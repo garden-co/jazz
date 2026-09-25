@@ -1,4 +1,4 @@
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -315,6 +315,28 @@ it("uploads an encrypted image to an accepted space after a transport-offline pe
       tier: "global",
     });
     expect(acceptedRoot).toMatchObject({ accountId });
+    const historyFailure = new Error("Accepted-history storage unavailable");
+    const observeHistory = vi
+      .spyOn(before, "observeE2eeHistory")
+      .mockRejectedValueOnce(historyFailure);
+    let failedSourceRuns = 0;
+    try {
+      await expect(
+        before.streamingTransaction((plan) =>
+          plan.insertStreaming(app.files, {
+            projectId: project.id,
+            name: "must-not-upload.png",
+            payload: (async function* () {
+              failedSourceRuns++;
+              yield image;
+            })(),
+          }),
+        ),
+      ).rejects.toBe(historyFailure);
+      expect(failedSourceRuns).toBe(0);
+    } finally {
+      observeHistory.mockRestore();
+    }
     await owner.close();
     owner = undefined;
 
@@ -392,3 +414,137 @@ it("uploads an encrypted image to an accepted space after a transport-offline pe
     if (!failed && errors.length) throw new AggregateError(errors, "Offline upload cleanup failed");
   }
 }, 60_000);
+
+it.each(["warn", "reject"] as const)(
+  "applies staleWrites %s before consuming an accepted-space offline stream",
+  async (staleWrites) => {
+    const app = s.defineApp({
+      projects: s.table({ title: s.string() }, {}),
+      files: s
+        .table(
+          { projectId: s.uuid(), payload: s.bytes() },
+          { project: s.rel("projects", "projectId") },
+        )
+        .encrypted({ space: "projectId", columns: ["payload"] }),
+    });
+    const permissions = definePermissions(app, ({ policy, session }) => {
+      policy.projects.allowRead.always();
+      policy.projects.allowInsert.always();
+      policy.files.allowRead.always();
+      policy.files.allowInsert.always();
+      policy.__e2ee_spaces.allowRead.always();
+      policy.__e2ee_spaces.allowInsert.where({ accountId: session.user.account });
+      policy.__e2ee_space_grants.allowRead.always();
+      policy.__e2ee_space_grants.allowInsert.where({ authorAccountId: session.user.account });
+      policy.__e2ee_space_deliveries.allowRead.always();
+      policy.__e2ee_space_deliveries.allowInsert.where({ senderAccountId: session.user.account });
+      // Retain a known-stale accepted epoch rather than automatically rotating it.
+      policy.__e2ee_space_successors.allowRead.always();
+      policy.__e2ee_space_successors.allowInsert.never();
+    });
+    const sessions: JazzSession<JazzClient>[] = [];
+    let server: LocalJazzServerHandle | undefined;
+    let gate: TransportGate | undefined;
+    let failed = false;
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+      gate = await transportGate(server.url);
+      await deploy({
+        serverUrl: server.url,
+        appId: server.appId,
+        adminSecret: server.adminSecret,
+        schema: app,
+        permissions,
+      });
+      for (let index = 0; index < 2; index++) {
+        let stored: string | null = null;
+        sessions.push(
+          await createJazzSession({
+            appId: server.appId,
+            serverUrl: gate.url,
+            app,
+            permissions,
+            driver: { type: "memory" },
+            initial: "local-first",
+            e2ee: {
+              app,
+              staleWrites,
+              store: {
+                async read() {
+                  return stored;
+                },
+                async update(transform) {
+                  stored = transform(stored);
+                },
+              },
+            },
+          }),
+        );
+      }
+      const owner = sessions[0]!.getSnapshot().client!.db;
+      const departing = sessions[1]!.getSnapshot().client!.db;
+      const ownerId = sessions[0]!.getSnapshot().account!.id;
+      const departingId = sessions[1]!.getSnapshot().account!.id;
+      await owner.e2ee.devices.list();
+      await departing.e2ee.devices.list();
+      const project = await owner
+        .insert(
+          app.projects,
+          { title: "Retained streaming epoch" },
+          { initialRecipients: [ownerId, departingId] },
+        )
+        .wait({ tier: "global" });
+      await departing.e2ee.spaces.revoke(app.projects, project.id, departingId).wait();
+      expect(
+        await owner.all(
+          app.__e2ee_space_grants.where({ recipientId: departingId, operation: "remove" }),
+          { tier: "global" },
+        ),
+      ).toEqual([expect.objectContaining({ recipientId: departingId, operation: "remove" })]);
+      expect(await owner.e2ee.explain({ scope: app.projects, identifier: project.id })).toEqual({
+        state: "maintenance-required",
+        reason: "recipient-removed",
+      });
+      gate.block();
+      warning.mockClear();
+      let sourceRuns = 0;
+      const upload = owner.insertStreaming(app.files, {
+        projectId: project.id,
+        payload: (async function* () {
+          sourceRuns++;
+          yield new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+        })(),
+      });
+      if (staleWrites === "reject") {
+        await expect(upload).rejects.toMatchObject({ code: "maintenance-required" });
+        expect(sourceRuns).toBe(0);
+        expect(warning).not.toHaveBeenCalled();
+      } else {
+        await (await upload).wait({ tier: "local" });
+        expect(sourceRuns).toBe(1);
+        expect(warning).toHaveBeenCalledOnce();
+      }
+    } catch (error) {
+      failed = true;
+      throw error;
+    } finally {
+      warning.mockRestore();
+      gate?.unblock();
+      const errors: unknown[] = [];
+      for (const close of [
+        ...sessions.map((session) => () => session.close()),
+        () => gate?.close(),
+        () => server?.stop(),
+      ]) {
+        try {
+          await close();
+        } catch (error) {
+          errors.push(error);
+        }
+      }
+      if (!failed && errors.length) throw new AggregateError(errors, "Stale stream cleanup failed");
+    }
+  },
+  60_000,
+);
