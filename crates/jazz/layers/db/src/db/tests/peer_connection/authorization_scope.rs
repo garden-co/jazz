@@ -3774,3 +3774,151 @@ fn invalidated_owner_delivery_cannot_cover_a_waiting_local_read() {
     foreground.detach_query(waiting);
     foreground.detach_query(refreshed);
 }
+
+/// A hostile foreground knows a row id, but not its contents or history.
+/// UPDATE permits its admitted role; SELECT still forbids the authoritative row.
+/// This uses the raw commit seam because ordinary update staging requires a local
+/// preimage. The transport and subscription paths remain the real three-tier path.
+#[test]
+fn scope_relay_terminal_rejects_mergeable_update_without_select() {
+    let editor = PublicPolicyExpr::SessionCmp {
+        path: vec!["claims".to_owned(), "role".to_owned()],
+        op: PublicCmpOp::Eq,
+        value: PublicValue::Text("editor".to_owned()),
+    };
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(PublicPolicyExpr::False)
+                        .with_insert(PublicPolicyExpr::False)
+                        .with_update(Some(editor.clone()), editor),
+                ),
+        ),
+    );
+    let author = AuthorSubject::for_test_bytes([0x91; 16]);
+    let claims = BTreeMap::from([(
+        crate::query::provider_claim_key("role"),
+        Value::String("editor".to_owned()),
+    )]);
+    let core = open_core(0x92, AuthorSubject::SYSTEM, &schema);
+    let target = row(0x93);
+    core.insert_with_id(
+        "todos",
+        target,
+        cells("authority-only secret", false, author),
+    )
+    .unwrap();
+    let before = core.read(&Query::from("todos")).unwrap();
+    assert_eq!(row_ids(&before), vec![target]);
+    assert_eq!(
+        before[0].cell(&schema.tables()[0], "title"),
+        Some(Value::String("authority-only secret".to_owned()))
+    );
+
+    let relay = open_db(0x94, author, &schema);
+    relay.set_relay_authority_session_owner_for_test();
+    let foreground = open_db(0x95, author, &schema);
+    foreground.set_non_durable_client();
+    foreground.set_test_provider_claims(author, claims.clone());
+    let (up, down, core_replies) = duplex_with_server_outbound_tap();
+    let _relay_upstream = block_on(relay.connect_upstream(up));
+    let _core_subscriber =
+        core.accept_scope_isolated_relay_subscriber(down, author, claims.clone(), 1);
+    let (up, down, foreground_uploads) = duplex_with_client_outbound_tap();
+    let _foreground_upstream = block_on(foreground.connect_upstream(up));
+    let _relay_subscriber = relay.accept_subscriber_with_claims(down, author, claims);
+    let query = Query::from("todos");
+    let mut stream = prepared_subscribe(&foreground, &query, global_subscribe_opts()).unwrap();
+    for _ in 0..64 {
+        foreground.tick().unwrap();
+        relay.tick().unwrap();
+        core.tick().unwrap();
+    }
+    let mut saw_settled_empty = false;
+    while let Some(event) = stream.try_next_event() {
+        match event {
+            SubscriptionEvent::Delta {
+                added,
+                updated,
+                settled,
+                ..
+            } => {
+                assert!(
+                    added.is_empty() && updated.is_empty(),
+                    "SELECT must hide the row"
+                );
+                saw_settled_empty |= settled;
+            }
+            other => panic!("unexpected initial subscription event: {other:?}"),
+        }
+    }
+    assert!(
+        saw_settled_empty,
+        "the authority must confirm the empty read"
+    );
+
+    // A parentless full replacement still updates an existing authoritative row.
+    // Omitting unknown history avoids requiring the relay to fetch a hidden
+    // predecessor. No hidden body is copied: all cells come from the attacker.
+    // The former per-version proof allowed UPDATE here; only the whole-unit
+    // evaluator also checks SELECT against Core's existing row (INV-RLS-24).
+    let (tx_id, unit) = foreground
+        .node
+        .node
+        .borrow_mut()
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", target, 10)
+                .made_by(author)
+                .cells(cells("blind replacement", true, author)),
+        )
+        .unwrap();
+    assert_eq!(foreground.write_state(tx_id).unwrap().fate, Fate::Pending);
+    foreground_uploads.borrow_mut().push_back(unit);
+
+    let mut terminal_denied = false;
+    for _ in 0..128 {
+        foreground.tick().unwrap();
+        relay.tick().unwrap();
+        core.tick().unwrap();
+        terminal_denied |= core_replies.borrow().iter().any(|message| {
+            matches!(
+                message,
+                SyncMessage::FateUpdate {
+                    tx_id: replied,
+                    fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+                    ..
+                } if *replied == tx_id
+            )
+        });
+        while let Some(event) = stream.try_next_event() {
+            match event {
+                SubscriptionEvent::Delta { added, updated, .. } => {
+                    assert!(
+                        added.is_empty() && updated.is_empty(),
+                        "neither authoritative contents nor the denied update may be disclosed"
+                    );
+                }
+                other => panic!("unexpected subscription event after upload: {other:?}"),
+            }
+        }
+    }
+    assert!(
+        terminal_denied,
+        "denial must originate at Core, not local preflight"
+    );
+    assert_eq!(
+        foreground.write_state(tx_id).unwrap().fate,
+        Fate::Rejected(RejectionReason::AuthorizationDenied)
+    );
+    assert_eq!(
+        core.read(&query).unwrap(),
+        before,
+        "the exact authoritative row, including provenance, must remain unchanged"
+    );
+    assert!(prepared_all(&foreground, &query, global_subscribe_opts()).is_empty());
+}
