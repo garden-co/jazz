@@ -495,6 +495,7 @@ impl IvmRuntime {
                 index,
                 scan,
                 intersections,
+                candidate_filter,
                 row_projection,
             } => {
                 let table = self
@@ -513,6 +514,7 @@ impl IvmRuntime {
                     &index,
                     scan.clone(),
                     intersections.clone(),
+                    candidate_filter.clone(),
                     row_projection.clone(),
                 )?;
                 let output = inferred_output;
@@ -1788,6 +1790,7 @@ impl IvmRuntime {
         index: &IndexSchema,
         scan: Option<StaticScanSpec>,
         intersections: Vec<(String, StaticScanSpec)>,
+        candidate_filter: Option<crate::ivm::IndexCandidateFilter>,
         row_projection: Option<String>,
     ) -> Result<IndexSourceOp, IvmRuntimeError> {
         for (intersection, _) in &intersections {
@@ -1797,6 +1800,41 @@ impl IvmRuntime {
                 .any(|index| index.name == *intersection)
             {
                 return Err(IvmRuntimeError::IndexNotFound(intersection.clone()));
+            }
+        }
+        if let Some(filter) = &candidate_filter {
+            if row_projection.is_none()
+                || !intersections.is_empty()
+                || !matches!(scan.as_ref(), Some(StaticScanSpec::Prefix(_)))
+                || !matches!(&filter.scan, StaticScanSpec::Prefix(_))
+            {
+                return Err(IvmRuntimeError::UnsupportedIndexCandidateFilter);
+            }
+            let candidate_table = self
+                .schema
+                .table(&filter.table)
+                .ok_or_else(|| IvmRuntimeError::TableNotFound(filter.table.clone()))?;
+            let candidate_index = candidate_table
+                .indices
+                .iter()
+                .find(|index| index.name == filter.index)
+                .ok_or_else(|| IvmRuntimeError::IndexNotFound(filter.index.clone()))?;
+            let covered = |table: &TableSchema, index: &IndexSchema, column: &str| {
+                index.columns.iter().any(|name| name == column)
+                    || table
+                        .primary_key
+                        .as_ref()
+                        .is_some_and(|key| key.columns.iter().any(|part| part.column == column))
+            };
+            if !covered(table, index, &filter.source_column) {
+                return Err(IvmRuntimeError::GraphFieldNotFound(
+                    filter.source_column.clone(),
+                ));
+            }
+            if !covered(candidate_table, candidate_index, &filter.candidate_column) {
+                return Err(IvmRuntimeError::GraphFieldNotFound(
+                    filter.candidate_column.clone(),
+                ));
             }
         }
         let (table_descriptor, variant_projection) = if table.has_variants() {
@@ -1836,6 +1874,7 @@ impl IvmRuntime {
             table: table.name.clone(),
             index: index.name.clone(),
             intersections,
+            candidate_filter,
             input_descriptor: table_descriptor,
             variant_projection,
             row_projection: row_projection.map(VariantProjectionTarget::Named),

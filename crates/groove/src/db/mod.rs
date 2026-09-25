@@ -1711,7 +1711,9 @@ mod storage_helpers;
 
 pub use batch::*;
 use encoding::*;
-pub(crate) use encoding::{index_record_descriptor, persisted_index_primary_key};
+pub(crate) use encoding::{
+    index_record_descriptor, persisted_index_column_value, persisted_index_primary_key,
+};
 use schema_admission::*;
 pub(crate) use storage_helpers::MeteredStorage;
 use storage_helpers::*;
