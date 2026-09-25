@@ -19,6 +19,10 @@ struct HydrationSubscription<'a> {
 }
 
 impl HydrationSubscription<'_> {
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.read_release")
+    )]
     fn release(&mut self) -> Result<(), Error> {
         if let Some(subscription) = self.subscription.take() {
             self.database.unsubscribe(subscription.id());
@@ -1327,6 +1331,10 @@ where
 
     /// The same installation and binding path serves one-result and retained
     /// consumers. Output terminals differ, but source hydration does not.
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.read_install")
+    )]
     async fn install_lowered_program_subscription(
         &mut self,
         program: QueryProgram,
@@ -1439,6 +1447,10 @@ where
     /// `root_indirect_values` decides which root fields the result rebuilds
     /// into logical large values. Callers that keep a field physical must
     /// drop it, or hydrate it, before rows cross a public boundary.
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.read_execute")
+    )]
     pub(super) async fn hydrate_lowered_program_once(
         &mut self,
         mut program: QueryProgram,
@@ -1483,6 +1495,8 @@ where
             prepared_shape,
         };
         let result = futures::future::poll_fn(|cx| {
+            #[cfg(feature = "cold-settle-attribution")]
+            let _span = tracing::info_span!("cold.phase.read_progress").entered();
             let subscription = owner
                 .subscription
                 .as_ref()

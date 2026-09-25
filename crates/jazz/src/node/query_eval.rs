@@ -2234,6 +2234,10 @@ where
 
     /// Materialize one-shot current rows and expose the canonical public
     /// result. Passing no profile keeps the ordinary read path clock-free.
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.read_materialize")
+    )]
     fn materialize_and_finalize_query_rows(
         &mut self,
         query: &crate::query::Query,
@@ -2246,32 +2250,44 @@ where
         let phase_started = profile.as_ref().map(|_| Instant::now());
         let mut rows = if query.aggregate.is_some() {
             self.materialize_aggregate_query_rows(query, app_output, deltas)?
-        } else if query.flat_join.is_some() {
-            deltas
-                .iter()
-                .filter(|(_, weight)| *weight > 0)
-                .map(|(record, _)| {
-                    CurrentRow::new(
-                        query.table.clone(),
-                        OwnedRecord::new(record.raw().to_vec(), record.descriptor()),
-                    )
-                })
-                .collect()
         } else {
+            let table = groove::Intern::new(if query.flat_join.is_some() {
+                query.table.clone()
+            } else {
+                table_schema.name.clone()
+            });
+            let mut previous: Option<(
+                records::RecordDescriptor,
+                std::sync::Arc<Vec<CurrentRowPublicationField>>,
+            )> = None;
             let mut rows = Vec::new();
             for (record, weight) in deltas.iter() {
                 if weight > 0 {
-                    let row = decode_current_row(table_schema, record)?;
-                    rows.push(self.materialize_current_row(table_schema, row)?);
+                    let descriptor = record.descriptor();
+                    let publication_fields = match &previous {
+                        Some((cached, fields)) if *cached == descriptor => fields.clone(),
+                        _ => {
+                            let fields = Self::app_row_publication_fields(&descriptor, app_output)?;
+                            previous = Some((descriptor, fields.clone()));
+                            fields
+                        }
+                    };
+                    // App-row publication is entirely descriptor/schema owned.
+                    // Bind it once instead of constructing default metadata and
+                    // immediately replacing it for every result row.
+                    rows.push(CurrentRow {
+                        table: table.clone(),
+                        record: std::sync::Arc::new(OwnedRecord::new(
+                            record.raw().to_vec(),
+                            descriptor,
+                        )),
+                        deleted: false,
+                        publication_fields,
+                    });
                 }
             }
             rows
         };
-        if query.aggregate.is_none() {
-            for row in &mut rows {
-                Self::bind_app_row_schema_fields(row, app_output)?;
-            }
-        }
         // The graph used for synchronous materialization intentionally retains
         // physical provenance fields so policy witnesses can
         // be resolved above. Do not let that internal descriptor cross the
@@ -4839,10 +4855,87 @@ fn sort_query_default_rows(rows: &mut [CurrentRow]) {
     rows.sort_by(default_query_row_order);
 }
 
+/// One public layout for a batch of admitted engine rows. The ordinary
+/// conversion establishes the descriptor and publication bindings; subsequent
+/// rows with that exact source layout can copy encoded fields. This avoids
+/// rebuilding the same metadata and owned logical values for every row.
+struct PreparedPublicRowProjection {
+    source: records::RecordDescriptor,
+    source_fields: std::sync::Arc<Vec<CurrentRowPublicationField>>,
+    projector: records::RecordProjector,
+    table: groove::Intern<String>,
+    output_fields: std::sync::Arc<Vec<CurrentRowPublicationField>>,
+    has_tx_alias: bool,
+}
+
+impl PreparedPublicRowProjection {
+    fn new(source: &CurrentRow, projected: &CurrentRow) -> Option<Self> {
+        let source_descriptor = *source.record.descriptor();
+        let target_descriptor = *projected.record.descriptor();
+        let mapping = target_descriptor
+            .fields()
+            .iter()
+            .enumerate()
+            .map(|(target, field)| {
+                let source_index = match field.name.as_deref()? {
+                    "row_uuid" | "tx_time" | "tx_node_id" => {
+                        source_descriptor.field_index(field.name.as_deref()?)
+                    }
+                    name @ ("$createdBy" | "$createdAt" | "$updatedBy" | "$updatedAt") => {
+                        source.provenance_field_index(name)
+                    }
+                    _ => projected.publication_fields[target]
+                        .application_name()
+                        .and_then(|name| source.application_column_index_by_name(name)),
+                }?;
+                Some((source_index, target))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        // Copying requires identical field types, including every nullable
+        // wrapper and nested enum identity. Any conversion keeps the ordinary
+        // value path instead.
+        let projector =
+            records::RecordProjector::new(source_descriptor, target_descriptor, mapping).ok()?;
+        Some(Self {
+            source: source_descriptor,
+            source_fields: source.publication_fields.clone(),
+            projector,
+            table: projected.table.clone(),
+            output_fields: projected.publication_fields.clone(),
+            has_tx_alias: source.projected_tx_alias().is_some(),
+        })
+    }
+
+    fn project(&self, row: &CurrentRow) -> Result<Option<CurrentRow>, Error> {
+        if *row.record.descriptor() != self.source
+            || row.publication_fields != self.source_fields
+            || row.projected_tx_alias().is_some() != self.has_tx_alias
+        {
+            return Ok(None);
+        }
+        // Keep the ordinary boundary's author validation. In particular, a
+        // matching encoded record shape is not itself an admitted author.
+        row.provenance()?;
+        let Ok(record) = self.projector.project(row.record.borrowed()) else {
+            return Ok(None);
+        };
+        Ok(Some(CurrentRow {
+            table: self.table.clone(),
+            record: std::sync::Arc::new(record),
+            deleted: false,
+            publication_fields: self.output_fields.clone(),
+        }))
+    }
+}
+
 /// Convert materializer-only rows back to the canonical application row
 /// descriptor before exposing them through a one-shot query.  The materializer
 /// may retain physical schema/provenance fields while resolving a row, whereas
 /// subscriptions are emitted from the public app-row terminal directly.
+#[cfg_attr(
+    feature = "cold-settle-attribution",
+    tracing::instrument(skip_all, name = "cold.phase.read_normalize")
+)]
 fn normalize_public_current_rows(
     query: &crate::query::Query,
     table: &TableSchema,
@@ -4853,6 +4946,30 @@ fn normalize_public_current_rows(
         .iter()
         .map(|column| column.name.clone())
         .collect::<Vec<_>>();
+    if query.aggregate.is_none() {
+        let Some((first, remaining)) = rows.split_first_mut() else {
+            return Ok(());
+        };
+        let projected = first.project(table, &columns)?;
+        if remaining.is_empty() {
+            *first = projected;
+            return Ok(());
+        }
+        let prepared = PreparedPublicRowProjection::new(first, &projected);
+        *first = projected;
+        for row in remaining {
+            *row = match prepared
+                .as_ref()
+                .map(|plan| plan.project(row))
+                .transpose()?
+                .flatten()
+            {
+                Some(projected) => projected,
+                None => row.project(table, &columns)?,
+            };
+        }
+        return Ok(());
+    }
     for row in rows {
         *row = if let Some(aggregate) = &query.aggregate {
             // A grouped source and an aggregate result may share a public name.

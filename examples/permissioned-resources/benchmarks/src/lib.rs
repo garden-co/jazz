@@ -5,6 +5,7 @@ pub use alloc_metrics::CountingAllocator as SelectedAllocator;
 #[cfg(feature = "bench-alloc-sites")]
 pub use alloc_metrics::SiteAllocator as SelectedAllocator;
 mod history_cost;
+mod initial_reads;
 mod slim_memory;
 mod work_budget;
 use std::cell::{Cell, RefCell};
@@ -598,6 +599,11 @@ pub fn profile_main() {
     let expected = expected_visible_counts(&seeded, config.identity);
     if config.identity == BenchIdentity::Member {
         assert_policy_active(&seeded, &expected);
+    }
+
+    if std::env::var_os("JAZZ_CUSTOMER_INITIAL_SELECTS").is_some() {
+        initial_reads::run(&schema, &seeded, &config);
+        return;
     }
 
     if config.runs_phase("cold") {
