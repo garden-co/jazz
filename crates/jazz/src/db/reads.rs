@@ -125,9 +125,34 @@ where
     /// Runtime callers must use this entry point when another operation may
     /// be suspended on storage. The synchronous API requires an idle owner.
     pub async fn prepare_query_async(&self, query: &Query) -> Result<PreparedQuery, Error> {
+        self.prepare_query_async_for(query, self.schema_view_is_fixed)
+            .await
+    }
+
+    /// Prepare a query against the schema this database handle was opened
+    /// with, after asynchronously acquiring the node owner.
+    ///
+    /// Typed client facades are pinned to that schema even when a catalogue
+    /// snapshot advances or rolls back the separate current-write pointer.
+    /// They prepare while their sync pump may be suspended inside a node
+    /// operation (for example awaiting large-value chunks), so they must wait
+    /// for the owner rather than use the synchronous entry point.
+    #[cfg(feature = "runtime")]
+    pub(crate) async fn prepare_query_for_open_schema_async(
+        &self,
+        query: &Query,
+    ) -> Result<PreparedQuery, Error> {
+        self.prepare_query_async_for(query, true).await
+    }
+
+    async fn prepare_query_async_for(
+        &self,
+        query: &Query,
+        open_schema: bool,
+    ) -> Result<PreparedQuery, Error> {
         self.ensure_open_schema_admitted()?;
         let mut node = self.node.node.lock().await;
-        let (schema, schema_version) = if self.schema_view_is_fixed {
+        let (schema, schema_version) = if open_schema {
             (self.schema.clone(), self.schema_version_id)
         } else {
             let current = node.current_write_schema()?;
@@ -512,24 +537,6 @@ where
     ) -> Result<PreparedQuery, Error> {
         let (schema, schema_version) = self.current_write_schema_for_query()?;
         self.prepare_query_bound_for_schema(query, params, &schema, schema_version)
-    }
-
-    /// Prepare a query against the schema this database handle was opened with.
-    ///
-    /// Typed client facades are pinned to that schema even when a catalogue
-    /// snapshot advances or rolls back the separate current-write pointer.
-    #[cfg(feature = "runtime")]
-    pub(crate) fn prepare_query_for_open_schema(
-        &self,
-        query: &Query,
-    ) -> Result<PreparedQuery, Error> {
-        self.ensure_open_schema_admitted()?;
-        self.prepare_query_bound_for_schema(
-            query,
-            BTreeMap::new(),
-            &self.schema,
-            self.schema_version_id,
-        )
     }
 
     fn prepare_query_bound_for_schema(
