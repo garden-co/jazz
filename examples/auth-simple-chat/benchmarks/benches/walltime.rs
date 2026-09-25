@@ -18,8 +18,10 @@ fn auth_chat_open_room(bencher: divan::Bencher<'_, '_>, room_messages: usize) {
 }
 
 /// A signed-in member sends 100 messages into an open room; each passes the
-/// claim-gated insert policy and reaches the open subscription.
-#[divan::bench(args = [1_000, 10_000], sample_count = 10, sample_size = 1)]
+/// claim-gated insert policy and reaches the open subscription. Three samples:
+/// the 10k case takes over a minute per sample on the macro runner, and the
+/// whole workload must fit its 20-minute job.
+#[divan::bench(args = [1_000, 10_000], sample_count = 3, sample_size = 1)]
 fn auth_chat_send_100(bencher: divan::Bencher<'_, '_>, room_messages: usize) {
     bencher
         .with_inputs(|| SendFixture::new(room_messages))
