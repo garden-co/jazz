@@ -1,0 +1,17 @@
+[package]
+name = "jazz-example-auth-chat-benchmark"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+jazz = { workspace = true }
+jazz-benchmark-guard = { path = "../../../crates/benchmark-guard" }
+uuid = "1.18.1"
+
+[dev-dependencies]
+divan = { workspace = true }
+
+[[bench]]
+name = "walltime"
+harness = false
