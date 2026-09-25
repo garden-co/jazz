@@ -2050,6 +2050,12 @@ where
         .borrow_mut()
         .scan_snapshot(&request.cf, &request.bounds);
     Box::pin(async move {
+        // An empty in-range snapshot needs no merge or per-entry buffering.
+        // Open the base here, preserving its original first-poll timing even
+        // when it is another staged overlay.
+        if staged.is_empty() {
+            return base.scan(request).await;
+        }
         // A base limit of only the logical result size is unsound: every
         // staged key whose final operation can remove it may consume one of
         // those physical entries without producing a logical result. A
