@@ -5081,23 +5081,40 @@ fn probe_3378_opening_snapshot_serve_cost() {
             client.tick().unwrap();
             #[cfg(feature = "cold-settle-attribution")]
             crate::cold_settle_attribution::reset();
-            // The opening may span several ticks (chunking, credit); sum the
-            // server's share across a fixed number of rounds.
+            // The opening may span many ticks (chunking, credit); sum the
+            // server's share until the client sees the settled opening.
             let mut serve = std::time::Duration::ZERO;
-            for _ in 0..8 {
+            let mut rounds = 0;
+            let opening = loop {
                 let started = std::time::Instant::now();
                 server.tick().unwrap();
                 serve += started.elapsed();
                 client.tick().unwrap();
-            }
+                rounds += 1;
+                if let Some(event) = subscription.try_next_event() {
+                    break event;
+                }
+                assert!(rounds < 10_000, "opening never arrived");
+            };
             #[cfg(feature = "cold-settle-attribution")]
             let attribution = crate::cold_settle_attribution::snapshot();
             #[cfg(not(feature = "cold-settle-attribution"))]
             let attribution = "n/a (build with cold-settle-attribution)";
-            let (added, _, _) = delta_rows(next_settled_opening(&mut subscription));
+            assert!(
+                matches!(
+                    &opening,
+                    SubscriptionEvent::Delta {
+                        reset: true,
+                        settled: true,
+                        ..
+                    }
+                ),
+                "expected a settled opening, got {opening:?}"
+            );
+            let (added, _, _) = delta_rows(opening);
             assert_eq!(added.len(), rows);
             println!(
-                "probe_3378 rows={rows} byte_wire={byte_wire} serve_tick_us={} last_resume_bytes={:?} attribution={attribution:?}",
+                "probe_3378 rows={rows} byte_wire={byte_wire} rounds={rounds} serve_tick_us={} last_resume_bytes={:?} attribution={attribution:?}",
                 serve.as_micros(),
                 subscriber.borrow().last_resume_bytes(),
             );
