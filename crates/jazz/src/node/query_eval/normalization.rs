@@ -553,6 +553,54 @@ pub(super) fn select_current_access_path(
     })
 }
 
+/// A first-result equality conjunction can use both columns of an explicitly
+/// declared two-column composite index as one prefix. The ordinary selector
+/// above keeps its single-column probes for live sources and ordered-page
+/// planning. Other indexed equalities stay as intersections, so a query that
+/// previously intersected three or more single indexes is never widened. An
+/// `id` equality keeps the primary-key probe instead.
+///
+/// Only `guarded_current_access_path` may call this, so its tier and
+/// secondary-index admission apply unchanged.
+pub(super) fn select_composite_equality_access_path(
+    table: &TableSchema,
+    equalities: &BTreeMap<String, Value>,
+) -> Option<CurrentAccessPath> {
+    if equalities.contains_key("id") {
+        return None;
+    }
+    table.composite_indexes.iter().find_map(|columns| {
+        let [first, second] = columns.as_slice() else {
+            return None;
+        };
+        let first_value = equalities.get(first)?.clone();
+        let second_value = equalities.get(second)?.clone();
+        let intersections = table
+            .global_current_indexed_columns()
+            .into_iter()
+            .filter(|column| column != first && column != second)
+            .filter_map(|column| {
+                equalities.get(&column).cloned().map(|value| {
+                    let prefix = vec![physical_current_index_value(table, &column, value)];
+                    (column, prefix)
+                })
+            })
+            .collect();
+        Some(CurrentAccessPath::Index {
+            column: first.clone(),
+            order_column: Some(second.clone()),
+            reverse: false,
+            prefix: vec![
+                physical_current_index_value(table, first, first_value),
+                physical_current_index_value(table, second, second_value),
+            ],
+            intersections,
+            maintained: false,
+            source_limit: None,
+        })
+    })
+}
+
 /// Current storage uses one nullable envelope to represent an un-authored
 /// cell. A logically nullable column has its own, inner envelope as well.
 /// Predicates use logical values, but secondary-index keys are physical

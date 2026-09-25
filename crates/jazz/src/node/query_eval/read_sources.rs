@@ -58,6 +58,18 @@ pub(super) enum HydrationLifetime {
     Retained,
 }
 
+/// Which selector `guarded_current_access_path` runs inside its
+/// admission checks. Every selector goes through the same guard.
+#[derive(Clone, Copy)]
+pub(super) enum AccessPathSelector {
+    /// `select_current_access_path`: a primary-key point read, or
+    /// single-column equality probes intersected together.
+    Ordinary,
+    /// `select_composite_equality_access_path`: both equalities of a
+    /// declared two-column composite index as one prefix.
+    CompositeEquality,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum CurrentAccessPath {
     PrimaryKey(Vec<Value>),
@@ -4126,6 +4138,7 @@ where
                 &equalities,
                 allow_local,
                 allow_secondary_indexes,
+                AccessPathSelector::Ordinary,
             )? {
                 paths.insert(source, path);
             }
@@ -4144,6 +4157,7 @@ where
         equalities: &BTreeMap<String, Value>,
         allow_local: bool,
         allow_secondary_indexes: bool,
+        selector: AccessPathSelector,
     ) -> Result<Option<CurrentAccessPath>, Error> {
         let Some(tier) = read_view.source_current_tier(source) else {
             return Ok(None);
@@ -4156,7 +4170,13 @@ where
             return Ok(None);
         }
         let table = self.table_in_schema(&source.table, read_view.read_schema)?;
-        let Some(mut path) = select_current_access_path(&table, equalities) else {
+        let selected = match selector {
+            AccessPathSelector::Ordinary => select_current_access_path(&table, equalities),
+            AccessPathSelector::CompositeEquality => {
+                select_composite_equality_access_path(&table, equalities)
+            }
+        };
+        let Some(mut path) = selected else {
             return Ok(None);
         };
         // Authorization dependencies are cached by policy shape and claim
@@ -4316,9 +4336,65 @@ where
                             &equalities,
                             true,
                             true,
+                            AccessPathSelector::Ordinary,
                         )?
                     {
                         paths.insert(root.clone(), path);
+                    }
+                }
+                // An unordered, unbounded first result may address a
+                // declared `(a, b)` composite index with both equalities as
+                // one prefix. It is admitted by the same guard, and replaces
+                // only a plain equality probe (never a primary-key point
+                // read, an ordered path, or a capped source), whose candidate
+                // set it narrows. Local reads keep the guard's settled
+                // candidates plus complete ahead overlay; the pre-existing
+                // stale Local index read (#3340) is unchanged by this.
+                let replaceable = match paths.get(&root) {
+                    None => true,
+                    Some(CurrentAccessPath::Index {
+                        order_column,
+                        source_limit,
+                        ..
+                    }) => order_column.is_none() && source_limit.is_none(),
+                    Some(_) => false,
+                };
+                if replaceable && query.limit.is_none() && query.order_by.is_empty() {
+                    let equalities = root_literal_equalities(query, binding)?;
+                    if let Some(CurrentAccessPath::Index {
+                        column,
+                        order_column,
+                        reverse,
+                        prefix,
+                        intersections,
+                        maintained,
+                        source_limit,
+                    }) = self.guarded_current_access_path(
+                        &request.reads.primary,
+                        &root,
+                        &equalities,
+                        true,
+                        true,
+                        AccessPathSelector::CompositeEquality,
+                    )? {
+                        let maintained = match paths.get(&root) {
+                            Some(CurrentAccessPath::Index {
+                                maintained: kept, ..
+                            }) => *kept || maintained,
+                            _ => maintained,
+                        };
+                        paths.insert(
+                            root.clone(),
+                            CurrentAccessPath::Index {
+                                column,
+                                order_column,
+                                reverse,
+                                prefix,
+                                intersections,
+                                maintained,
+                                source_limit,
+                            },
+                        );
                     }
                 }
             }
@@ -4385,6 +4461,7 @@ where
                                 &equalities,
                                 true,
                                 true,
+                                AccessPathSelector::Ordinary,
                             )?
                     {
                         paths.insert(join_source.clone(), path);
@@ -5548,6 +5625,69 @@ mod tests {
             select_current_access_path(&table, &equalities),
             Some(CurrentAccessPath::PrimaryKey(values)) if values == vec![Value::Uuid(row_id)]
         ));
+    }
+
+    /// Internal planner assertion: which composite prefix is chosen is only
+    /// observable as read work. Both equalities of a declared two-column
+    /// composite become one prefix, other indexed equalities stay
+    /// intersections, an `id` equality keeps the primary-key probe, and a
+    /// longer composite or a missing equality declines.
+    #[test]
+    fn composite_equality_selector_keeps_other_probes_and_declines_otherwise() {
+        let mut table = TableSchema::new(
+            "issues",
+            ["group", "state", "assignee"].map(|name| ColumnSchema::new(name, ColumnType::String)),
+        );
+        table.indexed_columns = BTreeSet::from(["group".to_owned(), "assignee".to_owned()]);
+        table.composite_indexes = BTreeSet::from([
+            vec![
+                "group".to_owned(),
+                "state".to_owned(),
+                "assignee".to_owned(),
+            ],
+            vec!["group".to_owned(), "state".to_owned()],
+        ]);
+        let text = |value: &str| Value::String(value.to_owned());
+        let equalities = BTreeMap::from([
+            ("group".to_owned(), text("wanted")),
+            ("state".to_owned(), text("open")),
+            ("assignee".to_owned(), text("ann")),
+        ]);
+        let Some(CurrentAccessPath::Index {
+            column,
+            order_column,
+            prefix,
+            intersections,
+            source_limit,
+            ..
+        }) = select_composite_equality_access_path(&table, &equalities)
+        else {
+            panic!("the (group, state) composite should be selected");
+        };
+        assert_eq!(column, "group");
+        assert_eq!(order_column.as_deref(), Some("state"));
+        assert_eq!(prefix.len(), 2);
+        assert_eq!(
+            intersections
+                .iter()
+                .map(|(column, _)| column.as_str())
+                .collect::<Vec<_>>(),
+            ["assignee"]
+        );
+        assert_eq!(source_limit, None);
+
+        let mut with_id = equalities.clone();
+        with_id.insert("id".to_owned(), Value::Uuid(uuid::Uuid::from_u128(1)));
+        assert_eq!(
+            select_composite_equality_access_path(&table, &with_id),
+            None
+        );
+        let mut group_only = equalities.clone();
+        group_only.remove("state");
+        assert_eq!(
+            select_composite_equality_access_path(&table, &group_only),
+            None
+        );
     }
 
     /// This is an internal planner assertion because the fallback is only

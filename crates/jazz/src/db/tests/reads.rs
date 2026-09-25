@@ -1129,6 +1129,213 @@ fn ordered_composite_pages_match_unbounded_query() {
     );
 }
 
+fn open_composite_equality_db() -> Db<RocksDbStorage> {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("issues")
+                    .column("group", PublicColumnType::Text)
+                    .column("state", PublicColumnType::Text)
+                    .column("assignee", PublicColumnType::Text)
+                    .index_only(["group", "assignee"])
+                    .composite_index(["group", "state"])
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(PublicPolicyExpr::True)
+                            .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True)
+                            .with_delete(PublicPolicyExpr::True),
+                    ),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("issue_tags")
+                    .fk_column("issue", "issues")
+                    .column("tag", PublicColumnType::Text)
+                    .index_only(["tag"])
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            ),
+    );
+    let db = block_on(Db::open_history_complete(DbConfig::new(
+        schema.clone(),
+        rocks_storage(&schema),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xb9; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+    // Issues 1..=40 are in group "wanted", every fourth one open; assignees
+    // alternate. Issue 1 and issues 41..=80 carry the "wanted" tag.
+    for n in 1..=80u8 {
+        db.seed_settled_mergeable_for_bootstrap(
+            "issues",
+            row(n),
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([
+                (
+                    "group".to_owned(),
+                    Value::String(if n <= 40 { "wanted" } else { "other" }.to_owned()),
+                ),
+                (
+                    "state".to_owned(),
+                    Value::String(if n % 4 == 1 { "open" } else { "closed" }.to_owned()),
+                ),
+                (
+                    "assignee".to_owned(),
+                    Value::String(if n % 2 == 1 { "ann" } else { "bo" }.to_owned()),
+                ),
+            ]),
+        )
+        .unwrap();
+        db.seed_settled_mergeable_for_bootstrap(
+            "issue_tags",
+            row(n + 100),
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([
+                ("issue".to_owned(), Value::Uuid(row(n).0)),
+                (
+                    "tag".to_owned(),
+                    Value::String(if n == 1 || n > 40 { "wanted" } else { "other" }.to_owned()),
+                ),
+            ]),
+        )
+        .unwrap();
+    }
+    db
+}
+
+/// Every query shape that can take the composite `(group, state)` prefix,
+/// compared with the same query under a limit no page reaches. A limit makes
+/// the first result decline composite-equality selection, so it is the
+/// control.
+fn composite_equality_reads_match_control(
+    db: &Db<RocksDbStorage>,
+    tier: DurabilityTier,
+    label: &str,
+) {
+    let opts = ReadOpts {
+        tier,
+        local_updates: LocalUpdates::Immediate,
+        propagation: Propagation::LocalOnly,
+        ..ReadOpts::default()
+    };
+    let read = |query: &Query| {
+        let prepared = db.prepare_query(query).unwrap();
+        let mut rows = row_ids(
+            &block_on(db.all_for_identity(&prepared, opts.clone(), AuthorSubject::SYSTEM)).unwrap(),
+        );
+        rows.sort();
+        rows
+    };
+    for assignee in [None, Some("ann")] {
+        for joined in [false, true] {
+            let mut query = Query::from("issues")
+                .filter(eq(col("group"), lit("wanted")))
+                .filter(eq(col("state"), lit("open")));
+            if let Some(assignee) = assignee {
+                query = query.filter(eq(col("assignee"), lit(assignee)));
+            }
+            if joined {
+                query = query.join_via("issue_tags", "issue", [eq(col("tag"), lit("wanted"))]);
+            }
+            assert_eq!(
+                read(&query),
+                read(&query.clone().limit(100_000)),
+                "{label} {tier:?}: assignee={assignee:?} joined={joined}"
+            );
+        }
+    }
+}
+
+/// A first-result equality conjunction over both columns of a declared
+/// `(group, state)` composite index reads only that prefix, and keeps other
+/// indexed equalities as intersections. It is admitted by the same guard as
+/// every other index path: only sources read at Local or Global may use it,
+/// so a read at tier `None` keeps its complete source. Results match the
+/// unindexed control at every tier, with pending edits that move rows into
+/// and out of the prefix, and after they settle.
+///
+/// The storage counter is needed because choosing the composite prefix is
+/// observable only as read work.
+///
+/// ```text
+/// seed: wanted/open = {1, 5, .., 37}; tag wanted = {1, 41..=80}
+/// Global join read -> [1], reads <= 55 (not the other 30 group rows)
+/// pending: 1 -> closed, 2 -> open, 41 -> wanted/open, delete 5; Local join read -> [41]
+/// tiers None, Local, Global == control -> settle -> == control again
+/// ```
+#[test]
+fn first_result_uses_guarded_composite_equality_index() {
+    let db = open_composite_equality_db();
+    let joined = Query::from("issues")
+        .filter(eq(col("group"), lit("wanted")))
+        .filter(eq(col("state"), lit("open")))
+        .join_via("issue_tags", "issue", [eq(col("tag"), lit("wanted"))]);
+    let (rows, reads) = global_page_with_reads(&db, joined.clone());
+    assert_eq!(rows, vec![row(1)]);
+    assert!(
+        reads.global_current_rows.reads <= 55,
+        "composite equality should avoid hydrating the other 30 group rows: {reads:?}"
+    );
+    for tier in [
+        DurabilityTier::None,
+        DurabilityTier::Local,
+        DurabilityTier::Global,
+    ] {
+        composite_equality_reads_match_control(&db, tier, "seeded");
+    }
+
+    let mut writes = Vec::new();
+    for (id, cells) in [
+        (1, vec![("state", "closed")]),
+        (2, vec![("state", "open")]),
+        (41, vec![("group", "wanted"), ("state", "open")]),
+    ] {
+        writes.push(
+            block_on(
+                db.update(
+                    "issues",
+                    row(id),
+                    cells
+                        .into_iter()
+                        .map(|(column, value)| (column.to_owned(), Value::String(value.to_owned())))
+                        .collect(),
+                    Default::default(),
+                ),
+            )
+            .unwrap()
+            .mergeable_tx_id(),
+        );
+    }
+    writes.push(
+        block_on(db.delete("issues", row(5), Default::default()))
+            .unwrap()
+            .mergeable_tx_id(),
+    );
+    for tier in [
+        DurabilityTier::None,
+        DurabilityTier::Local,
+        DurabilityTier::Global,
+    ] {
+        composite_equality_reads_match_control(&db, tier, "pending");
+    }
+    let prepared = db.prepare_query(&joined).unwrap();
+    assert_eq!(
+        row_ids(&db.read(&prepared).unwrap()),
+        vec![row(41)],
+        "a Local winner leaving the composite prefix must retract, one entering must appear"
+    );
+    for tx in writes {
+        db.finalize_local_mergeable_commit_for_test(tx).unwrap();
+    }
+    for tier in [
+        DurabilityTier::None,
+        DurabilityTier::Local,
+        DurabilityTier::Global,
+    ] {
+        composite_equality_reads_match_control(&db, tier, "settled");
+    }
+}
+
 /// Reads `query` once at Global and returns its rows with the storage reads
 /// it took.
 fn global_page_with_reads(
@@ -1170,8 +1377,9 @@ fn global_page_with_reads(
 #[test]
 fn ordered_composite_pages_retry_past_deleted_ties_and_complete_short_buckets() {
     let db = open_ordered_page_db();
-    let settle_deletes = |ids: &mut dyn Iterator<Item = u8>| {
+    let settle_deletes = |ids: Vec<u8>| {
         let writes = ids
+            .into_iter()
             .map(|id| {
                 block_on(db.delete("entries", row(id), Default::default()))
                     .unwrap()
@@ -1182,7 +1390,7 @@ fn ordered_composite_pages_retry_past_deleted_ties_and_complete_short_buckets() 
             db.finalize_local_mergeable_commit_for_test(tx).unwrap();
         }
     };
-    settle_deletes(&mut [54, 53].into_iter());
+    settle_deletes(vec![54, 53]);
 
     let top = || {
         Query::from("entries")
@@ -1204,7 +1412,7 @@ fn ordered_composite_pages_retry_past_deleted_ties_and_complete_short_buckets() 
     );
     ordered_pages_match_unbounded_control(&db, DurabilityTier::Global, "deleted top ties");
 
-    settle_deletes(&mut 1..=40);
+    settle_deletes((1..=40).collect());
     let short = || {
         Query::from("entries")
             .filter(eq(col("bucket"), lit("b")))
