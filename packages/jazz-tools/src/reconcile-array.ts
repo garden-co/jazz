@@ -1,21 +1,163 @@
-import { applySubscriptionDelta, type SubscriptionDelta } from "./runtime/subscription-manager.js";
+import {
+  normalizeRowDelta,
+  resultIdentity,
+  RowChangeKind,
+  type RowDelta,
+  type SubscriptionDelta,
+} from "./runtime/subscription-manager.js";
 
 /**
  * Apply a subscription delta to a reactive array, deep-merging only
  * the rows that actually changed.
+ *
+ * A non-reset delta is applied change by change, so a one-row change costs
+ * O(1) row merges instead of reconciling every row. Matched rows keep their
+ * identity and are deep-merged, exactly as {@link reconcileArray} would
+ * leave them. When the delta carries `all`, that is the authority for row
+ * content: each changed row is merged from its entry in `all`, and if the
+ * length or any changed row's position disagrees with `all`, the target is
+ * reconciled against `all` in full instead.
  */
 export function applyDelta<T extends { id: string }>(
   target: T[],
   delta: SubscriptionDelta<T>,
 ): void {
-  if (delta.all !== undefined) {
+  if (delta.reset) {
     reconcileArray(target, delta.all);
     return;
   }
 
-  const next = [...target];
-  applySubscriptionDelta(next, delta);
-  reconcileArray(target, next);
+  const changes = normalizeRowDelta(delta.delta);
+  const all = delta.all;
+  if (all !== undefined && exceedsStructuralSplices(target, changes)) {
+    // Each insert, removal or move is one splice, and a splice on a reactive
+    // array (Vue, Svelte) rewrites every later index, so many of them in one
+    // frame cost far more than one full reconcile.
+    reconcileArray(target, all);
+    return;
+  }
+  const maxSplices = all === undefined ? Infinity : MAX_STRUCTURAL_SPLICES;
+  if (!applyRowChanges(target, changes, all === undefined, maxSplices)) {
+    // The pre-check under-counted (moves hide behind in-place hints), so
+    // finish with one reconcile instead of more splices.
+    reconcileArray(target, all!);
+    return;
+  }
+  if (all !== undefined && !mergeChangedRowsFrom(target, all, changes)) {
+    reconcileArray(target, all);
+  }
+}
+
+/**
+ * Above this many splices in one frame, a full reconcile against `all` is
+ * cheaper on a reactive array than applying the splices one by one.
+ */
+const MAX_STRUCTURAL_SPLICES = 8;
+
+/**
+ * Whether the changes need more than {@link MAX_STRUCTURAL_SPLICES} splices.
+ * An update counts unless its row already sits at its index. This is a cheap
+ * pre-check that reads only the hinted slot, so it can misjudge moves;
+ * `applyRowChanges` enforces the cap exactly while it splices.
+ */
+function exceedsStructuralSplices<T extends { id: string }>(
+  target: T[],
+  changes: RowDelta<T>[],
+): boolean {
+  if (changes.length <= MAX_STRUCTURAL_SPLICES) return false;
+  let splices = 0;
+  for (const change of changes) {
+    if (change.kind === RowChangeKind.Updated) {
+      const hinted = target[change.index];
+      if (hinted !== undefined && resultIdentity(hinted) === change.id) continue;
+    }
+    if (++splices > MAX_STRUCTURAL_SPLICES) return true;
+  }
+  return false;
+}
+
+/**
+ * Apply the changes' structure (inserts, removals, moves) in delta order.
+ * Rows that are already present keep their identity; their content is
+ * merged here only when `mergeItems` is set. Returns false, part way
+ * through, as soon as it would make more than `maxSplices` splices.
+ */
+function applyRowChanges<T extends { id: string }>(
+  target: T[],
+  changes: RowDelta<T>[],
+  mergeItems: boolean,
+  maxSplices: number,
+): boolean {
+  let splices = 0;
+  for (const change of changes) {
+    const position = locate(target, change.id, change.index);
+    switch (change.kind) {
+      case RowChangeKind.Added:
+      case RowChangeKind.Updated: {
+        const previous = position === -1 ? undefined : target[position];
+        const next = previous ?? change.item;
+        if (next === undefined) break;
+        if (mergeItems && previous !== undefined && change.item !== undefined) {
+          deepMerge(previous as Record<string, unknown>, change.item as Record<string, unknown>);
+        }
+        if (position === -1) {
+          if (++splices > maxSplices) return false;
+          target.splice(clampIndex(change.index, target.length), 0, next);
+          break;
+        }
+        const index = clampIndex(change.index, target.length - 1);
+        if (index !== position) {
+          if (++splices > maxSplices) return false;
+          target.splice(position, 1);
+          target.splice(index, 0, next);
+        }
+        break;
+      }
+      case RowChangeKind.Removed:
+        if (position === -1) break;
+        if (++splices > maxSplices) return false;
+        target.splice(position, 1);
+        break;
+    }
+  }
+  return true;
+}
+
+/**
+ * Merge every added or updated row from its entry in `all`. Returns false,
+ * leaving the rest to a full reconcile, when the target's length or a
+ * changed row's position disagrees with `all`.
+ */
+function mergeChangedRowsFrom<T extends { id: string }>(
+  target: T[],
+  all: T[],
+  changes: RowDelta<T>[],
+): boolean {
+  if (target.length !== all.length) return false;
+  for (const change of changes) {
+    if (change.kind === RowChangeKind.Removed) continue;
+    const position = locate(target, change.id, change.index);
+    const source = all[position];
+    if (position === -1 || source === undefined || resultIdentity(source) !== change.id) {
+      return false;
+    }
+    const current = target[position]!;
+    if (current !== source) {
+      deepMerge(current as Record<string, unknown>, source as Record<string, unknown>);
+    }
+  }
+  return true;
+}
+
+/** Position of `id`, trying the delta's index before scanning the array. */
+function locate<T extends { id: string }>(target: T[], id: string, hint: number): number {
+  const hinted = target[hint];
+  if (hinted !== undefined && resultIdentity(hinted) === id) return hint;
+  return target.findIndex((item) => resultIdentity(item) === id);
+}
+
+function clampIndex(index: number, length: number): number {
+  return Math.max(0, Math.min(index, length));
 }
 
 /**

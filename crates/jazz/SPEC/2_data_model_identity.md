@@ -173,9 +173,21 @@ Schema identity is derived from schema content so independently observed copies
 of the same storage shape name the same version, while any storage-shape change
 names a different version. A `SchemaVersionId` is
 `Uuid::new_v5(SCHEMA_VERSION_NAMESPACE, JazzSchema::canonical_bytes())`
-(`INV-DATA-6`), domain-tagged `"jazz-schema-v0"`. The canonical bytes cover
-sorted tables, names, columns in declared order, types, merge
-strategy, and references. They deliberately do **not** include read/write
+(`INV-DATA-6`), domain-tagged `"jazz-schema-v1-large-value-kinds"`. The
+canonical bytes cover sorted tables, names, columns in declared order, types,
+merge strategy, references, and `branch_by`. A schema in which some table
+declares a composite index is instead domain-tagged
+`"jazz-schema-v2-composite-indexes"`, and each table's encoding then ends with
+its composite indexes: a `u64` count, then per index in canonical order
+(lexicographic over UTF-8 column-name bytes) a `u64` column count and each
+length-prefixed column name. Every schema without a composite index keeps its
+frozen v1 bytes and id; a distinct domain tag, rather than an optional trailing
+section, keeps the encoding injective. Adding or removing a composite index is
+therefore a new schema version that goes through ordinary catalogue lineage
+publication (ch. 10), which backfills the new index for existing rows; it is
+never a silent in-place respelling of the stored schema.
+`crates/jazz/tests/composite_indexes.rs` pins a plain and two composite ids.
+The canonical bytes deliberately do **not** include read/write
 policies: policies are runtime/catalogue metadata attached to a storage schema
 version, so publishing permissions for the same tables can refresh authorization
 without creating a second physical storage partition. Changing any storage-shape
