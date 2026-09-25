@@ -20,12 +20,13 @@ it("serialises overlapping key updates across connections and survives reopening
   expect(JSON.parse((await reopened.read())!).sort((a: number, b: number) => a - b)).toEqual(
     Array.from({ length: 24 }, (_, index) => index),
   );
+  const beforeFailedUpdate = await reopened.read();
   await expect(
     reopened.update(() => {
       throw new Error("transform refused");
     }),
   ).rejects.toThrow("transform refused");
-  expect(await reopened.read()).toBe(await first.read());
+  expect(await reopened.read()).toBe(beforeFailedUpdate);
   expect(await createKeyStore({ ...scope, env: "production" }).read()).toBeNull();
   expect(await createKeyStore({ ...scope, accountId: crypto.randomUUID() }).read()).toBeNull();
   expect(await createKeyStore({ ...scope, registry: `${scope.registry}/other` }).read()).toBeNull();
