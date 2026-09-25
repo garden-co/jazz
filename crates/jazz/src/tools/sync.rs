@@ -12,12 +12,17 @@ pub enum DurabilityTier {
 // Preserve the facade's existing serialized tags, independently of the core
 // transaction encoding. The removed intermediate tier is decode-only.
 #[derive(Serialize, Deserialize)]
+#[allow(deprecated)]
 enum DurabilityEncoding {
     Local,
+    #[deprecated(
+        note = "the edge tier was removed in alpha.57; use GlobalServer. Decode-only for old peers"
+    )]
     EdgeServer,
     GlobalServer,
 }
 
+#[allow(deprecated)]
 impl From<DurabilityEncoding> for DurabilityTier {
     fn from(value: DurabilityEncoding) -> Self {
         match value {

@@ -514,13 +514,18 @@ pub enum DurabilityTier {
 // Pin the established Postcard tags. Legacy Edge is accepted only while
 // decoding; new messages always encode Local as 1 and Global as 3.
 #[derive(serde::Deserialize, serde::Serialize)]
+#[allow(deprecated)]
 enum DurabilityEncoding {
     None,
     Local,
+    #[deprecated(
+        note = "the edge tier was removed in alpha.57; use Global. Decode-only for old peers"
+    )]
     Edge,
     Global,
 }
 
+#[allow(deprecated)]
 impl From<DurabilityEncoding> for DurabilityTier {
     fn from(value: DurabilityEncoding) -> Self {
         match value {
