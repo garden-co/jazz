@@ -5039,3 +5039,64 @@ fn history_complete_node_with_an_upstream_still_relays_subscriber_uploads() {
         "the mid must relay its subscribers' uploads to its upstream"
     );
 }
+
+/// Timing receipt for #3378: the server tick that serves one opening
+/// snapshot, plus (with `cold-settle-attribution`) the diagnostic encode that
+/// only fills `last_resume_bytes`. Run manually with `--ignored --nocapture`.
+#[test]
+#[ignore = "#3378: timing probe, run manually with --ignored"]
+fn probe_3378_opening_snapshot_serve_cost() {
+    let schema = schema();
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    for rows in [1_000usize, 10_000] {
+        for byte_wire in [false, true] {
+            let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+            for chunk in 0..rows.div_ceil(500) {
+                let tx = server.exclusive_tx().unwrap();
+                for index in chunk * 500..((chunk + 1) * 500).min(rows) {
+                    let mut id = [0u8; 16];
+                    id[..8].copy_from_slice(&(index as u64 + 1).to_be_bytes());
+                    tx.insert_with_id(
+                        "todos",
+                        RowUuid::from_bytes(id),
+                        cells(&format!("task {index:06} with a realistic title"), false, owner),
+                    )
+                    .unwrap();
+                }
+                tx.commit().unwrap();
+            }
+            let client = open_db(0xc1, client_author, &schema);
+            let (client_transport, server_transport) =
+                if byte_wire { byte_duplex() } else { duplex() };
+            let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+            let subscriber = server.accept_subscriber(server_transport, client_author);
+            let query = Query::from("todos");
+            let mut subscription =
+                prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+            client.tick().unwrap();
+            #[cfg(feature = "cold-settle-attribution")]
+            crate::cold_settle_attribution::reset();
+            // The opening may span several ticks (chunking, credit); sum the
+            // server's share across a fixed number of rounds.
+            let mut serve = std::time::Duration::ZERO;
+            for _ in 0..8 {
+                let started = std::time::Instant::now();
+                server.tick().unwrap();
+                serve += started.elapsed();
+                client.tick().unwrap();
+            }
+            #[cfg(feature = "cold-settle-attribution")]
+            let attribution = crate::cold_settle_attribution::snapshot();
+            #[cfg(not(feature = "cold-settle-attribution"))]
+            let attribution = "n/a (build with cold-settle-attribution)";
+            let (added, _, _) = delta_rows(next_settled_opening(&mut subscription));
+            assert_eq!(added.len(), rows);
+            println!(
+                "probe_3378 rows={rows} byte_wire={byte_wire} serve_tick_us={} last_resume_bytes={:?} attribution={attribution:?}",
+                serve.as_micros(),
+                subscriber.borrow().last_resume_bytes(),
+            );
+        }
+    }
+}
