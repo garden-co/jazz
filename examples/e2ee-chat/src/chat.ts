@@ -13,15 +13,16 @@ export const IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"
 export async function createChat(db: Db, ownerId: string) {
   const tx = db.beginExclusiveTransaction();
   const chat = tx.insert(app.chats, { ownerId });
-  tx.insert(app.chatOwners, { chatId: chat.id, accountId: ownerId });
-  tx.insert(
-    app.chatMembers,
-    { chatId: chat.id, accountId: ownerId },
-    { id: membershipId(chat.id, ownerId) },
-  );
+  // Upsert records exact point absence for these same-commit policy witnesses.
+  tx.upsert(app.chatOwners, crypto.randomUUID(), { chatId: chat.id, accountId: ownerId });
+  tx.upsert(app.chatMembers, membershipId(chat.id, ownerId), {
+    chatId: chat.id,
+    accountId: ownerId,
+  });
   // The registered scope insert stages its creator's root/grant in this same transaction.
-  await tx.commit().wait({ tier: "global" });
-  return chat;
+  const completion = tx.commit();
+  await completion.wait({ tier: "local" });
+  return { chat, completion };
 }
 
 // #region e2ee-chat-share
@@ -47,8 +48,8 @@ export async function sendMessage(
   senderId: string,
   text: string,
   image: File | null,
-  onProgress: (state: "Uploading" | "Awaiting acceptance") => void,
-): Promise<void> {
+  onProgress: (state: "Uploading" | "Saving locally") => void,
+) {
   if (!image && !text.trim()) throw new Error("Write a message or choose an image");
   if (
     image &&
@@ -64,14 +65,12 @@ export async function sendMessage(
     filename: image?.name ?? null,
     mimeType: image?.type ?? null,
   };
-  if (image) {
-    onProgress("Uploading");
-    const write = await db.insertStreaming(app.messages, { ...values, payload: image.stream() });
-    onProgress("Awaiting acceptance");
-    await write.wait({ tier: "global" });
-  } else {
-    onProgress("Awaiting acceptance");
-    await db.insert(app.messages, { ...values, payload: null }).wait({ tier: "global" });
-  }
+  onProgress(image ? "Uploading" : "Saving locally");
+  const write = image
+    ? await db.insertStreaming(app.messages, { ...values, payload: image.stream() })
+    : db.insert(app.messages, { ...values, payload: null });
+  onProgress("Saving locally");
+  await write.wait({ tier: "local" });
+  return write;
 }
 // #endregion e2ee-chat-upload

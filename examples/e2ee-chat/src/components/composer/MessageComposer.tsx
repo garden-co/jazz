@@ -6,7 +6,15 @@ import { IMAGE_TYPES, MAX_IMAGE_BYTES, sendMessage } from "../../chat.js";
 
 // Reuses chat-react's bottom composer layout and outline/icon Send affordance.
 // Plain text keeps this example independent of rich-text sanitisation/editor plugins.
-export function MessageComposer({ chatId, accountId }: { chatId: string; accountId: string }) {
+export function MessageComposer({
+  chatId,
+  accountId,
+  onSaved,
+}: {
+  chatId: string;
+  accountId: string;
+  onSaved: (id: string, accepted: Promise<unknown>) => void;
+}) {
   const db = useDb();
   const [text, setText] = useState("");
   const [image, setImage] = useState<File | null>(null);
@@ -14,6 +22,7 @@ export function MessageComposer({ chatId, accountId }: { chatId: string; account
   const [error, setError] = useState("");
   const [sending, setSending] = useState(false);
   const input = useRef<HTMLInputElement>(null);
+  const submission = useRef(0);
   return (
     <form
       className="m-2 flex flex-col gap-2"
@@ -21,12 +30,24 @@ export function MessageComposer({ chatId, accountId }: { chatId: string; account
       onSubmit={async (event) => {
         event.preventDefault();
         if (sending) return;
+        const current = ++submission.current;
         setSending(true);
         setError("");
         setStatus("");
         try {
-          await sendMessage(db, chatId, accountId, text, image, setStatus);
-          setStatus("Sent");
+          const write = await sendMessage(db, chatId, accountId, text, image, setStatus);
+          setStatus("Saved on this device");
+          const accepted = write.wait({ tier: "global" });
+          onSaved(write.value.id, accepted);
+          void accepted.then(
+            () => {
+              if (submission.current === current) setStatus("Accepted by server");
+            },
+            () => {
+              if (submission.current === current)
+                setStatus("Saved on this device · acceptance unconfirmed");
+            },
+          );
           setText("");
           setImage(null);
           if (input.current) input.current.value = "";

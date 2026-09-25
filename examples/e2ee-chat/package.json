@@ -10,9 +10,9 @@
     "typecheck": "tsc --noEmit",
     "preview": "vite preview",
     "test": "pnpm test:unit && pnpm test:browser && pnpm test:e2e",
-    "test:unit": "vitest run --config vitest.config.ts",
-    "test:browser": "vitest run --config vitest.config.browser.ts",
-    "test:e2e": "playwright test"
+    "test:unit": "node ../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.ts",
+    "test:browser": "node ../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.browser.ts",
+    "test:e2e": "node ../../dev/gates/run-correctness-consumer.mjs -- pnpm exec playwright test"
   },
   "dependencies": {
     "@radix-ui/react-slot": "^1.2.4",
