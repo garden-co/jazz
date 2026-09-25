@@ -4724,6 +4724,15 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage + 'static,
     {
+        // Retire receivers dropped since the last tick, then bring every
+        // queued retraction into arranged state before any bind hydrates,
+        // exactly as `prepare` does. Otherwise a full hydration that no
+        // longer counts a retracted binding has that retraction applied on
+        // top, and a later live attach would build on the result.
+        self.prune_dropped_subscriptions_with_storage(storage.as_ref())
+            .await?;
+        self.flush_pending_binding_retractions(storage.as_ref())
+            .await?;
         let Some(borrowed) = self.live_attach_borrowed_nodes(shape_id, binding_values)? else {
             return Ok(None);
         };
@@ -4732,7 +4741,6 @@ impl IvmRuntime {
             .get(&shape_id)
             .ok_or(IvmRuntimeError::PreparedShapeNotFound(shape_id))?;
         let binding_key = BindingKey(shape.binding_descriptor.create(binding_values)?);
-        let source_key = BindingSourceKey::prepared(shape.shape.clone());
         let delta = self.add_binding_ref(shape_id, binding_key.clone())?;
         debug_assert_eq!(delta.deltas.len(), 1, "a live attach admits a new binding");
         if let Err(error) = self
@@ -4751,17 +4759,23 @@ impl IvmRuntime {
             }
             return Err(error);
         }
-        debug_assert!(
-            !self
-                .pending_binding_retractions
-                .iter()
-                .any(|pending| pending.key == source_key),
-            "a live attach tick must not retract a sibling binding"
-        );
+        // A receiver dropped concurrently with the attach tick is discovered
+        // there and its retraction queued. Apply it before the new binding
+        // hydrates, so the borrowed nodes match the source's refcounts.
+        while !self.pending_binding_retractions.is_empty() {
+            self.flush_pending_binding_retractions(storage.as_ref())
+                .await?;
+        }
+        self.live_attaches += 1;
         Ok(Some(LiveAttach {
             binding_key,
             borrowed,
         }))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn live_attaches(&self) -> u64 {
+        self.live_attaches
     }
 
     /// The shared nodes a live attach may borrow, or `None` when the shape is
