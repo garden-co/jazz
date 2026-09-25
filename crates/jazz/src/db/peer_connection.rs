@@ -3600,19 +3600,9 @@ where
                                     _ => None,
                                 };
                                 let released_outbox_tx_id = match &message {
-                                    SyncMessage::FateUpdate {
-                                        tx_id,
-                                        fate,
-                                        global_time,
-                                        durability,
-                                        ..
-                                    } if outbox_release_receipt_eligible
-                                        && (matches!(fate, Fate::Rejected(_))
-                                            || (matches!(fate, Fate::Accepted)
-                                                && global_time.is_some()
-                                                && durability.is_some_and(|tier| {
-                                                    tier >= DurabilityTier::Global
-                                                }))) =>
+                                    SyncMessage::FateUpdate { tx_id, .. }
+                                        if outbox_release_receipt_eligible
+                                            && fate_update_settles_upload(&message, *tx_id) =>
                                     {
                                         Some(*tx_id)
                                     }
@@ -5346,6 +5336,15 @@ where
                                     tx_id,
                                 );
                             }
+                            // An authority that settled this upload terminally
+                            // (the same predicate an upstream fate must meet
+                            // to release an outbox entry) has nobody left to
+                            // ask. Queueing it would retain the unit forever.
+                            let settled_here = local_upload.as_ref().is_some_and(|(tx_id, _)| {
+                                responses
+                                    .iter()
+                                    .any(|response| fate_update_settles_upload(response, *tx_id))
+                            });
                             for response in responses {
                                 if matches!(response, SyncMessage::FateUpdate { .. }) {
                                     self.downstream_fates.borrow_mut().push(response);
@@ -5358,10 +5357,16 @@ where
                                     )?;
                                 }
                             }
-                            if let Some((tx_id, unit)) = local_upload
-                                && queue_pending_upload_in(&outbox, tx_id, Some(unit))
-                            {
-                                schedule_tick_in(&self.scheduler, TickUrgency::Deferred);
+                            if let Some((tx_id, unit)) = local_upload {
+                                if settled_here {
+                                    // A reconnect may have reconstructed this
+                                    // upload before the unit arrived here.
+                                    if outbox.borrow().contains(tx_id) {
+                                        self.released_outbox_tx_ids.push(tx_id);
+                                    }
+                                } else if queue_pending_upload_in(&outbox, tx_id, Some(unit)) {
+                                    schedule_tick_in(&self.scheduler, TickUrgency::Deferred);
+                                }
                             }
                             Ok::<bool, Error>(false)
                             })
@@ -7409,6 +7414,28 @@ where
 /// binding wakes for transport capacity. We remove only after `send` accepts
 /// the logical message, so a retry neither duplicates a sent fate nor loses a
 /// later fate behind it.
+/// Whether `message` is a terminal fate for `tx_id` that no upstream can
+/// revise: a rejection, or a Global-durable acceptance carrying its global
+/// time. Only such a fate retires an upload-outbox entry.
+fn fate_update_settles_upload(message: &SyncMessage, tx_id: TxId) -> bool {
+    match message {
+        SyncMessage::FateUpdate {
+            tx_id: fate_tx_id,
+            fate,
+            global_time,
+            durability,
+            ..
+        } => {
+            *fate_tx_id == tx_id
+                && (matches!(fate, Fate::Rejected(_))
+                    || (matches!(fate, Fate::Accepted)
+                        && global_time.is_some()
+                        && durability.is_some_and(|tier| tier >= DurabilityTier::Global)))
+        }
+        _ => false,
+    }
+}
+
 fn flush_downstream_fates<S>(
     node: &SharedNodeState<S>,
     peer: &mut PeerState,
@@ -7419,21 +7446,29 @@ fn flush_downstream_fates<S>(
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    loop {
-        let Some(fate) = fates.borrow().first().cloned() else {
-            return Ok(true);
+    // Send from a detached batch so draining K queued fates is O(K), not the
+    // O(K²) of removing each sent fate from the front of the `Vec`. Whatever
+    // was not sent goes back ahead of anything queued meanwhile.
+    let mut pending = std::mem::take(&mut *fates.borrow_mut());
+    let mut sent = 0;
+    let result = loop {
+        let Some(fate) = pending.get(sent).cloned() else {
+            break Ok(true);
         };
         match send_with_sync_context(node, peer, transport, fate) {
-            Ok(()) => {
-                fates.borrow_mut().remove(0);
-            }
+            Ok(()) => sent += 1,
             Err(error) if error.code == ErrorCode::Backpressure => {
                 schedule_tick_in(scheduler, TickUrgency::Deferred);
-                return Ok(false);
+                break Ok(false);
             }
-            Err(error) => return Err(error),
+            Err(error) => break Err(error),
         }
-    }
+    };
+    pending.drain(..sent);
+    let mut queue = fates.borrow_mut();
+    pending.append(&mut queue);
+    *queue = pending;
+    result
 }
 
 /// Retry the one ordinary-wire chunk response whose byte admission was refused.

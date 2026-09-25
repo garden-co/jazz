@@ -2853,6 +2853,10 @@ impl UploadOutbox {
         self.entries.len()
     }
 
+    pub(super) fn contains(&self, tx_id: TxId) -> bool {
+        self.tx_ids.contains(&tx_id)
+    }
+
     fn retain(&mut self, mut keep: impl FnMut(&PendingUpload) -> bool) {
         self.entries.retain(|pending| keep(pending));
         self.tx_ids.clear();
@@ -2892,10 +2896,12 @@ struct PendingUpload {
 /// recovery marker or an earlier same-transaction reconstruction.
 fn queue_pending_upload_in(outbox: &Outbox, tx_id: TxId, unit: Option<SyncMessage>) -> bool {
     let mut outbox = outbox.borrow_mut();
-    if let Some(pending) = outbox
-        .entries
-        .iter_mut()
-        .find(|pending| pending.tx_id == tx_id)
+    // `tx_ids` mirrors `entries`, so a new transaction skips the linear search.
+    if outbox.tx_ids.contains(&tx_id)
+        && let Some(pending) = outbox
+            .entries
+            .iter_mut()
+            .find(|pending| pending.tx_id == tx_id)
     {
         let Some(unit) = unit else {
             return false;

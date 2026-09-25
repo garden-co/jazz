@@ -4896,3 +4896,83 @@ fn rejected_legacy_edge_receipt_replay_reaches_the_application_like_an_ordinary_
     assert!(client.read(&todos).unwrap().is_empty());
     assert!(visible.is_empty());
 }
+
+/// A root authority settles every subscriber upload itself: its Accepted,
+/// Global-durable fate is terminal and nobody sits above it to ask again.
+/// So it must not retain those uploads in its own upload outbox, which is
+/// only drained by an upstream fate and would otherwise grow with every
+/// client write for the life of the process.
+///
+/// alice ──CommitUnit×N──► core ──Accepted(Global)──► alice
+///                          │
+///                          └── outbox stays empty; bob still sees all N rows
+///
+/// Internal: outbox retention is process memory, which no public API exposes.
+#[test]
+fn root_authority_does_not_retain_settled_subscriber_uploads() {
+    const WRITES: usize = 12;
+    let schema = schema();
+    let alice_author = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let bob_author = AuthorSubject::for_test_bytes([0xb1; 16]);
+    let core = open_core(0xa0, AuthorSubject::SYSTEM, &schema);
+    let alice = open_db(0xa1, alice_author, &schema);
+    let bob = open_db(0xb1, bob_author, &schema);
+    let (alice_transport, core_alice) = duplex();
+    let (bob_transport, core_bob) = duplex();
+    let _alice_upstream = crate::db::block_on(alice.connect_upstream(alice_transport));
+    let _bob_upstream = crate::db::block_on(bob.connect_upstream(bob_transport));
+    let _alice_link = core.accept_subscriber(core_alice, alice_author);
+    let _bob_link = core.accept_subscriber(core_bob, bob_author);
+    let prepared = bob.prepare_query(&Query::from("todos")).unwrap();
+    let _bob_rows = crate::db::block_on(bob.subscribe(
+        &prepared,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    let settle = || {
+        for _ in 0..8 {
+            alice.tick().unwrap();
+            core.tick().unwrap();
+            bob.tick().unwrap();
+        }
+    };
+    settle();
+
+    let mut writes = Vec::new();
+    for index in 0..WRITES {
+        writes.push(
+            alice
+                .insert(
+                    "todos",
+                    cells(&format!("alice {index}"), false, alice_author),
+                    Default::default(),
+                )
+                .unwrap(),
+        );
+        settle();
+    }
+
+    for write in &writes {
+        crate::db::block_on(write.wait(DurabilityTier::Global))
+            .expect("the root authority settles each upload globally");
+    }
+    assert_eq!(core.read(&core.table("todos")).unwrap().len(), WRITES);
+    let bob_rows = crate::db::block_on(bob.all(
+        &prepared,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    assert_eq!(bob_rows.len(), WRITES);
+    assert_eq!(alice.node.outbox.borrow().len(), 0);
+    assert_eq!(
+        core.server.outbox.borrow().len(),
+        0,
+        "a root authority has no upstream to drain settled uploads"
+    );
+}
