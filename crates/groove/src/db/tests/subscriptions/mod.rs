@@ -2911,6 +2911,7 @@ async fn input_source_retirement_rejects_foreign_runtime_identity() {
     ));
 }
 
+mod incremental_attach;
 mod parameters;
 mod prepared;
 
