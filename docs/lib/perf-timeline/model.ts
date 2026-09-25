@@ -186,7 +186,8 @@ export function formatTime(seconds: number): string {
   if (seconds >= 1) return `${seconds.toLocaleString("en-US", { maximumFractionDigits: 2 })} s`;
   if (seconds >= 0.001)
     return `${(seconds * 1000).toLocaleString("en-US", { maximumFractionDigits: 2 })} ms`;
-  return `${(seconds * 1e6).toLocaleString("en-US", { maximumFractionDigits: 2 })} µs`;
+  // Milliseconds are the smallest unit shown: 42 µs reads as 0.042 ms.
+  return `${(seconds * 1000).toLocaleString("en-US", { maximumSignificantDigits: 3 })} ms`;
 }
 
 export function checkpoint(point: Point): string {

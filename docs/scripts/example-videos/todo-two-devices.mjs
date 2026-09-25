@@ -64,8 +64,9 @@ function installCursor({ color, glideMs }) {
   else mount();
 }
 
-// Render the app in the docs site's font, served to the page by a route.
-function installFont({ family }) {
+// Render the app in the docs site's font (served to the page by a route) and
+// hide the dev-only inspector overlay, which isn't part of the app.
+function styleApp({ family }) {
   const style = document.createElement("style");
   style.textContent = [400, 700]
     .map(
@@ -73,8 +74,11 @@ function installFont({ family }) {
         `@font-face{font-family:${family};font-weight:${w};src:url(/__video-font/${w}.woff2) format("woff2")}`,
     )
     .concat(`body,input,button{font-family:${family},system-ui,sans-serif}`)
+    .concat("jazz-inspector-overlay{display:none!important}")
     .join("");
-  document.documentElement.append(style);
+  // Init scripts can run before the document has a root element.
+  if (document.documentElement) document.documentElement.append(style);
+  else addEventListener("DOMContentLoaded", () => document.head.append(style));
 }
 
 async function startExample() {
@@ -131,7 +135,7 @@ try {
       recordVideo: { dir: join(recordingDir, String(devices.length)), size },
     });
     await context.addInitScript(installCursor, { color, glideMs });
-    await context.addInitScript(installFont, { family: stageFont.family });
+    await context.addInitScript(styleApp, { family: stageFont.family });
     await context.route("**/__video-font/*.woff2", (route) =>
       route.fulfill({
         path: fileURLToPath(
@@ -150,6 +154,16 @@ try {
       .getByRole("button", { name: "Add" })
       .and(page.locator(":enabled"))
       .waitFor({ timeout: 60_000 });
+    const styled = await page.evaluate(async (family) => {
+      await document.fonts.ready;
+      const overlay = document.querySelector("jazz-inspector-overlay");
+      return (
+        getComputedStyle(document.body).fontFamily.includes(family) &&
+        document.fonts.check(`16px ${family}`) &&
+        (!overlay || getComputedStyle(overlay).display === "none")
+      );
+    }, stageFont.family);
+    if (!styled) throw new Error("The recording font or overlay styles did not apply");
   }
   const origin = Date.now();
   const captions = [];
@@ -227,7 +241,7 @@ try {
   const encoded = await composeWindows({
     browser,
     devices: recorded,
-    address: `localhost:${port}`,
+    address: "todo.example.com",
     workDir: recordingDir,
     captions,
     origin,

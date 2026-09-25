@@ -96,7 +96,7 @@ try {
 
   // Newest released number, per insert, with the /5 estimate: 2 s / 5 / 1350.
   const card = page.locator("#todo .group").first();
-  await card.locator("div.text-2xl").filter({ hasText: "296.3 µs*" }).waitFor();
+  await card.locator("div.text-2xl").filter({ hasText: "0.296 ms*" }).waitFor();
   assert.match(await card.innerText(), /per insert/);
   assert.match(await card.innerText(), /Released in v2\.0\.0-alpha\.2/);
   assert.match(await card.innerText(), /−50%/);
@@ -108,11 +108,11 @@ try {
   await tooltip.waitFor({ state: "visible" });
   const history = await tooltip.innerText();
   assert.match(history, /v2\.0\.0-alpha\.1/);
-  assert.match(history, /592\.59 µs\*/);
+  assert.match(history, /0\.593 ms\*/);
   assert.match(history, /Unreleased main/);
   assert.match(history, /Measured on the CodSpeed runner: 1\.48 ms/);
   // Open-PR experiments never feed a card or its history (0.001 s / 5 / 1350).
-  assert.doesNotMatch(`${await card.innerText()} ${history}`, /0\.15 µs/);
+  assert.doesNotMatch(`${await card.innerText()} ${history}`, /0\.000148 ms/);
 
   // Every other benchmark is listed, attributed to main when unreleased.
   const misc = await page.locator("#benchmarks").innerText();

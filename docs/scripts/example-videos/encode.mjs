@@ -69,7 +69,7 @@ async function renderStage({ browser, devices, captions, size, address, dir }) {
         <div class="abs" style="left:${x}px;top:${g.windowY - label}px;width:${size.width}px;color:#8b919c;font-size:15px;letter-spacing:.01em">${escape(d.label)}</div>
         <div class="abs" style="left:${x}px;top:${g.windowY}px;width:${size.width}px;height:${titleBar + size.height}px;border-radius:${radius}px;background:#000;box-shadow:0 18px 50px rgba(0,0,0,.55)"></div>
         <div class="abs" style="left:${x}px;top:${g.windowY}px;width:${size.width}px;height:${titleBar}px;border-radius:${radius}px ${radius}px 0 0;background:#26282d;border-bottom:1px solid #1a1b1f">
-          ${["#ff5f57", "#febc2e", "#28c840"].map((c, j) => `<span class="abs" style="left:${16 + j * 20}px;top:16px;width:12px;height:12px;border-radius:50%;background:${c}"></span>`).join("")}
+          ${["#55585e", "#55585e", "#55585e"].map((c, j) => `<span class="abs" style="left:${16 + j * 20}px;top:16px;width:12px;height:12px;border-radius:50%;background:${c}"></span>`).join("")}
           <div class="abs" style="left:50%;top:9px;transform:translateX(-50%);width:56%;height:26px;border-radius:7px;background:#36393f;color:#c9ccd1;font-size:13px;line-height:26px;text-align:center">${escape(address)}</div>
         </div>`;
     })
