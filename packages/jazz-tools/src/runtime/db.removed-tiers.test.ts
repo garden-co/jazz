@@ -54,7 +54,8 @@ it("waits for global instead of rejecting an already committed write at the remo
     });
     db = await createDb(await localAccountConfig(server.appId, server.url));
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const edge = { tier: "edge" } as unknown as { tier: "global" };
+    // Deprecated but still typed: editors strike it through and point to "global".
+    const edge = { tier: "edge" } as const;
 
     const inserted = await db.insert(app.notes, { title: "Draft" }).wait(edge);
     expect(inserted.title).toBe("Draft");

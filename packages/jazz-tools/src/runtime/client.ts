@@ -826,8 +826,8 @@ let warnedRemovedEdgeWriteTier = false;
  * so a removed tier must not reject: a caller that retries on rejection would
  * duplicate the write. `"edge"` waits for the stronger `"global"` instead.
  */
-function resolveWriteWaitTier(tier: unknown): DurabilityTier {
-  if (tier !== "edge") return tier as DurabilityTier;
+function resolveWriteWaitTier(tier: DurabilityTier | "edge"): DurabilityTier {
+  if (tier !== "edge") return tier;
   if (!warnedRemovedEdgeWriteTier) {
     warnedRemovedEdgeWriteTier = true;
     console.warn('The "edge" tier was removed. wait({ tier: "edge" }) now waits for "global".');
@@ -854,11 +854,17 @@ export class WriteHandle<T = void, WaitResult = void> {
   }
 
   /**
+   * @deprecated The "edge" tier was removed in alpha.57. Use `"global"`;
+   * `"edge"` now waits for `"global"`.
+   */
+  wait(options: { tier: "edge" }): Promise<WaitResult>;
+  /**
    * Wait for the write to be persisted at a given durability tier.
    *
    * Rejects with a {@link PersistedWriteRejectedError} if the write is rejected.
    */
-  async wait(options: { tier: DurabilityTier }): Promise<WaitResult> {
+  wait(options: { tier: DurabilityTier }): Promise<WaitResult>;
+  async wait(options: { tier: DurabilityTier | "edge" }): Promise<WaitResult> {
     const tier = resolveWriteWaitTier(options.tier);
     const ready = writeWaitReadiness.get(this)?.(tier);
     return this.#client.waitForTransaction(this.txId, tier, ready) as Promise<WaitResult>;
@@ -880,13 +886,19 @@ export class WriteResult<T> extends WriteHandle<T, T> {
   }
 
   /**
+   * @deprecated The "edge" tier was removed in alpha.57. Use `"global"`;
+   * `"edge"` now waits for `"global"`.
+   */
+  override wait(options: { tier: "edge" }): Promise<T>;
+  /**
    * Wait for the write to be persisted at a given durability tier.
    *
    * Rejects with a {@link PersistedWriteRejectedError} if the write is rejected.
    * @returns the inserted row.
    */
-  override async wait(options: { tier: DurabilityTier }): Promise<T> {
-    await super.wait(options);
+  override wait(options: { tier: DurabilityTier }): Promise<T>;
+  override async wait(options: { tier: DurabilityTier | "edge" }): Promise<T> {
+    await super.wait({ tier: resolveWriteWaitTier(options.tier) });
     return this.value;
   }
 
