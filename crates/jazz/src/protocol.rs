@@ -948,8 +948,17 @@ mod version_record_wire_row {
     // Descriptor identity includes immutable names, layouts, nested types and
     // enum registry/case schemas. Row bytes are produced by the encoder;
     // untrusted receipt admission is separate from this representation codec.
-    const MAX_DESCRIPTOR_PROOFS: usize = 16;
+    //
+    // Every row of a view update repeats its descriptor, so a miss costs a
+    // full descriptor encode or canonical decode per row. Retain enough
+    // distinct descriptors (tables x schema versions x nested shapes) that a
+    // multi-table stream does not evict itself; lookups are hashed so the
+    // larger bound does not turn each hit into a linear scan.
+    const MAX_DESCRIPTOR_PROOFS: usize = 256;
+    /// Largest single descriptor worth retaining.
     const MAX_DESCRIPTOR_PROOF_BYTES: usize = 64 * 1024;
+    /// Total encoded descriptor bytes retained per thread.
+    const MAX_DESCRIPTOR_PROOF_CACHE_BYTES: usize = 1024 * 1024;
 
     #[derive(Clone)]
     struct DescriptorProof {
@@ -958,26 +967,63 @@ mod version_record_wire_row {
         encoded: std::sync::Arc<[u8]>,
     }
 
+    /// Bounded FIFO of descriptor proofs with hashed lookup by source
+    /// descriptor (encode) and by encoded bytes (decode). Index entries point
+    /// at the newest proof for their key and are dropped with that proof.
     #[derive(Default)]
     struct DescriptorProofCache {
-        entries: std::collections::VecDeque<DescriptorProof>,
+        entries: std::collections::VecDeque<(u64, DescriptorProof)>,
+        by_source: rustc_hash::FxHashMap<RecordDescriptor, u64>,
+        by_encoded: rustc_hash::FxHashMap<std::sync::Arc<[u8]>, u64>,
+        next_id: u64,
         bytes: usize,
     }
 
     impl DescriptorProofCache {
+        fn get(&self, id: u64) -> Option<&DescriptorProof> {
+            let front = self.entries.front()?.0;
+            let index = usize::try_from(id.checked_sub(front)?).ok()?;
+            self.entries.get(index).map(|(_, proof)| proof)
+        }
+
+        fn by_source(&self, descriptor: &RecordDescriptor) -> Option<DescriptorProof> {
+            self.get(*self.by_source.get(descriptor)?).cloned()
+        }
+
+        fn by_encoded(&self, encoded: &[u8]) -> Option<DescriptorProof> {
+            // Consecutive rows usually share a descriptor: compare the newest
+            // proof before hashing the whole encoding.
+            if let Some((_, newest)) = self.entries.back()
+                && newest.encoded.as_ref() == encoded
+            {
+                return Some(newest.clone());
+            }
+            self.get(*self.by_encoded.get(encoded)?).cloned()
+        }
+
         fn remember(&mut self, proof: DescriptorProof) {
             // This is a retention limit, never an input acceptance limit.
             if proof.encoded.len() > MAX_DESCRIPTOR_PROOF_BYTES {
                 return;
             }
             while self.entries.len() >= MAX_DESCRIPTOR_PROOFS
-                || self.bytes + proof.encoded.len() > MAX_DESCRIPTOR_PROOF_BYTES
+                || self.bytes + proof.encoded.len() > MAX_DESCRIPTOR_PROOF_CACHE_BYTES
             {
-                let evicted = self.entries.pop_front().expect("nonempty bounded cache");
+                let (id, evicted) = self.entries.pop_front().expect("nonempty bounded cache");
                 self.bytes -= evicted.encoded.len();
+                if self.by_source.get(&evicted.source) == Some(&id) {
+                    self.by_source.remove(&evicted.source);
+                }
+                if self.by_encoded.get(evicted.encoded.as_ref()) == Some(&id) {
+                    self.by_encoded.remove(evicted.encoded.as_ref());
+                }
             }
+            let id = self.next_id;
+            self.next_id += 1;
             self.bytes += proof.encoded.len();
-            self.entries.push_back(proof);
+            self.by_source.insert(proof.source, id);
+            self.by_encoded.insert(proof.encoded.clone(), id);
+            self.entries.push_back((id, proof));
         }
     }
 
@@ -989,15 +1035,7 @@ mod version_record_wire_row {
     fn descriptor_for_encode(
         descriptor: &RecordDescriptor,
     ) -> Result<DescriptorProof, groove::records::Error> {
-        if let Some(proof) = DESCRIPTOR_PROOFS.with(|cache| {
-            cache
-                .borrow()
-                .entries
-                .iter()
-                .rev()
-                .find(|proof| proof.source == *descriptor)
-                .cloned()
-        }) {
+        if let Some(proof) = DESCRIPTOR_PROOFS.with(|cache| cache.borrow().by_source(descriptor)) {
             return Ok(proof);
         }
         let encoded = groove::records::encode_persisted_record_descriptor(descriptor)?;
@@ -1012,15 +1050,7 @@ mod version_record_wire_row {
     }
 
     fn descriptor_for_decode(encoded: &[u8]) -> Result<DescriptorProof, groove::records::Error> {
-        if let Some(proof) = DESCRIPTOR_PROOFS.with(|cache| {
-            cache
-                .borrow()
-                .entries
-                .iter()
-                .rev()
-                .find(|proof| proof.encoded.as_ref() == encoded)
-                .cloned()
-        }) {
+        if let Some(proof) = DESCRIPTOR_PROOFS.with(|cache| cache.borrow().by_encoded(encoded)) {
             return Ok(proof);
         }
         let canonical = groove::records::decode_persisted_record_descriptor(encoded)?;
@@ -1219,7 +1249,86 @@ mod version_record_wire_row {
             DESCRIPTOR_PROOFS.with(|cache| {
                 let cache = cache.borrow();
                 assert_eq!(cache.entries.len(), MAX_DESCRIPTOR_PROOFS);
-                assert!(cache.bytes <= MAX_DESCRIPTOR_PROOF_BYTES);
+                assert!(cache.bytes <= MAX_DESCRIPTOR_PROOF_CACHE_BYTES);
+            });
+        }
+
+        // Large descriptors hit the total byte bound long before the entry
+        // bound. Eviction must keep both indexes pointing at retained entries,
+        // and evicted descriptors must still encode to the same bytes.
+        #[test]
+        fn descriptor_proof_cache_byte_bound_eviction_keeps_indexes_consistent() {
+            DESCRIPTOR_PROOFS.with(|cache| *cache.borrow_mut() = DescriptorProofCache::default());
+            let big = (0..40)
+                .map(|index| {
+                    RecordDescriptor::new([(
+                        format!("{index:04}{}", "y".repeat(60 * 1024)),
+                        ValueType::U64,
+                    )])
+                })
+                .collect::<Vec<_>>();
+            let encoded = big
+                .iter()
+                .map(|descriptor| descriptor_for_encode(descriptor).unwrap().encoded)
+                .collect::<Vec<_>>();
+            DESCRIPTOR_PROOFS.with(|cache| {
+                let cache = cache.borrow();
+                assert!(cache.bytes <= MAX_DESCRIPTOR_PROOF_CACHE_BYTES);
+                assert!(cache.entries.len() < big.len());
+                assert_eq!(cache.by_source.len(), cache.entries.len());
+                assert_eq!(cache.by_encoded.len(), cache.entries.len());
+                for (id, proof) in &cache.entries {
+                    assert_eq!(cache.by_source.get(&proof.source), Some(id));
+                    assert_eq!(cache.by_encoded.get(proof.encoded.as_ref()), Some(id));
+                }
+            });
+            for (descriptor, bytes) in big.iter().zip(&encoded) {
+                assert_eq!(
+                    descriptor_for_encode(descriptor).unwrap().encoded.as_ref(),
+                    bytes.as_ref()
+                );
+                assert_eq!(
+                    descriptor_for_decode(bytes).unwrap().canonical,
+                    descriptor_for_encode(descriptor).unwrap().canonical
+                );
+            }
+        }
+
+        // A view update interleaves rows from many tables and schema
+        // versions. The retained set must cover them all, or every row pays a
+        // full descriptor decode (#3380 measured ~24 us per miss vs ~44 ns per hit).
+        #[test]
+        fn descriptor_proof_cache_retains_an_interleaved_multi_table_stream() {
+            DESCRIPTOR_PROOFS.with(|cache| *cache.borrow_mut() = DescriptorProofCache::default());
+            let rows = (0..64)
+                .map(|table| {
+                    let descriptor = RecordDescriptor::new([
+                        (format!("table_{table}_id"), ValueType::Uuid),
+                        (format!("table_{table}_title"), ValueType::String),
+                    ]);
+                    let raw = descriptor
+                        .create(&[Value::Uuid(uuid::Uuid::nil()), Value::String("t".into())])
+                        .unwrap();
+                    encode(&OwnedRecord::new(raw, descriptor)).unwrap()
+                })
+                .collect::<Vec<_>>();
+            DESCRIPTOR_PROOFS.with(|cache| *cache.borrow_mut() = DescriptorProofCache::default());
+            for row in &rows {
+                decode(row).unwrap();
+            }
+            let retained = DESCRIPTOR_PROOFS.with(|cache| cache.borrow().entries.len());
+            for row in rows.iter().chain(rows.iter()) {
+                decode(row).unwrap();
+            }
+            DESCRIPTOR_PROOFS.with(|cache| {
+                let cache = cache.borrow();
+                assert_eq!(retained, rows.len());
+                assert_eq!(
+                    cache.entries.len(),
+                    retained,
+                    "a warm stream must not re-decode"
+                );
+                assert_eq!(cache.by_encoded.len(), retained);
             });
         }
 
