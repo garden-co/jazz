@@ -5060,7 +5060,11 @@ fn probe_3378_opening_snapshot_serve_cost() {
                     tx.insert_with_id(
                         "todos",
                         RowUuid::from_bytes(id),
-                        cells(&format!("task {index:06} with a realistic title"), false, owner),
+                        cells(
+                            &format!("task {index:06} with a realistic title"),
+                            false,
+                            owner,
+                        ),
                     )
                     .unwrap();
                 }
