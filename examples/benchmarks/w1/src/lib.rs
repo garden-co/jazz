@@ -1,5 +1,7 @@
 //! W1 compatibility fixture derived from the realistic project-board workload.
 
+pub mod subscription_fanout;
+
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
@@ -1001,7 +1003,7 @@ pub mod ahead_current {
     use jazz::node::{MergeableCommit, NodeState};
     use jazz::schema::JazzSchema;
     use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
-    use jazz::tx::{DurabilityTier, Fate, TxId};
+    use jazz::tx::{DurabilityTier, TxId};
     use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 
     const TABLE: &str = "status";
@@ -1011,18 +1013,12 @@ pub mod ahead_current {
         core: NodeState<RocksDbStorage>,
         _directory: tempfile::TempDir,
         depth: usize,
-        tier: DurabilityTier,
         newest_tx: TxId,
     }
 
     impl AheadCurrentFixture {
-        pub fn new(depth: usize, tier: DurabilityTier) -> Self {
+        pub fn new(depth: usize) -> Self {
             assert!(depth > 0, "W1 requires at least one retained candidate");
-            assert!(
-                matches!(tier, DurabilityTier::Local | DurabilityTier::Edge),
-                "W1 only measures Local and Edge candidate visibility"
-            );
-
             let schema = schema();
             let directory = tempfile::tempdir().expect("create W1 fixture directory");
             let families = schema.column_families();
@@ -1048,15 +1044,6 @@ pub mod ahead_current {
                 let tx_id = publication.tx_id();
                 block_on(core.persist_and_settle_transaction(publication))
                     .expect("persist W1 candidate");
-                if tier == DurabilityTier::Edge {
-                    block_on(core.apply_fate_update(
-                        tx_id,
-                        Fate::Accepted,
-                        None,
-                        Some(DurabilityTier::Edge),
-                    ))
-                    .expect("edge-accept W1 candidate");
-                }
                 parent = Some(tx_id);
                 newest_tx = Some(tx_id);
             }
@@ -1065,7 +1052,6 @@ pub mod ahead_current {
                 core,
                 _directory: directory,
                 depth,
-                tier,
                 newest_tx: newest_tx.expect("non-empty W1 candidate history"),
             }
         }
@@ -1076,30 +1062,38 @@ pub mod ahead_current {
             let rows = self.current_rows();
             let metrics = self.core.storage_read_metrics();
 
-            assert_eq!(rows.len(), 1, "{:?} W1 winner count", self.tier);
-            assert_eq!(rows[0].row_uuid(), row(), "{:?} W1 winner row", self.tier);
+            assert_eq!(rows.len(), 1, "{:?} W1 winner count", DurabilityTier::Local);
+            assert_eq!(
+                rows[0].row_uuid(),
+                row(),
+                "{:?} W1 winner row",
+                DurabilityTier::Local
+            );
             assert_eq!(
                 rows[0].cell_at(0),
                 Some(Value::String(title(self.depth - 1))),
                 "{:?} W1 must expose the newest candidate ({:?})",
-                self.tier,
+                DurabilityTier::Local,
                 self.newest_tx,
             );
             assert_eq!(
-                metrics.ahead_current_rows.reads, self.depth,
+                metrics.ahead_current_rows.reads,
+                self.depth,
                 "{:?} W1 must read exactly its retained candidate depth: {metrics:?}",
-                self.tier,
+                DurabilityTier::Local,
             );
             assert_eq!(
-                metrics.ahead_current_rows.ranges, 2,
+                metrics.ahead_current_rows.ranges,
+                2,
                 "{:?} W1 must scan content and deletion ahead-current ranges: {metrics:?}",
-                self.tier,
+                DurabilityTier::Local,
             );
         }
 
         /// The timed operation: one current-row read over the prepared fixture.
         pub fn current_rows(&mut self) -> Vec<jazz::node::CurrentRow> {
-            block_on(self.core.current_rows(TABLE, self.tier)).expect("read W1 current rows")
+            block_on(self.core.current_rows(TABLE, DurabilityTier::Local))
+                .expect("read W1 current rows")
         }
     }
 
@@ -1134,10 +1128,8 @@ mod ahead_current_tests {
     use super::*;
 
     #[test]
-    fn bounded_receipt_reads_exact_local_and_edge_candidate_depth() {
-        for tier in [DurabilityTier::Local, DurabilityTier::Edge] {
-            AheadCurrentFixture::new(3, tier).assert_receipt();
-        }
+    fn bounded_receipt_reads_exact_local_candidate_depth() {
+        AheadCurrentFixture::new(3).assert_receipt();
     }
 
     /// Exercises the benchmark's exact public-result assertion outside timing.

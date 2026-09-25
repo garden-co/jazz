@@ -1,8 +1,24 @@
 use jazz::groove::storage::MemoryStorage;
 use jazz_example_benchmark_w1::{Fixture, ResumeFixture};
 
+#[global_allocator]
+static ALLOCATOR: jazz_benchmark_guard::Allocator = jazz_benchmark_guard::Allocator;
+
 fn main() {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
     divan::main();
+}
+
+/// Independent dashboard bindings through core -> relay -> foreground.
+#[divan::bench(args = [(600, 0), (600, 10), (600, 60), (6000, 60)], sample_count = 3)]
+fn subscription_fanout_memory(bencher: divan::Bencher<'_, '_>, (rows, lists): (usize, usize)) {
+    use jazz_example_benchmark_w1::subscription_fanout::FanoutFixture;
+    bencher
+        .with_inputs(|| FanoutFixture::new(rows, lists))
+        .bench_local_values(|mut fixture| {
+            let receipt = fixture.hydrate();
+            (fixture, receipt)
+        });
 }
 
 /// Query-engine microbenchmark. This deliberately excludes persistent-backend cost.

@@ -28,6 +28,7 @@ getrandom = "0.3"
 
 [dev-dependencies]
 jazz-benchmark-guard = { path = "../benchmark-guard" }
+divan = { workspace = true }
 hdrhistogram = "7.5.4"
 rusqlite = { version = "0.34", features = ["bundled"] }
 tempfile = "3.27.0"
@@ -44,4 +45,12 @@ harness = false
 
 [[bench]]
 name = "record_validation"
+harness = false
+
+[[bench]]
+name = "pull_vs_snapshot"
+harness = false
+
+[[bench]]
+name = "steady_state"
 harness = false

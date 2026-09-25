@@ -1509,6 +1509,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "bytes",
+ "codspeed-divan-compat",
  "futures",
  "futures-test",
  "getrandom 0.3.4",
@@ -2117,6 +2118,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-example-auth-chat-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz",
+ "jazz-benchmark-guard",
+ "uuid",
+]
+
+[[package]]
 name = "jazz-example-band-chat-benchmark"
 version = "0.1.0"
 dependencies = [
@@ -2137,6 +2148,7 @@ version = "0.1.0"
 dependencies = [
  "codspeed-divan-compat",
  "jazz",
+ "jazz-benchmark-guard",
  "jazz-storage-rocksdb",
  "tempfile",
 ]
@@ -2156,6 +2168,7 @@ dependencies = [
  "codspeed-divan-compat",
  "groove",
  "jazz",
+ "jazz-benchmark-guard",
 ]
 
 [[package]]
@@ -2164,6 +2177,7 @@ version = "0.1.0"
 dependencies = [
  "codspeed-divan-compat",
  "jazz",
+ "jazz-benchmark-guard",
 ]
 
 [[package]]
@@ -2213,6 +2227,7 @@ version = "0.1.0"
 dependencies = [
  "codspeed-divan-compat",
  "jazz",
+ "jazz-benchmark-guard",
 ]
 
 [[package]]

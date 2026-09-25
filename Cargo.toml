@@ -29,6 +29,7 @@ members = [
   "examples/policy-scoped-documents/benchmarks",
   "examples/big-label/benchmarks",
   "examples/epic-drop/benchmarks",
+  "examples/auth-simple-chat/benchmarks",
   "examples/band-chat/benchmarks",
   "examples/music-agent/benchmarks",
   "examples/record-player/benchmarks",
