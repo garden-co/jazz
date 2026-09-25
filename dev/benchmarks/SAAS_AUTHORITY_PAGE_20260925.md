@@ -12,8 +12,8 @@ writes, unsupported queries, and older peers use the coverage path. Live
 subscriptions, history, and deletions are unchanged.
 
 On the anonymized SaaS fixture with no deleted rows, the 39-query, 100-row-per-
-query relay workload drops from a median **1,594 ms to 483 ms (3.30×)** over
-three matched runs on main `5b6417fe5`. All 879 returned row IDs match a
+query relay workload drops from a median **1,549 ms to 475 ms (3.26×)** over
+three matched runs on main `f629fa7a9`. All 879 returned row IDs match a
 separate authority evaluation. The authority route also matches its exact
 binding-encoded bytes.
 
@@ -64,6 +64,23 @@ The median speedup is **3.30×**. Candidate/control binary SHA-256 values are
 `4e9a2f1729390b17c7a2540147c9c813c520f6dd941006e2afe10577be1242f7` /
 `2cc3e71e29112e6ed2bf6dd566f47768f517f9e93ecda689ac6ef25d1a973d8b`.
 The six `main-5b6417-` receipts record row counts and phase timings.
+
+On main `f629fa7a9`, which also contains the merged subscription order-scan
+and per-tick memo/state-scan fixes (#3452 and #3460), the matched relay runs
+were:
+
+| 39 pages, 879 rows | Run 1 | Run 2 | Run 3 | Median |
+| ------------------ | ----: | ----: | ----: | -----: |
+| Receiver coverage  | 1,523 | 1,549 | 1,612 |  1,549 |
+| Authority result   |   481 |   473 |   475 |    475 |
+
+The median gain is **3.26×**. Both arms request `resultOnly: true`; the
+control disables only the authority eligibility check. The candidate binary
+includes stacked #3489, whose unbounded path is not exercised by these
+100-row-limited queries. Candidate/control SHA-256 values are
+`3042a1514bab3ff67cd100c7c4191200d42c5a2deacbae96f14deac8ce38d21c` /
+`c77fefb0a9c1130515e7914ab7c2d3151dfc31cf22ced08f37d73ea1d4b430f8`.
+The six `main-f629fa7-` receipts contain row counts, bytes, and phases.
 
 Set `JAZZ_CUSTOMER_IDENTITY=member JAZZ_CUSTOMER_PHASES=cold
 JAZZ_CUSTOMER_NO_DIAGNOSTICS=1 JAZZ_CUSTOMER_CLIENT_ONESHOT=1
