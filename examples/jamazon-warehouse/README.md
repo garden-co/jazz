@@ -7,7 +7,9 @@ stock, customers, orders, order lines, payments, and delivery work.
 The app is a reference for multi-row exclusive checkout, ordered and bounded operational reads,
 local-first retry, and idempotent external-effect handoff. It is not a TPC-C compliance claim.
 `benchmarks/` duplicates the schema/query shapes in a deterministic Divan fixture; its complete
-state reads are test receipts, not console APIs.
+state reads are test receipts, not console APIs. `benchmarks/benches/walltime.rs` times 100
+checkouts, a retried checkout and the pending-order page on CodSpeed wall time;
+`benchmarks/metadata.ts` documents each case for the examples page.
 
 Operational reads are intentionally public in this demo so a shared warehouse console can observe
 stock and orders. Writes are not public: every mutable child row follows its warehouse, order, or

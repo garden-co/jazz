@@ -728,6 +728,12 @@ pub fn encode_sync_message(message: &SyncMessage) -> Result<Vec<u8>, postcard::E
     to_allocvec(message)
 }
 
+/// Exact byte length `encode_sync_message` would produce, without allocating
+/// or copying the encoding. For diagnostics that only need the size.
+pub(crate) fn encoded_sync_message_len(message: &SyncMessage) -> Result<usize, postcard::Error> {
+    postcard::serialize_with_flavor(message, postcard::ser_flavors::Size::default())
+}
+
 /// Serialize a semantic message only when its required capabilities were
 /// negotiated for this link.
 ///
@@ -2358,6 +2364,19 @@ mod tests {
             "SYNTHETIC_SMALL_DELTA_COMPRESSION raw={raw} per_message_zstd={per_message_zstd} streaming_zstd={streaming_zstd} streaming_lz4={streaming_lz4}"
         );
         assert!(streaming_zstd < per_message_zstd);
+    }
+
+    /// `last_resume_bytes` reports this length for diagnostics and receipts,
+    /// so it must equal the real encoding's length for every message shape.
+    #[test]
+    fn encoded_sync_message_len_matches_the_encoding() {
+        for message in sync_message_payload_variants() {
+            assert_eq!(
+                encoded_sync_message_len(&message).unwrap(),
+                encode_sync_message(&message).unwrap().len(),
+                "{message:?}"
+            );
+        }
     }
 
     fn sync_message_payload_variants() -> Vec<SyncMessage> {

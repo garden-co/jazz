@@ -14,7 +14,7 @@ use groove::storage::{
     Error, KeyValue, OrderedKvStorage, OwnedWriteOperation, ReadyStorageCursor, ReopenableStorage,
     ScanBounds, ScanDirection, ScanRequest, StorageCodecProfile, StorageCursor,
     StorageEpochManifest, StorageFactory, StorageFuture, StorageScan, Value, WriteManyOutcome,
-    validate_physical_storage_names,
+    WriteOperation, validate_physical_storage_names,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -33,6 +33,11 @@ const META_DDL: &str = "CREATE TABLE meta (key TEXT PRIMARY KEY, value BLOB NOT 
 const COLUMN_FAMILIES_DDL: &str =
     "CREATE TABLE column_families (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE) STRICT";
 const KV_DDL: &str = "CREATE TABLE kv (cf INTEGER NOT NULL, k BLOB NOT NULL, v BLOB NOT NULL, PRIMARY KEY (cf, k)) WITHOUT ROWID, STRICT";
+/// A write with its column family resolved to an id; `None` deletes the key.
+type ResolvedWrite<'a> = (i64, &'a [u8], Option<&'a [u8]>);
+
+const UPSERT: &str = "INSERT OR REPLACE INTO kv (cf, k, v) VALUES (?1, ?2, ?3)";
+const DELETE: &str = "DELETE FROM kv WHERE cf = ?1 AND k = ?2";
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Local persistence policy for the SQLite WAL.
@@ -77,23 +82,96 @@ struct WriteFlushCadence {
     pending: usize,
 }
 
-struct SqliteCursor {
-    values: std::vec::IntoIter<KeyValue>,
+/// Rows fetched per cursor page. Pages resume after the last returned key
+/// (keyset paging), so a scan never materializes more than one page.
+const SCAN_PAGE_ROWS: usize = 256;
+
+// Constant SQL for every scan page shape, so each is compiled once and served
+// from the connection's statement cache. `?1` is the family, `?2` the lower
+// key, `?3` the upper key when present, and the last parameter the page limit.
+const SCAN_FROM: &str = "SELECT k, v FROM kv WHERE cf = ?1 AND k >= ?2 ORDER BY k ASC LIMIT ?3";
+const SCAN_FROM_BELOW: &str =
+    "SELECT k, v FROM kv WHERE cf = ?1 AND k >= ?2 AND k < ?3 ORDER BY k ASC LIMIT ?4";
+const SCAN_AFTER: &str = "SELECT k, v FROM kv WHERE cf = ?1 AND k > ?2 ORDER BY k ASC LIMIT ?3";
+const SCAN_AFTER_BELOW: &str =
+    "SELECT k, v FROM kv WHERE cf = ?1 AND k > ?2 AND k < ?3 ORDER BY k ASC LIMIT ?4";
+const SCAN_FROM_REVERSE: &str =
+    "SELECT k, v FROM kv WHERE cf = ?1 AND k >= ?2 ORDER BY k DESC LIMIT ?3";
+const SCAN_FROM_BELOW_REVERSE: &str =
+    "SELECT k, v FROM kv WHERE cf = ?1 AND k >= ?2 AND k < ?3 ORDER BY k DESC LIMIT ?4";
+
+/// A lazy, non-snapshot ordered scan: it pages 256 rows at a time and resumes
+/// after the last returned key, like the memory backend's cursor. The raw
+/// cursor contract permits this; RocksDB's cursor happens to read a snapshot.
+struct SqliteCursor<'a> {
+    storage: &'a SqliteStorage,
+    cf: i64,
+    start: Vec<u8>,
+    end: Option<Vec<u8>>,
+    reverse: bool,
+    remaining: Option<usize>,
+    last_key: Option<Vec<u8>>,
+    done: bool,
 }
 
-impl SqliteCursor {
-    fn new(values: Vec<KeyValue>) -> Self {
-        Self {
-            values: values.into_iter(),
-        }
-    }
-}
-
-impl StorageCursor for SqliteCursor {
+impl StorageCursor for SqliteCursor<'_> {
     fn next_batch(&mut self) -> StorageFuture<'_, Result<Option<Vec<KeyValue>>, Error>> {
         Box::pin(async move {
-            let batch = self.values.by_ref().take(256).collect::<Vec<_>>();
-            Ok((!batch.is_empty()).then_some(batch))
+            if self.done {
+                return Ok(None);
+            }
+            let limit = self
+                .remaining
+                .map_or(SCAN_PAGE_ROWS, |remaining| remaining.min(SCAN_PAGE_ROWS));
+            if limit == 0 {
+                self.done = true;
+                return Ok(None);
+            }
+            // Forward pages resume strictly after the last key; reverse pages
+            // resume strictly below it, so it becomes the exclusive upper bound.
+            let (lower, lower_sql_exclusive, upper) = match (self.reverse, &self.last_key) {
+                (false, Some(last_key)) => (last_key, true, self.end.as_ref()),
+                (true, Some(last_key)) => (&self.start, false, Some(last_key)),
+                (_, None) => (&self.start, false, self.end.as_ref()),
+            };
+            let sql = match (self.reverse, lower_sql_exclusive, upper.is_some()) {
+                (false, false, false) => SCAN_FROM,
+                (false, false, true) => SCAN_FROM_BELOW,
+                (false, true, false) => SCAN_AFTER,
+                (false, true, true) => SCAN_AFTER_BELOW,
+                (true, _, false) => SCAN_FROM_REVERSE,
+                (true, _, true) => SCAN_FROM_BELOW_REVERSE,
+            };
+            let page_limit = i64::try_from(limit).unwrap_or(i64::MAX);
+            let batch = self.storage.with_connection(|connection| {
+                let mut statement = connection.prepare_cached(sql).map_err(backend)?;
+                let read = |row: &rusqlite::Row<'_>| {
+                    Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+                };
+                match upper {
+                    Some(upper) => statement
+                        .query_map(params![self.cf, lower, upper, page_limit], read)
+                        .map_err(backend)?
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(backend),
+                    None => statement
+                        .query_map(params![self.cf, lower, page_limit], read)
+                        .map_err(backend)?
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(backend),
+                }
+            })?;
+            if batch.len() < limit {
+                self.done = true;
+            }
+            if let Some(remaining) = self.remaining.as_mut() {
+                *remaining -= batch.len();
+            }
+            if batch.is_empty() {
+                return Ok(None);
+            }
+            self.last_key = batch.last().map(|(key, _)| key.clone());
+            Ok(Some(batch))
         })
     }
 }
@@ -378,6 +456,45 @@ impl SqliteStorage {
         operation(borrowed.as_mut().ok_or_else(closed)?)
     }
 
+    /// Commit one atomic batch whose families are already resolved. A `None`
+    /// value deletes the key.
+    async fn write_resolved(&self, operations: &[ResolvedWrite<'_>]) -> Result<(), Error> {
+        self.with_connection_mut(|connection| {
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(backend)?;
+            {
+                let mut upsert = transaction.prepare_cached(UPSERT).map_err(backend)?;
+                let mut delete = transaction.prepare_cached(DELETE).map_err(backend)?;
+                for (cf, key, value) in operations {
+                    match value {
+                        Some(value) => upsert.execute(params![cf, key, value]),
+                        None => delete.execute(params![cf, key]),
+                    }
+                    .map_err(backend)?;
+                }
+            }
+            transaction.commit().map_err(backend)
+        })?;
+        let should_flush = self
+            .write_flush_cadence
+            .borrow_mut()
+            .as_mut()
+            .is_some_and(|cadence| {
+                cadence.pending += 1;
+                if cadence.pending == cadence.every {
+                    cadence.pending = 0;
+                    true
+                } else {
+                    false
+                }
+            });
+        if should_flush {
+            self.flush_write_boundary().await?;
+        }
+        Ok(())
+    }
+
     fn cf_id(&self, name: &str) -> Result<i64, Error> {
         self.column_families
             .borrow()
@@ -424,52 +541,6 @@ impl SqliteStorage {
                 .map_err(backend)?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(backend)
-        })
-    }
-
-    fn scan_rows(
-        &self,
-        cf: String,
-        start: Vec<u8>,
-        end: Option<Vec<u8>>,
-        reverse: bool,
-        max_items: Option<usize>,
-    ) -> Result<Vec<KeyValue>, Error> {
-        let cf = self.cf_id(&cf)?;
-        if max_items == Some(0) {
-            return Ok(Vec::new());
-        }
-        self.with_connection(|connection| {
-            let order = if reverse { "DESC" } else { "ASC" };
-            let limit = max_items
-                .map(|limit| i64::try_from(limit).unwrap_or(i64::MAX))
-                .unwrap_or(-1);
-            let sql = if end.is_some() {
-                format!(
-                    "SELECT k, v FROM kv WHERE cf = ?1 AND k >= ?2 AND k < ?3 ORDER BY k {order} LIMIT ?4"
-                )
-            } else {
-                format!(
-                    "SELECT k, v FROM kv WHERE cf = ?1 AND k >= ?2 ORDER BY k {order} LIMIT ?3"
-                )
-            };
-            let mut statement = connection.prepare(&sql).map_err(backend)?;
-            match end.as_deref() {
-                Some(end) => statement
-                    .query_map(params![cf, start, end, limit], |row| {
-                        Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
-                    })
-                    .map_err(backend)?
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(backend),
-                None => statement
-                    .query_map(params![cf, start, limit], |row| {
-                        Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
-                    })
-                    .map_err(backend)?
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(backend),
-            }
         })
     }
 }
@@ -595,11 +666,9 @@ impl OrderedKvStorage for SqliteStorage {
             let cf = self.cf_id(&cf)?;
             self.with_connection(|connection| {
                 connection
-                    .query_row(
-                        "SELECT v FROM kv WHERE cf = ?1 AND k = ?2",
-                        params![cf, key],
-                        |row| row.get(0),
-                    )
+                    .prepare_cached("SELECT v FROM kv WHERE cf = ?1 AND k = ?2")
+                    .map_err(backend)?
+                    .query_row(params![cf, key], |row| row.get(0))
                     .optional()
                     .map_err(backend)
             })
@@ -619,19 +688,16 @@ impl OrderedKvStorage for SqliteStorage {
                     .transaction_with_behavior(TransactionBehavior::Immediate)
                     .map_err(backend)?;
                 let existing = transaction
-                    .query_row(
-                        "SELECT v FROM kv WHERE cf = ?1 AND k = ?2",
-                        params![cf, &key],
-                        |row| row.get::<_, Vec<u8>>(0),
-                    )
+                    .prepare_cached("SELECT v FROM kv WHERE cf = ?1 AND k = ?2")
+                    .map_err(backend)?
+                    .query_row(params![cf, &key], |row| row.get::<_, Vec<u8>>(0))
                     .optional()
                     .map_err(backend)?;
                 if existing.is_none() {
                     transaction
-                        .execute(
-                            "INSERT INTO kv (cf, k, v) VALUES (?1, ?2, ?3)",
-                            params![cf, key, value],
-                        )
+                        .prepare_cached("INSERT INTO kv (cf, k, v) VALUES (?1, ?2, ?3)")
+                        .map_err(backend)?
+                        .execute(params![cf, key, value])
                         .map_err(backend)?;
                 }
                 transaction.commit().map_err(backend)?;
@@ -653,10 +719,9 @@ impl OrderedKvStorage for SqliteStorage {
                     .transaction_with_behavior(TransactionBehavior::Immediate)
                     .map_err(backend)?;
                 let removed = transaction
-                    .execute(
-                        "DELETE FROM kv WHERE cf = ?1 AND k = ?2 AND v = ?3",
-                        params![cf, key, expected],
-                    )
+                    .prepare_cached("DELETE FROM kv WHERE cf = ?1 AND k = ?2 AND v = ?3")
+                    .map_err(backend)?
+                    .execute(params![cf, key, expected])
                     .map_err(backend)?
                     != 0;
                 transaction.commit().map_err(backend)?;
@@ -675,10 +740,9 @@ impl OrderedKvStorage for SqliteStorage {
             let cf = self.cf_id(&cf)?;
             self.with_connection(|connection| {
                 connection
-                    .execute(
-                        "INSERT OR REPLACE INTO kv (cf, k, v) VALUES (?1, ?2, ?3)",
-                        params![cf, key, value],
-                    )
+                    .prepare_cached(UPSERT)
+                    .map_err(backend)?
+                    .execute(params![cf, key, value])
                     .map_err(backend)?;
                 Ok(())
             })
@@ -690,7 +754,9 @@ impl OrderedKvStorage for SqliteStorage {
             let cf = self.cf_id(&cf)?;
             self.with_connection(|connection| {
                 connection
-                    .execute("DELETE FROM kv WHERE cf = ?1 AND k = ?2", params![cf, key])
+                    .prepare_cached(DELETE)
+                    .map_err(backend)?
+                    .execute(params![cf, key])
                     .map_err(backend)?;
                 Ok(())
             })
@@ -767,18 +833,20 @@ impl OrderedKvStorage for SqliteStorage {
                 }
                 ScanBounds::Range { start, end } => (start, Some(end)),
             };
-            if empty_range {
-                self.cf_id(&cf)?;
+            let cf = self.cf_id(&cf)?;
+            if empty_range || max_items == Some(0) {
                 return Ok(Box::new(ReadyStorageCursor::new(Vec::new())) as StorageScan<'_>);
             }
-            let values = self.scan_rows(
+            Ok(Box::new(SqliteCursor {
+                storage: self,
                 cf,
                 start,
                 end,
-                direction == ScanDirection::Reverse,
-                max_items,
-            )?;
-            Ok(Box::new(SqliteCursor::new(values)) as StorageScan<'_>)
+                reverse: direction == ScanDirection::Reverse,
+                remaining: max_items,
+                last_key: None,
+                done: false,
+            }) as StorageScan<'_>)
         })
     }
 
@@ -808,7 +876,7 @@ impl OrderedKvStorage for SqliteStorage {
             let cf_id = self.cf_id(&cf)?;
             self.with_connection_mut(|connection| {
                 let mut statement = connection
-                    .prepare(
+                    .prepare_cached(
                         "SELECT k, v FROM kv WHERE cf = ?1 AND k >= ?2 AND k <= ?3 ORDER BY k DESC",
                     )
                     .map_err(backend)?;
@@ -834,59 +902,18 @@ impl OrderedKvStorage for SqliteStorage {
             // Resolve every family before opening a write transaction. This
             // makes an unknown family a no-op batch, matching the atomic
             // contract of the in-memory and RocksDB adapters.
-            let operations = operations
-                .into_iter()
-                .map(|operation| {
-                    let name = match &operation {
-                        OwnedWriteOperation::Set { cf, .. }
-                        | OwnedWriteOperation::Delete { cf, .. } => cf,
-                    };
-                    Ok((self.cf_id(name)?, operation))
+            let resolved = operations
+                .iter()
+                .map(|operation| match operation {
+                    OwnedWriteOperation::Set { cf, key, value } => {
+                        Ok((self.cf_id(cf)?, key.as_slice(), Some(value.as_slice())))
+                    }
+                    OwnedWriteOperation::Delete { cf, key } => {
+                        Ok((self.cf_id(cf)?, key.as_slice(), None))
+                    }
                 })
                 .collect::<Result<Vec<_>, Error>>()?;
-            self.with_connection_mut(|connection| {
-                let transaction = connection
-                    .transaction_with_behavior(TransactionBehavior::Immediate)
-                    .map_err(backend)?;
-                for (cf, operation) in operations {
-                    match operation {
-                        OwnedWriteOperation::Set { key, value, .. } => {
-                            transaction
-                                .execute(
-                                    "INSERT OR REPLACE INTO kv (cf, k, v) VALUES (?1, ?2, ?3)",
-                                    params![cf, key, value],
-                                )
-                                .map_err(backend)?;
-                        }
-                        OwnedWriteOperation::Delete { key, .. } => {
-                            transaction
-                                .execute(
-                                    "DELETE FROM kv WHERE cf = ?1 AND k = ?2",
-                                    params![cf, key],
-                                )
-                                .map_err(backend)?;
-                        }
-                    }
-                }
-                transaction.commit().map_err(backend)
-            })?;
-            let should_flush =
-                self.write_flush_cadence
-                    .borrow_mut()
-                    .as_mut()
-                    .is_some_and(|cadence| {
-                        cadence.pending += 1;
-                        if cadence.pending == cadence.every {
-                            cadence.pending = 0;
-                            true
-                        } else {
-                            false
-                        }
-                    });
-            if should_flush {
-                self.flush_write_boundary().await?;
-            }
-            Ok(())
+            self.write_resolved(&resolved).await
         })
     }
 
@@ -905,6 +932,33 @@ impl OrderedKvStorage for SqliteStorage {
                 }
             }
             match self.write_many(operations).await {
+                Ok(()) => WriteManyOutcome::Committed,
+                Err(error) => WriteManyOutcome::PossiblyCommitted(error),
+            }
+        })
+    }
+
+    /// Bind borrowed keys and values directly instead of the default, which
+    /// copies every key and value into owned operations first.
+    fn write_many_borrowed_outcome<'a>(
+        &'a self,
+        operations: Vec<WriteOperation<'a>>,
+    ) -> StorageFuture<'a, WriteManyOutcome> {
+        Box::pin(async move {
+            let resolved = match operations
+                .iter()
+                .map(|operation| match *operation {
+                    WriteOperation::Set { cf, key, value } => {
+                        Ok((self.cf_id(cf)?, key, Some(value)))
+                    }
+                    WriteOperation::Delete { cf, key } => Ok((self.cf_id(cf)?, key, None)),
+                })
+                .collect::<Result<Vec<_>, Error>>()
+            {
+                Ok(resolved) => resolved,
+                Err(error) => return WriteManyOutcome::Uncommitted(error),
+            };
+            match self.write_resolved(&resolved).await {
                 Ok(()) => WriteManyOutcome::Committed,
                 Err(error) => WriteManyOutcome::PossiblyCommitted(error),
             }
