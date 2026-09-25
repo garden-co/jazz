@@ -2209,8 +2209,7 @@ where
         };
         let node = self
             .node_aliases
-            .iter()
-            .find_map(|(node, candidate)| (*candidate == alias).then_some(*node))
+            .node_for_alias(alias)
             .ok_or(Error::InvalidStoredValue(
                 "historical content witness node alias is missing",
             ))?;

@@ -1,5 +1,6 @@
 import { AuxiliaryReceiveDeadline } from "./auxiliary-receive-deadline.js";
 import { Utf8Decoder } from "../utf8.js";
+import { formatUuidAt } from "../hex.js";
 import { runtimeConnectionIncarnation, runtimeRandomBytes } from "../runtime-entropy.js";
 import { stripColumnQualifier } from "../query-column-name.js";
 import { RemoteLinkStatePublisher, type RemoteLinkState } from "../remote-link-state.js";
@@ -582,7 +583,6 @@ type NativeRowFieldPlan = {
 };
 
 const textDecoder = new Utf8Decoder({ fatal: true });
-const byteHex = Array.from({ length: 256 }, (_, byte) => byte.toString(16).padStart(2, "0"));
 const nativeRowFieldPlanCache = new WeakMap<WasmSchema, Map<string, NativeRowFieldPlan[]>>();
 
 function openPersistentDb(
@@ -6460,28 +6460,7 @@ export function parseUuid(value: string): Uint8Array {
 }
 
 export function formatUuid(bytes: Uint8Array): string {
-  return (
-    byteHex[bytes[0]!] +
-    byteHex[bytes[1]!] +
-    byteHex[bytes[2]!] +
-    byteHex[bytes[3]!] +
-    "-" +
-    byteHex[bytes[4]!] +
-    byteHex[bytes[5]!] +
-    "-" +
-    byteHex[bytes[6]!] +
-    byteHex[bytes[7]!] +
-    "-" +
-    byteHex[bytes[8]!] +
-    byteHex[bytes[9]!] +
-    "-" +
-    byteHex[bytes[10]!] +
-    byteHex[bytes[11]!] +
-    byteHex[bytes[12]!] +
-    byteHex[bytes[13]!] +
-    byteHex[bytes[14]!] +
-    byteHex[bytes[15]!]
-  );
+  return formatUuidAt(bytes, 0);
 }
 
 function readU32Le(bytes: Uint8Array, offset: number): number {
