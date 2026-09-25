@@ -20,8 +20,8 @@ The first workloads are intentionally small but realistic:
 [metadata.ts](metadata.ts) owns the wall-clock descriptions and timing
 boundaries for `benches/walltime.rs`, which CodSpeed runs on every
 `benchmark`-labelled PR and nightly: opening the 16-track pattern grid (17
-subscriptions) and toggling a pad while that grid is live. `benches/loads.rs`
-keeps the microbenchmarks above for local use.
+subscriptions) and toggling a pad while that grid is live. The other
+workloads above are exercised by `tests/workloads.rs`.
 
 Fixture setup is outside measured closures. Correctness tests assert exact
 window ordering and convergence before CodSpeed measures the same APIs.

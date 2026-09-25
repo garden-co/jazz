@@ -9,7 +9,6 @@ expected-red coverage until #1833, #1839, and #1844 land.
 boundaries for `benches/walltime.rs`, which CodSpeed runs on every
 `benchmark`-labelled PR and nightly: opening the CoverFlow library, opening a
 4,096-track playlist, and adding a track to a live playlist window.
-`benches/queries.rs` keeps the one-shot read microbenchmarks for local use.
 
 ```sh
 cargo test -p jazz-example-record-player-benchmark

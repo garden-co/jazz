@@ -12,9 +12,5 @@ jazz-benchmark-guard = { path = "../../../crates/benchmark-guard" }
 divan = { workspace = true }
 
 [[bench]]
-name = "loads"
-harness = false
-
-[[bench]]
 name = "walltime"
 harness = false

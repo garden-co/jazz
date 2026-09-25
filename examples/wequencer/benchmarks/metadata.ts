@@ -12,7 +12,11 @@ export const wequencerBenchmarks: BenchmarkMetadata[] = [
       "Subscribe to the session's ordered track list and to each track's ordered steps (17 subscriptions), and receive every first result.",
     fixture,
     storage,
-    includes: ["Opening 17 live subscriptions", "Materializing 16 tracks and 1,024 steps"],
+    includes: [
+      "Opening 17 live subscriptions",
+      "Materializing 16 tracks and 1,024 steps",
+      "Dropping the subscriptions",
+    ],
     excludes: ["Schema compilation, database opening and seeding", "Audio scheduling"],
     work: { count: 1, unit: "patterns opened/s", explanation: "One full grid per iteration." },
     source,

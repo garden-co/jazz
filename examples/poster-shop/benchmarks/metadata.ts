@@ -30,7 +30,7 @@ export const posterShopBenchmarks: BenchmarkMetadata[] = [
     name: "poster_shop_add_shape[4096]",
     title: "PosterShop · draw a shape on a live canvas",
     description:
-      "Insert one shape on top of a canvas whose ordered shape and cursor subscriptions are live, and wait until the canvas subscription delivers it. The cost currently grows with the number of shapes on the canvas, not with the one added row (#2086): about 4 ms at 512 shapes and 100 ms at 4,096 locally.",
+      "Insert one shape on top of a canvas whose ordered shape and cursor subscriptions are live, and wait until the canvas subscription delivers it. The cost currently grows with the number of shapes on the canvas, not with the one added row (#2086).",
     fixture: `${canvas(4096)} Each iteration adds one more shape.`,
     storage,
     includes: [

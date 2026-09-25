@@ -13,7 +13,11 @@ export const recordPlayerBenchmarks: BenchmarkMetadata[] = [
       "Subscribe to the title-ordered 20-album CoverFlow shelf and the focused album's metadata-only track list, and receive both first results. Audio bytes are not materialized.",
     fixture,
     storage,
-    includes: ["Opening two live subscriptions", "Materializing 20 albums and 8 tracks"],
+    includes: [
+      "Opening two live subscriptions",
+      "Materializing 20 albums and 8 tracks",
+      "Dropping the subscriptions",
+    ],
     excludes: ["Schema compilation, database opening and seeding", "Cover art and audio"],
     work: {
       count: 1,
@@ -29,7 +33,11 @@ export const recordPlayerBenchmarks: BenchmarkMetadata[] = [
       "Subscribe to the visible 16-entry window (offset 8) of a playlist ordered by position, and receive its first result.",
     fixture,
     storage,
-    includes: ["Opening one live windowed subscription", "Materializing 16 entries"],
+    includes: [
+      "Opening one live windowed subscription",
+      "Materializing 16 entries",
+      "Dropping the subscription",
+    ],
     excludes: ["Schema compilation, database opening and seeding", "Audio"],
     work: { count: 1, unit: "playlist opens/s", explanation: "One playlist window per iteration." },
     source,
