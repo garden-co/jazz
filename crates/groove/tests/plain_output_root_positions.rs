@@ -102,6 +102,42 @@ async fn an_output_carrying_the_top_by_identity_still_receives_root_positions() 
 }
 
 #[futures_test::test]
+async fn a_row_that_only_changes_rank_is_reordered_by_moves_alone() {
+    // The output keeps only the identity, so moving a shape to the back
+    // changes nothing it shows except positions. Moves alone carry the
+    // change (no insert, update or removal), and applying them in order puts
+    // the shape last.
+    let mut db = database().await;
+    let subscription = db
+        .subscribe([("shapes", ordered_shapes().project(["id"]))])
+        .unwrap();
+    subscription.try_recv().unwrap();
+
+    let mut batch = db.open_batch();
+    batch.update(
+        "shapes",
+        vec![Value::U64(1), Value::U64(0), Value::U64(SHAPES)],
+    );
+    let persistence = db.apply_batch(batch).await.unwrap().persist().await;
+    db.finish_persistence(persistence).unwrap();
+
+    let tick = subscription.try_recv().unwrap();
+    let operations = &tick.terminal_sinks["shapes"].operations;
+    let mut order: Vec<u64> = (0..SHAPES).collect();
+    for operation in operations {
+        let TerminalEdit::Move { key, index } = &operation.edit else {
+            panic!("expected only moves, got {operations:?}");
+        };
+        let id = u64::from_be_bytes(key[1..].try_into().unwrap());
+        let from = order.iter().position(|shape| *shape == id).unwrap();
+        order.remove(from);
+        order.insert(*index, id);
+    }
+    let expected: Vec<u64> = (1..SHAPES).chain([0]).collect();
+    assert_eq!(order, expected);
+}
+
+#[futures_test::test]
 async fn an_output_without_the_top_by_identity_does_not_collect_root_positions() {
     // The semi join between the TopBy and the output means the output's
     // terminal keys are its own fields, not the TopBy row identity that
