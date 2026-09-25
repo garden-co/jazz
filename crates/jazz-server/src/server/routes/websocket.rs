@@ -417,6 +417,11 @@ async fn account_still_admitted(
 /// the last check cannot have been revoked. Only a changed (or closed)
 /// registry needs the owner-thread lookup; this keeps one thread off every
 /// connection's message path (#3387).
+///
+/// Contract: `changes` must have been subscribed *before* a full
+/// `account_still_admitted` check that succeeded (the route does this at
+/// admission). Otherwise a revocation that landed between the subscription
+/// and the first frame would already be marked seen and never re-checked.
 async fn account_admission_current(
     state: &ServerState,
     identity: Option<AuthorSubject>,
@@ -3377,14 +3382,9 @@ mod tests {
             .await
             .expect("revoke Alice");
         assert_eq!(revoked.status(), axum::http::StatusCode::NO_CONTENT);
-        // Application traffic after revocation must not be served either.
-        let _ = ws
-            .send(WsMessage::Binary(
-                postcard::to_allocvec(&Vec::<Vec<u8>>::new())
-                    .expect("empty batch")
-                    .into(),
-            ))
-            .await;
+        // No client traffic is needed: the registry change alone must close
+        // the socket. The per-message gate is pinned separately by
+        // `per_message_account_gate_refuses_the_first_frame_after_revocation`.
         let rejected = tokio::time::timeout(Duration::from_secs(5), async {
             while let Some(Ok(message)) = ws.next().await {
                 if decode_ws_message(&message).iter().any(|frame| {
@@ -3417,6 +3417,312 @@ mod tests {
         })
         .await;
         assert!(closed.is_ok(), "the revoked socket must close");
+        core.shutdown().await;
+    }
+
+    /// Wraps only the account registry root and fails its next durable flush on
+    /// demand, reproducing an ambiguous storage error after the journal append.
+    #[cfg(feature = "embedded-server")]
+    #[derive(Debug)]
+    struct FailNextAccountFlushFactory {
+        inner: jazz_storage_rocksdb::RocksDbStorageFactory,
+        fail_next_account_flush: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[cfg(feature = "embedded-server")]
+    struct FailNextFlushStorage {
+        inner: jazz::groove::storage::BoxedStorage,
+        fail: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[cfg(feature = "embedded-server")]
+    mod fail_next_flush_storage {
+        use super::FailNextFlushStorage;
+        use jazz::groove::storage::{
+            Error, OrderedKvStorage, OwnedWriteOperation, ReopenableStorage, ScanRequest,
+            StorageFuture, StorageScan, Value,
+        };
+        impl OrderedKvStorage for FailNextFlushStorage {
+            fn get(
+                &self,
+                cf: String,
+                key: Vec<u8>,
+            ) -> StorageFuture<'_, Result<Option<Value>, Error>> {
+                self.inner.get(cf, key)
+            }
+            fn put_if_absent(
+                &self,
+                cf: String,
+                key: Vec<u8>,
+                value: Vec<u8>,
+            ) -> StorageFuture<'_, Result<Option<Value>, Error>> {
+                self.inner.put_if_absent(cf, key, value)
+            }
+            fn compare_and_delete(
+                &self,
+                cf: String,
+                key: Vec<u8>,
+                expected: Vec<u8>,
+            ) -> StorageFuture<'_, Result<bool, Error>> {
+                self.inner.compare_and_delete(cf, key, expected)
+            }
+            fn set(
+                &self,
+                cf: String,
+                key: Vec<u8>,
+                value: Vec<u8>,
+            ) -> StorageFuture<'_, Result<(), Error>> {
+                self.inner.set(cf, key, value)
+            }
+            fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>> {
+                self.inner.delete(cf, key)
+            }
+            fn scan(
+                &self,
+                request: ScanRequest,
+            ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+                self.inner.scan(request)
+            }
+            fn write_many(
+                &self,
+                operations: Vec<OwnedWriteOperation>,
+            ) -> StorageFuture<'_, Result<(), Error>> {
+                self.inner.write_many(operations)
+            }
+            fn close(&self) -> StorageFuture<'_, Result<(), Error>> {
+                self.inner.close()
+            }
+            fn flush_write_boundary(&self) -> StorageFuture<'_, Result<(), Error>> {
+                if self.fail.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                    Box::pin(async {
+                        Err(Error::InvalidStorageLayout(
+                            "test: injected account registry flush failure".into(),
+                        ))
+                    })
+                } else {
+                    self.inner.flush_write_boundary()
+                }
+            }
+        }
+        impl ReopenableStorage for FailNextFlushStorage {
+            fn reopen(
+                self,
+                column_families: Vec<String>,
+            ) -> StorageFuture<'static, Result<Self, Error>> {
+                Box::pin(async move {
+                    Ok(Self {
+                        inner: self.inner.reopen(column_families).await?,
+                        fail: self.fail,
+                    })
+                })
+            }
+        }
+    }
+
+    #[cfg(feature = "embedded-server")]
+    impl jazz::groove::storage::StorageFactory for FailNextAccountFlushFactory {
+        fn open(
+            &self,
+            path: std::path::PathBuf,
+            column_families: Vec<String>,
+            codec_profile: jazz::groove::storage::StorageCodecProfile,
+        ) -> jazz::groove::storage::StorageFuture<
+            '_,
+            Result<jazz::groove::storage::BoxedStorage, jazz::groove::storage::Error>,
+        > {
+            let is_accounts = path.ends_with("accounts.rocksdb");
+            let fail = self.fail_next_account_flush.clone();
+            Box::pin(async move {
+                let inner = self
+                    .inner
+                    .open(path, column_families, codec_profile)
+                    .await?;
+                Ok(if is_accounts {
+                    jazz::groove::storage::BoxedStorage::new(FailNextFlushStorage { inner, fail })
+                } else {
+                    inner
+                })
+            })
+        }
+    }
+
+    /// A revoke whose journal append lands but whose durable flush fails
+    /// returns an error and poisons the registry; a restart replays the
+    /// revocation. The per-message gate must fail closed, exactly like a
+    /// fresh registry lookup, rather than keep trusting Alice's last
+    /// successful check. Guards the #3387 gate: the owner announces every
+    /// attempted mutation, not only successful ones.
+    #[cfg(feature = "embedded-server")]
+    #[tokio::test]
+    async fn failed_revoke_flush_still_closes_the_per_message_account_gate() {
+        use crate::server::testing::{JazzServer, TEST_JWT_ISSUER, TestJwtIssuer};
+
+        let fail = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let schema = SchemaBuilder::new()
+            .table(
+                PublicTableSchema::builder("todos")
+                    .column("title", ColumnType::Text)
+                    .policies(public_table_policies()),
+            )
+            .build();
+        let core = JazzServer::builder()
+            .with_schema(schema)
+            .with_storage_factory(std::sync::Arc::new(FailNextAccountFlushFactory {
+                inner: jazz_storage_rocksdb::RocksDbStorageFactory,
+                fail_next_account_flush: fail.clone(),
+            }))
+            .start()
+            .await
+            .expect("start test server");
+        let client = reqwest::Client::new();
+        let accounts = format!("{}/apps/{}/accounts", core.base_url(), core.app_id());
+        let alice = TestJwtIssuer::jwt_for_user("alice");
+        let registered: serde_json::Value = client
+            .post(format!("{accounts}/register"))
+            .bearer_auth(&alice)
+            .send()
+            .await
+            .expect("register Alice")
+            .json()
+            .await
+            .expect("Alice's account");
+        let account = jazz::account_registry::AccountId(
+            uuid::Uuid::parse_str(registered["account"].as_str().expect("account")).expect("uuid"),
+        );
+        let identity = AuthorSubject::authenticated(TEST_JWT_ISSUER, "alice")
+            .expect("principal")
+            .with_account(account);
+        let (mut ws, _) = connect_async(format!(
+            "ws://127.0.0.1:{}/apps/{}/ws",
+            core.port(),
+            core.app_id()
+        ))
+        .await
+        .expect("connect Alice");
+        let prelude = serde_json::json!({ "peer_identity": identity.canonical(), "auth": { "jwt_token": alice } });
+        ws.send(WsMessage::Binary(prelude.to_string().into_bytes().into()))
+            .await
+            .expect("prelude");
+        ws.send(WsMessage::Binary(
+            ws_client_hello_batch_with_features(current_wire_features()).into(),
+        ))
+        .await
+        .expect("hello");
+        let first = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("hello deadline")
+            .expect("hello")
+            .expect("hello msg");
+        let frames = decode_ws_message(&first);
+        assert!(
+            matches!(frames.as_slice(), [WireFrame::Hello(_), ..]),
+            "{frames:?}"
+        );
+
+        let state = core.server_state();
+        let mut changes = state.accounts.as_ref().map(|registry| registry.subscribe());
+        fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        let revoked = client
+            .post(format!("{accounts}/revoke"))
+            .bearer_auth(&alice)
+            .json(&serde_json::json!({ "identity": { "issuer": TEST_JWT_ISSUER, "subject": "alice" } }))
+            .send().await.expect("revoke Alice");
+        assert!(
+            !revoked.status().is_success(),
+            "the injected flush failure surfaces as a failed revoke"
+        );
+        assert!(
+            !fail.load(std::sync::atomic::Ordering::SeqCst),
+            "the injected flush failure was consumed by the revoke"
+        );
+
+        // The poisoned registry now refuses every fresh lookup.
+        let lookup = super::super::accounts::resolve_assignment(
+            &core.server_state(),
+            jazz::account_registry::Principal {
+                issuer: TEST_JWT_ISSUER.into(),
+                subject: "alice".into(),
+            },
+        )
+        .await;
+        assert!(lookup.is_err());
+
+        // The per-message decision the reader/outgoing branches make, on a
+        // receiver subscribed before the revoke (as the live socket's is).
+        let per_message_new = account_admission_current(&state, Some(identity), &mut changes).await;
+        let per_message_old = account_still_admitted(&state, Some(identity)).await;
+
+        assert!(
+            per_message_old.is_err(),
+            "a fresh registry lookup fails closed"
+        );
+        assert!(
+            per_message_new.is_err(),
+            "after a journaled revoke poisoned the registry, the per-message gate must not keep admitting Alice (fresh lookup: {per_message_old:?})"
+        );
+        core.shutdown().await;
+    }
+
+    /// Pins the per-message gate itself (#3387): the end-to-end revocation
+    /// test would still pass if `account_admission_current` always admitted,
+    /// because the watch-driven branch closes the socket anyway. An unrelated
+    /// enrollment keeps Alice admitted; the first frame checked after her
+    /// revocation completes is refused.
+    #[cfg(feature = "embedded-server")]
+    #[tokio::test]
+    async fn per_message_account_gate_refuses_the_first_frame_after_revocation() {
+        use crate::server::testing::{JazzServer, TEST_JWT_ISSUER, TestJwtIssuer};
+
+        let core = JazzServer::start().await.expect("start test server");
+        let client = reqwest::Client::new();
+        let accounts = format!("{}/apps/{}/accounts", core.base_url(), core.app_id());
+        let alice = TestJwtIssuer::jwt_for_user("alice");
+        let registered: serde_json::Value = client
+            .post(format!("{accounts}/register"))
+            .bearer_auth(&alice)
+            .send()
+            .await
+            .expect("register Alice")
+            .json()
+            .await
+            .expect("Alice's account");
+        let account = jazz::account_registry::AccountId(
+            uuid::Uuid::parse_str(registered["account"].as_str().expect("account")).expect("uuid"),
+        );
+        let identity = Some(
+            AuthorSubject::authenticated(TEST_JWT_ISSUER, "alice")
+                .expect("principal")
+                .with_account(account),
+        );
+        let state = core.server_state();
+        let mut changes = state.accounts.as_ref().map(|registry| registry.subscribe());
+        account_admission_current(&state, identity, &mut changes)
+            .await
+            .expect("admitted");
+
+        let bob = client
+            .post(format!("{accounts}/register"))
+            .bearer_auth(TestJwtIssuer::jwt_for_user("bob"))
+            .send()
+            .await
+            .expect("register Bob");
+        assert_eq!(bob.status(), axum::http::StatusCode::OK);
+        account_admission_current(&state, identity, &mut changes)
+            .await
+            .expect("an unrelated enrollment keeps Alice admitted");
+
+        let revoked = client
+            .post(format!("{accounts}/revoke"))
+            .bearer_auth(&alice)
+            .json(&serde_json::json!({ "identity": { "issuer": TEST_JWT_ISSUER, "subject": "alice" } }))
+            .send().await.expect("revoke Alice");
+        assert_eq!(revoked.status(), axum::http::StatusCode::NO_CONTENT);
+        assert!(
+            account_admission_current(&state, identity, &mut changes)
+                .await
+                .is_err(),
+            "the first frame checked after revocation completes must be refused"
+        );
         core.shutdown().await;
     }
 

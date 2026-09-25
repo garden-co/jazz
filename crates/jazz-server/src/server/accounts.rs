@@ -27,7 +27,10 @@ enum Request {
 pub(crate) struct AccountRegistryOwner {
     sender: mpsc::Sender<Request>,
     closed: std::sync::atomic::AtomicBool,
-    changes: tokio::sync::watch::Sender<u64>,
+    /// Template receiver. The only sender lives on the owner thread, so the
+    /// watch closes (and every subscriber re-checks and fails closed) if that
+    /// thread exits for any reason, including a panic.
+    changes: tokio::sync::watch::Receiver<u64>,
 }
 
 impl AccountRegistryOwner {
@@ -35,8 +38,7 @@ impl AccountRegistryOwner {
         durable: Option<(Arc<dyn StorageFactory>, PathBuf)>,
     ) -> Result<Self, String> {
         let (sender, receiver) = mpsc::channel();
-        let (changes, _) = tokio::sync::watch::channel(0u64);
-        let notify = changes.clone();
+        let (notify, changes) = tokio::sync::watch::channel(0u64);
         let (ready, opened) = mpsc::sync_channel(1);
         std::thread::Builder::new()
             .name("jazz-account-registry".into())
@@ -84,14 +86,18 @@ impl AccountRegistryOwner {
                     match request {
                         Request::Execute(command, response) => {
                             let result = jazz::db::block_on(registry.execute(&command));
-                            if result.is_ok() {
-                                notify.send_modify(|revision| *revision = revision.wrapping_add(1));
-                            }
+                            // Announce every attempted mutation, including a
+                            // failed one: an error after the journal append
+                            // (for example a failed durable flush) may still
+                            // have changed or poisoned the registry, and live
+                            // sockets must re-check rather than keep trusting
+                            // their last successful lookup.
+                            notify.send_modify(|revision| *revision = revision.wrapping_add(1));
                             let _ = response.send(result);
                         }
                         Request::LoginOrRegister(principal, response) => {
                             let result = jazz::db::block_on(registry.login_or_register(&principal));
-                            if result.as_ref().is_ok_and(|result| result.created) {
+                            if result.as_ref().map_or(true, |result| result.created) {
                                 notify.send_modify(|revision| *revision = revision.wrapping_add(1));
                             }
                             let _ = response.send(result.map(|result| result.assignment));
@@ -121,7 +127,9 @@ impl AccountRegistryOwner {
     }
 
     pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
-        self.changes.subscribe()
+        let mut changes = self.changes.clone();
+        changes.mark_unchanged();
+        changes
     }
 
     pub(crate) fn close(&self) -> Result<(), String> {
@@ -198,6 +206,38 @@ mod tests {
         assert_eq!(owner.login_or_register(principal).await.unwrap(), created);
         assert!(!changes.has_changed().unwrap());
         owner.close().unwrap();
+    }
+
+    // Live sockets skip their per-message registry lookup while this watch is
+    // unchanged (#3387), so it must also announce failed mutations (which may
+    // have poisoned the registry) and close once the owner thread is gone.
+    #[tokio::test]
+    async fn changes_announce_failed_mutations_and_close_with_the_owner() {
+        let owner = AccountRegistryOwner::open(None).unwrap();
+        let mut changes = owner.subscribe();
+        assert!(!changes.has_changed().unwrap());
+        let unknown = Principal {
+            issuer: "https://issuer.example".into(),
+            subject: "nobody".into(),
+        };
+        let failed = owner
+            .execute(AccountCommand::Revoke {
+                approver: unknown.clone(),
+                target: unknown,
+            })
+            .await;
+        assert!(failed.is_err(), "an unassigned approver cannot revoke");
+        assert!(
+            changes.has_changed().unwrap(),
+            "a failed mutation is announced"
+        );
+        changes.borrow_and_update();
+        owner.close().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while changes.changed().await.is_ok() {}
+        })
+        .await
+        .expect("the watch closes when the owner thread exits");
     }
 
     // The registry owner must reject even an empty old-preview root at the
