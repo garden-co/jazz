@@ -1071,10 +1071,12 @@ pub mod ahead_current {
                 DurabilityTier::Local,
                 self.newest_tx,
             );
+            // Pending candidates fold into one overlay row per row, so the
+            // read cost no longer grows with the retained candidate depth.
             assert_eq!(
                 metrics.ahead_current_rows.reads,
-                self.depth,
-                "{:?} W1 must read exactly its retained candidate depth: {metrics:?}",
+                1,
+                "{:?} W1 must read one folded overlay row: {metrics:?}",
                 DurabilityTier::Local,
             );
             assert_eq!(

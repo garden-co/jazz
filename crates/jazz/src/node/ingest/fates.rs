@@ -112,7 +112,8 @@ where
             })
             .unwrap_or_default();
         if matches!(stored.fate, Fate::Rejected(_)) || stored.global_time.is_some() {
-            self.cleanup_fated_ahead_current_for_versions(&mut batch, &tx_versions)?;
+            self.cleanup_fated_ahead_current_for_versions(&mut batch, &tx_versions)
+                .await?;
         }
         for global_time in advanced_global_times
             .iter()

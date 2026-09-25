@@ -464,7 +464,8 @@ where
         batch: &mut DatabaseBatch,
         rejected: &VersionRow,
     ) -> Result<(), Error> {
-        self.recompute_ahead_overlay(batch, rejected, &BTreeSet::new()).await
+        let settling = BTreeSet::from([self.version_tx_id(rejected)?]);
+        self.recompute_ahead_overlay(batch, rejected, &settling).await
     }
 
     /// Rebuild one row's ahead overlay: its synced image with the row's
@@ -500,7 +501,9 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "pending version schema alias must exist",
             ))?;
-        let table_schema = self.table_in_schema(row.table(), schema_version)?;
+        // A renamed table names the row differently in the pending patch's
+        // schema than in the settling version's.
+        let table_schema = self.table_in_schema(first.table(), schema_version)?;
         let mut image = self
             .query_global_winner_in_batch(
                 batch,
@@ -601,28 +604,22 @@ where
         patch.with_record_values(folded)
     }
 
-    /// Once a transaction is rejected or globally settled, it must not remain
-    /// in the ahead-current overlay: accepted global effects live in current
-    /// tables, and rejected effects are no longer visible. Pending local
-    /// transactions remain in this overlay until Core supplies a final fate.
-    /// Outbox/redelivery may keep the commit unit until fate arrives, so
-    /// callers invoke this strictly after the cleanup-triggering fate is durable.
-    pub(super) async fn cleanup_fated_ahead_current_for_tx(
-        &mut self,
-        batch: &mut DatabaseBatch,
-        tx_id: TxId,
-    ) -> Result<(), Error> {
-        let versions = self.query_versions_for_tx(tx_id).await?;
-        self.cleanup_fated_ahead_current_for_versions(batch, &versions)
-    }
-
-    fn cleanup_fated_ahead_current_for_versions(
+    /// Drop the overlays a fated transaction owns, refolding any other
+    /// still-pending patches on those rows over the synced image.
+    pub(super) async fn cleanup_fated_ahead_current_for_versions(
         &mut self,
         batch: &mut DatabaseBatch,
         versions: &[VersionRow],
     ) -> Result<(), Error> {
+        let mut settling = BTreeSet::new();
         for version in versions {
-            self.write_ahead_current_delete(batch, version)?;
+            settling.insert(self.version_tx_id(version)?);
+        }
+        for version in versions {
+            if self.write_ahead_current_delete(batch, version)? {
+                self.recompute_ahead_overlay(batch, version, &settling)
+                    .await?;
+            }
         }
         Ok(())
     }
@@ -658,10 +655,19 @@ where
         if tx_ids.is_empty() {
             return Ok(());
         }
+        // Recovery runs before the open path indexes the overlay rows, and
+        // the delete below only drops an overlay this transaction owns.
+        self.rebuild_ahead_current_keys().await?;
+        let settling = tx_ids.iter().copied().collect::<BTreeSet<_>>();
         let mut batch = self.database.open_batch();
         for tx_id in &tx_ids {
-            self.cleanup_fated_ahead_current_for_tx(&mut batch, *tx_id)
-                .await?;
+            for version in self.query_versions_for_tx(*tx_id).await? {
+                if self.write_ahead_current_delete(&mut batch, &version)? {
+                    // Other still-pending patches on the row keep an overlay.
+                    self.recompute_ahead_overlay(&mut batch, &version, &settling)
+                        .await?;
+                }
+            }
         }
         let applied = self.database.apply_batch(batch).await?;
 let persisted = applied.persist().await;

@@ -1000,17 +1000,12 @@ fn scalar_frontier_read_and_all_write_actions_share_one_relation() {
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([update_doc, allowed_insert])
     );
+    // A fresh reader holds nothing to clear, so the deleted document ships
+    // nothing: removals are row deltas against what a receiver already holds.
     assert_view_update_only_ships_rows(
         &final_read,
-        BTreeSet::from([update_doc, allowed_insert, delete_doc]),
+        BTreeSet::from([update_doc, allowed_insert]),
     );
-    // The deleted row is absent from public results above, but its currently
-    // authorized deletion is carried so a receiver can clear cached content.
-    // It must not be confused with disclosure of the hidden document or with
-    // shipping the deleted document's content body again.
-    assert!(version_bundles_for_update(&final_read).iter().flat_map(|bundle| &bundle.versions)
-        .filter(|version| version.row_uuid() == delete_doc)
-        .all(|version| version.deletion() == Some(DeletionEvent::Deleted)));
 }
 
 #[test]

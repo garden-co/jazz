@@ -1865,7 +1865,8 @@ fn reopen_replay_deduplicates_pending_ahead_current_keys_per_table_and_layer() {
             MergeableCommit::new("todos", shared_row, 20).cells(title_cells("distinct key")),
         )
         .unwrap();
-    assert_eq!(ahead_current_row_count(&mut reader, "todos"), 2);
+    // One overlay row per row: the second pending patch folds into it.
+    assert_eq!(ahead_current_row_count(&mut reader, "todos"), 1);
     assert_eq!(ahead_current_row_count(&mut reader, "notes"), 1);
 
     reader

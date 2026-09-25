@@ -379,7 +379,8 @@ where
         {
             staged_global_times.push((global_time, tx_id));
             let advanced_global_times = self.record_applied_global_time(global_time, tx_id);
-            self.cleanup_fated_ahead_current_for_versions(batch, staged_versions)?;
+            self.cleanup_fated_ahead_current_for_versions(batch, staged_versions)
+                .await?;
             if !advanced_global_times.is_empty() {
                 for advanced in advanced_global_times
                     .into_iter()

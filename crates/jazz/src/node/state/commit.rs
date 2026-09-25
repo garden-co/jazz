@@ -931,7 +931,7 @@ where
         self.version_tx_id(&image).map(Some)
     }
 
-    async fn rebuild_ahead_current_keys(&mut self) -> Result<(), Error> {
+    pub(in crate::node) async fn rebuild_ahead_current_keys(&mut self) -> Result<(), Error> {
         #[cfg(feature = "testing")]
         {
             self.rebuild_ahead_current_keys_inner(None).await
