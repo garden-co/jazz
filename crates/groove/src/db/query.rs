@@ -253,6 +253,15 @@ impl Database {
             .subscription_has_pending_progress(subscription)
     }
 
+    /// Whether admitted evaluation work can still change this subscription's
+    /// terminal. A failed or missing subscription reports `false`: its error
+    /// is already queued for the receiver, which must drain it rather than
+    /// wait for progress that will never come.
+    pub fn subscription_has_pending_evaluation(&self, subscription: SubscriptionId) -> bool {
+        self.ivm_runtime
+            .subscription_has_pending_evaluation(subscription)
+    }
+
     /// Drive every suspended incremental evaluation until the runtime is
     /// either quiescent or waiting for storage.
     ///

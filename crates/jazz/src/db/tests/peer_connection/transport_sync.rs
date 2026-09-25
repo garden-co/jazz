@@ -2718,3 +2718,124 @@ fn subscribers_receive_spilled_rows_without_blocking_the_sync_turn() {
         received.rows.len()
     );
 }
+
+/// Answers every chunk request the client receives with `Unavailable`, as a
+/// serving peer that lost the value (or a relay out of demand slots) would.
+struct UnavailableChunkResponses {
+    inner: Box<dyn Transport>,
+}
+
+impl UnavailableChunkResponses {
+    fn rewrite(message: SyncMessage) -> SyncMessage {
+        match message {
+            SyncMessage::ChunkResponseBatch(mut batch) => {
+                for response in &mut batch.responses {
+                    response.result = crate::protocol::ChunkResponse::Unavailable;
+                }
+                SyncMessage::ChunkResponseBatch(batch)
+            }
+            message => message,
+        }
+    }
+}
+
+impl Transport for UnavailableChunkResponses {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        self.inner.send(message)
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inner.try_recv().map(Self::rewrite)
+    }
+
+    fn try_recv_result(&mut self) -> Result<Option<SyncMessage>, TransportError> {
+        self.inner
+            .try_recv_result()
+            .map(|message| message.map(Self::rewrite))
+    }
+}
+
+/// A spilled row whose chunks cannot be fetched must end the subscription
+/// visibly. Waiting for the receiver's evaluation must not also wait on a
+/// failed one, or the subscriber stalls forever with no error (#3349 review).
+#[test]
+fn unavailable_spilled_value_chunks_end_the_subscription_visibly() {
+    let schema = schema();
+    let owner = AuthorSubject::for_test_bytes([0x91; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0x92; 16]);
+    let server = open_core(0x93, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0x94, client_author, &schema);
+    seed(&server, "todos", cells(&"u".repeat(70_000), false, owner));
+
+    let (client_transport, server_transport) = duplex();
+    let client_transport = Box::new(UnavailableChunkResponses {
+        inner: client_transport,
+    });
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, client_author);
+    let query = Query::from("todos");
+    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+
+    for _ in 0..64 {
+        for tick in [
+            finish_tick_or_report_stall(&client),
+            server.tick().map(|_| ()).map_err(|error| error.to_string()),
+            finish_tick_or_report_stall(&client),
+        ] {
+            if let Err(error) = tick {
+                assert!(
+                    !error.contains("tick never completed"),
+                    "the sync turn must not wait on a failed chunk: {error}"
+                );
+                return;
+            }
+        }
+        while let Some(event) = subscription.try_next_event() {
+            match event {
+                SubscriptionEvent::Delta { settled, added, .. } => assert!(
+                    !settled || !added.is_empty(),
+                    "an unavailable spilled row must not settle as an empty result"
+                ),
+                SubscriptionEvent::Rejected { .. } | SubscriptionEvent::Closed => return,
+            }
+        }
+    }
+    panic!("the subscriber neither received the row nor saw its failure");
+}
+
+/// Closing while offline must not wait for a spilled value's chunks. The
+/// receiver's evaluation is detached waiting on them, and no later turn can
+/// deliver them once the runtime closes (#3349 review).
+#[test]
+fn close_while_offline_does_not_wait_for_detached_chunk_evaluation() {
+    let schema = schema();
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xa2; 16]);
+    let server = open_core(0xa3, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xa4, client_author, &schema);
+    seed(&server, "todos", cells(&"c".repeat(70_000), false, owner));
+    let (client_transport, server_transport) = duplex();
+    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, client_author);
+    let query = Query::from("todos");
+    let _subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    // Deliver the server's result, but disconnect before any chunk response.
+    finish_tick_or_report_stall(&client).unwrap();
+    server.tick().unwrap();
+    finish_tick_or_report_stall(&client).unwrap();
+    assert!(
+        client.node.node.borrow().has_pending_query_runtime(),
+        "the receiver must be waiting on the spilled value's chunks"
+    );
+    assert!(client.detach_connection(&upstream));
+
+    let mut close = std::pin::pin!(client.close());
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    for _ in 0..20_000 {
+        if let std::task::Poll::Ready(result) = close.as_mut().poll(&mut cx) {
+            result.expect("close succeeds while offline");
+            return;
+        }
+    }
+    panic!("close waited for chunks that can no longer arrive");
+}

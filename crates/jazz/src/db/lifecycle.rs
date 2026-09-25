@@ -579,6 +579,9 @@ where
         // remains ordered after every accepted mutation and wait observer.
         self.node.finish_transaction_abandonment_shutdown().await?;
         self.node.drain_subscription_finalizations().await?;
+        // Query evaluation detached on a remote chunk (#3349) cannot finish
+        // once this runtime closes; end it rather than wait for a reconnect.
+        self.node.chunk_resolver.fail_local_demand_for_close();
         self.node.node.lock().await.close().await?;
         self.node.retire_subscription_runtime_after_close();
         Ok(())

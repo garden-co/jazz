@@ -2206,8 +2206,16 @@ impl IvmRuntime {
             .iter()
             .map(|delta| delta.table.as_str())
             .collect::<HashSet<_>>();
+        // Beginning the tick folds queued binding retractions into it, so
+        // hydration admission must cover their graph slice too.
         let changed_bindings = binding_deltas
             .iter()
+            .chain(
+                (!binding_deltas.is_empty())
+                    .then_some(self.pending_binding_retractions.iter())
+                    .into_iter()
+                    .flatten(),
+            )
             .map(|delta| &delta.key)
             .collect::<HashSet<_>>();
         let affected_nodes = Arc::clone(
@@ -2680,12 +2688,18 @@ impl IvmRuntime {
     /// not hold a ready subscription's opening hostage).
     pub(crate) fn subscription_has_pending_progress(&self, id: SubscriptionId) -> bool {
         // A missing/failed receiver cannot prove a completed terminal.
-        if self.pending_incremental_polling
-            || self
-                .multisink_subscriptions
-                .get(&id)
-                .is_none_or(|s| s.failed)
-        {
+        self.multisink_subscriptions
+            .get(&id)
+            .is_none_or(|s| s.failed)
+            || self.subscription_has_pending_evaluation(id)
+    }
+
+    /// Whether admitted evaluation work (including notifications deferred
+    /// until durable) can still reach this subscription. Unlike
+    /// [`Self::subscription_has_pending_progress`], a failed or missing
+    /// subscription has none: its error is already queued for the receiver.
+    pub(crate) fn subscription_has_pending_evaluation(&self, id: SubscriptionId) -> bool {
+        if self.pending_incremental_polling {
             return true;
         }
         self.pending_incremental

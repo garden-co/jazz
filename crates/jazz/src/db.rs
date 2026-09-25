@@ -562,6 +562,42 @@ impl PeerChunkResolver {
         debug_assert!(state.relay_chunk_obligations <= MAX_RELAY_CHUNK_OBLIGATIONS);
     }
 
+    /// Fail every local chunk read that still waits on an upstream. Close
+    /// calls this before its final query flush: no later owner turn can
+    /// deliver those chunks, and a detached evaluation waiting on one would
+    /// otherwise hold close open until a reconnect that never comes.
+    fn fail_local_demand_for_close(&self) {
+        let mut state = self.state.borrow_mut();
+        let requests = state.pending_by_chunk.keys().cloned().collect::<Vec<_>>();
+        let mut failed = false;
+        for request in requests {
+            let Some(pending) = state.pending_by_chunk.get_mut(&request) else {
+                continue;
+            };
+            let waiters = std::mem::take(&mut pending.waiters);
+            for waiter in waiters {
+                match waiter {
+                    ChunkDemandWaiter::Local { sender, .. } => {
+                        failed = true;
+                        let _ = sender.send(Err(groove::chunks::ChunkError::Unavailable));
+                    }
+                    relay @ ChunkDemandWaiter::Relay { .. } => pending.waiters.push(relay),
+                }
+            }
+            if pending.waiters.is_empty() {
+                let upstream_id = pending.upstream_id;
+                state.pending_by_chunk.remove(&request);
+                state.chunk_by_upstream_id.remove(&upstream_id);
+                state
+                    .outbound
+                    .retain(|outbound| outbound.request_id != upstream_id);
+            }
+        }
+        if failed {
+            state.completion_generation = state.completion_generation.wrapping_add(1);
+        }
+    }
+
     fn cancel_local(&self, request: &groove::chunks::ChunkRequest, waiter_id: u64) {
         let mut state = self.state.borrow_mut();
         let Some(pending) = state.pending_by_chunk.get_mut(request) else {

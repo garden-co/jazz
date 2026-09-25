@@ -692,6 +692,18 @@ where
             .is_due(authority_result_key, generation)
     }
 
+    /// Whether a covered receiver still has admitted evaluation work, such as
+    /// an evaluation detached while it waits for large-value chunks. A failed
+    /// receiver has none: its error must be drained and reported, not waited
+    /// on (a failed chunk fetch would otherwise stall it silently).
+    pub(crate) fn covered_receiver_evaluation_pending(
+        &self,
+        local: &LocalMaintainedViewSubscription,
+    ) -> bool {
+        local.has_covered_input_sources()
+            && self.subscription_has_pending_query_evaluation(local.subscription_id())
+    }
+
     /// Replace the exact authority-covered source frontier of a receiver's
     /// local maintained graph. The authority selects and ships the input
     /// closure; this function neither re-runs policy nor reads an arbitrary
@@ -702,16 +714,6 @@ where
     /// opportunity to guess by table or collector name. Replacements are
     /// submitted as one database batch so the graph observes only the old or
     /// new closure, never a cross-source mixture.
-    /// Whether a covered receiver still has admitted runtime work, such as
-    /// an evaluation detached while it waits for large-value chunks.
-    pub(crate) fn covered_receiver_evaluation_pending(
-        &self,
-        local: &LocalMaintainedViewSubscription,
-    ) -> bool {
-        local.has_covered_input_sources()
-            && self.subscription_has_pending_query_runtime(local.subscription_id())
-    }
-
     pub(crate) async fn replace_local_maintained_covered_inputs(
         &mut self,
         local: &mut LocalMaintainedViewSubscription,
