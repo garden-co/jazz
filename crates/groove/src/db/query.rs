@@ -31,6 +31,26 @@ impl Database {
         &mut self,
         replacements: impl IntoIterator<Item = InputSourceReplacement>,
     ) -> Result<TickMetrics, Error> {
+        self.replace_input_sources_in(replacements, false).await
+    }
+
+    /// [`Self::replace_input_sources`] for runtime owners that must not hold their turn
+    /// open for cold storage or a remote chunk. Runnable evaluation finishes
+    /// before this returns; cold evaluation stays pending (see
+    /// [`Self::has_pending_progress`]) until a later
+    /// [`Self::drive_ready_progress_with_waker`] turn completes it.
+    pub async fn replace_input_sources_detaching_cold(
+        &mut self,
+        replacements: impl IntoIterator<Item = InputSourceReplacement>,
+    ) -> Result<TickMetrics, Error> {
+        self.replace_input_sources_in(replacements, true).await
+    }
+
+    async fn replace_input_sources_in(
+        &mut self,
+        replacements: impl IntoIterator<Item = InputSourceReplacement>,
+        detach_cold: bool,
+    ) -> Result<TickMetrics, Error> {
         self.ensure_not_poisoned()?;
         let overlay = Rc::new(StagedWriteOverlay::new_owned(
             Rc::clone(&self.storage),
@@ -40,11 +60,16 @@ impl Database {
             overlay,
             Rc::clone(&self.storage_read_metrics),
         ));
-        let metrics = match self
-            .ivm_runtime
-            .replace_input_sources(replacements, &storage)
-            .await
-        {
+        let tick = if detach_cold {
+            self.ivm_runtime
+                .replace_input_sources_detaching_cold(replacements, &storage)
+                .await
+        } else {
+            self.ivm_runtime
+                .replace_input_sources(replacements, &storage)
+                .await
+        };
+        let metrics = match tick {
             Ok(metrics) => metrics,
             // These are all preflight failures: record decoding, runtime
             // ownership, and descriptor compatibility are checked before the
@@ -80,6 +105,26 @@ impl Database {
         &mut self,
         deltas: impl IntoIterator<Item = InputSourceDelta>,
     ) -> Result<TickMetrics, Error> {
+        self.apply_input_source_deltas_in(deltas, false).await
+    }
+
+    /// [`Self::apply_input_source_deltas`] for runtime owners that must not hold their turn
+    /// open for cold storage or a remote chunk. Runnable evaluation finishes
+    /// before this returns; cold evaluation stays pending (see
+    /// [`Self::has_pending_progress`]) until a later
+    /// [`Self::drive_ready_progress_with_waker`] turn completes it.
+    pub async fn apply_input_source_deltas_detaching_cold(
+        &mut self,
+        deltas: impl IntoIterator<Item = InputSourceDelta>,
+    ) -> Result<TickMetrics, Error> {
+        self.apply_input_source_deltas_in(deltas, true).await
+    }
+
+    async fn apply_input_source_deltas_in(
+        &mut self,
+        deltas: impl IntoIterator<Item = InputSourceDelta>,
+        detach_cold: bool,
+    ) -> Result<TickMetrics, Error> {
         self.ensure_not_poisoned()?;
         let overlay = Rc::new(StagedWriteOverlay::new_owned(
             Rc::clone(&self.storage),
@@ -89,11 +134,16 @@ impl Database {
             overlay,
             Rc::clone(&self.storage_read_metrics),
         ));
-        let metrics = match self
-            .ivm_runtime
-            .apply_input_source_deltas(deltas, &storage)
-            .await
-        {
+        let tick = if detach_cold {
+            self.ivm_runtime
+                .apply_input_source_deltas_detaching_cold(deltas, &storage)
+                .await
+        } else {
+            self.ivm_runtime
+                .apply_input_source_deltas(deltas, &storage)
+                .await
+        };
+        let metrics = match tick {
             Ok(metrics) => metrics,
             Err(
                 error @ (IvmRuntimeError::RecordEncoding(_)
@@ -201,6 +251,15 @@ impl Database {
     pub fn subscription_has_pending_progress(&self, subscription: SubscriptionId) -> bool {
         self.ivm_runtime
             .subscription_has_pending_progress(subscription)
+    }
+
+    /// Whether admitted evaluation work can still change this subscription's
+    /// terminal. A failed or missing subscription reports `false`: its error
+    /// is already queued for the receiver, which must drain it rather than
+    /// wait for progress that will never come.
+    pub fn subscription_has_pending_evaluation(&self, subscription: SubscriptionId) -> bool {
+        self.ivm_runtime
+            .subscription_has_pending_evaluation(subscription)
     }
 
     /// Drive every suspended incremental evaluation until the runtime is
@@ -718,6 +777,11 @@ impl Database {
             overlay,
             Rc::clone(&self.storage_read_metrics),
         ));
+        let live = self
+            .ivm_runtime
+            .prepare_live_attach(prepared.id, &values, &storage)
+            .await
+            .map_err(Error::IvmRuntime)?;
         let subscription = self
             .ivm_runtime
             .bind_shape_one_sink_with_output_and_waker(
@@ -726,6 +790,7 @@ impl Database {
                 prepared.output,
                 &storage,
                 None,
+                live,
             )
             .map_err(Error::IvmRuntime)?;
         self.drive_resident_progress_now()?;
@@ -873,9 +938,14 @@ impl Database {
             overlay,
             Rc::clone(&self.storage_read_metrics),
         ));
+        let live = self
+            .ivm_runtime
+            .prepare_live_attach(shape, binding_values, &storage)
+            .await
+            .map_err(Error::IvmRuntime)?;
         let subscription = self
             .ivm_runtime
-            .bind_shape_one_sink_with_waker(shape, binding_values, &storage, None)
+            .bind_shape_one_sink_with_waker(shape, binding_values, &storage, None, live)
             .map_err(Error::IvmRuntime)?;
         self.drive_resident_progress_now()?;
         Ok(subscription)
@@ -903,6 +973,11 @@ impl Database {
             overlay,
             Rc::clone(&self.storage_read_metrics),
         ));
+        let live = self
+            .ivm_runtime
+            .prepare_live_attach(shape, binding_values, &storage)
+            .await
+            .map_err(Error::IvmRuntime)?;
         let subscription = self
             .ivm_runtime
             .bind_shape_one_sink_with_output_and_waker(
@@ -911,6 +986,7 @@ impl Database {
                 public_output,
                 &storage,
                 None,
+                live,
             )
             .map_err(Error::IvmRuntime)?;
         self.drive_resident_progress_now()?;
@@ -965,8 +1041,23 @@ impl Database {
             overlay,
             Rc::clone(&self.storage_read_metrics),
         ));
+        let live = if lifetime == SubscriptionLifetime::Retained {
+            self.ivm_runtime
+                .prepare_live_attach(shape, binding_values, &storage)
+                .await
+                .map_err(Error::IvmRuntime)?
+        } else {
+            None
+        };
         self.ivm_runtime
-            .bind_shape_with_lifetime(shape, binding_values, &storage, lifetime, progress_waker)
+            .bind_shape_with_lifetime(
+                shape,
+                binding_values,
+                &storage,
+                lifetime,
+                progress_waker,
+                live,
+            )
             .map_err(Error::IvmRuntime)
     }
 

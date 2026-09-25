@@ -203,6 +203,8 @@ pub struct IvmRuntime {
     /// Binding retractions discovered while routing notifications cannot tick
     /// recursively; the next public tick drains them before user deltas run.
     pending_binding_retractions: Vec<BindingDelta>,
+    /// Bindings admitted onto a live prepared shape without full hydration.
+    live_attaches: u64,
     deferred_notifications: HashMap<PublicationId, Vec<(SubscriptionId, QueuedMultisinkDeltas)>>,
     durable_notification_publications: HashSet<PublicationId>,
     completed_deferred_publications: HashSet<PublicationId>,
@@ -311,6 +313,7 @@ impl IvmRuntime {
                 .fetch_add(1, Ordering::Relaxed),
             next_input_source_id: 1,
             pending_binding_retractions: Vec::new(),
+            live_attaches: 0,
             deferred_notifications: HashMap::default(),
             durable_notification_publications: HashSet::default(),
             completed_deferred_publications: HashSet::default(),
@@ -477,6 +480,8 @@ pub enum IvmRuntimeError {
     InvalidPersistedIndex(String),
     #[error("intersected index sources currently require prefix scans")]
     UnsupportedIndexIntersectionScan,
+    #[error("candidate-filtered index sources require snapshot row projection and prefix scans")]
+    UnsupportedIndexCandidateFilter,
     #[error("join key arity mismatch: left={left}, right={right}")]
     JoinKeyArityMismatch { left: usize, right: usize },
     #[error("shape key field not found: {0}")]

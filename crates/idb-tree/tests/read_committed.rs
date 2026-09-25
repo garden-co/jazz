@@ -237,3 +237,50 @@ fn the_view_never_hydrates_and_cannot_write() {
         assert_eq!(ready(committed.get(b"a")).unwrap(), Some(b"1".to_vec()));
     });
 }
+
+#[test]
+fn a_flush_dropped_mid_commit_forces_a_reload_and_never_serves_its_writes() {
+    block_on(async {
+        let store = PausingStore::default();
+        let tree = IdbTree::open(store.clone(), Options::default())
+            .await
+            .unwrap();
+        tree.put(b"a".to_vec(), b"1".to_vec()).await.unwrap();
+        tree.flush().await.unwrap();
+        let committed = tree.read_committed();
+
+        tree.put(b"a".to_vec(), b"2".to_vec()).await.unwrap();
+        let (_hold, paused) = futures::channel::oneshot::channel();
+        *store.pause_next_commit.borrow_mut() = Some(paused);
+        let mut flush = Box::pin(tree.flush());
+        assert!(futures::poll!(flush.as_mut()).is_pending());
+        drop(flush);
+
+        // The outcome is unknown, so the live tree refuses everything, while
+        // the view keeps serving the last committed generation.
+        assert!(matches!(tree.get(b"a").await, Err(Error::CommitAbandoned)));
+        assert!(matches!(
+            tree.put(b"b".to_vec(), b"3".to_vec()).await,
+            Err(Error::CommitAbandoned)
+        ));
+        assert!(matches!(tree.flush().await, Err(Error::CommitAbandoned)));
+        assert_eq!(ready(committed.get(b"a")).unwrap(), Some(b"1".to_vec()));
+
+        // The store never committed it: a reload returns to generation 1 and
+        // the tree is writable again.
+        tree.reload().await.unwrap();
+        assert_eq!(tree.get(b"a").await.unwrap(), Some(b"1".to_vec()));
+        tree.put(b"b".to_vec(), b"3".to_vec()).await.unwrap();
+        tree.flush().await.unwrap();
+        drop(committed);
+        drop(tree);
+        let reopened = IdbTree::open(store, Options::default()).await.unwrap();
+        assert_eq!(
+            reopened.range(b"", b"\xff").await.unwrap(),
+            vec![
+                (b"a".to_vec(), b"1".to_vec()),
+                (b"b".to_vec(), b"3".to_vec())
+            ]
+        );
+    });
+}

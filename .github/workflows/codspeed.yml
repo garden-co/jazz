@@ -27,49 +27,36 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  examples:
-    # Scheduled/manual runs benchmark the default branch. PR runs are opt-in,
-    # but keep refreshing on new commits while the label remains present.
+  native-workloads-plan:
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark')
-    name: Example benchmark smoke
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 20
+    name: List wall-time workloads
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      workloads: ${{ steps.list.outputs.workloads }}
+      measure: ${{ steps.list.outputs.measure }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          toolchain: 1.93.1
-
-      # Cache Cargo's root-workspace target directory and the cargo-codspeed
-      # binary. Package selection below limits compilation to the smoke crate's
-      # dependency graph, while Cargo still writes artifacts to the root target.
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          cache-bin: true
-          shared-key: codspeed-example-benches-v1
-          workspaces: . -> target
-
-      - name: Install cargo-codspeed
-        run: cargo install cargo-codspeed --version 5.0.1 --locked
-
-      - name: Build example benchmark suites
-        run: cargo codspeed build --package jazz-example-benchmark-smoke --package jazz-example-benchmark-w1 --package jazz-example-big-label-benchmark --package jazz-example-band-chat-benchmark --package jazz-example-world-tour-benchmark --bench fixture --bench ahead_current --bench loads --bench queries --bench fast_resume
-
-      - name: Run example benchmark suites
-        uses: CodSpeedHQ/action@4296e51e7041e24dadb86d1d6e8b9320d223dbe8 # v5.0.3
-        with:
-          mode: simulation
-          run: cargo codspeed run --package jazz-example-benchmark-smoke --package jazz-example-benchmark-w1 --package jazz-example-big-label-benchmark --package jazz-example-band-chat-benchmark --package jazz-example-world-tour-benchmark
+      # One table, in dev/benchmarks/codspeed-artifact.mjs, feeds both matrices
+      # below, each workload's build/run arguments and measurement settings, and
+      # the artifact verifier. Add a workload there only.
+      - name: List workloads
+        id: list
+        run: |
+          workloads="$(node dev/benchmarks/codspeed-artifact.mjs matrix)"
+          measure="$(node dev/benchmarks/codspeed-artifact.mjs measure)"
+          echo "workloads=$workloads" >> "$GITHUB_OUTPUT"
+          echo "measure=$measure" >> "$GITHUB_OUTPUT"
 
   native-workloads-build:
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark')
+    needs: native-workloads-plan
     name: Build ${{ matrix.workload }} native benchmark
     # Match the measurement host's ABI, but do not spend macro-runner time on
     # compilation. One Cargo invocation per workload keeps each workload's
     # package, benches and features exactly as measured; feature unification
-    # across workloads can never change a receipt. The workload table lives in
-    # dev/benchmarks/codspeed-artifact.mjs.
+    # across workloads can never change a receipt.
     runs-on: blacksmith-16vcpu-ubuntu-2204-arm
     timeout-minutes: 45
     permissions:
@@ -77,17 +64,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        workload:
-          [
-            todo,
-            permissioned-resources,
-            policy-scoped-documents,
-            big-label-ingest,
-            w1-reads,
-            route-subscription,
-            groove-ivm,
-            selective-hydration,
-          ]
+        workload: ${{ fromJSON(needs.native-workloads-plan.outputs.workloads) }}
     env:
       CARGO_BUILD_JOBS: 16
       RUST_MIN_STACK: 4194304
@@ -108,7 +85,8 @@ jobs:
         with:
           path: target/release
           # Compatibility includes toolchain, CodSpeed, workload (and so its
-          # features), remap contract, lockfile and Cargo config. Only the save key includes source SHA.
+          # features), remap contract, lockfile and Cargo config. Only the save
+          # key includes source SHA.
           key: codspeed-native-v5-${{ matrix.workload }}-${{ runner.os }}-${{ runner.arch }}-ubuntu2204-rust1.93.1-codspeed5.0.1-per-workload-absolute-remap-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml') }}-${{ github.sha }}
           restore-keys: |
             codspeed-native-v5-${{ matrix.workload }}-${{ runner.os }}-${{ runner.arch }}-ubuntu2204-rust1.93.1-codspeed5.0.1-per-workload-absolute-remap-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml') }}-
@@ -164,49 +142,23 @@ jobs:
           retention-days: 7
 
   native-workloads-walltime:
-    needs: native-workloads-build
+    needs: [native-workloads-plan, native-workloads-build]
     # A matrix `needs` waits for every build. Still measure the workloads that
     # built when another failed; a missing bundle fails only its own download.
     if: ${{ !cancelled() && needs.native-workloads-build.result != 'skipped' }}
     name: ${{ matrix.workload }} native wall time
     runs-on: codspeed-macro
-    timeout-minutes: ${{ matrix.timeout || 20 }}
+    # Each workload keeps the limit its former build-and-run job had; the
+    # build no longer counts against it.
+    timeout-minutes: ${{ fromJSON(needs.native-workloads-plan.outputs.measure)[matrix.workload].timeout }}
     strategy:
       fail-fast: false
       matrix:
-        workload:
-          [
-            todo,
-            permissioned-resources,
-            policy-scoped-documents,
-            big-label-ingest,
-            w1-reads,
-            route-subscription,
-            groove-ivm,
-            selective-hydration,
-          ]
-        # Only the native example workloads ran with a raised thread stack
-        # before builds moved here; keep every other receipt's environment.
-        include:
-          - workload: todo
-            min_stack: 4194304
-          - workload: permissioned-resources
-            min_stack: 4194304
-          - workload: policy-scoped-documents
-            min_stack: 4194304
-          # These kept the limits their former build-and-run jobs had; the
-          # build no longer counts against them.
-          - workload: w1-reads
-            timeout: 35
-          - workload: route-subscription
-            timeout: 25
-          - workload: groove-ivm
-            timeout: 40
-          - workload: selective-hydration
-            timeout: 35
+        workload: ${{ fromJSON(needs.native-workloads-plan.outputs.workloads) }}
     env:
-      # Empty means unset to Rust std: the default thread stack.
-      RUST_MIN_STACK: ${{ matrix.min_stack }}
+      # Only the native examples raise the thread stack while measuring; an
+      # empty value is unset to Rust std.
+      RUST_MIN_STACK: ${{ fromJSON(needs.native-workloads-plan.outputs.measure)[matrix.workload].min_stack }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable

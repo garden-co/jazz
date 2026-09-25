@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import {
   artifactPaths,
   buildArgs,
+  measureSettings,
   measurementWorkspace,
   runArgs,
   seal,
@@ -111,8 +112,9 @@ test("multi-bench workloads seal and install every bench executable", async () =
   const dir = await mkdtemp(path.join(os.tmpdir(), "jazz-codspeed-artifact-multi-"));
   process.chdir(dir);
   try {
-    const { binaries, bundle } = artifactPaths("w1-reads");
+    const { binaries, bundle } = artifactPaths("w1");
     assert.deepEqual(binaries, {
+      ahead_current: "target/codspeed/walltime/jazz-example-benchmark-w1/ahead_current",
       reads_memory_walltime:
         "target/codspeed/walltime/jazz-example-benchmark-w1/reads_memory_walltime",
       reads_rocksdb_walltime:
@@ -123,18 +125,19 @@ test("multi-bench workloads seal and install every bench executable", async () =
       await writeFile(binary, binary);
     }
     await writeFile("cli", "CLI fixture");
-    const manifest = await seal("w1-reads", identity, "cli");
+    const manifest = await seal("w1", identity, "cli");
     assert.deepEqual(Object.keys(manifest.files).sort(), [
+      "ahead_current",
       "cargo-codspeed",
       "reads_memory_walltime",
       "reads_rocksdb_walltime",
     ]);
     assert.equal(manifest.contract.features, null);
-    assert.deepEqual(await verify("w1-reads", identity), manifest);
+    assert.deepEqual(await verify("w1", identity), manifest);
     // A bundle sealed for one workload never verifies as another.
     await assert.rejects(verify("groove-ivm", identity));
     await rm(path.join(bundle, "reads_rocksdb_walltime"));
-    await assert.rejects(verify("w1-reads", identity));
+    await assert.rejects(verify("w1", identity));
   } finally {
     process.chdir(previous);
     await rm(dir, { recursive: true, force: true });
@@ -145,15 +148,16 @@ test("each workload builds and runs exactly what it measured on the macro runner
   // The commands these workloads used when they compiled on codspeed-macro
   // (and, for the native examples, on the ARM builder). Moving the build must
   // not change a package, bench or feature.
+  const native = (name) =>
+    `--package jazz-example-${name}-benchmark --bench walltime --features jazz-benchmark-guard/mimalloc`;
   const previous = {
-    todo: "--package jazz-example-todo-benchmark --bench walltime --features jazz-benchmark-guard/mimalloc",
-    "permissioned-resources":
-      "--package jazz-example-permissioned-resources-benchmark --bench walltime --features jazz-benchmark-guard/mimalloc",
-    "policy-scoped-documents":
-      "--package jazz-example-policy-scoped-documents-benchmark --bench walltime --features jazz-benchmark-guard/mimalloc",
-    "big-label-ingest": "--package jazz-example-big-label-benchmark --bench ingest_walltime",
-    "w1-reads":
-      "--package jazz-example-benchmark-w1 --bench reads_memory_walltime --bench reads_rocksdb_walltime",
+    todo: native("todo"),
+    "permissioned-resources": native("permissioned-resources"),
+    "policy-scoped-documents": native("policy-scoped-documents"),
+    "band-chat": native("band-chat"),
+    "world-tour": native("world-tour"),
+    "big-label": "--package jazz-example-big-label-benchmark --bench ingest_walltime --bench loads",
+    w1: "--package jazz-example-benchmark-w1 --bench reads_memory_walltime --bench reads_rocksdb_walltime --bench ahead_current",
     "route-subscription": "--package jazz --bench route_subscription_curve --features testing",
     "groove-ivm": "--package groove --bench pull_vs_snapshot --bench steady_state",
     "selective-hydration": "--package jazz --bench selective_global_hydration --features testing",
@@ -256,6 +260,30 @@ test("version probe accepts the pinned CLI's exit-1 response, rejects real failu
   }
 });
 
+test("measurement keeps each workload's former thread stack and timeout", () => {
+  // Former macro jobs: native examples raised RUST_MIN_STACK and had 20 minutes;
+  // the others ran with the default stack under their own job limits.
+  const stack = "4194304";
+  assert.deepEqual(measureSettings(), {
+    todo: { min_stack: stack, timeout: 20 },
+    "permissioned-resources": { min_stack: stack, timeout: 20 },
+    "policy-scoped-documents": { min_stack: stack, timeout: 20 },
+    "band-chat": { min_stack: stack, timeout: 20 },
+    "world-tour": { min_stack: stack, timeout: 20 },
+    "big-label": { min_stack: "", timeout: 25 },
+    w1: { min_stack: "", timeout: 40 },
+    "route-subscription": { min_stack: "", timeout: 25 },
+    "groove-ivm": { min_stack: "", timeout: 40 },
+    "selective-hydration": { min_stack: "", timeout: 35 },
+  });
+  const cli = (action) =>
+    execFileSync("node", [path.join(root, "dev/benchmarks/codspeed-artifact.mjs"), action], {
+      encoding: "utf8",
+    });
+  assert.deepEqual(JSON.parse(cli("matrix")), workloads);
+  assert.deepEqual(JSON.parse(cli("measure")), measureSettings());
+});
+
 test("workflow separates native builds from unchanged CodSpeed measurement", async () => {
   const workflow = await readFile(path.join(root, ".github/workflows/codspeed.yml"), "utf8");
   const build = workflow
@@ -294,19 +322,15 @@ test("workflow separates native builds from unchanged CodSpeed measurement", asy
     run,
     /run: cargo codspeed run -m walltime \$\{\{ steps.install.outputs.run-args \}\}\n/,
   );
-  // Both matrices cover every workload the artifact script knows, in order.
-  const matrix = (job) =>
-    job
-      .match(/        workload:\n          \[\n([^\]]+)\]/)[1]
-      .split(",")
-      .map((item) => item.trim())
-      .filter(Boolean);
-  assert.deepEqual(matrix(build), workloads);
-  assert.deepEqual(matrix(run), workloads);
-  // Only the native examples raise the thread stack while measuring.
-  assert.match(run, /RUST_MIN_STACK: \$\{\{ matrix.min_stack \}\}/);
-  const raised = [...run.matchAll(/- workload: (\S+)\n\s+min_stack: 4194304/g)].map((m) => m[1]);
-  assert.deepEqual(raised, ["todo", "permissioned-resources", "policy-scoped-documents"]);
+  // Both matrices and the measurement settings come from the artifact script.
+  const fromPlan = "${{ fromJSON(needs.native-workloads-plan.outputs.workloads) }}";
+  assert.ok(build.includes(`workload: ${fromPlan}\n`));
+  assert.ok(run.includes(`workload: ${fromPlan}\n`));
+  const measure = "fromJSON(needs.native-workloads-plan.outputs.measure)[matrix.workload]";
+  assert.ok(run.includes(`timeout-minutes: \${{ ${measure}.timeout }}\n`));
+  assert.ok(run.includes(`RUST_MIN_STACK: \${{ ${measure}.min_stack }}\n`));
+  assert.doesNotMatch(run, /RUST_MIN_STACK: 4194304/);
+  assert.ok(workflow.includes('measure="$(node dev/benchmarks/codspeed-artifact.mjs measure)"'));
   // No other job compiles on the measurement runner.
   for (const job of workflow.split(/\n  (?=[a-z-]+:\n)/)) {
     if (/runs-on: codspeed-macro/.test(job)) {

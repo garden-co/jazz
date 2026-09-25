@@ -1,14 +1,15 @@
 # CodSpeed native benchmark build handoff
 
 Every CodSpeed walltime workload compiles on Blacksmith ARM64 Ubuntu 22.04,
-then runs on the existing `codspeed-macro` machines. The eight workloads are
-the three native examples (todo, permissioned resources, policy-scoped
-documents), BigLabel ingest, W1 reads (memory and RocksDB), route
-subscription, the Groove IVM experiment and maintained selective hydration.
-`workloadSpecs` in `codspeed-artifact.mjs` is the one table of each workload's
-package, benches and build-time features; the workflow reads its `build-args`
-and `run-args` rather than repeating them. The x86_64 simulation job is
-unchanged. Build latency, cache behavior and acceptance receipts are tracked in
+then runs on the existing `codspeed-macro` machines. The ten workloads are the
+five native examples (todo, permissioned resources, policy-scoped documents,
+BandChat, WorldTour), BigLabel (ingest and loads), W1 (memory, RocksDB and
+ahead-current), route subscription, the Groove IVM experiment and maintained
+selective hydration. `workloadSpecs` in `codspeed-artifact.mjs` is the one
+table of each workload's package, benches, build-time features, measurement
+thread stack and timeout. The workflow's plan job reads its `matrix` and
+`measure` output, and the build and measurement jobs read `build-args` and
+`run-args`, rather than repeating them. Build latency, cache behavior and acceptance receipts are tracked in
 [#3174](https://github.com/garden-co/jazz/issues/3174).
 
 ## Invariants
@@ -77,7 +78,7 @@ consumer can reuse a successful producer's bundle in a later attempt of the
 same run. A new source revision gets a different artifact name. A build failure
 prevents measurement; consumers must not fall back to the previous commit's
 binary. As initially configured, the consumer matrix waits for the whole build
-matrix, so the slowest producer gates all eight consumers. Account for that
+matrix, so the slowest producer gates all ten consumers. Account for that
 barrier, artifact transfer, cache upload and Cargo metadata dependency fetching
 when comparing end-to-end latency, not just the compiler step. One workload's build failure
 skips no other workload's measurement: the consumer matrix runs unless the

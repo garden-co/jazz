@@ -7,47 +7,62 @@ import { chmod, copyFile, mkdir, readFile, lstat, readdir, writeFile } from "nod
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
+// The single table of CodSpeed wall-time workloads. `matrix` prints the names
+// for the workflow's build and measurement jobs and `measure` their measurement
+// settings, so adding a workload here is the only workflow change it needs.
 // One Cargo invocation per workload, so feature unification across workloads
 // can never change what a receipt measures. Each entry reproduces the exact
-// package, benches and features the workload was measured with before builds
-// moved off the macro runner (#3174).
+// package, benches, features, thread stack and timeout the workload was
+// measured with before builds moved off the macro runner (#3174).
 const mimalloc = "jazz-benchmark-guard/mimalloc";
+const nativeStack = 4194304;
+const nativeExample = (name) => ({
+  package: `jazz-example-${name}-benchmark`,
+  benches: ["walltime"],
+  features: mimalloc,
+  minStack: nativeStack,
+  timeout: 20,
+});
 const workloadSpecs = {
-  todo: { package: "jazz-example-todo-benchmark", benches: ["walltime"], features: mimalloc },
-  "permissioned-resources": {
-    package: "jazz-example-permissioned-resources-benchmark",
-    benches: ["walltime"],
-    features: mimalloc,
-  },
-  "policy-scoped-documents": {
-    package: "jazz-example-policy-scoped-documents-benchmark",
-    benches: ["walltime"],
-    features: mimalloc,
-  },
-  "big-label-ingest": {
+  todo: nativeExample("todo"),
+  "permissioned-resources": nativeExample("permissioned-resources"),
+  "policy-scoped-documents": nativeExample("policy-scoped-documents"),
+  "band-chat": nativeExample("band-chat"),
+  "world-tour": nativeExample("world-tour"),
+  "big-label": {
     package: "jazz-example-big-label-benchmark",
-    benches: ["ingest_walltime"],
+    benches: ["ingest_walltime", "loads"],
     features: null,
+    minStack: null,
+    timeout: 25,
   },
-  "w1-reads": {
+  w1: {
     package: "jazz-example-benchmark-w1",
-    benches: ["reads_memory_walltime", "reads_rocksdb_walltime"],
+    benches: ["reads_memory_walltime", "reads_rocksdb_walltime", "ahead_current"],
     features: null,
+    minStack: null,
+    timeout: 40,
   },
   "route-subscription": {
     package: "jazz",
     benches: ["route_subscription_curve"],
     features: "testing",
+    minStack: null,
+    timeout: 25,
   },
   "groove-ivm": {
     package: "groove",
     benches: ["pull_vs_snapshot", "steady_state"],
     features: null,
+    minStack: null,
+    timeout: 40,
   },
   "selective-hydration": {
     package: "jazz",
     benches: ["selective_global_hydration"],
     features: "testing",
+    minStack: null,
+    timeout: 35,
   },
 };
 export const workloads = Object.keys(workloadSpecs);
@@ -70,7 +85,22 @@ function spec(workload) {
 }
 
 export function contractFor(workload) {
-  return { ...baseContract, ...spec(workload) };
+  const { package: pkg, benches, features } = spec(workload);
+  return { ...baseContract, package: pkg, benches, features };
+}
+
+// Per-workload measurement settings for the macro runner. An empty
+// RUST_MIN_STACK is unset to Rust std: the default thread stack.
+export function measureSettings() {
+  return Object.fromEntries(
+    workloads.map((w) => [
+      w,
+      {
+        min_stack: workloadSpecs[w].minStack ? String(workloadSpecs[w].minStack) : "",
+        timeout: workloadSpecs[w].timeout,
+      },
+    ]),
+  );
 }
 
 // Arguments after `cargo codspeed build -m walltime` / `cargo codspeed run -m walltime`.
@@ -226,6 +256,14 @@ async function main() {
     console.log(sourcePathFlags(process.cwd()));
     return;
   }
+  if (action === "matrix") {
+    console.log(JSON.stringify(workloads));
+    return;
+  }
+  if (action === "measure") {
+    console.log(JSON.stringify(measureSettings()));
+    return;
+  }
   if (action === "build-args" || action === "run-args") {
     console.log((action === "build-args" ? buildArgs : runArgs)(workload).join(" "));
     return;
@@ -233,7 +271,7 @@ async function main() {
   const { binaries, bundle } = artifactPaths(workload);
   assert.ok(
     ["seal", "install"].includes(action),
-    "usage: codspeed-artifact.mjs seal|install|build-args|run-args WORKLOAD",
+    "usage: codspeed-artifact.mjs seal|install|build-args|run-args WORKLOAD | rustflags | matrix | measure",
   );
   await platform();
   const identity = context();
