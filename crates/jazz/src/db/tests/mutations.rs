@@ -3019,6 +3019,51 @@ fn session_upload_uses_connection_identity_for_write_policy() {
     assert_eq!(rows[0].row_uuid(), row);
 }
 
+// Receipt-validation work is internal: an accepted upload looks the same
+// whether the server validated each version receipt once or twice. The
+// counter proves that a checked wire decoder's validation is not repeated at
+// ingest, while a transport that hands over decoded messages still is.
+#[test]
+fn session_upload_validates_each_version_receipt_once() {
+    const ROWS: usize = 3;
+    for wire in [true, false] {
+        let schema = owner_write_schema();
+        let session_author = AuthorSubject::for_test_bytes([0xc2; 16]);
+        let server = open_core(0x5f, AuthorSubject::SYSTEM, &schema);
+        let client = open_db(0xc2, session_author, &schema);
+        let (client_transport, server_transport) = if wire { byte_duplex() } else { duplex() };
+        let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+        let _subscriber = server.accept_subscriber(server_transport, session_author);
+
+        let tx = client.mergeable_tx().unwrap();
+        for index in 0..ROWS {
+            tx.insert(
+                "todos",
+                cells(&format!("row {index}"), false, session_author),
+                Default::default(),
+            )
+            .unwrap();
+        }
+        let tx_id = tx.commit().unwrap();
+        client.tick().unwrap();
+
+        crate::protocol::RECEIPT_VALIDATIONS.with(|count| count.set(0));
+        server.tick().unwrap();
+        let validations = crate::protocol::RECEIPT_VALIDATIONS.with(|count| count.get());
+        client.tick().unwrap();
+
+        assert_eq!(
+            validations, ROWS,
+            "wire={wire}: each uploaded version receipt is validated exactly once"
+        );
+        assert_eq!(
+            block_on(client.wait_for_transaction(tx_id, DurabilityTier::Global)).unwrap(),
+            tx_id
+        );
+        assert_eq!(server.read(&Query::from("todos")).unwrap().len(), ROWS);
+    }
+}
+
 // Write-policy work is internal: an accepted or rejected upload looks the
 // same whether the server evaluated each version's policy once or twice. The
 // counter proves the session admission proof no longer repeats the evaluation

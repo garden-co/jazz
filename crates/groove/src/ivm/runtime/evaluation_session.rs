@@ -6,6 +6,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use crate::ivm::graph::NodeId;
+use crate::records::Value;
 use crate::schema::DatabaseSchema;
 use crate::storage::{KeyValue, OwnedStorage, ScanRequest, StorageFuture};
 use crate::{chunks::ChunkLease, chunks::ChunkRequest, chunks::OwnedChunkProvider};
@@ -30,6 +31,7 @@ pub(super) enum StorageRequestKey {
         family: String,
         prefix: Vec<u8>,
         max_items: usize,
+        reversed: bool,
     },
     IndexedRowsPrefix {
         table: String,
@@ -41,12 +43,23 @@ pub(super) enum StorageRequestKey {
         index: String,
         prefix: Vec<u8>,
         max_items: usize,
+        reversed: bool,
     },
     IndexedRowsIntersection {
         table: String,
         index: String,
         prefix: Vec<u8>,
         intersections: Vec<(String, Vec<u8>)>,
+    },
+    IndexedRowsCandidateFilter {
+        table: String,
+        index: String,
+        prefix: Vec<u8>,
+        candidate_table: String,
+        candidate_index: String,
+        candidate_prefix: Vec<u8>,
+        source_column: String,
+        candidate_column: String,
     },
     IndexedRowsRange {
         table: String,
@@ -311,10 +324,14 @@ impl<'a> EvaluationRequests<'a> {
                 family,
                 prefix,
                 max_items,
+                reversed,
             }) => {
-                let future = storage.scan(
-                    ScanRequest::prefix(family.clone(), prefix.clone()).with_max_items(*max_items),
-                );
+                let mut request =
+                    ScanRequest::prefix(family.clone(), prefix.clone()).with_max_items(*max_items);
+                if *reversed {
+                    request = request.reversed();
+                }
+                let future = storage.scan(request);
                 Box::pin(async move {
                     future
                         .await
@@ -354,6 +371,7 @@ impl<'a> EvaluationRequests<'a> {
                 index,
                 prefix,
                 max_items,
+                reversed,
             }) => {
                 let table_schema = schema
                     .table(table)
@@ -366,10 +384,12 @@ impl<'a> EvaluationRequests<'a> {
                     .expect("compiled indexed-row source index exists")
                     .clone();
                 let index = index.clone();
-                let scan = storage.scan(
-                    ScanRequest::prefix("indices".to_owned(), prefix.clone())
-                        .with_max_items(*max_items),
-                );
+                let mut request = ScanRequest::prefix("indices".to_owned(), prefix.clone())
+                    .with_max_items(*max_items);
+                if *reversed {
+                    request = request.reversed();
+                }
+                let scan = storage.scan(request);
                 let storage = storage.clone();
                 Box::pin(async move {
                     let entries = scan.await?;
@@ -435,6 +455,119 @@ impl<'a> EvaluationRequests<'a> {
                         .filter_map(|(entry, key)| retained.contains(&key).then_some(entry))
                         .collect();
                     load_indexed_rows(storage, table_schema, primary_index_schema, index, entries)
+                        .await
+                        .map(EvaluationRequestOutput::Storage)
+                        .map_err(Into::into)
+                })
+            }
+            EvaluationRequestKey::Storage(StorageRequestKey::IndexedRowsCandidateFilter {
+                table,
+                index,
+                prefix,
+                candidate_table,
+                candidate_index,
+                candidate_prefix,
+                source_column,
+                candidate_column,
+            }) => {
+                let table_schema = schema
+                    .table(table)
+                    .expect("compiled candidate-filtered source table exists")
+                    .clone();
+                let index_schema = table_schema
+                    .indices
+                    .iter()
+                    .find(|entry| entry.name == *index)
+                    .expect("compiled candidate-filtered source index exists")
+                    .clone();
+                let candidate_schema = schema
+                    .table(candidate_table)
+                    .expect("compiled candidate table exists")
+                    .clone();
+                let candidate_index_schema = candidate_schema
+                    .indices
+                    .iter()
+                    .find(|entry| entry.name == *candidate_index)
+                    .expect("compiled candidate index exists")
+                    .clone();
+                let index = index.clone();
+                let prefix = prefix.clone();
+                let candidate_index = candidate_index.clone();
+                let candidate_prefix = candidate_prefix.clone();
+                let source_column = source_column.clone();
+                let candidate_column = candidate_column.clone();
+                let storage = storage.clone();
+                Box::pin(async move {
+                    let entries = storage
+                        .scan(ScanRequest::prefix("indices".to_owned(), prefix))
+                        .await?;
+                    // An already-small source is cheaper to hydrate directly.
+                    // Cap the candidate probe so a broad candidate prefix
+                    // cannot scan thousands of keys to filter a small source.
+                    // Both fallbacks hydrate the complete, unfiltered source.
+                    if entries.len() < CANDIDATE_FILTER_MIN_SOURCE_ENTRIES {
+                        return load_indexed_rows(
+                            storage,
+                            table_schema,
+                            index_schema,
+                            index,
+                            entries,
+                        )
+                        .await
+                        .map(EvaluationRequestOutput::Storage)
+                        .map_err(Into::into);
+                    }
+                    let candidate_scan_limit = entries.len().div_ceil(2);
+                    let candidates = storage
+                        .scan(
+                            ScanRequest::prefix("indices".to_owned(), candidate_prefix)
+                                .with_max_items(candidate_scan_limit),
+                        )
+                        .await?;
+                    if candidates.len() == candidate_scan_limit {
+                        return load_indexed_rows(
+                            storage,
+                            table_schema,
+                            index_schema,
+                            index,
+                            entries,
+                        )
+                        .await
+                        .map(EvaluationRequestOutput::Storage)
+                        .map_err(Into::into);
+                    }
+                    let candidate_uuids = indexed_uuid_values(
+                        &candidate_schema,
+                        &candidate_index,
+                        &candidate_index_schema,
+                        &candidates,
+                        &candidate_column,
+                    )?
+                    .into_iter()
+                    .flatten()
+                    .collect::<HashSet<_>>();
+                    if candidate_uuids.is_empty() {
+                        return Ok(EvaluationRequestOutput::Storage(
+                            StorageRequestOutput::Rows(Vec::new()),
+                        ));
+                    }
+                    let source_uuids = indexed_uuid_values(
+                        &table_schema,
+                        &index,
+                        &index_schema,
+                        &entries,
+                        &source_column,
+                    )?;
+                    let entries = entries
+                        .into_iter()
+                        .zip(source_uuids)
+                        .filter_map(|(entry, row_uuid)| {
+                            row_uuid
+                                .filter(|uuid| candidate_uuids.contains(uuid))
+                                .map(|_| entry)
+                        })
+                        .collect();
+                    load_indexed_rows(storage, table_schema, index_schema, index, entries)
                         .await
                         .map(EvaluationRequestOutput::Storage)
                         .map_err(Into::into)
@@ -583,6 +716,10 @@ impl<'a> EvaluationRequests<'a> {
     }
 }
 
+/// Below this many source index entries, a candidate-filtered source hydrates
+/// its rows directly instead of scanning the candidate index first.
+const CANDIDATE_FILTER_MIN_SOURCE_ENTRIES: usize = 512;
+
 async fn load_indexed_rows(
     storage: OwnedStorage<'_>,
     table: crate::schema::TableSchema,
@@ -630,6 +767,45 @@ async fn load_indexed_rows(
     })
     .await?;
     Ok(StorageRequestOutput::Rows(rows))
+}
+
+fn indexed_uuid_values(
+    table: &crate::schema::TableSchema,
+    index_name: &str,
+    index_schema: &crate::schema::IndexSchema,
+    entries: &[KeyValue],
+    column: &str,
+) -> Result<Vec<Option<uuid::Uuid>>, super::IvmRuntimeError> {
+    let index_descriptor = crate::db::index_record_descriptor();
+    entries
+        .iter()
+        .map(|(storage_key, persisted_record)| {
+            let index_record = index_descriptor.bind(persisted_record);
+            let stored_value = index_record
+                .get("value")
+                .map_err(super::IvmRuntimeError::RecordEncoding)?;
+            let value = crate::db::persisted_index_column_value(
+                table,
+                index_name,
+                index_schema,
+                storage_key,
+                &stored_value,
+                column,
+            )
+            .map_err(|_| super::IvmRuntimeError::InvalidPersistedIndex(index_name.to_owned()))?;
+            let mut value = &value;
+            while let Value::Nullable(Some(inner)) = value {
+                value = inner;
+            }
+            match value {
+                Value::Uuid(uuid) => Ok(Some(*uuid)),
+                Value::Nullable(None) => Ok(None),
+                _ => Err(super::IvmRuntimeError::InvalidPersistedIndex(
+                    index_name.to_owned(),
+                )),
+            }
+        })
+        .collect()
 }
 
 fn indexed_primary_keys(

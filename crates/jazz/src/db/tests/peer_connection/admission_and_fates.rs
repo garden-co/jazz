@@ -3773,6 +3773,213 @@ fn permission_advice_update_evaluates_post_patch_update_check() {
     assert_eq!(block_on(missing), PermissionAdvice::Denied);
 }
 
+/// The row lookup must find an existing, readable row: only an `Allowed`
+/// answer distinguishes a correct lookup from one that reports every row as
+/// missing, since both a violating patch and a missing row are `Denied`.
+#[test]
+fn permission_advice_update_allows_a_valid_patch_to_an_existing_row() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(PublicPolicyExpr::True)
+                        .with_update(None, public_literal_eq("done", PublicValue::Boolean(false))),
+                ),
+        ),
+    );
+    let author = AuthorSubject::for_test_bytes([0xa4; 16]);
+    let server = open_core(0x61, AuthorSubject::SYSTEM, &schema);
+    for title in ["other-1", "other-2"] {
+        server.insert("todos", cells(title, false, author)).unwrap();
+    }
+    let target = server
+        .insert("todos", cells("target", false, author))
+        .unwrap()
+        .row_uuid();
+    let client = open_db(0xa4, author, &schema);
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xa4; 16]),
+        1,
+        NodeUuid::from_bytes([0x61; 16]),
+        1,
+    );
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, author);
+    let mut ask = |row, patch| {
+        let advice = client.request_permission_advice(PermissionAdviceAction::Update {
+            table: "todos".to_owned(),
+            row,
+            patch,
+        });
+        client.tick().unwrap();
+        server.tick().unwrap();
+        client.tick().unwrap();
+        block_on(advice)
+    };
+    let rename = || BTreeMap::from([("title".to_owned(), Value::String("renamed".to_owned()))]);
+
+    assert_eq!(ask(target, rename()), PermissionAdvice::Allowed);
+    assert_eq!(
+        ask(
+            target,
+            BTreeMap::from([("done".to_owned(), Value::Bool(true))])
+        ),
+        PermissionAdvice::Denied
+    );
+    assert_eq!(ask(row(0xef), rename()), PermissionAdvice::Denied);
+}
+
+/// With an allow-all update policy, row existence alone decides update
+/// advice: a live row is Allowed, while a row that never existed or was
+/// deleted is Denied. Guards the #3386 point lookup against treating an
+/// absent or deleted row as present.
+#[test]
+fn permission_advice_update_denies_missing_and_deleted_rows_under_allow_all_policy() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(PublicPolicyExpr::True)
+                        .with_insert(PublicPolicyExpr::True)
+                        .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True)
+                        .with_delete(PublicPolicyExpr::True),
+                ),
+        ),
+    );
+    let author = AuthorSubject::for_test_bytes([0xa5; 16]);
+    let server = open_core(0x62, AuthorSubject::SYSTEM, &schema);
+    let live = server
+        .insert("todos", cells("live", false, author))
+        .unwrap()
+        .row_uuid();
+    let deleted = server
+        .insert("todos", cells("deleted", false, author))
+        .unwrap()
+        .row_uuid();
+    let client = open_db(0xa5, author, &schema);
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xa5; 16]),
+        1,
+        NodeUuid::from_bytes([0x62; 16]),
+        1,
+    );
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, author);
+    let ask = |row| {
+        let advice = client.request_permission_advice(PermissionAdviceAction::Update {
+            table: "todos".to_owned(),
+            row,
+            patch: BTreeMap::from([("title".to_owned(), Value::String("renamed".to_owned()))]),
+        });
+        client.tick().unwrap();
+        server.tick().unwrap();
+        client.tick().unwrap();
+        block_on(advice)
+    };
+
+    assert_eq!(ask(live), PermissionAdvice::Allowed);
+    assert_eq!(
+        ask(deleted),
+        PermissionAdvice::Allowed,
+        "live before deletion"
+    );
+    assert_eq!(ask(row(0xee)), PermissionAdvice::Denied, "never existed");
+
+    let _ = client.delete("todos", deleted, Default::default()).unwrap();
+    for _ in 0..3 {
+        client.tick().unwrap();
+        server.tick().unwrap();
+    }
+    assert_eq!(ask(deleted), PermissionAdvice::Denied, "deleted");
+    assert_eq!(
+        ask(live),
+        PermissionAdvice::Allowed,
+        "unrelated row stays live"
+    );
+}
+
+#[test]
+#[ignore = "#3386: timing probe, run manually with --ignored"]
+/// Server tick for one Update permission advice against a growing table,
+/// next to an idle tick. Before #3386 the row-existence check decoded the
+/// whole table, so the advice tick grew linearly with it.
+fn probe_3386_update_advice_latency() {
+    let policy = public_literal_eq("done", PublicValue::Boolean(false));
+    // No update policy: an update policy's support scope is hydrated over
+    // the whole table on every request and would mask the row lookup.
+    let policies = PublicTablePolicies::new().with_insert(policy);
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(policies),
+        ),
+    );
+    let author = AuthorSubject::for_test_bytes([0xa3; 16]);
+    let server = open_core(0x60, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xa3, author, &schema);
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xa3; 16]),
+        1,
+        NodeUuid::from_bytes([0x60; 16]),
+        1,
+    );
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, author);
+    let mut inserted = 0usize;
+    for size in [100usize, 1_000, 5_000] {
+        while inserted < size {
+            server
+                .insert("todos", cells(&format!("row {inserted}"), false, author))
+                .unwrap();
+            inserted += 1;
+        }
+        let mut total = std::time::Duration::ZERO;
+        const ASKS: u32 = 20;
+        for _ in 0..ASKS {
+            let advice = client.request_permission_advice(PermissionAdviceAction::Update {
+                table: "todos".to_owned(),
+                row: row(0xef),
+                patch: BTreeMap::from([("done".to_owned(), Value::Bool(false))]),
+            });
+            client.tick().unwrap();
+            let started = std::time::Instant::now();
+            server.tick().unwrap();
+            total += started.elapsed();
+            client.tick().unwrap();
+            assert_eq!(block_on(advice), PermissionAdvice::Denied);
+        }
+        eprintln!(
+            "PROBE rows={size} server_tick_us={}",
+            (total / ASKS).as_micros()
+        );
+        let mut idle = std::time::Duration::ZERO;
+        for _ in 0..ASKS {
+            client.tick().unwrap();
+            let started = std::time::Instant::now();
+            server.tick().unwrap();
+            idle += started.elapsed();
+        }
+        eprintln!(
+            "PROBE rows={size} idle_tick_us={}",
+            (idle / ASKS).as_micros()
+        );
+    }
+}
+
 #[test]
 fn permission_advice_response_wire_cannot_carry_policy_rows_or_reasons() {
     let request_id = PermissionAdviceRequestId([7; 16]);

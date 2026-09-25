@@ -100,6 +100,12 @@ where
         self.node.has_recovered_browser_relay_tx_for_test(tx_id)
     }
 
+    /// Core-shell capability: see `Node::declare_upload_root`.
+    #[cfg(feature = "runtime")]
+    pub(crate) fn declare_upload_root(&self) {
+        self.node.declare_upload_root();
+    }
+
     /// Core-shell capability; partial caches and relays must leave it disabled.
     #[cfg(feature = "runtime")]
     pub(crate) fn enable_authoritative_scalar_exit_refresh(&self) {
@@ -244,6 +250,22 @@ where
     pub async fn open_with_receipt_for_test(
         config: DbConfig<S>,
     ) -> Result<(Self, DbOpenReceipt), Error> {
+        Self::open_with_receipt_inner_for_test(config, false).await
+    }
+
+    #[cfg(feature = "testing")]
+    /// Open a history-complete serving core and return its node-open phase timings.
+    pub async fn open_history_complete_with_receipt_for_test(
+        config: DbConfig<S>,
+    ) -> Result<(Self, DbOpenReceipt), Error> {
+        Self::open_with_receipt_inner_for_test(config, true).await
+    }
+
+    #[cfg(feature = "testing")]
+    async fn open_with_receipt_inner_for_test(
+        config: DbConfig<S>,
+        history_complete: bool,
+    ) -> Result<(Self, DbOpenReceipt), Error> {
         let schema_version_id = config.schema.version_id();
         let schema_views = Rc::new(RefCell::new(BTreeMap::from([(
             SchemaViewId::for_schema(&config.schema),
@@ -253,18 +275,25 @@ where
             config.identity.node,
             config.schema.clone(),
             config.storage,
-            false,
+            history_complete,
         )
         .await?;
+        let requires_open_schema_admission =
+            !node.catalogue_schemas().contains_key(&schema_version_id);
+        let node = Node::new(node);
+        if requires_open_schema_admission {
+            *node.open_schema_admission.borrow_mut() =
+                Some(PendingOpenSchema::new(schema_version_id));
+        }
         let row_id_source_guarantees_fresh = config.id_source.is_none();
         let db = Self {
             schema: config.schema,
             schema_version_id,
             schema_view_is_fixed: false,
-            requires_open_schema_admission: false,
+            requires_open_schema_admission,
             schema_views,
             identity: config.identity,
-            node: Rc::new(Node::new(node)),
+            node: Rc::new(node),
             row_id_source: Rc::new(RefCell::new(
                 config
                     .id_source
@@ -1567,6 +1596,7 @@ fn schema_index_metadata_matches(left: &JazzSchema, right: &JazzSchema) -> bool 
             right.tables.iter().any(|right_table| {
                 left_table.name == right_table.name
                     && left_table.indexed_columns == right_table.indexed_columns
+                    && left_table.composite_indexes == right_table.composite_indexes
             })
         })
 }

@@ -718,6 +718,11 @@ impl Database {
             overlay,
             Rc::clone(&self.storage_read_metrics),
         ));
+        let live = self
+            .ivm_runtime
+            .prepare_live_attach(prepared.id, &values, &storage)
+            .await
+            .map_err(Error::IvmRuntime)?;
         let subscription = self
             .ivm_runtime
             .bind_shape_one_sink_with_output_and_waker(
@@ -726,6 +731,7 @@ impl Database {
                 prepared.output,
                 &storage,
                 None,
+                live,
             )
             .map_err(Error::IvmRuntime)?;
         self.drive_resident_progress_now()?;
@@ -873,9 +879,14 @@ impl Database {
             overlay,
             Rc::clone(&self.storage_read_metrics),
         ));
+        let live = self
+            .ivm_runtime
+            .prepare_live_attach(shape, binding_values, &storage)
+            .await
+            .map_err(Error::IvmRuntime)?;
         let subscription = self
             .ivm_runtime
-            .bind_shape_one_sink_with_waker(shape, binding_values, &storage, None)
+            .bind_shape_one_sink_with_waker(shape, binding_values, &storage, None, live)
             .map_err(Error::IvmRuntime)?;
         self.drive_resident_progress_now()?;
         Ok(subscription)
@@ -903,6 +914,11 @@ impl Database {
             overlay,
             Rc::clone(&self.storage_read_metrics),
         ));
+        let live = self
+            .ivm_runtime
+            .prepare_live_attach(shape, binding_values, &storage)
+            .await
+            .map_err(Error::IvmRuntime)?;
         let subscription = self
             .ivm_runtime
             .bind_shape_one_sink_with_output_and_waker(
@@ -911,6 +927,7 @@ impl Database {
                 public_output,
                 &storage,
                 None,
+                live,
             )
             .map_err(Error::IvmRuntime)?;
         self.drive_resident_progress_now()?;
@@ -965,8 +982,23 @@ impl Database {
             overlay,
             Rc::clone(&self.storage_read_metrics),
         ));
+        let live = if lifetime == SubscriptionLifetime::Retained {
+            self.ivm_runtime
+                .prepare_live_attach(shape, binding_values, &storage)
+                .await
+                .map_err(Error::IvmRuntime)?
+        } else {
+            None
+        };
         self.ivm_runtime
-            .bind_shape_with_lifetime(shape, binding_values, &storage, lifetime, progress_waker)
+            .bind_shape_with_lifetime(
+                shape,
+                binding_values,
+                &storage,
+                lifetime,
+                progress_waker,
+                live,
+            )
             .map_err(Error::IvmRuntime)
     }
 

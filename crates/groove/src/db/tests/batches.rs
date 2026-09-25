@@ -595,6 +595,57 @@ async fn present_staged_receipt_has_no_implicit_ttl_and_is_accepted_atomically()
 }
 
 #[futures_test::test]
+async fn a_staging_root_accepted_by_an_unpersisted_batch_cannot_be_accepted_again() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families()).unwrap();
+    let mut database = Database::new(schema, storage).await.unwrap();
+    database.set_chunk_storage(Rc::new(crate::chunks::MemoryChunkStorage::new()));
+    let staged = database
+        .prepare_and_stage_large_value(
+            crate::large_values::LargeValueKind::Bytes,
+            &vec![7; crate::large_values::INLINE_VALUE_MAX_BYTES * 4],
+        )
+        .await
+        .unwrap();
+
+    let mut first = database.open_batch();
+    first.insert(
+        "objects",
+        vec![
+            Value::U64(1),
+            Value::Large(Box::new(staged.value_ref.clone())),
+        ],
+    );
+    first.accept_large_value(staged.id);
+    let applied = database.apply_batch(first).await.unwrap();
+
+    // The first batch consumed the staging id, but its persistence has not
+    // run: storage alone still holds the staging record.
+    let mut second = database.open_batch();
+    second.insert(
+        "objects",
+        vec![Value::U64(2), Value::Large(Box::new(staged.value_ref))],
+    );
+    second.accept_large_value(staged.id);
+    // Rejected at acceptance, not only by the later root-count underflow check.
+    assert!(matches!(
+        database.apply_batch(second).await,
+        Err(Error::InvalidLargeValueMetadata(message)) if message.contains("already consumed")
+    ));
+
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted).unwrap();
+    assert!(database.staged_large_values().await.unwrap().is_empty());
+}
+
+#[futures_test::test]
 async fn resident_large_value_acceptance_blocks_stale_eviction_and_reclamation() {
     let schema = DatabaseSchema::new([TableSchema::new(
         "objects",

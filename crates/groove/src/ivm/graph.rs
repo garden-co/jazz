@@ -21,6 +21,19 @@ use thiserror::Error;
 
 use super::op_types::*;
 
+/// Snapshot-only index-key filter: an indexed row is hydrated only when its
+/// `source_column` UUID also appears in the candidate index's `candidate_column`.
+/// The candidate side is a conservative superset; the ordinary graph still
+/// checks the complete join, visibility, policy, and deletion rules.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct IndexCandidateFilter {
+    pub table: String,
+    pub index: String,
+    pub scan: StaticScanSpec,
+    pub source_column: String,
+    pub candidate_column: String,
+}
+
 /// User-facing graph construction API before deduplication.
 ///
 /// Builders refer to table and field names directly; the runtime resolves those
@@ -189,6 +202,7 @@ pub enum GraphBuilder {
         /// Row projection sources intersect these encoded index entries before
         /// fetching table records, so surviving rows are decoded only once.
         intersections: Vec<(String, StaticScanSpec)>,
+        candidate_filter: Option<IndexCandidateFilter>,
         /// When present, fetch indexed table rows and project their variants
         /// instead of exposing the index's encoded key/value records.
         row_projection: Option<String>,
@@ -572,6 +586,7 @@ impl GraphBuilder {
             index: index.into(),
             scan: None,
             intersections: Vec::new(),
+            candidate_filter: None,
             row_projection: None,
         }
     }
@@ -586,6 +601,7 @@ impl GraphBuilder {
             index: index.into(),
             scan: Some(scan),
             intersections: Vec::new(),
+            candidate_filter: None,
             row_projection: None,
         }
     }
@@ -603,6 +619,7 @@ impl GraphBuilder {
             index: index.into(),
             scan: Some(scan),
             intersections: Vec::new(),
+            candidate_filter: None,
             row_projection: Some(projection_target.into()),
         }
     }
@@ -621,6 +638,26 @@ impl GraphBuilder {
             index: index.into(),
             scan: Some(scan),
             intersections: intersections.into_iter().collect(),
+            candidate_filter: None,
+            row_projection: Some(projection_target.into()),
+        }
+    }
+
+    /// Snapshot-only row source with a conservative index-key semijoin before
+    /// full-row hydration. A retained source must use the ordinary live graph.
+    pub fn variant_index_candidate_scan(
+        table: impl Into<String>,
+        index: impl Into<String>,
+        scan: StaticScanSpec,
+        candidate_filter: IndexCandidateFilter,
+        projection_target: impl Into<String>,
+    ) -> Self {
+        Self::Index {
+            table: table.into(),
+            index: index.into(),
+            scan: Some(scan),
+            intersections: Vec::new(),
+            candidate_filter: Some(candidate_filter),
             row_projection: Some(projection_target.into()),
         }
     }
@@ -1638,6 +1675,10 @@ pub struct IvmGraph {
     frontier_sources: HashMap<String, HashSet<NodeId>>,
     /// Route barriers below shared prepared-shape terminals (#3288).
     routes: super::routes::RouteIndex,
+    /// Nodes inserted since the runtime last drained them. Every new node is
+    /// unretained until an operation adds a retainer, so graph GC starts its
+    /// incremental sweep from these.
+    added_since_drain: Vec<NodeId>,
 }
 
 impl IvmGraph {
@@ -1769,6 +1810,7 @@ impl IvmGraph {
         descriptor: NodeDescriptor,
         durability: NodeDurability,
     ) -> NodeId {
+        self.added_since_drain.push(id);
         // A durable node changes whether every route barrier above it keeps
         // ordinary activation, including in plans that never reached its
         // inputs because they stopped at such a barrier.
@@ -1892,6 +1934,11 @@ impl IvmGraph {
             }))
             .flat_map(|nodes| nodes.iter().copied())
             .collect()
+    }
+
+    /// Nodes inserted since the previous call, including ones removed since.
+    pub(crate) fn take_added_nodes(&mut self) -> Vec<NodeId> {
+        std::mem::take(&mut self.added_since_drain)
     }
 
     pub fn mark_ancestors<S>(&self, id: NodeId, retained: &mut std::collections::HashSet<NodeId, S>)

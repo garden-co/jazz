@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::ivm::graph::{DurableStorage, ProjectExpr};
+use crate::ivm::graph::{DurableStorage, IndexCandidateFilter, ProjectExpr};
 use crate::records::{FieldIdentity, RecordDescriptor, Value, ValueType};
 use crate::schema::IndexSchema;
 
@@ -51,6 +51,7 @@ pub struct IndexSourceOp {
     pub table: String,
     pub index: String,
     pub intersections: Vec<(String, StaticScanSpec)>,
+    pub candidate_filter: Option<IndexCandidateFilter>,
     /// Fixed descriptor consumed by `IndexBy` after optional variant
     /// projection. For homogeneous tables this is the ordinary table
     /// descriptor.
@@ -77,6 +78,15 @@ pub enum StaticScanSpec {
     /// only emitted by conservative one-shot lowering after every downstream
     /// operation that could discard or reorder a candidate has been ruled out.
     PrefixLimit {
+        prefix: Vec<LiteralValue>,
+        max_items: usize,
+    },
+    /// Read the last `max_items` entries under a prefix, in descending key
+    /// order, bounded before row decoding. Jazz emits this (and an ordered
+    /// `PrefixLimit`) only for a one-shot ordered-page probe whose caller
+    /// re-proves the page after every downstream filter, and falls back to an
+    /// unbounded source when it cannot.
+    ReversePrefixLimit {
         prefix: Vec<LiteralValue>,
         max_items: usize,
     },

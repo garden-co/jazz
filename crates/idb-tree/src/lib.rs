@@ -103,6 +103,17 @@ pub enum Error {
     OwnershipExpired,
     #[error("an IDBTree commit is already in flight")]
     CommitInFlight,
+    /// A flush was cancelled mid-commit. Every operation except reads through
+    /// a read-committed view fails until [`IdbTree::reload`] resolves the
+    /// commit's outcome from the store.
+    #[error("an IDBTree commit was abandoned; reload before using the tree")]
+    CommitAbandoned,
+    /// A read-committed view needed a page that is not resident. It never
+    /// hydrates: the caller retries through the ordinary tree instead.
+    #[error("IDBTree page {0} is not resident for a read-committed view")]
+    NotResident(PageId),
+    #[error("a read-committed IDBTree view cannot write")]
+    ReadOnlyView,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -139,6 +150,11 @@ struct TreeCore<S> {
     store: S,
     options: Options,
     metadata: Metadata,
+    /// Root of the last durable generation: the store's root at open, then
+    /// each successfully committed root. Its closure stays resident until a
+    /// later commit retires it, so read-committed views can serve it while
+    /// newer writes are staged or committing.
+    durable_root: Option<PageId>,
     pages: HashMap<PageId, Page>,
     /// Pages written in the active generation; their images live in `pages`.
     dirty: BTreeSet<PageId>,
@@ -150,6 +166,23 @@ struct TreeCore<S> {
     deleted: BTreeSet<PageId>,
     retirement_undo: Vec<PageId>,
     commit_in_flight: bool,
+    /// A flush was dropped while its commit was in flight, so whether that
+    /// commit landed is unknown, and the live root may name pages that never
+    /// became durable. Only [`IdbTree::reload`] recovers: the store is the
+    /// sole authority on the outcome.
+    commit_abandoned: bool,
+}
+
+struct AbandonOnDrop<'a, S>(Option<&'a RefCell<TreeCore<S>>>);
+
+impl<S> Drop for AbandonOnDrop<'_, S> {
+    fn drop(&mut self) {
+        if let Some(inner) = self.0.take() {
+            let mut tree = inner.borrow_mut();
+            tree.commit_in_flight = false;
+            tree.commit_abandoned = true;
+        }
+    }
 }
 
 /// A write only appends fresh COW page ids and advances root/allocation
@@ -194,6 +227,9 @@ pub struct IdbTree<S> {
     inner: Rc<RefCell<TreeCore<S>>>,
     _ownership: Rc<TreeOwnership>,
     reload_epoch: Rc<Cell<u64>>,
+    /// Reads see only the last committed generation, never staged or
+    /// committing writes, and never hydrate. See [`IdbTree::read_committed`].
+    read_committed: bool,
 }
 
 impl<S: PageStore + Clone> IdbTree<S> {
@@ -207,21 +243,75 @@ impl<S: PageStore + Clone> IdbTree<S> {
             inner: Rc::new(RefCell::new(tree)),
             _ownership: Rc::new(ownership),
             reload_epoch: Rc::new(Cell::new(0)),
+            read_committed: false,
         })
     }
 
-    fn ensure_live(&self) -> Result<(), Error> {
-        if self._ownership.is_live() {
-            Ok(())
-        } else {
-            Err(Error::OwnershipExpired)
+    /// A read-only view of the same tree that answers from the last committed
+    /// generation only. Writes staged since, including a commit still in
+    /// flight, are invisible to it. It never performs page I/O: a read that
+    /// needs a non-resident page fails with [`Error::NotResident`] on its
+    /// first poll, and every write method fails with [`Error::ReadOnlyView`].
+    pub fn read_committed(&self) -> Self {
+        Self {
+            read_committed: true,
+            ..self.clone()
         }
+    }
+
+    fn ensure_writable(&self) -> Result<(), Error> {
+        if self.read_committed {
+            Err(Error::ReadOnlyView)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// The root a read starts from, or None for a view of an empty store.
+    fn read_root(&self, tree: &TreeCore<S>) -> Option<PageId> {
+        if self.read_committed {
+            tree.durable_root
+        } else {
+            Some(tree.root_page_id())
+        }
+    }
+
+    /// Hydrate a missing page, or fail a read-committed view without I/O.
+    async fn hydrate_for_read(&self, page_id: PageId) -> Result<(), Error> {
+        if self.read_committed {
+            return Err(Error::NotResident(page_id));
+        }
+        self.hydrate(page_id).await
+    }
+
+    /// Hydrate a batch of missing pages, or fail a read-committed view without
+    /// I/O.
+    async fn hydrate_many_for_read(&self, page_ids: Vec<PageId>) -> Result<(), Error> {
+        if self.read_committed {
+            return Err(Error::NotResident(page_ids[0]));
+        }
+        self.hydrate_many(page_ids).await
+    }
+
+    fn ensure_live(&self) -> Result<(), Error> {
+        if !self._ownership.is_live() {
+            return Err(Error::OwnershipExpired);
+        }
+        // The durable root is still a committed generation after an abandoned
+        // commit, so the read-committed view keeps serving it.
+        if !self.read_committed && self.inner.borrow().commit_abandoned {
+            return Err(Error::CommitAbandoned);
+        }
+        Ok(())
     }
 
     /// Discard staged writes and reload the durable root while retaining this
     /// handle's ownership. Callers must serialize this with writes/flushes.
     pub async fn reload(&self) -> Result<(), Error> {
-        self.ensure_live()?;
+        if !self._ownership.is_live() {
+            return Err(Error::OwnershipExpired);
+        }
+        self.ensure_writable()?;
         let (store, options) = {
             let tree = self.inner.borrow();
             if tree.commit_in_flight {
@@ -230,7 +320,9 @@ impl<S: PageStore + Clone> IdbTree<S> {
             (tree.store.clone(), tree.options)
         };
         let fresh = TreeCore::open(store, options).await?;
-        self.ensure_live()?;
+        if !self._ownership.is_live() {
+            return Err(Error::OwnershipExpired);
+        }
         *self.inner.borrow_mut() = fresh;
         self.reload_epoch
             .set(self.reload_epoch.get().wrapping_add(1));
@@ -249,10 +341,16 @@ impl<S: PageStore + Clone> IdbTree<S> {
     pub async fn value_equals(&self, key: &[u8], expected: &[u8]) -> Result<Option<bool>, Error> {
         loop {
             self.ensure_live()?;
-            let attempt = self.inner.borrow().try_value_equals(key, expected)?;
+            let attempt = {
+                let tree = self.inner.borrow();
+                match self.read_root(&tree) {
+                    Some(root) => tree.try_value_equals(root, key, expected)?,
+                    None => Attempt::Ready(None),
+                }
+            };
             match attempt {
                 Attempt::Ready(value) => return Ok(value),
-                Attempt::Missing(page_id) => self.hydrate(page_id).await?,
+                Attempt::Missing(page_id) => self.hydrate_for_read(page_id).await?,
             }
         }
     }
@@ -260,15 +358,22 @@ impl<S: PageStore + Clone> IdbTree<S> {
     pub async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
         loop {
             self.ensure_live()?;
-            let attempt = self.inner.borrow().try_get(key)?;
+            let attempt = {
+                let tree = self.inner.borrow();
+                match self.read_root(&tree) {
+                    Some(root) => tree.try_get(root, key)?,
+                    None => Attempt::Ready(None),
+                }
+            };
             match attempt {
                 Attempt::Ready(value) => return Ok(value),
-                Attempt::Missing(page_id) => self.hydrate(page_id).await?,
+                Attempt::Missing(page_id) => self.hydrate_for_read(page_id).await?,
             }
         }
     }
 
     pub async fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), Error> {
+        self.ensure_writable()?;
         loop {
             self.ensure_live()?;
             let attempt = self
@@ -283,6 +388,7 @@ impl<S: PageStore + Clone> IdbTree<S> {
     }
 
     pub async fn delete(&self, key: &[u8]) -> Result<bool, Error> {
+        self.ensure_writable()?;
         loop {
             self.ensure_live()?;
             let attempt = self
@@ -298,6 +404,7 @@ impl<S: PageStore + Clone> IdbTree<S> {
 
     pub async fn write_many(&self, operations: Vec<WriteOperation>) -> Result<(), Error> {
         self.ensure_live()?;
+        self.ensure_writable()?;
         for operation in &operations {
             let key = match operation {
                 WriteOperation::Set { key, .. } | WriteOperation::Delete { key } => key,
@@ -331,10 +438,16 @@ impl<S: PageStore + Clone> IdbTree<S> {
     ) -> Result<Vec<KeyValue>, Error> {
         loop {
             self.ensure_live()?;
-            let attempt = self.inner.borrow().try_range(start, end, limit)?;
+            let attempt = {
+                let tree = self.inner.borrow();
+                match self.read_root(&tree) {
+                    Some(root) => tree.try_range(root, start, end, limit)?,
+                    None => ScanAttempt::Ready(Vec::new()),
+                }
+            };
             match attempt {
                 ScanAttempt::Ready(rows) => return Ok(rows),
-                ScanAttempt::Missing(page_ids) => self.hydrate_many(page_ids).await?,
+                ScanAttempt::Missing(page_ids) => self.hydrate_many_for_read(page_ids).await?,
             }
         }
     }
@@ -347,16 +460,23 @@ impl<S: PageStore + Clone> IdbTree<S> {
     ) -> Result<Vec<KeyValue>, Error> {
         loop {
             self.ensure_live()?;
-            let attempt = self.inner.borrow().try_range_reverse(start, end, limit)?;
+            let attempt = {
+                let tree = self.inner.borrow();
+                match self.read_root(&tree) {
+                    Some(root) => tree.try_range_reverse(root, start, end, limit)?,
+                    None => ScanAttempt::Ready(Vec::new()),
+                }
+            };
             match attempt {
                 ScanAttempt::Ready(rows) => return Ok(rows),
-                ScanAttempt::Missing(page_ids) => self.hydrate_many(page_ids).await?,
+                ScanAttempt::Missing(page_ids) => self.hydrate_many_for_read(page_ids).await?,
             }
         }
     }
 
     pub async fn flush(&self) -> Result<(), Error> {
         self.ensure_live()?;
+        self.ensure_writable()?;
         let (store, prepared) = {
             let mut tree = self.inner.borrow_mut();
             (tree.store.clone(), tree.prepare_commit()?)
@@ -364,7 +484,12 @@ impl<S: PageStore + Clone> IdbTree<S> {
         let Some(prepared) = prepared else {
             return Ok(());
         };
+        // If this future is dropped while the store commit is pending, nothing
+        // would ever complete it: the tree would refuse every later commit and
+        // keep serving the uncommitted root. Mark the commit abandoned instead.
+        let mut abandon = AbandonOnDrop(Some(&self.inner));
         let outcome = store.commit(prepared.commit()).await;
+        abandon.0 = None;
         self.inner.borrow_mut().complete_commit(prepared, outcome)
     }
 
@@ -549,16 +674,19 @@ impl<S: PageStore> TreeCore<S> {
     pub async fn open(store: S, options: Options) -> Result<Self, Error> {
         let options = options.validate()?;
         let metadata = store.load_metadata().await.map_err(Error::Store)?;
+        let metadata = metadata.unwrap_or_else(|| Metadata::empty(options.page_size));
         let mut tree = Self {
             store,
             options,
-            metadata: metadata.unwrap_or_else(|| Metadata::empty(options.page_size)),
+            durable_root: metadata.root_page_id,
+            metadata,
             pages: HashMap::new(),
             dirty: BTreeSet::new(),
             write_floor: PageId::MAX,
             deleted: BTreeSet::new(),
             retirement_undo: Vec::new(),
             commit_in_flight: false,
+            commit_abandoned: false,
         };
         if tree.metadata.page_size != options.page_size {
             return Err(Error::InvalidOptions(format!(
@@ -575,11 +703,12 @@ impl<S: PageStore> TreeCore<S> {
 
     fn try_value_equals(
         &self,
+        root: PageId,
         key: &[u8],
         expected: &[u8],
     ) -> Result<Attempt<Option<bool>>, Error> {
-        let Some((_, entries, _, mut visited)) = self.resident_descent(key)? else {
-            return Ok(Attempt::Missing(self.missing_page_for_key(key)?));
+        let Some((_, entries, _, mut visited)) = self.resident_descent_from(root, key)? else {
+            return Ok(Attempt::Missing(self.missing_page_for_key_from(root, key)?));
         };
         let Ok(index) = entries.binary_search_by(|(candidate, _)| candidate.as_slice().cmp(key))
         else {
@@ -621,9 +750,9 @@ impl<S: PageStore> TreeCore<S> {
         }
     }
 
-    fn try_get(&self, key: &[u8]) -> Result<Attempt<Option<Vec<u8>>>, Error> {
-        let Some((_, entries, _, mut visited)) = self.resident_descent(key)? else {
-            return Ok(Attempt::Missing(self.missing_page_for_key(key)?));
+    fn try_get(&self, root: PageId, key: &[u8]) -> Result<Attempt<Option<Vec<u8>>>, Error> {
+        let Some((_, entries, _, mut visited)) = self.resident_descent_from(root, key)? else {
+            return Ok(Attempt::Missing(self.missing_page_for_key_from(root, key)?));
         };
         let value = entries
             .binary_search_by(|(candidate, _)| candidate.as_slice().cmp(key))
@@ -715,6 +844,7 @@ impl<S: PageStore> TreeCore<S> {
 
     fn try_range(
         &self,
+        root: PageId,
         start: &[u8],
         end: &[u8],
         limit: usize,
@@ -723,7 +853,7 @@ impl<S: PageStore> TreeCore<S> {
         let mut missing = Vec::new();
         let mut visited = HashSet::new();
         self.collect_range_resident(
-            self.root_page_id(),
+            root,
             start,
             end,
             limit,
@@ -739,6 +869,7 @@ impl<S: PageStore> TreeCore<S> {
 
     fn try_range_reverse(
         &self,
+        root: PageId,
         start: &[u8],
         end: &[u8],
         limit: usize,
@@ -747,7 +878,7 @@ impl<S: PageStore> TreeCore<S> {
         let mut missing = Vec::new();
         let mut visited = HashSet::new();
         self.collect_range_reverse_resident(
-            self.root_page_id(),
+            root,
             start,
             end,
             limit,
@@ -839,6 +970,7 @@ impl<S: PageStore> TreeCore<S> {
                 for page_id in prepared.retired {
                     self.pages.remove(&page_id);
                 }
+                self.durable_root = prepared.commit.metadata.root_page_id;
                 self.metadata.generation = committed.generation;
                 Ok(())
             }
@@ -865,7 +997,15 @@ impl<S: PageStore> TreeCore<S> {
     }
 
     fn resident_descent(&self, key: &[u8]) -> Result<Option<Descent<'_>>, Error> {
-        let mut page_id = self.root_page_id();
+        self.resident_descent_from(self.root_page_id(), key)
+    }
+
+    fn resident_descent_from(
+        &self,
+        root: PageId,
+        key: &[u8],
+    ) -> Result<Option<Descent<'_>>, Error> {
+        let mut page_id = root;
         let mut path = Vec::new();
         let mut visited = HashSet::new();
         loop {
@@ -896,7 +1036,11 @@ impl<S: PageStore> TreeCore<S> {
     }
 
     fn missing_page_for_key(&self, key: &[u8]) -> Result<PageId, Error> {
-        let mut page_id = self.root_page_id();
+        self.missing_page_for_key_from(self.root_page_id(), key)
+    }
+
+    fn missing_page_for_key_from(&self, root: PageId, key: &[u8]) -> Result<PageId, Error> {
+        let mut page_id = root;
         let mut visited = HashSet::new();
         loop {
             if !visited.insert(page_id) {
