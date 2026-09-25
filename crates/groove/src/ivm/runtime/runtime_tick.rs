@@ -68,7 +68,7 @@ struct EvaluationSession<'a> {
 pub(super) struct IncrementalEvaluation<'a> {
     table_deltas: Vec<TableDelta>,
     binding_deltas: Vec<BindingDelta>,
-    binding_snapshots: HashMap<BindingSourceKey, RecordDeltas>,
+    binding_snapshots: Arc<BindingSnapshots>,
     table_frontiers: HashMap<String, u64>,
     binding_frontiers: HashMap<BindingSourceKey, u64>,
     current_tick: u64,
@@ -250,7 +250,7 @@ struct PendingSubscriptionHydration {
     outputs: BTreeMap<String, CompiledNode>,
     initial: Arc<Mutex<Option<MultisinkDeltas>>>,
     session: EvaluationSession<'static>,
-    binding_snapshots: HashMap<BindingSourceKey, RecordDeltas>,
+    binding_snapshots: Arc<BindingSnapshots>,
     hydrate_arrangements: bool,
     lifetime: SubscriptionLifetime,
     metrics: TickMetrics,
@@ -1719,7 +1719,7 @@ impl<'a> EvaluationSession<'a> {
     fn poll(
         &mut self,
         runtime: &IvmRuntime,
-        binding_snapshots: &HashMap<BindingSourceKey, RecordDeltas>,
+        binding_snapshots: &BindingSnapshots,
         hydrate_arrangements: bool,
         metrics: &mut TickMetrics,
         cx: &mut Context<'_>,
@@ -1988,7 +1988,7 @@ impl IvmRuntime {
         subscription_id: SubscriptionId,
         outputs: BTreeMap<String, CompiledNode>,
         storage: OwnedStorage<'static>,
-        binding_snapshots: Option<HashMap<BindingSourceKey, RecordDeltas>>,
+        binding_snapshots: Option<Arc<BindingSnapshots>>,
         binding_frontier_advance: Option<&str>,
         initial: Arc<Mutex<Option<MultisinkDeltas>>>,
         lifetime: SubscriptionLifetime,
@@ -2857,12 +2857,16 @@ impl IvmRuntime {
         }
         let current_tick = self.current_tick + 1;
         let durable_writes = Rc::new(RefCell::new(StagedWriteState::default()));
+        // Durable nodes run under `&self`, so the binding set cannot change
+        // before the incremental evaluation below reuses this snapshot.
+        let binding_snapshots = self.binding_snapshot_deltas();
         let table_delta_records = table_deltas
             .iter()
             .map(|delta| delta.deltas.len())
             .sum::<usize>();
         self.tick_durable_nodes(
             &table_deltas,
+            &binding_snapshots,
             &activation.durable,
             current_tick,
             storage.as_ref(),
@@ -2886,7 +2890,6 @@ impl IvmRuntime {
             &mut binding_frontiers,
             &mut node_meta,
         );
-        let binding_snapshots = self.binding_snapshot_deltas();
         let affected_subscriptions = affected_nodes
             .iter()
             .filter_map(|node| self.subscriptions_by_output_node.get(node))
@@ -3113,7 +3116,7 @@ impl IvmRuntime {
         roots: impl IntoIterator<Item = NodeId>,
         owned_storage: OwnedStorage<'a>,
         mode: HydrationMode,
-        binding_snapshots: Option<HashMap<BindingSourceKey, RecordDeltas>>,
+        binding_snapshots: Option<Arc<BindingSnapshots>>,
         binding_frontier_advance: Option<&str>,
     ) -> Result<HashMap<NodeId, RecordDeltas>, IvmRuntimeError> {
         let roots = roots.into_iter().collect::<VecDeque<_>>();
@@ -3165,7 +3168,7 @@ impl IvmRuntime {
         outputs: &BTreeMap<String, CompiledNode>,
         storage: &S,
         mode: HydrationMode,
-        binding_snapshots: Option<HashMap<BindingSourceKey, RecordDeltas>>,
+        binding_snapshots: Option<Arc<BindingSnapshots>>,
         binding_frontier_advance: Option<&str>,
     ) -> Result<MultisinkDeltas, IvmRuntimeError>
     where
@@ -3212,6 +3215,7 @@ impl IvmRuntime {
     async fn tick_durable_nodes(
         &self,
         table_deltas: &[TableDelta],
+        binding_snapshots: &BindingSnapshots,
         durable_nodes: &[NodeId],
         current_tick: u64,
         storage: &dyn OrderedKvStorage,
@@ -3226,7 +3230,6 @@ impl IvmRuntime {
         binding_frontiers: &HashMap<BindingSourceKey, u64>,
         durable_writes: &RefCell<StagedWriteState>,
     ) -> Result<(), IvmRuntimeError> {
-        let binding_snapshots = self.binding_snapshot_deltas();
         let durable_overlay = StagedWriteOverlay::new(storage, durable_writes);
         let mut metrics = TickMetrics::default();
         for &node in durable_nodes {
@@ -3247,7 +3250,7 @@ impl IvmRuntime {
                     variant_projections: &self.variant_projections,
                     table_deltas,
                     binding_deltas: &[],
-                    binding_snapshots: &binding_snapshots,
+                    binding_snapshots,
                     current_tick,
                     operator_states,
                     arrangement_states,
