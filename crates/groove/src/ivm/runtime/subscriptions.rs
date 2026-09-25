@@ -3660,6 +3660,7 @@ impl IvmRuntime {
         self.bind_shape_with_public_fields(shape_id, binding_values, BTreeMap::new(), storage, None)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn bind_shape_with_lifetime<S>(
         &mut self,
         shape_id: PreparedShapeId,
@@ -3715,6 +3716,7 @@ impl IvmRuntime {
         feature = "cold-settle-attribution",
         tracing::instrument(skip_all, name = "cold.phase.query_bind")
     )]
+    #[allow(clippy::too_many_arguments)]
     fn bind_shape_with_public_fields_staged<S>(
         &mut self,
         shape_id: PreparedShapeId,
@@ -3754,6 +3756,7 @@ impl IvmRuntime {
         result
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn bind_shape_with_public_fields_staged_inner<S>(
         &mut self,
         shape_id: PreparedShapeId,
