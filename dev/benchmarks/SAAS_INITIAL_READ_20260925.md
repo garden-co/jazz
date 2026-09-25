@@ -53,11 +53,11 @@ Add `JAZZ_CUSTOMER_SERVER_ONESHOT_ALL=1` and omit
 
 ## Matched observations
 
-| Child query | Maintained Core→Client settle | Trusted-host read + app-cell roundtrip | Ratio, diagnostic only |
-| --- | ---: | ---: | ---: |
-| `limit(100)` | 700 ms | 318 ms | 2.20× |
-| `limit(1000)` | 757 ms | 336 ms | 2.25× |
-| All 23,831 rows | 3,025 ms | 485 ms | 6.23× |
+| Child query     | Maintained Core→Client settle | Trusted-host read + app-cell roundtrip | Ratio, diagnostic only |
+| --------------- | ----------------------------: | -------------------------------------: | ---------------------: |
+| `limit(100)`    |                        700 ms |                                 318 ms |                  2.20× |
+| `limit(1000)`   |                        757 ms |                                 336 ms |                  2.25× |
+| All 23,831 rows |                      3,025 ms |                                 485 ms |                  6.23× |
 
 These pairs use the same binary and fixture. Their row-set hashes match.
 The result-only times omit protocol framing, connection scheduling, local
@@ -107,11 +107,11 @@ exactly (`70d72d638f780d01925d6aff72d46df4f40639a2e08e50ed8afd54d7f1fa7259`).
 The optimized control binary SHA-256 was
 `40c28a3c9c71d127291ea35c0814681c6cc71d9a0a7ba00dbd6ba7d3d1ea4662`.
 
-| Complete 39-query lane | Current `main` control | Earlier integrated read stack |
-| --- | ---: | ---: |
-| Core→device relay→Client settle | 6,917 ms | 7,104 ms |
-| Direct Core→Client settle | 4,152 ms | 4,311 ms |
-| Trusted-host one-shot read + app-cell roundtrip | 612 ms | 658 ms median |
+| Complete 39-query lane                          | Current `main` control | Earlier integrated read stack |
+| ----------------------------------------------- | ---------------------: | ----------------------------: |
+| Core→device relay→Client settle                 |               6,917 ms |                      7,104 ms |
+| Direct Core→Client settle                       |               4,152 ms |                      4,311 ms |
+| Trusted-host one-shot read + app-cell roundtrip |                 612 ms |                 658 ms median |
 
 Every lane returned the expected 27,518 authorized rows. Control receipts:
 [relay](saas-read-20260925/main-full-relay.json),
@@ -134,10 +134,10 @@ construction. The source is benchmark commit `a1c20ca86` on the unchanged
 `fe34ff553` engine. The optimized baseline binary SHA-256 was
 `01ff7eb082ab8abc696a8961f999594a04eb1b6f16cbc2a67267be940fb6ea69`.
 
-| Client request-to-result | Relay | Direct |
-| --- | ---: | ---: |
+| Client request-to-result          |            Relay |           Direct |
+| --------------------------------- | ---------------: | ---------------: |
 | All 39 plain SELECTs, 27,518 rows | 6,684 / 6,649 ms | 3,943 / 3,931 ms |
-| Child `limit(100)`, 100 rows | 748 ms | 683 ms |
+| Child `limit(100)`, 100 rows      |           748 ms |           683 ms |
 
 The clean full-result runs spent about 2.2 s in Core ticks, 2.7 s in relay
 ticks when present, 1.0 s in Client ticks, and 0.68 s polling the read futures
@@ -196,7 +196,7 @@ times were Core query setup (951 ms), Client storage apply (729 ms), Client
 ingest (257 ms), and Core supporting-row publication (248 ms). Sampled callers
 include join arrangement, record-key
 encoding, and record projection into large intermediate buffers. These are
-*requested bytes over the run*, not live heap size. Allocation totals and
+_requested bytes over the run_, not live heap size. Allocation totals and
 phase counters are exact; caller ranks are sampled estimates, and profiled
 wall times are not comparable to clean receipts. [Compact attribution
 receipt](saas-read-20260925/allocation-attribution.json).
@@ -281,7 +281,7 @@ experiment; merely lifting this guard would be incorrect.
   history removal as a separate feature decision rather than the main first
   read fix.
 - [#3260](https://github.com/garden-co/jazz/pull/3260) exposes progressive
-  *local* previews while a stronger tier is pending. It does not supply the
+  _local_ previews while a stronger tier is pending. It does not supply the
   complete authoritative result proposed here.
 - [#3348](https://github.com/garden-co/jazz/pull/3348) shares prepared shapes
   for Local-tier subscriptions and reports faster writes but slower hydration
