@@ -34,6 +34,7 @@ async function tryLoadNodePackagedWasmBinary(): Promise<Uint8Array | null> {
 }
 
 let wasmInitializationTail: Promise<void> = Promise.resolve();
+let initializedWasmUrl: string | undefined;
 
 /** Load and initialize the browser/Node WASM runtime. */
 export function loadWasmModule(runtime?: RuntimeSourcesConfig): Promise<WasmModule> {
@@ -80,6 +81,10 @@ async function initializeWasmModule(runtime?: RuntimeSourcesConfig): Promise<Was
 }
 
 async function initializeWasmFromUrl(wasmModule: any, wasmUrl: string): Promise<void> {
+  // The initialization tail serializes callers within this realm. Reuse a
+  // successful URL load across account-manager and database initialization.
+  if (initializedWasmUrl === wasmUrl) return;
+
   const response = await fetch(wasmUrl);
   if (!response.ok) {
     throw new Error(
@@ -100,4 +105,5 @@ async function initializeWasmFromUrl(wasmModule: any, wasmUrl: string): Promise<
     );
   }
   await wasmModule.default({ module_or_path: bytes });
+  initializedWasmUrl = wasmUrl;
 }
