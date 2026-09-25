@@ -1435,7 +1435,13 @@ impl<S: PageStore> TreeCore<S> {
             let Page::Leaf { mut entries } = page else {
                 unreachable!()
             };
-            let right_entries = self.split_leaf_entries(page_id, &mut entries)?;
+            let middle = page::leaf_split_index(&entries, self.options.page_size).ok_or(
+                Error::PageTooLarge {
+                    page_id,
+                    page_size: self.options.page_size,
+                },
+            )?;
+            let right_entries = entries.split_off(middle);
             let separator = right_entries[0].0.clone();
             PageReplacement::Split {
                 left: self.allocate_page(Page::Leaf { entries })?,

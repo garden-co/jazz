@@ -40,6 +40,25 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    #[doc(hidden)]
+    pub fn authenticated_catalogue_capture(&self) -> Option<&[u8]> {
+        self.authenticated_catalogue_capture.as_deref()
+    }
+
+    #[doc(hidden)]
+    pub fn set_authenticated_catalogue_capture(&mut self, capture: Vec<u8>) {
+        self.authenticated_catalogue_capture = Some(capture);
+        self.authenticated_catalogue_ready = true;
+    }
+
+    #[doc(hidden)]
+    pub fn take_authenticated_catalogue_state(&mut self) -> (Option<Vec<u8>>, bool) {
+        (
+            self.authenticated_catalogue_capture.take(),
+            self.authenticated_catalogue_ready,
+        )
+    }
+
     #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     pub async fn pending_upload_count_for_test(&self) -> Result<usize, Error> {
@@ -80,6 +99,27 @@ impl NodeState {
     where
         T: ReopenableStorage + 'static,
     {
+        Self::new_client_with_cached_catalogue(
+            node_uuid,
+            requested_schema,
+            storage,
+            history_complete,
+            None,
+        )
+        .await
+    }
+
+    #[doc(hidden)]
+    pub async fn new_client_with_cached_catalogue<T>(
+        node_uuid: NodeUuid,
+        requested_schema: JazzSchema,
+        storage: T,
+        history_complete: bool,
+        mut cached: Option<crate::protocol::CatalogueSnapshot>,
+    ) -> Result<Self, Error>
+    where
+        T: ReopenableStorage + 'static,
+    {
         crate::storage_codec_profile::require_node_storage_admission(&storage)?;
         let meta_database = Database::new_with_storage_layout(
             JazzSchema::empty().lower_catalogue_meta_to_groove(),
@@ -105,7 +145,32 @@ impl NodeState {
                 )
                 .await?;
             match genesis_rows.as_slice() {
-                [] => requested_schema,
+                [] => {
+                    if let Some(snapshot) = cached.take() {
+                        // Reuse discovery's residue checks before allowing the
+                        // uninitialized path to install any physical identities.
+                        let (storage, _) =
+                            Self::discover_durable_catalogue_genesis(meta_database.into_storage())
+                                .await?;
+                        let mut node = Self::new_with_options_inner(
+                            node_uuid,
+                            JazzSchema::empty(),
+                            storage,
+                            history_complete,
+                            CatalogueBootstrapState::Uninitialized,
+                            #[cfg(feature = "testing")]
+                            None,
+                            #[cfg(any(test, feature = "testing"))]
+                            None,
+                        )
+                        .await?;
+                        let outcome = node.apply_trusted_catalogue_snapshot(snapshot).await?;
+                        node.persist_and_settle_outcome(outcome).await?;
+                        node.authenticated_catalogue_ready = true;
+                        return Ok(node);
+                    }
+                    requested_schema
+                }
                 [genesis] => {
                     let id = SchemaVersionId(
                         genesis
@@ -142,7 +207,7 @@ impl NodeState {
         };
         // Ordinary recovery validates every catalogue record and physical mapping.
         // Discovery adds only a point read on an already-admitted schema open.
-        Self::new_with_options_inner(
+        let mut node = Self::new_with_options_inner(
             node_uuid,
             schema,
             meta_database.into_storage(),
@@ -153,7 +218,23 @@ impl NodeState {
             #[cfg(any(test, feature = "testing"))]
             None,
         )
-        .await
+        .await?;
+        if let Some(snapshot) = cached {
+            let local = node.catalogue_snapshot()?;
+            let (older, newer) = if snapshot.lineages.len() >= local.lineages.len()
+                && snapshot.current_write_schema.revision >= local.current_write_schema.revision
+            {
+                (&local, &snapshot)
+            } else {
+                (&snapshot, &local)
+            };
+            validate_catalogue_snapshot_replacement(older, newer).map_err(|_| {
+                Error::InvalidCatalogueUpdate("cached catalogue conflicts with existing root")
+            })?;
+            node.validate_cached_catalogue_snapshot(snapshot)?;
+            node.authenticated_catalogue_ready = true;
+        }
+        Ok(node)
     }
 
     /// Direct-message test peers share one authority catalogue for each fixture
@@ -877,6 +958,8 @@ impl NodeState {
             },
             catalogue_bootstrap_state,
             catalogue_bootstrap_marker,
+            authenticated_catalogue_capture: None,
+            authenticated_catalogue_ready: false,
             clock: Clock {
                 tx_time: TxTime::default(),
                 reservation_high_water: Rc::new(Cell::new(TxTime::default())),

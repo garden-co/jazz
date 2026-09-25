@@ -25,6 +25,7 @@
 //! callback that frees through mimalloc instead.
 
 mod e2ee_crypto;
+mod initialization;
 #[cfg(feature = "rn-test-bridge")]
 mod rn_test_bridge;
 
@@ -1824,7 +1825,11 @@ pub struct NapiDb {
     // independent of the SYSTEM author value.
     trusted_backend: bool,
     author_admissions: NativeAuthorAdmissions,
+    initialization_seals: Rc<RefCell<BTreeMap<String, jazz::db::InitializationSeal>>>,
 }
+
+// napi factory impls must be expanded after their class declaration.
+mod account_owner;
 
 /// Native bounded-memory sink used by the TypeScript async streaming-mutation
 /// adapter. Each push incrementally prepares and stages bounded Groove nodes,
@@ -2814,17 +2819,21 @@ impl NapiDb {
     }
 
     #[napi(factory, js_name = "openMemory")]
-    pub fn open_memory(schema: Uint8Array, config: Uint8Array) -> js::Result<Self> {
+    pub fn open_memory(
+        schema: Uint8Array,
+        config: Uint8Array,
+        cached_catalogue: Option<Uint8Array>,
+    ) -> js::Result<Self> {
         let (schema, config) = decode_core_open_args(&schema, &config)?;
         let identity = core_open_identity(&config, None)?;
         let refs = schema.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-        let db = open_core_db(
+        let db = initialization::open_cached_db(
             schema,
             CoreMemoryStorage::new(&refs).expect("valid memory storage families"),
             config,
             identity,
-            false,
+            cached_catalogue.as_deref(),
         )?;
         let streaming = StreamingOwnerLifecycle::new();
         Ok(Self {
@@ -2835,6 +2844,7 @@ impl NapiDb {
             streaming,
             trusted_backend: false,
             author_admissions: NativeAuthorAdmissions::default(),
+            initialization_seals: Rc::default(),
         })
     }
 
@@ -2855,6 +2865,7 @@ impl NapiDb {
         )?;
         let streaming = StreamingOwnerLifecycle::new();
         Ok(Self {
+            initialization_seals: Rc::default(),
             inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Memory(Rc::new(db))))),
             owns_runtime: true,
             non_durable_client: Rc::new(Cell::new(false)),
@@ -2876,6 +2887,7 @@ impl NapiDb {
         token: String,
         app_id: String,
         claimed_author: String,
+        cached_catalogue: Option<Uint8Array>,
     ) -> js::Result<Self> {
         let (schema, config) = decode_core_open_args(&schema, &config)?;
         let proof = CoreSelfSignedClientProof {
@@ -2886,15 +2898,16 @@ impl NapiDb {
         let identity = core_open_identity(&config, Some(&proof))?;
         let refs = schema.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-        let db = open_core_db(
+        let db = initialization::open_cached_db(
             schema,
             CoreMemoryStorage::new(&refs).expect("valid memory storage families"),
             config,
             identity,
-            false,
+            cached_catalogue.as_deref(),
         )?;
         let streaming = StreamingOwnerLifecycle::new();
         Ok(Self {
+            initialization_seals: Rc::default(),
             inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Memory(Rc::new(db))))),
             owns_runtime: true,
             non_durable_client: Rc::new(Cell::new(false)),
@@ -2910,13 +2923,21 @@ impl NapiDb {
         data_path: String,
         schema: Uint8Array,
         config: Uint8Array,
+        cached_catalogue: Option<Uint8Array>,
     ) -> js::Result<Self> {
         let (schema, config) = decode_core_open_args(&schema, &config)?;
         let identity = core_open_identity(&config, None)?;
         let storage = open_persistent_core_storage(data_path, &schema)?;
-        let db = open_core_db(schema, storage, config, identity, false)?;
+        let db = initialization::open_cached_db(
+            schema,
+            storage,
+            config,
+            identity,
+            cached_catalogue.as_deref(),
+        )?;
         let streaming = StreamingOwnerLifecycle::new();
         Ok(Self {
+            initialization_seals: Rc::default(),
             inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Persistent(Rc::new(
                 db,
             ))))),
@@ -2943,6 +2964,7 @@ impl NapiDb {
         let db = open_core_db(schema, storage, config, identity, true)?;
         let streaming = StreamingOwnerLifecycle::new();
         Ok(Self {
+            initialization_seals: Rc::default(),
             inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Persistent(Rc::new(
                 db,
             ))))),
@@ -2963,6 +2985,7 @@ impl NapiDb {
         token: String,
         app_id: String,
         claimed_author: String,
+        cached_catalogue: Option<Uint8Array>,
     ) -> js::Result<Self> {
         let (schema, config) = decode_core_open_args(&schema, &config)?;
         let proof = CoreSelfSignedClientProof {
@@ -2972,9 +2995,21 @@ impl NapiDb {
         };
         let identity = core_open_identity(&config, Some(&proof))?;
         let storage = open_persistent_core_storage(data_path, &schema)?;
-        let db = open_core_db(schema, storage, config, identity, false)?;
+        let db = initialization::open_cached_db(
+            schema,
+            storage,
+            config,
+            identity,
+            cached_catalogue.as_deref(),
+        )?;
+        // SAFETY: this root was opened for the exact proof-verified account
+        // subject. The host owns the fresh/leased node identity; restore uses
+        // only that subject's complete exact durable units, never caller IDs.
+        core_block_on(unsafe { db.restore_initialization_owner_pending_uploads() })
+            .map_err(napi_error)?;
         let streaming = StreamingOwnerLifecycle::new();
         Ok(Self {
+            initialization_seals: Rc::default(),
             inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Persistent(Rc::new(
                 db,
             ))))),
@@ -3079,6 +3114,7 @@ impl NapiDb {
         };
         let view_id = self.streaming.register_view()?;
         Ok(Self {
+            initialization_seals: Rc::default(),
             inner: Rc::new(RefCell::new(Some(view))),
             owns_runtime: false,
             non_durable_client: Rc::clone(&self.non_durable_client),
@@ -3914,6 +3950,7 @@ impl NapiDb {
     }
     #[napi(js_name = "__closePollable", skip_typescript)]
     pub fn close(&self) -> js::Result<Either<Uint8Array, PendingNativeRead>> {
+        self.initialization_seals.borrow_mut().clear();
         let lifecycle = Rc::clone(&self.streaming);
         let owns_runtime = self.owns_runtime;
         let view_id = self.view_id;
@@ -5471,6 +5508,8 @@ pub fn verify_local_first_identity_proof_napi(
 
 #[cfg(test)]
 mod tests {
+    mod account_owner;
+    mod initialization;
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use std::cell::Cell;
@@ -5730,6 +5769,7 @@ mod tests {
                 ordinary_path.to_string_lossy().into_owned(),
                 Uint8Array::from(schema.to_vec()),
                 Uint8Array::from(config.clone()),
+                None,
             )
             .is_err(),
             "openPersistent must reject a manifest that omits Jazz codecs"
@@ -5772,6 +5812,7 @@ mod tests {
                 token,
                 "codec-profile-test".to_owned(),
                 claimed_author,
+                None,
             )
             .is_err(),
             "openPersistentWithSelfSignedProof must reject a manifest that omits Jazz codecs"
@@ -6059,7 +6100,7 @@ mod tests {
         let schema = serde_json::to_vec(&source).expect("encode streaming schema");
         let author = CoreAuthorSubject::for_test_bytes([0xd1; 16]);
         let config = encode_persistent_open_config(author);
-        let db = NapiDb::open_memory(Uint8Array::from(schema), Uint8Array::from(config))
+        let db = NapiDb::open_memory(Uint8Array::from(schema), Uint8Array::from(config), None)
             .expect("open streaming fixture");
         let descriptor = RecordDescriptor::new(Vec::<(String, ValueType)>::new());
         let raw = descriptor.create(&[]).expect("encode streaming cells");
@@ -6140,8 +6181,12 @@ mod tests {
             .build();
         let schema = serde_json::to_vec(&source).expect("encode view schema");
         let config = encode_persistent_open_config(CoreAuthorSubject::for_test_bytes([0xd4; 16]));
-        let owner = NapiDb::open_memory(Uint8Array::from(schema.clone()), Uint8Array::from(config))
-            .expect("open view fixture");
+        let owner = NapiDb::open_memory(
+            Uint8Array::from(schema.clone()),
+            Uint8Array::from(config),
+            None,
+        )
+        .expect("open view fixture");
         let view = owner
             .register_schema(Uint8Array::from(schema.clone()))
             .expect("register schema view");
@@ -6387,8 +6432,12 @@ mod tests {
             .build();
         let schema = serde_json::to_vec(&source).expect("encode drain schema");
         let config = encode_persistent_open_config(CoreAuthorSubject::for_test_bytes([0xe1; 16]));
-        let owner = NapiDb::open_memory(Uint8Array::from(schema.clone()), Uint8Array::from(config))
-            .expect("open drain owner");
+        let owner = NapiDb::open_memory(
+            Uint8Array::from(schema.clone()),
+            Uint8Array::from(config),
+            None,
+        )
+        .expect("open drain owner");
         let first_view = owner
             .register_schema(Uint8Array::from(schema.clone()))
             .expect("register first drain view");
@@ -6720,6 +6769,7 @@ mod tests {
         let db = NapiDb::open_memory(
             Uint8Array::from(schema),
             Uint8Array::from(encode_persistent_open_config(author)),
+            None,
         )
         .expect("open memory NAPI fixture");
         let label_cells = |value: &str| {
@@ -6994,6 +7044,7 @@ mod tests {
             NapiDb::open_memory(
                 Uint8Array::from(b"{}".to_vec()),
                 Uint8Array::from(memory_credential),
+                None,
             )
             .is_err(),
             "openMemory must reject an unverified backend credential before opening the DB"
@@ -7016,6 +7067,7 @@ mod tests {
             persistent_path.to_string_lossy().into_owned(),
             Uint8Array::from(b"{}".to_vec()),
             Uint8Array::from(persistent_credential),
+            None,
         );
         let created_storage = persistent_path.exists();
         if created_storage {
@@ -7114,6 +7166,7 @@ mod tests {
             proof.token.clone(),
             proof.app_id.clone(),
             proof.claimed_author.clone(),
+            None,
         );
         let created_storage = persistent_path.exists();
         if created_storage {
@@ -7255,7 +7308,7 @@ mod tests {
         assert_eq!(write.row_id, CoreRowUuid::from_bytes([0xb4; 16]));
 
         let ordinary =
-            NapiDb::open_memory(Uint8Array::from(schema), Uint8Array::from(config)).unwrap();
+            NapiDb::open_memory(Uint8Array::from(schema), Uint8Array::from(config), None).unwrap();
         let err = match ordinary.insert_with_options(
             "items".to_owned(),
             Uint8Array::from(cells),
@@ -7467,7 +7520,7 @@ mod tests {
         };
         let backend = NapiDb::open_memory_as_backend(schema_bytes(), config()).unwrap();
         let other = NapiDb::open_memory_as_backend(schema_bytes(), config()).unwrap();
-        let ordinary = NapiDb::open_memory(schema_bytes(), config()).unwrap();
+        let ordinary = NapiDb::open_memory(schema_bytes(), config(), None).unwrap();
         let app_id = "native-session-admission";
         let token = jazz::tools::identity::mint_jazz_self_signed_token(
             &[0x93; 32],
@@ -8088,6 +8141,7 @@ mod tests {
         // The public NAPI transaction surface binds Alice at begin and addresses
         // subsequent reads through the owner-wide open transaction id.
         let binding = NapiDb {
+            initialization_seals: Rc::default(),
             inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Memory(Rc::clone(
                 &owner,
             ))))),
@@ -8117,6 +8171,7 @@ mod tests {
             "planted positive: the bound transaction reads successfully"
         );
         let view_binding = NapiDb {
+            initialization_seals: Rc::default(),
             inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Memory(Rc::clone(
                 &view,
             ))))),

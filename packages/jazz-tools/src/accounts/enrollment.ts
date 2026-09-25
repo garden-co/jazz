@@ -25,18 +25,26 @@ interface HandleCredentials {
   auth?: JWTAuth;
   backend?: Readonly<BackendAuth & { nodeId: string }>;
   localFirstSecret?: string;
+  generatedHere?: () => Promise<boolean>;
   invalidated: Set<() => void>;
 }
 const credentials = new WeakMap<AccountHandle, HandleCredentials>();
 
 /** @internal Native key derivation stays in Rust; hosts prepare it before use. */
 export interface LocalFirstAccountFactory {
-  create(): { accountId: string; identity: AccountIdentity; auth: JWTAuth; secret?: string };
+  create(): {
+    accountId: string;
+    identity: AccountIdentity;
+    auth: JWTAuth;
+    secret?: string;
+    generatedHere?: () => Promise<boolean>;
+  };
   restore?(secret: string): {
     accountId: string;
     identity: AccountIdentity;
     auth: JWTAuth;
     secret?: string;
+    generatedHere?: () => Promise<boolean>;
   };
 }
 
@@ -91,10 +99,26 @@ function mintHandle(
   identity: AccountIdentity,
   auth: JWTAuth,
   localFirstSecret?: string,
+  generatedHere?: () => Promise<boolean>,
 ): AccountHandle {
   const handle = new EnrolledAccount(id, identity) as AccountHandle;
-  credentials.set(handle, { registry, auth, localFirstSecret, invalidated: new Set() });
+  credentials.set(handle, {
+    registry,
+    auth,
+    localFirstSecret,
+    generatedHere,
+    invalidated: new Set(),
+  });
   return handle;
+}
+
+/** @internal Durable creation provenance is not an accepted membership assertion. */
+export async function accountGeneratedHere(handle: AccountHandle): Promise<boolean> {
+  const material = credentials.get(handle);
+  if (!material) throw new AccountAuthError("invalid_account_handle");
+  const generated = (await material.generatedHere?.()) ?? false;
+  if (credentials.get(handle) !== material) throw new AccountAuthError("account_logged_out");
+  return generated;
 }
 
 /** Export a local signing root for passphrase/passkey backup. Never store it in UI snapshots. */
@@ -214,14 +238,30 @@ export function createAccountManagerWithRuntime(options: {
       createLocalFirst() {
         const local = options.localFirst.create();
         return retain(
-          mintHandle(registry, local.accountId, local.identity, local.auth, local.secret),
+          mintHandle(
+            registry,
+            local.accountId,
+            local.identity,
+            local.auth,
+            local.secret,
+            local.generatedHere,
+          ),
         );
       },
       restoreLocalFirst(secret) {
         parseAuthSecret(secret);
         const local = options.localFirst.restore?.(secret);
         if (!local) throw new AccountAuthError("local_first_restore_unavailable");
-        return retain(mintHandle(registry, local.accountId, local.identity, local.auth, secret));
+        return retain(
+          mintHandle(
+            registry,
+            local.accountId,
+            local.identity,
+            local.auth,
+            secret,
+            local.generatedHere,
+          ),
+        );
       },
       async becomeBackend(auth) {
         const started = epoch;
@@ -284,6 +324,7 @@ export function createAccountManagerWithRuntime(options: {
             restored.identity,
             restored.auth,
             options.restoredLocalFirstSecret,
+            restored.generatedHere,
           ),
         )
       : undefined,

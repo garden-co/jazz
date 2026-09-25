@@ -181,6 +181,88 @@ where
     }
 
     #[doc(hidden)]
+    pub fn seal_initialization_transaction(
+        &mut self,
+        id: OpenTransactionId,
+        reserved: TxId,
+        nonce: OpenTransactionId,
+        author: AuthorSubject,
+    ) -> Result<(), Error> {
+        self.check_staged_transaction_identity(id, author, author)?;
+        self.open_tx_mut(id)?.initialization_seal = Some((reserved, nonce));
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    pub fn check_initialization_seal(
+        &self,
+        id: OpenTransactionId,
+        reserved: TxId,
+        nonce: OpenTransactionId,
+    ) -> Result<(), Error> {
+        if self
+            .open_tx
+            .open_transactions
+            .get(&id)
+            .is_some_and(|tx| tx.initialization_seal == Some((reserved, nonce)))
+        {
+            Ok(())
+        } else {
+            Err(Error::OpenTransactionIdentityMismatch)
+        }
+    }
+
+    #[doc(hidden)]
+    pub async fn publish_initialization_transaction(
+        &mut self,
+        id: OpenTransactionId,
+        reserved: TxId,
+        nonce: OpenTransactionId,
+    ) -> Result<(PublishedTransaction, SyncMessage), Error> {
+        self.check_initialization_seal(id, reserved, nonce)?;
+        self.open_tx
+            .open_transactions
+            .get_mut(&id)
+            .unwrap()
+            .initialization_seal = None;
+        let result = self.commit_exclusive_bound_at(id, reserved).await;
+        if result.is_err() {
+            // The seal has been consumed. Close under this same owner lock,
+            // before a later queued cleanup or ordinary operation can run.
+            self.open_tx.open_transactions.remove(&id);
+            self.open_tx.closed_batches.insert(id);
+        }
+        result
+    }
+
+    #[doc(hidden)]
+    pub async fn prepare_initialization_insert(
+        &mut self,
+        id: OpenTransactionId,
+        schema: SchemaVersionId,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<(), Error> {
+        let tx = self.open_tx(id)?;
+        if !matches!(tx.kind, OpenTransactionKind::Exclusive { .. })
+            || tx
+                .writes
+                .iter()
+                .any(|write| write.table == table && write.row_uuid == row)
+        {
+            return Err(Error::OpenTransactionIdentityMismatch);
+        }
+        self.tx_read_in_schema(id, schema, table, row).await?;
+        let observed = &self.open_tx(id)?.base_snapshot_rows[&(schema, table.to_owned(), row)];
+        if observed.content_version.is_some() || observed.deletion_version.is_some() {
+            return Err(Error::InvalidMergeableCommit(
+                "initialization insert requires an absent coordinate",
+            ));
+        }
+        Ok(())
+    }
+
+    #[doc(hidden)]
     pub fn check_staged_transaction_identity(
         &self,
         id: OpenTransactionId,
@@ -280,6 +362,7 @@ where
         self.open_tx.open_transactions.insert(
             id,
             OpenTransaction {
+                initialization_seal: None,
                 kind,
                 provisional_author,
                 base_snapshot,
@@ -2039,6 +2122,7 @@ where
         self.open_tx
             .open_transactions
             .get(&tx_id)
+            .filter(|tx| tx.initialization_seal.is_none())
             .ok_or(Error::MissingOpenBatch(tx_id))
     }
 
@@ -2099,6 +2183,7 @@ where
         self.open_tx
             .open_transactions
             .get_mut(&tx_id)
+            .filter(|tx| tx.initialization_seal.is_none())
             .ok_or(Error::MissingOpenBatch(tx_id))
     }
 
@@ -2220,6 +2305,7 @@ where
                     || snapshot.dots.contains(&tx_id)
             })
     }
+
 
     pub(super) async fn snapshot_row_in_schema(
         &mut self,
@@ -2537,6 +2623,8 @@ pub(super) enum OpenTransactionKind {
 
 #[derive(Clone)]
 pub(super) struct OpenTransaction {
+    /// Frozen work can only be published by its owning, single-use capability.
+    initialization_seal: Option<(TxId, OpenTransactionId)>,
     /// Commit semantics and attribution carried by this open transaction.
     pub(super) kind: OpenTransactionKind,
     /// Author reflected by transaction-local provenance before commit.

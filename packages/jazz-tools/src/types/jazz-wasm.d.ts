@@ -93,7 +93,7 @@ declare module "jazz-wasm" {
   };
 
   export class WasmDb {
-    static openMemory(schema: Uint8Array, config: Uint8Array): WasmDb;
+    static openMemory(schema: Uint8Array, config: Uint8Array, cachedCatalogue?: Uint8Array): WasmDb;
     /** Explicit trusted-backend ABI; raw open config cannot select SYSTEM. */
     static openMemoryAsBackend(schema: Uint8Array, config: Uint8Array): WasmDb;
     static openMemoryWithSelfSignedProof(
@@ -102,6 +102,7 @@ declare module "jazz-wasm" {
       token: string,
       appId: string,
       claimedAuthor: string,
+      cachedCatalogue?: Uint8Array,
     ): WasmDb;
     /** Private host bridge: reads only, before E1-to-E2 manifest publication. */
     static preflightBrowserEpochOne(pageStore: unknown): Promise<void>;
@@ -112,6 +113,7 @@ declare module "jazz-wasm" {
       schema: Uint8Array,
       config: Uint8Array,
       storageOwner: string,
+      cachedCatalogue?: Uint8Array,
     ): Promise<WasmDb>;
     static openBrowserWithSelfSignedProof(
       pageStore: unknown,
@@ -121,6 +123,7 @@ declare module "jazz-wasm" {
       appId: string,
       claimedAuthor: string,
       storageOwner: string,
+      cachedCatalogue?: Uint8Array,
     ): Promise<WasmDb>;
     setLargeValueStagingPolicy(
       incomingBytesPerWindow: number,
@@ -155,6 +158,19 @@ declare module "jazz-wasm" {
     ): void;
     commitTransaction(openTransactionId: string, kind?: string | null): WasmWrite;
     rollbackTransaction(openTransactionId: string): void;
+    sealInitializationTransaction(
+      openTransactionId: string,
+    ): Promise<{ token: string; reservedTxId: string }>;
+    publishInitializationTransaction(token: string): Promise<WasmWrite>;
+    cancelInitializationTransaction(token: string): Promise<void>;
+    recordInitializationInsertAbsence(
+      openTransactionId: string,
+      table: string,
+      rowId: Uint8Array,
+    ): Promise<void>;
+    initializationTransactionStatus(ids: string[]): Promise<string>;
+    takeAuthenticatedCatalogueState(): Promise<{ capture?: Uint8Array | null; ready: boolean }>;
+    validateCatalogueCaptureReplacement(previous: Uint8Array, next: Uint8Array): void;
 
     all(
       query: Uint8Array,

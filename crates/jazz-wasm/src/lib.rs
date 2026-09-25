@@ -866,6 +866,8 @@ impl WasmWrite {
     }
 }
 
+mod initialization;
+
 #[wasm_bindgen]
 pub struct WasmDb {
     // Close owns the removed runtime until terminal completion. Only deferred
@@ -878,6 +880,8 @@ pub struct WasmDb {
     // are otherwise a privilege-escalation surface, because their author is
     // provenance while admission remains the runtime's SYSTEM identity.
     trusted_backend: bool,
+    initialization_seals:
+        Rc<RefCell<std::collections::BTreeMap<String, jazz::db::InitializationSeal>>>,
 }
 
 enum WasmDbInner {
@@ -1828,21 +1832,27 @@ impl WasmDb {
     }
 
     #[wasm_bindgen(js_name = openMemory)]
-    pub fn open_memory(schema: Vec<u8>, config: Vec<u8>) -> Result<WasmDb, JsValue> {
+    pub fn open_memory(
+        schema: Vec<u8>,
+        config: Vec<u8>,
+        cached_catalogue: Option<Vec<u8>>,
+    ) -> Result<WasmDb, JsValue> {
         initialize_wasm_tracing();
         console_error_panic_hook::set_once();
         let (schema, config) = decode_open_args(&schema, &config)?;
         validate_untrusted_open_author(&config)?;
         let refs = schema.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-        let db = block_on(open_db(
+        let db = block_on(initialization::open_cached_db(
             schema,
             MemoryStorage::new(&refs).expect("valid memory storage families"),
             config,
+            cached_catalogue.as_deref(),
         ))
         .map_err(to_js_error)?;
         db.set_deferred_local_persistence(true);
         Ok(Self {
+            initialization_seals: Rc::default(),
             inner: Rc::new(RefCell::new(Some(WasmDbInner::Memory(Rc::new(db))))),
             owns_runtime: true,
             non_durable_client: Rc::new(Cell::new(false)),
@@ -1871,6 +1881,7 @@ impl WasmDb {
         .map_err(to_js_error)?;
         db.set_deferred_local_persistence(true);
         Ok(Self {
+            initialization_seals: Rc::default(),
             inner: Rc::new(RefCell::new(Some(WasmDbInner::Memory(Rc::new(db))))),
             owns_runtime: true,
             non_durable_client: Rc::new(Cell::new(false)),
@@ -1888,6 +1899,7 @@ impl WasmDb {
         token: String,
         app_id: String,
         claimed_author: String,
+        cached_catalogue: Option<Vec<u8>>,
     ) -> Result<WasmDb, JsValue> {
         initialize_wasm_tracing();
         console_error_panic_hook::set_once();
@@ -1896,14 +1908,16 @@ impl WasmDb {
             verify_self_signed_runtime_author(&token, &app_id, &claimed_author)?;
         let refs = schema.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-        let db = block_on(open_db(
+        let db = block_on(initialization::open_cached_db(
             schema,
             MemoryStorage::new(&refs).expect("valid memory storage families"),
             config,
+            cached_catalogue.as_deref(),
         ))
         .map_err(to_js_error)?;
         db.set_deferred_local_persistence(true);
         Ok(Self {
+            initialization_seals: Rc::default(),
             inner: Rc::new(RefCell::new(Some(WasmDbInner::Memory(Rc::new(db))))),
             owns_runtime: true,
             non_durable_client: Rc::new(Cell::new(false)),
@@ -1952,6 +1966,7 @@ impl WasmDb {
         schema: Vec<u8>,
         config: Vec<u8>,
         storage_owner: String,
+        cached_catalogue: Option<Vec<u8>>,
     ) -> Result<WasmDb, JsValue> {
         initialize_wasm_tracing();
         console_error_panic_hook::set_once();
@@ -1967,14 +1982,21 @@ impl WasmDb {
         )
         .await
         .map_err(to_js_error)?;
-        let db = open_scope_isolated_relay_db(schema, storage, config, storage_owner)
-            .await
-            .map_err(to_js_error)?;
+        let db = open_scope_isolated_relay_db(
+            schema,
+            storage,
+            config,
+            storage_owner,
+            cached_catalogue.as_deref(),
+        )
+        .await
+        .map_err(to_js_error)?;
         db.restore_browser_relay_pending_uploads()
             .await
             .map_err(to_js_error)?;
         db.set_deferred_local_persistence(true);
         Ok(Self {
+            initialization_seals: Rc::default(),
             inner: Rc::new(RefCell::new(Some(WasmDbInner::Browser(Rc::new(db))))),
             owns_runtime: true,
             non_durable_client: Rc::new(Cell::new(false)),
@@ -1992,6 +2014,7 @@ impl WasmDb {
         app_id: String,
         claimed_author: String,
         storage_owner: String,
+        cached_catalogue: Option<Vec<u8>>,
     ) -> Result<WasmDb, JsValue> {
         initialize_wasm_tracing();
         console_error_panic_hook::set_once();
@@ -2008,14 +2031,21 @@ impl WasmDb {
         )
         .await
         .map_err(to_js_error)?;
-        let db = open_scope_isolated_relay_db(schema, storage, config, storage_owner)
-            .await
-            .map_err(to_js_error)?;
+        let db = open_scope_isolated_relay_db(
+            schema,
+            storage,
+            config,
+            storage_owner,
+            cached_catalogue.as_deref(),
+        )
+        .await
+        .map_err(to_js_error)?;
         db.restore_browser_relay_pending_uploads()
             .await
             .map_err(to_js_error)?;
         db.set_deferred_local_persistence(true);
         Ok(Self {
+            initialization_seals: Rc::default(),
             inner: Rc::new(RefCell::new(Some(WasmDbInner::Browser(Rc::new(db))))),
             owns_runtime: true,
             non_durable_client: Rc::new(Cell::new(false)),
@@ -2066,6 +2096,7 @@ impl WasmDb {
     pub fn register_schema(&self, schema: Vec<u8>) -> Result<WasmDb, JsValue> {
         let schema = decode_public_schema(&schema)?;
         Ok(Self {
+            initialization_seals: Rc::default(),
             inner: Rc::new(RefCell::new(Some(
                 self.open_inner()?.register_schema_view(schema)?,
             ))),
@@ -2969,6 +3000,7 @@ impl WasmDb {
 
     #[wasm_bindgen(js_name = close)]
     pub fn close(&self) -> js_sys::Promise {
+        self.initialization_seals.borrow_mut().clear();
         // A physical storage-close failure remains terminal. Only a deferred
         // upload claim leaves storage open and permits owner tick/close retry.
         let Some(inner) = self.inner.borrow_mut().take() else {
@@ -3389,6 +3421,7 @@ async fn open_scope_isolated_relay_db(
     storage: BrowserStorage,
     config: WasmOpenDbConfig,
     storage_owner: String,
+    cached_catalogue: Option<&[u8]>,
 ) -> Result<Db, jazz::db::Error> {
     let mut db_config = DbConfig::new(schema, storage, config.identity.into());
     if let Some(seed) = config.row_id_seed {
@@ -3405,7 +3438,15 @@ async fn open_scope_isolated_relay_db(
             config.identity.author,
         )
     };
-    let db = unsafe { Db::open_scope_isolated_client_relay(db_config, scope).await? };
+    // SAFETY: the private host has validated the app-scoped cache envelope.
+    let db = unsafe {
+        Db::open_scope_isolated_client_relay_with_cached_catalogue(
+            db_config,
+            scope,
+            cached_catalogue,
+        )
+        .await?
+    };
     configure_initial_sync_flush_cadence(&db, initial_sync_flush_every)?;
     Ok(db)
 }
@@ -4717,6 +4758,7 @@ mod dynamic_schema_view_tests {
             .expect("open memory-backed wasm transport"),
         );
         let binding = WasmDb {
+            initialization_seals: Rc::default(),
             inner: Rc::new(RefCell::new(Some(WasmDbInner::Memory(db)))),
             owns_runtime: false,
             non_durable_client: Rc::new(Cell::new(false)),
@@ -5441,6 +5483,7 @@ mod dynamic_schema_view_tests {
             .expect("commit attached exclusive transaction");
 
         let binding = WasmDb {
+            initialization_seals: Rc::default(),
             inner: Rc::new(RefCell::new(Some(WasmDbInner::Memory(Rc::clone(&owner))))),
             owns_runtime: false,
             non_durable_client: Rc::new(Cell::new(false)),
@@ -5456,6 +5499,7 @@ mod dynamic_schema_view_tests {
             )
             .expect("begin owner transaction");
         let view_binding = WasmDb {
+            initialization_seals: Rc::default(),
             inner: Rc::new(RefCell::new(Some(WasmDbInner::Memory(Rc::clone(&view))))),
             owns_runtime: false,
             non_durable_client: Rc::new(Cell::new(false)),
