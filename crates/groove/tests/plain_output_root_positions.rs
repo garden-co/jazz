@@ -1,9 +1,8 @@
 //! Generic root positions (insert indices and moves) for plain ordered
 //! outputs are collected only for an output that can apply them (#2086).
-//! Collecting them materializes the touched TopBy group's whole before and
-//! after windows, so a one-row write to an unbounded ordered result costs time
-//! proportional to the result. An unbounded TopBy whose outputs take no
-//! positions keeps its delta-only path instead.
+//! For an unbounded TopBy, collecting them ranks only the rows a write
+//! changed (#3505), so a one-row write costs the same at any result size. An
+//! unbounded TopBy whose outputs take no positions records no ranks at all.
 
 use groove::db::{Database, GraphBuilder};
 use groove::ivm::runtime::TerminalEdit;
@@ -80,8 +79,8 @@ fn last_tick_position_work(db: &Database) -> (usize, usize) {
 
 #[futures_test::test]
 async fn an_output_carrying_the_top_by_identity_still_receives_root_positions() {
-    // Positive control: this output applies positions, so the write collects
-    // the group's windows and the insert lands at its ordered index.
+    // Positive control: this output applies positions, so the write ranks the
+    // inserted shape and it lands at its ordered index.
     let mut db = database().await;
     let subscription = db.subscribe([("shapes", ordered_shapes())]).unwrap();
     subscription.try_recv().unwrap();
@@ -89,7 +88,8 @@ async fn an_output_carrying_the_top_by_identity_still_receives_root_positions() 
     add_shape(&mut db, SHAPES).await;
 
     let (positions, _) = last_tick_position_work(&db);
-    assert!(positions > SHAPES as usize, "{positions}");
+    // Only the inserted shape is ranked, not the other SHAPES rows.
+    assert_eq!(positions, 1);
     let tick = subscription.try_recv().unwrap();
     let operations = &tick.terminal_sinks["shapes"].operations;
     assert!(
