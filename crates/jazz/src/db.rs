@@ -1544,21 +1544,17 @@ trait LocalMutexBorrow<T> {
 impl<T> LocalMutexBorrow<T> for Rc<LocalMutex<T>> {
     #[track_caller]
     fn borrow(&self) -> futures::lock::MutexGuard<'_, T> {
+        let caller = std::panic::Location::caller();
         self.try_lock().unwrap_or_else(|| {
-            panic!(
-                "synchronous node operation at {} reentered a suspended operation",
-                std::panic::Location::caller()
-            )
+            panic!("synchronous node operation at {caller} reentered a suspended operation")
         })
     }
 
     #[track_caller]
     fn borrow_mut(&self) -> futures::lock::MutexGuard<'_, T> {
+        let caller = std::panic::Location::caller();
         self.try_lock().unwrap_or_else(|| {
-            panic!(
-                "synchronous node operation at {} reentered a suspended operation",
-                std::panic::Location::caller()
-            )
+            panic!("synchronous node operation at {caller} reentered a suspended operation")
         })
     }
 }
