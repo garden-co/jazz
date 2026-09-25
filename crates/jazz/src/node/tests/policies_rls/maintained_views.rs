@@ -22,7 +22,7 @@ fn maintained_view_seeded_query_engine_snapshot_matches_rows_and_witnesses() {
         &mut core,
         MergeableCommit::new("todos", row(0x93), 20).cells(owner_cells(author_a, "delete me")),
     );
-    let deleted_readable_delete = accept_global(
+    let _deleted_readable_delete = accept_global(
         &mut core,
         MergeableCommit::new("todos", row(0x93), 21).deletion(DeletionEvent::Deleted),
     );
@@ -30,7 +30,7 @@ fn maintained_view_seeded_query_engine_snapshot_matches_rows_and_witnesses() {
         &mut core,
         MergeableCommit::new("todos", row(0x94), 22).cells(owner_cells(author_b, "hidden delete")),
     );
-    let deleted_unreadable_delete = accept_global(
+    let _deleted_unreadable_delete = accept_global(
         &mut core,
         MergeableCommit::new("todos", row(0x94), 23).deletion(DeletionEvent::Deleted),
     );
@@ -49,14 +49,14 @@ fn maintained_view_seeded_query_engine_snapshot_matches_rows_and_witnesses() {
         [
             (sibling_tx, row(0x90), VersionLayer::Content),
             (sibling_tx, row(0x91), VersionLayer::Content),
-            (deleted_readable_delete, row(0x93), VersionLayer::Deletion),
-            (deleted_unreadable_delete, row(0x94), VersionLayer::Deletion),
         ],
+        // A fresh seed holds no deleted rows: removals are row deltas, so
+        // no deletion replacement witness is seeded.
         [
             (row(0x93), VersionLayer::Content, false),
-            (row(0x93), VersionLayer::Deletion, true),
+            (row(0x93), VersionLayer::Deletion, false),
             (row(0x94), VersionLayer::Content, false),
-            (row(0x94), VersionLayer::Deletion, true),
+            (row(0x94), VersionLayer::Deletion, false),
         ],
     );
     assert_query_engine_maintained_seed_matches_public_rows_and_witnesses(
@@ -66,14 +66,11 @@ fn maintained_view_seeded_query_engine_snapshot_matches_rows_and_witnesses() {
         author_a,
         [
             (sibling_tx, row(0x90), VersionLayer::Content),
-            (deleted_readable_delete, row(0x93), VersionLayer::Deletion),
         ],
         [
             (row(0x93), VersionLayer::Content, false),
-            (row(0x93), VersionLayer::Deletion, true),
+            (row(0x93), VersionLayer::Deletion, false),
             (row(0x94), VersionLayer::Content, false),
-            // Alice cannot read Bob's retained preimage, so even the deletion
-            // replacement witness must stay outside her admitted closure.
             (row(0x94), VersionLayer::Deletion, false),
         ],
     );

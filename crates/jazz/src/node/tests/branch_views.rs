@@ -1336,13 +1336,12 @@ fn branch_coordinates_use_one_canonical_prefix_in_memory_and_after_rocks_reopen(
             .primary_key_scan_raw(&physical_ahead_current_table_name(table_id), &prefix)
             .unwrap()
             .len(),
-        2,
-        "locally settled content and deletion use the canonical branch prefix in ahead-current"
+        1,
+        "the folded pending overlay uses the canonical branch prefix in ahead-current"
     );
 
-    // The deleted branch row has two pending images (content and deletion),
-    // both carrying its title; the sibling branch has one.
-    for (branch_key, expected) in [(&key, 2), (&sibling_key, 1)] {
+    // Each branch row has one folded pending overlay carrying its title.
+    for (branch_key, expected) in [(&key, 1), (&sibling_key, 1)] {
         assert_eq!(
             rocks
                 .database

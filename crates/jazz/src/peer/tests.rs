@@ -670,7 +670,10 @@ fn client_fast_cursor_authorization_proof_controls_rehydrate_reset() {
         )
         .unwrap();
     accept_global(&mut core, deleted_tx, 2);
-    fresh.declare_known_state(subscription, known(2, 1));
+    // The reader last settled at 1, before the deletion; its stale
+    // authorization proof forces a full resend, and the row that left since
+    // its watermark ships its deleted image.
+    fresh.declare_known_state(subscription, known(1, 1));
     let revoke_update = fresh.rehydrate_query(&mut core, &shape, &binding).unwrap();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         version_carriers, ..
@@ -6088,26 +6091,19 @@ fn duplicate_usage_reconciles_canonical_membership_after_deletion_witness() {
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         supporting_rows,
+        version_carriers,
         ..
     }) = canonical_update
     else {
         panic!("expected canonical view update");
     };
     assert_eq!(*subscription, canonical);
+    // The deleted row leaves the supporting set; its deleted image ships so
+    // the receiver's copy stops matching.
+    assert!(supporting_rows.added_rows().is_empty());
     assert!(
-        supporting_rows
-            .added_rows()
-            .iter()
-            .any(|input| input.row == live
-                && input.version.tx == deleted_tx
-                && input.version.layer == crate::protocol::ResultRowLayer::Deletion),
-        "the supporting snapshot carries the deletion that makes the result empty"
-    );
-    assert!(
-        supporting_rows
-            .added_rows()
-            .iter()
-            .all(|input| input.row == live)
+        carriers_ship_deleted_image(version_carriers, live, deleted_tx),
+        "the update carries the deletion that makes the result empty"
     );
 
     // The clone is a distinct concrete receiver. Production subscription

@@ -554,9 +554,9 @@ fn attributed_write_checkpoint_error_cleans_up_terminal_permission_subject() {
         )
         .unwrap();
 
-    // The first six transaction reads are part of validation and acceptance;
-    // The seventh after Accepted persists.
-    storage.fail_after_transaction_reads(6);
+    // The first five transaction reads are part of validation and acceptance;
+    // the sixth comes after Accepted persists.
+    storage.fail_after_transaction_reads(5);
     let error = core
         .finalize_local_mergeable_commit_settled(tx_id)
         .unwrap_err();

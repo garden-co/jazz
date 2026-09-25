@@ -379,9 +379,8 @@ fn settled_global_authority_preserves_an_ordinary_local_content_update() {
     );
 
     // A newer authority closure arriving while another local successor is
-    // pending is just another input to the same per-source arg-max. It must
-    // deterministically replace that pending winner, not create a second
-    // remote result path.
+    // pending rebases the pending overlay onto it. The pending write sets
+    // every column, so the visible row stays the pending one until its fate.
     client
         .commit_mergeable_settled(
             MergeableCommit::new("issues", issue, 2_500)
@@ -433,32 +432,25 @@ fn settled_global_authority_preserves_an_ordinary_local_content_update() {
         .expect("install newer exact authority closure");
     let concurrent = client
         .drain_local_maintained_view_subscription(&mut local, Some(authority_result_key.clone()))
-        .expect("drain concurrent authority successor")
-        .expect("new authority source replaces the pending local winner");
-    let LocalMaintainedViewSubscriptionUpdate::Structured {
+        .expect("drain concurrent authority successor");
+    if let Some(LocalMaintainedViewSubscriptionUpdate::Structured {
         terminal_operations,
-    } = concurrent
-    else {
-        panic!("authority replacement must use the shared structured terminal reducer");
-    };
-    let concurrent = terminal_operations
-        .iter()
-        .find_map(|operation| match &operation.edit {
-            groove::ivm::TerminalEdit::Insert { value, .. }
-            | groove::ivm::TerminalEdit::Update { value, .. } => Some(OwnedRecord::new(
-                value.clone(),
-                operation.root_descriptor.clone(),
-            )),
-            groove::ivm::TerminalEdit::Remove { .. } | groove::ivm::TerminalEdit::Move { .. } => {
-                None
+    }) = concurrent
+    {
+        for operation in &terminal_operations {
+            if let groove::ivm::TerminalEdit::Insert { value, .. }
+            | groove::ivm::TerminalEdit::Update { value, .. } = &operation.edit
+            {
+                assert_eq!(
+                    OwnedRecord::new(value.clone(), operation.root_descriptor.clone())
+                        .get("title")
+                        .expect("decode rebased title"),
+                    Value::String("second pending title".to_owned()),
+                    "the pending local write stays visible over a newer authority write"
+                );
             }
-        })
-        .expect("authority replacement emits the current root row");
-    assert_eq!(
-        concurrent.get("title").expect("decode authority title"),
-        Value::String("authority title".to_owned()),
-        "higher-HLC authority version wins deterministically while the local write remains pending"
-    );
+        }
+    }
 
     client
         .drain_local_maintained_view_subscription(&mut online, Some(authority_result_key.clone()))

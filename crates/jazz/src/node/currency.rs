@@ -146,8 +146,15 @@ where
         branch_key: &BranchKey,
         row_uuid: RowUuid,
     ) -> Result<Option<VersionRow>, Error> {
-        self.query_winner_from_pk_in_branch(table, branch_key, row_uuid)
-            .await
+        // The pending overlay, when the row has one, is the local row: it is
+        // the synced image with every pending patch folded on top.
+        self.query_current_winner_in_branch(
+            table,
+            branch_key,
+            row_uuid,
+            PhysicalCurrentClass::Ahead,
+        )
+        .await
     }
 
     /// Return the newest locally known version for a row/layer except one
@@ -211,12 +218,24 @@ where
         branch_key: &BranchKey,
         row_uuid: RowUuid,
     ) -> Result<Option<VersionRow>, Error> {
-        let schema_version = self.catalogue.active_schema.schema;
-        let current_table = self.physical_current_table_for_schema(
-            schema_version,
+        self.query_current_winner_in_branch(
             table,
+            branch_key,
+            row_uuid,
             PhysicalCurrentClass::Global,
-        )?;
+        )
+        .await
+    }
+
+    async fn query_current_winner_in_branch(
+        &mut self,
+        table: &str,
+        branch_key: &BranchKey,
+        row_uuid: RowUuid,
+        class: PhysicalCurrentClass,
+    ) -> Result<Option<VersionRow>, Error> {
+        let schema_version = self.catalogue.active_schema.schema;
+        let current_table = self.physical_current_table_for_schema(schema_version, table, class)?;
         let raw = self
             .database
             .primary_key_get_raw(

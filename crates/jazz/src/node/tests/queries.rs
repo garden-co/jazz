@@ -1182,7 +1182,7 @@ fn groove_current_rows_match_oracle_for_seeded_m1_commits() {
 }
 
 #[test]
-fn local_current_from_ahead_index_matches_history_argmax_for_seeded_commits() {
+fn local_current_from_ahead_index_matches_pending_fold_for_seeded_commits() {
     for seed in 0..16_u64 {
         let (_temp_dir, mut node) = open_node();
         let mut parents = BTreeMap::<RowUuid, (Option<TxId>, Option<TxId>)>::new();
@@ -1270,34 +1270,83 @@ fn history_argmax_current_rows(
 ) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
     let table = node.table("todos").unwrap().clone();
     let versions = node.query_table_versions("todos").unwrap();
-    // Deletion is a cell of the row image: the newest image decides both the
-    // cells and whether the row is visible.
-    let mut winners = BTreeMap::<RowUuid, &VersionRow>::new();
+    // The local row is the synced image (the newest accepted post-image) with
+    // the row's still-pending patches folded on top in tx order. A pending
+    // patch stores a full image but replaces only the columns it authors.
+    let mut synced = BTreeMap::<RowUuid, (GlobalTime, &VersionRow)>::new();
+    let mut pending =
+        BTreeMap::<RowUuid, Vec<(TxId, &VersionRow, Option<BTreeSet<String>>)>>::new();
     for version in &versions {
-        if winners.get(&version.row_uuid()).is_none_or(|current| {
-            (version.tx_time(), version.tx_node_alias())
-                > (current.tx_time(), current.tx_node_alias())
-        }) {
-            winners.insert(version.row_uuid(), version);
+        let tx_id = node.version_tx_id(version).unwrap();
+        match node.transaction_state_settled(tx_id) {
+            Some((Fate::Accepted, Some(global_time), _)) => {
+                if synced
+                    .get(&version.row_uuid())
+                    .is_none_or(|(current, _)| global_time > *current)
+                {
+                    synced.insert(version.row_uuid(), (global_time, version));
+                }
+            }
+            Some((Fate::Pending, None, _)) => {
+                let authored = node.authored_columns_for_version(version).unwrap();
+                pending
+                    .entry(version.row_uuid())
+                    .or_default()
+                    .push((tx_id, version, authored))
+            }
+            _ => {}
         }
     }
-    winners
-        .into_iter()
-        .filter_map(|(row_uuid, version)| {
-            if version.is_deleted() {
-                return None;
+    let cells_of = |version: &VersionRow| {
+        table
+            .columns
+            .iter()
+            .filter_map(|column| {
+                version
+                    .cell(&table, &column.name)
+                    .unwrap()
+                    .map(|value| (column.name.clone(), value))
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    let rows = synced
+        .keys()
+        .chain(pending.keys())
+        .copied()
+        .collect::<BTreeSet<_>>();
+    rows.into_iter()
+        .filter_map(|row_uuid| {
+            let mut image = synced
+                .get(&row_uuid)
+                .map(|(_, version)| (cells_of(version), version.is_deleted()));
+            let mut patches = pending.remove(&row_uuid).unwrap_or_default();
+            patches.sort_by_key(|(tx_id, _, _)| *tx_id);
+            for (_, patch, authored) in patches {
+                let authors =
+                    |name: &str| authored.as_ref().is_none_or(|columns| columns.contains(name));
+                image = Some(match image {
+                    Some((mut cells, deleted)) => {
+                        let patch_cells = cells_of(patch);
+                        for column in &table.columns {
+                            if authors(&column.name) {
+                                match patch_cells.get(&column.name) {
+                                    Some(value) => cells.insert(column.name.clone(), value.clone()),
+                                    None => cells.remove(&column.name),
+                                };
+                            }
+                        }
+                        let deleted = if authors(crate::node::DELETION_COLUMN_NAME) {
+                            patch.is_deleted()
+                        } else {
+                            deleted
+                        };
+                        (cells, deleted)
+                    }
+                    None => (cells_of(patch), patch.is_deleted()),
+                });
             }
-            let cells = table
-                .columns
-                .iter()
-                .filter_map(|column| {
-                    version
-                        .cell(&table, &column.name)
-                        .unwrap()
-                        .map(|value| (column.name.clone(), value))
-                })
-                .collect::<BTreeMap<_, _>>();
-            Some((row_uuid, cells))
+            let (cells, deleted) = image?;
+            (!deleted).then_some((row_uuid, cells))
         })
         .collect()
 }
