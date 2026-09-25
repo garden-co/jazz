@@ -4886,9 +4886,12 @@ impl IvmRuntime {
         // queued retraction into arranged state before any bind hydrates,
         // exactly as `prepare` does. Otherwise a full hydration that no
         // longer counts a retracted binding has that retraction applied on
-        // top, and a later live attach would build on the result.
+        // top, and a later live attach would build on the result. Queued
+        // retractions that the coming full hydration makes moot are dropped
+        // rather than ticked (see `absorb_unobserved_binding_retractions`).
         self.prune_dropped_subscriptions_with_storage(storage.as_ref())
             .await?;
+        self.absorb_unobserved_binding_retractions(shape_id)?;
         self.flush_pending_binding_retractions(storage.as_ref())
             .await?;
         let Some(borrowed) = self.live_attach_borrowed_nodes(shape_id, binding_values)? else {
@@ -4934,6 +4937,78 @@ impl IvmRuntime {
     #[cfg(test)]
     pub(crate) fn live_attaches(&self) -> u64 {
         self.live_attaches
+    }
+
+    /// Drop the queued retractions of `shape_id`'s binding source when the
+    /// full hydration this bind must take rebuilds everything they touch.
+    ///
+    /// Settling a retraction costs an incremental tick through the whole
+    /// shape. That work is only needed when something still observes the
+    /// retracted binding's state. With no binding of the source left, no
+    /// subscription targeting it, and every node the retraction would touch
+    /// inside this shape's upstream closure, the bind cannot attach live: it
+    /// fully hydrates from the source's current refcounts, which already
+    /// exclude the retracted bindings, and advances the binding input of
+    /// every such node so none reuses a stale memo. Applying the retraction
+    /// after that hydration would instead subtract it twice. Anything less
+    /// certain (another shape or subscription on the source, or in-flight
+    /// evaluation that may already carry the queue) keeps the flush.
+    fn absorb_unobserved_binding_retractions(
+        &mut self,
+        shape_id: PreparedShapeId,
+    ) -> Result<(), IvmRuntimeError> {
+        let shape = self
+            .prepared_shapes
+            .get(&shape_id)
+            .ok_or(IvmRuntimeError::PreparedShapeNotFound(shape_id))?;
+        let source_key = BindingSourceKey::prepared(shape.shape.clone());
+        if !self
+            .pending_binding_retractions
+            .iter()
+            .any(|pending| pending.key == source_key)
+            || self.has_pending_incremental()
+            || self
+                .binding_sources
+                .get(&source_key)
+                .is_some_and(|source| !source.refcounts.is_empty())
+            || self.multisink_subscriptions.values().any(|subscription| {
+                let MultisinkSubscriptionTarget::RoutedShape {
+                    shape_id: target, ..
+                } = &subscription.target
+                else {
+                    return false;
+                };
+                self.prepared_shapes
+                    .get(target)
+                    .is_none_or(|target| target.shape == shape.shape)
+            })
+        {
+            return Ok(());
+        }
+        let mut closure = HashSet::<NodeId>::default();
+        let mut pending = shape
+            .terminals
+            .values()
+            .map(|terminal| terminal.output.node)
+            .collect::<Vec<_>>();
+        while let Some(node) = pending.pop() {
+            if closure.insert(node)
+                && let Some(graph_node) = self.graph.node(node)
+            {
+                pending.extend(graph_node.descriptor.inputs.iter().copied());
+            }
+        }
+        if !self
+            .graph
+            .affected_nodes_through_routes(std::iter::empty(), std::iter::once(&source_key))
+            .iter()
+            .all(|node| closure.contains(node))
+        {
+            return Ok(());
+        }
+        self.pending_binding_retractions
+            .retain(|pending| pending.key != source_key);
+        Ok(())
     }
 
     /// The shared nodes a live attach may borrow, or `None` when the shape is
