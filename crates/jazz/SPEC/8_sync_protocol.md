@@ -28,8 +28,8 @@ Invariant digest:
 - `INV-SYNC-21`: Wire `TxId` and row-version payloads MUST use node UUIDs and schema version IDs, not node-local integer aliases.
 - `INV-SYNC-23`: A serving peer MUST reject a capability-gapped live subscription with `SyncMessage::SubscribeRejected` addressed to the requested `SubscriptionKey`; the rejected subscription MUST NOT become active, `Unsubscribe` for it is a no-op, and the connection MUST keep serving other subscriptions.
 - `INV-SYNC-24`: Known-state payload dedup may omit only native bodies, never required physical snapshot membership or delta additions/removals. Fresh subscriptions and recovery require a full snapshot; retained transport revisions are not durable coverage receipts.
-- `INV-SYNC-25`: A stream served under known-state dedup followed by its repair responses MUST be observationally equivalent to the same stream served without dedup.
-- `INV-SYNC-26`: A receiver detecting a referenced version without its body MUST be able to request exactly those `(table, row_uuid, tx_time, tx_node_id)` payloads, and the server MUST serve them subject to ordinary read policy. The repair vocabulary and server/client repair helpers are implemented and activated for declared known-state subscriptions.
+- `INV-SYNC-25`: A stream served under known-state dedup followed by its known-state-miss resends MUST be observationally equivalent to the same stream served without dedup.
+- `INV-SYNC-26`: A receiver that finds an update naming a held row whose body it no longer has MUST reopen that view without known state, and the serving peer MUST then resend every row of the view with its body under ordinary read policy. There is no per-version fetch: rows are identified by `(row, row_seq)` and resent whole. A second such update for the same view before it settles is a protocol error rather than a resend loop.
 - `INV-SYNC-27`: A fast known-state declaration MUST only be made for contiguously applied, unevicted served streams in the current process; eviction invalidates its in-memory cursor, and restart never recovers a declaration.
 - `INV-SYNC-29`: A fast known-state declaration carrying authorization progress may affect native-body dedup only when its server-stamped progress matches the serving peer’s current token for that reader and binding view. It MUST NOT replace the complete supporting set or the fresh selected-authority confirmation.
 - `INV-SYNC-30`: `settled_through` is a durable canonical-view history cursor for known-state payload dedup and repair, not a subscription or one-shot coverage receipt. Global settlement and coverage additionally require a fresh confirming `ViewUpdate` from the selected continuously active upstream connection. A new settled one-shot requires confirmation for its exact current usage-site `SubscriptionKey`; an update for a detached predecessor cannot satisfy it even when shape, binding, and options are equal. Disconnect, restart, upstream switch, or any update from a nonselected upstream invalidates all selected-authority receipts immediately unless an exact recomputation closure is proven.
@@ -848,21 +848,20 @@ declaration — and, for fast declarations, the version settled at or before
 The complete supporting-row set and inventory refs are never omitted — only
 payload bodies.
 
-The optimism is bounded by two nets. First, the structural integrity check: a
-receiver that encounters a referenced version without holding its body treats
-this as a **known-state miss**, not an error. Second, the precise repair
-request: the receiver requests exactly the missing `(row_uuid, tx_time,
-tx_node_id)` payloads, and the server MUST serve them subject to ordinary read
-policy (`INV-SYNC-26`). Convergence is preserved: a stream served under
-known-state dedup followed by its repairs MUST be observationally equivalent
-to the same stream served without dedup (`INV-SYNC-25`, cf. `INV-SYNC-20`).
-A receiver must not fill a gap from another binding's authority receipt or
-claim settlement while an exact supporting body is unavailable. A superseded
-set is discarded when a newer complete set arrives. The canonical repair-carrying case is
-visibility gained without a new version being minted — a policy/membership
-change admitting rows whose versions settled at or before `p` (ch. 7);
-version-minting scope entry is self-consistent because the entering version
-settles above `p`.
+The optimism is bounded by one net. A receiver that encounters a referenced
+row without holding its body treats this as a **known-state miss**, not an
+error: it forgets the view's declared known state and reopens the view, and
+the serving peer resends every row with its body under ordinary read policy
+(`INV-SYNC-26`). There is no per-version fetch; rows are identified by
+`(row, row_seq)` and resent whole. Convergence is preserved: a stream served
+under known-state dedup followed by that resend MUST be observationally
+equivalent to the same stream served without dedup (`INV-SYNC-25`, cf.
+`INV-SYNC-20`). A receiver must not fill a gap from another binding's
+authority receipt or claim settlement while a supporting body is unavailable.
+The canonical miss is visibility gained without a new row seq: a policy or
+membership change admitting rows that settled at or before `p` (ch. 7). A
+row-local view has no such case, because its membership changes only with
+the row's own seq.
 
 Holdings from point-in-time reads dedup conservatively: a version is assumed
 held only for rows **unchanged since the declared cut** (current version
@@ -879,7 +878,7 @@ known-state coverage grows.
 
 _Further invariants._ `INV-SYNC-24` — fast and slow declarations omit only
 eligible version bodies; `INV-SYNC-25` — dedup + repairs converge to the
-undeduped stream; `INV-SYNC-26` — repair requests are exact and policy-checked;
+undeduped stream; `INV-SYNC-26` — a known-state miss reopens the view for a full resend;
 `INV-SYNC-27` — process-local fast declarations require contiguous application
 and no eviction; eviction invalidates the in-memory fact. Neither fast cursors
 nor slow exact declarations are persisted; restart restores native data only.

@@ -467,6 +467,18 @@ where
         }
     }
 
+    /// Declare nothing for this view on its next open, so the serving peer
+    /// resends every row with its body. Used when an update named a held row
+    /// whose body this receiver no longer has.
+    pub(crate) fn forget_declared_known_state(&mut self, subscription: SubscriptionKey) {
+        if let Ok(key) = self.authority_result_key_for_subscription(subscription)
+            && let Some(state) = self.query.authority_results.get_mut(&key)
+        {
+            state.supporting_revision = None;
+            state.settled_through = None;
+        }
+    }
+
     pub(crate) fn authority_result_key_for_subscription(
         &self,
         subscription: SubscriptionKey,

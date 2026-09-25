@@ -2018,9 +2018,12 @@ mod tests {
     // a redundant receipt pass or prove the locally selected trust boundary.
     #[test]
     fn trusted_encoder_skips_receipt_validation_but_session_admission_keeps_it() {
-        let message = SyncMessage::RowVersionPayloads {
-            version_bundles: version_bundles(2),
-        };
+        let message = view_update_with_carriers(
+            version_bundles(2)
+                .into_iter()
+                .map(VersionCarrier::Bundle)
+                .collect(),
+        );
         crate::protocol::RECEIPT_VALIDATIONS.with(|count| count.set(0));
         let payload = encode_sync_message(&message).unwrap();
         assert_eq!(
@@ -2388,17 +2391,6 @@ mod tests {
                 fate: Fate::Accepted,
                 global_time: Some(GlobalTime(7)),
                 durability: Some(DurabilityTier::Global),
-            },
-            SyncMessage::FetchRowVersions {
-                requests: vec![crate::protocol::RowVersionRef::new(
-                    "todos",
-                    RowUuid::from_bytes([0x77; 16]),
-                    tx_id,
-                )],
-                delegated_session: None,
-            },
-            SyncMessage::RowVersionPayloads {
-                version_bundles: Vec::new(),
             },
         ];
 

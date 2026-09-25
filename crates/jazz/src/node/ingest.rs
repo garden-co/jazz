@@ -9,9 +9,7 @@
 
 use super::*;
 use crate::protocol::{CatalogueAck, LensOp, SchemaLineagePublication, VersionBundleRef};
-use crate::protocol_limits::{
-    commit_unit_limit_violation, validate_known_state_declaration, validate_shape_registration_size,
-};
+use crate::protocol_limits::{commit_unit_limit_violation, validate_shape_registration_size};
 use crate::schema::ColumnSchema;
 
 pub(super) const MAX_SCHEMA_LINEAGE_DECLARATIONS: usize = 4096;

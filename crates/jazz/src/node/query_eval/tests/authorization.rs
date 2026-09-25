@@ -915,23 +915,6 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         missing.is_empty(),
         "the server snapshot already carries every visible row-version payload; missing {missing:?}"
     );
-    if !missing.is_empty() {
-        let messages = normal_peer
-            .handle_row_versions_fetch(
-                &mut node,
-                SyncMessage::FetchRowVersions {
-                    requests: missing.clone(),
-                    delegated_session: None,
-                },
-            )
-            .expect("serve normal-member message include/order repair payloads");
-        let [SyncMessage::RowVersionPayloads { version_bundles }] = messages.as_slice() else {
-            panic!("expected row-version repair payloads")
-        };
-        normal_client
-            .apply_row_version_payloads_for_requests(&missing, version_bundles.clone())
-            .expect("apply normal-member message include/order repair payloads");
-    }
     normal_client
         .apply_sync_message_settled(normal_update)
         .expect("client applies normal-member message include/order snapshot");

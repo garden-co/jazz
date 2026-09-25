@@ -1695,9 +1695,20 @@ fn channel_decoded_budget_is_checked_before_payload_admission() {
 // reveal whether an admitted trusted link redundantly revalidates every receipt.
 #[test]
 fn channel_adapter_propagates_locally_admitted_trusted_decoder_context() {
-    let message = SyncMessage::RowVersionPayloads {
-        version_bundles: transport_version_bundles(2),
-    };
+    let message = SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        subscription: crate::protocol::SubscriptionKey {
+            shape_id: crate::query::ShapeId(uuid::Uuid::from_bytes([0x22; 16])),
+            binding_id: crate::query::BindingId(uuid::Uuid::from_bytes([0x33; 16])),
+            read_view: Default::default(),
+        },
+        settled_through: crate::time::GlobalTime(500),
+        version_carriers: transport_version_bundles(2)
+            .into_iter()
+            .map(VersionCarrier::Bundle)
+            .collect(),
+        peer_payload_inventory: PeerPayloadInventory::default(),
+        supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(Vec::new()),
+    });
     for trusted in [false, true, false] {
         let (left, right) = byte_duplex_raw();
         let mut sender = WireTransportAdapter::current(left);
@@ -1911,17 +1922,7 @@ fn reordered_delivery_and_fate_apply_in_dependency_order_to_real_client() {
     real_client_reordered_delivery_and_fate(false, false);
 }
 
-#[test]
-fn repaired_wire_view_keeps_lease_and_defers_dependent_fate() {
-    real_client_reordered_delivery_and_fate(true, false);
-}
-
-#[test]
-fn disconnect_releases_retained_wire_repair_and_fate() {
-    real_client_reordered_delivery_and_fate(true, true);
-}
-
-fn real_client_reordered_delivery_and_fate(repair: bool, detach: bool) {
+fn real_client_reordered_delivery_and_fate(repair: bool, _detach: bool) {
     struct Tap {
         inner: WireTransportAdapter<ByteDuplexTransport>,
         sent: Rc<RefCell<Vec<SyncMessage>>>,
@@ -2092,70 +2093,6 @@ fn real_client_reordered_delivery_and_fate(repair: bool, detach: bool) {
     block_on(async { upstream.lock().await.tick().await })
         .expect("fate cannot run before its snapshot introduces the transaction");
     client.tick().unwrap();
-    if repair {
-        {
-            let upstream = upstream.borrow();
-            let ConnectionLink::Upstream(state) = &upstream.link else {
-                unreachable!()
-            };
-            assert_eq!(state.pending_row_version_repairs.len(), 1);
-            assert!(
-                state.pending_row_version_repairs[0].lease.is_some(),
-                "retained view owns its reservation"
-            );
-            assert_eq!(state.deferred_repair_fates.len(), 1);
-            assert!(
-                state.deferred_repair_fates[0].lease.is_some(),
-                "deferred fate owns its reservation"
-            );
-        }
-        if detach {
-            assert!(client.detach_connection(&upstream));
-            let upstream = upstream.borrow();
-            let ConnectionLink::Upstream(state) = &upstream.link else {
-                unreachable!()
-            };
-            assert!(state.pending_row_version_repairs.is_empty());
-            assert!(state.deferred_repair_fates.is_empty());
-            assert!(upstream.staged_inbound.is_empty());
-            return;
-        }
-        // Model another retained bulk view without allocating D bytes. The
-        // real repair below exceeds one extent and must use progress capacity.
-        use crate::wire::channel_credit::ChannelCredits;
-        use crate::wire::channels::ChannelClass;
-        let held_bulk = ChannelCredits::receive_message(
-            &receiver_credits,
-            ChannelClass::Delivery,
-            crate::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES,
-        )
-        .unwrap();
-        sender_credits.lock().unwrap().reserve_message(
-            ChannelClass::Delivery,
-            crate::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES,
-        );
-        for _ in 0..32 {
-            subscriber.borrow_mut().tick().unwrap();
-            client.tick().unwrap();
-        }
-        assert!(
-            sent.borrow().iter().any(|message| matches!(
-                message,
-                SyncMessage::RowVersionPayloads { .. }
-            ) && crate::wire::encode_sync_message(message)
-                .unwrap()
-                .len()
-                > crate::wire::channels::CHANNEL_CHUNK_BYTES),
-            "repair genuinely needs bulk-sized progress capacity"
-        );
-        drop(held_bulk);
-        let upstream = upstream.borrow();
-        let ConnectionLink::Upstream(state) = &upstream.link else {
-            unreachable!()
-        };
-        assert!(state.pending_row_version_repairs.is_empty());
-        assert!(state.deferred_repair_fates.is_empty());
-    }
     assert_eq!(
         row_ids(&prepared_read(&client, &Query::from("todos"))),
         if repair {
@@ -2165,241 +2102,6 @@ fn real_client_reordered_delivery_and_fate(repair: bool, detach: bool) {
         }
     );
 }
-#[test]
-fn deferred_view_retains_fate_dependency() {
-    let schema = schema();
-    let alice = AuthorSubject::for_test_bytes([0xb1; 16]);
-    let server = open_core(0xb1, AuthorSubject::SYSTEM, &schema);
-    let client = open_db(0xb2, alice, &schema);
-    let row = RowUuid::from_bytes([0xb3; 16]);
-    server
-        .insert_with_id("todos", row, cells("0", false, alice))
-        .unwrap();
-    let (upstream, downstream, _requests, responses) = duplex_with_taps();
-    let upstream = block_on(client.connect_upstream(upstream));
-    let subscriber = server.accept_subscriber(downstream, alice);
-    let mut stream =
-        prepared_subscribe(&client, &Query::from("todos"), global_subscribe_opts()).unwrap();
-    let mut held = Vec::new();
-    let mut introduced = None;
-    let mut introduced_time = None;
-    let mut snapshot = RelationSnapshot::default();
-    for revision in 0..2 {
-        if revision > 0 {
-            server
-                .update(
-                    "todos",
-                    row,
-                    BTreeMap::from([("title".to_owned(), Value::String(revision.to_string()))]),
-                )
-                .unwrap();
-        }
-        for _ in 0..8 {
-            subscriber.borrow_mut().tick().unwrap();
-            // Only the first snapshot needs a body fetch. Later deltas carry
-            // their own bodies but must wait behind that predecessor.
-            responses.borrow_mut().retain_mut(|message| {
-                match message {
-                    SyncMessage::ViewUpdate(payload) if payload.supporting_rows.is_snapshot() => {
-                        payload.version_carriers.clear();
-                    }
-                    SyncMessage::ViewUpdate(payload) => {
-                        introduced_time = mark_carriers_pending_for_fate_test(payload);
-                        introduced = payload
-                            .supporting_rows
-                            .added_rows()
-                            .first()
-                            .map(|row| row.version.tx);
-                    }
-                    SyncMessage::RowVersionPayloads { .. } => {
-                        held.push(message.clone());
-                        return false;
-                    }
-                    _ => {}
-                }
-                true
-            });
-            client.tick().unwrap();
-            while let Some(event) = stream.try_next_event() {
-                apply_subscription_event(&mut snapshot, event);
-            }
-        }
-    }
-    responses.borrow_mut().push_back(SyncMessage::FateUpdate {
-        tx_id: introduced.expect("later delta introduces transaction"),
-        fate: Fate::Accepted,
-        global_time: introduced_time,
-        durability: Some(DurabilityTier::Global),
-    });
-    client
-        .tick()
-        .expect("fate following an admitted but body-deferred view must remain valid");
-    let queued = match &upstream.borrow().link {
-        ConnectionLink::Upstream(state) => state.pending_row_version_repairs.len(),
-        _ => unreachable!("client upstream"),
-    };
-    assert!(
-        queued == 2,
-        "snapshot and all dependent deltas must remain ordered: {queued}"
-    );
-    assert!(
-        snapshot.rows.is_empty(),
-        "no successor may install before its missing predecessor"
-    );
-    assert!(!held.is_empty(), "the first repair was actually delayed");
-    responses.borrow_mut().extend(held);
-    for _ in 0..24 {
-        subscriber.borrow_mut().tick().unwrap();
-        client.tick().unwrap();
-        while let Some(event) = stream.try_next_event() {
-            apply_subscription_event(&mut snapshot, event);
-        }
-    }
-    assert_eq!(snapshot.rows.len(), 1);
-    assert_eq!(
-        snapshot.rows[0].cell(&schema.tables[0], "title"),
-        Some(Value::String("1".to_owned()))
-    );
-}
-#[test]
-fn superseded_view_keeps_deferred_fate_dependency() {
-    let schema = schema();
-    let alice = AuthorSubject::for_test_bytes([0xb1; 16]);
-    let server = open_core(0xb1, AuthorSubject::SYSTEM, &schema);
-    let client = open_db(0xb2, alice, &schema);
-    let row = RowUuid::from_bytes([0xb3; 16]);
-    server
-        .insert_with_id("todos", row, cells("0", false, alice))
-        .unwrap();
-    let (upstream, downstream, _requests, responses) = duplex_with_taps();
-    let upstream = block_on(client.connect_upstream(upstream));
-    let subscriber = server.accept_subscriber(downstream, alice);
-    let mut stream =
-        prepared_subscribe(&client, &Query::from("todos"), global_subscribe_opts()).unwrap();
-    let mut held = Vec::new();
-    let mut introduced = None;
-    let mut introduced_time = None;
-    let mut snapshot = RelationSnapshot::default();
-    for revision in 0..2 {
-        if revision > 0 {
-            server
-                .update(
-                    "todos",
-                    row,
-                    BTreeMap::from([("title".to_owned(), Value::String(revision.to_string()))]),
-                )
-                .unwrap();
-        }
-        for _ in 0..8 {
-            subscriber.borrow_mut().tick().unwrap();
-            // Only the first snapshot needs a body fetch. Later deltas carry
-            // their own bodies but must wait behind that predecessor.
-            responses.borrow_mut().retain_mut(|message| {
-                match message {
-                    SyncMessage::ViewUpdate(payload) if payload.supporting_rows.is_snapshot() => {
-                        payload.version_carriers.clear();
-                    }
-                    SyncMessage::ViewUpdate(payload) => {
-                        introduced_time = mark_carriers_pending_for_fate_test(payload);
-                        introduced = payload
-                            .supporting_rows
-                            .added_rows()
-                            .first()
-                            .map(|row| row.version.tx);
-                    }
-                    SyncMessage::RowVersionPayloads { .. } => {
-                        held.push(message.clone());
-                        return false;
-                    }
-                    _ => {}
-                }
-                true
-            });
-            client.tick().unwrap();
-            while let Some(event) = stream.try_next_event() {
-                apply_subscription_event(&mut snapshot, event);
-            }
-        }
-    }
-    responses.borrow_mut().push_back(SyncMessage::FateUpdate {
-        tx_id: introduced.expect("later delta introduces transaction"),
-        fate: Fate::Accepted,
-        global_time: introduced_time,
-        durability: Some(DurabilityTier::Global),
-    });
-    client
-        .tick()
-        .expect("fate following an admitted but body-deferred view must remain valid");
-    let queued = match &upstream.borrow().link {
-        ConnectionLink::Upstream(state) => state.pending_row_version_repairs.len(),
-        _ => unreachable!("client upstream"),
-    };
-    assert!(
-        queued == 2,
-        "snapshot and all dependent deltas must remain ordered: {queued}"
-    );
-    assert!(
-        snapshot.rows.is_empty(),
-        "no successor may install before its missing predecessor"
-    );
-    assert!(!held.is_empty(), "the first repair was actually delayed");
-    // A newer complete snapshot normally supersedes an unsent old delta.
-    // The old delta is also the only carrier of the deferred fate's transaction.
-    server
-        .update(
-            "todos",
-            row,
-            BTreeMap::from([("title".to_owned(), Value::String("2".to_owned()))]),
-        )
-        .unwrap();
-    for _ in 0..8 {
-        subscriber.borrow_mut().tick().unwrap();
-    }
-    let mut fresh_snapshot = false;
-    for message in responses.borrow_mut().iter_mut() {
-        if let SyncMessage::ViewUpdate(payload) = message {
-            assert_eq!(payload.supporting_rows.added_rows().len(), 1);
-            payload.supporting_rows = crate::protocol::SupportingRowsUpdate::snapshot(
-                payload.supporting_rows.added_rows().to_vec(),
-            );
-            fresh_snapshot = true;
-        }
-    }
-    assert!(fresh_snapshot, "new complete recovery snapshot emitted");
-    client
-        .tick()
-        .expect("superseding snapshot applies while old body remains held");
-    {
-        let upstream = upstream.borrow();
-        let ConnectionLink::Upstream(state) = &upstream.link else {
-            unreachable!()
-        };
-        assert_eq!(
-            state.pending_row_version_repairs.len(),
-            1,
-            "only active obsolete repair remains"
-        );
-        assert_eq!(state.deferred_repair_fates.len(), 1);
-    }
-    responses.borrow_mut().extend(held);
-    for _ in 0..24 {
-        subscriber.borrow_mut().tick().unwrap();
-        client.tick().unwrap();
-        while let Some(event) = stream.try_next_event() {
-            apply_subscription_event(&mut snapshot, event);
-        }
-    }
-    let settled = client.write_state(introduced.unwrap()).unwrap();
-    assert_eq!(settled.fate, Fate::Accepted);
-    assert_eq!(settled.durability, DurabilityTier::Global);
-    assert_eq!(settled.global_time, introduced_time);
-    assert_eq!(snapshot.rows.len(), 1);
-    assert_eq!(
-        snapshot.rows[0].cell(&schema.tables[0], "title"),
-        Some(Value::String("2".to_owned()))
-    );
-}
-
 // Focused repair fixtures retain real carrier identities while controlling
 // settlement timing; the separate producer-driven test checks observer routing.
 fn mark_carriers_pending_for_fate_test(

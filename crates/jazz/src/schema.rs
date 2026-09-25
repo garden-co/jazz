@@ -47,9 +47,9 @@ pub const AUTHORITY_POLICY_BINDINGS_STORE: &str = "jazz_authority_policy_binding
 pub const SUBSCRIPTION_WATERMARKS_STORE: &str = "jazz_subscription_watermarks_v1";
 /// Versioned local current-row availability and ordering receipts.
 pub const LOCAL_ROW_AVAILABILITY_STORE: &str = "jazz_local_row_availability_v1";
-/// Append-only proof that a scope-isolated relay actually received a row
-/// version from its upstream authority. This is distinct from live result
-/// membership, whose later removals only govern future disclosure.
+/// Retired: the scope relay's row-version repair ledger. Nothing writes or
+/// reads it since the repair lane was removed; it stays registered so stores
+/// that already hold it still open.
 pub const SCOPE_RELAY_REPAIR_LEDGER_STORE: &str = "jazz_scope_relay_repair_ledger";
 /// Direct groove record store used to distinguish clean shutdown from crash
 /// recovery windows for bounded startup repair.

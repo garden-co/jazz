@@ -13,7 +13,7 @@ use jazz::ids::{
 use jazz::protocol::{
     CatalogueAck, CatalogueSnapshot, CurrentWriteSchema, DelegatedSessionBinding, LensOp,
     MigrationLens, PeerPayloadInventory, PhysicalColumnIdentity, PhysicalIdentityManifest,
-    PhysicalTableIdentity, RegisterShapeOptions, ResultRowLayer, RowVersionRef, RowVersionRefEntry,
+    PhysicalTableIdentity, RegisterShapeOptions, ResultRowLayer, RowVersionRefEntry,
     SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason,
     SubscribeServerFailureCode, SubscriptionKey, SyncMessage, TableLens, VersionBundle,
     VersionCarrier, VersionRecord, build_version_bundle_runs_from_singletons,
@@ -623,35 +623,6 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                     schema: lineage_target_id,
                 },
             })),
-        ),
-        (
-            "fetch_row_versions_todos",
-            "FetchRowVersions",
-            SyncMessage::FetchRowVersions {
-                requests: vec![RowVersionRef::new("todos", row, tx_id)],
-                delegated_session: None,
-            },
-        ),
-        (
-            "fetch_row_versions_delegated_session_claim_snapshot",
-            "FetchRowVersions",
-            SyncMessage::FetchRowVersions {
-                requests: vec![RowVersionRef::new("todos", row, tx_id)],
-                delegated_session: Some(DelegatedSessionBinding {
-                    identity: AuthorSubject::for_test_bytes([0x74; 16]),
-                    claims: BTreeMap::from([(
-                        "user_id".to_owned(),
-                        Value::String("delegated-repair-user".to_owned()),
-                    )]),
-                }),
-            },
-        ),
-        (
-            "row_version_payloads_empty",
-            "RowVersionPayloads",
-            SyncMessage::RowVersionPayloads {
-                version_bundles: Vec::new(),
-            },
         ),
     ]
     .into_iter()

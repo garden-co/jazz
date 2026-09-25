@@ -12,9 +12,8 @@ use super::*;
 use crate::ids::SchemaVersionId;
 use crate::node::maintained_subscription_view::MaintainedSubscriptionView;
 use crate::protocol::{
-    KnownStateDeclaration, PeerPayloadInventory, ResultMemberEntry, RowVersionRef, SupportingRow,
-    VersionBundle, VersionBundleRef, VersionCarrier, VersionRecord,
-    build_version_carriers_from_singletons,
+    KnownStateDeclaration, PeerPayloadInventory, ResultMemberEntry, SupportingRow, VersionBundle,
+    VersionBundleRef, VersionCarrier, VersionRecord, build_version_carriers_from_singletons,
 };
 
 fn apply_covered_input_closure_admission_delta(
@@ -879,18 +878,7 @@ where
                 | KnownStateDeclaration::FastWithAuthorizationProgress { position, .. }
                 | KnownStateDeclaration::Watermark { position, .. },
             ) => Some(*position),
-            Some(KnownStateDeclaration::ExactVersionSet { .. }) | None => None,
-        };
-        let known_state_exact_refs = match &known_state {
-            Some(KnownStateDeclaration::ExactVersionSet { versions }) => {
-                versions.iter().cloned().collect::<BTreeSet<_>>()
-            }
-            Some(
-                KnownStateDeclaration::Fast { .. }
-                | KnownStateDeclaration::FastWithAuthorizationProgress { .. }
-                | KnownStateDeclaration::Watermark { .. },
-            )
-            | None => BTreeSet::new(),
+            None => None,
         };
         let skipped_known_state_rows = result_member_adds
             .iter()
@@ -901,13 +889,6 @@ where
                     && position <= declared
                 {
                     return Some((row.table.to_string(), row.row_uuid));
-                }
-                if let Some(tx_id) = row.content_tx {
-                    let version_ref =
-                        RowVersionRef::new(row.table.to_string(), row.row_uuid, tx_id);
-                    if known_state_exact_refs.contains(&version_ref) {
-                        return Some((row.table.to_string(), row.row_uuid));
-                    }
                 }
                 None
             })
@@ -1030,13 +1011,11 @@ where
             .map(|(table, row, tx)| (table.as_str(), *row, *tx))
             .collect::<BTreeSet<_>>();
         for (tx_id, wanted_rows) in &wanted_add_rows_by_tx {
-            // Scope membership and immutable-body availability are independent.
-            // A resumed physical snapshot still declares every input, while a
-            // cursor/exact inventory may omit its already-held native bodies.
-            // An inaccurate availability claim is handled by scoped row repair.
-            if wanted_rows.iter().all(|(table, row)| {
-                known_state_exact_refs.contains(&RowVersionRef::new(table.clone(), *row, *tx_id))
-            }) || if let Some(position) = known_state_position {
+            // Scope membership and body availability are independent. A
+            // resumed snapshot still declares every input, while rows the
+            // receiver holds through its watermark ship no body. A receiver
+            // that lost one asks again without known state.
+            if if let Some(position) = known_state_position {
                 self.query_transaction_memo(*tx_id, &mut context)
                     .await?
                     .and_then(|tx| tx.global_time)

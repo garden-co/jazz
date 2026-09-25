@@ -119,19 +119,13 @@ pub enum SyncMessage {
     CatalogueAck(CatalogueAck),
     /// Downstream current-row view update.
     ViewUpdate(ViewUpdatePayload),
-    /// Repair-lane request for exact row-version payloads referenced by known-state dedup.
-    FetchRowVersions {
-        /// Exact version identities requested by the receiver.
-        requests: Vec<RowVersionRef>,
-        /// Policy snapshot that made the originating subscription/view update
-        /// visible. Only a trusted relay may delegate this to its upstream.
-        delegated_session: Option<DelegatedSessionBinding>,
-    },
-    /// Repair-lane response carrying canonical row-version payloads.
-    RowVersionPayloads {
-        /// Version bundles visible to the requesting link identity.
-        version_bundles: Vec<VersionBundle>,
-    },
+    /// Retired row-version repair request tag. Rows are identified by
+    /// `(row, row_seq)` and resent whole, so there is no per-version fetch.
+    #[doc(hidden)]
+    Reserved15(ReservedWireMessage),
+    /// Retired row-version repair response tag.
+    #[doc(hidden)]
+    Reserved16(ReservedWireMessage),
     /// Trusted upstream catalogue metadata required to decode immutable
     /// authored-version payloads before their view update arrives.
     CatalogueSnapshot(Box<CatalogueSnapshot>),
@@ -759,9 +753,6 @@ impl SyncMessage {
     pub fn validate_version_carriers(&self) -> Result<(), VersionBundleRunError> {
         match self {
             Self::CommitUnit { versions, .. } => validate_version_records(versions),
-            Self::RowVersionPayloads { version_bundles } => {
-                validate_version_bundles(version_bundles)
-            }
             Self::CurrentRowsReceipt(receipt) => {
                 validate_version_carrier_runs(&receipt.version_carriers)?;
                 for carrier in &receipt.version_carriers {
@@ -862,13 +853,6 @@ fn validate_version_carrier_runs(
         if let VersionCarrier::Run(run) = carrier {
             run.validate()?;
         }
-    }
-    Ok(())
-}
-
-fn validate_version_bundles(bundles: &[VersionBundle]) -> Result<(), VersionBundleRunError> {
-    for bundle in bundles {
-        validate_version_records(&bundle.versions)?;
     }
     Ok(())
 }
@@ -3609,11 +3593,6 @@ pub enum KnownStateDeclaration {
         authorization_progress: Option<u64>,
         /// Receiver's installed supporting-set revision.
         supporting_revision: [u8; 16],
-    },
-    /// Exact declaration of row-version payloads currently held by the receiver.
-    ExactVersionSet {
-        /// Explicit version refs the receiver can satisfy without a body.
-        versions: Vec<RowVersionRef>,
     },
 }
 

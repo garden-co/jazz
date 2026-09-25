@@ -42,7 +42,7 @@ pub(super) fn fast_current_membership_position(
             ..
         })
         | Some(KnownStateDeclaration::Watermark { position, .. }) => Some(*position),
-        Some(KnownStateDeclaration::ExactVersionSet { .. }) | None => None,
+        None => None,
     }
 }
 
@@ -59,9 +59,7 @@ pub(super) fn fast_authorization_progress(
             authorization_progress,
             ..
         }) => *authorization_progress,
-        Some(KnownStateDeclaration::Fast { .. })
-        | Some(KnownStateDeclaration::ExactVersionSet { .. })
-        | None => None,
+        Some(KnownStateDeclaration::Fast { .. }) | None => None,
     }
 }
 

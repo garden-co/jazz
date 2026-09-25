@@ -230,65 +230,6 @@ impl RoutedMessages {
 mod tests {
     use super::*;
     #[test]
-    fn full_ordinary_router_queue_keeps_progress_capacity() {
-        let message = SyncMessage::RowVersionPayloads {
-            version_bundles: Vec::new(),
-        };
-        let mut receiver = RoutedMessages::default();
-        for _ in 0..MAX_CHANNEL_QUEUED_MESSAGES {
-            receiver
-                .ready
-                .push_back(ReceivedSyncMessage::unleased(message.clone()));
-        }
-        let mut sender = RoutedMessages::default();
-        let context = WireInboundContext::new(
-            crate::wire::WIRE_PROTOCOL_VERSION,
-            crate::wire::FEATURE_SYNC_MESSAGE_PAYLOAD,
-            None,
-        );
-        let credits = std::sync::Arc::new(std::sync::Mutex::new(
-            crate::wire::channel_credit::ChannelCredits::new(context.clone()),
-        ));
-        for _ in 0..crate::wire::channels::CONTROL_RESERVE_MESSAGES {
-            let bytes = sender
-                .prepare(
-                    crate::wire::channels::PROGRESS_CHANNEL,
-                    false,
-                    crate::wire::encode_sync_message(&message).unwrap(),
-                )
-                .unwrap();
-            let lease = crate::wire::channel_credit::ChannelCredits::receive_message(
-                &credits,
-                ChannelClass::Progress,
-                bytes.len(),
-            )
-            .unwrap();
-            receiver
-                .receive(
-                    crate::wire::channels::PROGRESS_CHANNEL,
-                    ChannelClass::Progress,
-                    bytes,
-                    lease,
-                    &context,
-                )
-                .unwrap();
-            sender.accepted(crate::wire::channels::PROGRESS_CHANNEL, false);
-        }
-        assert_eq!(
-            receiver.ready.len(),
-            MAX_CHANNEL_QUEUED_MESSAGES + crate::wire::channels::CONTROL_RESERVE_MESSAGES
-        );
-        assert!(
-            crate::wire::channel_credit::ChannelCredits::receive_message(
-                &credits,
-                ChannelClass::Progress,
-                1
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
     fn routed_envelope_v1_corpus_is_exact() {
         let mut router = RoutedMessages::default();
         let ordinary = router.prepare(3, false, vec![0xaa, 0xbb]).unwrap();
