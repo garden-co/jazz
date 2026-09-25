@@ -536,12 +536,9 @@ where
             prepared_claim_binding_mode,
             false,
         )?;
-        // Retain the established, guarded primary-key paths. In particular a
-        // policy-scoped root must stay a complete current
-        // source: a point cap there can strand a deletion-driven membership
-        // transition. The new selector contributes only secondary equality
-        // indexes for concrete maintained roots; it must not widen that
-        // legacy guard by injecting another primary-key cap.
+        // Retain the established primary-key paths. The new selector
+        // contributes only secondary equality indexes for concrete maintained
+        // roots; it must not inject another primary-key cap.
         let mut access_paths = self.current_query_primary_key_access_paths(shape, binding)?;
         if allow_secondary_indexes {
             access_paths.extend(
