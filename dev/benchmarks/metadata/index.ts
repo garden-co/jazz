@@ -6,6 +6,8 @@ import { coreBenchmarks } from "../../../crates/jazz/benches/metadata.ts";
 import { policyDocumentBenchmarks } from "../../../examples/policy-scoped-documents/benchmarks/metadata.ts";
 import { bandChatBenchmarks } from "../../../examples/band-chat/benchmarks/metadata.ts";
 import { worldTourBenchmarks } from "../../../examples/world-tour/benchmarks/metadata.ts";
+import { chatBenchmarks } from "../../../examples/chat-react/benchmarks/metadata.ts";
+import { authChatBenchmarks } from "../../../examples/auth-simple-chat/benchmarks/metadata.ts";
 export { metadataRevision, throughput, type BenchmarkMetadata } from "./types.ts";
 
 export const benchmarkMetadata = [
@@ -17,6 +19,8 @@ export const benchmarkMetadata = [
   ...policyDocumentBenchmarks,
   ...bandChatBenchmarks,
   ...worldTourBenchmarks,
+  ...chatBenchmarks,
+  ...authChatBenchmarks,
 ];
 const byName = new Map(benchmarkMetadata.map((metadata) => [metadata.name, metadata]));
 if (byName.size !== benchmarkMetadata.length) throw new Error("Duplicate benchmark metadata name");
