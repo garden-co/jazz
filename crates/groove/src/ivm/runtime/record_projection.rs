@@ -384,9 +384,218 @@ enum WindowRoot<'a> {
 }
 
 /// Root ordering for one group's window (#3290): only this group's roots take
-/// part, indices are positions within the group, and only rows that differ
-/// between the windows (plus any unchanged row that must move) are keyed.
+/// part and indices are positions within the group. Rows byte-identical in
+/// both windows keep their relative order, so only the changed rows are keyed
+/// and placed (#3505).
 pub(super) fn apply_group_window_ordering(
+    before: &[WindowedRecord],
+    after: &[WindowedRecord],
+    key_of: &RootKeyOf<'_>,
+    root_descriptor: RecordDescriptor,
+    terminal: &mut TerminalDeltas,
+) -> Result<(), IvmRuntimeError> {
+    fn records(window: &[WindowedRecord]) -> rustc_hash::FxHashSet<&[u8]> {
+        window.iter().map(|(record, _)| record.as_ref()).collect()
+    }
+    let (before_records, after_records) = (records(before), records(after));
+    let changed = |window: &[WindowedRecord], other: &rustc_hash::FxHashSet<&[u8]>| {
+        window
+            .iter()
+            .enumerate()
+            .filter(|(_, (record, _))| !other.contains(record.as_ref()))
+            .map(|(index, (record, _))| Ok((index, key_of(record)?)))
+            .collect::<Result<Vec<_>, IvmRuntimeError>>()
+    };
+    let changes = GroupChanges {
+        removed: changed(before, &after_records)?,
+        added: changed(after, &before_records)?,
+    };
+    if apply_changed_group_ordering(&changes, root_descriptor, terminal) {
+        return Ok(());
+    }
+    apply_group_window_ordering_by_scan(before, after, key_of, root_descriptor, terminal)
+}
+
+/// One group's rows whose presence differs between the before and after
+/// windows, each with its window index and root key, ascending by index.
+/// Every other row is in both windows with identical bytes, hence identical
+/// sort key: those rows keep their relative order and need no edit.
+pub(super) struct GroupChanges {
+    pub(super) removed: Vec<(usize, Vec<u8>)>,
+    pub(super) added: Vec<(usize, Vec<u8>)>,
+}
+
+/// A changed row currently in the consumer's list. `gap` counts the unchanged
+/// rows before it; the vector holding these is in list order.
+struct FloatingRoot<'a> {
+    key: &'a [u8],
+    gap: usize,
+    settled: bool,
+}
+
+/// Places the changed rows of one group with O(changed²) work and without
+/// visiting unchanged rows (#3505). Insert indices are rewritten and a Move is
+/// appended only for a changed row that is not already between its
+/// neighbours; a rank-only change therefore costs one Move, not one per
+/// shifted row. Each index is a position in the consumer's list at the moment
+/// the edit applies.
+///
+/// Invariant: the unchanged rows plus every "settled" changed row appear in
+/// the consumer's list in after-window order. A row settles by being placed
+/// directly after its nearest settled predecessor in the after window (or
+/// found already there), which preserves the invariant; once every present
+/// after-row is settled, the list equals the after window.
+///
+/// Returns false, having changed nothing, when a key repeats within a window
+/// or an Insert addresses a key absent from the after window; the caller then
+/// falls back to scanning complete windows.
+pub(super) fn apply_changed_group_ordering(
+    changes: &GroupChanges,
+    root_descriptor: RecordDescriptor,
+    terminal: &mut TerminalDeltas,
+) -> bool {
+    let mut target = HashMap::<&[u8], usize>::default();
+    for (slot, (_, key)) in changes.added.iter().enumerate() {
+        if target.insert(key.as_slice(), slot).is_some() {
+            return false;
+        }
+    }
+    let mut departed = rustc_hash::FxHashSet::<&[u8]>::default();
+    for (_, key) in &changes.removed {
+        if !departed.insert(key.as_slice()) {
+            return false;
+        }
+    }
+    if target.is_empty() && departed.is_empty() {
+        return true;
+    }
+    let changed = |key: &[u8]| target.contains_key(key) || departed.contains(key);
+    for operation in &terminal.operations {
+        if operation.path.is_empty()
+            && changed(&operation.root_key)
+            && let TerminalEdit::Insert { key, .. } = &operation.edit
+            && !target.contains_key(key.as_slice())
+        {
+            return false;
+        }
+    }
+    let added = &changes.added;
+    let gap_of = |slot: usize| added[slot].0 - slot;
+    let mut floating = changes
+        .removed
+        .iter()
+        .enumerate()
+        .map(|(rank, (index, key))| FloatingRoot {
+            key: key.as_slice(),
+            gap: index - rank,
+            settled: false,
+        })
+        .collect::<Vec<_>>();
+    let mut settled = vec![false; added.len()];
+    let position = |floating: &[FloatingRoot<'_>], key: &[u8]| {
+        floating.iter().position(|root| root.key == key)
+    };
+    // The list slot directly after after-row `slot`'s nearest settled
+    // predecessor: a settled changed row in the same gap, else the unchanged
+    // row closing the previous gap (or the front).
+    let placement = |floating: &[FloatingRoot<'_>], settled: &[bool], slot: usize| {
+        let gap = gap_of(slot);
+        let mut previous = slot;
+        while previous > 0 {
+            previous -= 1;
+            if gap_of(previous) != gap {
+                break;
+            }
+            if settled[previous] {
+                let at =
+                    position(floating, &added[previous].1).expect("a settled row is in the list");
+                return (at + 1, gap);
+            }
+        }
+        (floating.partition_point(|root| root.gap < gap), gap)
+    };
+    for operation in &mut terminal.operations {
+        if !operation.path.is_empty() || !changed(&operation.root_key) {
+            continue;
+        }
+        match &mut operation.edit {
+            TerminalEdit::Insert { index, key, .. } => {
+                let slot = target[key.as_slice()];
+                if let Some(existing) = position(&floating, key) {
+                    floating.remove(existing);
+                }
+                settled[slot] = false;
+                let (at, gap) = placement(&floating, &settled, slot);
+                floating.insert(
+                    at,
+                    FloatingRoot {
+                        key: added[slot].1.as_slice(),
+                        gap,
+                        settled: true,
+                    },
+                );
+                settled[slot] = true;
+                *index = gap + at;
+            }
+            TerminalEdit::Remove { key } => {
+                if let Some(existing) = position(&floating, key) {
+                    floating.remove(existing);
+                }
+                if let Some(slot) = target.get(key.as_slice()) {
+                    settled[*slot] = false;
+                }
+            }
+            TerminalEdit::Update { .. } | TerminalEdit::Move { .. } => {}
+        }
+    }
+    for slot in 0..added.len() {
+        if settled[slot] {
+            continue;
+        }
+        let key = added[slot].1.as_slice();
+        let Some(current) = position(&floating, key) else {
+            continue;
+        };
+        let gap = gap_of(slot);
+        let (after_predecessor, _) = placement(&floating, &settled, slot);
+        let in_place = floating[current].gap == gap
+            && current >= after_predecessor
+            && floating[after_predecessor..current]
+                .iter()
+                .all(|root| !root.settled);
+        if in_place {
+            floating[current].settled = true;
+            settled[slot] = true;
+            continue;
+        }
+        floating.remove(current);
+        let (at, gap) = placement(&floating, &settled, slot);
+        floating.insert(
+            at,
+            FloatingRoot {
+                key,
+                gap,
+                settled: true,
+            },
+        );
+        settled[slot] = true;
+        terminal.operations.push(TerminalOperation {
+            root_descriptor,
+            root_key: key.to_vec(),
+            path: Vec::new(),
+            edit: TerminalEdit::Move {
+                key: key.to_vec(),
+                index: gap + at,
+            },
+        });
+    }
+    true
+}
+
+/// The pre-#3505 placement: walks both complete windows and repairs the list
+/// front to back. Kept for the degenerate inputs the changed-row placement
+/// declines (a repeated root key within a window).
+fn apply_group_window_ordering_by_scan(
     before: &[WindowedRecord],
     after: &[WindowedRecord],
     key_of: &RootKeyOf<'_>,

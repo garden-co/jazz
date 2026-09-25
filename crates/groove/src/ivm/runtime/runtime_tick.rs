@@ -1010,6 +1010,9 @@ impl<'a> IncrementalEvaluation<'a> {
         if self.discarded {
             return;
         }
+        // Root ordering snapshots share TopBy group state. Release them before
+        // folding overlays, or the fold would copy every touched group.
+        self.root_ordering_windows.clear();
         // Drop the committed entries before folding staged COW state. This
         // makes recursive closures and arrangement bases uniquely owned while
         // leaving unrelated graph state untouched.

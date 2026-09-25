@@ -558,7 +558,9 @@ impl SparseGroups {
 /// large parent collection merely because the tick later needs atomic commit.
 #[derive(Clone, Debug, Default)]
 pub(super) struct CollectByGroup {
-    base: Rc<BTreeMap<CollectByOrderKey, i64>>,
+    /// Counted so a row's rank among positive entries is not a linear walk
+    /// (#3505); the staged overlay stays a small sparse map.
+    base: Rc<CountedMap<CollectByOrderKey>>,
     overlay: Rc<BTreeMap<CollectByOrderKey, Option<i64>>>,
 }
 
@@ -576,10 +578,33 @@ impl CollectByGroup {
     }
 
     pub(super) fn count_before(&self, key: &CollectByOrderKey) -> usize {
-        self.iter()
-            .take_while(|(candidate, _)| *candidate < key)
-            .filter(|(_, weight)| **weight > 0)
-            .count()
+        self.count_before_each(std::iter::once(key))[0]
+    }
+
+    /// Positive entries before each of `keys` (ascending): the counted base's
+    /// rank, corrected by the staged overlay entries below the key in one
+    /// merged walk. Costs O(log n) per key plus the overlay, not the group.
+    pub(super) fn count_before_each<'k>(
+        &self,
+        keys: impl IntoIterator<Item = &'k CollectByOrderKey>,
+    ) -> Vec<usize> {
+        let mut overlay = self.overlay.iter().peekable();
+        let mut adjustment = 0isize;
+        let mut ranks = Vec::new();
+        let mut previous: Option<&CollectByOrderKey> = None;
+        for key in keys {
+            debug_assert!(previous.is_none_or(|previous| previous <= key));
+            previous = Some(key);
+            while let Some((candidate, weight)) = overlay.next_if(|(candidate, _)| *candidate < key)
+            {
+                let staged = weight.is_some_and(|weight| weight > 0);
+                let base = self.base.get(candidate).is_some_and(|weight| *weight > 0);
+                adjustment += isize::from(staged) - isize::from(base);
+            }
+            let rank = self.base.positive_before(key) as isize + adjustment;
+            ranks.push(usize::try_from(rank).expect("rank counts present entries"));
+        }
+        ranks
     }
 
     pub(super) fn is_empty(&self) -> bool {
@@ -613,7 +638,7 @@ impl CollectByGroup {
 }
 
 pub(super) struct CollectByGroupIter<'a> {
-    base: std::iter::Peekable<std::collections::btree_map::Iter<'a, CollectByOrderKey, i64>>,
+    base: std::iter::Peekable<counted_map::Iter<'a, CollectByOrderKey>>,
     overlay:
         std::iter::Peekable<std::collections::btree_map::Iter<'a, CollectByOrderKey, Option<i64>>>,
 }
@@ -767,64 +792,118 @@ pub(super) fn validate_arg_by_primary_key_indices(
 }
 
 /// Single-tick evaluator over a deduplicated graph.
+///
+/// A touched TopBy group's ordered state at its first touch in this tick and
+/// after its latest touch, plus the order keys touched in between (#3505).
+/// The snapshots share the retained group (two reference counts), so
+/// recording costs nothing proportional to the group. An output that applies
+/// positions ranks only the changed rows through the counted index; complete
+/// windows are materialized only for a bounded window or a filtering chain.
 #[derive(Clone, Debug, Default)]
 pub(super) struct RootOrderingWindows {
-    /// Every touched group's before/after window records, in evaluation
-    /// order. Position maps are built only when an output applies them.
-    entries: Vec<(Vec<u8>, GroupWindow)>,
+    groups: HashMap<Vec<u8>, GroupTransition>,
     descriptor: Option<RecordDescriptor>,
     identity: Vec<usize>,
-    /// Each group's first and last entry, so an output reaching a few groups
-    /// does not scan every touched group's windows. Reset by `record`.
-    group_entries: std::cell::OnceCell<HashMap<Vec<u8>, (usize, usize)>>,
+    top_by: Option<TopByOp>,
 }
 
-/// A group's before and after window records.
-type WindowPair<'a> = (&'a [WindowedRecord], &'a [WindowedRecord]);
+#[derive(Clone, Debug)]
+struct GroupTransition {
+    before: CollectByGroup,
+    after: CollectByGroup,
+    /// Every order key whose weight may differ between the snapshots. False
+    /// after a replacement, which changes keys it never touches.
+    touched: BTreeSet<CollectByOrderKey>,
+    touched_complete: bool,
+}
 
-#[derive(Clone, Debug, Default)]
-struct GroupWindow {
-    before: Vec<WindowedRecord>,
-    after: Vec<WindowedRecord>,
+/// Rows of one group's before and after windows that differ by bytes, each
+/// with its window index and encoded record, ascending by index.
+pub(super) struct ChangedWindowRows {
+    pub(super) removed: Vec<(usize, Bytes)>,
+    pub(super) added: Vec<(usize, Bytes)>,
 }
 
 impl RootOrderingWindows {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn record(
         &mut self,
         descriptor: RecordDescriptor,
         top_by: &TopByOp,
         group: &[u8],
-        before: &[WindowedRecord],
-        after: &[WindowedRecord],
+        before: impl FnOnce() -> CollectByGroup,
+        after: &CollectByGroup,
+        touched: impl IntoIterator<Item = CollectByOrderKey>,
+        touched_complete: bool,
     ) {
         if self.descriptor.is_none() {
             self.descriptor = Some(descriptor);
             self.identity = top_by_identity_fields(top_by, descriptor.fields().len());
+            self.top_by = Some(top_by.clone());
         }
-        self.group_entries.take();
-        self.entries.push((
-            group.to_vec(),
-            GroupWindow {
-                before: before.to_vec(),
-                after: after.to_vec(),
-            },
-        ));
+        let transition = self
+            .groups
+            .entry(group.to_vec())
+            .or_insert_with(|| GroupTransition {
+                before: before(),
+                after: CollectByGroup::default(),
+                touched: BTreeSet::new(),
+                touched_complete: true,
+            });
+        transition.after = after.clone();
+        transition.touched.extend(touched);
+        transition.touched_complete &= touched_complete;
     }
 
-    /// A group's window across this tick: its first before and last after.
-    fn group_window(&self, group: &[u8]) -> Option<WindowPair<'_>> {
-        let index = self.group_entries.get_or_init(|| {
-            let mut index = HashMap::<Vec<u8>, (usize, usize)>::default();
-            for (position, (group, _)) in self.entries.iter().enumerate() {
-                index
-                    .entry(group.clone())
-                    .and_modify(|(_, last)| *last = position)
-                    .or_insert((position, position));
+    /// A group's complete before and after windows across this tick.
+    fn group_window(&self, group: &[u8]) -> Option<(Vec<WindowedRecord>, Vec<WindowedRecord>)> {
+        let transition = self.groups.get(group)?;
+        let top_by = self.top_by.as_ref()?;
+        Some((
+            top_by_window_from_ordered_group(Some(&transition.before), top_by),
+            top_by_window_from_ordered_group(Some(&transition.after), top_by),
+        ))
+    }
+
+    /// The rows whose presence changed in a zero-offset unbounded window,
+    /// ranked through the counted group index: O(changed · log n), not O(n).
+    /// `None` when the window is bounded or the touched keys are incomplete.
+    fn changed_rows(&self, group: &[u8]) -> Option<ChangedWindowRows> {
+        let transition = self.groups.get(group)?;
+        let top_by = self.top_by.as_ref()?;
+        if top_by.offset != 0
+            || top_by.limit != TopByLimit::Unbounded
+            || !transition.touched_complete
+        {
+            return None;
+        }
+        let present = |group: &CollectByGroup, key: &CollectByOrderKey| {
+            group.get(key).is_some_and(|weight| *weight > 0)
+        };
+        let mut removed = Vec::new();
+        let mut added = Vec::new();
+        for key in &transition.touched {
+            match (
+                present(&transition.before, key),
+                present(&transition.after, key),
+            ) {
+                (true, false) => removed.push(key),
+                (false, true) => added.push(key),
+                _ => {}
             }
-            index
-        });
-        let &(first, last) = index.get(group)?;
-        Some((&self.entries[first].1.before, &self.entries[last].1.after))
+        }
+        let rows = |group: &CollectByGroup, keys: Vec<&CollectByOrderKey>| {
+            group
+                .count_before_each(keys.iter().copied())
+                .into_iter()
+                .zip(keys)
+                .map(|(index, key)| (index, key.1.clone()))
+                .collect::<Vec<_>>()
+        };
+        Some(ChangedWindowRows {
+            removed: rows(&transition.before, removed),
+            added: rows(&transition.after, added),
+        })
     }
 }
 
@@ -1332,7 +1411,7 @@ impl TickEvaluator<'_> {
     }
 
     pub(super) fn apply_root_ordering(
-        &self,
+        &mut self,
         ordering_node: NodeId,
         root_descriptor: RecordDescriptor,
         identity: Option<(&RootIdentity, &BTreeSet<Vec<u8>>)>,
@@ -1351,11 +1430,12 @@ impl TickEvaluator<'_> {
         let Some(descriptor) = windows.descriptor else {
             return Ok(());
         };
+        let graph = self.graph;
         let key_of = |record: &[u8]| {
             if !identity.projected {
                 return encoded_identity_key_part(descriptor, record, &windows.identity);
             }
-            match project_window_record(self.graph, &identity.chain, descriptor, record)? {
+            match project_window_record(graph, &identity.chain, descriptor, record)? {
                 Some((output, projected)) => {
                     encoded_identity_key_part(output, &projected, &identity.fields)
                 }
@@ -1363,12 +1443,38 @@ impl TickEvaluator<'_> {
                 None => Ok(Vec::new()),
             }
         };
-        if !identity.filtered && !identity.projected {
+        let mut visited = 0usize;
+        if !identity.filtered {
             for group in groups {
+                // Every window row reaches the output, so only the rows whose
+                // presence changed need a rank (#3505).
+                if let Some(changed) = windows.changed_rows(group) {
+                    visited += changed.removed.len() + changed.added.len();
+                    let keyed = |rows: &[(usize, Bytes)]| {
+                        rows.iter()
+                            .map(|(index, record)| Ok((*index, key_of(record)?)))
+                            .collect::<Result<Vec<_>, IvmRuntimeError>>()
+                    };
+                    let changes = GroupChanges {
+                        removed: keyed(&changed.removed)?,
+                        added: keyed(&changed.added)?,
+                    };
+                    if apply_changed_group_ordering(&changes, root_descriptor, terminal) {
+                        continue;
+                    }
+                }
                 if let Some((before, after)) = windows.group_window(group) {
-                    apply_group_window_ordering(before, after, &key_of, root_descriptor, terminal)?;
+                    visited += before.len() + after.len();
+                    apply_group_window_ordering(
+                        &before,
+                        &after,
+                        &key_of,
+                        root_descriptor,
+                        terminal,
+                    )?;
                 }
             }
+            self.metrics.root_ordering_position_records += visited;
             return Ok(());
         }
         // What this tick's output edits say about each root key: present
@@ -1391,7 +1497,7 @@ impl TickEvaluator<'_> {
             let mut kept = Vec::with_capacity(window.len());
             for entry in window {
                 let reaches = match window_record_reaches_output(
-                    self.graph,
+                    graph,
                     &identity.chain,
                     descriptor,
                     &entry.0,
@@ -1419,12 +1525,14 @@ impl TickEvaluator<'_> {
             let Some((before, after)) = windows.group_window(group) else {
                 continue;
             };
+            visited += before.len() + after.len();
             let (before, after) = (
-                reaching(before, after, false)?,
-                reaching(after, before, true)?,
+                reaching(&before, &after, false)?,
+                reaching(&after, &before, true)?,
             );
             apply_group_window_ordering(&before, &after, &key_of, root_descriptor, terminal)?;
         }
+        self.metrics.root_ordering_position_records += visited;
         Ok(())
     }
 
@@ -2593,28 +2701,49 @@ impl TickEvaluator<'_> {
 
         let mut output = Vec::new();
         let replace = self.context.arrangement_update_mode == ArrangementUpdateMode::Replace;
-        if !replace
-            && top_by.offset == 0
-            && top_by.limit == TopByLimit::Unbounded
-            && !self.root_ordering_windows.contains_key(&node)
-        {
+        let positions = self.root_ordering_windows.contains_key(&node);
+        if !replace && top_by.offset == 0 && top_by.limit == TopByLimit::Unbounded {
             // Without a selection boundary, only touched records can change
-            // membership. Structured collectors own their positional edits;
-            // plain consumers requesting generic positions retain the window
-            // path below. Keep the same ordered state for subsequent snapshots
-            // and for a plain consumer attached on a later tick.
+            // membership. A consumer applying positions gets the group's
+            // before/after snapshots and touched keys (reference counts, not
+            // windows) and ranks only the rows that changed (#3505).
             for (group_prefix, group_deltas) in &touched_groups {
+                let before = positions.then(|| {
+                    state
+                        .value()
+                        .groups
+                        .get(group_prefix)
+                        .cloned()
+                        .unwrap_or_default()
+                });
                 let group = state
                     .value_mut()
                     .groups
                     .get_or_default(group_prefix.clone());
-                output.extend(update_unbounded_top_by_group(
+                let mut touched = Vec::new();
+                output.extend(update_unbounded_top_by_group_touching(
                     output_desc,
                     top_by,
                     group,
                     group_deltas,
+                    positions.then_some(&mut touched),
                 )?);
                 self.metrics.top_by_delta_membership_records += group_deltas.len();
+                if let Some(before) = before {
+                    let windows = self
+                        .root_ordering_windows
+                        .get_mut(&node)
+                        .expect("positions were requested");
+                    windows.record(
+                        output_desc,
+                        top_by,
+                        group_prefix,
+                        || before,
+                        group,
+                        touched,
+                        true,
+                    );
+                }
             }
             state
                 .value_mut()
@@ -2626,22 +2755,23 @@ impl TickEvaluator<'_> {
                 deltas: output,
             });
         }
-        let before = touched_groups
+        let before_groups = touched_groups
             .keys()
             .map(|group| {
-                Ok((
+                (
                     group.clone(),
                     if replace {
-                        Vec::new()
+                        CollectByGroup::default()
                     } else {
-                        top_by_window_from_ordered_group(state.value().groups.get(group), top_by)
+                        state.value().groups.get(group).cloned().unwrap_or_default()
                     },
-                ))
+                )
             })
-            .collect::<Result<BTreeMap<_, _>, IvmRuntimeError>>()?;
+            .collect::<BTreeMap<_, _>>();
         if replace {
             state.value_mut().groups.clear();
         }
+        let mut touched_keys = BTreeMap::<Vec<u8>, Vec<CollectByOrderKey>>::new();
         for (group_prefix, group_deltas) in &touched_groups {
             let group = state
                 .value_mut()
@@ -2653,6 +2783,12 @@ impl TickEvaluator<'_> {
                     delta.record.clone(),
                 );
                 let weight = group.get(&order_key).copied().unwrap_or_default() + delta.weight;
+                if positions {
+                    touched_keys
+                        .entry(group_prefix.clone())
+                        .or_default()
+                        .push(order_key.clone());
+                }
                 group.set(order_key, weight);
             }
         }
@@ -2661,15 +2797,28 @@ impl TickEvaluator<'_> {
             .remove_empty_touched_groups(touched_groups.keys().cloned());
         state.mark_forward_as_of(sub_tick)?;
         for group_prefix in touched_groups.keys() {
-            let before = before.get(group_prefix).cloned().unwrap_or_default();
-            let after =
-                top_by_window_from_ordered_group(state.value().groups.get(group_prefix), top_by);
-            let position_records = before.len().saturating_add(after.len());
+            let before_group = &before_groups[group_prefix];
+            let after_group = state
+                .value()
+                .groups
+                .get(group_prefix)
+                .cloned()
+                .unwrap_or_default();
+            let before = top_by_window_from_ordered_group(Some(before_group), top_by);
+            let after = top_by_window_from_ordered_group(Some(&after_group), top_by);
             if let Some(windows) = self.root_ordering_windows.get_mut(&node) {
-                windows.record(output_desc, top_by, group_prefix, &before, &after);
-                self.metrics.root_ordering_position_records += position_records;
+                windows.record(
+                    output_desc,
+                    top_by,
+                    group_prefix,
+                    || before_group.clone(),
+                    &after_group,
+                    touched_keys.remove(group_prefix).unwrap_or_default(),
+                    !replace,
+                );
             } else {
-                self.metrics.root_ordering_position_records_skipped += position_records;
+                self.metrics.root_ordering_position_records_skipped +=
+                    before.len().saturating_add(after.len());
             }
             output.extend(diff_record_windows(before, after));
         }

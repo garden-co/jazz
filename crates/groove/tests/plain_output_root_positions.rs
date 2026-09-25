@@ -123,6 +123,9 @@ async fn a_row_that_only_changes_rank_is_reordered_by_moves_alone() {
 
     let tick = subscription.try_recv().unwrap();
     let operations = &tick.terminal_sinks["shapes"].operations;
+    // Every other shape keeps its relative order, so one move of the changed
+    // shape suffices (#3505), not one per shifted shape.
+    assert_eq!(operations.len(), 1, "{operations:?}");
     let mut order: Vec<u64> = (0..SHAPES).collect();
     for operation in operations {
         let TerminalEdit::Move { key, index } = &operation.edit else {
