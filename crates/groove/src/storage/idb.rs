@@ -731,6 +731,38 @@ mod tests {
         }
     }
 
+    /// A query can retain a journal write while the foreground owner awaits a
+    /// different storage read. Do not repoll that original query in this receipt.
+    #[futures_test::test]
+    async fn foreground_read_finishes_a_parked_idb_mutation() {
+        let pages = CommitErrorPageStore::default();
+        let storage = IdbStorage::open(pages.clone(), &["records"]).await.unwrap();
+        let (release, paused) = futures::channel::oneshot::channel();
+        *pages.pause_next_commit.borrow_mut() = Some(paused);
+        let mut writer = storage.put_if_absent(
+            "records".into(),
+            b"journal".to_vec(),
+            b"pending-install".to_vec(),
+        );
+        assert!(futures::poll!(writer.as_mut()).is_pending());
+        let mut reader = storage.get("records".into(), b"journal".to_vec());
+        assert!(futures::poll!(reader.as_mut()).is_pending());
+        release.send(Ok(())).unwrap();
+        match futures::poll!(reader.as_mut()) {
+            Poll::Ready(Ok(value)) => assert_eq!(value, Some(b"pending-install".to_vec())),
+            result => panic!("foreground read did not finish the parked mutation: {result:?}"),
+        }
+        assert_eq!(writer.await.unwrap(), None);
+        let reopened = IdbStorage::open(pages, &["records"]).await.unwrap();
+        assert_eq!(
+            reopened
+                .get("records".into(), b"journal".to_vec())
+                .await
+                .unwrap(),
+            Some(b"pending-install".to_vec())
+        );
+    }
+
     /// A retained cold query must not block a second storage read or writer.
     /// This storage-level receipt controls a single page future, a scheduling
     /// boundary which cannot be asserted deterministically through a server.
