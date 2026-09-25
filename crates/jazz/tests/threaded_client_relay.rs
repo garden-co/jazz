@@ -380,9 +380,6 @@ fn ui_thread(
         drain_ui_downstream(&mut ui, &from_worker);
         let row_uuid = row((idx % 24) as u8 + 1);
         let mut commit = MergeableCommit::new(TABLE, row_uuid, 10 + idx).made_by(ui_author);
-        if let Some(parent) = parents.get(&row_uuid).copied() {
-            commit = commit.parents(vec![parent]);
-        }
         let title = format!("merge-{idx}");
         let (tx_id, unit) = commit_unit(&mut ui, commit.cells(cells(title, ui_owner)));
         parents.insert(row_uuid, tx_id);

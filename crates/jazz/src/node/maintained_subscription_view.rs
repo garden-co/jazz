@@ -12,9 +12,8 @@ use groove::records::{
 
 use super::NodeAliases;
 use super::codec::{
-    VersionLayer, VersionRow, VersionRowParts, authored_column_ids_from_value,
-    deletion_event_from_value, history_values_from_parts, nullable_value,
-    register_values_from_parts, runtime_result_identity_bytes, tx_ids_from_value,
+    VersionRow, VersionRowParts, authored_column_ids_from_value, deletion_event_from_value,
+    history_values_from_parts, nullable_value, runtime_result_identity_bytes,
     version_tx_id_from_aliases,
 };
 use super::query_engine::{
@@ -39,7 +38,7 @@ use crate::tools::{ObjectId, OutputOccurrenceId};
 use crate::tx::TxId;
 
 type TableSchemas = BTreeMap<String, TableSchema>;
-type VersionDecodePlanCache = BTreeMap<(String, VersionLayer), VersionDecodePlan>;
+type VersionDecodePlanCache = BTreeMap<(String, WitnessLayer), VersionDecodePlan>;
 
 #[derive(Clone, Debug)]
 struct VersionDecodePlan {
@@ -49,7 +48,6 @@ struct VersionDecodePlan {
     tx_time_idx: usize,
     tx_node_idx: usize,
     schema_version_idx: usize,
-    parents_idx: usize,
     created_by_idx: usize,
     created_at_idx: usize,
     updated_by_idx: usize,
@@ -381,10 +379,29 @@ struct ReplacementIndex {
     key_bytes: usize,
 }
 
+/// Which witness terminal a maintained row came from. Storage has one row
+/// image per version; a deletion witness is the image of a row whose
+/// `_deletion` cell is set, while content witnesses never carry it.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+enum WitnessLayer {
+    Content,
+    Deletion,
+}
+
+impl WitnessLayer {
+    fn of(row: &VersionRow) -> Self {
+        if row.deletion().is_some() {
+            Self::Deletion
+        } else {
+            Self::Content
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct VersionIdentity {
     table: groove::Intern<String>,
-    layer: VersionLayer,
+    layer: WitnessLayer,
     raw_record: Arc<[u8]>,
 }
 
@@ -392,7 +409,7 @@ struct VersionIdentity {
 struct VersionSortKey {
     table: groove::Intern<String>,
     row_uuid: RowUuid,
-    layer: VersionLayer,
+    layer: WitnessLayer,
     raw_record: Arc<[u8]>,
 }
 
@@ -400,7 +417,7 @@ struct VersionSortKey {
 struct ReplacementKey {
     table: groove::Intern<String>,
     row_uuid: RowUuid,
-    layer: VersionLayer,
+    layer: WitnessLayer,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -594,7 +611,7 @@ impl MaintainedSubscriptionView {
             version: RowVersionRefEntry {
                 tx,
                 schema_version: None,
-                layer: if row.layer() == VersionLayer::Content {
+                layer: if WitnessLayer::of(row) == WitnessLayer::Content {
                     ResultRowLayer::Content
                 } else {
                     ResultRowLayer::Deletion
@@ -899,12 +916,12 @@ impl MaintainedSubscriptionView {
                 }
                 DecodedMaintainedEvent::ReplacementContent { source, row } => {
                     let identity = VersionIdentity::for_row(&row);
-                    let key = ReplacementKey::for_row(&row, VersionLayer::Content);
+                    let key = ReplacementKey::for_row(&row);
                     NetEvent::Replacement(source, key, identity, row)
                 }
                 DecodedMaintainedEvent::ReplacementDeletion { source, row } => {
                     let identity = VersionIdentity::for_row(&row);
-                    let key = ReplacementKey::for_row(&row, VersionLayer::Deletion);
+                    let key = ReplacementKey::for_row(&row);
                     NetEvent::Replacement(source, key, identity, row)
                 }
                 DecodedMaintainedEvent::SharedVersion { source, row } => {
@@ -985,7 +1002,7 @@ impl MaintainedSubscriptionView {
                 NetEvent::SharedVersion(source, identity, row) => {
                     let covered_input =
                         self.supporting_row_for_version(source, &row, node_aliases)?;
-                    let key = ReplacementKey::for_row(&row, identity.layer);
+                    let key = ReplacementKey::for_row(&row);
                     let payload = VersionPayload::prepare(row, &identity, node_aliases)?;
                     self.versions.apply_delta(Arc::clone(&payload), weight);
                     self.replacements
@@ -1051,6 +1068,15 @@ impl MaintainedSubscriptionView {
 
     pub(crate) fn acknowledged_supporting_rows(&self) -> impl Iterator<Item = &SupportingRow> {
         self.supporting.acknowledged_rows()
+    }
+
+    /// The only physical table this view reads, when it reads exactly one.
+    pub(crate) fn single_physical_table(
+        &self,
+    ) -> Option<(&str, crate::ids::GlobalPhysicalTableId)> {
+        let mut tables = self.physical_tables.iter();
+        let (table, id) = tables.next()?;
+        tables.next().is_none().then_some((table.as_str(), *id))
     }
 
     pub(crate) fn supporting_rows(&self) -> impl Iterator<Item = &SupportingRow> {
@@ -1638,7 +1664,7 @@ impl MaintainedSubscriptionView {
                     fact.version.tx == tx_id
                         && version.table() == table.as_str()
                         && version.row_uuid() == row_uuid
-                        && version.deletion().is_none()
+                        && !version.is_deleted()
                 })
             || self
                 .replacement_for(table.as_str(), row_uuid)
@@ -1795,9 +1821,9 @@ fn covered_input_for_version(
         version: RowVersionRefEntry {
             tx,
             schema_version: None,
-            layer: match row.layer() {
-                VersionLayer::Content => ResultRowLayer::Content,
-                VersionLayer::Deletion => ResultRowLayer::Deletion,
+            layer: match WitnessLayer::of(row) {
+                WitnessLayer::Content => ResultRowLayer::Content,
+                WitnessLayer::Deletion => ResultRowLayer::Deletion,
             },
             batch: Some(tx),
             branch_or_prefix: (!branch_or_prefix.is_empty()).then_some(branch_or_prefix),
@@ -3016,9 +3042,9 @@ fn decode_typed_version_witness(
         ))?;
     let deletion = tagged_deletion(record.get_idx(field_idx(record, &schema.deletion_field)?)?)?;
     let layer = if deletion.is_some() {
-        VersionLayer::Deletion
+        WitnessLayer::Deletion
     } else {
-        VersionLayer::Content
+        WitnessLayer::Content
     };
     let cache_key = (table.name.clone(), layer);
     if !decode_plan_cache.contains_key(&cache_key) {
@@ -3047,7 +3073,7 @@ fn decode_typed_version_witness(
         },
         None => BranchKey::default(),
     };
-    let authored_columns = if layer == VersionLayer::Content {
+    let authored_columns = if layer == WitnessLayer::Content {
         nullable_value(record.get_idx(plan.authored_columns_idx)?)?
             .map(authored_column_ids_from_value)
             .transpose()?
@@ -3064,7 +3090,6 @@ fn decode_typed_version_witness(
             plan.schema_version_idx,
         )?),
         tx_time,
-        parents: tx_ids_from_value(record.get_idx(plan.parents_idx)?)?,
         created_by: RowAuthor::from_record(record.get_record(plan.created_by_idx)?)
             .map_err(|_| groove::records::Error::NonCanonicalRecord)?
             .as_author_subject(),
@@ -3090,11 +3115,7 @@ fn decode_typed_version_witness(
         authored_columns,
         deletion,
     };
-    let values = if layer == VersionLayer::Content {
-        history_values_from_parts(table, &parts)?
-    } else {
-        register_values_from_parts(&parts)?
-    };
+    let values = history_values_from_parts(table, &parts)?;
     // Query witnesses already contain encoded nullable user cells. Copy those
     // fields into the history layout instead of allocating a cells map, cloning
     // its values, and encoding them again. Metadata still follows the existing
@@ -3102,8 +3123,12 @@ fn decode_typed_version_witness(
     let raw = plan.descriptor.create_with_encoded_fields::<super::Error>(
         record.raw().len(),
         |index, output| {
-            if layer == VersionLayer::Content && index >= 10 && index < 10 + table.columns.len() {
-                let source_index = plan.user_indices[&table.columns[index - 10].name];
+            let user_cells = super::codec::HistoryRowRecord::USER_CELLS;
+            if layer == WitnessLayer::Content
+                && index >= user_cells
+                && index < user_cells + table.columns.len()
+            {
+                let source_index = plan.user_indices[&table.columns[index - user_cells].name];
                 if record.descriptor().fields()[source_index].value_type
                     == plan.descriptor.fields()[index].value_type
                 {
@@ -3128,7 +3153,7 @@ fn decode_typed_version_witness(
         // Internal byte-equivalence oracle: public query equality would not
         // detect a change to the immutable history record's exact encoding.
         let reference_parts = &mut parts;
-        if layer == VersionLayer::Content {
+        if layer == WitnessLayer::Content {
             for column in &table.columns {
                 if let Some(value) =
                     nullable_value(record.get_idx(plan.user_indices[&column.name])?)?
@@ -3137,11 +3162,7 @@ fn decode_typed_version_witness(
                 }
             }
         }
-        let reference_values = if layer == VersionLayer::Content {
-            history_values_from_parts(table, reference_parts)?
-        } else {
-            register_values_from_parts(reference_parts)?
-        };
+        let reference_values = history_values_from_parts(table, reference_parts)?;
         assert_eq!(raw, plan.descriptor.create(&reference_values)?);
     }
     let version = VersionRow {
@@ -3157,20 +3178,16 @@ fn build_version_decode_plan(
     terminal_descriptor: RecordDescriptor,
     schema: &VersionWitnessSchema,
     table: &TableSchema,
-    layer: VersionLayer,
+    layer: WitnessLayer,
 ) -> Result<VersionDecodePlan, super::Error> {
-    let descriptor = if layer == VersionLayer::Deletion {
-        table.register_storage_table().record_schema()
-    } else {
-        table.history_storage_table().record_schema()
-    };
+    let descriptor = table.history_storage_table().record_schema();
     let branch_idx = schema
         .identity
         .branch_or_prefix_field
         .as_ref()
         .map(|field| field_idx_in_descriptor(terminal_descriptor, field))
         .transpose()?;
-    let user_indices = if layer == VersionLayer::Content {
+    let user_indices = if layer == WitnessLayer::Content {
         schema
             .user_fields
             .iter()
@@ -3194,7 +3211,6 @@ fn build_version_decode_plan(
             terminal_descriptor,
             &schema.identity.schema_field,
         )?,
-        parents_idx: field_idx_in_descriptor(terminal_descriptor, &schema.parents_field)?,
         created_by_idx: field_idx_in_descriptor(terminal_descriptor, &schema.created_by_field)?,
         created_at_idx: field_idx_in_descriptor(terminal_descriptor, &schema.created_at_field)?,
         updated_by_idx: field_idx_in_descriptor(terminal_descriptor, &schema.updated_by_field)?,
@@ -3291,11 +3307,11 @@ impl WeightedVersionIndex {
         let lower = VersionSortKey {
             table,
             row_uuid,
-            layer: VersionLayer::Content,
+            layer: WitnessLayer::Content,
             raw_record: Arc::default(),
         };
         rows.range(lower..).next().is_some_and(|(key, _)| {
-            key.table == table && key.row_uuid == row_uuid && key.layer == VersionLayer::Content
+            key.table == table && key.row_uuid == row_uuid && key.layer == WitnessLayer::Content
         })
     }
 
@@ -3372,8 +3388,8 @@ impl ReplacementIndex {
         weight: i64,
     ) {
         let by_key = match key.layer {
-            VersionLayer::Content => &mut self.content_by_key,
-            VersionLayer::Deletion => &mut self.deletion_by_key,
+            WitnessLayer::Content => &mut self.content_by_key,
+            WitnessLayer::Deletion => &mut self.deletion_by_key,
         };
         let row_versions = by_key.entry(key.clone()).or_default();
         let was_empty = row_versions.is_empty();
@@ -3423,12 +3439,12 @@ impl ReplacementIndex {
         let content = self.content_by_key.get(&ReplacementKey {
             table,
             row_uuid,
-            layer: VersionLayer::Content,
+            layer: WitnessLayer::Content,
         });
         let deletion = self.deletion_by_key.get(&ReplacementKey {
             table,
             row_uuid,
-            layer: VersionLayer::Deletion,
+            layer: WitnessLayer::Deletion,
         });
         (replacement_winner(content), replacement_winner(deletion))
     }
@@ -3559,7 +3575,7 @@ impl VersionIdentity {
     fn for_row(row: &VersionRow) -> Self {
         Self {
             table: row.table,
-            layer: row.layer(),
+            layer: WitnessLayer::of(row),
             raw_record: Arc::from(row.record.raw()),
         }
     }
@@ -3570,18 +3586,18 @@ impl VersionSortKey {
         Self {
             table: row.table,
             row_uuid: row.row_uuid(),
-            layer: row.layer(),
+            layer: WitnessLayer::of(row),
             raw_record: Arc::clone(&identity.raw_record),
         }
     }
 }
 
 impl ReplacementKey {
-    fn for_row(row: &VersionRow, layer: VersionLayer) -> Self {
+    fn for_row(row: &VersionRow) -> Self {
         Self {
             table: row.table,
             row_uuid: row.row_uuid(),
-            layer,
+            layer: WitnessLayer::of(row),
         }
     }
 }
@@ -4528,7 +4544,6 @@ mod tests {
             created_at_field: "created_at".to_owned(),
             updated_by_field: "updated_by".to_owned(),
             updated_at_field: "updated_at".to_owned(),
-            parents_field: "parents".to_owned(),
             authored_columns_field: "authored_columns".to_owned(),
             deletion_field: "_deletion".to_owned(),
             user_fields: BTreeMap::new(),
@@ -4565,7 +4580,6 @@ mod tests {
                 tx_node_alias: NodeAlias(10),
                 schema_version_alias: SchemaVersionAlias(0),
                 tx_time: TxTime(time),
-                parents: Vec::new(),
                 created_by: AuthorSubject::system_at(NodeUuid(uuid::Uuid::from_u128(10))),
                 created_at: TxTime(time),
                 updated_by: AuthorSubject::system_at(NodeUuid(uuid::Uuid::from_u128(10))),
@@ -4590,7 +4604,6 @@ mod tests {
                 tx_node_alias: NodeAlias(10),
                 schema_version_alias: SchemaVersionAlias(0),
                 tx_time: TxTime(time),
-                parents: Vec::new(),
                 created_by: AuthorSubject::system_at(NodeUuid(uuid::Uuid::from_u128(10))),
                 created_at: TxTime(time),
                 updated_by: AuthorSubject::system_at(NodeUuid(uuid::Uuid::from_u128(10))),
@@ -5038,7 +5051,7 @@ mod tests {
                 version(row(1), 100, "shared")
             };
             let identity = VersionIdentity::for_row(&record);
-            let key = ReplacementKey::for_row(&record, identity.layer);
+            let key = ReplacementKey::for_row(&record);
             let sort_key = VersionSortKey::for_row(&record, &identity);
             let tx_id = version_tx_id_from_aliases(&record, &aliases()).unwrap();
             let shared = DecodedMaintainedEvent::SharedVersion {
@@ -5801,7 +5814,7 @@ mod tests {
             seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
             let payload = Arc::clone(&payloads[(seed >> 32) as usize % payloads.len()]);
             let identity = VersionIdentity::for_row(&payload.row);
-            let key = ReplacementKey::for_row(&payload.row, payload.row.layer());
+            let key = ReplacementKey::for_row(&payload.row);
             let weight = [1, -1, 0, -4, 2, 3, -2][step % 7];
             let new = oracle.get(&identity).map_or(0, |version| version.weight) + weight;
             if new > 0 {
@@ -5834,7 +5847,7 @@ mod tests {
         let retained_bytes = retained.footprint_bytes();
         for (identity, version) in &oracle {
             index.apply_delta(
-                ReplacementKey::for_row(&version.row, version.row.layer()),
+                ReplacementKey::for_row(&version.row),
                 identity.clone(),
                 Arc::clone(&version.payload),
                 -version.weight - 1,
@@ -5847,7 +5860,7 @@ mod tests {
         retained.assert_footprint_matches_full_scan();
         let payload = Arc::clone(&payloads[0]);
         index.apply_delta(
-            ReplacementKey::for_row(&payload.row, payload.row.layer()),
+            ReplacementKey::for_row(&payload.row),
             VersionIdentity::for_row(&payload.row),
             payload,
             1,
@@ -6071,15 +6084,15 @@ mod tests {
                 (
                     version.table().to_owned(),
                     version.row_uuid(),
-                    version.layer(),
+                    WitnessLayer::of(version),
                 )
             })
             .collect::<Vec<_>>();
         assert_eq!(
             ordering,
             vec![
-                ("todos".to_owned(), row_a, VersionLayer::Content),
-                ("todos".to_owned(), row_b, VersionLayer::Content),
+                ("todos".to_owned(), row_a, WitnessLayer::Content),
+                ("todos".to_owned(), row_b, WitnessLayer::Content),
             ]
         );
 

@@ -15,6 +15,7 @@ use crate::query::{
     RelationJoinCondition, RelationJoinKind, RelationProjectColumn, RelationProjectExpr,
     RelationQuery, ShapeId, ValidatedQuery, claim, col, contains, eq, gt, lit, ne, not, param,
 };
+use crate::schema::MergeStrategy;
 use crate::tools::public_schema::{
     CmpOp as PublicCmpOp, ColumnDescriptor as PublicColumnDescriptor,
     ColumnMergeStrategy as PublicColumnMergeStrategy, ColumnType as PublicColumnType,
@@ -65,8 +66,6 @@ include!("persistence_contracts.rs");
 include!("write_policy_lowering.rs");
 include!("sync/mod.rs");
 include!("m3_differential.rs");
-include!("counter_merge.rs");
-include!("merge_heads.rs");
 include!("recovery.rs");
 include!("general.rs");
 include!("view_update_capture.rs");

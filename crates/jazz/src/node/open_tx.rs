@@ -137,9 +137,14 @@ where
             .map_err(|_| Error::UnadmittedWriteAuthor)?
             .as_author_subject();
         let local_base = self.tx_time_high_water();
+        // Every time applied past the frontier was recorded with its
+        // transaction, so the base names them without a scan (#3390).
         let mut dots = Vec::with_capacity(self.clock.applied_global_times_after_frontier.len());
         for global_time in self.clock.applied_global_times_after_frontier.clone() {
-            dots.extend(self.transaction_ids_for_global_time(global_time).await?);
+            match self.clock.frontier_dots.get(&global_time) {
+                Some(tx_ids) => dots.extend(tx_ids.iter().copied()),
+                None => dots.extend(self.transaction_ids_for_global_time(global_time).await?),
+            }
         }
         let base_snapshot = Snapshot::exclusive_base(
             self.node_uuid,
@@ -493,26 +498,6 @@ where
             .map(|(column, value)| (column, value.into()))
             .collect::<BTreeMap<_, _>>();
         validate_mergeable_write_shape(cells.is_empty(), deletion.is_some())?;
-        let cache_key = (write_schema_version, table.to_owned(), row_uuid);
-        let snapshot_row = if let Some(snapshot_row) = self
-            .open_tx(tx_id)?
-            .base_snapshot_rows
-            .get(&cache_key)
-            .cloned()
-        {
-            snapshot_row
-        } else {
-            let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
-            self.snapshot_row_in_schema(write_schema_version, table, row_uuid, &snapshot)
-                .await?
-        };
-        // Content and deletion are independent history registers.  A version
-        // parent is ancestry for the register being written, never a generic
-        // causal dependency on whichever row version happened to be read.
-        let parent = match deletion {
-            Some(_) => snapshot_row.deletion_version,
-            None => snapshot_row.content_version,
-        };
         positional_cells_from_map(&table_schema, &cells)?;
         let pending = PendingWrite {
             table: table.to_owned(),
@@ -521,9 +506,7 @@ where
             branch: BranchSelector::default(),
             cells: PendingCells::Replace(cells),
             deletion,
-            parents: parent.into_iter().collect(),
             now_ms,
-            refresh_parents_at_commit: false,
             known_fresh_row: false,
             verified_inherited_cells: None,
             branch_view_copy: None,
@@ -554,9 +537,7 @@ where
         row_uuid: RowUuid,
         cells: BTreeMap<String, Value>,
         deletion: Option<DeletionEvent>,
-        parents: Vec<TxId>,
         now_ms: Option<u64>,
-        refresh_parents_at_commit: bool,
     ) -> Result<(), Error> {
         self.tx_write_mergeable_in_schema(
             tx_id,
@@ -565,9 +546,7 @@ where
             row_uuid,
             cells,
             deletion,
-            parents,
             now_ms,
-            refresh_parents_at_commit,
             false,
         )
         .await
@@ -581,9 +560,7 @@ where
         row_uuid: RowUuid,
         cells: BTreeMap<String, Value>,
         deletion: Option<DeletionEvent>,
-        parents: Vec<TxId>,
         now_ms: Option<u64>,
-        refresh_parents_at_commit: bool,
         known_fresh_row: bool,
     ) -> Result<(), Error> {
         self.tx_write_mergeable_in_schema_and_branch(
@@ -593,9 +570,7 @@ where
             row_uuid,
             cells,
             deletion,
-            parents,
             now_ms,
-            refresh_parents_at_commit,
             BranchSelector::default(),
             known_fresh_row,
         )
@@ -610,9 +585,7 @@ where
         row_uuid: RowUuid,
         cells: BTreeMap<String, Value>,
         deletion: Option<DeletionEvent>,
-        parents: Vec<TxId>,
         now_ms: Option<u64>,
-        refresh_parents_at_commit: bool,
         branch: BranchSelector,
         known_fresh_row: bool,
     ) -> Result<(), Error> {
@@ -623,9 +596,7 @@ where
             row_uuid,
             cells,
             deletion,
-            parents,
             now_ms,
-            refresh_parents_at_commit,
             branch,
             known_fresh_row,
             None,
@@ -647,9 +618,7 @@ where
         row_uuid: RowUuid,
         cells: BTreeMap<String, Value>,
         deletion: Option<DeletionEvent>,
-        parents: Vec<TxId>,
         now_ms: Option<u64>,
-        refresh_parents_at_commit: bool,
         branch: BranchSelector,
         known_fresh_row: bool,
         verified_inherited_cells: Option<BTreeMap<String, Value>>,
@@ -676,9 +645,7 @@ where
                 branch,
                 cells: PendingCells::Replace(cells),
                 deletion,
-                parents,
                 now_ms,
-                refresh_parents_at_commit,
                 known_fresh_row,
                 verified_inherited_cells,
                 branch_view_copy,
@@ -766,9 +733,7 @@ where
                 branch,
                 cells: PendingCells::Patch(patch),
                 deletion: None,
-                parents: Vec::new(),
                 now_ms,
-                refresh_parents_at_commit: false,
                 known_fresh_row: false,
                 verified_inherited_cells: None,
                 branch_view_copy: None,
@@ -1012,24 +977,11 @@ where
                 })?;
             }
         }
-        for parent in open_tx.writes.iter().flat_map(|write| write.parents.iter()) {
-            self.merge_tx_time(parent.time);
-        }
         let tx_id = match reserved {
             Some(reserved) => {
                 if reserved.node != self.node_uuid {
                     return Err(Error::InvalidMergeableCommit(
                         "reserved transaction identity belongs to another node",
-                    ));
-                }
-                if open_tx
-                    .writes
-                    .iter()
-                    .flat_map(|write| write.parents.iter())
-                    .any(|parent| parent.time >= reserved.time)
-                {
-                    return Err(Error::InvalidMergeableCommit(
-                        "reserved transaction identity must dominate every parent",
                     ));
                 }
                 self.merge_tx_time(reserved.time);
@@ -1039,18 +991,17 @@ where
         };
         let provenance_snapshot = open_tx.base_snapshot.clone();
         let mut versions = Vec::with_capacity(open_tx.writes.len());
-        for write in open_tx.writes {
+        for (write, has_content) in coalesce_exclusive_writes(open_tx.writes) {
             let snapshot_content = self
-                .snapshot_layer_winner(
+                .snapshot_winner(
                     write.schema_version,
                     &write.table,
                     write.row_uuid,
-                    VersionLayer::Content,
                     &provenance_snapshot,
                 )
                 .await;
             let table_schema = self.table_in_schema(&write.table, write.schema_version)?;
-            let PendingCells::Replace(mut cells) = write.cells else {
+            let PendingCells::Replace(mut cells) = write.cells.clone() else {
                 return Err(Error::InvalidMergeableCommit(
                     "exclusive transaction cannot contain update patches",
                 ));
@@ -1077,6 +1028,15 @@ where
                     ));
                 }
             }
+            // A delete or restore without replacement content writes the
+            // snapshot's row image with its new deletion state.
+            if !has_content {
+                cells = inherited.clone();
+            }
+            // Content replacements carry the snapshot row's deletion state.
+            let deletion = write
+                .deletion
+                .or_else(|| snapshot_content.as_ref().and_then(VersionRow::deletion));
             for (column, value) in &mut cells {
                 let semantic_kind = table_schema
                     .columns
@@ -1102,13 +1062,12 @@ where
                 &table_schema,
                 write.schema_version,
                 write.row_uuid,
-                write.parents,
                 created_by,
                 created_at.physical_ms(),
                 made_by,
                 provenance_at.physical_ms(),
                 &cells,
-                write.deletion,
+                deletion,
             )?);
         }
         let tx = Transaction {
@@ -1377,27 +1336,6 @@ where
             .collect::<Vec<_>>();
         let mut commits = Vec::with_capacity(open_tx.writes.len());
         for (index, write) in open_tx.writes.into_iter().enumerate() {
-            let parents = if write.refresh_parents_at_commit {
-                if write.deletion.is_none() {
-                    self.local_content_winner_tx_id_in_branch(
-                        &write.table,
-                        &write.branch,
-                        write.row_uuid,
-                    )
-                    .await?
-                } else {
-                    self.local_deletion_winner_tx_id_in_branch(
-                        &write.table,
-                        &write.branch,
-                        write.row_uuid,
-                    )
-                    .await?
-                }
-                .into_iter()
-                .collect()
-            } else {
-                write.parents
-            };
             let (cells, authored_columns) = match write.cells {
                 PendingCells::Replace(cells) => (cells, None),
                 PendingCells::Patch(patch) => {
@@ -1424,7 +1362,6 @@ where
             )
             .branch(write.branch)
             .made_by(made_by)
-            .parents(parents)
             .cells(cells);
             if let Some(inherited) = write.verified_inherited_cells.as_ref() {
                 commit = commit.verified_inherited_large_cells(inherited);
@@ -1458,25 +1395,11 @@ where
         let first = commits.first().ok_or(Error::InvalidMergeableCommit(
             "mergeable transaction requires at least one write",
         ))?;
-        for (_, commit) in &commits {
-            for parent in &commit.parents {
-                self.merge_tx_time(parent.time);
-            }
-        }
         let made_at = match reserved {
             Some(reserved) => {
                 if reserved.node != self.node_uuid {
                     return Err(Error::InvalidMergeableCommit(
                         "reserved transaction identity belongs to another node",
-                    ));
-                }
-                if commits
-                    .iter()
-                    .flat_map(|(_, commit)| commit.parents.iter())
-                    .any(|parent| parent.time >= reserved.time)
-                {
-                    return Err(Error::InvalidMergeableCommit(
-                        "reserved transaction identity must dominate every parent",
                     ));
                 }
                 self.merge_tx_time(reserved.time);
@@ -1553,6 +1476,7 @@ where
     pub(super) fn record_applied_global_time(
         &mut self,
         global_time: GlobalTime,
+        tx_id: TxId,
     ) -> Vec<GlobalTime> {
         self.clock.global_time_register = self.clock.global_time_register.max(global_time);
         if global_time <= self.clock.committed_global_time {
@@ -1562,12 +1486,19 @@ where
             .clock
             .applied_global_times_after_frontier
             .insert(global_time);
+        let dots = self.clock.frontier_dots.entry(global_time).or_default();
+        if !dots.contains(&tx_id) {
+            dots.push(tx_id);
+        }
         let locally_minted = self.clock.locally_minted_global_times.remove(&global_time);
         if self.history_complete || locally_minted {
             self.clock.committed_global_time = global_time;
             self.clock
                 .applied_global_times_after_frontier
                 .retain(|applied| *applied > global_time);
+            self.clock
+                .frontier_dots
+                .retain(|applied, _| *applied > global_time);
         }
         newly_applied.then_some(global_time).into_iter().collect()
     }
@@ -1591,6 +1522,9 @@ where
         self.clock
             .applied_global_times_after_frontier
             .retain(|applied| *applied > settled_through);
+        self.clock
+            .frontier_dots
+            .retain(|applied, _| *applied > settled_through);
     }
 
     pub(crate) fn open_transaction_snapshot(
@@ -1651,22 +1585,10 @@ where
         snapshot: &Snapshot,
     ) -> Result<SnapshotRow, Error> {
         let content = self
-            .snapshot_layer_winner(
-                schema_version,
-                table,
-                row_uuid,
-                VersionLayer::Content,
-                snapshot,
-            )
+            .snapshot_winner(schema_version, table, row_uuid, snapshot)
             .await;
         let deletion = self
-            .snapshot_layer_winner(
-                schema_version,
-                table,
-                row_uuid,
-                VersionLayer::Deletion,
-                snapshot,
-            )
+            .snapshot_winner(schema_version, table, row_uuid, snapshot)
             .await;
         self.snapshot_row_from_winners(schema_version, table, content, deletion)
     }
@@ -1691,38 +1613,36 @@ where
         let mut rows = BTreeMap::new();
         for group in versions.chunk_by(|left, right| left.row_uuid() == right.row_uuid()) {
             let row_uuid = group[0].row_uuid();
-            let mut winners = [None, None];
-            'layers: for (slot, layer) in [VersionLayer::Content, VersionLayer::Deletion]
-                .into_iter()
-                .enumerate()
-            {
-                let mut candidate_indices = Vec::new();
-                for (idx, version) in group.iter().enumerate() {
-                    // A per-row read treats an undecodable identity as "no
-                    // winner" for that layer; keep that outcome.
-                    let Ok(tx_id) = self.version_tx_id(version) else {
-                        continue 'layers;
-                    };
-                    if version.layer() != layer {
-                        continue;
+            // One version per transaction carries both content and deletion,
+            // so the covered winner answers both, as in the per-row read.
+            let mut candidate_indices = Vec::new();
+            let mut undecodable = false;
+            for (idx, version) in group.iter().enumerate() {
+                // A per-row read treats an undecodable identity as "no
+                // winner"; keep that outcome.
+                let Ok(tx_id) = self.version_tx_id(version) else {
+                    undecodable = true;
+                    break;
+                };
+                let is_covered = match covered.get(&tx_id) {
+                    Some(is_covered) => *is_covered,
+                    None => {
+                        let is_covered = self.snapshot_covers(tx_id, snapshot).await;
+                        covered.insert(tx_id, is_covered);
+                        is_covered
                     }
-                    let is_covered = match covered.get(&tx_id) {
-                        Some(is_covered) => *is_covered,
-                        None => {
-                            let is_covered = self.snapshot_covers(tx_id, snapshot).await;
-                            covered.insert(tx_id, is_covered);
-                            is_covered
-                        }
-                    };
-                    if is_covered {
-                        candidate_indices.push(idx);
-                    }
+                };
+                if is_covered {
+                    candidate_indices.push(idx);
                 }
-                winners[slot] =
-                    current_version_index(group, &candidate_indices, layer, &self.node_aliases)
-                        .map(|idx| group[idx].clone());
             }
-            let [content, deletion] = winners;
+            let winner = if undecodable {
+                None
+            } else {
+                current_version_index(group, &candidate_indices, &self.node_aliases)
+                    .map(|idx| group[idx].clone())
+            };
+            let (content, deletion) = (winner.clone(), winner);
             rows.insert(
                 row_uuid,
                 self.snapshot_row_from_winners(schema_version, table, content, deletion)?,
@@ -1807,12 +1727,11 @@ where
         })
     }
 
-    pub(super) async fn snapshot_layer_winner(
+    pub(super) async fn snapshot_winner(
         &mut self,
         schema_version: SchemaVersionId,
         table: &str,
         row_uuid: RowUuid,
-        layer: VersionLayer,
         snapshot: &Snapshot,
     ) -> Option<VersionRow> {
         // Snapshot reads must be stable for the whole transaction lifetime.
@@ -1826,11 +1745,11 @@ where
         let mut candidate_indices = Vec::new();
         for (idx, version) in versions.iter().enumerate() {
             let tx_id = self.version_tx_id(version).ok()?;
-            if version.layer() == layer && self.snapshot_covers(tx_id, snapshot).await {
+            if self.snapshot_covers(tx_id, snapshot).await {
                 candidate_indices.push(idx);
             }
         }
-        current_version_index(&versions, &candidate_indices, layer, &self.node_aliases)
+        current_version_index(&versions, &candidate_indices, &self.node_aliases)
             .map(|idx| versions[idx].clone())
     }
 
@@ -1842,13 +1761,7 @@ where
         snapshot: &Snapshot,
     ) -> Option<TxId> {
         let version = self
-            .snapshot_layer_winner(
-                schema_version,
-                table,
-                row_uuid,
-                VersionLayer::Content,
-                snapshot,
-            )
+            .snapshot_winner(schema_version, table, row_uuid, snapshot)
             .await?;
         self.version_tx_id(&version).ok()
     }
@@ -1997,12 +1910,8 @@ pub(super) struct PendingWrite {
     cells: PendingCells,
     /// Deletion-register event, if any.
     pub(super) deletion: Option<DeletionEvent>,
-    /// Parent vector carried by the staged write.
-    pub(super) parents: Vec<TxId>,
     /// Per-write provenance time, or `None` for a commit-time clock value.
     pub(super) now_ms: Option<u64>,
-    /// Whether restore parents must follow the current layer winner at commit time.
-    pub(super) refresh_parents_at_commit: bool,
     /// The production UUID source generated this staged insert's id, so it may
     /// use the trusted fresh-coordinate fast path.
     pub(super) known_fresh_row: bool,
@@ -2022,4 +1931,38 @@ pub(super) struct SnapshotRow {
     read_version: Option<TxId>,
     deleted: bool,
     provenance: Option<(VersionRow, VersionRow)>,
+}
+
+/// One row has one image per transaction: merge a row's staged content
+/// replacement with its staged delete/restore event, in staging order.
+/// Returns each merged write with whether it carries replacement content.
+fn coalesce_exclusive_writes(writes: Vec<PendingWrite>) -> Vec<(PendingWrite, bool)> {
+    let mut merged: Vec<(PendingWrite, bool)> = Vec::with_capacity(writes.len());
+    for write in writes {
+        let has_content = write.deletion.is_none();
+        let existing = merged.iter_mut().find(|(candidate, _)| {
+            candidate.table == write.table
+                && candidate.row_uuid == write.row_uuid
+                && candidate.schema_version == write.schema_version
+                && candidate.branch == write.branch
+        });
+        match existing {
+            Some((candidate, candidate_has_content)) => {
+                // Content staged after a delete resurrects the row.
+                let resurrects = has_content && candidate.deletion == Some(DeletionEvent::Deleted);
+                if has_content {
+                    candidate.cells = write.cells;
+                    *candidate_has_content = true;
+                }
+                candidate.deletion = if resurrects {
+                    Some(DeletionEvent::Restored)
+                } else {
+                    write.deletion.or(candidate.deletion)
+                };
+                candidate.now_ms = write.now_ms.or(candidate.now_ms);
+            }
+            None => merged.push((write, has_content)),
+        }
+    }
+    merged
 }

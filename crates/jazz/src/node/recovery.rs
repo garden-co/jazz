@@ -246,16 +246,6 @@ where
                 ));
             }
         }
-        if let Some(raw) = self
-            .database
-            .index_last_raw(SHARED_DELETION_HISTORY_TABLE, "by_tx", &[])
-            .await?
-        {
-            self.merge_tx_time(TxTime(
-                raw.record()
-                    .get_u64(SharedDeletionHistoryRowRecord::FIELD_TX_TIME_IDX)?,
-            ));
-        }
         #[cfg(feature = "testing")]
         if let (Some(receipt), Some(started)) = (&mut receipt, started) {
             receipt.recover_catalogue_state = started.elapsed();
@@ -310,7 +300,20 @@ where
                 continue;
             }
             if let Some(global_time) = global_time {
-                accepted_global_times.push(GlobalTime(global_time));
+                let node = self
+                    .node_for_alias(NodeAlias(
+                        record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?,
+                    ))
+                    .ok_or(Error::InvalidStoredValue(
+                        "transaction node alias must exist",
+                    ))?;
+                accepted_global_times.push((
+                    GlobalTime(global_time),
+                    TxId::new(
+                        TxTime(record.get_u64(TransactionRowRecord::FIELD_TIME_IDX)?),
+                        node,
+                    ),
+                ));
             }
         }
         accepted_global_times.sort();
@@ -320,12 +323,13 @@ where
             receipt.accepted_global_times = accepted_global_times.len();
             receipt.global_time_records_scanned = global_time_records_scanned;
         }
-        for global_time in accepted_global_times {
-            self.record_applied_global_time(global_time);
+        for (global_time, tx_id) in accepted_global_times {
+            self.record_applied_global_time(global_time, tx_id);
         }
         if self.history_complete {
             self.clock.committed_global_time = self.clock.global_time_register;
             self.clock.applied_global_times_after_frontier.clear();
+            self.clock.frontier_dots.clear();
         }
         #[cfg(feature = "testing")]
         if let (Some(receipt), Some(started)) = (&mut receipt, started) {
@@ -334,58 +338,6 @@ where
 
         #[cfg(feature = "testing")]
         let started = receipt.as_ref().map(|_| web_time::Instant::now());
-        let mut pending_edges = Vec::new();
-        let mut pending_parent_time_bound = PendingParentTimeBound::Empty;
-        for raw in self
-            .database
-            .primary_key_scan_raw("jazz_pending_edges", &[])
-            .await?
-        {
-            let record = raw.record();
-            let child_alias =
-                NodeAlias(record.get_u64(PendingEdgeRowRecord::FIELD_CHILD_NODE_ID_IDX)?);
-            let parent_alias =
-                NodeAlias(record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_NODE_ID_IDX)?);
-            let Some(child_node) = alias_to_node.get(&child_alias).copied() else {
-                return Err(Error::InvalidStoredValue(
-                    "pending edge child alias must exist",
-                ));
-            };
-            let Some(parent_node) = alias_to_node.get(&parent_alias).copied() else {
-                return Err(Error::InvalidStoredValue(
-                    "pending edge parent alias must exist",
-                ));
-            };
-            let child = TxId::new(
-                TxTime(record.get_u64(PendingEdgeRowRecord::FIELD_CHILD_TIME_IDX)?),
-                child_node,
-            );
-            let parent = TxId::new(
-                TxTime(record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_TIME_IDX)?),
-                parent_node,
-            );
-            // Validate the persisted row-version coordinate even though the
-            // in-memory rejection graph only needs TxIds. Otherwise a corrupt
-            // pending constraint could silently survive reopen.
-            let _ = pending_edge_coordinate_from_record(record)?;
-            pending_parent_time_bound.observe(parent.time);
-            pending_edges.push((child, parent));
-        }
-        self.rejections.pending_parent_time_bound = pending_parent_time_bound;
-        for (child, parent) in pending_edges {
-            if self
-                .query_transaction(child)
-                .await?
-                .is_some_and(|tx| matches!(tx.fate, Fate::Pending))
-                && self
-                    .query_transaction(parent)
-                    .await?
-                    .is_some_and(|tx| matches!(tx.fate, Fate::Pending))
-            {
-                self.record_child_edges(child, [parent]).await;
-            }
-        }
-
         let mut rejected_headers = Vec::new();
         for raw in self
             .database

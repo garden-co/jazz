@@ -15,9 +15,9 @@ use jazz::groove::storage::{TestStorage, TestStorageOperation};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::CurrentRow;
 use jazz::protocol::{
-    BranchSelector, RegisterShapeOptions, ResultRowLayer, RowVersionRef, RowVersionRefEntry,
-    ShapeAst, Subscribe, SubscribeRejectReason, SubscriptionKey, SyncMessage, VersionBundle,
-    VersionBundleScope, VersionCarrier, VersionRecord, ViewUpdatePayload,
+    BranchSelector, RegisterShapeOptions, ResultRowLayer, RowVersionRefEntry, ShapeAst, Subscribe,
+    SubscribeRejectReason, SubscriptionKey, SyncMessage, VersionBundle, VersionBundleScope,
+    VersionCarrier, VersionRecord, ViewUpdatePayload,
 };
 use jazz::query::{ArraySubquery, BindingId, OrderDirection, Query, col, eq, lit};
 use jazz::schema::JazzSchema;
@@ -532,7 +532,6 @@ fn scope_isolated_worker_test_upstream_handle_drives_real_foreground_link() {
         table,
         schema.version_id(),
         row,
-        Vec::new(),
         alice,
         tx_id.time.physical_ms(),
         alice,
@@ -541,7 +540,6 @@ fn scope_isolated_worker_test_upstream_handle_drives_real_foreground_link() {
         None,
     )
     .expect("encode authority row version");
-    let request = RowVersionRef::new("todos", row, tx_id);
     // INV-SYNC-36: an authority never sends result membership. It declares a
     // complete source closure and ships the exact source witness, from which
     // the receiver derives its own terminal.
@@ -628,77 +626,6 @@ fn scope_isolated_worker_test_upstream_handle_drives_real_foreground_link() {
     drop(worker_foreground);
     drop(foreground);
     drop(worker);
-
-    // The authority link and the initial foreground are gone. A freshly
-    // opened worker with the exact same durable scope may still serve the
-    // physical version it was previously authorized to learn; it must not
-    // need to re-run current policy to repair the new foreground.
-    let reopened =
-        open_persistent_scope_isolated_browser_worker(storage.path(), 0x29, alice, &schema);
-    let (mut reopened_foreground_transport, reopened_worker_transport) = duplex();
-    let _reopened_foreground = reopened.accept_subscriber(reopened_worker_transport, alice);
-    reopened_foreground_transport
-        .send(SyncMessage::FetchRowVersions {
-            requests: vec![request],
-            delegated_session: None,
-        })
-        .expect("foreground requests retained repair");
-    reopened
-        .tick()
-        .expect("serve retained same-scope repair after reopen");
-    reopened
-        .tick()
-        .expect("flush retained same-scope repair after reopen");
-    let replies =
-        std::iter::from_fn(|| reopened_foreground_transport.try_recv()).collect::<Vec<_>>();
-    assert!(
-        replies.iter().any(|reply| matches!(
-            reply,
-            SyncMessage::RowVersionPayloads { version_bundles } if version_bundles.len() == 1
-        )),
-        "same-scope reopen serves the previously authority-delivered exact version, got {replies:?}"
-    );
-
-    let bob = AuthorSubject::for_test_bytes([0xba; 16]);
-    let (mut bob_transport, bob_worker_transport) = duplex();
-    let _bob_foreground = reopened.accept_subscriber(bob_worker_transport, bob);
-    bob_transport
-        .send(SyncMessage::FetchRowVersions {
-            requests: vec![RowVersionRef::new("todos", row, tx_id)],
-            delegated_session: None,
-        })
-        .expect("other subject requests retained repair");
-    assert!(
-        block_on(reopened.tick()).is_err(),
-        "an out-of-scope foreground request must fail closed before a repair reply"
-    );
-    let bob_replies = std::iter::from_fn(|| bob_transport.try_recv()).collect::<Vec<_>>();
-    assert!(
-        !bob_replies
-            .iter()
-            .any(|reply| matches!(reply, SyncMessage::RowVersionPayloads { .. })),
-        "a different foreground subject must never reuse Alice's durable repair ledger"
-    );
-
-    let (mut generic_transport, generic_worker_transport) = duplex();
-    let _generic_relay = reopened.accept_relay_subscriber(generic_worker_transport);
-    generic_transport
-        .send(SyncMessage::FetchRowVersions {
-            requests: vec![RowVersionRef::new("todos", row, tx_id)],
-            delegated_session: None,
-        })
-        .expect("generic relay requests retained repair");
-    // A generic relay may be forwarded/ignored rather than rejected with a
-    // transport error, but it must never receive the scope-owned body.
-    let _ = block_on(reopened.tick());
-    let _ = block_on(reopened.tick());
-    let generic_replies = std::iter::from_fn(|| generic_transport.try_recv()).collect::<Vec<_>>();
-    assert!(
-        !generic_replies
-            .iter()
-            .any(|reply| matches!(reply, SyncMessage::RowVersionPayloads { .. })),
-        "a generic relay lacks a foreground session capability and must fail closed"
-    );
 }
 
 #[test]

@@ -1089,7 +1089,6 @@ fn local_edit_after_confirmed_unavailable_retains_optimistic_visibility() {
             .commit_mergeable(
                 MergeableCommit::new("parents", id, 100)
                     .made_by(alice)
-                    .parents(vec![parent])
                     .cells(BTreeMap::from([(
                         "label".to_owned(),
                         Value::String("local draft".to_owned()),
@@ -1222,7 +1221,6 @@ fn local_unavailable_confirmed_row_keeps_pending_successor() {
         .commit_mergeable_settled(
             MergeableCommit::new("parents", row(1), 100)
                 .made_by(alice)
-                .parents(vec![parent])
                 .cells(BTreeMap::from([(
                     "label".to_owned(),
                     Value::String("core confirmed".to_owned()),
@@ -1275,7 +1273,6 @@ fn local_unavailable_confirmed_row_keeps_pending_successor() {
         .commit_mergeable_settled(
             MergeableCommit::new("parents", row(1), 200)
                 .made_by(alice)
-                .parents(vec![accepted])
                 .cells(BTreeMap::from([(
                     "label".to_owned(),
                     Value::String("pending successor".to_owned()),

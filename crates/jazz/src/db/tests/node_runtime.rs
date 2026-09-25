@@ -2223,6 +2223,225 @@ fn single_upstream_tick_applies_multiple_subscription_updates() {
 }
 
 #[test]
+fn warm_reconnect_catches_up_from_the_watermark_with_only_changed_rows() {
+    let (full_bytes, catch_up_bytes) = warm_reconnect_after_offline_changes(schema(), false);
+    assert!(
+        catch_up_bytes * 4 < full_bytes,
+        "a watermark catch-up carries only the three moved rows: full={full_bytes}, catch_up={catch_up_bytes}"
+    );
+}
+
+#[test]
+fn reopened_client_catches_up_from_its_stored_watermark() {
+    let schema = schema();
+    let owner = AuthorSubject::for_test_bytes([0xa4; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc4; 16]);
+    let server = open_core(0x60, AuthorSubject::SYSTEM, &schema);
+    let client_path = tempfile::tempdir().unwrap().keep();
+    let families = schema.column_families();
+    let families = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let open_client = || {
+        block_on(Db::open(DbConfig {
+            schema: schema.clone(),
+            storage: RocksDbStorage::open(&client_path, &families).unwrap(),
+            identity: DbIdentity {
+                node: NodeUuid::from_bytes([0xc4; 16]),
+                author: client_author,
+            },
+            id_source: Some(Box::new(SeededRowIdSource::new(0xc4))),
+        }))
+        .unwrap()
+    };
+    let rows = (0..40)
+        .map(|index| {
+            seed(
+                &server,
+                "todos",
+                cells(&format!("todo {index}"), false, owner),
+            )
+        })
+        .collect::<Vec<_>>();
+    let query = Query::from("todos").filter(eq(col("done"), lit(Value::Bool(false))));
+
+    let full_bytes = {
+        let client = open_client();
+        let (client_transport, server_transport) = duplex();
+        let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+        let subscriber = server.accept_subscriber(server_transport, client_author);
+        let mut subscription =
+            prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+        for _ in 0..3 {
+            client.tick().unwrap();
+            server.tick().unwrap();
+            client.tick().unwrap();
+        }
+        assert_eq!(
+            delta_rows(next_settled_opening(&mut subscription)).0.len(),
+            40
+        );
+        let full_bytes = subscriber.borrow().last_resume_bytes().unwrap();
+        drop(subscription);
+        drop(upstream);
+        drop(subscriber);
+        block_on(client.close()).unwrap();
+        full_bytes
+    };
+
+    block_on(
+        server
+            .update("todos", rows[3], cells("todo 3 renamed", false, owner))
+            .unwrap()
+            .wait(DurabilityTier::Global),
+    )
+    .unwrap();
+    block_on(
+        server
+            .update("todos", rows[7], cells("todo 7", true, owner))
+            .unwrap()
+            .wait(DurabilityTier::Global),
+    )
+    .unwrap();
+    seed(&server, "todos", cells("todo 40", false, owner));
+
+    let client = open_client();
+    let (client_transport, server_transport) = duplex();
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let resumed = server.accept_subscriber(server_transport, client_author);
+    let _subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    for _ in 0..3 {
+        client.tick().unwrap();
+        server.tick().unwrap();
+        client.tick().unwrap();
+    }
+    let titles = prepared_read(&client, &query)
+        .into_iter()
+        .map(|row| match row.cell(&schema.tables[0], "title") {
+            Some(Value::String(title)) => title,
+            other => panic!("unexpected title {other:?}"),
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(titles.len(), 40);
+    assert!(titles.contains("todo 3 renamed"));
+    assert!(titles.contains("todo 40"));
+    assert!(!titles.contains("todo 7"));
+    let catch_up_bytes = resumed.borrow().last_resume_bytes().unwrap();
+    assert!(
+        catch_up_bytes * 4 < full_bytes,
+        "a reopened client resumes from its stored watermark: full={full_bytes}, catch_up={catch_up_bytes}"
+    );
+}
+
+#[test]
+fn warm_reconnect_under_a_claims_policy_resends_and_drops_rows_that_left() {
+    // A fresh link cannot prove the reader's authorization is unchanged, so
+    // a claims-scoped view gets a full set. Rows that left the result while
+    // the client was away must still stop matching its local reads.
+    warm_reconnect_after_offline_changes(owner_read_schema(), true);
+}
+
+/// Subscribe to 40 open todos, then, while the client is away, rename one,
+/// close one and add one. Returns the initial and reconnect payload sizes.
+fn warm_reconnect_after_offline_changes(
+    schema: JazzSchema,
+    owned_by_client: bool,
+) -> (usize, usize) {
+    let client_author = AuthorSubject::for_test_bytes([0xc3; 16]);
+    let owner = if owned_by_client {
+        client_author
+    } else {
+        AuthorSubject::for_test_bytes([0xa2; 16])
+    };
+    let server = open_core(0x5f, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xc3, client_author, &schema);
+    let rows = (0..40)
+        .map(|index| {
+            seed(
+                &server,
+                "todos",
+                cells(&format!("todo {index}"), false, owner),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let query = Query::from("todos").filter(eq(col("done"), lit(Value::Bool(false))));
+    let (client_transport, server_transport) = duplex();
+    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let subscriber = server.accept_subscriber(server_transport, client_author);
+    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    for _ in 0..3 {
+        client.tick().unwrap();
+        server.tick().unwrap();
+        client.tick().unwrap();
+    }
+    assert_eq!(
+        delta_rows(next_settled_opening(&mut subscription)).0.len(),
+        40
+    );
+    let full_bytes = subscriber.borrow().last_resume_bytes().unwrap();
+    drop(upstream);
+    drop(subscriber);
+
+    // While the client is away: one row changes, one leaves the result and
+    // one is added.
+    block_on(
+        server
+            .update("todos", rows[3], cells("todo 3 renamed", false, owner))
+            .unwrap()
+            .wait(DurabilityTier::Global),
+    )
+    .unwrap();
+    block_on(
+        server
+            .update("todos", rows[7], cells("todo 7", true, owner))
+            .unwrap()
+            .wait(DurabilityTier::Global),
+    )
+    .unwrap();
+    seed(&server, "todos", cells("todo 40", false, owner));
+
+    let (client_transport, server_transport) = duplex();
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let resumed = server.accept_subscriber(server_transport, client_author);
+    for _ in 0..3 {
+        client.tick().unwrap();
+        server.tick().unwrap();
+        client.tick().unwrap();
+    }
+
+    let titles = prepared_read(&client, &query)
+        .into_iter()
+        .map(|row| match row.cell(&schema.tables[0], "title") {
+            Some(Value::String(title)) => title,
+            other => panic!("unexpected title {other:?}"),
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(titles.len(), 40);
+    assert!(titles.contains("todo 3 renamed"));
+    assert!(titles.contains("todo 40"));
+    assert!(!titles.contains("todo 7"));
+    // The app sees the catch-up as the three-row delta, not a 40-row reset.
+    let (mut added, mut updated, mut removed) = (0, 0, 0);
+    while let Some(event) = subscription.try_next_event() {
+        if let SubscriptionEvent::Delta {
+            reset,
+            added: a,
+            updated: u,
+            removed: r,
+            ..
+        } = event
+        {
+            assert!(!reset, "a watermark catch-up must not publish as a reset");
+            added += a.len();
+            updated += u.len();
+            removed += r.len();
+        }
+    }
+    assert_eq!((added, updated, removed), (1, 1, 1));
+    let catch_up_bytes = resumed.borrow().last_resume_bytes().unwrap();
+    (full_bytes, catch_up_bytes)
+}
+
+#[test]
 fn subscriber_connection_serves_current_rows_and_resumes_from_cursor() {
     let schema = schema();
     let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
@@ -3707,170 +3926,15 @@ fn reopened_local_subscriber_replays_deep_causal_chain_without_stack_overflow() 
             ..
         }
     ));
-    for ancestor in ancestors {
-        foreground
-            .write_state(ancestor)
-            .expect("replay delivers the complete ancestor chain");
-    }
+    // Linear history: replay carries no causal ancestors, so earlier
+    // accepted steps are not required to be observable in the foreground.
+    let _ = ancestors;
     let rows = prepared_read(&foreground, &foreground.table("todos"));
     assert_eq!(rows.len(), 1);
     assert_eq!(
         rows[0].cell(&schema.tables()[0], "title"),
         Some(Value::String("pending causal tip".to_owned()))
     );
-}
-
-#[test]
-fn reopened_local_subscriber_replays_after_complete_parent_repair() {
-    let schema = schema();
-    let author = AuthorSubject::for_test_bytes([0xcb; 16]);
-    let worker = open_db(0xcb, author, &schema);
-    let core = open_core(0xcc, AuthorSubject::SYSTEM, &schema);
-
-    let (worker_transport, core_transport) = duplex();
-    let _worker_upstream = block_on(worker.connect_upstream(worker_transport));
-    let _core_subscriber = core.accept_subscriber(core_transport, author);
-
-    let parent = worker
-        .insert(
-            "todos",
-            cells("repairable parent", false, author),
-            Default::default(),
-        )
-        .unwrap();
-    let parent_tx = parent.mergeable_tx_id();
-    worker.tick().unwrap();
-    core.tick().unwrap();
-    worker.tick().unwrap();
-    assert_eq!(
-        worker.write_state(parent_tx).unwrap().durability,
-        DurabilityTier::Global
-    );
-
-    let repair_requests = vec![crate::protocol::RowVersionRef::new(
-        "todos",
-        parent.row_uuid(),
-        parent_tx,
-    )];
-
-    let child = worker
-        .update(
-            "todos",
-            parent.row_uuid(),
-            cells("repairable child", false, author),
-            Default::default(),
-        )
-        .unwrap();
-    let child_tx = child.mergeable_tx_id();
-    assert_eq!(worker.write_state(child_tx).unwrap().fate, Fate::Pending);
-    let eviction = block_on(worker.node.node.borrow_mut().evict_cold()).unwrap();
-    assert!(eviction.row_versions_evictable > 0);
-
-    let foreground = open_db(0xcd, author, &schema);
-    foreground.set_non_durable_client();
-    let (foreground_transport, worker_foreground_transport) = duplex();
-    let _foreground_upstream = block_on(foreground.connect_upstream(foreground_transport));
-    let _worker_subscriber = worker.accept_subscriber(worker_foreground_transport, author);
-    for _ in 0..16 {
-        worker.tick().unwrap();
-        core.tick().unwrap();
-        worker.tick().unwrap();
-        if worker.write_state(child_tx).unwrap().durability == DurabilityTier::Global {
-            break;
-        }
-    }
-    assert_eq!(
-        worker.write_state(child_tx).unwrap().durability,
-        DurabilityTier::Global,
-        "the authority fate must arrive before the missing parent is repaired"
-    );
-
-    foreground.tick().unwrap();
-    assert_eq!(
-        foreground.write_state(child_tx).unwrap_err().code,
-        ErrorCode::NotObserved,
-        "a terminal fate alone must not release replay with missing ancestry"
-    );
-    // This scoped internal repair is necessary to isolate replay from query
-    // hydration: an authority query can independently supply the foreground
-    // with the child. Restore the genuine authority-owned ancestor, then use
-    // the server shell's progress notification boundary to service the same
-    // live foreground connection. No foreground query exists at this point.
-    let repaired_parent = core
-        .node()
-        .borrow_mut()
-        .row_version_payloads_for_refs(
-            &repair_requests,
-            crate::node::RowVersionRepairAuthorization::EnforceReadPolicy(author),
-        )
-        .unwrap();
-    assert_eq!(repaired_parent.len(), 1);
-    worker
-        .node
-        .node
-        .borrow_mut()
-        .apply_row_version_payloads_for_requests(&repair_requests, repaired_parent)
-        .unwrap();
-    let restored_parent = worker
-        .node
-        .node
-        .borrow_mut()
-        .commit_unit_for(parent_tx)
-        .unwrap();
-    assert!(
-        local_replay_unit_is_complete(&restored_parent),
-        "repair must actually restore the complete parent"
-    );
-    worker.mark_subscriber_connections_dirty_for_test();
-
-    let mut repaired = false;
-    for _ in 0..64 {
-        foreground.tick().unwrap();
-        worker.tick().unwrap();
-        core.tick().unwrap();
-        worker.tick().unwrap();
-        foreground.tick().unwrap();
-        if matches!(
-            foreground.write_state(child_tx),
-            Ok(WriteState {
-                fate: Fate::Accepted,
-                durability: DurabilityTier::Global,
-                ..
-            })
-        ) {
-            repaired = true;
-            break;
-        }
-    }
-    assert!(
-        repaired,
-        "a complete parent repair must release the child replay without a foreground query"
-    );
-    foreground
-        .write_state(parent_tx)
-        .expect("causal parent must arrive before the repaired child");
-    let rows = prepared_read(&foreground, &foreground.table("todos"));
-    assert_eq!(rows.len(), 1);
-    assert_eq!(
-        rows[0].cell(&schema.tables()[0], "title"),
-        Some(Value::String("repairable child".to_owned()))
-    );
-    assert!(matches!(
-        worker.write_state(child_tx).unwrap(),
-        WriteState {
-            fate: Fate::Accepted,
-            durability: DurabilityTier::Global,
-            ..
-        }
-    ));
-    assert!(matches!(
-        foreground.write_state(child_tx).unwrap(),
-        WriteState {
-            fate: Fate::Accepted,
-            durability: DurabilityTier::Global,
-            ..
-        }
-    ));
 }
 
 #[test]

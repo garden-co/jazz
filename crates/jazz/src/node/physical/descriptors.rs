@@ -818,17 +818,14 @@ pub(super) fn physical_version_storage_tables(
         );
         physical.primary_key = template.primary_key.clone();
         physical.indices = template.indices.clone();
-        let mut register = template_table.register_storage_table();
-        register.name = physical_register_table_name(table_id);
-
-        let logical_global_tables = template_table.global_current_storage_tables();
-        let current_system_columns = logical_global_tables[0]
+        let logical_global = template_table.global_current_storage_table();
+        let current_system_columns = logical_global
             .columns
             .iter()
             .take(GlobalCurrentRowRecord::USER_CELLS)
             .cloned()
             .collect::<Vec<_>>();
-        let current_trailing_columns = logical_global_tables[0]
+        let current_trailing_columns = logical_global
             .columns
             .iter()
             .skip(GlobalCurrentRowRecord::USER_CELLS + template_table.columns.len())
@@ -850,7 +847,11 @@ pub(super) fn physical_version_storage_tables(
             physical_global_current_table_name(table_id),
             current_columns(),
         );
-        physical_global.primary_key = logical_global_tables[0].primary_key.clone();
+        physical_global.primary_key = logical_global.primary_key.clone();
+        physical_global = physical_global.with_index(GrooveIndexSchema::new(
+            crate::schema::GLOBAL_CURRENT_BY_SEQ_INDEX,
+            ["branch_key", "global_time", "row_uuid"],
+        ));
         let indexed_columns = variants
             .iter()
             .flat_map(|(_, logical_table, mapping, _)| {
@@ -884,16 +885,13 @@ pub(super) fn physical_version_storage_tables(
                     .chain(column_ids.iter().map(|id| physical_user_column_field(*id))),
             ));
         }
-        let mut register_global = logical_global_tables[1].clone();
-        register_global.name = physical_register_global_current_table_name(table_id);
-
-        let logical_ahead_tables = template_table.ahead_current_storage_tables();
+        let logical_ahead = template_table.ahead_current_storage_table();
         let mut physical_ahead = GrooveTableSchema::new_with_bound_registries(
             physical_ahead_current_table_name(table_id),
             current_columns(),
         );
-        physical_ahead.primary_key = logical_ahead_tables[0].primary_key.clone();
-        physical_ahead.indices = logical_ahead_tables[0].indices.clone();
+        physical_ahead.primary_key = logical_ahead.primary_key.clone();
+        physical_ahead.indices = logical_ahead.indices.clone();
         for column_id in indexed_columns {
             physical_ahead = physical_ahead.with_index(GrooveIndexSchema::new(
                 physical_current_index_name(column_id),
@@ -907,9 +905,6 @@ pub(super) fn physical_version_storage_tables(
                     .chain(column_ids.iter().map(|id| physical_user_column_field(*id))),
             ));
         }
-        let mut register_ahead = logical_ahead_tables[1].clone();
-        register_ahead.name = physical_register_ahead_current_table_name(table_id);
-
         let rejected_template = template_table.rejected_versions_storage_table();
         let rejected_system_columns = rejected_template
             .columns
@@ -982,11 +977,8 @@ pub(super) fn physical_version_storage_tables(
             rejected = rejected.with_variant_payload(tag, payload);
         }
         tables.push(physical);
-        tables.push(register);
         tables.push(physical_global);
-        tables.push(register_global);
         tables.push(physical_ahead);
-        tables.push(register_ahead);
         tables.push(rejected);
     }
     Ok(tables)
@@ -1152,7 +1144,7 @@ fn physical_current_descriptor(
     table: &TableSchema,
     mapping: &TablePhysicalMapping,
 ) -> Result<records::RecordDescriptor, Error> {
-    let logical_descriptor = table.global_current_storage_tables()[0].record_schema();
+    let logical_descriptor = table.global_current_storage_table().record_schema();
     let physical_names = physical_current_field_names(table, mapping)?;
     if logical_descriptor.fields().len() != physical_names.len() {
         return Err(Error::InvalidStoredValue(

@@ -91,7 +91,6 @@ async fn commit(
         .commit_mergeable_unit(
             MergeableCommit::new("tasks", row_uuid, made_at)
                 .made_by(author)
-                .parents(parents.into_iter().collect())
                 .cells(task_cells(title, count)),
         )
         .await

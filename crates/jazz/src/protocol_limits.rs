@@ -5,9 +5,7 @@
 //! oversized shape registration is rejected before key derivation and is
 //! therefore fatal to the offending peer link. The core owns this contract.
 
-use crate::protocol::{
-    KnownStateDeclaration, RegisterShapeOptions, RowVersionRef, ShapeAst, VersionRecord,
-};
+use crate::protocol::{RegisterShapeOptions, ShapeAst, VersionRecord};
 
 /// Maximum encoded `WireFrame` bytes accepted before postcard decode.
 ///
@@ -127,17 +125,11 @@ pub const MAX_RETAINED_PEER_SHAPES: usize = 1024;
 /// encoded byte size and physical framing.
 pub const MAX_COMMIT_UNIT_VERSIONS: usize = 4096;
 
-/// Maximum row-version repair refs in one `FetchRowVersions` request.
+/// Maximum outcomes in one local availability receipt.
 ///
-/// Source: matches the first known-state repair tier; large reconnect holes
-/// should batch exact requests instead of creating unbounded semantic vectors.
-pub const MAX_FETCH_ROW_VERSIONS: usize = 1024;
-/// Maximum exact row-version refs in one slow known-state declaration.
-///
-/// Source: same count tier as `FetchRowVersions`; larger local holdings should
-/// degrade to no declaration and full ship. Truncation is forbidden because it
-/// would silently overclaim.
-pub const MAX_KNOWN_STATE_EXACT_REFS: usize = MAX_FETCH_ROW_VERSIONS;
+/// Source: the count tier formerly shared with exact known-state declarations;
+/// larger batches split rather than grow one semantic vector.
+pub const MAX_KNOWN_STATE_EXACT_REFS: usize = 1024;
 
 /// Maximum immutable-chunk requests admitted from one auxiliary message.
 ///
@@ -178,35 +170,6 @@ pub fn validate_shape_registration_size(
     let size = postcard::experimental::serialized_size(&(ast, opts))
         .map_err(|err| format!("failed to measure shape registration payload: {err}"))?;
     validate_len("shape registration", size, MAX_SHAPE_REGISTRATION_BYTES)
-}
-
-/// Validate row-version repair request size after sync-message decode.
-pub fn validate_fetch_row_versions(requests: &[RowVersionRef]) -> Result<(), String> {
-    if requests.len() > MAX_FETCH_ROW_VERSIONS {
-        return Err(format!(
-            "row-version repair request count {} exceeds max {}",
-            requests.len(),
-            MAX_FETCH_ROW_VERSIONS
-        ));
-    }
-    Ok(())
-}
-
-/// Validate an optional known-state declaration after sync-message decode.
-pub fn validate_known_state_declaration(
-    declaration: &Option<KnownStateDeclaration>,
-) -> Result<(), String> {
-    let Some(KnownStateDeclaration::ExactVersionSet { versions }) = declaration else {
-        return Ok(());
-    };
-    if versions.len() > MAX_KNOWN_STATE_EXACT_REFS {
-        return Err(format!(
-            "known-state exact declaration count {} exceeds max {}",
-            versions.len(),
-            MAX_KNOWN_STATE_EXACT_REFS
-        ));
-    }
-    Ok(())
 }
 
 /// Return a malformed-commit reason when the commit unit exceeds protocol limits.

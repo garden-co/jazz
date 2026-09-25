@@ -2246,22 +2246,10 @@ fn mergeable_tx_coalesces_restore_then_update_for_same_row() {
         panic!("expected commit unit");
     };
     assert_eq!(tx.tx_id, tx_id);
-    assert_eq!(tx.n_total_writes, 2);
-    assert_eq!(versions.len(), 2);
-    assert_eq!(
-        versions
-            .iter()
-            .filter(|version| version.deletion().is_none())
-            .count(),
-        1
-    );
-    assert_eq!(
-        versions
-            .iter()
-            .filter(|version| version.deletion() == Some(DeletionEvent::Restored))
-            .count(),
-        1
-    );
+    // Restore and update of one row coalesce into one restored row image.
+    assert_eq!(tx.n_total_writes, 1);
+    assert_eq!(versions.len(), 1);
+    assert_eq!(versions[0].deletion(), Some(DeletionEvent::Restored));
 }
 
 #[test]
@@ -2476,10 +2464,12 @@ fn mergeable_tx_and_ref_have_identical_restore_and_reinsert_results() {
             Some(Value::Bool(true)),
         ))
     );
+    // One row image per transaction: the insert after the delete is the
+    // later write of the row, so the row is live again.
     assert_eq!(
         builder_state.get(&reinserted),
         Some(&(
-            true,
+            false,
             Some(Value::String("reinserted".to_owned())),
             Some(Value::Bool(true)),
         ))

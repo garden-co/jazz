@@ -921,11 +921,8 @@ where
                 });
             stores.extend([
                 physical_history_table_name(table_id),
-                physical_register_table_name(table_id),
                 physical_global_current_table_name(table_id),
-                physical_register_global_current_table_name(table_id),
                 physical_ahead_current_table_name(table_id),
-                physical_register_ahead_current_table_name(table_id),
                 physical_rejected_versions_table_name(table_id),
             ]);
         }
@@ -1042,7 +1039,6 @@ fn assert_native_corpus_has_required_families<S>(
         "jazz_nodes",
         "jazz_schema_versions",
         "jazz_transactions",
-        "jazz_merge_heads",
         "jazz_global_changes",
         "jazz_deletion_history",
         groove::db::LARGE_VALUE_METADATA_CF,
@@ -1176,7 +1172,6 @@ where
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 101)
                 .branch(branch)
-                .parents(vec![first])
                 .cells(BTreeMap::from([
                     ("title".to_owned(), v("mixed-write predecessor")),
                     ("attachment".to_owned(), Value::Bytes(vec![3, 4, 5, 6])),

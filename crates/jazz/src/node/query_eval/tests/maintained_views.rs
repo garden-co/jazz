@@ -247,7 +247,6 @@ fn settled_global_authority_preserves_an_ordinary_local_content_update() {
         .commit_mergeable_settled(
             MergeableCommit::new("issues", issue, 2_000)
                 .made_by(AuthorSubject::SYSTEM)
-                .parents(vec![initial_tx])
                 .cells(BTreeMap::from([
                     (
                         "title".to_owned(),
@@ -387,7 +386,6 @@ fn settled_global_authority_preserves_an_ordinary_local_content_update() {
         .commit_mergeable_settled(
             MergeableCommit::new("issues", issue, 2_500)
                 .made_by(AuthorSubject::SYSTEM)
-                .parents(vec![initial_tx])
                 .cells(BTreeMap::from([
                     (
                         "title".to_owned(),
@@ -407,7 +405,6 @@ fn settled_global_authority_preserves_an_ordinary_local_content_update() {
         .commit_mergeable_settled(
             MergeableCommit::new("issues", issue, 3_000)
                 .made_by(AuthorSubject::SYSTEM)
-                .parents(vec![initial_tx])
                 .cells(BTreeMap::from([
                     (
                         "title".to_owned(),

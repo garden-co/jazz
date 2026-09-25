@@ -101,7 +101,6 @@ fn commit(
             .commit_mergeable_unit(
                 MergeableCommit::new("todos", row_uuid, made_at)
                     .made_by(writer)
-                    .parents(parents.into_iter().collect())
                     .cells(cells(title, owner)),
             )
             .await

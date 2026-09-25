@@ -100,7 +100,7 @@ where
         for version in versions {
             let (policy_schema_version, table, cells) =
                 self.policy_projection_for_version_record(version)?;
-            if version.deletion() == Some(DeletionEvent::Deleted) {
+            if version.deletes_row() {
                 actions.push(PermissionAdviceAction::Delete {
                     table: table.name.clone(),
                     row: version.row_uuid(),
@@ -167,7 +167,7 @@ where
         author: AuthorSubject,
         candidate_tx_id: Option<TxId>,
     ) -> Result<bool, Error> {
-        if author == AuthorSubject::SYSTEM || version.deletion() == Some(DeletionEvent::Deleted) {
+        if author == AuthorSubject::SYSTEM || version.deletes_row() {
             return Ok(true);
         }
         let (policy_schema_version, table, _) =
@@ -284,7 +284,7 @@ where
         };
         // Every user operation requires an explicit grant, including on a
         // table with no policies at all. SYSTEM is the explicit bypass above.
-        if version.deletion() == Some(DeletionEvent::Deleted) {
+        if version.deletes_row() {
             let Some(policy) = table.write_policies.delete_using.clone() else {
                 return Ok(false);
             };
@@ -299,6 +299,37 @@ where
                 .await?
             {
                 Some(current) => current,
+                // An insert followed by a delete in one transaction is one
+                // row image carrying both its content and the deletion. It
+                // must pass the insert grant, then the delete grant against
+                // that same content.
+                None if !cells.is_empty() => {
+                    let Some(insert_policy) = table.write_policies.insert_check.clone() else {
+                        return Ok(false);
+                    };
+                    if !self
+                        .write_policy_query_allows_candidate_with_provenance_for_schema(
+                            policy_schema_version,
+                            &table,
+                            &insert_policy,
+                            version.row_uuid(),
+                            &cells,
+                            author,
+                            true,
+                            version_provenance(version),
+                        )
+                        .await?
+                    {
+                        return Ok(false);
+                    }
+                    current_row_from_cells_with_explicit_provenance(
+                        &table,
+                        version.row_uuid(),
+                        &cells,
+                        version_provenance(version),
+                        None,
+                    )?
+                }
                 None => return Ok(false),
             };
             let current_cells = table
@@ -617,16 +648,13 @@ where
         row_uuid: RowUuid,
     ) -> Result<Option<CurrentRow>, Error> {
         if self
-            .query_local_layer_winner(&table.name, row_uuid, VersionLayer::Deletion)
+            .query_local_winner(&table.name, row_uuid)
             .await?
             .is_some_and(|version| version.deletion() == Some(DeletionEvent::Deleted))
         {
             return Ok(None);
         }
-        let Some(version) = self
-            .query_local_layer_winner(&table.name, row_uuid, VersionLayer::Content)
-            .await?
-        else {
+        let Some(version) = self.query_local_winner(&table.name, row_uuid).await? else {
             return Ok(None);
         };
         let (_policy_schema_version, projected_table, cells) =
@@ -700,15 +728,6 @@ where
         }
 
         Err(Error::InvalidCatalogueUpdate("lens chain is unknown"))
-    }
-
-    pub(super) fn policy_schema_for_table_name(&self, table: &str) -> SchemaVersionId {
-        let write_schema = self.catalogue.active_schema.schema;
-        if self.table_in_schema(table, write_schema).is_ok() {
-            write_schema
-        } else {
-            self.catalogue.local_schema_version_id
-        }
     }
 
     pub(super) fn read_policy_schema_for_table_name(
@@ -813,7 +832,7 @@ where
         // same incoming unit for its content and real creation provenance.
         for candidate in candidate_versions {
             if candidate.row_uuid() != version.row_uuid()
-                || candidate.deletion().is_some()
+                || candidate.deletes_row()
                 || candidate.branch_key() != version.branch_key()
             {
                 continue;
@@ -849,65 +868,21 @@ where
         } else {
             &table.name
         };
-        for parent in version.parents() {
-            for parent_version in self.query_versions_for_tx(parent).await? {
-                if parent_version.row_uuid() != version.row_uuid()
-                    || parent_version.layer() != VersionLayer::Content
-                {
-                    continue;
-                }
-                let (_policy_schema_version, projected_table, cells) =
-                    match self.policy_projection_for_version_row(&parent_version) {
-                        Ok(projected) => projected,
-                        Err(Error::InvalidCatalogueUpdate("lens chain is unknown")) => {
-                            let source_schema = self
-                                .schema_version_for_alias(parent_version.schema_version_alias())
-                                .ok_or(Error::InvalidStoredValue(
-                                    "history schema version alias must exist",
-                                ))?;
-                            let source_table =
-                                self.table_in_schema(parent_version.table(), source_schema)?;
-                            if !policy_tables_are_directly_compatible(&source_table, table) {
-                                return Err(Error::InvalidCatalogueUpdate("lens chain is unknown"));
-                            }
-                            (
-                                self.policy_schema_for_table_name(&table.name),
-                                table.clone(),
-                                parent_version.cells(&source_table)?,
-                            )
-                        }
-                        Err(error) => return Err(error),
-                    };
-                if projected_table.name != table.name {
-                    continue;
-                }
-                return reconstructed_policy_subject_row(
-                    table,
-                    version.row_uuid(),
-                    &cells,
-                    &parent_version,
-                )
-                .map(Some);
-            }
-        }
-
         let local_previous = match candidate_tx_id {
             Some(candidate_tx_id) => {
-                self.query_local_layer_winner_in_branch_excluding_tx(
+                self.query_local_winner_in_branch_excluding_tx(
                     subject_table,
                     version.branch_key(),
                     version.row_uuid(),
-                    VersionLayer::Content,
                     candidate_tx_id,
                 )
                 .await?
             }
             None => {
-                self.query_local_layer_winner_in_branch(
+                self.query_local_winner_in_branch(
                     subject_table,
                     version.branch_key(),
                     version.row_uuid(),
-                    VersionLayer::Content,
                 )
                 .await?
             }
@@ -927,12 +902,7 @@ where
         }
 
         if let Some(current_version) = self
-            .query_global_layer_winner_in_branch(
-                subject_table,
-                version.branch_key(),
-                version.row_uuid(),
-                VersionLayer::Content,
-            )
+            .query_global_winner_in_branch(subject_table, version.branch_key(), version.row_uuid())
             .await?
         {
             if candidate_tx_id != Some(self.version_tx_id(&current_version)?) {

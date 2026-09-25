@@ -1031,20 +1031,15 @@ pub mod ahead_current {
             .expect("open W1 RocksDB");
             let mut core = block_on(NodeState::new(node(), schema, storage)).expect("open W1 node");
 
-            let mut parent = None;
             let mut newest_tx = None;
             for index in 0..depth {
-                let mut commit = MergeableCommit::new(TABLE, row(), 20_000_000 + index as u64)
+                let commit = MergeableCommit::new(TABLE, row(), 20_000_000 + index as u64)
                     .cells(cells(index));
-                if let Some(parent_tx) = parent {
-                    commit = commit.parents(vec![parent_tx]);
-                }
                 let publication =
                     block_on(core.commit_mergeable(commit)).expect("commit W1 candidate");
                 let tx_id = publication.tx_id();
                 block_on(core.persist_and_settle_transaction(publication))
                     .expect("persist W1 candidate");
-                parent = Some(tx_id);
                 newest_tx = Some(tx_id);
             }
 
@@ -1084,8 +1079,8 @@ pub mod ahead_current {
             );
             assert_eq!(
                 metrics.ahead_current_rows.ranges,
-                2,
-                "{:?} W1 must scan content and deletion ahead-current ranges: {metrics:?}",
+                1,
+                "{:?} W1 must scan one ahead-current range (deletion is a row cell): {metrics:?}",
                 DurabilityTier::Local,
             );
         }

@@ -22,22 +22,16 @@ where
         &self,
         changed_tables: &std::collections::HashSet<String>,
     ) -> std::collections::HashSet<String> {
-        let shared_deletion_history =
-            changed_tables.contains(SHARED_DELETION_HISTORY_TABLE);
         self.catalogue
             .physical_mappings
             .values()
             .flat_map(|mapping| {
                 mapping.tables.iter().filter_map(|(logical_table, table)| {
                     let table_id = table.table_id;
-                    let changed = shared_deletion_history
-                        || [
+                    let changed = [
                             physical_history_table_name(table_id),
-                            physical_register_table_name(table_id),
                             physical_global_current_table_name(table_id),
-                            physical_register_global_current_table_name(table_id),
                             physical_ahead_current_table_name(table_id),
-                            physical_register_ahead_current_table_name(table_id),
                             physical_rejected_versions_table_name(table_id),
                         ]
                         .iter()
@@ -60,36 +54,15 @@ where
         self.physical_table_id_for_schema(schema_version, version.table())
     }
 
-    pub(super) fn physical_register_table_for_schema(
-        &self,
-        schema_version: SchemaVersionId,
-        logical_table: &str,
-    ) -> Result<String, Error> {
-        let table_id = self.physical_table_id_for_schema(schema_version, logical_table)?;
-        Ok(physical_register_table_name(table_id))
-    }
-
     pub(super) fn physical_current_table_for_schema(
         &self,
         schema_version: SchemaVersionId,
         logical_table: &str,
-        layer: VersionLayer,
-        class: PhysicalCurrentClass,
-    ) -> Result<String, Error> {
+        class: PhysicalCurrentClass,) -> Result<String, Error> {
         let table_id = self.physical_table_id_for_schema(schema_version, logical_table)?;
-        Ok(match (class, layer) {
-            (PhysicalCurrentClass::Global, VersionLayer::Content) => {
-                physical_global_current_table_name(table_id)
-            }
-            (PhysicalCurrentClass::Global, VersionLayer::Deletion) => {
-                physical_register_global_current_table_name(table_id)
-            }
-            (PhysicalCurrentClass::Ahead, VersionLayer::Content) => {
-                physical_ahead_current_table_name(table_id)
-            }
-            (PhysicalCurrentClass::Ahead, VersionLayer::Deletion) => {
-                physical_register_ahead_current_table_name(table_id)
-            }
+        Ok(match class {
+            PhysicalCurrentClass::Global => physical_global_current_table_name(table_id),
+            PhysicalCurrentClass::Ahead => physical_ahead_current_table_name(table_id),
         })
     }
 
@@ -118,6 +91,87 @@ where
             storage_table,
             physical_current_projection_target(alias, logical_table),
             shared_branch_scan(None),
+        ))
+    }
+
+    /// Read raw row images of one branch through the physical winner
+    /// projection. Deletion markers need only system fields, so they must not
+    /// pass through the read schema's enum lens: an old schema cannot name a
+    /// newer case, but it can still observe that the row was deleted.
+    pub(super) fn physical_current_marker_source_graph(
+        &self,
+        schema_version: SchemaVersionId,
+        logical_table: &str,
+        class: PhysicalCurrentClass,
+        branch_key: &BranchKey,
+    ) -> Result<GraphBuilder, Error> {
+        let mapping = self
+            .catalogue
+            .physical_mappings
+            .get(&schema_version)
+            .and_then(|mapping| mapping.tables.get(logical_table))
+            .cloned()
+            .ok_or(Error::InvalidStoredValue(
+                "physical current marker mapping missing",
+            ))?;
+        let table = self.table_in_schema_ref(logical_table, schema_version)?;
+        let physical_fields = physical_current_descriptor(table, &mapping)?
+            .fields()
+            .iter()
+            .map(|field| {
+                field.name.clone().ok_or(Error::InvalidStoredValue(
+                    "physical current winner field unnamed",
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let storage_table = physical_current_source_table(
+            &self.catalogue.catalogue_schemas,
+            &self.catalogue.physical_mappings,
+            schema_version,
+            logical_table,
+            class,
+        )?;
+        Ok(GraphBuilder::variant_source_scan(
+            storage_table,
+            physical_current_winner_projection_target(mapping.table_id, &physical_fields),
+            branch_scan(branch_key, None),
+        ))
+    }
+
+    /// Read the global winners that a capped composite index scan names,
+    /// through the same system-field winner projection as
+    /// `physical_current_marker_source_graph`.
+    pub(crate) fn physical_global_marker_index_graph(
+        &self,
+        schema_version: SchemaVersionId,
+        logical_table: &str,
+        index: String,
+        scan: groove::ivm::StaticScanSpec,
+    ) -> Result<GraphBuilder, Error> {
+        let mapping = self
+            .catalogue
+            .physical_mappings
+            .get(&schema_version)
+            .and_then(|mapping| mapping.tables.get(logical_table))
+            .cloned()
+            .ok_or(Error::InvalidStoredValue(
+                "physical current marker mapping missing",
+            ))?;
+        let table = self.table_in_schema_ref(logical_table, schema_version)?;
+        let physical_fields = physical_current_descriptor(table, &mapping)?
+            .fields()
+            .iter()
+            .map(|field| {
+                field.name.clone().ok_or(Error::InvalidStoredValue(
+                    "physical current winner field unnamed",
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(GraphBuilder::variant_index_scan(
+            physical_global_current_table_name(mapping.table_id),
+            index,
+            physical_current_winner_projection_target(mapping.table_id, &physical_fields),
+            scan,
         ))
     }
 
@@ -404,7 +458,7 @@ where
             ];
             for storage_table in &storage_tables {
                 let logical_output =
-                    target_table.global_current_storage_tables()[0].record_schema();
+                    target_table.global_current_storage_table().record_schema();
                 let physical_names = physical_current_field_names(&target_table, &target_mapping)?;
                 let output = widened_projection_descriptor(
                     &logical_output,
@@ -552,7 +606,7 @@ where
             physical_ahead_current_table_name(target_mapping.table_id),
         ];
         for storage_table in &storage_tables {
-            let logical_output = target_table.global_current_storage_tables()[0].record_schema();
+            let logical_output = target_table.global_current_storage_table().record_schema();
             // This query-local target is the semantic read boundary. Unlike
             // the durable all-fields storage target, it must expose the
             // authored descriptor itself: enum tags are translated into that
@@ -1255,7 +1309,7 @@ where
         let target_storage = match shape {
             ContentProjectionShape::History => target_table.history_storage_table(),
             ContentProjectionShape::Current => {
-                target_table.global_current_storage_tables()[0].clone()
+                target_table.global_current_storage_table()
             }
         };
         let user_cells = match shape {

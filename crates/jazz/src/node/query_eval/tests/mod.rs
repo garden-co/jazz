@@ -679,32 +679,6 @@ fn current_titles(
         .collect()
 }
 
-fn historical_titles_via_full_scan(
-    node: &mut NodeState<RocksDbStorage>,
-    table: &TableSchema,
-    position: GlobalTime,
-) -> BTreeMap<RowUuid, Value> {
-    let table_id = node
-        .physical_table_id_for_schema(node.catalogue.local_schema_version_id, &table.name)
-        .expect("physical table id");
-    let history_source = node
-        .physical_history_source_graph(node.catalogue.local_schema_version_id, &table.name)
-        .expect("physical history source");
-    let deltas = node
-        .database
-        .query_graph(historical_current_graph_full_scan(
-            table,
-            table_id,
-            position,
-            history_source,
-        ))
-        .expect("full-scan historical graph");
-    let rows = node
-        .materialize_inline_current_query_rows(table, deltas)
-        .expect("materialize full-scan historical graph");
-    current_titles(table, rows)
-}
-
 fn delete_global(
     node: &mut NodeState<RocksDbStorage>,
     table: &str,

@@ -316,19 +316,13 @@ where
                     self.register_shape_with_options(shape_id, ast, opts)?;
                     Ok(PublicationOutcome::settled(Vec::new()))
                 }
-                SyncMessage::FetchRowVersions { .. } => Err(Error::UnsupportedSyncMessage(
-                    "row-version repair fetch must be served by peer state",
-                )),
-                SyncMessage::RowVersionPayloads { .. } => Err(Error::UnsupportedSyncMessage(
-                    "row-version repair payload requires outstanding request context",
-                )),
+                SyncMessage::Reserved15(retired) | SyncMessage::Reserved16(retired) => {
+                    match retired {}
+                }
                 SyncMessage::CatalogueSnapshot(_) => Err(Error::UnsupportedSyncMessage(
                     "catalogue snapshot requires a trusted upstream link",
                 )),
                 SyncMessage::Subscribe(subscribe) => {
-                    validate_known_state_declaration(&subscribe.known_state).map_err(|_| {
-                        Error::UnsupportedSyncMessage("known-state declaration exceeds limit")
-                    })?;
                     self.apply_subscribe(subscribe)?;
                     Ok(PublicationOutcome::settled(Vec::new()))
                 }

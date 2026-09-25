@@ -11,9 +11,11 @@ use jazz::ids::{NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState, SKEW_TOLERANCE_MS};
 use jazz::peer::PeerState;
 use jazz::protocol::{
-    KnownStateDeclaration, RowVersionRef, SubscriptionKey, SyncMessage, expand_version_carriers,
+    KnownStateCompleteness, KnownStateDeclaration, RowVersionRef, SubscriptionKey, SyncMessage,
+    expand_version_carriers,
 };
 use jazz::schema::JazzSchema;
+use jazz::time::GlobalTime;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::{Fate, TxId};
 use jazz::wire::encode_sync_message;
@@ -42,12 +44,11 @@ fn main() {
 
     for coverage_percent in coverage_percentages {
         let known_count = rows * coverage_percent / 100;
-        let known_versions = versions[..known_count]
-            .iter()
-            .map(|(row_uuid, tx_id)| RowVersionRef::new(TABLE, *row_uuid, *tx_id))
-            .collect::<Vec<_>>();
-        let declaration = (known_count > 0).then_some(KnownStateDeclaration::ExactVersionSet {
-            versions: known_versions,
+        // "Q at W": the receiver holds every row settled through the
+        // watermark of the last known row.
+        let declaration = (known_count > 0).then(|| KnownStateDeclaration::Fast {
+            completeness: KnownStateCompleteness::FastCurrentMembership,
+            position: versions[known_count - 1].2,
         });
         let declaration_bytes = postcard::to_allocvec(&declaration)
             .expect("encode known-state declaration payload")
@@ -94,11 +95,11 @@ fn main() {
         assert_eq!(result_members.len(), rows);
         let expected_versions = versions
             .iter()
-            .map(|(row_uuid, tx_id)| RowVersionRef::new(TABLE, *row_uuid, *tx_id))
+            .map(|(row_uuid, tx_id, _)| RowVersionRef::new(TABLE, *row_uuid, *tx_id))
             .collect::<BTreeSet<_>>();
         let covered_versions = versions[..known_count]
             .iter()
-            .map(|(row_uuid, tx_id)| RowVersionRef::new(TABLE, *row_uuid, *tx_id))
+            .map(|(row_uuid, tx_id, _)| RowVersionRef::new(TABLE, *row_uuid, *tx_id))
             .chain(expanded_bundles.iter().flat_map(|bundle| {
                 bundle.versions.iter().map(|version| {
                     RowVersionRef::new(version.table(), version.row_uuid(), bundle.tx.tx_id)
@@ -155,7 +156,7 @@ impl Fixture {
         }
     }
 
-    fn seed(&mut self, rows: usize) -> Vec<(RowUuid, TxId)> {
+    fn seed(&mut self, rows: usize) -> Vec<(RowUuid, TxId, GlobalTime)> {
         (0..rows)
             .map(|index| {
                 let row_uuid = row(index);
@@ -168,14 +169,15 @@ impl Fixture {
                     .expect("create fixture commit");
                 let tx_id = support::settle_transaction(&mut self.writer, publication);
                 let fate = core_ingest(&mut self.core, &unit, u64::MAX - SKEW_TOLERANCE_MS);
-                assert!(matches!(
-                    fate,
-                    SyncMessage::FateUpdate {
-                        fate: Fate::Accepted,
-                        ..
-                    }
-                ));
-                (row_uuid, tx_id)
+                let SyncMessage::FateUpdate {
+                    fate: Fate::Accepted,
+                    global_time: Some(global_time),
+                    ..
+                } = fate
+                else {
+                    panic!("fixture commit must be accepted with a global time: {fate:?}");
+                };
+                (row_uuid, tx_id, global_time)
             })
             .collect()
     }

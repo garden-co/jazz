@@ -2406,9 +2406,7 @@ where
                     large_value_uploads: transferred_large_value_uploads,
                     awaiting_large_value_uploads: BTreeMap::new(),
                     failed_large_value_uploads: BTreeSet::new(),
-                    pending_row_version_fetches: VecDeque::new(),
-                    pending_row_version_repairs: VecDeque::new(),
-                    deferred_repair_fates: VecDeque::new(),
+                    missing_body_resends: BTreeSet::new(),
                     scope_view_cuts: BTreeMap::new(),
                     scope_receipts: BTreeMap::new(),
                     expected_scope_authority,
@@ -2920,9 +2918,7 @@ where
         }
         connection_ref.staged_inbound.clear();
         if let ConnectionLink::Upstream(state) = &mut connection_ref.link {
-            state.pending_row_version_repairs.clear();
-            state.pending_row_version_fetches.clear();
-            state.deferred_repair_fates.clear();
+            state.missing_body_resends.clear();
         }
         self.current_rows.borrow_mut().disconnect(connection_epoch);
         let upstream_upload_destination = connection_ref.upstream_upload_destination;

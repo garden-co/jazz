@@ -32,6 +32,34 @@ impl PeerState {
         }
     }
 
+    /// A watermark is answered once: afterwards the receiver holds a new
+    /// revision, so later rehydrates only reuse the position for body dedupe.
+    pub(crate) fn settle_watermark_declaration(&mut self, subscription: SubscriptionKey) {
+        if let Some(KnownStateDeclaration::Watermark {
+            position,
+            authorization_progress,
+            ..
+        }) = self.downstream_known_states.get(&subscription).cloned()
+        {
+            self.downstream_known_states.insert(
+                subscription,
+                match authorization_progress {
+                    Some(authorization_progress) => {
+                        KnownStateDeclaration::FastWithAuthorizationProgress {
+                            completeness: crate::protocol::KnownStateCompleteness::FastCurrentMembership,
+                            position,
+                            authorization_progress,
+                        }
+                    }
+                    None => KnownStateDeclaration::Fast {
+                        completeness: crate::protocol::KnownStateCompleteness::FastCurrentMembership,
+                        position,
+                    },
+                },
+            );
+        }
+    }
+
     /// Advance retained per-binding authorization generations after this
     /// reader's authority is rebuilt.
     pub(crate) fn advance_authorization_progress(&mut self) {
@@ -173,74 +201,6 @@ impl PeerState {
             .count()
     }
 
-    /// Serve exact row-version repair fetches for this peer.
-    pub async fn handle_row_versions_fetch<S>(
-        &mut self,
-        node: &mut NodeState<S>,
-        message: SyncMessage,
-    ) -> Result<Vec<SyncMessage>, Error>
-    where
-        S: OrderedKvStorage,
-    {
-        let SyncMessage::FetchRowVersions { requests, .. } = message else {
-            return Err(Error::UnsupportedSyncMessage(
-                "non-row-version-fetch peer request",
-            ));
-        };
-        validate_fetch_row_versions(&requests).map_err(|_| {
-            Error::UnsupportedSyncMessage("row-version repair request exceeds limit")
-        })?;
-        if self.role() == PeerRole::Relay {
-            return Err(Error::InvalidStoredValue(
-                "relay row-version repair requires an explicit immutable policy binding",
-            ));
-        }
-        let identity = self.permission_subject().ok_or(Error::InvalidStoredValue(
-            "direct repair is missing a terminated permission subject",
-        ))?;
-        let claims = node.session_claims_for(identity);
-        self.serve_row_versions(
-            node,
-            &requests,
-            RepairServingContext::Authority {
-                policy_binding: (identity, claims),
-            },
-        )
-        .await
-    }
-
-    /// Build repair-lane responses for visible requested row-version payloads.
-    pub(crate) async fn serve_row_versions<S>(
-        &mut self,
-        node: &mut NodeState<S>,
-        requests: &[RowVersionRef],
-        context: RepairServingContext,
-    ) -> Result<Vec<SyncMessage>, Error>
-    where
-        S: OrderedKvStorage,
-    {
-        let versions = match context {
-            RepairServingContext::Authority {
-                policy_binding: (identity, claims),
-            } => node
-                .scoped_active_session_claims(identity, claims)
-                .row_version_payloads_for_refs(
-                    requests,
-                    crate::node::RowVersionRepairAuthorization::EnforceReadPolicy(identity),
-                )
-                .await?,
-            RepairServingContext::ScopeIsolatedClientRelay => node
-                .row_version_payloads_for_refs(
-                    requests,
-                    crate::node::RowVersionRepairAuthorization::RetainedScopeLedger,
-                )
-                .await?,
-        };
-        Ok(vec![SyncMessage::RowVersionPayloads {
-            version_bundles: versions,
-        }])
-    }
-
     /// Return current result_set for one subscription.
     pub fn subscription_result_sets(
         &self,
@@ -273,15 +233,4 @@ impl PeerState {
             .and_then(|state| state.maintained_subscription_view.as_ref())
             .map(|maintained| maintained.maintained.footprint().into())
     }
-
-}
-
-/// Chosen by the topology boundary, rather than inferred from `PeerRole`.
-/// Multiplexed relays receive no retained-knowledge capability and must ask an
-/// authority to serve repairs.
-pub(crate) enum RepairServingContext {
-    Authority {
-        policy_binding: (AuthorSubject, BTreeMap<String, groove::records::Value>),
-    },
-    ScopeIsolatedClientRelay,
 }

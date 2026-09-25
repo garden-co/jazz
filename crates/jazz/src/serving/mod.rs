@@ -2636,11 +2636,6 @@ mod tests {
                 .any(|name| name == "__groove_class_history")
         );
         assert!(
-            column_families
-                .iter()
-                .any(|name| name == "__groove_class_register")
-        );
-        assert!(
             !column_families
                 .iter()
                 .any(|name| name == "jazz_todos_history")

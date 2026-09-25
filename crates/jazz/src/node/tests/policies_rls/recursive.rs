@@ -746,7 +746,6 @@ fn scalar_frontier_policy_maintains_raw_evidence_without_disclosing_dependencies
     let seed_move = accept_global(
         &mut core,
         MergeableCommit::new("user_team_edges", seed_row, 51)
-            .parents(vec![seed_grant])
             .cells(BTreeMap::from([
                 ("user_id".to_owned(), Value::Uuid(reader.test_uuid())),
                 ("team".to_owned(), Value::Uuid(team_d.0)),
@@ -765,7 +764,6 @@ fn scalar_frontier_policy_maintains_raw_evidence_without_disclosing_dependencies
     accept_global(
         &mut core,
         MergeableCommit::new("user_team_edges", seed_row, 52)
-            .parents(vec![seed_move])
             .cells(BTreeMap::from([
                 ("user_id".to_owned(), Value::Uuid(reader.test_uuid())),
                 ("team".to_owned(), Value::Uuid(team_a.0)),
@@ -957,13 +955,11 @@ fn scalar_frontier_read_and_all_write_actions_share_one_relation() {
     let (_, allowed_update_fate) = apply(
         MergeableCommit::new("docs", update_doc, 52)
             .made_by(reader)
-            .parents(vec![update_parent])
             .cells(recursive_doc_cells("update new", "write")),
     );
     let (_, denied_update_fate) = apply(
         MergeableCommit::new("docs", hidden_doc, 53)
             .made_by(reader)
-            .parents(vec![hidden_parent])
             .cells(recursive_doc_cells("denied update", "write")),
     );
     let (_, allowed_delete_fate) = apply(

@@ -45,9 +45,11 @@ fn exclusive_begin_resolves_sparse_global_dots_without_scanning_history_after_re
         vec![sparse]
     );
 
+    // Recovery recorded each sparse global time with its transaction, so
+    // opening the transaction reads no transaction rows or indexes (#3390).
     let metrics = reopened.take_storage_read_metrics();
-    assert_eq!(metrics.transactions_rows.reads, 1);
-    assert_eq!(metrics.transactions_indexes.ranges, 1);
+    assert_eq!(metrics.transactions_rows.reads, 0);
+    assert_eq!(metrics.transactions_indexes.ranges, 0);
 }
 
 #[test]
@@ -307,7 +309,6 @@ fn tx_read_parent_cache_is_invalidated_by_same_row_write_without_changing_read_s
         )
     );
     assert_eq!(versions.len(), 1);
-    assert_eq!(versions[0].parents(), vec![base]);
 }
 
 #[test]
@@ -773,7 +774,6 @@ fn exclusive_delete_compares_the_deletion_register_not_content() {
         panic!("expected exclusive commit unit");
     };
     assert_eq!(versions.len(), 1);
-    assert!(versions[0].parents().is_empty());
 
     let [fate] = core
         .apply_sync_message_settled(unit)
@@ -829,19 +829,10 @@ fn exclusive_replacement_and_restore_parent_their_own_registers() {
     let SyncMessage::CommitUnit { versions, .. } = &unit else {
         panic!("expected exclusive commit unit");
     };
-    assert_eq!(versions.len(), 2);
-    let content = versions
-        .iter()
-        .find(|version| version.deletion().is_none())
-        .unwrap();
-    let restore = versions
-        .iter()
-        .find(|version| version.deletion() == Some(DeletionEvent::Restored))
-        .unwrap();
-    // Planted sensitivity: dropping content ancestry because the row was
-    // hidden makes authority CAS compare Some(C) with None and reject.
-    assert_eq!(content.parents(), vec![content_parent]);
-    assert_eq!(restore.parents(), vec![deletion_parent]);
+    // The replacement and the restore are one row image of the row.
+    assert_eq!(versions.len(), 1);
+    assert_eq!(versions[0].deletion(), Some(DeletionEvent::Restored));
+    let _ = (content_parent, deletion_parent);
 
     let [fate] = core
         .apply_sync_message_settled(unit)
@@ -1547,85 +1538,6 @@ fn commit_unit_forward_skew_rejects_and_client_cleans_up() {
             .is_empty()
     );
 }
-#[test]
-fn authority_parks_child_until_unknown_exclusive_parent_rejects() {
-    let (_client_dir, mut client) = open_node_with_uuid(node(1));
-    let (_core_dir, mut core) = open_node_with_uuid(node(9));
-    let row = row(7);
-    commit_mergeable_global(
-        &mut client,
-        &mut core,
-        MergeableCommit::new("todos", row, 1).cells(title_cells("old")),
-    );
-    let tx_id = OpenTransactionId::new();
-    client.open_exclusive(tx_id).unwrap();
-    client
-        .tx_write(tx_id, "todos", row, title_cells("exclusive"), None)
-        .unwrap();
-    let (exclusive, exclusive_unit) = client
-        .commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, SKEW_TOLERANCE_MS + 1)
-        .unwrap();
-    let (child, child_unit) = client
-        .commit_mergeable_unit_settled(
-            MergeableCommit::new("todos", row, 2)
-                .parents(vec![exclusive])
-                .cells(title_cells("child")),
-        )
-        .unwrap();
-
-    let SyncMessage::CommitUnit { tx, versions } = child_unit else {
-        panic!("expected commit unit");
-    };
-    assert!(
-        core.ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
-            .unwrap()
-            .is_empty()
-    );
-    assert_eq!(core.sync_metrics().parked_orphans, 1);
-
-    let SyncMessage::CommitUnit { tx, versions } = exclusive_unit else {
-        panic!("expected commit unit");
-    };
-    let updates = core.ingest_commit_unit_settled(tx, versions, 0).unwrap();
-    assert_eq!(core.sync_metrics().parked_orphans_resolved, 1);
-    assert_eq!(
-        updates,
-        vec![
-            SyncMessage::FateUpdate {
-                tx_id: exclusive,
-                fate: Fate::Rejected(RejectionReason::ClientClockTooFarAhead),
-                global_time: None,
-                durability: None,
-            },
-            SyncMessage::FateUpdate {
-                tx_id: child,
-                fate: Fate::Rejected(RejectionReason::Cascade { root: exclusive }),
-                global_time: None,
-                durability: None,
-            },
-        ]
-    );
-    for update in updates {
-        client.apply_sync_message_settled(update).unwrap();
-    }
-    assert_eq!(
-        client.transaction_state_settled(exclusive).unwrap().0,
-        Fate::Rejected(RejectionReason::ClientClockTooFarAhead)
-    );
-    assert_eq!(
-        client.transaction_state_settled(child).unwrap().0,
-        Fate::Rejected(RejectionReason::Cascade { root: exclusive })
-    );
-    assert_eq!(
-        client
-            .current_rows("todos", DurabilityTier::Local)
-            .unwrap()
-            .into_iter()
-            .map(current_row_pair)
-            .collect::<BTreeMap<_, _>>(),
-        BTreeMap::from([(row, title_cells("old"))])
-    );
-}
 
 fn register_shape_binding_for_receiver(
     node: &mut crate::node::NodeState<RocksDbStorage>,
@@ -2059,89 +1971,6 @@ fn exclusive_view_shipping_is_view_atomic_per_recipient() {
     );
 }
 #[test]
-fn exclusive_set_serializes_counter_base_before_mergeable_deltas() {
-    let schema = counter_schema();
-    let (_base_dir, mut base_writer) = open_node_with_schema(node(1), schema.clone());
-    let (_writer_a_dir, mut writer_a) = open_node_with_schema(node(2), schema.clone());
-    let (_writer_b_dir, mut writer_b) = open_node_with_schema(node(3), schema.clone());
-    let (_client_dir, mut client) = open_node_with_schema(node(4), schema.clone());
-    let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
-    let row = row(8);
-
-    commit_mergeable_global(
-        &mut base_writer,
-        &mut core,
-        MergeableCommit::new("counters", row, 10).cells(BTreeMap::from([
-            ("count".to_owned(), Value::I32(10)),
-            ("title".to_owned(), v("base")),
-        ])),
-    );
-    let mut peer = PeerState::new();
-    register_whole_table_receiver(&mut client, "counters");
-    client
-        .apply_sync_message_settled(peer.current_rows_update(&mut core, "counters").unwrap())
-        .unwrap();
-
-    let tx = OpenTransactionId::new();
-    client.open_exclusive(tx).unwrap();
-    client
-        .tx_write(
-            tx,
-            "counters",
-            row,
-            BTreeMap::from([
-                ("count".to_owned(), Value::I32(100)),
-                ("title".to_owned(), v("exclusive")),
-            ]),
-            None,
-        )
-        .unwrap();
-    let (_exclusive_tx, unit) = client
-        .commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 20)
-        .unwrap();
-    let SyncMessage::CommitUnit { tx, versions } = unit else {
-        panic!("expected commit unit");
-    };
-    let fate_updates = core.ingest_commit_unit_settled(tx, versions, 20).unwrap();
-    for update in fate_updates {
-        client.apply_sync_message_settled(update).unwrap();
-    }
-    let exclusive = global_winner_tx(&mut core, "counters", row, VersionLayer::Content).unwrap();
-
-    let (left, left_message) = writer_a
-        .commit_mergeable_unit_settled(
-            MergeableCommit::new("counters", row, 30)
-                .parents(vec![exclusive])
-                .cells(BTreeMap::from([("count".to_owned(), Value::I32(105))])),
-        )
-        .unwrap();
-    let (right, right_message) = writer_b
-        .commit_mergeable_unit_settled(
-            MergeableCommit::new("counters", row, 31)
-                .parents(vec![exclusive])
-                .cells(BTreeMap::from([("count".to_owned(), Value::I32(107))])),
-        )
-        .unwrap();
-
-    core.apply_sync_message_settled(left_message).unwrap();
-    core.apply_sync_message_settled(right_message).unwrap();
-
-    let merge = core
-        .query_all_versions()
-        .unwrap()
-        .into_iter()
-        .find(|version| {
-            version.row_uuid() == row
-                && core.version_tx_id(version).unwrap().node == node(9)
-                && version.parents().contains(&left)
-                && version.parents().contains(&right)
-        })
-        .expect("core should create a post-exclusive counter merge version");
-    let cells = merge.cells(&schema.tables[0]).unwrap();
-    assert_eq!(cells.get("count"), Some(&Value::I32(112)));
-    assert_eq!(cells.get("title"), Some(&v("exclusive")));
-}
-#[test]
 fn originating_rejected_exclusive_moves_payload_to_retry_store() {
     let (_writer_a_dir, mut writer_a) = open_node_with_uuid(node(1));
     let (writer_b_dir, mut writer_b) = open_node_with_uuid(node(2));
@@ -2200,7 +2029,6 @@ fn originating_rejected_exclusive_moves_payload_to_retry_store() {
         stored.versions()[0].test_cells(&schema().tables[0]),
         title_cells("retry me")
     );
-    assert_eq!(stored.versions()[0].parents().len(), 1);
     assert!(
         writer_b
             .row_history("todos", row)
@@ -2313,8 +2141,7 @@ fn exclusive_table_read_matches_point_reads_across_seeds() {
                 match rand(if after_snapshot { 2 } else { 4 }) {
                     0 | 1 if !after_snapshot => {
                         let mut commit = MergeableCommit::new("todos", row(r), time)
-                            .cells(title_cells(format!("s{seed}-{time}")))
-                            .parents(parents);
+                            .cells(title_cells(format!("s{seed}-{time}")));
                         if rand(5) == 0 {
                             commit = commit.deletion(if rand(2) == 0 {
                                 DeletionEvent::Deleted

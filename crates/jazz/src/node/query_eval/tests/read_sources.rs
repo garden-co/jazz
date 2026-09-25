@@ -64,13 +64,7 @@ fn inline_policy_provenance_requirement_synthesizes_version_witnesses() {
             && tx_time_field == "tx_time"
             && tx_node_field == "tx_node_id"
     ));
-    for field in [
-        "table",
-        "layer",
-        "schema_version",
-        "parents",
-        "authored_columns",
-    ] {
+    for field in ["table", "layer", "schema_version", "authored_columns"] {
         assert!(
             descriptor.field_index(field).is_some(),
             "synthesized witness descriptor must carry {field}"
@@ -188,7 +182,7 @@ fn reverse_table_lens_projects_membership_and_content_version_sources() {
 }
 
 #[test]
-fn historical_cut_bounded_source_matches_full_scan_graph() {
+fn historical_cut_rewinds_rows_changed_after_the_cut() {
     let schema = public_query_eval_schema(
         PublicSchemaBuilder::new()
             .table(PublicTableSchemaBuilder::new("docs").column("title", PublicColumnType::Text)),
@@ -247,15 +241,30 @@ fn historical_cut_bounded_source_matches_full_scan_graph() {
             .expect("bounded historical query"),
     );
     let selected_metrics = node.query_engine_read_metrics().clone();
-    let full = historical_titles_via_full_scan(&mut node, &table, GlobalTime(2));
 
-    assert_eq!(bounded, full);
+    // Rows whose latest seq is after the cut rewind to their newest image at
+    // or below it; rows created after the cut are absent.
+    assert_eq!(
+        bounded,
+        BTreeMap::from([
+            (first, Value::String("first".to_owned())),
+            (second, Value::String("second".to_owned())),
+        ])
+    );
     assert_eq!(selected_metrics.source_global_time_range_scans, 1);
     assert_eq!(selected_metrics.source_full_scans, 0);
+    assert_eq!(
+        current_titles(
+            &table,
+            node.query_rows_at(&shape, &binding, GlobalTime(3))
+                .expect("cut after the delete"),
+        ),
+        BTreeMap::from([(second, Value::String("second".to_owned()))])
+    );
 }
 
 #[test]
-fn historical_cut_reads_only_table_global_time_range() {
+fn historical_cut_hides_rows_created_after_the_cut() {
     let schema = public_query_eval_schema(
         PublicSchemaBuilder::new()
             .table(PublicTableSchemaBuilder::new("docs").column("title", PublicColumnType::Text)),
@@ -292,7 +301,6 @@ fn historical_cut_reads_only_table_global_time_range() {
         node.query_rows_at(&shape, &binding, GlobalTime(1))
             .expect("bounded historical query"),
     );
-    let read_metrics = node.take_storage_read_metrics();
     let selected_metrics = node.query_engine_read_metrics().clone();
 
     assert_eq!(
@@ -300,20 +308,6 @@ fn historical_cut_reads_only_table_global_time_range() {
         BTreeMap::from([(row(0x41), Value::String("at-cut".to_owned()))])
     );
     assert_eq!(selected_metrics.source_global_time_range_scans, 1);
-    assert_eq!(
-        read_metrics.global_changes_indexes.ranges, 1,
-        "bounded cut should use one by_table_global_time range"
-    );
-    assert!(
-        read_metrics.global_changes_indexes.reads <= 2,
-        "small cut should not read the later same-table history: {:?}",
-        read_metrics.global_changes_indexes
-    );
-    assert!(
-        read_metrics.global_changes_rows.reads <= 2,
-        "small cut should not fetch later same-table change rows: {:?}",
-        read_metrics.global_changes_rows
-    );
 }
 
 #[test]
@@ -336,7 +330,6 @@ fn denormalized_current_content_witness_projects_history_provenance_to_unix_mill
         .commit_mergeable_settled(
             MergeableCommit::new("issues", row(11), 1_100)
                 .made_by(AuthorSubject::SYSTEM)
-                .parents(vec![first])
                 .cells(BTreeMap::from([
                     ("title".to_owned(), Value::String("second".to_owned())),
                     ("state".to_owned(), Value::String("closed".to_owned())),

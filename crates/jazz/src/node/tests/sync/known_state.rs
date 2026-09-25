@@ -871,122 +871,6 @@ fn complete_empty_snapshot_for_duplicate_usage_replaces_canonical_view() {
 }
 
 #[test]
-fn known_state_rehydrate_skips_known_bodies_and_repairs_missing_payload() {
-    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
-    let (_core_dir, mut core) = open_node_with_uuid(node(9));
-    let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
-    let row_uuid = row(17);
-    let (shape, binding) = core.whole_table_shape_binding("todos").unwrap();
-    let subscription = core.whole_table_subscription_key("todos").unwrap();
-    register_shape_binding(&mut reader, &shape, &binding);
-
-    let (_tx_id, commit_unit) = writer
-        .commit_mergeable_unit_settled(
-            MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("known")),
-        )
-        .unwrap();
-    let SyncMessage::CommitUnit { tx, versions } = commit_unit else {
-        panic!("expected commit unit");
-    };
-    core.ingest_commit_unit_settled(tx.clone(), versions, u64::MAX - SKEW_TOLERANCE_MS)
-        .unwrap();
-    reader
-        .ingest_known_transaction(
-            tx,
-            Vec::new(),
-            Fate::Accepted,
-            Some(GlobalTime(1)),
-            DurabilityTier::Global,
-        )
-        .unwrap();
-    let mut control_peer = relay_with_system_binding(subscription);
-    let control_update = control_peer
-        .rehydrate_query_for_subscription_with_opts(
-            &mut core,
-            subscription,
-            &shape,
-            &binding,
-            RegisterShapeOptions::default(),
-        )
-        .unwrap()
-        .expect("expected view update");
-    let control_version_bundles = version_bundles_for_update(&control_update);
-    let control_input = covered_input_for_row(&control_update, row_uuid);
-    assert_eq!(control_input.version.tx, _tx_id);
-    assert_eq!(control_version_bundles.len(), 1);
-
-    let mut peer = relay_with_system_binding(subscription);
-    peer.declare_known_state(
-        subscription,
-        Some(crate::protocol::KnownStateDeclaration::Fast {
-            completeness: crate::protocol::KnownStateCompleteness::FastCurrentMembership,
-            position: GlobalTime::new(10, 0).unwrap(),
-        }),
-    );
-
-    let update = peer
-        .rehydrate_query_for_subscription_with_opts(
-            &mut core,
-            subscription,
-            &shape,
-            &binding,
-            RegisterShapeOptions::default(),
-        )
-        .unwrap()
-        .expect("expected view update");
-    let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        settled_through,
-        peer_payload_inventory,
-        ..
-    }) = &update
-    else {
-        panic!("expected view update");
-    };
-    assert_eq!(*settled_through, GlobalTime::new(10, 0).unwrap());
-    // A cursor deduplicates bodies, not the new usage's input manifest.
-    assert!(!peer_payload_inventory.opening_pending);
-    assert!(version_bundles.is_empty());
-
-    let missing = reader
-        .missing_known_state_row_version_refs(&update)
-        .unwrap();
-    assert_eq!(
-        missing,
-        vec![crate::protocol::RowVersionRef::new(
-            "todos", row_uuid, _tx_id
-        )]
-    );
-    // Alice's claimed cursor was ahead of her retained payloads. Repair the
-    // actual missing body, then verify the same rows as the undeduplicated
-    // control opening rather than accepting an empty apparent success.
-    let mut repair_peer = PeerState::client_link(AuthorSubject::SYSTEM);
-    let messages = repair_peer
-        .handle_row_versions_fetch(
-            &mut core,
-            SyncMessage::FetchRowVersions {
-                requests: missing.clone(),
-                delegated_session: None,
-            },
-        )
-        .unwrap();
-    let [SyncMessage::RowVersionPayloads { version_bundles }] = messages.as_slice() else {
-        panic!("expected row-version payloads");
-    };
-    reader
-        .apply_row_version_payloads_for_requests(&missing, version_bundles.clone())
-        .unwrap();
-    reader.apply_sync_message_settled(update).unwrap();
-    assert_eq!(
-        receiver_rows(&mut reader, &shape, &binding, DurabilityTier::Global)
-            .into_iter()
-            .map(current_row_pair)
-            .collect::<BTreeMap<_, _>>(),
-        BTreeMap::from([(row_uuid, title_cells("known"))])
-    );
-}
-
-#[test]
 fn fast_known_state_rehydrate_ships_only_members_after_declared_position() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
@@ -1091,60 +975,6 @@ fn fast_known_state_rehydrate_ships_only_members_after_declared_position() {
     );
 
     assert_ne!(tx_a, tx_b);
-}
-
-#[test]
-fn exact_known_state_rehydrate_skips_known_bodies_but_preserves_membership() {
-    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
-    let (_core_dir, mut core) = open_node_with_uuid(node(9));
-    let row_uuid = row(19);
-    let (shape, binding) = core.whole_table_shape_binding("todos").unwrap();
-    let subscription = core.whole_table_subscription_key("todos").unwrap();
-
-    let (tx_id, commit_unit) = writer
-        .commit_mergeable_unit_settled(
-            MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("known")),
-        )
-        .unwrap();
-    let SyncMessage::CommitUnit { tx, versions } = commit_unit else {
-        panic!("expected commit unit");
-    };
-    core.ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
-        .unwrap();
-
-    let mut peer = relay_with_system_binding(subscription);
-    peer.declare_known_state(
-        subscription,
-        Some(crate::protocol::KnownStateDeclaration::ExactVersionSet {
-            versions: vec![crate::protocol::RowVersionRef::new(
-                "todos", row_uuid, tx_id,
-            )],
-        }),
-    );
-    let update = peer
-        .rehydrate_query_for_subscription_with_opts(
-            &mut core,
-            subscription,
-            &shape,
-            &binding,
-            RegisterShapeOptions::default(),
-        )
-        .unwrap()
-        .expect("expected view update");
-    let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        supporting_rows: program_fact_adds,
-        ..
-    }) = &update
-    else {
-        panic!("expected view update");
-    };
-    assert!(program_fact_adds.added_rows().iter().any(|fact| matches!(
-        fact,
-        input
-            if input.row == row_uuid && input.version.tx == tx_id
-    )));
-    assert!(version_bundles.is_empty());
 }
 
 #[test]
@@ -1326,272 +1156,6 @@ fn reopened_reader_keeps_local_rows_and_requires_fresh_remote_snapshot() {
 }
 
 #[test]
-fn exact_known_state_rehydrate_repairs_missing_payload() {
-    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
-    let (_core_dir, mut core) = open_node_with_uuid(node(9));
-    let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
-    let row_uuid = row(21);
-    let (shape, binding) = core.whole_table_shape_binding("todos").unwrap();
-    let subscription = core.whole_table_subscription_key("todos").unwrap();
-    register_shape_binding(&mut reader, &shape, &binding);
-
-    let (tx_id, commit_unit) = writer
-        .commit_mergeable_unit_settled(
-            MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("known")),
-        )
-        .unwrap();
-    let SyncMessage::CommitUnit { tx, versions } = commit_unit else {
-        panic!("expected commit unit");
-    };
-    core.ingest_commit_unit_settled(tx.clone(), versions, u64::MAX - SKEW_TOLERANCE_MS)
-        .unwrap();
-    reader
-        .ingest_known_transaction(
-            tx,
-            Vec::new(),
-            Fate::Accepted,
-            Some(GlobalTime(1)),
-            DurabilityTier::Global,
-        )
-        .unwrap();
-
-    let mut peer = relay_with_system_binding(subscription);
-    peer.declare_known_state(
-        subscription,
-        Some(crate::protocol::KnownStateDeclaration::ExactVersionSet {
-            versions: vec![crate::protocol::RowVersionRef::new(
-                "todos", row_uuid, tx_id,
-            )],
-        }),
-    );
-    let update = peer
-        .rehydrate_query_for_subscription_with_opts(
-            &mut core,
-            subscription,
-            &shape,
-            &binding,
-            RegisterShapeOptions::default(),
-        )
-        .unwrap()
-        .expect("expected view update");
-    let missing = reader
-        .missing_known_state_row_version_refs(&update)
-        .unwrap();
-    assert_eq!(
-        missing,
-        vec![crate::protocol::RowVersionRef::new(
-            "todos", row_uuid, tx_id
-        )]
-    );
-    // The maintained view above deliberately models a relay and therefore
-    // requires its binding explicitly. This direct repair receipt instead
-    // models the one terminated SYSTEM session that asked for those visible
-    // versions; relay transport repair is bound by its owner-loop request.
-    let mut repair_peer = PeerState::client_link(AuthorSubject::SYSTEM);
-    let messages = repair_peer
-        .handle_row_versions_fetch(
-            &mut core,
-            SyncMessage::FetchRowVersions {
-                requests: missing.clone(),
-                delegated_session: None,
-            },
-        )
-        .unwrap();
-    let [SyncMessage::RowVersionPayloads { version_bundles }] = messages.as_slice() else {
-        panic!("expected row-version payloads");
-    };
-    reader
-        .apply_row_version_payloads_for_requests(&missing, version_bundles.clone())
-        .unwrap();
-    reader.apply_sync_message_settled(update).unwrap();
-    assert_eq!(
-        reader
-            .current_rows("todos", DurabilityTier::Local)
-            .unwrap()
-            .into_iter()
-            .map(current_row_pair)
-            .collect::<BTreeMap<_, _>>(),
-        BTreeMap::from([(row_uuid, title_cells("known"))])
-    );
-}
-
-#[test]
-fn slow_known_state_declaration_skips_exact_local_versions_only() {
-    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
-    let (_core_dir, mut core) = open_node_with_uuid(node(9));
-    let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
-    let row_a = row(21);
-    let row_b = row(22);
-    let (shape, binding) = core.whole_table_shape_binding("todos").unwrap();
-    let subscription = core.whole_table_subscription_key("todos").unwrap();
-    register_shape_binding(&mut reader, &shape, &binding);
-    let values = Vec::new();
-
-    let (tx_a, unit_a) = writer
-        .commit_mergeable_unit_settled(
-            MergeableCommit::new("todos", row_a, 10).cells(title_cells("local")),
-        )
-        .unwrap();
-    let SyncMessage::CommitUnit {
-        tx: tx_a_record,
-        versions: versions_a,
-    } = unit_a
-    else {
-        panic!("expected commit unit");
-    };
-    core.ingest_commit_unit_settled(
-        tx_a_record.clone(),
-        versions_a.clone(),
-        u64::MAX - SKEW_TOLERANCE_MS,
-    )
-    .unwrap();
-    reader
-        .ingest_known_transaction(
-            tx_a_record,
-            versions_a,
-            Fate::Accepted,
-            Some(GlobalTime(1)),
-            DurabilityTier::Global,
-        )
-        .unwrap();
-    // Establish the exact source closure through the normal authority
-    // publication path. A deferred update carries its input receipts but has
-    // not completed its live authority handoff, so it cannot declare even an
-    // exact known state yet.
-    let authority_message = system_authority_reset(&mut core, &shape, &binding, subscription);
-    assert_eq!(
-        covered_input_for_row(&authority_message, row_a).version.tx,
-        tx_a
-    );
-    let mut deferred_authority = view_update_parts(authority_message.clone(), true);
-    deferred_authority.settled_through = GlobalTime::default();
-    reader.apply_view_update(deferred_authority).unwrap();
-    assert_eq!(
-        reader
-            .known_state_declaration_for_subscription(
-                &shape,
-                &binding,
-                subscription,
-                &values,
-                AuthorSubject::SYSTEM,
-                None,
-            )
-            .unwrap(),
-        None,
-        "a deferred exact receipt must not overclaim known state"
-    );
-    let mut settled_authority = view_update_parts(authority_message, false);
-    settled_authority.settled_through = GlobalTime::default();
-    reader.apply_view_update(settled_authority).unwrap();
-
-    let (tx_b, unit_b) = writer
-        .commit_mergeable_unit_settled(
-            MergeableCommit::new("todos", row_b, 11).cells(title_cells("remote")),
-        )
-        .unwrap();
-    core.apply_sync_message_settled(unit_b).unwrap();
-
-    let declaration = reader
-        .known_state_declaration_for_subscription(
-            &shape,
-            &binding,
-            subscription,
-            &values,
-            AuthorSubject::SYSTEM,
-            None,
-        )
-        .unwrap()
-        .expect("reader should derive exact slow known-state");
-    assert_eq!(
-        declaration,
-        crate::protocol::KnownStateDeclaration::ExactVersionSet {
-            versions: vec![crate::protocol::RowVersionRef::new("todos", row_a, tx_a)]
-        }
-    );
-
-    let mut control_peer = relay_with_system_binding(subscription);
-    let control_update = control_peer
-        .rehydrate_query_for_subscription_with_opts(
-            &mut core,
-            subscription,
-            &shape,
-            &binding,
-            RegisterShapeOptions::default(),
-        )
-        .unwrap()
-        .expect("expected view update");
-    let control_bundles = version_bundles_for_update(&control_update);
-    let control_inputs =
-        [row_a, row_b].map(|row_uuid| covered_input_for_row(&control_update, row_uuid));
-    assert_eq!(control_inputs[0].version.tx, tx_a);
-    assert_eq!(control_inputs[1].version.tx, tx_b);
-    assert_eq!(control_bundles.len(), 2);
-
-    let mut peer = relay_with_system_binding(subscription);
-    peer.declare_known_state(subscription, Some(declaration));
-    let update = peer
-        .rehydrate_query_for_subscription_with_opts(
-            &mut core,
-            subscription,
-            &shape,
-            &binding,
-            RegisterShapeOptions::default(),
-        )
-        .unwrap()
-        .expect("expected view update");
-    let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-        supporting_rows: program_fact_adds,
-        ..
-    }) = &update
-    else {
-        panic!("expected declared update");
-    };
-    assert_eq!(
-        program_fact_adds
-            .added_rows()
-            .iter()
-            .map(|input| input.row)
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from([row_a, row_b]),
-    );
-    assert_eq!(version_bundles.len(), 1);
-    assert_eq!(version_bundles[0].tx.tx_id, tx_b);
-    assert!(
-        reader
-            .missing_known_state_row_version_refs(&update)
-            .unwrap()
-            .is_empty()
-    );
-    reader.apply_sync_message_settled(update).unwrap();
-    assert_eq!(
-        receiver_rows(&mut reader, &shape, &binding, DurabilityTier::Global)
-            .into_iter()
-            .map(current_row_pair)
-            .collect::<BTreeMap<_, _>>(),
-        BTreeMap::from([
-            (row_a, title_cells("local")),
-            (row_b, title_cells("remote")),
-        ])
-    );
-    reader.apply_unsubscribe(subscription);
-    assert_eq!(
-        reader
-            .known_state_declaration_for_subscription(
-                &shape,
-                &binding,
-                subscription,
-                &values,
-                AuthorSubject::SYSTEM,
-                None,
-            )
-            .unwrap(),
-        None,
-        "detaching the exact receipt must retire its live settlement evidence"
-    );
-}
-
-#[test]
 fn retired_empty_read_does_not_resurrect_a_marker_without_its_source_closure() {
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
@@ -1634,25 +1198,8 @@ fn over_cap_slow_known_state_declaration_degrades_to_full_ship() {
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let (shape, binding) = core.whole_table_shape_binding("todos").unwrap();
     let subscription = core.whole_table_subscription_key("todos").unwrap();
-    let refs = (0..=crate::protocol_limits::MAX_KNOWN_STATE_EXACT_REFS)
-        .map(|idx| {
-            crate::protocol::RowVersionRef::new(
-                "todos",
-                row((idx % 255) as u8),
-                TxId::new(TxTime(idx as u64 + 1), node(1)),
-            )
-        })
-        .collect::<Vec<_>>();
-    assert!(
-        crate::node::query_eval::exact_known_state_declaration_for_test(
-            shape.shape_id(),
-            subscription,
-            &[],
-            refs,
-        )
-        .is_none(),
-        "oversized exact declarations must degrade to no declaration, never truncate"
-    );
+    // Exact version-set declarations are retired: without a watermark a
+    // receiver declares nothing and the serving peer ships the full set.
 
     let mut writer = open_node_with_uuid(node(1)).1;
     let tx_id = commit_mergeable_global(
@@ -1730,9 +1277,14 @@ fn fast_known_state_is_process_local_and_invalidated_by_eviction() {
             None,
         )
         .unwrap();
-    assert_eq!(
-        declaration, None,
-        "restart must not recover a body-dedup cursor"
+    // A row-local view resumes "Q at W" from its stored watermark; it is
+    // not a Fast body-dedup cursor and does not restore live settlement.
+    assert!(
+        matches!(
+            declaration,
+            Some(crate::protocol::KnownStateDeclaration::Watermark { .. })
+        ),
+        "restart resumes a row-local view from its stored watermark: {declaration:?}"
     );
     let authority = AuthorityResultKey::unscoped(BindingViewKey {
         shape_id: shape.shape_id(),
@@ -2116,7 +1668,9 @@ fn failed_body_eviction_still_invalidates_volatile_scope_and_cursors() {
         reopened.row_history("todos", row_uuid).unwrap(),
         persisted_history
     );
-    assert_eq!(
+    // The failed eviction deleted no body, so a stored watermark may still
+    // resume the view; it never comes back as a Fast body-dedup cursor.
+    assert!(!matches!(
         reopened
             .known_state_declaration_for_subscription(
                 &shape,
@@ -2127,8 +1681,8 @@ fn failed_body_eviction_still_invalidates_volatile_scope_and_cursors() {
                 None
             )
             .unwrap(),
-        None
-    );
+        Some(crate::protocol::KnownStateDeclaration::Fast { .. })
+    ));
 }
 
 #[test]
@@ -2170,8 +1724,15 @@ fn storage_reopen_retains_rows_without_scope_or_fast_cursor() {
             None,
         )
         .unwrap();
-    assert_eq!(declaration, None);
-    assert!(reopened.query.authority_results.is_empty());
+    // The row-local view resumes from its stored watermark ("Q at W"),
+    // rebuilt from the retained rows; live settlement still needs Core.
+    assert!(
+        matches!(
+            declaration,
+            Some(crate::protocol::KnownStateDeclaration::Watermark { .. })
+        ),
+        "{declaration:?}"
+    );
     assert_eq!(reopened.row_history("todos", row_uuid).unwrap().len(), 1);
     let authority = AuthorityResultKey::unscoped(BindingViewKey {
         shape_id: shape.shape_id(),

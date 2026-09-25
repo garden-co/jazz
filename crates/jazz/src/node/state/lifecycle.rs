@@ -354,14 +354,7 @@ where
             }
         } else { legacy_pointer };
         let mut has_non_catalogue_residue = false;
-        for table in [
-            "jazz_transactions",
-            "jazz_rejected_transactions",
-            "jazz_pending_edges",
-            "jazz_merge_heads",
-            "jazz_global_changes",
-            "jazz_deletion_history",
-        ] {
+        for table in ["jazz_transactions", "jazz_rejected_transactions"] {
             if !meta_database
                 .primary_key_scan_raw(table, &[])
                 .await?
@@ -834,9 +827,13 @@ where
                 locally_minted_global_times: BTreeSet::new(),
                 committed_global_time: GlobalTime(0),
                 applied_global_times_after_frontier: BTreeSet::new(),
+                frontier_dots: BTreeMap::new(),
             },
             parking: Parking::default(),
             query: QueryServing {
+                watermark_restore_seen: BTreeSet::new(),
+                persisted_watermarks: BTreeMap::new(),
+                watermarks_invalidated: false,
                 local_availability_records: BTreeMap::new(),
                 local_availability_authorities: BTreeMap::new(),
                 local_unavailable_inputs: BTreeMap::new(),
@@ -888,16 +885,10 @@ where
             pending_persistence: BTreeSet::new(),
             node_aliases: NodeAliases::default(),
             absent_node_alias: None,
-            ahead_current_keys: FxHashSet::default(),
-            content_version_reachability_cache: BTreeMap::new(),
-            content_version_reachability_cache_order: VecDeque::new(),
-            content_version_reachability_cache_tx_ids: 0,
+            ahead_current_keys: FxHashMap::default(),
+            minting_global_time: false,
             sync_metrics: SyncMetrics::default(),
             query_engine_read_metrics: QueryEngineReadMetrics::default(),
-            #[cfg(any(test, feature = "testing"))]
-            merge_head_reachability_walks: 0,
-            #[cfg(any(test, feature = "testing"))]
-            merge_head_reachability_nodes: 0,
             #[cfg(any(test, feature = "testing"))]
             query_program_compilations: 0,
             session_claims: BTreeMap::new(),
@@ -1887,7 +1878,6 @@ where
         self.query.compiled_query_program_cache.clear();
         self.query.query_program_templates.clear();
         self.query.supported_query_program_requests.clear();
-        self.clear_content_version_reachability_cache();
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();
         self.query.policy_authorization_graph_replacements.clear();

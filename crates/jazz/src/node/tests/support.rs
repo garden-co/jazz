@@ -35,11 +35,11 @@ where
     S: OrderedKvStorage,
 {
     let versions = node.query_table_versions(table).unwrap();
-    let mut local_expected = BTreeMap::<(RowUuid, VersionLayer), TxId>::new();
-    let mut global_expected = BTreeMap::<(RowUuid, VersionLayer), TxId>::new();
+    let mut local_expected = BTreeMap::<RowUuid, TxId>::new();
+    let mut global_expected = BTreeMap::<RowUuid, TxId>::new();
     for version in &versions {
         let tx_id = node.version_tx_id(version).unwrap();
-        let key = (version.row_uuid(), version.layer());
+        let key = version.row_uuid();
         local_expected
             .entry(key)
             .and_modify(|winner| *winner = (*winner).max(tx_id))
@@ -55,32 +55,24 @@ where
         }
     }
 
-    for ((row_uuid, layer), expected_tx) in local_expected {
+    for (row_uuid, expected_tx) in local_expected {
         let actual = node
-            .query_local_layer_winner(table, row_uuid, layer)
+            .query_local_winner(table, row_uuid)
             .unwrap()
             .map(|winner| node.version_tx_id(&winner).unwrap());
         assert_eq!(
             actual,
             Some(expected_tx),
-            "local argmax winner must match stored versions for {table}/{row_uuid:?}/{layer:?}"
+            "local argmax winner must match stored versions for {table}/{row_uuid:?}"
         );
     }
 
-    let mut actual_global = BTreeMap::<(RowUuid, VersionLayer), TxId>::new();
+    let mut actual_global = BTreeMap::<RowUuid, TxId>::new();
     let physical_table = node
         .physical_table_id_for_schema(node.catalogue.local_schema_version_id, table)
         .unwrap();
-    for (storage_table, layer) in [
-        (
-            physical_global_current_table_name(physical_table),
-            VersionLayer::Content,
-        ),
-        (
-            physical_register_global_current_table_name(physical_table),
-            VersionLayer::Deletion,
-        ),
-    ] {
+    {
+        let storage_table = physical_global_current_table_name(physical_table);
         for raw in node
             .database
             .primary_key_scan_raw(&storage_table, &[])
@@ -103,7 +95,7 @@ where
                     .unwrap(),
             );
             let tx_node = node.node_for_alias(tx_node_alias).unwrap();
-            actual_global.insert((row_uuid, layer), TxId::new(tx_time, tx_node));
+            actual_global.insert(row_uuid, TxId::new(tx_time, tx_node));
         }
     }
     assert_eq!(
@@ -187,14 +179,12 @@ fn schema() -> JazzSchema {
 fn global_winner_tx<S>(
     node: &mut NodeState<S>,
     table: &str,
-    row_uuid: RowUuid,
-    layer: VersionLayer,
-) -> Option<TxId>
+    row_uuid: RowUuid,) -> Option<TxId>
 where
     S: OrderedKvStorage,
 {
     let winner = node
-        .query_global_layer_winner(table, row_uuid, layer)
+        .query_global_winner(table, row_uuid)
         .unwrap()?;
     Some(node.version_tx_id(&winner).unwrap())
 }
@@ -209,14 +199,6 @@ where
         .primary_key_scan_raw(&physical_ahead_current_table_name(physical_table), &[])
         .unwrap()
         .len()
-        + node
-            .database
-            .primary_key_scan_raw(
-                &physical_register_ahead_current_table_name(physical_table),
-                &[],
-            )
-            .unwrap()
-            .len()
 }
 fn owner_policy_schema() -> JazzSchema {
     build_public_test_schema(
@@ -341,14 +323,12 @@ fn version_record<V: Into<Value> + Clone>(
         &schema.tables[0],
         schema.version_id(),
         row_uuid,
-        parents,
         AuthorSubject::system_at(node(1)),
         1,
         AuthorSubject::system_at(node(1)),
         1,
         &cells,
-        deletion,
-    )
+        deletion,)
     .unwrap()
 }
 fn version_record_cells(record: &VersionRecord, table: &TableSchema) -> BTreeMap<String, Value> {
@@ -823,7 +803,7 @@ fn commit_and_oracle(
     commit: MergeableCommit,
 ) -> TxId {
     let row_uuid = commit.row_uuid;
-    let parents = commit.parents.clone();
+    let parents: Vec<TxId> = Vec::new();
     let cells = commit.cells.clone();
     let deletion = commit.deletion;
     let published = node.commit_mergeable(commit).unwrap();
@@ -843,7 +823,7 @@ fn commit_global_and_oracle(
     commit: MergeableCommit,
 ) -> (TxId, GlobalTime) {
     let row_uuid = commit.row_uuid;
-    let parents = commit.parents.clone();
+    let parents: Vec<TxId> = Vec::new();
     let cells = commit.cells.clone();
     let deletion = commit.deletion;
     let (published, unit) = writer.commit_mergeable_unit(commit).unwrap();
@@ -1154,7 +1134,7 @@ fn add_core_versions_to_oracle(
         if tx_id.node == node(9) && known_txs.insert(tx_id) {
             let table_schema = core.table(&version.table).unwrap().clone();
             let cells = version.cells(&table_schema).unwrap();
-            let parents = version.parents();
+            let parents = Vec::<TxId>::new();
             assert_eq!(
                 cells,
                 oracle.merged_cells_for_parents(version.row_uuid(), &parents),
@@ -1202,7 +1182,7 @@ fn add_commit_unit_versions_to_oracle(
 ) {
     for version in versions {
         let mut model = ModelRowVersion::new(version.row_uuid(), tx.tx_id, tx.tx_id.time);
-        model.parents = version.parents();
+        model.parents = Vec::new();
         model.cells = version_record_cells(version, table_schema);
         model.deletion = version.deletion();
         oracle.add_version(model);
@@ -1653,7 +1633,7 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                 };
                 commits_started += 1;
                 let row_uuid = commit.row_uuid;
-                let parents = commit.parents.clone();
+                let parents: Vec<TxId> = Vec::new();
                 let cells = commit.cells.clone();
                 let deletion = commit.deletion;
                 let (published, message) = if use_writer_a {
@@ -1853,7 +1833,6 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                 let parent_ref = settle_published(writer, parent_publication).unwrap();
                 let child_commit =
                     MergeableCommit::new("todos", parent_row, 1_300 + rng.choose(12) as u64)
-                        .parents(vec![parent_ref])
                         .made_by(made_by)
                         .cells(owner_cells_with_author(
                             owner,
@@ -2106,10 +2085,6 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
         assert!(
             node.parking.parked_commit_units.is_empty(),
             "seed {seed}: {name} parked commit units should drain before index checks"
-        );
-        assert!(
-            node.rejections.child_txs_by_parent.is_empty(),
-            "seed {seed}: {name} pending cascade edges should be pruned at quiescence"
         );
     }
     assert_exclusive_serialization_matches_oracle(

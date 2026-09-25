@@ -58,10 +58,7 @@ use crate::protocol::{
     SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason,
     SubscribeServerFailureCode, SubscriptionKey, SyncMessage, TableLens,
 };
-use crate::protocol_limits::{
-    MAX_SHAPE_REGISTRATIONS_PER_PEER, validate_fetch_row_versions,
-    validate_known_state_declaration, validate_shape_registration_size,
-};
+use crate::protocol_limits::{MAX_SHAPE_REGISTRATIONS_PER_PEER, validate_shape_registration_size};
 use crate::query::{
     Binding, BindingId, Operand, Predicate, Query, QueryError, RelationQuery, ShapeId,
     ValidatedQuery, relation_query_to_query,
@@ -2338,12 +2335,8 @@ where
                         (
                             tx.n_total_writes,
                             versions.len(),
-                            versions
-                                .iter()
-                                .flat_map(crate::protocol::VersionRecord::parents)
-                                .collect::<BTreeSet<_>>()
-                                .into_iter()
-                                .collect::<Vec<_>>(),
+                            // Linear history: replay order is transaction order.
+                            Vec::<TxId>::new(),
                         )
                     };
                     units.insert(tx_id, unit);
@@ -3690,7 +3683,6 @@ fn subscriber_inbound_message_is_authority_only(
             | SyncMessage::SubscribeRejected { .. }
             | SyncMessage::CatalogueAck(_)
             | SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. })
-            | SyncMessage::RowVersionPayloads { .. }
             | SyncMessage::CatalogueSnapshot(_)
             | SyncMessage::PermissionAdviceResponse { .. }
             | SyncMessage::AuthorizationScopeReceipt { .. }

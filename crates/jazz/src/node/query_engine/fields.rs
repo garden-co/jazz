@@ -90,7 +90,6 @@ pub(crate) fn descriptor_public_name(field: &DescriptorField) -> Option<&str> {
             | "tx_time"
             | "tx_node_id"
             | "schema_version"
-            | "parents"
             | "authored_columns"
             | "global_time"
             | "settle_position"

@@ -85,29 +85,14 @@ impl<S: OrderedKvStorage> NodeState<S> {
             };
             let table_id =
                 self.physical_table_id_for_schema(coordinate.schema, &coordinate.table)?;
-            // includeDeleted provenance may name the register event. Fetch
-            // content and deletion winners independently, as ordinary views do.
+            // The current row image carries both content and deletion state.
             let Some(tx_id) = self
-                .visible_global_layer_tx_id_for_physical_table_now(
-                    table_id,
-                    coordinate.row,
-                    VersionLayer::Content,
-                )
+                .visible_global_tx_id_for_physical_table_now(table_id, coordinate.row)
                 .await
             else {
                 continue;
             };
-            let mut transactions = BTreeSet::from([tx_id]);
-            if let Some(deletion_tx) = self
-                .visible_global_layer_tx_id_for_physical_table_now(
-                    table_id,
-                    coordinate.row,
-                    VersionLayer::Deletion,
-                )
-                .await
-            {
-                transactions.insert(deletion_tx);
-            }
+            let transactions = BTreeSet::from([tx_id]);
             let mut carriers = Vec::new();
             for tx in transactions {
                 let versions = self
@@ -196,12 +181,10 @@ impl<S: OrderedKvStorage> NodeState<S> {
                 {
                     return Err(invalid());
                 }
-                // A deletion register proves lifecycle state, not a readable
-                // row body. Every Readable coordinate needs content evidence
-                // before any carrier is ingested or a caller can clear a marker.
-                if version.deletion().is_none() {
-                    content_covered.insert(index);
-                }
+                // Every Readable coordinate needs a row-image carrier before
+                // any carrier is ingested or a caller can clear a marker. A
+                // deleted image still carries its readable pre-delete cells.
+                content_covered.insert(index);
                 requests.push(crate::protocol::RowVersionRef::new(
                     coordinate.table.clone(),
                     coordinate.row,

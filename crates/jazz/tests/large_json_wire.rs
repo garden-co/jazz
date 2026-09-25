@@ -39,7 +39,6 @@ fn json_version_records_freeze_inline_and_indirect_semantics() {
             table,
             SchemaVersionId::from_bytes([0x22; 16]),
             RowUuid::from_bytes([0x44; 16]),
-            vec![],
             author,
             7,
             author,

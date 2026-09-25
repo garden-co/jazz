@@ -546,20 +546,19 @@ fn accepted_fates_maintain_global_current_tables() {
     let (second, second_message) = writer
         .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row, 11)
-                .parents(vec![first])
                 .cells(title_cells("second")),
         )
         .unwrap();
 
     core.apply_sync_message_settled(first_message).unwrap();
     assert_eq!(
-        global_winner_tx(&mut core, "todos", row, VersionLayer::Content),
+        global_winner_tx(&mut core, "todos", row),
         Some(first)
     );
 
     core.apply_sync_message_settled(second_message).unwrap();
     assert_eq!(
-        global_winner_tx(&mut core, "todos", row, VersionLayer::Content),
+        global_winner_tx(&mut core, "todos", row),
         Some(second)
     );
 }
@@ -616,123 +615,6 @@ fn reopened_core_continues_sync_after_restart() {
             (row(2), title_cells("after")),
         ])
     );
-}
-#[test]
-fn originating_causality_rejection_retains_child_payload() {
-    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
-    let (_core_dir, mut core) = open_node_with_uuid(node(9));
-    let row = row(7);
-    let parent = TxId::new(TxTime::from(200), node(2));
-    core.ingest_commit_unit_settled(
-        Transaction {
-            tx_id: parent,
-            kind: TxKind::Mergeable,
-            n_total_writes: 1,
-            made_by: AuthorSubject::system_at(parent.node),
-            permission_subject: None,
-            base_snapshot: None,
-            row_read_set: None,
-            absent_read_set: None,
-            predicate_read_set: None,
-            user_metadata_json: None,
-            contribution_merge: None,
-        },
-        vec![version_record(row, Vec::new(), title_cells("parent"), None)],
-        u64::MAX - SKEW_TOLERANCE_MS,
-    )
-    .unwrap();
-    let child = writer
-        .commit_mergeable_at_settled(
-            MergeableCommit::new("todos", row, 101)
-                .parents(vec![parent])
-                .cells(title_cells("child")),
-            TxTime::from(101),
-        )
-        .unwrap();
-    let unit = writer.commit_unit_for(child).unwrap();
-    let SyncMessage::CommitUnit { tx, versions } = unit else {
-        panic!("expected commit unit");
-    };
-    assert!(tx.tx_id.time < parent.time);
-    let [fate] = core
-        .ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
-        .unwrap()
-        .try_into()
-        .unwrap();
-    assert_eq!(
-        fate,
-        SyncMessage::FateUpdate {
-            tx_id: child,
-            fate: Fate::Rejected(RejectionReason::CausalityViolation),
-            global_time: None,
-            durability: None,
-        }
-    );
-    assert!(core.rejected_transaction(child).is_none());
-    writer.apply_sync_message_settled(fate).unwrap();
-    let stored = writer.rejected_transaction(child).unwrap();
-    assert_eq!(stored.reason(), RejectionReason::CausalityViolation);
-    assert_eq!(stored.versions().len(), 1);
-    assert_eq!(stored.versions()[0].parents(), vec![parent]);
-    assert_eq!(
-        stored.versions()[0].test_cells(&schema().tables[0]),
-        title_cells("child")
-    );
-    assert!(
-        writer
-            .row_history("todos", row)
-            .unwrap()
-            .iter()
-            .all(|entry| entry.tx_id() != child)
-    );
-}
-#[test]
-fn originating_cascade_rejection_retains_root_cause() {
-    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
-    let (_core_dir, mut core) = open_node_with_uuid(node(9));
-    let row = row(7);
-    let (root, root_unit) = writer
-        .commit_mergeable_unit_settled(
-            MergeableCommit::new("todos", row, SKEW_TOLERANCE_MS + 1).cells(title_cells("root")),
-        )
-        .unwrap();
-    let SyncMessage::CommitUnit { tx, versions } = root_unit else {
-        panic!("expected commit unit");
-    };
-    let [root_fate] = core
-        .ingest_commit_unit_settled(tx, versions, 0)
-        .unwrap()
-        .try_into()
-        .unwrap();
-    writer.apply_sync_message_settled(root_fate).unwrap();
-
-    let (child, child_unit) = writer
-        .commit_mergeable_unit_settled(
-            MergeableCommit::new("todos", row, SKEW_TOLERANCE_MS + 2)
-                .parents(vec![root])
-                .cells(title_cells("child")),
-        )
-        .unwrap();
-    let [child_fate] = core
-        .apply_sync_message_settled(child_unit)
-        .unwrap()
-        .try_into()
-        .unwrap();
-    assert_eq!(
-        child_fate,
-        SyncMessage::FateUpdate {
-            tx_id: child,
-            fate: Fate::Rejected(RejectionReason::Cascade { root }),
-            global_time: None,
-            durability: None,
-        }
-    );
-    writer.apply_sync_message_settled(child_fate).unwrap();
-    let stored = writer.rejected_transaction(child).unwrap();
-    assert_eq!(stored.reason(), RejectionReason::Cascade { root });
-    assert_eq!(stored.cascade_root(), Some(root));
-    assert_eq!(stored.versions()[0].parents(), vec![root]);
-    assert!(core.rejected_transactions().is_empty());
 }
 #[test]
 fn commit_units_sync_upstream_and_fates_flow_back() {
@@ -814,9 +696,19 @@ fn duplicate_commit_units_must_match_original_payload() {
     core.ingest_commit_unit_settled(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap();
 
-    let mut conflicting = versions;
-    conflicting[0] = version_record(row, Vec::new(), title_cells("changed"), None);
+    // Core stores its post-image, not the authored patch, so a redelivery of
+    // an accepted unit is deduplicated by tx id and cannot rewrite the row.
+    let stored = crate::db::block_on(core.query_versions_for_tx(tx.tx_id)).unwrap();
+    let mut rewritten = versions.clone();
+    rewritten[0] = version_record(row, Vec::new(), title_cells("changed"), None);
+    core.ingest_commit_unit_settled(tx.clone(), rewritten, u64::MAX - SKEW_TOLERANCE_MS)
+        .unwrap();
+    assert_eq!(crate::db::block_on(core.query_versions_for_tx(tx.tx_id)).unwrap(), stored);
 
+    // A payload that addresses a different row is still a conflict.
+    let row_uuid_8 = RowUuid::from_bytes([8; 16]);
+    let mut conflicting = versions;
+    conflicting[0] = version_record(row_uuid_8, Vec::new(), title_cells("first"), None);
     assert!(matches!(
         core.ingest_commit_unit_settled(tx, conflicting, u64::MAX - SKEW_TOLERANCE_MS),
         Err(Error::ConflictingCommitUnit(_))

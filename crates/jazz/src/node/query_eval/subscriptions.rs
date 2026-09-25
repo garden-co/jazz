@@ -444,6 +444,41 @@ where
     /// Return the exact policy-scoped durable identity fixed at subscription
     /// admission. Wire updates contain only the usage handle and cannot choose
     /// or reconstruct this identity themselves.
+    /// Whether this receiver's installed supporting set for `subscription`
+    /// is exactly `revision`.
+    pub(crate) fn holds_supporting_revision(
+        &self,
+        subscription: SubscriptionKey,
+        revision: [u8; 16],
+    ) -> bool {
+        self.authority_result_key_for_subscription(subscription)
+            .ok()
+            .and_then(|key| self.query.authority_results.get(&key))
+            .is_some_and(|state| state.supporting_revision == Some(revision))
+    }
+
+    /// Stop declaring a watermark for `subscription` until a new complete set
+    /// is installed; the next subscribe asks for one.
+    pub(crate) fn forget_supporting_revision(&mut self, subscription: SubscriptionKey) {
+        if let Ok(key) = self.authority_result_key_for_subscription(subscription)
+            && let Some(state) = self.query.authority_results.get_mut(&key)
+        {
+            state.supporting_revision = None;
+        }
+    }
+
+    /// Declare nothing for this view on its next open, so the serving peer
+    /// resends every row with its body. Used when an update named a held row
+    /// whose body this receiver no longer has.
+    pub(crate) fn forget_declared_known_state(&mut self, subscription: SubscriptionKey) {
+        if let Ok(key) = self.authority_result_key_for_subscription(subscription)
+            && let Some(state) = self.query.authority_results.get_mut(&key)
+        {
+            state.supporting_revision = None;
+            state.settled_through = None;
+        }
+    }
+
     pub(crate) fn authority_result_key_for_subscription(
         &self,
         subscription: SubscriptionKey,
@@ -1070,7 +1105,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         subscription: SubscriptionKey,
-        values: &[Value],
+        _values: &[Value],
         identity: AuthorSubject,
         policy_binding: Option<&(AuthorSubject, BTreeMap<String, Value>)>,
     ) -> Result<Option<KnownStateDeclaration>, Error> {
@@ -1103,6 +1138,17 @@ where
         {
             return Ok(None);
         }
+        // A reopened receiver restores a row-local view's watermark from its
+        // durable record and rebuilds the held set from synced rows.
+        if self
+            .query
+            .authority_results
+            .get(&authority_result_key)
+            .is_none_or(|state| state.settled_through.is_none())
+        {
+            self.restore_subscription_watermark(shape, binding, &authority_result_key, identity)
+                .await?;
+        }
         // This process's unevicted receipt may deduplicate bodies on reconnect;
         // restart restores neither this cursor nor scope. The serving peer
         // must still send a fresh complete supporting set, and ordinary receipt
@@ -1113,11 +1159,26 @@ where
             .get(&authority_result_key)
             .and_then(|state| state.settled_through)
         {
-            let authorization_progress = self
-                .query
-                .authority_results
-                .get(&authority_result_key)
-                .and_then(|state| state.authorization_progress);
+            let state = self.query.authority_results.get(&authority_result_key);
+            let authorization_progress = state.and_then(|state| state.authorization_progress);
+            // "Q at W": with an installed, claimed supporting set the serving
+            // peer can answer with only the rows that moved past W.
+            if let Some(supporting_revision) = state
+                .filter(|state| {
+                    state.pending_authoritative_reset.is_none()
+                        && matches!(
+                            state.source_closure,
+                            crate::node::AuthoritySourceClosure::Claimed { .. }
+                        )
+                })
+                .and_then(|state| state.supporting_revision)
+            {
+                return Ok(Some(KnownStateDeclaration::Watermark {
+                    position,
+                    authorization_progress,
+                    supporting_revision,
+                }));
+            }
             return Ok(Some(match authorization_progress {
                 Some(authorization_progress) => {
                     KnownStateDeclaration::FastWithAuthorizationProgress {
@@ -1132,39 +1193,10 @@ where
                 },
             }));
         }
-        // Without a process-local cursor, only a live exact receipt can justify an
-        // exact declaration. Locally authored/cached rows alone cannot do so.
-        if !self.has_settled_authority_result(&authority_result_key) {
-            return Ok(None);
-        }
-        // A live exact receipt without a fast watermark still proves which
-        // membership this process received, but cannot claim currentness at a
-        // global cursor. Fall through to the bounded exact version set.
-        let mut refs = Vec::new();
-        for row in self
-            .query_rows_for_link(shape, binding, DurabilityTier::Local, identity)
-            .await?
-        {
-            let Some(tx_id) = self.current_row_tx_id(&row).await else {
-                continue;
-            };
-            refs.push(RowVersionRef::new(
-                row.table().to_owned(),
-                row.row_uuid(),
-                tx_id,
-            ));
-        }
-        refs.sort();
-        refs.dedup();
-        if refs.is_empty() {
-            return Ok(None);
-        }
-        Ok(exact_known_state_declaration_if_within_limits(
-            shape.shape_id(),
-            subscription,
-            values,
-            refs,
-        ))
+        // Without a watermark there is no known state to declare: rows are
+        // identified by (row, row_seq), not by exact version sets, so the
+        // serving peer answers with a complete set.
+        Ok(None)
     }
 
     #[allow(dead_code)]

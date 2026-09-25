@@ -483,7 +483,6 @@ fn maintained_subscription_view_shared_todo_member_include_emits_relation_deltas
     let visible_member_tx = accept_global(
         &mut core,
         MergeableCommit::new("members", member_row, 12)
-            .parents(vec![hidden_member_tx])
             .cells(BTreeMap::from([
                 ("name".to_owned(), Value::String("visible owner".to_owned())),
                 ("userID".to_owned(), Value::Uuid(reader.test_uuid())),
@@ -503,7 +502,6 @@ fn maintained_subscription_view_shared_todo_member_include_emits_relation_deltas
     let hidden_again_tx = accept_global(
         &mut core,
         MergeableCommit::new("members", member_row, 13)
-            .parents(vec![visible_member_tx])
             .cells(BTreeMap::from([
                 ("name".to_owned(), Value::String("hidden again".to_owned())),
                 ("userID".to_owned(), Value::Uuid(other.test_uuid())),

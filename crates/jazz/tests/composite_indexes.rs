@@ -505,7 +505,7 @@ fn composite_index_logical_names_cannot_collide_with_single_column_indexes() {
             .build(),
     )
     .expect("schema compiles");
-    let global_current = &schema.tables()[0].global_current_storage_tables()[0];
+    let global_current = &schema.tables()[0].global_current_storage_table();
     let names = global_current
         .indices
         .iter()

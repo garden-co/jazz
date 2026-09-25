@@ -1,426 +1,7 @@
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum ParentCoordinateValidation {
-    Exact,
-    Inconclusive,
-}
-
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    /// All constraint inserts/updates pass here so the conservative absence
-    /// proof includes staged rows before any later read or suspension.
-    pub(super) fn stage_pending_parent_constraint(
-        &mut self,
-        batch: &mut DatabaseBatch,
-        child: (NodeAlias, TxId),
-        parent: (NodeAlias, TxId),
-        coordinate: &ParentCoordinate,
-        replace: bool,
-    ) -> Result<(), Error> {
-        let values = pending_edge_values(child.0, child.1, parent.0, parent.1, coordinate)?;
-        self.rejections.pending_parent_time_bound.observe(parent.1.time);
-        if replace {
-            batch.update("jazz_pending_edges", values);
-        } else {
-            batch.insert("jazz_pending_edges", values);
-        }
-        Ok(())
-    }
-
-    /// Validate a TxId parent in the only coordinate where it has row-version
-    /// meaning. A missing transaction remains a constrained pending edge; a
-    /// known transaction without this exact version is malformed, never a
-    /// substitute from a sibling row, branch, or deletion layer.
-    pub(super) async fn validate_known_parent_coordinate(
-        &mut self,
-        parent: TxId,
-        coordinate: &ParentCoordinate,
-    ) -> Result<ParentCoordinateValidation, Error> {
-        let Some(parent_tx) = self.query_transaction(parent).await? else {
-            return Ok(ParentCoordinateValidation::Inconclusive);
-        };
-        // Retain the resident cache's all-branch/all-layer lookup. On a cold
-        // cache, a valid parent needs one exact history read rather than every
-        // sibling row in its transaction. A miss still uses the completeness
-        // and wrong-coordinate rules below without changing their semantics.
-        if !self.query.tx_versions_cache.contains_key(&parent)
-            && let Some(candidate) = self
-                .query_exact_parent_version(parent, parent_tx.node_alias, coordinate)
-                .await?
-        {
-            if self.version_tx_id(&candidate)? != parent
-                || !self.version_row_matches_parent_coordinate(&candidate, coordinate)?
-            {
-                return Err(Error::InvalidStoredValue("parent history key does not match stored coordinate"));
-            }
-            return Ok(ParentCoordinateValidation::Exact);
-        }
-        // A missing exact witness in a partial transaction cannot establish
-        // an invalid parent. Other retained rows provide no evidence about
-        // this coordinate. Avoid loading that fragment for every missing
-        // parent; retain the pending coordinate constraint instead.
-        if parent_tx.view_scoped_cardinality
-            && !self.query.tx_versions_cache.contains_key(&parent)
-        {
-            return Ok(ParentCoordinateValidation::Inconclusive);
-        }
-        let coordinate_versions = self
-            .query_versions_for_tx_physical_coordinate(
-                parent,
-                coordinate.physical_table_id,
-                coordinate.row_uuid,
-            )
-            .await?;
-        for candidate in &coordinate_versions {
-            if self.version_row_matches_parent_coordinate(candidate, coordinate)? {
-                return Ok(ParentCoordinateValidation::Exact);
-            }
-        }
-        if parent_tx.view_scoped_cardinality {
-            return Ok(ParentCoordinateValidation::Inconclusive);
-        }
-        let parent_versions = self.query_versions_for_tx(parent).await?;
-        if parent_versions.is_empty() {
-            return Ok(ParentCoordinateValidation::Inconclusive);
-        }
-        let parent_is_complete = !parent_tx.view_scoped_cardinality
-            && usize::try_from(parent_tx.tx.n_total_writes)
-                .is_ok_and(|expected| parent_versions.len() >= expected);
-        if !parent_is_complete {
-            // A view-scoped transaction may contain only another row so far.
-            // Retain the durable constraint until the requested parent
-            // coordinate arrives or an authority sees the complete unit.
-            return Ok(ParentCoordinateValidation::Inconclusive);
-        }
-        Err(Error::InvalidMergeableCommit(
-            "version parent does not resolve to the same physical row, branch, and layer",
-        ))
-    }
-
-    fn version_row_matches_parent_coordinate(
-        &self,
-        version: &VersionRow,
-        coordinate: &ParentCoordinate,
-    ) -> Result<bool, Error> {
-        Ok(version.row_uuid() == coordinate.row_uuid
-            && version.branch_key() == &coordinate.branch_key
-            && version.layer() == coordinate.layer
-            && self.physical_table_id_for_version(version)? == coordinate.physical_table_id)
-    }
-
-    fn version_record_matches_parent_coordinate(
-        &self,
-        version: &VersionRecord,
-        coordinate: &ParentCoordinate,
-    ) -> Result<bool, Error> {
-        Ok(version.row_uuid() == coordinate.row_uuid
-            && version.branch_key() == &coordinate.branch_key
-            && VersionLayer::for_record(version) == coordinate.layer
-            && self.physical_table_id_for_schema(version.schema_version(), version.table())?
-                == coordinate.physical_table_id)
-    }
-
-    #[cfg_attr(feature = "cold-settle-attribution", tracing::instrument(skip_all, name = "cold.phase.parent_completion"))]
-    async fn complete_parent_versions<V: std::borrow::Borrow<VersionRecord>>(
-        &mut self,
-        tx: &Transaction,
-        incoming: &[V],
-    ) -> Result<Option<Vec<VersionRecord>>, Error> {
-        let mut assembled = BTreeMap::new();
-        if self.query_transaction(tx.tx_id).await?.is_some() {
-            for stored in self.query_versions_for_tx(tx.tx_id).await? {
-                let version = self.version_record_from_row(&stored)?;
-                assembled.insert(view_version_key_for_ingest(&version), version);
-            }
-        }
-        for version in incoming {
-            let version = version.borrow();
-            match assembled.get(&view_version_key_for_ingest(version)) {
-                Some(existing) if existing != version => {
-                    return Err(Error::ConflictingCommitUnit(tx.tx_id));
-                }
-                Some(_) => {}
-                None => {
-                    assembled.insert(view_version_key_for_ingest(version), version.clone());
-                }
-            }
-        }
-        if usize::try_from(tx.n_total_writes).ok() != Some(assembled.len()) {
-            return Ok(None);
-        }
-        Ok(Some(assembled.into_values().collect()))
-    }
-
-    /// Validate durable constraints owned by already-accepted partial children
-    /// before a complete parent can become durable. Pending children retain
-    /// their edge so ordinary post-ingest fate propagation can accept or
-    /// reject them; an accepted child is immutable, so a contradictory parent
-    /// is a typed protocol conflict rather than a retroactive fate rewrite.
-    pub(super) async fn preflight_complete_parent_constraints(
-        &mut self,
-        batch: &mut DatabaseBatch,
-        parent: TxId,
-        complete_versions: &[VersionRecord],
-    ) -> Result<(), Error> {
-        if self.rejections.pending_parent_time_bound.excludes(parent.time) {
-            self.database.ensure_usable()?;
-            return Ok(());
-        }
-        let raw_constraints = self
-            .database
-            .primary_key_scan_raw_in_batch(batch, "jazz_pending_edges", &[])
-            .await?
-            .into_iter()
-            .map(|raw| raw.owned_record())
-            .collect::<Vec<_>>();
-        self.preflight_complete_parent_records(batch, parent, complete_versions, raw_constraints)
-            .await
-    }
-
-    async fn preflight_complete_parent_records(
-        &mut self,
-        batch: &mut DatabaseBatch,
-        parent: TxId,
-        complete_versions: &[VersionRecord],
-        raw_constraints: Vec<OwnedRecord>,
-    ) -> Result<(), Error> {
-        let mut constraints = Vec::with_capacity(raw_constraints.len());
-        for raw in raw_constraints {
-            let record = raw.borrowed();
-            let parent_alias = NodeAlias(
-                record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_NODE_ID_IDX)?,
-            );
-            let stored_parent = TxId::new(
-                TxTime(record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_TIME_IDX)?),
-                self.node_for_alias(parent_alias).ok_or(Error::InvalidStoredValue(
-                    "pending edge parent alias must exist",
-                ))?,
-            );
-            if stored_parent != parent {
-                continue;
-            }
-            let child_alias = NodeAlias(
-                record.get_u64(PendingEdgeRowRecord::FIELD_CHILD_NODE_ID_IDX)?,
-            );
-            let child = TxId::new(
-                TxTime(record.get_u64(PendingEdgeRowRecord::FIELD_CHILD_TIME_IDX)?),
-                self.node_for_alias(child_alias).ok_or(Error::InvalidStoredValue(
-                    "pending edge child alias must exist",
-                ))?,
-            );
-            constraints.push((
-                child_alias,
-                child,
-                parent_alias,
-                pending_edge_coordinate_from_record(record)?,
-            ));
-        }
-        for (child_alias, child, parent_alias, coordinate) in constraints {
-            let Some(child_tx) = self.query_transaction(child).await? else {
-                return Err(Error::InvalidStoredValue(
-                    "pending parent constraint child transaction is missing",
-                ));
-            };
-            if !matches!(child_tx.fate, Fate::Accepted) {
-                continue;
-            }
-            let mut exact = false;
-            for version in complete_versions {
-                if self.version_record_matches_parent_coordinate(version, &coordinate)? {
-                    exact = true;
-                    break;
-                }
-            }
-            if !exact {
-                return Err(Error::ConflictingCommitUnit(parent));
-            }
-            batch.delete(
-                "jazz_pending_edges",
-                pending_edge_primary_key(
-                    child_alias,
-                    child,
-                    parent_alias,
-                    parent,
-                    &coordinate,
-                )?,
-            );
-        }
-        Ok(())
-    }
-
-    /// One atomic preflight boundary for every bulk path. All accepted-child
-    /// constraints are validated, and their matching deletes are staged,
-    /// before the caller may add or persist any parent rows in the batch.
-    pub(super) async fn preflight_complete_parent_batch(
-        &mut self,
-        batch: &mut DatabaseBatch,
-        complete_parents: &[(TxId, Vec<VersionRecord>)],
-    ) -> Result<(), Error> {
-        if complete_parents.is_empty() {
-            return Ok(());
-        }
-        let raw_constraints = self
-            .database
-            .primary_key_scan_raw_in_batch(batch, "jazz_pending_edges", &[])
-            .await?;
-        if raw_constraints.is_empty() {
-            return Ok(());
-        }
-        let parents = complete_parents.iter().map(|(parent, _)| *parent).collect::<BTreeSet<_>>();
-        let mut by_parent = BTreeMap::<TxId, Vec<OwnedRecord>>::new();
-        for raw in raw_constraints {
-            let record = raw.record();
-            let alias = NodeAlias(record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_NODE_ID_IDX)?);
-            let parent = TxId::new(
-                TxTime(record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_TIME_IDX)?),
-                self.node_for_alias(alias).ok_or(Error::InvalidStoredValue(
-                    "pending edge parent alias must exist",
-                ))?,
-            );
-            if parents.contains(&parent) {
-                by_parent.entry(parent).or_default().push(raw.owned_record());
-            }
-        }
-        // This boundary only reads constraints and stages matching deletes;
-        // no parent/child transaction or new constraint is published between
-        // groups. Retain the caller's parent order and defer child/coordinate
-        // decoding until that parent's turn. A repeated parent has no new work:
-        // its Accepted constraints were deleted, and Pending children were left
-        // unchanged for post-persistence settlement.
-        for (parent, versions) in complete_parents {
-            if let Some(records) = by_parent.remove(parent) {
-                self.preflight_complete_parent_records(batch, *parent, versions, records)
-                    .await?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Complete the other half of bulk parent ingestion after atomic
-    /// persistence. Exact Pending edges remain available to the child's later
-    /// fate update; mismatches reject and cascade exactly as on the ordinary
-    /// one-transaction ingest path.
-    pub(super) async fn settle_completed_parent_batch(
-        &mut self,
-        complete_parents: &BTreeSet<TxId>,
-    ) -> Result<(), Error> {
-        for parent in complete_parents {
-            self.invalidate_tx_version_tables_cache(*parent);
-        }
-        self.reject_mismatched_pending_children_for_parents(complete_parents)
-            .await
-    }
-
-    /// Resolve durable constraints left by children that referenced a parent
-    /// before this node received it. A parent transaction can carry many row
-    /// versions, so transaction existence alone is never sufficient.
-    pub(super) async fn reject_mismatched_pending_children_for_parent(
-        &mut self,
-        parent: TxId,
-    ) -> Result<(), Error> {
-        self.reject_mismatched_pending_children_for_parents(&BTreeSet::from([parent]))
-            .await
-    }
-
-    async fn reject_mismatched_pending_children_for_parents(
-        &mut self,
-        parents: &BTreeSet<TxId>,
-    ) -> Result<(), Error> {
-        if parents.is_empty() {
-            return Ok(());
-        }
-        if parents.iter().all(|parent| {
-            self.rejections.pending_parent_time_bound.excludes(parent.time)
-        }) {
-            self.database.ensure_usable()?;
-            return Ok(());
-        }
-        // Discover the constraints once for the entire admitted batch. Most
-        // downloaded transactions have no waiting children; loading their
-        // history first would probe every history table for no useful work.
-        let mut constraints = BTreeMap::<TxId, Vec<(TxId, ParentCoordinate)>>::new();
-        for raw in self
-            .database
-            .primary_key_scan_raw("jazz_pending_edges", &[])
-            .await?
-        {
-            let record = raw.record();
-            let parent_alias =
-                NodeAlias(record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_NODE_ID_IDX)?);
-            let parent = TxId::new(
-                TxTime(record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_TIME_IDX)?),
-                self.node_for_alias(parent_alias)
-                    .ok_or(Error::InvalidStoredValue(
-                        "pending edge parent alias must exist",
-                    ))?,
-            );
-            if !parents.contains(&parent) {
-                continue;
-            }
-            let child_alias =
-                NodeAlias(record.get_u64(PendingEdgeRowRecord::FIELD_CHILD_NODE_ID_IDX)?);
-            let child = TxId::new(
-                TxTime(record.get_u64(PendingEdgeRowRecord::FIELD_CHILD_TIME_IDX)?),
-                self.node_for_alias(child_alias)
-                    .ok_or(Error::InvalidStoredValue(
-                        "pending edge child alias must exist",
-                    ))?,
-            );
-            constraints
-                .entry(parent)
-                .or_default()
-                .push((child, pending_edge_coordinate_from_record(record)?));
-        }
-
-        for (parent, children) in constraints {
-            let mut invalid_children = BTreeSet::new();
-            let Some(parent_tx) = self.query_transaction(parent).await? else {
-                continue;
-            };
-            if matches!(parent_tx.fate, Fate::Rejected(_)) {
-                continue;
-            }
-            let parent_versions = self.query_versions_for_tx(parent).await?;
-            let parent_is_complete = !parent_tx.view_scoped_cardinality
-                && !parent_versions.is_empty()
-                && usize::try_from(parent_tx.tx.n_total_writes)
-                    .is_ok_and(|expected| parent_versions.len() >= expected);
-            if !parent_is_complete {
-                continue;
-            }
-            for (child, coordinate) in children {
-                let mut exact = false;
-                for candidate in &parent_versions {
-                    if self.version_row_matches_parent_coordinate(candidate, &coordinate)? {
-                        exact = true;
-                        break;
-                    }
-                }
-                if !exact {
-                    invalid_children.insert(child);
-                }
-            }
-
-            for child in invalid_children {
-                if self
-                    .query_transaction(child)
-                    .await?
-                    .is_some_and(|tx| matches!(tx.fate, Fate::Pending))
-                {
-                    Box::pin(self.apply_fate_update(
-                        child,
-                        Fate::Rejected(RejectionReason::CausalityViolation),
-                        None,
-                        None,
-                    ))
-                    .await?;
-                }
-            }
-        }
-        Ok(())
-    }
-
     pub(super) async fn ingest_transaction_and_versions(
         &mut self,
         tx: Transaction,
@@ -471,9 +52,10 @@ where
         fate: Fate,
         global_time: Option<GlobalTime>,
         durability: DurabilityTier,
-        staged_global_times: &mut Vec<GlobalTime>,
+        staged_global_times: &mut Vec<(GlobalTime, TxId)>,
         staged_content_versions: &mut Vec<VersionRow>,
     ) -> Result<(), Error> {
+        let tx_id = tx.tx_id;
         let (staged_versions, fate, global_time) = self
             .stage_transaction_and_versions_with_current_indexes(
                 batch,
@@ -489,6 +71,7 @@ where
             .await?;
         self.finalize_staged_transaction_ingest(
             batch,
+            tx_id,
             fate,
             global_time,
             staged_global_times,
@@ -565,19 +148,6 @@ where
         view_scoped_cardinality: bool,
     ) -> Result<(), Error> {
         let tx_id = tx.tx_id;
-        let complete_parent_versions = if view_scoped_cardinality {
-            None
-        } else {
-            self.complete_parent_versions(&tx, &versions).await?
-        };
-        if let Some(complete_parent_versions) = complete_parent_versions.as_deref() {
-            self.preflight_complete_parent_constraints(
-                &mut batch,
-                tx_id,
-                complete_parent_versions,
-            )
-            .await?;
-        }
         // Staging owns the decoded records and derived-index working set. Keep
         // it behind an async allocation boundary so admission does not retain
         // that state on the caller's poll stack.
@@ -596,6 +166,7 @@ where
         let mut staged_global_times = Vec::new();
         self.finalize_staged_transaction_ingest(
             &mut batch,
+            tx_id,
             fate,
             global_time,
             &mut staged_global_times,
@@ -611,8 +182,6 @@ where
         // this call's new versions, so discard it before any constraint or
         // caller re-query observes the assembled transaction.
         self.invalidate_tx_version_tables_cache(tx_id);
-        self.reject_mismatched_pending_children_for_parent(tx_id)
-            .await?;
         Ok(())
     }
 
@@ -641,13 +210,6 @@ where
         }
         self.merge_tx_time(tx.tx_id.time);
         let tx_node_alias = self.ensure_node_alias(tx.tx_id.node).await?;
-        let parent_nodes = versions
-            .iter()
-            .flat_map(|version| version.parents().into_iter().map(|parent| parent.node))
-            .collect::<BTreeSet<_>>();
-        for parent_node in parent_nodes {
-            self.ensure_node_alias(parent_node).await?;
-        }
         for schema in versions.iter().map(VersionRecord::schema_version).collect::<BTreeSet<_>>() {
             self.ensure_schema_version_alias(schema).await?;
         }
@@ -702,10 +264,8 @@ where
             batch.insert("jazz_transactions", tx_values);
         }
 
-        let mut parent_edges = BTreeSet::new();
-        let mut pending_parent_constraints = Vec::new();
         let mut pending_global_updates =
-            BTreeMap::<(String, BranchKey, RowUuid, VersionLayer), VersionRow>::new();
+            BTreeMap::<(String, BranchKey, RowUuid), VersionRow>::new();
         let mut content_versions = Vec::new();
         let mut stored_versions = Vec::new();
         for version in versions {
@@ -728,77 +288,55 @@ where
                 (author_schema != self.catalogue.local_schema_version_id)
                     .then_some(author_schema),
             )?;
-            let table_id = self.physical_table_id_for_schema(author_schema, &table_schema.name)?;
-            let layer = VersionLayer::for_record(&version);
-            let parent_coordinate = ParentCoordinate {
-                physical_table_id: table_id,
-                branch_key: stored.branch_key().clone(),
-                row_uuid: stored.row_uuid(),
-                layer,
-            };
-            for parent in stored.parents() {
-                let parent_validation = self
-                    .validate_known_parent_coordinate(parent, &parent_coordinate)
-                    .await?;
-                parent_edges.insert(parent);
-                if matches!(fate, Fate::Pending)
-                    || matches!(fate, Fate::Accepted)
-                        && view_scoped_cardinality
-                        && parent_validation == ParentCoordinateValidation::Inconclusive
-                {
-                    pending_parent_constraints.push((parent, parent_coordinate.clone()));
-                }
-            }
-            // History admission does not select the local winner. Local
-            // current state is maintained from the history/write-ahead delta;
-            // only the explicit global-current update below needs a winner
-            // lookup here. Do not load/decode local history just to discard it.
-            if !matches!(fate, Fate::Rejected(_)) && stored.layer() == VersionLayer::Content {
-                content_versions.push(stored.clone());
-            }
-            stored_versions.push(stored.clone());
+            let mut stored = stored;
             if update_current_indexes && matches!(fate, Fate::Accepted) {
-                if global_time.is_some() {
-                    let previous_global_current = self.query_global_layer_winner_in_batch(
-                        batch,
-                        author_schema,
-                        &table_schema.name,
-                        stored.branch_key(),
+                if global_time.is_some() && self.minting_global_time {
+                    let key = (
+                        stored.table().to_owned(),
+                        stored.branch_key().clone(),
                         stored.row_uuid(),
-                        stored.layer(),
-                    ).await?;
-                    let previous_global_winner =
-                        if let Some(previous) = previous_global_current.as_ref() {
-                            Some((previous, self.version_tx_id(previous)?, previous.tx_time()))
-                        } else {
-                            None
-                        };
-                    let new_is_global_current = version_wins_over_open_winner(
-                        &stored,
-                        tx.tx_id,
-                        tx.tx_id.time,
-                        previous_global_winner,
                     );
-                    debug_assert!(
-                        new_is_global_current || previous_global_current.is_some(),
-                        "clock condition violated: global winner after insert must be the previous winner or inserted version"
+                    if let Some(merged) = self
+                        .merged_global_post_image(batch, author_schema, &table_schema, &stored, tx.tx_id)
+                        .await?
+                    {
+                        // History holds the post-image at this seq; peers
+                        // receive it for this transaction.
+                        stored = merged.clone();
+                        pending_global_updates.insert(key, merged);
+                    }
+                } else if global_time.is_some() {
+                    let key = (
+                        stored.table().to_owned(),
+                        stored.branch_key().clone(),
+                        stored.row_uuid(),
                     );
-                    if new_is_global_current {
-                        pending_global_updates.insert(
-                            (
-                                stored.table().to_owned(),
-                                stored.branch_key().clone(),
-                                stored.row_uuid(),
-                                stored.layer(),
-                            ),
-                            stored.clone(),
-                        );
+                    // Accepted rows from upstream are post-images at their
+                    // seq: a newer seq replaces the row whole.
+                    let current_seq = self
+                        .global_current_seq_in_batch(
+                            batch,
+                            author_schema,
+                            stored.table(),
+                            stored.branch_key(),
+                            stored.row_uuid(),
+                        )
+                        .await?;
+                    if current_seq.is_none_or(|current| Some(current) < global_time) {
+                        pending_global_updates.insert(key, stored.clone());
                     }
                 }
             }
+            if !matches!(fate, Fate::Rejected(_)) {
+                content_versions.push(stored.clone());
+            }
+            stored_versions.push(stored.clone());
             let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
             let storage_key = self.version_storage_primary_key(&stored)?;
-            if batch.ensure_exact(&self.database, history_table.as_ref(), storage_key, groove_record).await?
+            if global_time.is_some() && matches!(fate, Fate::Accepted) && !self.minting_global_time {
+                // The authority's post-image replaces this node's own copy.
+                batch.update_raw(history_table.as_ref(), storage_key, groove_record);
+            } else if batch.ensure_exact(&self.database, history_table.as_ref(), storage_key, groove_record).await?
                 == groove::db::EnsureExactOutcome::Conflict
             {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
@@ -811,11 +349,6 @@ where
         if update_current_indexes && !matches!(fate, Fate::Rejected(_)) {
             if let Some(staged) = staged_content_versions {
                 staged.extend(content_versions.iter().cloned());
-            } else {
-                for stored in &content_versions {
-                    self.update_merge_heads_for_content_version_in_batch(batch, stored)
-                        .await?;
-                }
             }
         }
         if update_current_indexes && matches!(fate, Fate::Accepted) {
@@ -823,25 +356,10 @@ where
                 for stored in pending_global_updates.values() {
                     self.write_global_current_update(batch, stored, global_time)?;
                 }
+                let synced = pending_global_updates.values().cloned().collect::<Vec<_>>();
+                self.rebase_ahead_overlays(batch, &synced, &BTreeSet::from([tx.tx_id]))
+                    .await?;
             }
-        }
-        for (parent, coordinate) in &pending_parent_constraints {
-            let parent_alias = self.node_aliases.get(&parent.node).copied().ok_or(
-                Error::InvalidStoredValue("pending edge parent alias must exist"),
-            )?;
-            self.stage_pending_parent_constraint(
-                batch,
-                (tx_node_alias, tx.tx_id),
-                (parent_alias, *parent),
-                coordinate,
-                tx_already_known,
-            )?;
-        }
-        if matches!(fate, Fate::Accepted) {
-            self.rejections.child_txs_by_parent.remove(&tx.tx_id);
-            self.prune_child_edges(tx.tx_id);
-        } else if matches!(fate, Fate::Pending) {
-            self.record_child_edges(tx.tx_id, parent_edges).await;
         }
         self.cache_tx_versions(tx.tx_id, stored_versions.clone());
         Ok((stored_versions, fate, global_time))
@@ -850,16 +368,17 @@ where
     async fn finalize_staged_transaction_ingest(
         &mut self,
         batch: &mut DatabaseBatch,
+        tx_id: TxId,
         fate: Fate,
         global_time: Option<GlobalTime>,
-        staged_global_times: &mut Vec<GlobalTime>,
+        staged_global_times: &mut Vec<(GlobalTime, TxId)>,
         staged_versions: &[VersionRow],
     ) -> Result<(), Error> {
         if matches!(fate, Fate::Accepted)
             && let Some(global_time) = global_time
         {
-            staged_global_times.push(global_time);
-            let advanced_global_times = self.record_applied_global_time(global_time);
+            staged_global_times.push((global_time, tx_id));
+            let advanced_global_times = self.record_applied_global_time(global_time, tx_id);
             self.cleanup_fated_ahead_current_for_versions(batch, staged_versions)?;
             if !advanced_global_times.is_empty() {
                 for advanced in advanced_global_times
@@ -872,22 +391,6 @@ where
             }
         }
         Ok(())
-    }
-
-    fn translate_cells_to_current_write_schema(
-        &mut self,
-        source: SchemaVersionId,
-        table: &str,
-        cells: &mut BTreeMap<String, Value>,
-    ) -> Result<(SchemaVersionId, String), Error> {
-        let target = self.catalogue.active_schema.schema;
-        if source == target {
-            return Ok((source, table.to_owned()));
-        }
-        if let Some(path) = self.compiled_lens_path(source, target, table)? {
-            return Ok((target, apply_compiled_lens_path(&path, cells)));
-        }
-        Ok((source, table.to_owned()))
     }
 
     /// A wire row version is a complete row under the schema id it declares.
@@ -910,7 +413,7 @@ where
                 }
             }
             if let Err(Error::InvalidMergeableCommit(reason)) =
-                validate_canonical_version_parts(version.branch_key(), &version.parents())
+                validate_canonical_version_parts(version.branch_key())
             {
                 return Some(reason.to_owned());
             }
@@ -963,7 +466,7 @@ where
                 ));
             }
         };
-        if version.deletion().is_none() {
+        {
             for (column, branch_value) in branch_cells {
                 let Some(position) = table
                     .columns
@@ -1061,14 +564,12 @@ where
         };
         self.ingest_rejected_transaction(storage_tx, fate.clone())
             .await?;
-        let mut updates = vec![SyncMessage::FateUpdate {
+        Ok(vec![SyncMessage::FateUpdate {
             tx_id: tx.tx_id,
             fate,
             global_time: None,
             durability: None,
-        }];
-        updates.extend(self.cascade_rejections_from(tx.tx_id).await?);
-        Ok(updates)
+        }])
     }
 
     /// Ensure every known authored schema named by an arriving commit has a

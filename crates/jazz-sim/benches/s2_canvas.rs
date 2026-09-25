@@ -285,14 +285,9 @@ fn run_live(ctx: &mut dyn DriverContext, config: &Config, coalesced: bool) -> Li
             let y = (rng.next_u64() % 10_000) as f64 / 10.0;
             let start_ms = ctx.now_ms();
             let submit_at = Instant::now();
-            let mut commit = MergeableCommit::new(SHAPES, row_uuid, 10_000 + commits as u64)
+            let commit = MergeableCommit::new(SHAPES, row_uuid, 10_000 + commits as u64)
                 .made_by(participant_author(active_idx))
                 .cells(shape_cells(canvas, shape_idx, x, y));
-            if let Some(parent) =
-                current_content_parent(&mut participants[active_idx].node, row_uuid)
-            {
-                commit = commit.parents(vec![parent]);
-            }
             let (tx_id, unit) =
                 commit_mergeable_unit_settled(&mut participants[active_idx].node, commit).unwrap();
             ctx.send(&participants[active_idx].name, "core", unit);
@@ -379,7 +374,6 @@ fn run_live(ctx: &mut dyn DriverContext, config: &Config, coalesced: bool) -> Li
         assert_eq!(shape_state(&mut participant.node), expected);
     }
     assert!(rows(&mut spy.node, &shape, &binding).is_empty());
-    assert_merges_are_concurrent(&mut core, config.shapes);
     let (merge_versions, merges_of_merges) = merge_counters(&mut core, config.shapes);
     LiveSummary {
         commits,
@@ -841,12 +835,9 @@ fn run_writer_actor(
         let row_uuid = shape_row(item.shape_idx);
         let intent = Instant::now();
         let made_at = epoch.elapsed().as_millis() as u64;
-        let mut commit = MergeableCommit::new(SHAPES, row_uuid, made_at)
+        let commit = MergeableCommit::new(SHAPES, row_uuid, made_at)
             .made_by(participant_author(writer_idx))
             .cells(shape_cells(canvas_id(), item.shape_idx, item.x, item.y));
-        if let Some(parent) = current_content_parent(&mut node, row_uuid) {
-            commit = commit.parents(vec![parent]);
-        }
         let (tx_id, unit) =
             commit_mergeable_unit_settled(&mut node, commit).expect("writer commit");
         local_commit_visibility_us
@@ -964,7 +955,6 @@ fn run_core_actor(
             }
         }
     }
-    assert_merges_are_concurrent(&mut core, shapes);
     let (merge_versions, merges_of_merges) = merge_counters(&mut core, shapes);
     let state = shape_state(&mut core);
     CoreResult {
@@ -1231,12 +1221,9 @@ fn run_historical_loads(
             let row_uuid = shape_row(shape_idx);
             let x = (rng.next_u64() % 10_000) as f64 / 10.0;
             let y = (rng.next_u64() % 10_000) as f64 / 10.0;
-            let mut commit = MergeableCommit::new(SHAPES, row_uuid, 10_000 + commits as u64)
+            let commit = MergeableCommit::new(SHAPES, row_uuid, 10_000 + commits as u64)
                 .made_by(participant_author(active_idx))
                 .cells(shape_cells(canvas, shape_idx, x, y));
-            if let Some(parent) = current_content_parent(&mut writer, row_uuid) {
-                commit = commit.parents(vec![parent]);
-            }
             let (_tx_id, unit) = commit_mergeable_unit_settled(&mut writer, commit).unwrap();
             let SyncMessage::CommitUnit { tx, versions } = unit else {
                 unreachable!();
@@ -1463,12 +1450,9 @@ fn run_failure(ctx: &mut dyn DriverContext, config: &Config) -> FailureSummary {
     let mut catchup_bytes = 0;
     for idx in 0..(config.active * config.rate_per_sec.min(20)) {
         let row_uuid = shape_row(idx % config.shapes);
-        let mut commit = MergeableCommit::new(SHAPES, row_uuid, 50_000 + idx as u64)
+        let commit = MergeableCommit::new(SHAPES, row_uuid, 50_000 + idx as u64)
             .made_by(participant_author(0))
             .cells(shape_cells(canvas, idx, idx as f64, (idx * 2) as f64));
-        if let Some(parent) = current_content_parent(&mut participant.node, row_uuid) {
-            commit = commit.parents(vec![parent]);
-        }
         let (_tx_id, unit) = commit_mergeable_unit_settled(&mut participant.node, commit).unwrap();
         let SyncMessage::CommitUnit { tx, versions } = unit else {
             unreachable!();
@@ -2007,83 +1991,19 @@ fn shape_state(node: &mut NodeState<RocksDbStorage>) -> BTreeMap<RowUuid, (u64, 
         .collect()
 }
 
-fn current_content_parent(
-    node: &mut NodeState<RocksDbStorage>,
-    row_uuid: RowUuid,
-) -> Option<jazz::tx::TxId> {
-    block_on(node.row_history(SHAPES, row_uuid))
-        .ok()?
-        .into_iter()
-        .find(|entry| {
-            entry.deletion().is_none()
-                && entry.is_locally_current()
-                && !matches!(entry.fate(), Fate::Rejected(_))
-        })
-        .map(|entry| entry.tx_id())
-}
-
+/// Linear history: Core mints at most one parentless, SYSTEM-authored fold
+/// version per contended write, and never folds a fold, so `merges_of_merges`
+/// is always zero. The pair is kept so the emitted summary shape is stable.
 fn merge_counters(core: &mut NodeState<RocksDbStorage>, shapes: usize) -> (usize, usize) {
     let mut merges = 0;
-    let mut merges_of_merges = 0;
     for idx in 0..shapes {
         for entry in block_on(core.row_history(SHAPES, shape_row(idx))).unwrap() {
-            if entry.parents().len() > 1 && entry.made_by() == AuthorSubject::SYSTEM {
+            if entry.made_by() == AuthorSubject::SYSTEM {
                 merges += 1;
-                if entry.parents().iter().any(|parent| {
-                    block_on(core.transaction_record(*parent))
-                        .is_some_and(|record| record.made_by == AuthorSubject::SYSTEM)
-                }) {
-                    merges_of_merges += 1;
-                }
             }
         }
     }
-    (merges, merges_of_merges)
-}
-
-fn assert_merges_are_concurrent(core: &mut NodeState<RocksDbStorage>, shapes: usize) {
-    for idx in 0..shapes {
-        let history = block_on(core.row_history(SHAPES, shape_row(idx))).unwrap();
-        let parents_by_tx = history
-            .iter()
-            .map(|entry| (entry.tx_id(), entry.parents()))
-            .collect::<BTreeMap<_, _>>();
-        for entry in &history {
-            let parents = entry.parents();
-            if parents.len() <= 1 || entry.made_by() != AuthorSubject::SYSTEM {
-                continue;
-            }
-            for (left_idx, left) in parents.iter().enumerate() {
-                for right in parents.iter().skip(left_idx + 1) {
-                    assert!(
-                        !is_ancestor(*left, *right, &parents_by_tx)
-                            && !is_ancestor(*right, *left, &parents_by_tx),
-                        "merge {:?} has non-concurrent parents {:?} and {:?}",
-                        entry.tx_id(),
-                        left,
-                        right
-                    );
-                }
-            }
-        }
-    }
-}
-
-fn is_ancestor(
-    ancestor: jazz::tx::TxId,
-    candidate: jazz::tx::TxId,
-    parents_by_tx: &BTreeMap<jazz::tx::TxId, Vec<jazz::tx::TxId>>,
-) -> bool {
-    let mut stack = vec![candidate];
-    while let Some(tx_id) = stack.pop() {
-        if tx_id == ancestor {
-            return true;
-        }
-        if let Some(parents) = parents_by_tx.get(&tx_id) {
-            stack.extend(parents.iter().copied());
-        }
-    }
-    false
+    (merges, 0)
 }
 
 fn canvas_cells() -> BTreeMap<String, Value> {

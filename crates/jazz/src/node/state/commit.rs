@@ -8,7 +8,6 @@ where
         commit: MergeableCommit,
     ) -> Result<PublishedTransaction, Error> {
         commit.validate()?;
-        self.merge_commit_parent_times(std::slice::from_ref(&commit))?;
         let made_at = self.mint_tx_time(commit.now_ms)?;
         self.commit_mergeable_at(commit, made_at).await
     }
@@ -46,129 +45,8 @@ where
                 ));
             }
         }
-        self.merge_commit_parent_times(&commits)?;
         let made_at = self.mint_tx_time(commits[0].now_ms)?;
         self.commit_mergeable_many_at(commits, made_at).await
-    }
-
-    /// Commit the already-calculated output of the high-level contribution
-    /// merge helper as one ordinary mergeable transaction.
-    pub(crate) async fn commit_calculated_merge_many(
-        &mut self,
-        commits: Vec<MergeableCommit>,
-        provenance: ContributionMergeProvenance,
-    ) -> Result<PublishedTransaction, Error> {
-        self.require_catalogue_ready()?;
-        provenance.validate().map_err(Error::InvalidMergeableCommit)?;
-        if commits.is_empty() {
-            return Err(Error::InvalidMergeableCommit(
-                "calculated merge requires at least one write",
-            ));
-        }
-        for commit in &commits {
-            commit.validate()?;
-            if commit.effective_permission_subject() != commits[0].effective_permission_subject() {
-                return Err(Error::InvalidMergeableCommit(
-                    "calculated merge permission subjects must match",
-                ));
-            }
-        }
-        let schema_version = self.catalogue.active_schema.schema;
-        let mut emitted = BTreeSet::new();
-        for commit in &commits {
-            let table = self.table_in_schema(&commit.table, schema_version)?;
-            let schema = &self
-                .catalogue
-                .catalogue_schemas
-                .get(&schema_version)
-                .ok_or(Error::InvalidStoredValue("current write schema missing"))?
-                .schema;
-            let (branch_key, _) = schema
-                .project_branch_selector(&table, &commit.branch)
-                .map_err(Error::InvalidBranchKey)?;
-            let layer = if commit.deletion.is_some() {
-                MergeAspect::Deletion
-            } else {
-                MergeAspect::Content
-            };
-            if layer == MergeAspect::Deletion {
-                emitted.insert(ContributionCoordinate {
-                    branch_key,
-                    table: commit.table.clone(),
-                    row_uuid: commit.row_uuid,
-                    layer,
-                    component: ContributionComponent::Register,
-                });
-            } else {
-                let authored = commit
-                    .authored_columns
-                    .clone()
-                    .unwrap_or_else(|| commit.cells.keys().cloned().collect());
-                for column in authored {
-                    let column_type = table
-                        .columns
-                        .iter()
-                        .find(|candidate| candidate.name == column)
-                        .expect("authored column exists")
-                        .column_type
-                        .clone();
-                    let components = match table.merge_strategy(&column) {
-                        MergeStrategy::Lww => vec![ContributionComponent::Column(column)],
-                        MergeStrategy::Counter => vec![ContributionComponent::Operation {
-                            column,
-                            identity: Vec::new(),
-                        }],
-                        MergeStrategy::GSet => match commit.cells.get(&column) {
-                            Some(Value::Array(elements)) => elements
-                                .iter()
-                                .map(|element| {
-                                    encode_contribution_gset_identity(
-                                        &column_type,
-                                        element,
-                                    )
-                                    .map(|identity| ContributionComponent::Operation {
-                                        column: column.clone(),
-                                        identity,
-                                    })
-                                })
-                                .collect::<Result<Vec<_>, _>>()?,
-                            _ => {
-                                return Err(Error::InvalidMergeableCommit(
-                                    "g-set calculated merge value must be an array",
-                                ));
-                            }
-                        },
-                    };
-                    emitted.extend(components.into_iter().map(|component| ContributionCoordinate {
-                        branch_key: branch_key.clone(),
-                        table: commit.table.clone(),
-                        row_uuid: commit.row_uuid,
-                        layer,
-                        component,
-                    }));
-                }
-            }
-        }
-        if provenance
-            .substitutions
-            .iter()
-            .any(|substitution| !emitted.contains(&substitution.target))
-        {
-            return Err(Error::InvalidMergeableCommit(
-                "contribution substitution target was not emitted",
-            ));
-        }
-        self.merge_commit_parent_times(&commits)?;
-        let made_at = self.mint_tx_time(commits[0].now_ms)?;
-        self.commit_mergeable_many_at_with_schema_versions_and_provenance(
-            commits
-                .into_iter()
-                .map(|commit| (schema_version, commit))
-                .collect(),
-            made_at,
-            Some(provenance),
-        )
-        .await
     }
 
     /// Commit local mergeable writes under one admitted authored schema.
@@ -200,7 +78,6 @@ where
                 ));
             }
         }
-        self.merge_commit_parent_times(&commits)?;
         let made_at = self.mint_tx_time(commits[0].now_ms)?;
         self.commit_mergeable_many_at_with_schema_versions(
             commits
@@ -243,11 +120,6 @@ where
                     "mergeable transaction permission subjects must match",
                 ));
             }
-            if commit.parents.iter().any(|parent| parent.time >= reserved.time) {
-                return Err(Error::InvalidMergeableCommit(
-                    "reserved transaction does not dominate its prepared parents",
-                ));
-            }
         }
         self.merge_tx_time(reserved.time);
         self.commit_mergeable_many_at_with_schema_versions(
@@ -258,17 +130,6 @@ where
             reserved.time,
         )
         .await
-    }
-
-    fn merge_commit_parent_times(&mut self, commits: &[MergeableCommit]) -> Result<(), Error> {
-        for commit in commits {
-            if !commit.parents.is_empty() {
-                for parent in &commit.parents {
-                    self.merge_tx_time(parent.time);
-                }
-            }
-        }
-        Ok(())
     }
 
     pub(crate) async fn commit_mergeable_at(
@@ -307,7 +168,7 @@ where
 
     pub(super) async fn commit_mergeable_many_at_with_schema_versions_and_provenance(
         &mut self,
-        mut commits: Vec<(SchemaVersionId, MergeableCommit)>,
+        commits: Vec<(SchemaVersionId, MergeableCommit)>,
         made_at: TxTime,
         contribution_merge: Option<ContributionMergeProvenance>,
     ) -> Result<PublishedTransaction, Error> {
@@ -317,6 +178,10 @@ where
         for (_, commit) in &commits {
             commit.validate()?;
         }
+        // One row has one image per transaction. A restore with replacement
+        // content arrives as a content commit plus a `Restored` event; stamp
+        // both into a single version of the row.
+        let mut commits = coalesce_same_row_commits(commits);
         // Authorization is evaluated as the session/capability selected before
         // durable attribution is normalized. In particular, `SystemAt` is
         // never allowed to replace the in-process `System` capability.
@@ -369,17 +234,31 @@ where
             }) {
                 continue;
             }
+            let exists_locally = Box::pin(self.query_local_winner_in_branch(
+                &commit.table,
+                &head,
+                commit.row_uuid,))
+            .await?
+            .is_some();
+            let exists = exists_locally
+                || Box::pin(self.query_global_winner_in_branch(
+                    &commit.table,
+                    &head,
+                    commit.row_uuid,))
+                .await?
+                .is_some();
+            let operation = if exists {
+                BranchWriteOperation::ExactHeadUpdate
+            } else {
+                BranchWriteOperation::ExactHeadInsert
+            };
             contribution_merge.branch_write_intents.push(BranchWriteIntent {
                 version: 1,
                 physical_table_id: table_id,
                 authored_schema: *schema_version,
                 row_uuid: commit.row_uuid,
                 head,
-                operation: if commit.parents.is_empty() {
-                    BranchWriteOperation::ExactHeadInsert
-                } else {
-                    BranchWriteOperation::ExactHeadUpdate
-                },
+                operation,
             });
         }
         contribution_merge.branch_write_intents.sort_by(|left, right| {
@@ -423,16 +302,6 @@ where
             .collect::<BTreeSet<_>>();
         self.ensure_large_value_stages_current(&staged_ids).await?;
         let tx_node_alias = self.ensure_node_alias(tx_id.node).await?;
-        // Parent TxIds are durable canonical references. Establish every
-        // local alias before the history batch so an unknown parent retains a
-        // durable coordinate constraint instead of being silently skipped.
-        let parent_nodes = commits
-            .iter()
-            .flat_map(|(_, commit)| commit.parents.iter().map(|parent| parent.node))
-            .collect::<BTreeSet<_>>();
-        for parent_node in parent_nodes {
-            self.ensure_node_alias(parent_node).await?;
-        }
         let mut batch = self.database.open_batch();
         for (_, commit) in &commits {
             for staged_id in &commit.staged_large_values {
@@ -451,8 +320,6 @@ where
             )?,
         );
         let mut stored_versions = Vec::new();
-        let mut authored_content_rows = BTreeSet::new();
-        let mut pending_parent_constraints = Vec::new();
         for (write_schema_version, commit) in commits {
             let provenance_at = TxTime::from_physical_ms(commit.now_ms).map_err(|_| {
                 Error::InvalidMergeableCommit(
@@ -472,88 +339,30 @@ where
             let (branch_key, branch_cells) = schema
                 .project_branch_selector(&table_schema, &commit.branch)
                 .map_err(Error::InvalidBranchKey)?;
-            let table_id = self.physical_table_id_for_schema(
-                write_schema_version,
-                &table_schema.name,
-            )?;
-            let layer = VersionLayer::for_commit(&commit);
-            let parent_coordinate = ParentCoordinate {
-                physical_table_id: table_id,
-                branch_key: branch_key.clone(),
-                row_uuid: commit.row_uuid,
-                layer,
-            };
-            for parent in &commit.parents {
-                self.validate_known_parent_coordinate(*parent, &parent_coordinate)
-                    .await?;
-            }
-            let first_content_occurrence_in_batch = layer != VersionLayer::Content
-                || authored_content_rows.insert((
-                    table_id,
-                    branch_key.clone(),
-                    commit.row_uuid,
-                ));
-            let known_fresh_content_row = commit.known_fresh_row
-                && layer == VersionLayer::Content
-                && first_content_occurrence_in_batch;
-            let previous_local_current = if known_fresh_content_row {
+            let known_fresh_row = commit.known_fresh_row;
+            let previous_local_current = if known_fresh_row {
                 None
             } else {
-                self.query_local_layer_winner_in_branch(
-                    &table_schema.name,
-                    &branch_key,
-                    commit.row_uuid,
-                    layer,
-                )
-                .await?
+                self.query_local_winner_in_branch(&table_schema.name, &branch_key, commit.row_uuid)
+                    .await?
             };
-            let known_first_local_content_version =
-                layer == VersionLayer::Content
-                    && first_content_occurrence_in_batch
-                    && (known_fresh_content_row || previous_local_current.is_none());
             let previous_current = match previous_local_current {
                 Some(previous) => Some(previous),
-                None if !known_fresh_content_row => {
-                    self.query_global_layer_winner_in_branch(
+                None if !known_fresh_row => {
+                    self.query_global_winner_in_branch(
                         &table_schema.name,
                         &branch_key,
                         commit.row_uuid,
-                        layer,
                     )
                     .await?
                 }
                 None => None,
             };
-            let creator_source = if let Some(previous) = previous_current.as_ref() {
-                Some(previous.clone())
-            } else if layer == VersionLayer::Deletion {
-                match self.query_local_layer_winner_in_branch(
-                    &table_schema.name,
-                    &branch_key,
-                    commit.row_uuid,
-                    VersionLayer::Content,
-                ).await? {
-                    Some(previous) => Some(previous),
-                    None => self.query_global_layer_winner_in_branch(
-                        &table_schema.name,
-                        &branch_key,
-                        commit.row_uuid,
-                        VersionLayer::Content,
-                    ).await?,
-                }
-            } else {
-                None
-            };
-            let (created_by, created_at) = creator_source
+            let (created_by, created_at) = previous_current
                 .as_ref()
                 .map(|version| (version.created_by(), version.created_at()))
                 .unwrap_or((commit.made_by, provenance_at));
 
-            let parents = if commit.parents.is_empty() {
-                Vec::new()
-            } else {
-                commit.parents
-            };
             let mut cells = commit.cells;
             for (column, value) in branch_cells {
                 if let Some(authored) = cells.get(&column)
@@ -565,128 +374,109 @@ where
                 }
                 cells.insert(column, value);
             }
-            let authored_columns = Some(
-                commit
-                    .authored_columns
-                    .clone()
-                    .unwrap_or_else(|| cells.keys().cloned().collect()),
-            );
+            let mut authored_columns = commit
+                .authored_columns
+                .clone()
+                .unwrap_or_else(|| cells.keys().cloned().collect());
+            // The version is a complete row image: unauthored cells carry the
+            // previous image forward, as does its deletion state unless this
+            // commit deletes or restores the row.
+            let deletion = match commit.deletion {
+                Some(deletion) => {
+                    authored_columns.insert(DELETION_COLUMN_NAME.to_owned());
+                    Some(deletion)
+                }
+                None => previous_current.as_ref().and_then(VersionRow::deletion),
+            };
+            let mut base_cells = BTreeMap::new();
+            if let Some(previous) = previous_current.as_ref() {
+                let previous_schema = self
+                    .schema_version_for_alias(previous.schema_version_alias())
+                    .ok_or(Error::InvalidStoredValue(
+                        "previous row image schema alias must exist",
+                    ))?;
+                let previous_table = self.table_in_schema(previous.table(), previous_schema)?;
+                let mut inherited = previous.cells(&previous_table)?;
+                let projected = if previous_schema == write_schema_version {
+                    Some(table_schema.name.clone())
+                } else {
+                    self.translate_cells(
+                        previous_schema,
+                        write_schema_version,
+                        previous.table(),
+                        &mut inherited,
+                    )?
+                };
+                if projected.as_deref() == Some(table_schema.name.as_str()) {
+                    base_cells = inherited.clone();
+                    for (column, value) in inherited {
+                        if !authored_columns.contains(&column) && !cells.contains_key(&column) {
+                            cells.insert(column, value);
+                        }
+                    }
+                }
+            }
+            // Merge columns travel as ops over the image this write saw; the
+            // local overlay shows the resulting image.
+            let image_cells = merge_ops::split_merge_ops(
+                &table_schema,
+                &authored_columns,
+                &base_cells,
+                &mut cells,
+            )?;
             let authored_column_ids = self.authored_column_ids_for_names(
                 write_schema_version,
                 &table_schema.name,
-                authored_columns.as_ref(),
+                Some(&authored_columns),
             )?;
-            let history_descriptor = if commit.deletion.is_none() {
-                Some(
-                    self.prepared_physical_write_plan(
-                        write_schema_version,
-                        &table_schema.name,
-                        PhysicalWriteTarget::History,
-                    )?
-                    .logical_descriptor,
+            let history_descriptor = Some(
+                self.prepared_physical_write_plan(
+                    write_schema_version,
+                    &table_schema.name,
+                    PhysicalWriteTarget::History,
+                )?
+                .logical_descriptor,
+            );
+            let row_version = |cells| {
+                VersionRow::from_parts_with_schema_version(
+                    &table_schema,
+                    VersionRowParts {
+                        table: commit.table.clone(),
+                        branch_key: branch_key.clone(),
+                        row_uuid: commit.row_uuid,
+                        tx_node_alias,
+                        schema_version_alias,
+                        tx_time: made_at,
+                        created_by,
+                        created_at,
+                        updated_by: commit.made_by,
+                        updated_at: provenance_at,
+                        cells,
+                        authored_columns: authored_column_ids.clone(),
+                        deletion,
+                    },
+                    (write_schema_version != self.catalogue.local_schema_version_id)
+                        .then_some(write_schema_version),
+                    history_descriptor.clone(),
                 )
-            } else {
-                None
             };
-            let stored = VersionRow::from_parts_with_schema_version(
-                &table_schema,
-                VersionRowParts {
-                    table: commit.table,
-                    branch_key,
-                    row_uuid: commit.row_uuid,
-                    tx_node_alias,
-                    schema_version_alias,
-                    tx_time: made_at,
-                    parents,
-                    created_by,
-                    created_at,
-                    updated_by: commit.made_by,
-                    updated_at: provenance_at,
-                    cells,
-                    authored_columns: authored_column_ids,
-                    deletion: commit.deletion,
-                },
-                (write_schema_version != self.catalogue.local_schema_version_id)
-                    .then_some(write_schema_version),
-                history_descriptor,
-            )?;
-            let previous_winner = if let Some(previous) = previous_current.as_ref() {
-                Some((
-                    previous,
-                    self.version_tx_id(previous)?,
-                    self.version_made_at(previous).await?,
-                ))
-            } else {
-                None
-            };
-            let new_is_current =
-                version_wins_over_open_winner(&stored, tx_id, made_at, previous_winner);
-            let _ = (new_is_current, previous_current);
+            let overlay = image_cells.map(&row_version).transpose()?;
+            let stored = row_version(cells)?;
             let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
             batch.insert_raw(
                 history_table.as_ref(),
                 self.version_storage_primary_key(&stored)?,
                 groove_record,
             );
-            self.update_merge_heads_for_content_version(
-                &mut batch,
-                &stored,
-                known_first_local_content_version,
-            )
-            .await?;
-            self.write_ahead_current_insert(&mut batch, &stored)?;
-            pending_parent_constraints.extend(
-                stored
-                    .parents()
-                    .into_iter()
-                    .map(|parent| (parent, parent_coordinate.clone())),
-            );
+            self.write_ahead_current_insert(&mut batch, overlay.as_ref().unwrap_or(&stored))?;
             stored_versions.push(stored);
         }
-        for (parent, coordinate) in pending_parent_constraints {
-            let parent_alias = self
-                .node_aliases
-                .get(&parent.node)
-                .copied()
-                .ok_or(Error::InvalidStoredValue(
-                    "pending edge parent alias must exist after allocation",
-                ))?;
-            self.stage_pending_parent_constraint(
-                &mut batch,
-                (tx_node_alias, tx_id),
-                (parent_alias, parent),
-                &coordinate,
-                false,
-            )?;
-        }
-        let pending_child_edges = {
-            let mut edges = Vec::new();
-            for stored in &stored_versions {
-                for parent in stored.parents() {
-                    if self
-                        .query_transaction(parent)
-                        .await?
-                        .is_none_or(|tx| matches!(tx.fate, Fate::Pending))
-                    {
-                        edges.push(parent);
-                    }
-                }
-            }
-            edges
-        };
         let persistence = self.database.apply_batch(batch).await?;
         self.cache_tx_versions(tx_id, stored_versions.clone());
         if permission_subject != made_by {
             self.open_tx
                 .local_permission_subjects
                 .insert(tx_id, permission_subject);
-        }
-        for parent in pending_child_edges {
-            self.rejections
-                .child_txs_by_parent
-                .entry(parent)
-                .or_default()
-                .insert(tx_id);
         }
         self.pending_persistence.insert(tx_id);
         Ok(PublishedTransaction { tx_id, persistence })
@@ -971,45 +761,20 @@ where
         let (branch_key, _) = schema
             .project_branch_selector(&table_schema, branch)
             .map_err(Error::InvalidBranchKey)?;
-        let deletion = match self.query_local_layer_winner_in_branch(
+        let content = match self.query_local_winner_in_branch(
             table,
             &branch_key,
-            row_uuid,
-            VersionLayer::Deletion,
-        )
+            row_uuid,)
         .await?
         {
             Some(version) => Some(version),
-            None => self.query_global_layer_winner_in_branch(
+            None => self.query_global_winner_in_branch(
                 table,
                 &branch_key,
-                row_uuid,
-                VersionLayer::Deletion,
-            )
+                row_uuid,)
             .await?,
         };
-        if deletion.is_some_and(|version| version.deletion() == Some(DeletionEvent::Deleted)) {
-            return Ok(None);
-        }
-        let content = match self.query_local_layer_winner_in_branch(
-            table,
-            &branch_key,
-            row_uuid,
-            VersionLayer::Content,
-        )
-        .await?
-        {
-            Some(version) => Some(version),
-            None => self.query_global_layer_winner_in_branch(
-                table,
-                &branch_key,
-                row_uuid,
-                VersionLayer::Content,
-            )
-            .await?,
-        };
-        let Some(content) = content
-        else {
+        let Some(content) = content.filter(|version| !version.is_deleted()) else {
             return Ok(None);
         };
         let content_tx = self.version_tx_id(&content)?;
@@ -1040,38 +805,44 @@ where
         branch: &BranchSelector,
         row_uuid: RowUuid,
     ) -> Result<Option<TxId>, Error> {
-        self.local_layer_winner_tx_id_in_branch_selector(
-            table,
-            branch,
-            row_uuid,
-            VersionLayer::Content,
-        )
-        .await
+        // A deleted image is not visible content.
+        let Some(version) = self
+            .local_winner_in_branch_selector(table, branch, row_uuid)
+            .await?
+        else {
+            return Ok(None);
+        };
+        if version.is_deleted() {
+            return Ok(None);
+        }
+        self.version_tx_id(&version).map(Some)
     }
 
-    /// Return the exact local deletion parent for a branch-local row.
+    /// Return the local winner of a branch-local row while it is deleted.
     pub async fn local_deletion_winner_tx_id_in_branch(
         &mut self,
         table: &str,
         branch: &BranchSelector,
         row_uuid: RowUuid,
     ) -> Result<Option<TxId>, Error> {
-        self.local_layer_winner_tx_id_in_branch_selector(
-            table,
-            branch,
-            row_uuid,
-            VersionLayer::Deletion,
-        )
-        .await
+        let Some(version) = self
+            .local_winner_in_branch_selector(table, branch, row_uuid)
+            .await?
+        else {
+            return Ok(None);
+        };
+        if !version.is_deleted() {
+            return Ok(None);
+        }
+        self.version_tx_id(&version).map(Some)
     }
 
-    async fn local_layer_winner_tx_id_in_branch_selector(
+    async fn local_winner_in_branch_selector(
         &mut self,
         table: &str,
         branch: &BranchSelector,
         row_uuid: RowUuid,
-        layer: VersionLayer,
-    ) -> Result<Option<TxId>, Error> {
+    ) -> Result<Option<VersionRow>, Error> {
         let schema_version = self.catalogue.active_schema.schema;
         let table_schema = self.table_in_schema(table, schema_version)?;
         let schema = &self
@@ -1083,11 +854,8 @@ where
         let (branch_key, _) = schema
             .project_branch_selector(&table_schema, branch)
             .map_err(Error::InvalidBranchKey)?;
-        self.query_local_layer_winner_in_branch(table, &branch_key, row_uuid, layer)
-            .await?
-            .as_ref()
-            .map(|version| self.version_tx_id(version))
-            .transpose()
+        self.query_local_winner_in_branch(table, &branch_key, row_uuid)
+            .await
     }
 
     /// Return current rows at the requested durability tier.
@@ -1125,7 +893,7 @@ where
         Ok(self
             .local_current_content_row_candidate(&table_schema, row_uuid, schema_version)
             .await?
-            .map(|(_, (time, node))| TxId::new(time, node)))
+            .and_then(|(_, (time, node), deleted)| (!deleted).then(|| TxId::new(time, node))))
     }
 
     pub(crate) async fn local_deletion_winner_tx_id(
@@ -1148,10 +916,19 @@ where
         row_uuid: RowUuid,
     ) -> Result<Option<TxId>, Error> {
         let table_schema = self.table_in_schema(table, schema_version)?;
-        Ok(self
-            .local_current_deletion_candidate(&table_schema, row_uuid, schema_version)
+        // Deletion is stamped into the row image: the "deletion winner" is the
+        // current image's transaction while that image is deleted.
+        // The newest local image is one ordered point read of history.
+        let Some(image) = self
+            .query_local_winner_in_branch(&table_schema.name, &BranchKey::default(), row_uuid)
             .await?
-            .map(|(_, (time, node))| TxId::new(time, node)))
+        else {
+            return Ok(None);
+        };
+        if image.deletion() != Some(DeletionEvent::Deleted) {
+            return Ok(None);
+        }
+        self.version_tx_id(&image).map(Some)
     }
 
     async fn rebuild_ahead_current_keys(&mut self) -> Result<(), Error> {
@@ -1193,45 +970,20 @@ where
                 if let Some(receipt) = &mut receipt {
                     receipt.ahead_current_entries += 1;
                 }
+                let record = raw.record();
+                let tx_time = TxTime(record.get_u64(HistoryRowRecord::FIELD_TX_TIME_IDX)?);
+                let node = self
+                    .node_for_alias(NodeAlias(
+                        record.get_u64(HistoryRowRecord::FIELD_TX_NODE_ID_IDX)?,
+                    ))
+                    .ok_or(Error::InvalidStoredValue("overlay node alias must exist"))?;
                 self.ahead_current_keys
-                    .insert((table_id, VersionLayer::Content, raw.key().to_vec()));
-            }
-            let deletion_table = physical_register_ahead_current_table_name(table_id);
-            let deletion_rows = self
-                .database
-                .primary_key_scan_raw(&deletion_table, &[])
-                .await?;
-            for raw in deletion_rows {
-                #[cfg(feature = "testing")]
-                if let Some(receipt) = &mut receipt {
-                    receipt.ahead_current_entries += 1;
-                }
-                self.ahead_current_keys
-                    .insert((table_id, VersionLayer::Deletion, raw.key().to_vec()));
+                    .insert((table_id, raw.key().to_vec()), TxId::new(tx_time, node));
             }
         }
         Ok(())
     }
 
-    fn insert_ahead_current_key(
-        &mut self,
-        table_id: PhysicalTableId,
-        layer: VersionLayer,
-        encoded_primary_key: Vec<u8>,
-    ) {
-        self.ahead_current_keys
-            .insert((table_id, layer, encoded_primary_key));
-    }
-
-    fn remove_ahead_current_key(
-        &mut self,
-        table_id: PhysicalTableId,
-        layer: VersionLayer,
-        encoded_primary_key: Vec<u8>,
-    ) {
-        self.ahead_current_keys
-            .remove(&(table_id, layer, encoded_primary_key));
-    }
 
     pub(super) fn cached_tx_version_tables(&self, tx_id: TxId) -> Option<BTreeSet<String>> {
         self.query.tx_version_tables_cache.get(&tx_id).cloned()
@@ -1493,17 +1245,9 @@ where
         let content =
             self.local_current_content_row_candidate(&table_schema, row_uuid, schema_version)
                 .await?;
-        let deletion =
-            self.local_current_deletion_candidate(&table_schema, row_uuid, schema_version)
-                .await?;
-        if let (Some((_, content_tx)), Some((deletion, deletion_tx))) = (&content, &deletion)
-            && deletion_tx > content_tx
-            && *deletion == DeletionEvent::Deleted
-        {
-            return Ok(None);
-        }
         content
-            .map(|(row, _)| {
+            .filter(|(_, _, deleted)| !deleted)
+            .map(|(row, _, _)| {
                 let mut row = self.materialize_current_row(&table_schema, row)?;
                 // Exact local reads bypass the query terminal's publication
                 // binder, but native write merging consumes the same row ABI.
@@ -1518,7 +1262,7 @@ where
         table: &TableSchema,
         row_uuid: RowUuid,
         schema_version: SchemaVersionId,
-    ) -> Result<Option<(CurrentRow, (TxTime, NodeUuid))>, Error> {
+    ) -> Result<Option<(CurrentRow, (TxTime, NodeUuid), bool)>, Error> {
         let prefix = vec![groove::ivm::LiteralValue::from(Value::Uuid(row_uuid.0))];
         let global = self.physical_current_source_scan_graph(
             schema_version,
@@ -1534,85 +1278,33 @@ where
         )?;
         let result = self
             .database
-            .query_graph(GraphBuilder::arg_max_by(
-                GraphBuilder::union([global, ahead]),
-                ["row_uuid"],
-                ["tx_time", "tx_node_id"],
-            ))
+            .query_graph(crate::node::codec::pending_overlay_over(global, ahead))
             .await
             .map_err(|error| Self::malformed_current_query_error(&table.name, row_uuid, error))?;
         let Some(delta) = result.deltas.into_iter().find(|delta| delta.weight > 0) else {
             return Ok(None);
         };
         let record = BorrowedRecord::new(&delta.record, &result.descriptor);
-        let tx = self.current_record_sort_key(&table.name, row_uuid, record)?;
-        Ok(Some((decode_current_row(table, record)?, tx)))
-    }
-
-    async fn local_current_deletion_candidate(
-        &mut self,
-        table: &TableSchema,
-        row_uuid: RowUuid,
-        schema_version: SchemaVersionId,
-    ) -> Result<Option<(DeletionEvent, (TxTime, NodeUuid))>, Error> {
-        let table_id = self.physical_table_id_for_schema(schema_version, &table.name)?;
-        // Global has one current register per row; ahead is ordered by
-        // (branch, row, tx_time, tx_node_id). Its last entry is therefore
-        // exactly the candidate selected by the former union/arg-max graph.
-        let prefix = [
-            Value::Bytes(BranchKey::default().canonical_bytes()),
-            Value::Uuid(row_uuid.0),
-        ];
-        let global = self
-            .database
-            .primary_key_get_raw(&physical_register_global_current_table_name(table_id), &prefix)
-            .await
-            .map_err(|error| Self::malformed_current_query_error(&table.name, row_uuid, error))?;
-        let ahead = self
-            .database
-            .primary_key_last_raw(&physical_register_ahead_current_table_name(table_id), &prefix)
-            .await
-            .map_err(|error| Self::malformed_current_query_error(&table.name, row_uuid, error))?;
-        let winner = match (&global, &ahead) {
-            (None, None) => return Ok(None),
-            (Some(value), None) | (None, Some(value)) => value,
-            (Some(global), Some(ahead)) => {
-                let g = global.record();
-                let a = ahead.record();
-                let key = |record: BorrowedRecord<'_>| -> Result<_, Error> {
-                    let malformed = |error| {
-                        Self::malformed_current_query_error(
-                            &table.name,
-                            row_uuid,
-                            GrooveDbError::RecordEncoding(error),
-                        )
-                    };
-                    Ok((
-                        record
-                            .get_u64(RegisterGlobalCurrentRowRecord::FIELD_TX_TIME_IDX)
-                            .map_err(malformed)?,
-                        record
-                            .get_u64(RegisterGlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)
-                            .map_err(malformed)?,
-                    ))
-                };
-                // Arg-max compares the stored node alias, then breaks ties
-                // with ascending encoded record bytes, not node UUID order.
-                let order = key(a)?.cmp(&key(g)?);
-                if order.is_gt() || (order.is_eq() && a.bytes() < g.bytes()) {
-                    ahead
-                } else {
-                    global
-                }
-            }
+        let deleted = match result.descriptor.field_index("_deletion") {
+            Some(field) => record
+                .get_nullable_enum(field)
+                .map_err(|error| {
+                    Self::malformed_current_query_error(
+                        &table.name,
+                        row_uuid,
+                        GrooveDbError::RecordEncoding(error),
+                    )
+                })?
+                .is_some_and(|tag| {
+                    matches!(
+                        deletion_event_from_value(Value::EnumTag(tag)),
+                        Ok(DeletionEvent::Deleted)
+                    )
+                }),
+            None => false,
         };
-        let record = winner.record();
-        Ok(Some((
-            deletion_event_from_value(
-                record.get_idx(RegisterGlobalCurrentRowRecord::FIELD__DELETION_IDX)?,
-            )?,
-            self.current_record_sort_key(&table.name, row_uuid, record)?,
-        )))
+        let tx = self.current_record_sort_key(&table.name, row_uuid, record)?;
+        Ok(Some((decode_current_row(table, record)?, tx, deleted)))
     }
 
     fn current_record_sort_key(
@@ -1665,4 +1357,60 @@ where
         }))
     }
 
+}
+
+/// Merge commits addressing the same row of the same schema/branch into one
+/// row-image commit, in authoring order: later cells and deletion events win,
+/// authored column sets are unioned.
+fn coalesce_same_row_commits(
+    commits: Vec<(SchemaVersionId, MergeableCommit)>,
+) -> Vec<(SchemaVersionId, MergeableCommit)> {
+    if commits.len() < 2 {
+        return commits;
+    }
+    let mut by_row = std::collections::HashMap::<(String, RowUuid), Vec<usize>>::new();
+    let mut merged: Vec<(SchemaVersionId, MergeableCommit)> = Vec::with_capacity(commits.len());
+    for (schema_version, commit) in commits {
+        let candidates = by_row
+            .entry((commit.table.clone(), commit.row_uuid))
+            .or_default();
+        let existing = candidates.iter().copied().find(|index| {
+            let (existing_schema, existing) = &merged[*index];
+            *existing_schema == schema_version && existing.branch == commit.branch
+        });
+        let Some(index) = existing else {
+            candidates.push(merged.len());
+            merged.push((schema_version, commit));
+            continue;
+        };
+        let base = &mut merged[index].1;
+        let base_authored = base
+            .authored_columns
+            .take()
+            .unwrap_or_else(|| base.cells.keys().cloned().collect());
+        let next_authored = commit
+            .authored_columns
+            .clone()
+            .unwrap_or_else(|| commit.cells.keys().cloned().collect());
+        base.authored_columns = Some(base_authored.union(&next_authored).cloned().collect());
+        // Content written after a delete in the same transaction resurrects
+        // the row: the later write of the row wins.
+        let resurrects =
+            commit.deletion.is_none() && base.deletion == Some(DeletionEvent::Deleted);
+        base.cells.extend(commit.cells);
+        base.deletion = if resurrects {
+            Some(DeletionEvent::Restored)
+        } else {
+            commit.deletion.or(base.deletion)
+        };
+        base.now_ms = base.now_ms.max(commit.now_ms);
+        base.known_fresh_row &= commit.known_fresh_row;
+        base.prepared_large_columns
+            .extend(commit.prepared_large_columns);
+        base.staged_large_values.extend(commit.staged_large_values);
+        if commit.user_metadata_json.is_some() {
+            base.user_metadata_json = commit.user_metadata_json;
+        }
+    }
+    merged
 }
