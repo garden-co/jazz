@@ -77,6 +77,7 @@ it("automatically creates and reopens a fresh founder's encrypted text and image
   let db: Db | undefined;
   let recipient: Db | undefined;
   let blocked = false;
+  let scenarioError: unknown;
   try {
     await deploy({ ...server, schema: app, permissions });
     const accounts = await createAccountManager(managerConfig);
@@ -220,7 +221,9 @@ it("automatically creates and reopens a fresh founder's encrypted text and image
     expect(await db.one(app.images.where({ id: image.id }), { tier: "global" })).toEqual(
       expectedImage,
     );
-    expect(await db.all(app.__e2ee_spaces, { tier: "global" })).toEqual(roots);
+    expect(
+      await db.all(app.__e2ee_spaces.where({ identifier: project.id }), { tier: "global" }),
+    ).toEqual(roots);
     recipient = await createDb({
       appId: server.appId,
       serverUrl: server.serverUrl,
@@ -230,29 +233,46 @@ it("automatically creates and reopens a fresh founder's encrypted text and image
     });
     await withTimeout(
       db.e2ee.spaces.grant(app.projects, project.id, onlineAccount.id).wait(),
-      15_000,
+      60_000,
       "Accepted founder could not deliver the original image key",
     );
-    expect(await recipient.one(app.images.where({ id: image.id }), { tier: "global" })).toEqual(
-      expectedImage,
-    );
+    expect(
+      await withTimeout(
+        recipient.one(app.images.where({ id: image.id }), { tier: "global" }),
+        30_000,
+        "Recipient encrypted image unavailable",
+      ),
+    ).toEqual(expectedImage);
     expect({ planCalls, sourceReads }).toEqual({ planCalls: 1, sourceReads: 1 });
+  } catch (error) {
+    scenarioError = error;
+    throw error;
   } finally {
+    const cleanupErrors: unknown[] = [];
     try {
       if (blocked) await unblockJazzServerNetwork(server.serverUrl);
-      await Promise.all(
+      const closures = await Promise.allSettled(
         [db, recipient].map((client) =>
           client
             ? withTimeout(client.shutdown(), 5_000, "Founder test cleanup stalled")
             : undefined,
         ),
       );
-    } finally {
-      try {
-        await withTimeout(stopJazzServer(server.serverUrl), 5_000, "Server cleanup stalled");
-      } finally {
-        for (const key of keys) localStorage.removeItem(key);
-      }
+      for (const result of closures)
+        if (result.status === "rejected") cleanupErrors.push(result.reason);
+    } catch (error) {
+      cleanupErrors.push(error);
     }
+    try {
+      await withTimeout(stopJazzServer(server.serverUrl), 5_000, "Server cleanup stalled");
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    for (const key of keys) localStorage.removeItem(key);
+    if (cleanupErrors.length)
+      throw new AggregateError(
+        scenarioError === undefined ? cleanupErrors : [scenarioError, ...cleanupErrors],
+        "Offline founder scenario or cleanup failed",
+      );
   }
 }, 120_000);

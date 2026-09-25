@@ -36,18 +36,19 @@ export function localFirstAccountId(appId: string, subject: string): string {
 export function localFirstFactory(options: {
   appId: string;
   mintToken(secret: string, audience: string): string;
-  retainSecret(secret: string): void | Promise<void>;
+  retainSecret(secret: string, generatedHere?: boolean): void | Promise<void>;
   generateSecret?(): string;
   isSecretRetained?(secret: string): Promise<boolean>;
+  isGeneratedHere?(secret: string): Promise<boolean>;
 }): LocalFirstAccountFactory {
-  const restore = (secret: string) => {
+  const restore = (secret: string, generatedHere = false) => {
     parseAuthSecret(secret);
     const token = options.mintToken(secret, options.appId);
     const payload = parseJwtPayload(token);
     if (payload?.iss !== "urn:jazz:local-first" || typeof payload.sub !== "string") {
       throw new Error("Native runtime returned an invalid local-first identity");
     }
-    const retained = Promise.resolve(options.retainSecret(secret));
+    const retained = Promise.resolve(options.retainSecret(secret, generatedHere));
     // A synchronous handle may exist before asynchronous platform persistence
     // finishes, but no context can use its key before durable retention.
     // Observe rejection immediately even if the app never opens a context.
@@ -65,7 +66,14 @@ export function localFirstFactory(options: {
       accountId: localFirstAccountId(options.appId, payload.sub),
       identity: { issuer: payload.iss, subject: payload.sub },
       auth: { getToken },
+      generatedHere: async () => {
+        await retained;
+        return options.isGeneratedHere ? options.isGeneratedHere(secret) : generatedHere;
+      },
     };
   };
-  return { create: () => restore((options.generateSecret ?? generateAuthSecret)()), restore };
+  return {
+    create: () => restore((options.generateSecret ?? generateAuthSecret)(), true),
+    restore: (secret) => restore(secret),
+  };
 }

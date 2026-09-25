@@ -280,10 +280,12 @@ where
         if id == self.catalogue.active_schema.schema {
             Some(&self.catalogue.active_schema.compiled)
         } else {
-            self.catalogue.catalogue_schemas.get(&id).map(|schema| &schema.schema)
+            self.catalogue
+                .catalogue_schemas
+                .get(&id)
+                .map(|schema| &schema.schema)
         }
     }
-
 
     /// Highest contiguously activated authoritative catalogue position.
     pub fn active_catalogue_seq(&self) -> u64 {
@@ -424,7 +426,10 @@ where
             .values()
             .cloned()
             .collect::<Vec<_>>();
-        if let Some(schema) = schemas.iter_mut().find(|schema| schema.id == self.catalogue.active_schema.schema) {
+        if let Some(schema) = schemas
+            .iter_mut()
+            .find(|schema| schema.id == self.catalogue.active_schema.schema)
+        {
             schema.schema = self.catalogue.active_schema.compiled.clone();
         }
         schemas.sort_by_key(|schema| schema.id);
@@ -592,6 +597,53 @@ where
             .ok()
             .flatten()
             .map(|stored| stored.to_record())
+    }
+
+    #[doc(hidden)]
+    pub async fn initialization_transaction_status(
+        &mut self,
+        id: TxId,
+        author: AuthorSubject,
+    ) -> Result<InitializationTransactionStatus, Error> {
+        use InitializationTransactionStatus as Status;
+        let Some(stored) = self.query_transaction(id).await? else {
+            return Ok(Status::NotObserved);
+        };
+        if stored.tx.made_by != author {
+            return Ok(Status::NotObserved);
+        }
+        // Rejected audits intentionally survive removal of their row payloads.
+        // They are terminal fate evidence, not an incomplete replayable unit.
+        if !matches!(stored.fate, Fate::Rejected(_))
+            && (stored.view_scoped_cardinality
+                || !stored.tx.has_complete_exclusive_evidence()
+                || self.query_versions_for_tx(id).await?.len() != stored.tx.n_total_writes as usize)
+        {
+            return Ok(Status::Incomplete);
+        }
+        let durability = if self.pending_persistence.contains(&id) {
+            DurabilityTier::None
+        } else {
+            stored.durability
+        };
+        Ok(Status::Complete {
+            fate: stored.fate,
+            durability,
+        })
+    }
+
+    #[doc(hidden)]
+    pub async fn is_durable_global_replay_ancestor(
+        &mut self,
+        id: TxId,
+    ) -> Result<bool, Error> {
+        let Some(stored) = self.query_transaction(id).await? else {
+            return Ok(false);
+        };
+        Ok(stored.fate == Fate::Accepted
+            && stored.durability == DurabilityTier::Global
+            && stored.global_time.is_some()
+            && !self.pending_persistence.contains(&id))
     }
 
     /// Return locally originated transactions that still need upstream settlement.
@@ -775,7 +827,13 @@ where
         // Keep only this process-local counter; no membership, settlement,
         // predecessor, compiled source, or pending publication survives.
         #[cfg(any(test, feature = "testing"))]
-        crate::delivery_diagnostics::record(|| format!("invalidate_scopes runtime={} receipts={}", self.groove_runtime_token(), self.query.authority_results.len()));
+        crate::delivery_diagnostics::record(|| {
+            format!(
+                "invalidate_scopes runtime={} receipts={}",
+                self.groove_runtime_token(),
+                self.query.authority_results.len()
+            )
+        });
         for state in self.query.authority_results.values_mut() {
             *state = AuthorityResultState {
                 applied_view_update_generation: state.applied_view_update_generation,

@@ -96,6 +96,50 @@ impl Page {
     }
 }
 
+/// Choose a contiguous split that fits both leaves and a root promoting its separator.
+/// Size arithmetic follows the page-v1 codec without encoding candidate pages.
+pub(crate) fn leaf_split_index(
+    entries: &[(Vec<u8>, ValueCell)],
+    page_size: usize,
+) -> Option<usize> {
+    const LEAF_OVERHEAD: usize = HEADER_LEN + 1 + 4;
+    const ROOT_OVERHEAD: usize = HEADER_LEN + 1 + 4 + 4 + 4 + 2 * 8;
+    let total = entries.iter().try_fold(0usize, |total, (key, value)| {
+        total.checked_add(leaf_entry_len(key, value)?)
+    })?;
+    let capacity = page_size.checked_sub(LEAF_OVERHEAD)?;
+    let mut left = 0usize;
+    let mut best = None;
+    for (index, (key, value)) in entries
+        .iter()
+        .enumerate()
+        .take(entries.len().saturating_sub(1))
+    {
+        left += leaf_entry_len(key, value)?;
+        let right = total - left;
+        let separator_len = entries[index + 1].0.len();
+        if left > capacity
+            || right > capacity
+            || ROOT_OVERHEAD.checked_add(separator_len)? > page_size
+        {
+            continue;
+        }
+        let larger = left.max(right);
+        if best.is_none_or(|(previous, _)| larger < previous) {
+            best = Some((larger, index + 1));
+        }
+    }
+    best.map(|(_, index)| index)
+}
+
+fn leaf_entry_len(key: &[u8], value: &ValueCell) -> Option<usize> {
+    let value_len = match value {
+        ValueCell::Inline(bytes) => 4usize.checked_add(bytes.len())?,
+        ValueCell::Overflow { .. } => 8 + 8,
+    };
+    key.len().checked_add(4 + 1)?.checked_add(value_len)
+}
+
 /// Encode one page using the fixed IDBTree v1 storage format.
 ///
 /// All integers are little-endian. Page, value-cell, and option tags are the

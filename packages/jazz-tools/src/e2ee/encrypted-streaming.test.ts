@@ -332,7 +332,7 @@ it("uploads an encrypted image to an accepted space after a transport-offline pe
             })(),
           }),
         ),
-      ).rejects.toBe(historyFailure);
+      ).rejects.toMatchObject({ code: "key-unavailable" });
       expect(failedSourceRuns).toBe(0);
     } finally {
       observeHistory.mockRestore();

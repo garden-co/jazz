@@ -7,6 +7,153 @@ struct PlannedCatalogueSnapshot {
     activated_lineages: Vec<StagedSchemaLineage>,
 }
 
+enum CatalogueSnapshotMode {
+    AuthorityAdmission,
+    CachedValidation,
+}
+
+/// Validate portable identity coordinates before comparing a cache to another
+/// catalogue. Admission still uses the planner below (including lens semantics).
+fn cached_snapshot_genesis(
+    snapshot: &crate::protocol::CatalogueSnapshot,
+) -> Result<&SchemaVersion, Error> {
+    let invalid = || Error::InvalidCatalogueUpdate("invalid cached catalogue identity chain");
+    let schemas = snapshot
+        .schemas
+        .iter()
+        .map(|schema| (schema.id, schema))
+        .collect::<BTreeMap<_, _>>();
+    if schemas.len() != snapshot.schemas.len()
+        || schemas
+            .values()
+            .any(|schema| schema.id != schema.schema.version_id())
+        || !schemas.contains_key(&snapshot.current_write_schema.schema)
+    {
+        return Err(invalid());
+    }
+    let targets = snapshot
+        .lineages
+        .iter()
+        .map(|(_, publication)| publication.schema.id)
+        .collect::<BTreeSet<_>>();
+    let mut genesis = schemas
+        .values()
+        .filter(|schema| !targets.contains(&schema.id));
+    let genesis_schema = *genesis.next().ok_or_else(invalid)?;
+    if genesis.next().is_some() {
+        return Err(invalid());
+    }
+    snapshot
+        .genesis_physical_identities
+        .validate_for_schema(&genesis_schema.schema)
+        .map_err(Error::InvalidCatalogueUpdate)?;
+    let mut manifests =
+        BTreeMap::from([(genesis_schema.id, &snapshot.genesis_physical_identities)]);
+    let mut lineages = snapshot.lineages.iter().collect::<Vec<_>>();
+    lineages.sort_by_key(|(seq, _)| *seq);
+    for (index, (seq, publication)) in lineages.into_iter().enumerate() {
+        if *seq != index as u64 + 1
+            || publication.id != publication.content_id()
+            || publication.lens.id != publication.lens.content_id()
+            || publication.lens.target != publication.schema.id
+            || publication.schema.id != publication.schema.schema.version_id()
+            || !schemas.contains_key(&publication.schema.id)
+            || manifests.contains_key(&publication.schema.id)
+        {
+            return Err(invalid());
+        }
+        let source = schemas.get(&publication.lens.source).ok_or_else(invalid)?;
+        manifests
+            .get(&source.id)
+            .ok_or_else(invalid)?
+            .validate_evolution_to_with_history(
+                &source.schema,
+                &publication.physical_identities,
+                &publication.schema.schema,
+                &publication.lens,
+                manifests.values().map(|manifest| (**manifest).clone()),
+            )
+            .map_err(Error::InvalidCatalogueUpdate)?;
+        manifests.insert(publication.schema.id, &publication.physical_identities);
+    }
+    Ok(genesis_schema)
+}
+
+/// Rebind only genesis in a cache-planning copy. Accepted lineage receipts
+/// remain byte-for-byte immutable, even when their genesis coordinates rotate.
+pub(crate) fn rebind_cached_catalogue_snapshot(
+    snapshot: &mut crate::protocol::CatalogueSnapshot,
+    genesis_identities: &PhysicalIdentityManifest,
+) -> Result<SchemaVersionId, Error> {
+    let genesis = cached_snapshot_genesis(snapshot)?;
+    PhysicalIdentityManifest::validate_genesis_rebind(
+        &snapshot.genesis_physical_identities,
+        genesis_identities,
+        &genesis.schema,
+    )
+    .map_err(Error::InvalidCatalogueUpdate)?;
+    if snapshot.genesis_physical_identities == *genesis_identities {
+        return Ok(genesis.id);
+    }
+    snapshot.genesis_physical_identities = genesis_identities.clone();
+    // An inherited coordinate cannot change the canonical content of an
+    // accepted publication. Validate unchanged receipts against this genesis.
+    cached_snapshot_genesis(snapshot).map(|schema| schema.id)
+}
+
+pub(crate) fn validate_cached_catalogue_identities(
+    snapshot: &crate::protocol::CatalogueSnapshot,
+) -> Result<SchemaVersionId, Error> {
+    cached_snapshot_genesis(snapshot).map(|schema| schema.id)
+}
+
+/// Check monotone replacement of authenticated catalogues without changing
+/// retained lineage receipts when the genesis identity rotates.
+#[doc(hidden)]
+pub fn validate_catalogue_snapshot_replacement(
+    previous: &crate::protocol::CatalogueSnapshot,
+    next: &crate::protocol::CatalogueSnapshot,
+) -> Result<(), Error> {
+    let next_genesis = crate::node::validate_cached_catalogue_identities(next)?;
+    let previous_genesis =
+        if previous.genesis_physical_identities == next.genesis_physical_identities {
+            crate::node::validate_cached_catalogue_identities(previous)?
+        } else {
+            let mut comparison = previous.clone();
+            crate::node::rebind_cached_catalogue_snapshot(
+                &mut comparison,
+                &next.genesis_physical_identities,
+            )?
+        };
+    if previous_genesis != next_genesis
+        || previous.schemas.iter().any(|schema| {
+            !next.schemas.iter().any(|candidate| {
+                candidate.id == schema.id && candidate.schema.version_id() == schema.id
+            })
+        })
+        || previous
+            .lineages
+            .iter()
+            .any(|lineage| !next.lineages.contains(lineage))
+        || previous.current_write_schema.revision > next.current_write_schema.revision
+        || (previous.current_write_schema.revision == next.current_write_schema.revision
+            && (previous.current_write_schema != next.current_write_schema
+                || previous
+                    .schemas
+                    .iter()
+                    .find(|schema| schema.id == previous.current_write_schema.schema)
+                    != next
+                        .schemas
+                        .iter()
+                        .find(|schema| schema.id == next.current_write_schema.schema)))
+    {
+        return Err(Error::InvalidCatalogueUpdate(
+            "incompatible or regressing authenticated catalogue cache",
+        ));
+    }
+    Ok(())
+}
+
 /// Returns whether a trusted catalogue replacement changes the *live* Groove
 /// runtime's effective input.  The catalogue is deliberately much larger than
 /// that input: it also retains historical authority schemas, lenses, and
@@ -470,6 +617,26 @@ where
         &self,
         snapshot: crate::protocol::CatalogueSnapshot,
     ) -> Result<PlannedCatalogueSnapshot, Error> {
+        self.plan_catalogue_snapshot(snapshot, CatalogueSnapshotMode::AuthorityAdmission)
+    }
+
+    pub(crate) fn validate_cached_catalogue_snapshot(
+        &self,
+        mut snapshot: crate::protocol::CatalogueSnapshot,
+    ) -> Result<(), Error> {
+        // Cache compatibility is coordinate-based, but planning against an
+        // existing root must neither replace its UUIDs nor rewrite its receipts.
+        let local = self.catalogue_snapshot()?;
+        rebind_cached_catalogue_snapshot(&mut snapshot, &local.genesis_physical_identities)?;
+        self.plan_catalogue_snapshot(snapshot, CatalogueSnapshotMode::CachedValidation)
+            .map(|_| ())
+    }
+
+    fn plan_catalogue_snapshot(
+        &self,
+        snapshot: crate::protocol::CatalogueSnapshot,
+        mode: CatalogueSnapshotMode,
+    ) -> Result<PlannedCatalogueSnapshot, Error> {
         if !self.catalogue.pending_lineages.is_empty() || !self.catalogue.staged_lineages.is_empty()
         {
             return Err(Error::InvalidCatalogueUpdate(
@@ -848,7 +1015,8 @@ where
             }
         }
 
-        if snapshot.current_write_schema.revision < planned.active_schema.revision
+        if (matches!(mode, CatalogueSnapshotMode::AuthorityAdmission)
+            && snapshot.current_write_schema.revision < planned.active_schema.revision)
             || (snapshot.current_write_schema.revision == planned.active_schema.revision
                 && snapshot.current_write_schema != planned.active_schema.wire_pointer())
             || !planned

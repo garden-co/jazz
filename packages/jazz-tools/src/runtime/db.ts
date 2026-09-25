@@ -1,15 +1,19 @@
 import type { DbAccessContext } from "./db-access-context.js";
 import { Utf8Decoder } from "./utf8.js";
+import type { ReservedTxId } from "./provisional-initialization.js";
 import { runtimeRandomBytes } from "./runtime-entropy.js";
 import { streamingBytes } from "./streaming-source.js";
 import { parseUuid, formatUuid } from "./uuid.js";
 import { assertRequiredRowColumnsPresent } from "./row-validation.js";
-import { initialRecipientIds, SpaceInitialisationRequired } from "../e2ee/space-lifecycle.js";
-import { acceptInitialHistory, discardInitialHistory } from "../e2ee/accepted-history.js";
+import {
+  initialRecipientIds,
+  SpaceInitialisationRequired,
+  ProvisionalSpaceRequiresExclusive,
+} from "../e2ee/space-lifecycle.js";
 import {
   e2eeForDb,
   e2eeSchemaForDb,
-  completeInitialSpace,
+  assertSpaceWriteTransaction,
   prepareInitialSpaceForTransaction,
   prepareInitialSpaceRows,
   prepareMissingSpaceWrite,
@@ -54,7 +58,6 @@ import {
   ExclusiveWriteResult,
   WriteResult,
   JazzClient,
-  type AuthUpdate,
   withTransactionAdmission,
   type MutationErrorEvent,
   WriteHandle,
@@ -1087,7 +1090,52 @@ type DbTransactionHandleBinding = {
 };
 
 const dbTxHandleBindings = new WeakMap<Transaction, DbTransactionHandleBinding>();
-const initialisingTransactions = new WeakSet<Transaction>();
+type InitializationJournal = {
+  sealed(id: ReservedTxId): Promise<void>;
+  local(): Promise<void>;
+  completion(): Promise<void>;
+};
+const initializationJournals = new WeakMap<Transaction, InitializationJournal[]>();
+const initializationScopes = new WeakMap<object, Transaction>();
+const initializationIO = new WeakMap<object, TransactionPreparationIO>();
+/** @internal Preserve INSERT while capturing exact absence on its owning transaction. */
+export async function insertInitializationRow<T, Init>(
+  scope: E2eeTransactionScope,
+  table: TableProxy<T, Init>,
+  data: Init,
+  options: InsertOptions & { id: string },
+): Promise<T> {
+  const io = initializationIO.get(scope);
+  if (io) await io.recordInitializationInsertAbsence(table._table, options.id);
+  else {
+    const tx = initializationScopes.get(scope);
+    if (!tx) throw new Error("Initialization requires an owned transaction");
+    const { ownerClient, openTransactionId } = getDbTxHandleBinding(tx, "initialization insert");
+    await ownerClient.recordInitializationInsertAbsence(
+      openTransactionId,
+      table._table,
+      options.id,
+    );
+  }
+  return scope.insert(table, data, options);
+}
+
+/** @internal Attach sealed linkage before the enclosing transaction can publish. */
+export function journalE2eeInitialization(
+  scope: E2eeTransactionScope,
+  journal: InitializationJournal,
+): void {
+  const tx = initializationScopes.get(scope);
+  if (!tx) throw new Error("Initialization requires an owned preparation scope");
+  const journals = initializationJournals.get(tx) ?? [];
+  journals.push(journal);
+  initializationJournals.set(tx, journals);
+}
+
+/** @internal Exact owner status; no SDK-supplied author and no transaction enumeration. */
+export async function initializationStatus(db: Db, ids: readonly ReservedTxId[]) {
+  return db.e2eeInitializationTransactionStatus(ids);
+}
 const streamingInitialSeeds = new WeakMap<
   Transaction,
   Map<WasmSchema, Map<string, InitialSpaceSeed>>
@@ -1109,7 +1157,7 @@ function streamingInitialSeed(
 }
 const standaloneWriteRetries = new WeakMap<
   Transaction,
-  { prepare: (tx: Transaction) => void; branch: boolean } | null
+  { prepare: (tx: Transaction) => void; branch: boolean; initialiseMissing: boolean } | null
 >();
 
 function getDbTxHandleBinding(handle: Transaction, operation: string): DbTransactionHandleBinding {
@@ -1264,7 +1312,7 @@ export type Scoped<TTransaction> = Omit<TTransaction, "commit" | "rollback">;
 function createTransactionScope<TTransaction extends object>(
   transaction: TTransaction,
 ): Scoped<TTransaction> {
-  return new Proxy(transaction, {
+  const scope = new Proxy(transaction, {
     get(target, property) {
       if (property === "commit" || property === "rollback") {
         return undefined;
@@ -1284,6 +1332,8 @@ function createTransactionScope<TTransaction extends object>(
       return Reflect.set(target, property, value, target);
     },
   }) as Scoped<TTransaction>;
+  if (transaction instanceof Transaction) initializationScopes.set(scope, transaction);
+  return scope;
 }
 
 function createTransactionWriteResult<TResult, TKind extends TransactionKind>(
@@ -1348,7 +1398,12 @@ export async function runInTransaction<TResult, TKind extends TransactionKind>(
     }
     throw error;
   });
-  return createTransactionWriteResult(transaction, resolvedValue, txId, resultClient());
+  const ownerClient = resultClient();
+  ownerClient.bindTransactionWait(
+    getDbTxHandleBinding(transaction, "result").openTransactionId,
+    txId,
+  );
+  return createTransactionWriteResult(transaction, resolvedValue, txId, ownerClient);
 }
 
 function copyMutableEncryptedValue(value: Value): Value {
@@ -1453,57 +1508,57 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    */
   commit(): TransactionCommitHandle<TKind> {
     const { ownerClient, openTransactionId } = this.requireBinding("commit");
+    const publish = async () => {
+      // Drain existing preparation before deciding whether it registered a journal.
+      await ownerClient.prepareTransaction(openTransactionId, async () => {});
+      const journals = initializationJournals.get(this);
+      if (!journals?.length) return ownerClient.commitTransaction(openTransactionId).txId;
+      const seal = await ownerClient.sealInitializationTransaction(openTransactionId);
+      try {
+        for (const journal of journals) await journal.sealed(seal.reservedTxId);
+      } catch (error) {
+        await ownerClient.cancelInitializationTransaction(seal);
+        throw error;
+      }
+      const id = await ownerClient.publishInitializationTransaction(seal);
+      ownerClient.setInitializationCompletion(
+        id,
+        Promise.all(journals.map((journal) => journal.completion())).then(() => {}),
+      );
+      await ownerClient.waitForExclusiveTransaction(id, "local");
+      for (const journal of journals) await journal.local();
+      return id;
+    };
+    // Ordinary commits must not acquire initialization preparation or extra
+    // promise hops: application waits claim their mutation errors immediately.
+    const commit = () =>
+      this.mayInitialiseSpace || initializationJournals.has(this)
+        ? publish()
+        : ownerClient.commitTransaction(openTransactionId).txId;
     let txId: Promise<TxId>;
     if (this.pendingReads.size > 0) {
-      txId = Promise.all(this.pendingReads).then(
-        () => ownerClient.commitTransaction(openTransactionId).txId,
-        async (error) => {
-          this.failedRead = true;
-          try {
-            await ownerClient.rollbackTransaction(openTransactionId);
-            this.failedReadCleanupComplete = true;
-          } catch {
-            // Preserve the original pending read error.
-          }
-          this.clearInitialSpaceKeys();
-          throw error;
-        },
-      );
+      txId = Promise.all(this.pendingReads).then(commit, async (error) => {
+        this.failedRead = true;
+        try {
+          await ownerClient.rollbackTransaction(openTransactionId);
+          this.failedReadCleanupComplete = true;
+        } catch {
+          // Preserve the original pending read error.
+        }
+        this.clearInitialSpaceKeys();
+        throw error;
+      });
     } else {
-      txId = ownerClient.commitTransaction(openTransactionId).txId;
+      txId = commit();
     }
+    ownerClient.bindTransactionWait(openTransactionId, txId);
     this.committing = true;
-    const requiresInitialAcceptance = initialisingTransactions.has(this);
-    const initialRoots: SpaceRoot[] | undefined =
-      requiresInitialAcceptance || this.mayInitialiseSpace ? [] : undefined;
     const finishCommit = () => {
       this.committing = false;
-      if (initialRoots)
-        for (const { root } of this.initialSpaceKeys.values()) initialRoots.push(root);
-      this.clearInitialSpaceKeys(true);
+      this.clearInitialSpaceKeys();
     };
     // Observe completion without delaying application waits on the transaction ID.
     void txId.then(finishCommit, finishCommit);
-    if (initialRoots) {
-      // Local durability cannot authorise a provisional epoch. Keeping the
-      // acceptance floor on txId also preserves it through callback/map handles.
-      txId = txId
-        .then(async (id) => {
-          if (requiresInitialAcceptance || initialRoots.length)
-            await ownerClient.waitForExclusiveTransaction(id, "global");
-          // Cache the accepted identity before the later initial-recipient handoff.
-          // Handoff failures cannot revoke this already accepted receipt.
-          for (const root of initialRoots) {
-            await acceptInitialHistory(this.e2ee!.db, root, id);
-            await completeInitialSpace(this.e2ee!.db, root);
-          }
-          return id;
-        })
-        .catch((error) => {
-          for (const root of initialRoots) discardInitialHistory(this.e2ee!.db, root);
-          throw error;
-        });
-    }
     if (this.kind === "exclusive") {
       return new ExclusiveWriteHandle(txId, ownerClient) as TransactionCommitHandle<TKind>;
     }
@@ -1526,11 +1581,8 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     return ownerClient.rollbackTransaction(openTransactionId);
   }
 
-  private clearInitialSpaceKeys(committing = false): void {
-    for (const { secret, root } of this.initialSpaceKeys.values()) {
-      secret.fill(0);
-      if (!committing && this.e2ee) discardInitialHistory(this.e2ee.db, root);
-    }
+  private clearInitialSpaceKeys(): void {
+    for (const { secret } of this.initialSpaceKeys.values()) secret.fill(0);
     this.initialSpaceKeys.clear();
     this.encryptedScopes.clear();
   }
@@ -1568,14 +1620,35 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     );
     const client = this.resolveClient(table._schema);
     const { openTransactionId, session, attribution } = this.requireBinding("insert");
-    const row = client.insertInternal(
-      table._table,
-      values,
-      normalizeInsertOptions(table._schema, table._table, options),
-      session,
-      attribution,
-      openTransactionId,
-    );
+    const normalized = normalizeInsertOptions(table._schema, table._table, options);
+    const captureAbsence =
+      this.kind === "exclusive" && this.e2ee && encryptedSchemas.has(table._schema);
+    const row = captureAbsence
+      ? client.previewInsertInternal(table._table, values, normalized?.id)
+      : client.insertInternal(
+          table._table,
+          values,
+          normalized,
+          session,
+          attribution,
+          openTransactionId,
+        );
+    if (captureAbsence) {
+      const snapshot = structuredClone(values);
+      client
+        .prepareTransaction(openTransactionId, async (io) => {
+          await io.recordInitializationInsertAbsence(table._table, row.id);
+          io.insertInternal(
+            table._table,
+            snapshot,
+            { ...normalized, id: row.id },
+            session,
+            attribution,
+            openTransactionId,
+          );
+        })
+        .catch(() => {});
+    }
     if (initialisesSpace) {
       const preparation = prepareInitialSpaceForTransaction(
         this.e2ee!.db,
@@ -1595,11 +1668,11 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
   private prepareScopeCreation(): void {
     if (this.kind !== "exclusive" || !this.e2ee)
       throw new Error("E2EE scope creation requires an authenticated exclusive transaction");
+    this.mayInitialiseSpace = true;
   }
 
   private async retainInitialSpaceKey(secret: Uint8Array, root: SpaceRoot): Promise<void> {
     if (this.cancelled) {
-      if (this.e2ee) discardInitialHistory(this.e2ee.db, root);
       throw new Error("Transaction was rolled back during E2EE preparation");
     }
     this.initialSpaceKeys.set(`${root.scopeId}:${root.identifier}`, {
@@ -1643,15 +1716,16 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       const retryOptions = { ...optionsSnapshot, id: preview.id };
       standaloneWriteRetries.set(this, {
         branch: optionsSnapshot?.branch !== undefined,
+        initialiseMissing: true,
         prepare: (tx) => {
           tx.bindTable(table);
           tx.prepareEncryptedRow(table, data, retryOptions, "insert", values);
         },
       });
     }
-    if (operation === "insert" && this.kind === "exclusive") this.mayInitialiseSpace = true;
     const scope = new TypedTableQueryBuilder(declaration.scope, table._schema);
     const db = this.e2ee.db;
+    this.mayInitialiseSpace = true;
     ownerClient.prepareTransaction(openTransactionId, async (io) => {
       if (operation === "restore") {
         const query = new TypedTableQueryBuilder<
@@ -1713,6 +1787,8 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
             openTransactionId,
           );
         } else {
+          if (this.kind === "exclusive")
+            await io.recordInitializationInsertAbsence(table._table, preview.id);
           io.insertInternal(
             table._table,
             physical,
@@ -1759,6 +1835,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     mayCreate: boolean,
   ): Promise<void> {
     const db = this.e2ee!.db;
+    await assertSpaceWriteTransaction(db, scope, identifier, this.kind);
     let entered = false;
     try {
       await withSpaceKeys(
@@ -1766,6 +1843,11 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
         scope,
         identifier,
         async (secret, root) => {
+          const rootQuery = new TypedTableQueryBuilder("__e2ee_spaces", scope._schema)
+            .where({ id: root.id })
+            .select("id");
+          if (!(await readTransactionRows(rootQuery, { tier: "local" }, false, binding, io)).length)
+            throw new E2eeDataError("key-unavailable");
           entered = true;
           await stage(secret, root);
         },
@@ -1782,6 +1864,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
         throw error;
       const prepared =
         this.kind === "exclusive" ? preparedTransactionScope(binding, io) : undefined;
+      if (prepared) initializationScopes.set(prepared, this);
       if (
         !(await prepareMissingSpaceWrite(
           db,
@@ -1883,7 +1966,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
             .select("id");
           const rows = await readTransactionRows<Record<string, unknown>>(
             query,
-            { tier: "global", ...(options?.branch !== undefined && { branch: options.branch }) },
+            { tier: "local", ...(options?.branch !== undefined && { branch: options.branch }) },
             false,
             binding,
             io,
@@ -1913,6 +1996,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
           }
           // Insert, rather than upsert, makes hidden/concurrently created rows
           // reject atomically instead of acquiring a new creator grant.
+          await io.recordInitializationInsertAbsence(table._table, id);
           io.insertInternal(
             table._table,
             values,
@@ -2065,18 +2149,18 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       preparedUpdates ?? toWriteRecord(data, metadata.logical, table._table),
     );
     const optionsSnapshot = options ? structuredClone(options) : undefined;
-    if (operation === "upsert" && this.kind === "exclusive") this.mayInitialiseSpace = true;
     const binding = this.requireBinding("update");
     const { ownerClient, openTransactionId, session, attribution } = binding;
     const normalized = normalizeUpdateOptions(table._schema, table._table, optionsSnapshot);
-    if (operation === "upsert" && standaloneWriteRetries.has(this)) {
+    if (standaloneWriteRetries.has(this)) {
       const retryValues = structuredClone(updates);
       const retryOptions = optionsSnapshot;
       standaloneWriteRetries.set(this, {
         branch: optionsSnapshot?.branch !== undefined,
+        initialiseMissing: operation === "upsert",
         prepare: (tx) => {
           tx.bindTable(table);
-          tx.updateEncrypted(table, id, data, retryOptions, "upsert", retryValues);
+          tx.updateEncrypted(table, id, data, retryOptions, operation, retryValues);
         },
       });
     }
@@ -2086,12 +2170,13 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       .includeDeleted()
       .where({ id })
       .select(declaration.space);
+    if (operation === "upsert") this.mayInitialiseSpace = true;
     ownerClient.prepareTransaction(openTransactionId, async (io) => {
       const rows = await readTransactionRows<Record<string, unknown>>(
         query,
         {
           ...optionsSnapshot,
-          tier: operation === "upsert" ? "global" : "local",
+          tier: "local",
         },
         false,
         binding,
@@ -2199,6 +2284,8 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
             value: await encryptCell(db, table, id, name, updates[name]!, secret, root),
           };
         }
+        if (creating && this.kind === "exclusive")
+          await io.recordInitializationInsertAbsence(table._table, id);
         write();
         this.encryptedScopes.set(
           encryptedRowScopeKey(table._table, id, normalized?.branch),
@@ -2248,17 +2335,23 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
   }
 
   /**
-   * @internal Covered E2EE history and its authority order. Valid only after
-   * this exclusive transaction's global wait succeeds. A local read plus a
-   * global wait is insufficient: conflict checks do not hydrate missing history.
+   * @internal Accepted E2EE rows and their authority order. Default reads require
+   * covered history and this transaction's Global acceptance. Local-only reads
+   * validate retained accepted history in the fixed snapshot, not live freshness.
    */
   allSettledForE2ee<T extends { id: string }>(
     query: QueryBuilder<T>,
+    propagation?: "local-only",
   ): Promise<{ rows: T[]; settlements: RowSettlement[] }> {
     if (this.kind !== "exclusive")
       throw new Error("E2EE settlement reads require an exclusive transaction");
     const reading = (async () => {
-      const { rows, settlements } = await this.readAll(query, { tier: "global" }, "with-rows");
+      const { rows, settlements } = await this.readAll(
+        query,
+        { tier: "global" },
+        "with-rows",
+        propagation,
+      );
       checkTransactionSettlements(rows, settlements);
       return { rows, settlements };
     })();
@@ -2273,11 +2366,13 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     query: QueryBuilder<T>,
     options: QueryOptions | undefined,
     settlementMetadata: "with-rows",
+    propagation?: "local-only",
   ): Promise<SettledRows<T>>;
   private async readAll<T>(
     query: QueryBuilder<T>,
     options: QueryOptions | undefined,
     settlementMetadata: false | "with-rows" = false,
+    propagation?: "local-only",
   ): Promise<T[] | SettledRows<T>> {
     this.bindQuery(query);
     const client = this.resolveClient(query._schema);
@@ -2286,7 +2381,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       options,
       settlementMetadata,
       this.requireBinding("query"),
-      client,
+      transactionHistoryQueries(client, propagation),
       this.e2ee
         ? (table, rows) =>
             decryptCellRows(this.e2ee!.db, query._schema, table, rows, this.initialSpaceKeys)
@@ -2453,6 +2548,17 @@ async function decryptEqualityMatches(
   for (const row of matches) decryptedQuerySpaces.set(row, [equality.space]);
   await decryptQueryIncludes(schema, table, matches, includes, transforms, decrypt);
   return matches;
+}
+
+function transactionHistoryQueries(
+  client: Pick<JazzClient, "queryInternal">,
+  propagation?: "local-only",
+): Pick<JazzClient, "queryInternal"> {
+  if (!propagation) return client;
+  return {
+    queryInternal: (query, options, session) =>
+      client.queryInternal(query, { ...options, propagation }, session),
+  };
 }
 
 function readTransactionRows<T>(
@@ -2633,10 +2739,11 @@ export function prepareDbTransaction(
     throw new Error("E2EE initialisation requires an exclusive transaction");
   transaction.openTransactionId(); // Check admission before registering asynchronous work.
   const binding = getDbTxHandleBinding(transaction, "prepare");
-  initialisingTransactions.add(transaction);
   const { ownerClient, openTransactionId } = binding;
   return ownerClient.prepareTransaction(openTransactionId, async (io) => {
-    await prepare(preparedTransactionScope(binding, io), io);
+    const scope = preparedTransactionScope(binding, io);
+    initializationScopes.set(scope, transaction);
+    await prepare(scope, io);
   });
 }
 
@@ -2683,19 +2790,20 @@ function preparedTransactionScope(
       );
       return transformOutputRow(table, transformRow(row, table._schema, table._table));
     },
-    async allSettledForE2ee(query) {
+    async allSettledForE2ee(query, propagation) {
       binding.resolveClient(query._schema);
       const { rows, settlements } = await readTransactionRows(
         query,
         { tier: "global" },
         "with-rows",
         binding,
-        io,
+        transactionHistoryQueries(io, propagation),
       );
       checkTransactionSettlements(rows, settlements);
       return { rows, settlements };
     },
   };
+  initializationIO.set(scope, io);
   return scope;
 }
 /**
@@ -3077,24 +3185,33 @@ export class Db {
       throw error;
     }
     const committed = runInTransaction(tx, () => value, client);
-    return this.wrapWriteWait(
-      new WriteResult(
-        value,
-        committed
-          .then((result) => result.txId)
-          .catch(async (error) => {
-            const retry = standaloneWriteRetries.get(tx);
-            if (!(error instanceof SpaceInitialisationRequired) || !retry) throw error;
-            if (retry.branch)
-              throw new Error(
-                "Encrypted branch first-use is unsupported; initialise the space with a root-target write first",
-              );
-            const exclusive = this.createTransaction("exclusive", context);
-            return (await runInTransaction(exclusive, () => retry.prepare(exclusive), client)).txId;
-          }),
-        client,
-      ),
+    const result: WriteResult<T> = new WriteResult(
+      value,
+      committed
+        .then((result) => result.txId)
+        .catch(async (error) => {
+          const retry = standaloneWriteRetries.get(tx);
+          if (
+            !retry ||
+            !(error instanceof SpaceInitialisationRequired) ||
+            (!retry.initialiseMissing && !(error instanceof ProvisionalSpaceRequiresExclusive))
+          )
+            throw error;
+          if (retry.branch && !(error instanceof ProvisionalSpaceRequiresExclusive))
+            throw new Error(
+              "Encrypted branch first-use is unsupported; initialise the space with a root-target write first",
+            );
+          const exclusive = this.createTransaction("exclusive", context);
+          client.bindTransactionWait(
+            getDbTxHandleBinding(exclusive, "retry").openTransactionId,
+            result.txId,
+          );
+          return (await runInTransaction(exclusive, () => retry.prepare(exclusive), client)).txId;
+        }),
+      client,
     );
+    client.bindTransactionWait(getDbTxHandleBinding(tx, "result").openTransactionId, result.txId);
+    return this.wrapWriteWait(result);
   }
 
   private handleMutationError(event: MutationErrorEvent): void {
@@ -3280,6 +3397,16 @@ export class Db {
     return this.connection.isExplicitlyOffline();
   }
 
+  /** @internal Query exact durable-owner status after local host admission. */
+  async e2eeInitializationTransactionStatus(ids: readonly ReservedTxId[]) {
+    this.assertOpen();
+    const schema = e2eeSchemaForDb(this);
+    if (!schema) throw new Error("Initialization status requires an E2EE schema");
+    const client = this.getClient(schema);
+    await this.ensureReady("local");
+    return client.initializationTransactionStatus(ids);
+  }
+
   /** @internal Observations only: these reads do not prove complete history. */
   async observeE2eeHistory(queries: readonly QueryBuilder<{ id: string }>[]) {
     this.assertOpen();
@@ -3331,6 +3458,7 @@ export class Db {
     localOnly = false,
   ): Promise<string | null> {
     const client = this.getClient(table._schema);
+    await this.ensureReady("local");
     const runtime = client.getRuntime();
     if (!runtime.tableIdentity)
       throw new Error("Runtime does not expose catalogue table identities");
@@ -3338,6 +3466,7 @@ export class Db {
     this.assertOpen();
     // A local candidate is not catalogue coverage or proof of key membership.
     if (localOnly) return localIdentity;
+    if (localIdentity && (await client.hasAuthenticatedCatalogue())) return localIdentity;
     // Fresh runtimes can have local bootstrap identities before receiving the
     // server catalogue. Only reuse an identity already covered for this client.
     if (
@@ -3604,7 +3733,7 @@ export class Db {
               .includeDeleted()
               .where({ id: entry.id })
               .select(encryption?.space ?? "id"),
-            { tier: "global" },
+            { tier: encryption ? "local" : "global" },
           )) as Record<string, unknown> | null;
           entry.existing = row !== null;
           if (row && encryption) {
@@ -3793,7 +3922,7 @@ export class Db {
                   .includeDeleted()
                   .where({ id: entry.id })
                   .select(encryption.space),
-                { tier: "global" },
+                { tier: "local" },
               )) as Record<string, unknown> | null;
               if (
                 !!row !== !!entry.existing ||
@@ -3820,6 +3949,8 @@ export class Db {
             if (!entry.stream) transaction.insert(entry.table, entry.data, entry.options);
             else
               await prepareDbTransaction(transaction, async (_tx, io) => {
+                if (entry.operation === "insert")
+                  await io.recordInitializationInsertAbsence(entry.table._table, entry.id);
                 await io.attachStreamingMutation(entry.staged!);
               });
           }
@@ -4085,7 +4216,12 @@ export class Db {
         encrypted.columns.some((name) => Object.hasOwn(data, name)))
     ) {
       if (diffs !== undefined) throw new Error("Encrypted updates do not support applyDiffs");
-      return this.preparedWrite("mergeable", client, (tx) => tx.update(table, id, data, options));
+      return this.preparedWrite(
+        "mergeable",
+        client,
+        (tx) => tx.update(table, id, data, options),
+        true,
+      );
     }
     const descriptors = lowerApplyDiffs(table, data, options?.applyDiffs);
     const transformedData = transformInputColumns(table, data);
