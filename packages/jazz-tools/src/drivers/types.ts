@@ -188,6 +188,7 @@ export interface TableSchema {
   relations?: import("../relationships.js").Relationships;
   columns: ColumnDescriptor[];
   indexed_columns?: string[];
+  composite_indexes?: string[][];
   policies?: TablePolicies;
   /** Ordinary immutable columns that form this table's branch key. */
   branchBy?: string[];

@@ -570,6 +570,386 @@ describe("SubscriptionManager", () => {
     expect(manager.all()).toEqual([{ id: rootId, title: "reopened", children: [] }]);
   });
 
+  it("removes many roots in one frame while keeping edits on surviving roots", () => {
+    const manager = new SubscriptionManager<IncludedRoot>();
+    const count = 2000;
+    const ids = Array.from(
+      { length: count },
+      (_, index) => `00000000-0000-4000-8000-${(index + 1).toString(16).padStart(12, "0")}`,
+    );
+    const childId = "00000000-0000-4000-9000-000000000001";
+    const childKey = [10, ...uuidBytes(childId)];
+    manager.handleDelta(
+      emptyRuntimeDelta({ added: ids.map((id, index) => runtimeAddedRoot(id, index, id)) }),
+      transformIncluded,
+    );
+
+    const survivor = ids[count - 1]!;
+    const result = manager.handleDelta(
+      emptyRuntimeDelta({
+        removed: ids.slice(0, -1).map((id) => runtimeRemovedRecord(id, 0)),
+        terminalOperations: [
+          {
+            root_key: [10, ...uuidBytes(ids[0]!)],
+            path: [{ Collection: 1 }],
+            edit: { Remove: { key: childKey } },
+          },
+          {
+            root_key: [10, ...uuidBytes(survivor)],
+            path: [{ Collection: 1 }],
+            edit: {
+              Insert: { index: 0, key: childKey, row: terminalTextChild(childId, "child") },
+            },
+          },
+        ],
+      }),
+      transformIncluded,
+    );
+
+    expect(result.all).toEqual([
+      { id: survivor, title: survivor, children: [{ id: childId, name: "child" }] },
+    ]);
+    expect(manager.size).toBe(1);
+
+    // A removed root no longer has a retained terminal row, so a later child
+    // edit for it waits for re-hydration instead of patching stale state.
+    const deferred = manager.handleDelta(
+      emptyRuntimeDelta({
+        terminalOperations: [
+          {
+            root_key: [10, ...uuidBytes(ids[1]!)],
+            path: [{ Collection: 1 }],
+            edit: {
+              Insert: { index: 0, key: childKey, row: terminalTextChild(childId, "late") },
+            },
+          },
+        ],
+      }),
+      transformIncluded,
+    );
+    expect(deferred.all).toEqual(result.all);
+  });
+
+  it("keeps occurrence addresses bounded by the live result under churn", () => {
+    const manager = new SubscriptionManager<IncludedRoot>();
+    const addresses = () =>
+      (manager as unknown as { terminalOccurrenceAddresses: Map<string, string> })
+        .terminalOccurrenceAddresses.size;
+    const id = (n: number) => `00000000-0000-4000-8000-${n.toString(16).padStart(12, "0")}`;
+    const window = 10;
+    manager.handleDelta(
+      emptyRuntimeDelta({
+        added: Array.from({ length: window }, (_, n) => runtimeAddedRoot(id(n), n, `r${n}`)),
+      }),
+      transformIncluded,
+    );
+    for (let n = window; n < window + 500; n++) {
+      manager.handleDelta(
+        emptyRuntimeDelta({
+          added: [runtimeAddedRoot(id(n), window - 1, `r${n}`)],
+          removed: [runtimeRemovedRecord(id(n - window), 0)],
+        }),
+        transformIncluded,
+      );
+    }
+    expect(manager.size).toBe(window);
+    expect(addresses()).toBe(window);
+
+    // A root that leaves and comes back is addressable by descendant edits again.
+    const childId = "00000000-0000-4000-9000-000000000001";
+    const childKey = [10, ...uuidBytes(childId)];
+    manager.handleDelta(
+      emptyRuntimeDelta({ added: [runtimeAddedRoot(id(0), 0, "back")] }),
+      transformIncluded,
+    );
+    const edited = manager.handleDelta(
+      emptyRuntimeDelta({
+        terminalOperations: [
+          {
+            root_key: [10, ...uuidBytes(id(0))],
+            path: [{ Collection: 1 }],
+            edit: {
+              Insert: { index: 0, key: childKey, row: terminalTextChild(childId, "child") },
+            },
+          },
+        ],
+      }),
+      transformIncluded,
+    );
+    expect(edited.all?.[0]).toEqual({
+      id: id(0),
+      title: "back",
+      children: [{ id: childId, name: "child" }],
+    });
+    expect(addresses()).toBe(window + 1);
+  });
+
+  it("replays a deferred edit on a typed root after its address was pruned", () => {
+    const manager = new SubscriptionManager<IncludedRoot>();
+    const rootId = "00000000-0000-4000-8000-000000000001";
+    const joinedId = "00000000-0000-4000-8000-000000000002";
+    const childId = "00000000-0000-4000-9000-000000000001";
+    const childKey = [10, ...uuidBytes(childId)];
+    const sidecar = typedResultKey(uuidBytes(rootId), [uuidBytes(joinedId)], [[1, "arm"]]);
+    const added = (title: string): RuntimeSubscriptionAddedRow => ({
+      sourceId: rootId,
+      occurrenceKey: sidecar,
+      index: 0,
+      row: includedRootRow(rootId, title),
+    });
+    // Groove's ordered root key for this occurrence: root UUID, then the
+    // union-arm label ahead of the joined UUID it discriminates.
+    const orderedRoot = [
+      10,
+      ...uuidBytes(rootId),
+      6,
+      ...new TextEncoder().encode("arm"),
+      0,
+      0,
+      10,
+      ...uuidBytes(joinedId),
+    ];
+    manager.handleDelta(emptyRuntimeDelta({ added: [added("first")] }), transformIncluded);
+    manager.handleDelta(
+      emptyRuntimeDelta({ removed: [{ sourceId: rootId, occurrenceKey: sidecar, index: 0 }] }),
+      transformIncluded,
+    );
+    expect(manager.all()).toEqual([]);
+
+    const deferred = manager.handleDelta(
+      emptyRuntimeDelta({
+        terminalOperations: [
+          {
+            root_key: orderedRoot,
+            path: [{ Collection: 1 }],
+            edit: {
+              Insert: { index: 0, key: childKey, row: terminalTextChild(childId, "child") },
+            },
+          },
+        ],
+      }),
+      transformIncluded,
+    );
+    expect(deferred.all).toEqual([]);
+
+    const rehydrated = manager.handleDelta(
+      emptyRuntimeDelta({ added: [added("again")] }),
+      transformIncluded,
+    );
+    expect(rehydrated.all).toEqual([
+      { id: rootId, title: "again", children: [{ id: childId, name: "child" }] },
+    ]);
+  });
+
+  it("keeps a root that one frame removes and re-adds addressable by descendant edits", () => {
+    const manager = new SubscriptionManager<IncludedRoot>();
+    const rootId = "00000000-0000-4000-8000-000000000001";
+    const otherId = "00000000-0000-4000-8000-000000000003";
+    const childId = "00000000-0000-4000-8000-000000000002";
+    const rootKey = [10, ...uuidBytes(rootId)];
+    const childKey = [10, ...uuidBytes(childId)];
+    manager.handleDelta(
+      emptyRuntimeDelta({
+        added: [runtimeAddedRoot(rootId, 0, "original"), runtimeAddedRoot(otherId, 1, "other")],
+      }),
+      transformIncluded,
+    );
+
+    // The root stays in the result, so its occurrence address must survive
+    // pruning and its retained row must survive the removal.
+    const readded = manager.handleDelta(
+      emptyRuntimeDelta({
+        removed: [runtimeRemovedRecord(rootId, 0)],
+        added: [runtimeAddedRoot(rootId, 1, "readded")],
+      }),
+      transformIncluded,
+    );
+    expect(readded.all).toEqual([
+      { id: otherId, title: "other", children: [] },
+      { id: rootId, title: "readded", children: [] },
+    ]);
+    expect(
+      (manager as unknown as { terminalOccurrenceAddresses: Map<string, string> })
+        .terminalOccurrenceAddresses.size,
+    ).toBe(2);
+
+    const edited = manager.handleDelta(
+      emptyRuntimeDelta({
+        terminalOperations: [
+          {
+            root_key: rootKey,
+            path: [{ Collection: 1 }],
+            edit: {
+              Insert: { index: 0, key: childKey, row: terminalTextChild(childId, "child") },
+            },
+          },
+        ],
+      }),
+      transformIncluded,
+    );
+    expect(edited.all).toEqual([
+      { id: otherId, title: "other", children: [] },
+      { id: rootId, title: "readded", children: [{ id: childId, name: "child" }] },
+    ]);
+  });
+
+  it("rolls back a failed reset or bulk frame to the exact prior state", () => {
+    const manager = new SubscriptionManager<IncludedRoot>();
+    const id = (n: number) => `00000000-0000-4000-8000-${n.toString(16).padStart(12, "0")}`;
+    const childId = "00000000-0000-4000-9000-000000000001";
+    const childKey = [10, ...uuidBytes(childId)];
+    const insertChild = (root: number, name: string) => ({
+      root_key: [10, ...uuidBytes(id(root))],
+      path: [{ Collection: 1 }],
+      edit: { Insert: { index: 0, key: childKey, row: terminalTextChild(childId, name) } },
+    });
+    const removeMissingChild = (root: number) => ({
+      root_key: [10, ...uuidBytes(id(root))],
+      path: [{ Collection: 1 }],
+      edit: { Remove: { key: [10, ...uuidBytes("00000000-0000-4000-9000-0000000000ff")] } },
+    });
+    manager.handleDelta(
+      emptyRuntimeDelta({
+        added: Array.from({ length: 40 }, (_, n) => runtimeAddedRoot(id(n), n, `r${n}`)),
+      }),
+      transformIncluded,
+    );
+    manager.handleDelta(
+      emptyRuntimeDelta({ terminalOperations: [insertChild(3, "kept")] }),
+      transformIncluded,
+    );
+    const before = manager.all();
+    const addresses = () =>
+      (manager as unknown as { terminalOccurrenceAddresses: Map<string, string> })
+        .terminalOccurrenceAddresses.size;
+
+    // A reset replaces all state before it meets a malformed occurrence key.
+    const malformed = typedResultKey(
+      uuidBytes(id(101)),
+      [uuidBytes(id(102)), uuidBytes(id(103))],
+      [
+        [1, "second"],
+        [0, "first"],
+      ],
+    );
+    expect(() =>
+      manager.handleDelta(
+        emptyRuntimeDelta({
+          reset: true,
+          added: [
+            runtimeAddedRoot(id(100), 0, "fresh"),
+            { ...runtimeAddedRoot(id(101), 1, "bad"), occurrenceKey: malformed },
+          ],
+        }),
+        transformIncluded,
+      ),
+    ).toThrow(/malformed or noncanonical ResultKey V1 terminal occurrence key/);
+    expect(manager.all()).toEqual(before);
+
+    // A bulk frame (32+ changes) that removes, moves and adds, then fails.
+    expect(() =>
+      manager.handleDelta(
+        emptyRuntimeDelta({
+          removed: Array.from({ length: 20 }, (_, n) => runtimeRemovedRecord(id(n + 10), n + 10)),
+          added: Array.from({ length: 20 }, (_, n) => runtimeAddedRoot(id(n + 200), n, `new${n}`)),
+          terminalOperations: [removeMissingChild(5)],
+        }),
+        transformIncluded,
+      ),
+    ).toThrow(/terminal child removal addressed missing key/);
+    expect(manager.all()).toEqual(before);
+    expect(manager.size).toBe(40);
+    expect(addresses()).toBe(40);
+
+    // Rolled-back state is fully live: removed roots are addressable again and
+    // the failed frame's roots are not.
+    const edited = manager.handleDelta(
+      emptyRuntimeDelta({
+        removed: [runtimeRemovedRecord(id(0), 0)],
+        terminalOperations: [insertChild(15, "after")],
+      }),
+      transformIncluded,
+    );
+    expect(edited.all).toHaveLength(39);
+    expect(edited.all?.find((root) => root.id === id(15))?.children).toEqual([
+      { id: childId, name: "after" },
+    ]);
+    expect(edited.all?.find((root) => root.id === id(3))?.children).toEqual([
+      { id: childId, name: "kept" },
+    ]);
+    expect(edited.all?.some((root) => root.id === id(200))).toBe(false);
+  });
+
+  it("keeps a joined root that one frame removes and re-adds addressable by descendant edits", () => {
+    // A typed occurrence's ordered key is not derivable from its public id, so
+    // a pruned address would leave descendant edits for it unresolvable.
+    const manager = new SubscriptionManager<IncludedRoot>();
+    const rootId = "00000000-0000-4000-8000-000000000001";
+    const joinedId = "00000000-0000-4000-8000-000000000002";
+    const childId = "00000000-0000-4000-9000-000000000001";
+    const sidecar = typedResultKey(uuidBytes(rootId), [uuidBytes(joinedId)], [[1, "arm"]]);
+    const orderedRootKey = [
+      10,
+      ...uuidBytes(rootId),
+      6,
+      ...new TextEncoder().encode("arm"),
+      0,
+      0,
+      10,
+      ...uuidBytes(joinedId),
+    ];
+    const added = (title: string) => ({
+      sourceId: rootId,
+      occurrenceKey: sidecar,
+      index: 0,
+      row: includedRootRow(rootId, title),
+    });
+    manager.handleDelta(emptyRuntimeDelta({ added: [added("first")] }), transformIncluded);
+    manager.handleDelta(
+      emptyRuntimeDelta({
+        removed: [{ sourceId: rootId, occurrenceKey: sidecar, index: 0 }],
+        added: [added("again")],
+      }),
+      transformIncluded,
+    );
+
+    const edited = manager.handleDelta(
+      emptyRuntimeDelta({
+        terminalOperations: [
+          {
+            root_key: orderedRootKey,
+            path: [{ Collection: 1 }],
+            edit: {
+              Insert: {
+                index: 0,
+                key: [10, ...uuidBytes(childId)],
+                row: terminalTextChild(childId, "child"),
+              },
+            },
+          },
+        ],
+      }),
+      transformIncluded,
+    );
+    expect(edited.all?.map((root) => root.children)).toEqual([[{ id: childId, name: "child" }]]);
+  });
+
+  it("drops the retained row of a root that leaves the result", () => {
+    const manager = new SubscriptionManager<IncludedRoot>();
+    const rootId = "00000000-0000-4000-8000-000000000001";
+    manager.handleDelta(
+      emptyRuntimeDelta({ added: [runtimeAddedRoot(rootId, 0, "original")] }),
+      transformIncluded,
+    );
+    manager.handleDelta(
+      emptyRuntimeDelta({ removed: [runtimeRemovedRecord(rootId, 0)] }),
+      transformIncluded,
+    );
+    expect(
+      (manager as unknown as { terminalRows: Map<string, unknown> }).terminalRows.has(rootId),
+    ).toBe(false);
+  });
+
   it("clears tracked state before applying reset frames", () => {
     const manager = new SubscriptionManager<TestItem>();
     const first = "00000000-0000-4000-8000-000000000001";
@@ -674,6 +1054,119 @@ describe("SubscriptionManager", () => {
     const current = reduceDeltas(initial, result);
     expect(current.map((item) => item.id)).toEqual(["C", "D", "A", "E"]);
     expect(current.find((item) => item.id === "D")?.name).toBe("D*");
+  });
+
+  it("applies runs of removals around indexed inserts in order", () => {
+    const manager = new SubscriptionManager<TestItem>();
+    const ids = ["A", "B", "C", "D", "E", "F"];
+    const initial = handleDecodedDelta(
+      manager,
+      ids.map((id, index) => ({ kind: 0 as const, id, index, row: makeRow(id, id, index) })),
+      transform,
+    );
+    const result = handleDecodedDelta(
+      manager,
+      [
+        { kind: 1, id: "A", index: 0 },
+        { kind: 1, id: "C", index: 0 },
+        { kind: 0, id: "X", index: 1, row: makeRow("X", "X", 9) },
+        { kind: 1, id: "D", index: 2 },
+        { kind: 1, id: "F", index: 2 },
+        { kind: 1, id: "missing", index: 2 },
+      ],
+      transform,
+    );
+
+    expect(manager.all().map((item) => item.id)).toEqual(["B", "X", "E"]);
+    expect(reduceDeltas(initial, { delta: result.delta }).map((item) => item.id)).toEqual([
+      "B",
+      "X",
+      "E",
+    ]);
+    expect(manager.size).toBe(3);
+  });
+
+  it("keeps positions exact for indexed changes after a removal run", () => {
+    const manager = new SubscriptionManager<TestItem>();
+    const ids = ["A", "B", "C", "D", "E"];
+    const frames = [
+      handleDecodedDelta(
+        manager,
+        ids.map((id, index) => ({ kind: 0 as const, id, index, row: makeRow(id, id, index) })),
+        transform,
+      ),
+    ];
+    frames.push(
+      handleDecodedDelta(
+        manager,
+        [
+          { kind: 1, id: "B", index: 1 },
+          { kind: 1, id: "C", index: 1 },
+        ],
+        transform,
+      ),
+    );
+    frames.push(handleDecodedDelta(manager, [{ kind: 1, id: "E", index: 2 }], transform));
+    expect(manager.all().map((item) => item.id)).toEqual(["A", "D"]);
+    frames.push(
+      handleDecodedDelta(
+        manager,
+        [
+          { kind: 0, id: "B", index: 1, row: makeRow("B", "B", 5) },
+          { kind: 2, id: "D", index: 0, row: makeRow("D", "D", 6) },
+        ],
+        transform,
+      ),
+    );
+
+    expect(manager.all().map((item) => item.id)).toEqual(["D", "B", "A"]);
+    expect(reduceDeltas(...frames.map((frame) => ({ delta: frame.delta })))).toEqual(manager.all());
+  });
+
+  it("applies many same-index replacements, updates and moves in one frame", () => {
+    const manager = new SubscriptionManager<TestItem>();
+    const ids = Array.from({ length: 40 }, (_, index) => `r${index}`);
+    const initial = handleDecodedDelta(
+      manager,
+      ids.map((id, index) => ({ kind: 0 as const, id, index, row: makeRow(id, id, 0) })),
+      transform,
+    );
+    // Changes arrive in ascending final-index order, as the runtime emits them.
+    const expected = [...ids];
+    const frame: DecodedRowDelta = [{ kind: 2, id: "r39", index: 0 }];
+    expected.splice(expected.indexOf("r39"), 1);
+    expected.unshift("r39");
+    for (let index = 1; index < 37; index += 4) {
+      // Replace the row at `index` with a new one at the same position.
+      frame.push({ kind: 1, id: expected[index]!, index });
+      frame.push({ kind: 0, id: `n${index}`, index, row: makeRow(`n${index}`, "new", 1) });
+      expected[index] = `n${index}`;
+      // Update the next row in place.
+      const next = expected[index + 1]!;
+      frame.push({ kind: 2, id: next, index: index + 1, row: makeRow(next, "upd", 2) });
+    }
+    frame.push({ kind: 2, id: "r38", index: 39, row: makeRow("r38", "upd", 3) });
+    const result = handleDecodedDelta(manager, frame, transform);
+
+    expect(manager.all().map((item) => item.id)).toEqual(expected);
+    expect(reduceDeltas(initial, { delta: result.delta })).toEqual(manager.all());
+
+    // The next frame addresses rows by id, so positions must be exact again.
+    const next = handleDecodedDelta(
+      manager,
+      [
+        { kind: 1, id: "r38", index: 39 },
+        { kind: 2, id: "n21", index: 0, row: makeRow("n21", "moved", 4) },
+      ],
+      transform,
+    );
+    expected.splice(expected.indexOf("r38"), 1);
+    expected.splice(expected.indexOf("n21"), 1);
+    expected.unshift("n21");
+    expect(manager.all().map((item) => item.id)).toEqual(expected);
+    expect(reduceDeltas(initial, { delta: result.delta }, { delta: next.delta })).toEqual(
+      manager.all(),
+    );
   });
 
   it("clears state", () => {

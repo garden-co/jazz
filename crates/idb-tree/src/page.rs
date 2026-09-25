@@ -25,6 +25,32 @@ pub(crate) fn internal_key_len(key: &[u8]) -> usize {
     4 + key.len() + 8
 }
 
+/// The exact v1 encoded length of `page`, without encoding or checksumming
+/// it. Writes use this to decide fit and split; [`encode_page`] at commit
+/// remains the final validator of both shape and size.
+pub(crate) fn encoded_len(page: &Page) -> usize {
+    match page {
+        Page::Leaf { entries } => {
+            LEAF_BASE_LEN
+                + entries
+                    .iter()
+                    .map(|(key, value)| leaf_entry_len(key, value))
+                    .sum::<usize>()
+        }
+        Page::Internal { keys, children } => {
+            HEADER_LEN
+                + 1
+                + 4
+                + keys.iter().map(|key| 4 + key.len()).sum::<usize>()
+                + 4
+                + 8 * children.len()
+        }
+        Page::Overflow { next, bytes } => {
+            HEADER_LEN + 1 + if next.is_some() { 9 } else { 1 } + 4 + bytes.len()
+        }
+    }
+}
+
 const PAGE_LEAF_TAG: u8 = 0;
 const PAGE_INTERNAL_TAG: u8 = 1;
 const PAGE_OVERFLOW_TAG: u8 = 2;
@@ -358,6 +384,39 @@ impl<'a> Decoder<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn computed_length_matches_the_encoding_for_every_page_kind() {
+        let pages = [
+            Page::leaf(),
+            Page::Leaf {
+                entries: vec![
+                    (vec![1], ValueCell::Inline(vec![])),
+                    (vec![2, 3], ValueCell::Inline(vec![9; 40])),
+                    (vec![4; 17], ValueCell::Overflow { head: 7, len: 99 }),
+                ],
+            },
+            Page::Internal {
+                keys: vec![vec![5], vec![6; 30]],
+                children: vec![1, 2, 3],
+            },
+            Page::Overflow {
+                next: None,
+                bytes: vec![1; 13],
+            },
+            Page::Overflow {
+                next: Some(4),
+                bytes: vec![2],
+            },
+        ];
+        for page in pages {
+            assert_eq!(
+                encoded_len(&page),
+                encode_page(&page).unwrap().len(),
+                "{page:?}"
+            );
+        }
+    }
 
     fn to_hex(bytes: &[u8]) -> String {
         bytes.iter().map(|byte| format!("{byte:02x}")).collect()

@@ -205,10 +205,8 @@ where
             }
             if self
                 .node_aliases
-                .iter()
-                .any(|(existing_uuid, existing_alias)| {
-                    *existing_alias == NodeAlias(alias) && *existing_uuid != uuid
-                })
+                .node_for_alias(NodeAlias(alias))
+                .is_some_and(|existing_uuid| existing_uuid != uuid)
             {
                 return Err(Error::InvalidStoredValue(
                     "node alias maps to multiple durable UUIDs",

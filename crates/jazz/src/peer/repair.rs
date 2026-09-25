@@ -51,6 +51,41 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
+        self.prove_terminal_commit(node, writer, claims, versions, candidate_tx_id, true)
+            .await
+    }
+
+    /// Establish the terminal support proof without evaluating the final
+    /// write policies. For admission paths whose terminal ingest evaluates
+    /// those policies itself, so a second evaluation here would be discarded.
+    pub(crate) async fn prove_terminal_commit_support<S>(
+        &mut self,
+        node: &mut NodeState<S>,
+        writer: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+        versions: &[VersionRecord],
+        candidate_tx_id: TxId,
+    ) -> Result<(), Error>
+    where
+        S: OrderedKvStorage,
+    {
+        self.prove_terminal_commit(node, writer, claims, versions, candidate_tx_id, false)
+            .await
+            .map(|_| ())
+    }
+
+    async fn prove_terminal_commit<S>(
+        &mut self,
+        node: &mut NodeState<S>,
+        writer: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+        versions: &[VersionRecord],
+        candidate_tx_id: TxId,
+        evaluate_write_policies: bool,
+    ) -> Result<bool, Error>
+    where
+        S: OrderedKvStorage,
+    {
         // SYSTEM is the trusted backend policy subject. Row-policy admission
         // already bypasses it, so it must not try to hydrate an authorization
         // support proof: claim and join predicates have no SYSTEM session to
@@ -156,6 +191,9 @@ impl PeerState {
         // reached a stable authority cut. The terminal result still has to be
         // evaluated under this exact snapshot; a claim-only policy has no
         // support subscription at all and must not become an implicit grant.
+        if !evaluate_write_policies {
+            return Ok(true);
+        }
         for version in versions {
             if !node
                 .version_satisfies_write_policy(version, writer, candidate_tx_id, versions)
