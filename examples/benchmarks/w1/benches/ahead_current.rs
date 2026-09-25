@@ -1,11 +1,14 @@
 use jazz_example_benchmark_w1::AheadCurrentFixture;
 
+// Wall-clock suite on CodSpeed's macro runner; the app prefix keeps the name
+// unique on the examples page.
+
 fn main() {
     divan::main();
 }
 
 #[divan::bench(args = [100, 1_000, 10_000])]
-fn local_ahead_current_history(bencher: divan::Bencher<'_, '_>, depth: usize) {
+fn w1_local_ahead_current_history(bencher: divan::Bencher<'_, '_>, depth: usize) {
     let mut fixture = AheadCurrentFixture::new(depth);
     fixture.assert_receipt();
     bencher.bench_local(|| divan::black_box(fixture.current_rows()));
