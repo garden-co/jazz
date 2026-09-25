@@ -34,7 +34,7 @@ use std::thread;
 
 use futures::lock::Mutex as LocalMutex;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, DeleteOptions, PeerConnection, PeerIoPump, ReadOpts,
+    Db, DbConfig, DbIdentity, DeleteOptions, PeerConnection, PeerIoPump, ReadOpts, RemoteLinkHint,
     SerializedReadResult, SerializedSubscriptionAuthorization, SubscriptionEvent,
     SubscriptionStream, TickScheduler, TickUrgency, Transport, UpdateOptions, UpsertOptions,
     block_on,
@@ -797,6 +797,11 @@ struct OpenedForeground {
     scope: RelayScope,
     relay: u64,
     client: u64,
+    /// Last native-socket reachability reported to this foreground's `Db`.
+    remote_link_hint: Option<RemoteLinkHint>,
+    /// This foreground was reported `Live` since it opened or last went
+    /// explicitly offline; a disconnected worker is then backing off.
+    link_was_live: bool,
     runtime_token: u64,
     wake: Option<Arc<ForegroundWakeState>>,
     lease: ForegroundNodeLease,
@@ -1429,12 +1434,77 @@ impl NativeRelayHost {
                 scope,
                 relay: relay_handle,
                 client: client_handle,
+                remote_link_hint: None,
+                link_was_live: false,
                 runtime_token,
                 wake: None,
                 lease,
             },
         );
         Ok(foreground)
+    }
+
+    /// Report the relay-owned native socket's reachability to the foreground
+    /// `Db`, which drives its `local-first-unless-empty` reads. The foreground's
+    /// own upstream is the local relay core, which is always attached, so it
+    /// cannot tell whether the authoritative server could answer. Only a
+    /// change is reported, so an `Attempting` report timestamps the start of
+    /// the attempt the relay first observed. Foregrounds without a native
+    /// socket session keep the core's derived state.
+    fn sync_foreground_remote_link(&mut self, foreground: u64) {
+        let Some(opened) = self.foregrounds.get(&foreground) else {
+            return;
+        };
+        let Some(relay) = self.relays.get(&opened.relay) else {
+            return;
+        };
+        if !self
+            .private_socket_sessions
+            .contains_key(&relay.admitted_scope)
+        {
+            return;
+        }
+        let scope = opened.scope.clone();
+        let previous = opened.remote_link_hint;
+        let explicitly_offline = self.explicitly_offline_scopes.contains(&scope);
+        if explicitly_offline
+            && opened.link_was_live
+            && let Some(opened) = self.foregrounds.get_mut(&foreground)
+        {
+            // Going back online after an explicit offline period is a fresh
+            // attempt.
+            opened.link_was_live = false;
+        }
+        let Some(opened) = self.foregrounds.get(&foreground) else {
+            return;
+        };
+        // A worker that is not connected after this foreground saw it live
+        // is backing off between retries: nothing waits on that, as on the
+        // TS and native-facade hosts. Only a first connection, or one after
+        // an explicit offline period, is an attempt.
+        let hint = if explicitly_offline {
+            RemoteLinkHint::Failed
+        } else {
+            match self.private_scope_workers.get(&scope) {
+                Some(worker) if worker.connected.load(Ordering::Acquire) => RemoteLinkHint::Live,
+                Some(_) if self.private_scope_terminal_error(&scope).is_some() => {
+                    RemoteLinkHint::Failed
+                }
+                Some(_) if opened.link_was_live => RemoteLinkHint::Failed,
+                Some(_) => RemoteLinkHint::Attempting,
+                None => RemoteLinkHint::Failed,
+            }
+        };
+        if previous == Some(hint) {
+            return;
+        }
+        let reported = self
+            .foreground_client(foreground)
+            .is_ok_and(|client| client.set_foreground_remote_link_hint(hint).is_ok());
+        if reported && let Some(opened) = self.foregrounds.get_mut(&foreground) {
+            opened.remote_link_hint = Some(hint);
+            opened.link_was_live |= hint == RemoteLinkHint::Live;
+        }
     }
 
     fn tick_foreground(&mut self, foreground: u64) -> Result<(), JazzNativeRelayStatus> {
@@ -2719,6 +2789,9 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
     {
         return JazzNativeRelayStatus::InvalidHandle;
     }
+    if !matches!(command, ForegroundDbCommandRequest::Close) {
+        host.sync_foreground_remote_link(foreground);
+    }
     let response = match command {
         ForegroundDbCommandRequest::NativeSessionMetadata => {
             let opened = match host.foregrounds.get(&foreground) {
@@ -3476,6 +3549,14 @@ impl NativeRelayClient {
             jazz::binding_codec::encode_rows(&row.into_iter().collect::<Vec<_>>()).map_err(
                 |error| RelayError::ForegroundCommand(format!("encode local current row: {error}")),
             )
+        })
+    }
+
+    fn set_foreground_remote_link_hint(&self, hint: RemoteLinkHint) -> Result<(), RelayError> {
+        let id = self.id;
+        self.relay.run(move |worker| {
+            worker.foreground_client(id)?.db.set_remote_link_hint(hint);
+            Ok(())
         })
     }
 
@@ -6554,16 +6635,33 @@ fn foreground_read_opts_from_json(json: &str) -> Result<ReadOpts, RelayError> {
         } else {
             key.as_str()
         };
+        if key == "tier"
+            && matches!(
+                item.as_str(),
+                Some("remote-if-possible" | "RemoteIfPossible")
+            )
+        {
+            return Err(failure("the remote-if-possible tier was removed; use local-first-unless-empty, or remote for server-confirmed reads".to_owned()));
+        }
         if key == "tier" && matches!(item.as_str(), Some("edge" | "Edge")) {
             return Err(failure(
                 "the edge tier was removed; use remote or global for Core confirmation".to_owned(),
             ));
         }
+        if key == "tier"
+            && matches!(
+                item.as_str(),
+                Some("local-first-unless-empty" | "LocalFirstUnlessEmpty")
+            )
+        {
+            // The core owns the local-first-unless-empty gate.
+            value["tier"] = serde_json::Value::String("Local".to_owned());
+            value["empty_opening"] = serde_json::Value::String("AwaitRemote".to_owned());
+            continue;
+        }
         let normalized = match (key, item.as_str()) {
             ("tier", Some("local" | "Local" | "local-first" | "LocalFirst")) => Some("Local"),
-            ("tier", Some("remote" | "Remote" | "remote-if-possible" | "RemoteIfPossible")) => {
-                Some("Global")
-            }
+            ("tier", Some("remote" | "Remote")) => Some("Global"),
             ("tier", Some("global" | "Global" | "core" | "Core")) => Some("Global"),
             ("tier", Some("none" | "None")) => Some("None"),
             ("local_updates", Some("immediate" | "Immediate")) => Some("Immediate"),

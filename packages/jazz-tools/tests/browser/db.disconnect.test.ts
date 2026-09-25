@@ -569,9 +569,9 @@ describe("Db disconnect/reconnect", () => {
         "worker namespace: owner local write did not resolve while disconnected",
       );
 
-      // Attach only after the namespace is already offline. This is the
-      // important race: the late tab must await its init-state handshake
-      // before classifying RemoteIfPossible as Local rather than Global.
+      // Attach only after the namespace is already offline. The late tab must
+      // learn the worker's offline state during its init handshake so a
+      // local-first-unless-empty read never waits on the missing server.
       const editor = ctx.track(
         await createDb({
           appId: server.appId,
@@ -585,7 +585,7 @@ describe("Db disconnect/reconnect", () => {
       // worker and must therefore make the same explicit-offline read choice.
       // A remote read would exclude this not-yet-settled row.
       const localFallback = await withWorkerOperationTimeout(
-        editor.all(todoByTitle(title), { tier: ReadTier.RemoteIfPossible }),
+        editor.all(todoByTitle(title), { tier: ReadTier.LocalFirstUnlessEmpty }),
         "worker namespace: editor did not use local fallback after owner disconnect",
       );
       expect(localFallback).toHaveLength(1);
@@ -594,7 +594,7 @@ describe("Db disconnect/reconnect", () => {
       const snapshots: Todo[][] = [];
       const unsubscribe = ctx.trackSubscription(
         editor.subscribe(todoByTitle(title), (rows) => snapshots.push(rows), {
-          tier: ReadTier.RemoteIfPossible,
+          tier: ReadTier.LocalFirstUnlessEmpty,
         }),
       );
       await waitForCondition(

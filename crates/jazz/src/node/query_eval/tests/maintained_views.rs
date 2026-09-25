@@ -210,7 +210,7 @@ fn settled_global_authority_preserves_an_ordinary_local_content_update() {
             None,
         ),
     )
-    .expect("open online remote-if-possible source");
+    .expect("open online remote source with the pending overlay");
     assert_eq!(
         online_initial.root_count, 1,
         "online excludes unrelated cache"

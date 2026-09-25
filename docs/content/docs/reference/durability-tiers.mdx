@@ -34,18 +34,32 @@ Read choices control which data a query uses and when its **first result** is de
 They are intentionally separate from write durability.
 
 New applications should use the product read choices `"local-first"`,
-`"remote"`, and `"remote-if-possible"`:
+`"remote"`, and `"local-first-unless-empty"`:
 
 - `"local-first"` uses cached local knowledge and shows pending local writes immediately, while still syncing.
 - `"remote"` uses the server's current query scope, without pending local writes. It waits while offline.
-- `"remote-if-possible"` prioritizes remote data, but falls back to local data if the app explicitly calls `db.disconnect()` (a timeout, connection error, or slow response never triggers that fallback).
-  Online, pending edits/deletes to in-scope rows and matching new inserts appear before server approval. Editing an existing out-of-scope row does not bring it into the result; cached related rows are not pulled in automatically.
+- `"local-first-unless-empty"` is `"local-first"` with one exception: when the local result is
+  empty and the server is reachable (or its first connection is still being set up), the first
+  result waits for the server's first answer. If local data exists, it is shown immediately and
+  catches up with the server as it syncs.
 
-A one-shot keeps its initial choice. A `"remote-if-possible"` subscription follows
-confirmed disconnect/reconnect transitions in both directions, waiting for a fresh
-remote scope on reconnect. Losing remote access does not erase cached data:
-local-first and offline fallback may still show it. An actual synced deletion,
-however, hides the row from local reads too.
+`"local-first-unless-empty"` never waits on a server it cannot reach. The first result is local,
+and immediate, when no server is configured, after `db.disconnect()`, while the connection is down
+or retrying, or when the connection attempt fails. While a connection attempt is in progress, an
+empty result waits at most until five seconds after that attempt started, however late the read
+begins. Once connected, it waits for the server's first answer without a time limit. If the
+connection drops while an empty result is waiting, the empty result is delivered at that moment.
+After the first result, a subscription behaves exactly like `"local-first"`, and remote rows
+appear as they sync.
+
+Queries with an `offset` are the exception. A partly synced local cache would apply the offset to
+the wrong rows, so under `"local-first-unless-empty"` an offset window reads the server's page
+whenever the server can answer, and the local page only when it cannot. A window showing the local
+page switches to the server's page as soon as the server answers, so rows can shift at that moment
+(for example after a local insert).
+
+Losing remote access does not erase cached data: local-first reads may still show it. An actual
+synced deletion, however, hides the row from local reads too.
 
 The read aliases `"local"` and `"global"` remain accepted. Prefer the read choices
 above for queries; write durability uses `wait({ tier: "local" | "global" })`.

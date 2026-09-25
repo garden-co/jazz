@@ -23,6 +23,7 @@ import {
 import { getTrustedReservedSession, setTrustedReservedSession } from "./db-internal-session.js";
 import { mapAuthReason } from "./auth-state.js";
 import { httpUrlToWs } from "./url.js";
+import type { RemoteLinkState } from "./remote-link-state.js";
 
 /** @internal Runtime operations bound to the currently executing preparation. */
 export type TransactionPreparationIO = Pick<
@@ -156,6 +157,12 @@ export type AuthUpdate =
  * Common interface for the runtime backing `JazzClient`.
  */
 export interface Runtime {
+  /** @internal Live reachability of the upstream server, for read scheduling only. */
+  remoteLinkState?(): RemoteLinkState;
+  /** @internal Observe {@link Runtime.remoteLinkState} changes. */
+  onRemoteLinkStateChange?(listener: (state: RemoteLinkState) => void, signal: AbortSignal): void;
+  /** @internal Report the host's view of the server link to the core read gate. */
+  setRemoteLinkHint?(state: RemoteLinkState): void;
   /** @internal Construct a provisional row without staging or accepting a write. */
   previewInsert?(table: string, values: InsertValues, objectId?: string): Row;
   insert(
@@ -348,10 +355,32 @@ export const ReadTier = {
   LocalFirst: "local-first",
   /** Current remote query scope, without pending local writes; waits offline. */
   Remote: "remote",
-  /** Remote scope plus pending scoped edits/new inserts online; local knowledge after explicit disconnect. */
-  RemoteIfPossible: "remote-if-possible",
+  /**
+   * Local knowledge and pending writes, delivered immediately. Only when the
+   * local result is empty while the server is reachable (or still connecting)
+   * does the first delivery wait for the first remote answer. Offline,
+   * unconfigured, and failed connections deliver the local result at once.
+   */
+  LocalFirstUnlessEmpty: "local-first-unless-empty",
 } as const;
 export type ReadTier = (typeof ReadTier)[keyof typeof ReadTier];
+
+/** @internal True for the local-first-unless-empty tier. */
+export function isLocalFirstUnlessEmptyTier(
+  tier: unknown,
+): tier is typeof ReadTier.LocalFirstUnlessEmpty {
+  return tier === ReadTier.LocalFirstUnlessEmpty;
+}
+
+const REMOVED_REMOTE_IF_POSSIBLE =
+  'The "remote-if-possible" tier was removed. Use ReadTier.LocalFirstUnlessEmpty, or ReadTier.Remote for server-confirmed reads.';
+
+function rejectRemovedReadTier(tier: unknown): void {
+  if (tier === "edge") {
+    throw new Error('The "edge" tier was removed. Use ReadTier.Remote for Core-confirmed reads.');
+  }
+  if (tier === "remote-if-possible") throw new Error(REMOVED_REMOTE_IF_POSSIBLE);
+}
 /** @deprecated Read APIs also accept these legacy durability names unchanged. */
 export type LegacyReadDurabilityTier = DurabilityTier;
 export type QueryReadTier = ReadTier | LegacyReadDurabilityTier;
@@ -398,7 +427,7 @@ export interface BranchView {
 }
 
 export interface QueryExecutionOptions {
-  /** `ReadTier.RemoteIfPossible` falls back only after an explicit disconnect. @deprecated DurabilityTier values remain accepted with their old meaning. */
+  /** Product read tier. @deprecated DurabilityTier values remain accepted with their old meaning. */
   tier?: QueryReadTier;
   /** Admit exact-head history, falling back to an optional live or frozen base. */
   branch?: BranchView;
@@ -418,9 +447,7 @@ export function publicQueryExecutionOptions(
 ): QueryExecutionOptions | undefined {
   if (!options) return undefined;
   const candidate = options as { tier?: unknown; branch?: unknown };
-  if (candidate.tier === "edge") {
-    throw new Error('The "edge" tier was removed. Use ReadTier.Remote for Core-confirmed reads.');
-  }
+  rejectRemovedReadTier(candidate.tier);
   const result: QueryExecutionOptions = {};
   if (isPublicQueryReadTier(candidate.tier)) result.tier = candidate.tier;
   if (candidate.branch !== undefined) result.branch = candidate.branch as BranchView;
@@ -432,7 +459,7 @@ export function isPublicQueryReadTier(value: unknown): value is QueryReadTier {
   return (
     value === ReadTier.LocalFirst ||
     value === ReadTier.Remote ||
-    value === ReadTier.RemoteIfPossible ||
+    value === ReadTier.LocalFirstUnlessEmpty ||
     value === "local" ||
     value === "global"
   );
@@ -449,7 +476,7 @@ export type InternalQueryExecutionOptions = Omit<QueryExecutionOptions, "tier"> 
 };
 
 export interface ResolvedQueryExecutionOptions {
-  tier: DurabilityTier;
+  tier: RuntimeReadTier;
   localUpdates: LocalUpdatesMode;
   propagation: QueryPropagation;
   visibility: QueryVisibility;
@@ -611,17 +638,18 @@ export function resolveEffectiveQueryExecutionOptions(
   };
 }
 
-/** @internal Lower product read choices to local or Core-confirmed reads. */
-export function resolveReadTier(tier: InternalQueryReadTier): DurabilityTier {
-  if ((tier as string) === "edge") {
-    throw new Error('The "edge" tier was removed. Use ReadTier.Remote for Core-confirmed reads.');
-  }
+/**
+ * @internal Tier names the runtime bindings accept for reads. The core Db owns
+ * the local-first-unless-empty opening gate, so that tier passes through.
+ */
+export type RuntimeReadTier = DurabilityTier | "local-first-unless-empty";
+
+/** @internal Lower product read choices to the runtime's read tiers. */
+export function resolveReadTier(tier: InternalQueryReadTier): RuntimeReadTier {
+  rejectRemovedReadTier(tier);
   if (tier === "local-only") return "local";
-  return tier === ReadTier.LocalFirst
-    ? "local"
-    : tier === ReadTier.Remote || tier === ReadTier.RemoteIfPossible
-      ? "global"
-      : tier;
+  if (isLocalFirstUnlessEmptyTier(tier)) return "local-first-unless-empty";
+  return tier === ReadTier.LocalFirst ? "local" : tier === ReadTier.Remote ? "global" : tier;
 }
 
 function isBrowserRuntime(): boolean {
