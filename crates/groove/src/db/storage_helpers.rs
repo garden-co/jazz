@@ -441,7 +441,9 @@ impl<'a, S> MeteredStorage<'a, S> {
 
 struct MeteredStorageCursor<'a> {
     inner: crate::storage::StorageScan<'a>,
-    column_family: String,
+    /// Tables have one destination for the entire cursor. The shared indices
+    /// family is key-dependent and must still classify each returned entry.
+    table_destination: Option<StorageReadDestination>,
     metrics: &'a RefCell<StorageReadMetrics>,
 }
 
@@ -456,8 +458,12 @@ impl crate::storage::StorageCursor for MeteredStorageCursor<'_> {
             let batch = self.inner.next_batch().await?;
             if let Some(batch) = &batch {
                 let mut metrics = self.metrics.borrow_mut();
-                for (key, _) in batch {
-                    metrics.record_range_row(&self.column_family, key);
+                if let Some(destination) = self.table_destination {
+                    metrics.record_destination(destination, batch.len(), 0);
+                } else {
+                    for (key, _) in batch {
+                        metrics.record_destination(storage_index_read_destination(key), 1, 0);
+                    }
                 }
             }
             Ok(batch)
@@ -480,16 +486,21 @@ where
         '_,
         Result<crate::storage::StorageScan<'_>, crate::storage::Error>,
     > {
-        let cf = request.cf.clone();
+        let table_destination =
+            (request.cf != "indices").then(|| storage_table_read_destination(&request.cf));
         let metric_key = match &request.bounds {
-            crate::storage::ScanBounds::Prefix(prefix) => prefix.clone(),
-            crate::storage::ScanBounds::Range { start, .. } => start.clone(),
+            crate::storage::ScanBounds::Prefix(prefix) => prefix,
+            crate::storage::ScanBounds::Range { start, .. } => start,
         };
-        self.metrics.borrow_mut().record_range(&cf, &metric_key);
+        self.metrics.borrow_mut().record_destination(
+            table_destination.unwrap_or_else(|| storage_index_read_destination(metric_key)),
+            0,
+            1,
+        );
         Box::pin(async move {
             Ok(Box::new(MeteredStorageCursor {
                 inner: self.storage.scan(request).await?,
-                column_family: cf,
+                table_destination,
                 metrics: &self.metrics,
             }) as crate::storage::StorageScan<'_>)
         })
