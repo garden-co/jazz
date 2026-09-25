@@ -5,12 +5,21 @@ import { IMAGE_TYPES, MAX_IMAGE_BYTES } from "../../chat.js";
 import type { Message } from "../../../schema.js";
 
 // Adapted from chat-react's ChatMessage: same alignment, Item bubble and metadata.
-export function ChatMessage({ message, isMe }: { message: Message; isMe: boolean }) {
+export function ChatMessage({
+  message,
+  isMe,
+  status,
+}: {
+  message: Message;
+  isMe: boolean;
+  status: string;
+}) {
   const [image, setImage] = useState<{ payload: Uint8Array; mimeType: string; url: string }>();
   useEffect(() => {
     const { payload, mimeType } = message;
     if (
       !payload ||
+      payload.byteLength === 0 ||
       !mimeType ||
       !IMAGE_TYPES.some((type) => type === mimeType) ||
       payload.byteLength > MAX_IMAGE_BYTES
@@ -28,12 +37,16 @@ export function ChatMessage({ message, isMe }: { message: Message; isMe: boolean
       : undefined;
   return (
     <article
-      className={`max-w-7/8 flex flex-col ${isMe ? "self-end items-end" : "self-start items-start"}`}
+      data-testid={`message-${message.id}`}
+      className={`max-w-7/8 shrink-0 flex flex-col ${isMe ? "self-end items-end" : "self-start items-start"}`}
     >
       <ChatMetadata
         date={message.$createdAt}
         senderName={isMe ? "You" : message.senderId.slice(0, 8)}
       />
+      <span data-testid="message-status" className="text-xs">
+        {status}
+      </span>
       <Item
         className={`max-w-full inline-flex px-2 pt-0 py-1 shadow-xs ${isMe ? "border-0 bg-primary-500 text-white" : "bg-background"}`}
       >
@@ -45,6 +58,9 @@ export function ChatMessage({ message, isMe }: { message: Message; isMe: boolean
                 <img
                   src={url}
                   alt={message.filename ?? "Encrypted image"}
+                  onError={() =>
+                    setImage((current) => (current?.url === url ? undefined : current))
+                  }
                   className="max-h-80 max-w-full rounded-sm object-contain"
                 />
                 <a href={url} download={message.filename ?? "image"} className="underline text-sm">

@@ -31,9 +31,10 @@ const physical = s.defineApp({
       chatId: s.uuid(),
       senderId: s.uuid(),
       text: s.bytes(),
-      filename: s.bytes().optional(),
-      mimeType: s.bytes().optional(),
-      payload: s.bytes().optional(),
+      // Logical nulls are authenticated ciphertext, not physical SQL NULL.
+      filename: s.bytes(),
+      mimeType: s.bytes(),
+      payload: s.bytes(),
     },
     { chat: s.rel("chats", "chatId") },
   ),
@@ -80,9 +81,10 @@ it("keeps room administration with its immutable owner while recipients can send
     );
     const owner = await createDb(configs[0]!);
     clients.push(owner);
-    const chat = await createChat(owner, configs[0]!.account.id).catch((cause) => {
+    const { chat, completion } = await createChat(owner, configs[0]!.account.id).catch((cause) => {
       throw new Error("Room creation was rejected", { cause });
     });
+    await completion.wait({ tier: "global" });
     // Membership is accepted but this recipient has not enrolled an E2EE device yet.
     await expect(shareChat(owner, chat.id, configs[1]!.account.id)).rejects.toThrow();
     expect(
@@ -247,7 +249,15 @@ it("keeps room administration with its immutable owner while recipients can send
         accountId: configs[2]!.account.id,
       })
       .wait({ tier: "global" });
-    const stored = await outsider.one(physical.messages.where({ id: image.value.id }), {
+    // A Db has one schema view; this reader deliberately omits E2EE decoding.
+    const observer = await createDb({
+      appId: server.appId,
+      serverUrl: server.url,
+      account: configs[2]!.account,
+      driver: { type: "memory" },
+    });
+    clients.push(observer);
+    const stored = await observer.one(physical.messages.where({ id: image.value.id }), {
       tier: "global",
     });
     expect(stored).not.toBeNull();
