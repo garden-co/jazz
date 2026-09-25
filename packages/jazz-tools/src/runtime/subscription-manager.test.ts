@@ -931,7 +931,7 @@ describe("SubscriptionManager", () => {
       }),
       transformIncluded,
     );
-    expect(edited.all.map((root) => root.children)).toEqual([[{ id: childId, name: "child" }]]);
+    expect(edited.all?.map((root) => root.children)).toEqual([[{ id: childId, name: "child" }]]);
   });
 
   it("drops the retained row of a root that leaves the result", () => {
