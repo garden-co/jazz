@@ -1,7 +1,8 @@
 // Uploads encoded walkthroughs from docs/.example-videos/ to Vercel Blob and
 // records their public URLs in lib/showcase/videos.json, which the examples
 // page reads. Paths are content-addressed, so a re-record never overwrites a
-// URL a deployed page still uses.
+// URL a deployed page still uses. After uploading, delete any temporary copy
+// under public/examples/videos/.
 //
 //   BLOB_READ_WRITE_TOKEN=… pnpm --filter docs upload:example-videos
 import { createHash } from "node:crypto";

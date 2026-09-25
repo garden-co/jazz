@@ -58,7 +58,7 @@ export const heroExamples: HeroExample[] = [
     video: {
       id: "todo-two-devices",
       caption:
-        "Two independent browsers (separate origins, storage and identities) syncing through a local Jazz server. Captured automatically with Playwright.",
+        "Two independent browser profiles (separate storage and identities) syncing through a local Jazz server. Recorded automatically with Playwright from the example app.",
     },
     metrics: [
       {
