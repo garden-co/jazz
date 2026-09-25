@@ -2444,7 +2444,7 @@ impl ClientDbInner {
                                 let mut next = previous.clone();
                                 next.previous_index = Some(previous.index);
                                 next.row = crate::node::CurrentRow::new_with_publication_fields(
-                                    previous.row.table().to_owned(),
+                                    previous.row.table(),
                                     state.record()?,
                                     previous.row.publication_fields().to_vec(),
                                 );
