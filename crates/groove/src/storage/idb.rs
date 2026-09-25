@@ -21,6 +21,31 @@ use super::{
 const MAX_GENERATION_CONFLICT_RETRIES: usize = 8;
 const MAX_CONFLICT_BACKOFF_YIELDS: usize = 16;
 
+/// A write future dropped part-way (a cancelled task, a torn-down page) may
+/// leave staged writes, or a commit of unknown outcome, in the tree. Force the
+/// next operation to reload from the store instead of serving or committing
+/// that state. An error returned through `?` also drops the armed guard; that
+/// is harmless, because every caller already reloads after a failed write.
+struct ResetIfCancelled<'a>(Option<&'a Cell<bool>>);
+
+impl<'a> ResetIfCancelled<'a> {
+    fn arm(needs_reset: &'a Cell<bool>) -> Self {
+        Self(Some(needs_reset))
+    }
+
+    fn disarm(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for ResetIfCancelled<'_> {
+    fn drop(&mut self) {
+        if let Some(needs_reset) = self.0.take() {
+            needs_reset.set(true);
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct IdbStorage<S> {
     tree: Rc<RefCell<IdbTree<S>>>,
@@ -223,9 +248,21 @@ where
                 }),
             })
             .collect::<Result<Vec<_>, Error>>()?;
+        let cancelled = ResetIfCancelled::arm(&self.needs_reset);
         tree.write_many(writes).await?;
         tree.flush().await?;
+        cancelled.disarm();
         Ok(())
+    }
+
+    async fn flush_tree(&self) -> Result<(), Error> {
+        let cancelled = ResetIfCancelled::arm(&self.needs_reset);
+        let result = self.tree().flush().await;
+        cancelled.disarm();
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) => Err(self.discard_failed_tree(error.into()).await),
+        }
     }
 
     async fn write_many_replaying_generation_conflicts(
@@ -401,10 +438,7 @@ where
         Box::pin(async move {
             let _guard = self.mutation_gate.lock().await;
             self.ensure_ready().await?;
-            match self.tree().flush().await {
-                Ok(()) => Ok(()),
-                Err(error) => Err(self.discard_failed_tree(error.into()).await),
-            }
+            self.flush_tree().await
         })
     }
 
@@ -412,10 +446,7 @@ where
         Box::pin(async move {
             let _guard = self.mutation_gate.lock().await;
             self.ensure_ready().await?;
-            match self.tree().flush().await {
-                Ok(()) => Ok(()),
-                Err(error) => Err(self.discard_failed_tree(error.into()).await),
-            }
+            self.flush_tree().await
         })
     }
 
@@ -578,6 +609,10 @@ mod tests {
             Rc<RefCell<Option<futures::channel::oneshot::Receiver<Result<(), String>>>>>,
         pause_next_commit:
             Rc<RefCell<Option<futures::channel::oneshot::Receiver<Result<(), String>>>>>,
+        /// Like IndexedDB, the next commit lands in the store even if the
+        /// caller stops waiting for its acknowledgement.
+        pause_after_next_commit:
+            Rc<RefCell<Option<futures::channel::oneshot::Receiver<Result<(), String>>>>>,
     }
 
     impl PageStore for CommitErrorPageStore {
@@ -611,7 +646,14 @@ mod tests {
                         .await
                         .map_err(|_| "commit pause cancelled".to_owned())??;
                 }
-                self.inner.commit(commit).await
+                let committed = self.inner.commit(commit).await;
+                let acknowledge = self.pause_after_next_commit.borrow_mut().take();
+                if let Some(acknowledge) = acknowledge {
+                    acknowledge
+                        .await
+                        .map_err(|_| "acknowledgement cancelled".to_owned())??;
+                }
+                committed
             })
         }
     }
@@ -794,6 +836,76 @@ mod tests {
                         None
                     );
                 }
+            }
+        });
+    }
+
+    /// A write future dropped while its IndexedDB commit is pending (a
+    /// cancelled task, a torn-down page) must not leave its uncommitted rows
+    /// readable or wedge later writes. Whether that commit landed is decided
+    /// by the store alone.
+    #[test]
+    fn a_write_cancelled_mid_commit_is_never_read_uncommitted_and_storage_recovers() {
+        futures::executor::block_on(async {
+            for lands_anyway in [false, true] {
+                let pages = CommitErrorPageStore::default();
+                let storage = IdbStorage::open(pages.clone(), &["records"]).await.unwrap();
+                storage
+                    .set("records".into(), b"key".to_vec(), b"before".to_vec())
+                    .await
+                    .unwrap();
+
+                let (_hold, paused) = futures::channel::oneshot::channel();
+                if lands_anyway {
+                    *pages.pause_after_next_commit.borrow_mut() = Some(paused);
+                } else {
+                    *pages.pause_next_commit.borrow_mut() = Some(paused);
+                }
+                let mut write = Box::pin(storage.write_many(vec![
+                    OwnedWriteOperation::Set {
+                        cf: "records".into(),
+                        key: b"key".to_vec(),
+                        value: b"after".to_vec(),
+                    },
+                    OwnedWriteOperation::Set {
+                        cf: "records".into(),
+                        key: b"new".to_vec(),
+                        value: b"staged".to_vec(),
+                    },
+                ]));
+                assert!(futures::poll!(write.as_mut()).is_pending());
+                drop(write);
+
+                let (key, new): (&[u8], Option<&[u8]>) = if lands_anyway {
+                    (b"after", Some(b"staged"))
+                } else {
+                    (b"before", None)
+                };
+                let get = |key: &'static [u8]| storage.get("records".into(), key.to_vec());
+                assert_eq!(get(b"key").await.unwrap().as_deref(), Some(key));
+                assert_eq!(get(b"new").await.unwrap().as_deref(), new);
+
+                storage
+                    .set("records".into(), b"later".to_vec(), b"write".to_vec())
+                    .await
+                    .unwrap();
+                let reopened = IdbStorage::open(pages.clone(), &["records"]).await.unwrap();
+                let rows = reopened
+                    .scan(ScanRequest::prefix("records".into(), Vec::new()))
+                    .await
+                    .unwrap()
+                    .next_batch()
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let mut expected = vec![
+                    (b"key".to_vec(), key.to_vec()),
+                    (b"later".to_vec(), b"write".to_vec()),
+                ];
+                if let Some(new) = new {
+                    expected.push((b"new".to_vec(), new.to_vec()));
+                }
+                assert_eq!(rows, expected, "lands_anyway={lands_anyway}");
             }
         });
     }

@@ -65,6 +65,12 @@ struct EvaluationSession<'a> {
     work_queue: EvaluationWorkQueue,
     /// How root outputs present indirect values to the caller.
     root_indirect_values: RootIndirectValues,
+    /// Nodes that stay owned by the live runtime rather than this session.
+    /// A binding attached to an already-maintained prepared shape brings the
+    /// shared nodes up to date through an ordinary binding tick, then hydrates
+    /// against only its own binding. Those nodes' session state then covers
+    /// one binding, so it must never replace the live state for all of them.
+    borrowed: HashSet<NodeId>,
 }
 
 pub(super) struct IncrementalEvaluation<'a> {
@@ -1012,6 +1018,11 @@ impl<'a> IncrementalEvaluation<'a> {
         if self.discarded {
             return;
         }
+        // Installed operator state is root-scoped; recursive child scopes are
+        // scratch. Drop them here, from this evaluation's own states, rather
+        // than scanning every installed state afterwards.
+        self.operator_states
+            .retain(|key, _| key.scope == ScopeId::root());
         // Drop the committed entries before folding staged COW state. This
         // makes recursive closures and arrangement bases uniquely owned while
         // leaving unrelated graph state untouched.
@@ -1486,9 +1497,12 @@ impl<'a> IncrementalEvaluation<'a> {
             Poll::Ready(result) => result?,
         }
         self.install(runtime);
-        runtime
-            .operator_states
-            .retain(|key, _| key.scope == ScopeId::root());
+        debug_assert!(
+            runtime
+                .operator_states
+                .keys()
+                .all(|key| key.scope == ScopeId::root())
+        );
         let notifications = std::mem::take(&mut self.pending_notifications);
         let mut dropped_subscriptions = dropped_subscriptions;
         for (subscription_id, queued) in notifications {
@@ -1688,6 +1702,7 @@ impl<'a> EvaluationSession<'a> {
             evaluation_inputs: EvaluationInputs::default(),
             work_queue,
             root_indirect_values: RootIndirectValues::Materialize,
+            borrowed: HashSet::default(),
         })
     }
 
@@ -1906,6 +1921,25 @@ impl<'a> EvaluationSession<'a> {
     }
 
     fn install(mut self, runtime: &mut IvmRuntime) {
+        if !self.borrowed.is_empty() {
+            let borrowed = std::mem::take(&mut self.borrowed);
+            self.relevant_nodes.retain(|node| !borrowed.contains(node));
+            self.operator_states
+                .retain(|key, _| !borrowed.contains(&key.node));
+            let borrowed_keys = self
+                .arrangement_keys_by_input
+                .iter()
+                .filter(|(node, _)| borrowed.contains(node))
+                .flat_map(|(_, keys)| keys.iter().cloned())
+                .collect::<HashSet<_>>();
+            self.arrangement_keys_by_input
+                .retain(|node, _| !borrowed.contains(node));
+            self.arrangement_states
+                .retain(|key, _| !borrowed_keys.contains(key));
+            self.eval_memo
+                .retain(|key, _| !borrowed.contains(&key.node));
+            self.node_meta.retain(|node, _| !borrowed.contains(node));
+        }
         for node in &self.relevant_nodes {
             runtime.operator_states.remove(&OperatorStateKey {
                 scope: ScopeId::root(),
@@ -1932,7 +1966,11 @@ impl<'a> EvaluationSession<'a> {
                 collect_by.groups.commit_overlay();
             }
         }
-        runtime.operator_states.extend(self.operator_states);
+        runtime.operator_states.extend(
+            self.operator_states
+                .into_iter()
+                .filter(|(key, _)| key.scope == ScopeId::root()),
+        );
         for node in &self.relevant_nodes {
             if let Some(keys) = runtime.arrangement_keys_by_input.get(node) {
                 for key in keys {
@@ -1987,6 +2025,7 @@ impl IvmRuntime {
         initial: Arc<Mutex<Option<MultisinkDeltas>>>,
         lifetime: SubscriptionLifetime,
         root_indirect_values: RootIndirectValues,
+        borrowed: HashSet<NodeId>,
     ) -> Result<(), IvmRuntimeError> {
         let mut seen_roots = HashSet::new();
         let roots = outputs
@@ -2001,6 +2040,22 @@ impl IvmRuntime {
             })?;
         let mut session = EvaluationSession::hydration(self, roots, storage)?;
         session.root_indirect_values = root_indirect_values;
+        if !borrowed.is_empty() {
+            // The attach tick advanced every shared node. The subscription's
+            // own nodes may be resident from an earlier binding of the same
+            // value, with a memo that predates later writes; never reuse it.
+            let own = session
+                .relevant_nodes
+                .iter()
+                .filter(|node| !borrowed.contains(node))
+                .copied()
+                .collect::<Vec<_>>();
+            for node in own {
+                let meta = session.node_meta.entry(node).or_default();
+                meta.input_generation = meta.input_generation.wrapping_add(1);
+            }
+        }
+        session.borrowed = borrowed;
         if let Some(shape) = binding_frontier_advance {
             session.advance_binding_input(&self.graph, shape);
         }
@@ -3016,7 +3071,7 @@ impl IvmRuntime {
     }
 
     fn evict_eval_memo(&mut self) {
-        if self.eval_memo.keys().any(|key| key.tick_epoch.is_some()) {
+        if self.eval_memo.tick_entries() > 0 {
             let mut retained_bytes = 0usize;
             self.eval_memo.retain(|key, entry| {
                 let keep = key.tick_epoch.is_none();
