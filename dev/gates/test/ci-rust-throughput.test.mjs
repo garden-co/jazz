@@ -1435,13 +1435,16 @@ test("CodSpeed caches the root-workspace Cargo target", () => {
   );
 });
 
-test("CodSpeed runs nightly on main and only for benchmark-labeled PRs", () => {
+test("CodSpeed baselines every main merge and runs only for benchmark-labeled PRs", () => {
+  // Every main merge queues a CodSpeed run. Otherwise PR reports compare
+  // against a stale main run and attribute intervening merges to the PR
+  // (#3488).
   const document = parse(codspeedWorkflow);
-  assert.equal(document.on.push, undefined, "ordinary main pushes must not run CodSpeed");
+  assert.deepEqual(document.on.push, { branches: ["main"] });
   assert.deepEqual(document.on.pull_request, {
     types: ["labeled", "synchronize", "reopened"],
   });
-  assert.deepEqual(document.on.schedule, [{ cron: "17 3 * * *" }]);
+  assert.equal(document.on.schedule, undefined, "per-merge runs replace the nightly baseline");
   assert.equal(document.on.workflow_dispatch, null);
   // Every root job carries the label gate; dependent jobs inherit its skip.
   const labelGate =
@@ -1452,13 +1455,35 @@ test("CodSpeed runs nightly on main and only for benchmark-labeled PRs", () => {
     }
   };
   rootJobsAreGated(document.jobs);
+  // Main runs share one group and are never cancelled mid-run, so a burst of
+  // merges coalesces to the running commit plus the latest. PR runs cancel
+  // superseded pushes.
+  assert.deepEqual(document.concurrency, {
+    group: "codspeed-example-benchmarks-${{ github.event.pull_request.number || github.ref }}",
+    "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
+  });
+  assert.throws(() => {
+    // Keying main runs by commit would run every merge of a burst in parallel.
+    const thrash = parse(codspeedWorkflow.replace("|| github.ref }}", "|| github.sha }}"));
+    assert.match(thrash.concurrency.group, /github\.ref \}\}$/);
+  }, /match/);
 
   assert.throws(() => {
+    const unsafe = parse(codspeedWorkflow.replace("  push:\n    branches: [main]\n", ""));
+    assert.deepEqual(unsafe.on.push, { branches: ["main"] });
+  }, /Expected values to be strictly deep-equal/);
+  assert.throws(() => {
     const unsafe = parse(
-      codspeedWorkflow.replace("  schedule:\n", "  push:\n    branches: [main]\n  schedule:\n"),
+      codspeedWorkflow.replace(
+        "cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
+        "cancel-in-progress: true",
+      ),
     );
-    assert.equal(unsafe.on.push, undefined, "ordinary main pushes must not run CodSpeed");
-  }, /ordinary main pushes/);
+    assert.equal(
+      unsafe.concurrency["cancel-in-progress"],
+      "${{ github.event_name == 'pull_request' }}",
+    );
+  }, /strictly equal/);
   assert.throws(() => {
     const unsafe = parse(
       codspeedWorkflow.replace(
