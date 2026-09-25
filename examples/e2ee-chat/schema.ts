@@ -1,7 +1,10 @@
 // #region e2ee-chat-schema
 import { schema as s } from "jazz-tools";
+import { deviceRequestSchema } from "jazz-tools/e2ee";
 
 export const app = s.defineApp({
+  // Explicit because chatOwners declares a typed reference to account identity.
+  ...deviceRequestSchema,
   chats: s.table({ ownerId: s.uuid() }, {}),
   chatOwners: s.table(
     { chatId: s.uuid(), accountId: s.uuid() },
