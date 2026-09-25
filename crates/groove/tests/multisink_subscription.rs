@@ -502,8 +502,8 @@ async fn root_position_maps_follow_plain_consumer_demand_for_shared_ordering() {
         }));
         assert!(!structured.try_recv().unwrap().terminal_sinks["rows"].is_empty());
         let metrics = db.last_tick_metrics().unwrap();
-        // One shared TopBy: both consumers must not duplicate position work,
-        // and only the inserted row is ranked, not the whole window.
+        // One shared TopBy: only the plain consumer takes positions, and only
+        // the inserted row is ranked for it, not the whole window.
         assert_eq!(metrics.root_ordering_position_records, 1);
         assert_eq!(metrics.root_ordering_position_records_skipped, 0);
         assert_eq!(metrics.top_by_delta_membership_records, 1);
