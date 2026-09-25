@@ -38,6 +38,7 @@ mod indices;
 mod persistence;
 mod publication_indices;
 mod queries;
+mod read_metrics;
 mod schema;
 mod storage_extraction;
 mod subscriptions;
