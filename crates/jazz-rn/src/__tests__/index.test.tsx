@@ -447,3 +447,77 @@ it("rejects trailing, nonminimal, truncated, and out-of-range foreground handles
     }
   }
 });
+
+it("decodes terminal-operation JSON exactly on the ASCII fast path and strictly otherwise", () => {
+  const relay = loadRelay(null);
+  // The RN TS lib does not declare TextEncoder; encode UTF-8 by hand.
+  const utf8 = (text: string) =>
+    Uint8Array.from(
+      unescape(encodeURIComponent(text))
+        .split("")
+        .map((char) => char.charCodeAt(0)),
+    );
+  const varint = (value: number) => {
+    const out: number[] = [];
+    do {
+      let byte = value & 0x7f;
+      value >>>= 7;
+      if (value > 0) byte |= 0x80;
+      out.push(byte);
+    } while (value > 0);
+    return out;
+  };
+  const deltaEvent = (json: Uint8Array) => {
+    const tier = utf8("Local");
+    return Uint8Array.from([
+      4, // subscription events
+      1, // one event
+      3, // delta with terminal operations
+      0,
+      1,
+      ...varint(tier.length),
+      ...tier,
+      ...varint(2),
+      9,
+      8,
+      ...varint(json.length),
+      ...json,
+    ]);
+  };
+  const payload = Array.from({ length: 20_000 }, (_, index) => (index * 37) & 0xff);
+  const operations = [
+    {
+      root_key: [1, 2, 3],
+      path: [{ Collection: "comments" }, { Key: [4, 5] }],
+      edit: { Insert: { index: 0, key: [6, 7], value: payload } },
+    },
+  ];
+  // Larger than one fast-path chunk, so chunk boundaries are covered.
+  const ascii = utf8(JSON.stringify(operations));
+  expect(ascii.length).toBeGreaterThan(8192 * 4);
+  const nonAscii = utf8(
+    JSON.stringify([{ ...operations[0], path: [{ Collection: "kommentäre 💬" }] }]),
+  );
+  for (const [json, expected] of [
+    [ascii, operations],
+    [nonAscii, [{ ...operations[0], path: [{ Collection: "kommentäre 💬" }] }]],
+  ] as const) {
+    expect(relay.decodeNativeForegroundResponse(deltaEvent(json))).toEqual({
+      type: "subscriptionEvents",
+      events: [
+        {
+          type: "delta",
+          reset: false,
+          settled: true,
+          tier: "Local",
+          delta: Uint8Array.of(9, 8),
+          terminalOperations: expected,
+        },
+      ],
+    });
+  }
+  const malformed = Uint8Array.from([...utf8('["'), 0xc3, 0x28, 34, 93]);
+  expect(() => relay.decodeNativeForegroundResponse(deltaEvent(malformed))).toThrow(
+    /malformed UTF-8 terminal operations/,
+  );
+});
