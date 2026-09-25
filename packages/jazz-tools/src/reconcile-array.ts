@@ -1,21 +1,114 @@
-import { applySubscriptionDelta, type SubscriptionDelta } from "./runtime/subscription-manager.js";
+import {
+  normalizeRowDelta,
+  resultIdentity,
+  RowChangeKind,
+  type RowDelta,
+  type SubscriptionDelta,
+} from "./runtime/subscription-manager.js";
 
 /**
  * Apply a subscription delta to a reactive array, deep-merging only
  * the rows that actually changed.
+ *
+ * A non-reset delta is applied change by change, so a one-row change costs
+ * O(1) row merges instead of reconciling every row. Matched rows keep their
+ * identity and are deep-merged, exactly as {@link reconcileArray} would
+ * leave them. When the delta carries `all`, that is the authority for row
+ * content: each changed row is merged from its entry in `all`, and if the
+ * length or any changed row's position disagrees with `all`, the target is
+ * reconciled against `all` in full instead.
  */
 export function applyDelta<T extends { id: string }>(
   target: T[],
   delta: SubscriptionDelta<T>,
 ): void {
-  if (delta.all !== undefined) {
+  if (delta.reset) {
     reconcileArray(target, delta.all);
     return;
   }
 
-  const next = [...target];
-  applySubscriptionDelta(next, delta);
-  reconcileArray(target, next);
+  const changes = normalizeRowDelta(delta.delta);
+  const all = delta.all;
+  applyRowChanges(target, changes, all === undefined);
+  if (all !== undefined && !mergeChangedRowsFrom(target, all, changes)) {
+    reconcileArray(target, all);
+  }
+}
+
+/**
+ * Apply the changes' structure (inserts, removals, moves) in delta order.
+ * Rows that are already present keep their identity; their content is
+ * merged here only when `mergeItems` is set.
+ */
+function applyRowChanges<T extends { id: string }>(
+  target: T[],
+  changes: RowDelta<T>[],
+  mergeItems: boolean,
+): void {
+  for (const change of changes) {
+    const position = locate(target, change.id, change.index);
+    switch (change.kind) {
+      case RowChangeKind.Added:
+      case RowChangeKind.Updated: {
+        const previous = position === -1 ? undefined : target[position];
+        const next = previous ?? change.item;
+        if (next === undefined) break;
+        if (mergeItems && previous !== undefined && change.item !== undefined) {
+          deepMerge(previous as Record<string, unknown>, change.item as Record<string, unknown>);
+        }
+        if (position === -1) {
+          target.splice(clampIndex(change.index, target.length), 0, next);
+          break;
+        }
+        const index = clampIndex(change.index, target.length - 1);
+        if (index !== position) {
+          target.splice(position, 1);
+          target.splice(index, 0, next);
+        }
+        break;
+      }
+      case RowChangeKind.Removed:
+        if (position !== -1) target.splice(position, 1);
+        break;
+    }
+  }
+}
+
+/**
+ * Merge every added or updated row from its entry in `all`. Returns false,
+ * leaving the rest to a full reconcile, when the target's length or a
+ * changed row's position disagrees with `all`.
+ */
+function mergeChangedRowsFrom<T extends { id: string }>(
+  target: T[],
+  all: T[],
+  changes: RowDelta<T>[],
+): boolean {
+  if (target.length !== all.length) return false;
+  for (const change of changes) {
+    if (change.kind === RowChangeKind.Removed) continue;
+    const position = locate(target, change.id, change.index);
+    const source = all[position];
+    if (position === -1 || source === undefined || resultIdentity(source) !== change.id) {
+      return false;
+    }
+    const current = target[position]!;
+    if (current !== source) {
+      deepMerge(current as Record<string, unknown>, source as Record<string, unknown>);
+    }
+  }
+  return true;
+}
+
+/** Position of `id`, trying the delta's index before scanning the array. */
+function locate<T extends { id: string }>(target: T[], id: string, hint: number): number {
+  const hinted = target[hint];
+  if (hinted !== undefined && resultIdentity(hinted) === id) return hint;
+  return target.findIndex((item) => resultIdentity(item) === id);
+}
+
+function clampIndex(index: number, length: number): number {
+  return Math.max(0, Math.min(index, length));
 }
 
 /**
