@@ -7,6 +7,7 @@ import type {
   ColumnDescriptor,
   ColumnType,
   InsertValues,
+  NativeTerminalBytes,
   NativeTerminalOperation,
   RuntimeSubscriptionDelta,
   RuntimeTerminalOperation,
@@ -4599,7 +4600,7 @@ function decodeRuntimeTerminalOperations(
     let columns = rootColumns;
     let targetColumns: readonly ColumnDescriptor[] | undefined;
     const path: RuntimeTerminalOperation["path"] = operation.path.map((segment) => {
-      if ("Key" in segment) return { Key: segment.Key };
+      if ("Key" in segment) return { Key: terminalKey(segment.Key) };
 
       if (!columns) {
         throw new Error("native terminal collection path requires subscription output columns");
@@ -4623,13 +4624,13 @@ function decodeRuntimeTerminalOperations(
       if (!targetColumns) throw new Error("native terminal insert has no collection target");
       const id = terminalPayloadRowId(edit.Insert.key);
       return {
-        root_key: operation.root_key,
+        root_key: terminalKey(operation.root_key),
         path,
         edit: {
           Insert: {
             index: edit.Insert.index,
-            key: edit.Insert.key,
-            row: decodeNativeTerminalRow(id, targetColumns, Uint8Array.from(edit.Insert.value)),
+            key: terminalKey(edit.Insert.key),
+            row: decodeNativeTerminalRow(id, targetColumns, terminalBytes(edit.Insert.value)),
           },
         },
       };
@@ -4638,34 +4639,44 @@ function decodeRuntimeTerminalOperations(
       if (!targetColumns) throw new Error("native terminal update has no collection target");
       const id = terminalPayloadRowId(edit.Update.key);
       return {
-        root_key: operation.root_key,
+        root_key: terminalKey(operation.root_key),
         path,
         edit: {
           Update: {
-            key: edit.Update.key,
-            row: decodeNativeTerminalRow(id, targetColumns, Uint8Array.from(edit.Update.value)),
+            key: terminalKey(edit.Update.key),
+            row: decodeNativeTerminalRow(id, targetColumns, terminalBytes(edit.Update.value)),
           },
         },
       };
     }
     if ("Remove" in edit) {
       return {
-        root_key: operation.root_key,
+        root_key: terminalKey(operation.root_key),
         path,
-        edit: { Remove: edit.Remove },
+        edit: { Remove: { key: terminalKey(edit.Remove.key) } },
       };
     }
     return {
-      root_key: operation.root_key,
+      root_key: terminalKey(operation.root_key),
       path,
-      edit: { Move: edit.Move },
+      edit: { Move: { key: terminalKey(edit.Move.key), index: edit.Move.index } },
     };
   });
 }
 
+/** Materializer keys stay number arrays; NAPI and WASM hand over `Uint8Array`s. */
+function terminalKey(bytes: NativeTerminalBytes): number[] {
+  return Array.isArray(bytes) ? bytes : Array.from(bytes);
+}
+
+/** Row payloads are decoded straight from a native `Uint8Array` without a copy. */
+function terminalBytes(bytes: NativeTerminalBytes): Uint8Array {
+  return bytes instanceof Uint8Array ? bytes : Uint8Array.from(bytes);
+}
+
 /** Decode the leading UUID key field from Groove's ordered record-key carrier. */
-function terminalPayloadRowId(encoded: readonly number[]): string {
-  const bytes = Uint8Array.from(encoded);
+function terminalPayloadRowId(encoded: NativeTerminalBytes): string {
+  const bytes = terminalBytes(encoded);
   if (bytes.length < 17 || bytes[0] !== 10) {
     throw new Error("terminal key must begin with a UUID row key");
   }
