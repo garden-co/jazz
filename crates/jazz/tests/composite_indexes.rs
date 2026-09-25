@@ -446,3 +446,41 @@ fn schema_version_ids_are_pinned_for_plain_and_composite_schemas() {
         two(["rank", "owner"], ["owner", "rank"])
     );
 }
+
+/// The public `composite_indexes` field is a plain `Vec`, so a schema can be
+/// built without the builder's canonical sort. Such a hand-built, unsorted
+/// table is the same schema as the sorted one everywhere schemas are
+/// compared, hashed, or encoded: equality, `SchemaHash`, the serialized public
+/// schema, and the compiled schema's version id all agree.
+#[test]
+fn hand_built_unsorted_composite_indexes_are_canonical() {
+    let sorted = SchemaBuilder::new()
+        .table(
+            tasks_table()
+                .composite_index(["owner", "rank"])
+                .composite_index(["rank", "owner"]),
+        )
+        .build();
+    let mut unsorted = sorted.clone();
+    for (_, table) in &mut unsorted {
+        table.composite_indexes.reverse();
+        assert_eq!(table.composite_indexes[0][0].as_str(), "rank");
+    }
+
+    assert_eq!(unsorted, sorted);
+    assert_eq!(SchemaHash::compute(&unsorted), SchemaHash::compute(&sorted));
+    assert_eq!(
+        serde_json::to_string(&unsorted).unwrap(),
+        serde_json::to_string(&sorted).unwrap()
+    );
+    assert_eq!(
+        JazzSchema::new(&unsorted).unwrap().version_id(),
+        JazzSchema::new(&sorted).unwrap().version_id()
+    );
+
+    let mut different = sorted.clone();
+    for (_, table) in &mut different {
+        table.composite_indexes.pop();
+    }
+    assert_ne!(different, sorted, "the set of indexes is still identity");
+}
