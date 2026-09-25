@@ -86,7 +86,7 @@ pub use routed_messages::ReceivedSyncMessage;
 mod wire_transport;
 #[cfg(test)]
 use wire_transport::{LogicalMessageReassembler, RECENT_COMPLETED_LOGICAL_MESSAGES};
-pub use wire_transport::{WireFlushStatus, WireTransportAdapter};
+pub use wire_transport::{WireFlushStatus, WireSendOutcome, WireTransportAdapter};
 
 /// Pragmatic single-threaded serialization boundary for canonical Jazz state.
 ///
@@ -1948,6 +1948,8 @@ struct StagedInboundMessage {
     message: SyncMessage,
     lease: Option<crate::wire::channel_credit::BufferLease>,
     authority_receipt_eligible: bool,
+    /// See [`ReceivedSyncMessage`]: set only from the checked wire decoder.
+    receipts_validated: bool,
 }
 
 struct PendingAuthorityViewUpdate {
@@ -2526,6 +2528,15 @@ fn direct_schema_view_lens(
                 ),
             ));
         }
+        if source_table.composite_indexes != target_table.composite_indexes {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                format!(
+                    "schema view changes composite indexes on {} without explicit index admission",
+                    target_table.name
+                ),
+            ));
+        }
         let mut ops = Vec::new();
         for target_column in &target_table.columns {
             match source_table
@@ -2834,9 +2845,29 @@ pub(super) type Outbox = Rc<RefCell<UploadOutbox>>;
 pub(super) struct UploadOutbox {
     entries: VecDeque<PendingUpload>,
     tx_ids: HashSet<TxId>,
+    /// Declared by a server shell that owns final authority for its writes.
+    declared_root: bool,
+    /// Sticky: set once any upstream attaches, including after the fact.
+    upstream_attached: bool,
 }
 
 impl UploadOutbox {
+    /// Whether a subscriber upload this node settled terminally has nobody
+    /// above it to forward to. Only a declared root that has never attached
+    /// an upstream qualifies; anything else must queue and relay as usual.
+    pub(super) fn settles_uploads_locally(&self) -> bool {
+        self.declared_root && !self.upstream_attached
+    }
+
+    #[cfg(any(test, feature = "runtime"))]
+    pub(super) fn declare_root(&mut self) {
+        self.declared_root = true;
+    }
+
+    pub(super) fn mark_upstream_attached(&mut self) {
+        self.upstream_attached = true;
+    }
+
     fn push(&mut self, pending: PendingUpload) -> bool {
         if !self.tx_ids.insert(pending.tx_id) {
             return false;
@@ -2851,6 +2882,10 @@ impl UploadOutbox {
 
     fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    pub(super) fn contains(&self, tx_id: TxId) -> bool {
+        self.tx_ids.contains(&tx_id)
     }
 
     fn retain(&mut self, mut keep: impl FnMut(&PendingUpload) -> bool) {
@@ -2892,10 +2927,12 @@ struct PendingUpload {
 /// recovery marker or an earlier same-transaction reconstruction.
 fn queue_pending_upload_in(outbox: &Outbox, tx_id: TxId, unit: Option<SyncMessage>) -> bool {
     let mut outbox = outbox.borrow_mut();
-    if let Some(pending) = outbox
-        .entries
-        .iter_mut()
-        .find(|pending| pending.tx_id == tx_id)
+    // `tx_ids` mirrors `entries`, so a new transaction skips the linear search.
+    if outbox.tx_ids.contains(&tx_id)
+        && let Some(pending) = outbox
+            .entries
+            .iter_mut()
+            .find(|pending| pending.tx_id == tx_id)
     {
         let Some(unit) = unit else {
             return false;

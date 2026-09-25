@@ -103,6 +103,15 @@ impl SchemaHash {
                 }
             }
 
+            if !table_schema.composite_indexes.is_empty() {
+                hasher.update(b"composite_indexes\0");
+                let indexes =
+                    super::schema::canonical_composite_index_order(&table_schema.composite_indexes);
+                hasher.update(
+                    &serde_json::to_vec(&indexes).expect("composite index names serialize"),
+                );
+            }
+
             if !table_schema.branch_by.is_empty() {
                 hasher.update(b"branch_by\0");
                 hasher.update(

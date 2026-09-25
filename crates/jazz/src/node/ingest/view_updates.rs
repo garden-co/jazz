@@ -360,9 +360,9 @@ where
             .into_iter()
             .map(|record| self.decode_history_owned_record(requested_table, &storage_table, record))
             .collect::<Result<Vec<_>, Error>>()?;
-        let aliases = self.node_aliases.clone();
+        let aliases = &self.node_aliases;
         versions.sort_by_key(|version| {
-            version_tx_id_from_aliases(version, &aliases).expect("valid version tx id")
+            version_tx_id_from_aliases(version, aliases).expect("valid version tx id")
         });
         Ok(versions)
     }

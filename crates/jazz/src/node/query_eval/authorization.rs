@@ -287,7 +287,7 @@ where
         if let Some(graph) = self.policy_authorization_graph_cache_get(&cache_key) {
             return Ok(graph);
         }
-        self.policy_authorization_row_id_graph_inner(request, None, true)
+        self.policy_authorization_row_id_graph_inner(request, None, true, None)
             .await
     }
 
@@ -295,10 +295,16 @@ where
         &mut self,
         request: QueryProgramRequest,
         access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+        bounded_deletion_register: Option<(SourceId, GraphBuilder)>,
     ) -> Result<PolicyAuthorizationGraph, Error> {
         self.query_engine_read_metrics.policy_authorization_graphs += 1;
-        self.policy_authorization_row_id_graph_inner(request, Some(access_paths), false)
-            .await
+        self.policy_authorization_row_id_graph_inner(
+            request,
+            Some(access_paths),
+            false,
+            bounded_deletion_register,
+        )
+        .await
     }
 
     async fn policy_authorization_row_id_graph_inner(
@@ -306,6 +312,7 @@ where
         request: QueryProgramRequest,
         forced_access_paths: Option<BTreeMap<SourceId, CurrentAccessPath>>,
         cache: bool,
+        bounded_deletion_register: Option<(SourceId, GraphBuilder)>,
     ) -> Result<PolicyAuthorizationGraph, Error> {
         let cache_key = policy_authorization_graph_cache_key(&request);
         self.restore_expired_policy_compilation_state();
@@ -360,6 +367,7 @@ where
                     Box::pin(self.compile_query_program_request_with_shared_access_paths(
                         request,
                         access_paths.clone(),
+                        bounded_deletion_register,
                     ))
                     .await?
                 };
@@ -2061,6 +2069,7 @@ mod authorization_scope_compiler_tests {
             futures::executor::block_on(node.point_policy_authorization_row_id_graph(
                 request,
                 BTreeMap::new(),
+                None,
             )),
             Err(Error::PolicyProofCycle { table, depth }) if table == "resources" && depth == 1
         ));

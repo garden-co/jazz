@@ -715,6 +715,8 @@ where
         candidate_tx_id: TxId,
         candidate_versions: &[VersionRecord],
     ) -> Result<bool, Error> {
+        #[cfg(test)]
+        WRITE_POLICY_VERSION_EVALUATIONS.with(|count| count.set(count.get() + 1));
         self.write_policy_allows_version_record(
             version,
             author,
@@ -751,8 +753,16 @@ where
             if existing.tx != *tx || existing.versions != versions {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
             }
-            if existing.ingest_context != mode.ingest_context {
+            if !CommitUnitIngestContext::same_parked_authority(
+                existing.ingest_context,
+                mode.ingest_context,
+            ) {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
+            }
+            if let (Some(existing), Some(resent)) =
+                (existing.ingest_context.as_mut(), mode.ingest_context)
+            {
+                existing.version_receipts_validated &= resent.version_receipts_validated;
             }
             existing.ingress_role = existing.ingress_role.strongest(mode.ingress_role);
             return Ok(true);
@@ -789,8 +799,16 @@ where
             if existing.tx != *tx || existing.versions != versions {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
             }
-            if existing.ingest_context != mode.ingest_context {
+            if !CommitUnitIngestContext::same_parked_authority(
+                existing.ingest_context,
+                mode.ingest_context,
+            ) {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
+            }
+            if let (Some(existing), Some(resent)) =
+                (existing.ingest_context.as_mut(), mode.ingest_context)
+            {
+                existing.version_receipts_validated &= resent.version_receipts_validated;
             }
             existing.ingress_role = existing.ingress_role.strongest(mode.ingress_role);
             return Ok(true);

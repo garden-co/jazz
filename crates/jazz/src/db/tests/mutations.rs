@@ -3019,6 +3019,147 @@ fn session_upload_uses_connection_identity_for_write_policy() {
     assert_eq!(rows[0].row_uuid(), row);
 }
 
+// Receipt-validation work is internal: an accepted upload looks the same
+// whether the server validated each version receipt once or twice. The
+// counter proves that a checked wire decoder's validation is not repeated at
+// ingest, while a transport that hands over decoded messages still is.
+#[test]
+fn session_upload_validates_each_version_receipt_once() {
+    const ROWS: usize = 3;
+    for wire in [true, false] {
+        let schema = owner_write_schema();
+        let session_author = AuthorSubject::for_test_bytes([0xc2; 16]);
+        let server = open_core(0x5f, AuthorSubject::SYSTEM, &schema);
+        let client = open_db(0xc2, session_author, &schema);
+        let (client_transport, server_transport) = if wire { byte_duplex() } else { duplex() };
+        let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+        let _subscriber = server.accept_subscriber(server_transport, session_author);
+
+        let tx = client.mergeable_tx().unwrap();
+        for index in 0..ROWS {
+            tx.insert(
+                "todos",
+                cells(&format!("row {index}"), false, session_author),
+                Default::default(),
+            )
+            .unwrap();
+        }
+        let tx_id = tx.commit().unwrap();
+        client.tick().unwrap();
+
+        crate::protocol::RECEIPT_VALIDATIONS.with(|count| count.set(0));
+        server.tick().unwrap();
+        let validations = crate::protocol::RECEIPT_VALIDATIONS.with(|count| count.get());
+        client.tick().unwrap();
+
+        assert_eq!(
+            validations, ROWS,
+            "wire={wire}: each uploaded version receipt is validated exactly once"
+        );
+        assert_eq!(
+            block_on(client.wait_for_transaction(tx_id, DurabilityTier::Global)).unwrap(),
+            tx_id
+        );
+        assert_eq!(server.read(&Query::from("todos")).unwrap().len(), ROWS);
+    }
+}
+
+// Write-policy work is internal: an accepted or rejected upload looks the
+// same whether the server evaluated each version's policy once or twice. The
+// counter proves the session admission proof no longer repeats the evaluation
+// that terminal ingest performs, while both outcomes stay unchanged.
+#[test]
+fn session_upload_evaluates_write_policy_once_per_version() {
+    const ROWS: usize = 3;
+    let schema = owner_write_schema();
+    let session_author = AuthorSubject::for_test_bytes([0xc3; 16]);
+    let server = open_core(0x60, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xc3, session_author, &schema);
+    let (client_transport, server_transport) = duplex();
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, session_author);
+
+    let tx = client.mergeable_tx().unwrap();
+    for index in 0..ROWS {
+        tx.insert(
+            "todos",
+            cells(&format!("row {index}"), false, session_author),
+            Default::default(),
+        )
+        .unwrap();
+    }
+    let tx_id = tx.commit().unwrap();
+    client.tick().unwrap();
+
+    crate::node::WRITE_POLICY_VERSION_EVALUATIONS.with(|count| count.set(0));
+    server.tick().unwrap();
+    let evaluations = crate::node::WRITE_POLICY_VERSION_EVALUATIONS.with(|count| count.get());
+    client.tick().unwrap();
+
+    assert_eq!(
+        evaluations, ROWS,
+        "each accepted version's write policy is evaluated exactly once"
+    );
+    assert_eq!(
+        block_on(client.wait_for_transaction(tx_id, DurabilityTier::Global)).unwrap(),
+        tx_id
+    );
+    assert_eq!(server.read(&Query::from("todos")).unwrap().len(), ROWS);
+}
+
+// Same internal accounting for a denial: the session writes a row owned by
+// someone else, bypassing the client's own policy check the way an untrusted
+// client can. The server still rejects it after one evaluation.
+#[test]
+fn session_upload_denied_by_write_policy_evaluates_it_once() {
+    let schema = owner_write_schema();
+    let session_author = AuthorSubject::for_test_bytes([0xc5; 16]);
+    let other_author = AuthorSubject::for_test_bytes([0xc6; 16]);
+    let server = open_core(0x61, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xc5, session_author, &schema);
+    let (client_transport, server_transport) = duplex();
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, session_author);
+
+    let tx_id = client
+        .node
+        .node
+        .borrow_mut()
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(0xf2), client.next_now_ms())
+                .made_by(session_author)
+                .cells(cells("not mine", false, other_author)),
+        )
+        .unwrap();
+    client
+        .node
+        .outbox
+        .borrow_mut()
+        .push(PendingUpload { tx_id, unit: None });
+    client.tick().unwrap();
+
+    crate::node::WRITE_POLICY_VERSION_EVALUATIONS.with(|count| count.set(0));
+    server.tick().unwrap();
+    let evaluations = crate::node::WRITE_POLICY_VERSION_EVALUATIONS.with(|count| count.get());
+    client.tick().unwrap();
+
+    assert_eq!(
+        evaluations, 1,
+        "the denied version is evaluated exactly once"
+    );
+    let handle = WriteHandle {
+        node: Rc::downgrade(&client.node.node),
+        row_uuid: row(0xf2),
+        tx_id,
+        local_tier: DurabilityTier::Local,
+        queued_status: None,
+        queued_alias: None,
+    };
+    let err = block_on(handle.wait(DurabilityTier::Global)).unwrap_err();
+    assert_eq!(err.code, ErrorCode::WriteRejected);
+    assert!(server.read(&Query::from("todos")).unwrap().is_empty());
+}
+
 // This sync-boundary test is intentionally lower-level: the public policy
 // test app reaches this same prepared server write-policy path, but cannot
 // distinguish a malformed prepared claim binding from an ordinary denial.

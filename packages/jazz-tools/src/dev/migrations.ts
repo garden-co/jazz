@@ -188,11 +188,14 @@ function renderSchemaWitness(schema: WasmSchema): string {
         tableSchema.indexed_columns === undefined
           ? ""
           : `.indexOnly(${JSON.stringify(tableSchema.indexed_columns)})`;
+      const compositeIndexes = (tableSchema.composite_indexes ?? [])
+        .map((columns) => `.compositeIndex(${JSON.stringify(columns)})`)
+        .join("");
       const branch =
         tableSchema.branchBy === undefined
           ? ""
           : `.branchBy(${JSON.stringify(tableSchema.branchBy)})`;
-      return `${JSON.stringify(tableName)}: s.table({\n${indentBlock(columnLines.join("\n"), 2)}\n}, {\n${indentBlock(relationLines.join("\n"), 2)}\n})${index}${branch}`;
+      return `${JSON.stringify(tableName)}: s.table({\n${indentBlock(columnLines.join("\n"), 2)}\n}, {\n${indentBlock(relationLines.join("\n"), 2)}\n})${index}${compositeIndexes}${branch}`;
     });
 
   if (tableEntries.length === 0) {

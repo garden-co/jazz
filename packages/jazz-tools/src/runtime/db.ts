@@ -51,7 +51,12 @@ import {
 import { type RuntimeSource, type RuntimeTokenOptions } from "./runtime-source.js";
 import type { AuthFailureReason } from "./auth-state.js";
 import { translateQuery } from "./query-adapter.js";
-import { applyColumnTransforms, transformRow, transformRows } from "./row-transformer.js";
+import {
+  applyColumnTransforms,
+  createRowTransformer,
+  transformRow,
+  transformRows,
+} from "./row-transformer.js";
 import { toValue, toWriteRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
 import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
@@ -2702,20 +2707,17 @@ export class Db {
     const outputRelationNames = Object.keys(outputIncludes);
     const wasmQuery = translateQuery(builderJson, planningSchema);
 
+    const transformSubscriptionRow = createRowTransformer<Record<string, unknown>>(
+      outputSchema,
+      outputTable,
+      outputIncludes,
+      builtQuery.select,
+      query._columnTransformsByTable,
+      false,
+    );
     const transform = (row: WasmRow): T =>
       applyColumnTransforms(
-        applyPartialValueSelections(
-          transformRow(
-            row,
-            outputSchema,
-            outputTable,
-            outputIncludes,
-            builtQuery.select,
-            query._columnTransformsByTable,
-            false,
-          ),
-          builtQuery.partialSelect,
-        ),
+        applyPartialValueSelections(transformSubscriptionRow(row), builtQuery.partialSelect),
         outputTransforms,
         outputRelationNames,
       ) as T;

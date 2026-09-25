@@ -1468,6 +1468,12 @@ fn branch_scan(
                 max_items,
             }
         }
+        Some(StaticScanSpec::ReversePrefixLimit { prefix, max_items }) => {
+            StaticScanSpec::ReversePrefixLimit {
+                prefix: prepend(prefix),
+                max_items,
+            }
+        }
         Some(StaticScanSpec::Range { start, end }) => StaticScanSpec::Range {
             start: prepend(start),
             end: prepend(end),
