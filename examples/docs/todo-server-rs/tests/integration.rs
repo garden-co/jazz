@@ -100,7 +100,7 @@ async fn setup_test_app_with_path(data_dir: PathBuf) -> Router {
         data_dir,
         storage: ClientStorage::Persistent,
         storage_factory: Some(std::sync::Arc::new(
-            jazz_storage_rocksdb::RocksDbStorageFactory,
+            jazz_storage_rocksdb::RocksDbStorageFactory::default(),
         )),
         jwt_token: None,
         backend_secret: None,
@@ -470,7 +470,7 @@ async fn test_local_persistence() {
             data_dir: data_path.clone(),
             storage: ClientStorage::Persistent,
             storage_factory: Some(std::sync::Arc::new(
-                jazz_storage_rocksdb::RocksDbStorageFactory,
+                jazz_storage_rocksdb::RocksDbStorageFactory::default(),
             )),
             jwt_token: None,
             backend_secret: None,
@@ -503,7 +503,7 @@ async fn test_local_persistence() {
             data_dir: data_path,
             storage: ClientStorage::Persistent,
             storage_factory: Some(std::sync::Arc::new(
-                jazz_storage_rocksdb::RocksDbStorageFactory,
+                jazz_storage_rocksdb::RocksDbStorageFactory::default(),
             )),
             jwt_token: None,
             backend_secret: None,
@@ -788,7 +788,7 @@ async fn test_server_resync() {
             data_dir: data_path.clone(),
             storage: ClientStorage::Persistent,
             storage_factory: Some(std::sync::Arc::new(
-                jazz_storage_rocksdb::RocksDbStorageFactory,
+                jazz_storage_rocksdb::RocksDbStorageFactory::default(),
             )),
             jwt_token: Some(make_test_jwt("client1-user")),
             backend_secret: None,
@@ -838,7 +838,7 @@ async fn test_server_resync() {
             data_dir: data_path,
             storage: ClientStorage::Persistent,
             storage_factory: Some(std::sync::Arc::new(
-                jazz_storage_rocksdb::RocksDbStorageFactory,
+                jazz_storage_rocksdb::RocksDbStorageFactory::default(),
             )),
             jwt_token: Some(make_test_jwt("client2-user")),
             backend_secret: None,

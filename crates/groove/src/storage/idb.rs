@@ -53,6 +53,7 @@ pub struct IdbStorage<S> {
     mutation_gate: Rc<Mutex<()>>,
     needs_reset: Rc<Cell<bool>>,
     tree_epoch: Rc<Cell<u64>>,
+    admission: Option<super::StorageAdmission>,
 }
 
 impl<S> IdbStorage<S>
@@ -60,17 +61,55 @@ where
     S: PageStore + Clone,
 {
     pub async fn open(store: S, column_families: &[&str]) -> Result<Self, Error> {
+        Self::open_inner(store, column_families, None, false).await
+    }
+
+    pub async fn open_admitted(
+        store: S,
+        column_families: &[&str],
+        admission: super::StorageAdmission,
+    ) -> Result<Self, Error> {
+        Self::open_inner(store, column_families, Some(admission), false).await
+    }
+
+    /// Restricted to the preflight phase; does not initialize an absent tree.
+    pub async fn open_read_only(store: S, column_families: &[&str]) -> Result<Self, Error> {
+        Self::open_inner(store, column_families, None, true).await
+    }
+
+    async fn open_inner(
+        store: S,
+        column_families: &[&str],
+        admission: Option<super::StorageAdmission>,
+        read_only: bool,
+    ) -> Result<Self, Error> {
         super::validate_physical_storage_names(column_families)?;
+        let tree = if read_only {
+            IdbTree::open_read_only(store, Options::default()).await?
+        } else {
+            IdbTree::open(store, Options::default()).await?
+        };
+        let mut families: BTreeSet<String> =
+            column_families.iter().map(|cf| (*cf).to_owned()).collect();
+        if read_only {
+            let mut start = Vec::new();
+            while let Some(key) = tree.next_key(&start).await? {
+                let (cf, _) = key_codec::decode_column_family_key(&key)?;
+                families.insert(cf.to_owned());
+                let prefix = key_codec::encode_column_family_key(cf, &[])?;
+                let Some(next) = super::prefix_successor(&prefix) else {
+                    break;
+                };
+                start = next;
+            }
+        }
         Ok(Self {
-            tree: Rc::new(RefCell::new(
-                IdbTree::open(store.clone(), Options::default()).await?,
-            )),
-            column_families: Rc::new(RefCell::new(
-                column_families.iter().map(|cf| (*cf).to_owned()).collect(),
-            )),
+            tree: Rc::new(RefCell::new(tree)),
+            column_families: Rc::new(RefCell::new(families)),
             mutation_gate: Rc::new(Mutex::new(())),
             needs_reset: Rc::new(Cell::new(false)),
             tree_epoch: Rc::new(Cell::new(0)),
+            admission,
         })
     }
 
@@ -297,6 +336,10 @@ impl<S> OrderedKvStorage for IdbStorage<S>
 where
     S: PageStore + Clone + 'static,
 {
+    fn admission(&self) -> Result<super::StorageAdmission, Error> {
+        self.admission.clone().ok_or(Error::UnsupportedAdmission)
+    }
+
     fn compare_value(
         &self,
         cf: String,

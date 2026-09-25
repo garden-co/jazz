@@ -47,7 +47,7 @@ impl PeerState {
         writer: AuthorSubject,
         claims: BTreeMap<String, Value>,
         versions: &[VersionRecord],
-        candidate_tx_id: TxId,
+        candidate_tx: &crate::tx::Transaction,
     ) -> Result<bool, Error>
     where
         S: OrderedKvStorage,
@@ -64,7 +64,7 @@ impl PeerState {
         // scope-isolated relay, and same-author sessions may differ. A
         // claim-only policy must not become an implicit grant.
         let mut node = node.scoped_active_session_claims(writer, claims);
-        node.commit_unit_satisfies_write_policy(versions, writer, candidate_tx_id)
+        node.commit_unit_satisfies_write_policy(versions, writer, candidate_tx)
             .await
     }
 

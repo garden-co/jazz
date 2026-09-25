@@ -45,6 +45,18 @@ pub struct Transaction {
     pub contribution_merge: Option<ContributionMergeProvenance>,
 }
 
+impl Transaction {
+    /// Mergeable units need no read proof; exclusive units require every field.
+    #[doc(hidden)]
+    pub fn has_complete_exclusive_evidence(&self) -> bool {
+        self.kind != TxKind::Exclusive
+            || (self.base_snapshot.is_some()
+                && self.row_read_set.is_some()
+                && self.absent_read_set.is_some()
+                && self.predicate_read_set.is_some())
+    }
+}
+
 /// Non-causal evidence attached to an ordinary calculated merge transaction.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct ContributionMergeProvenance {

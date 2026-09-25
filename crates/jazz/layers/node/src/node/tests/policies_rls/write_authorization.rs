@@ -34,6 +34,10 @@ impl FailTransactionReadMemoryStorage {
 }
 
 impl OrderedKvStorage for FailTransactionReadMemoryStorage {
+    fn admission(&self) -> Result<groove::storage::StorageAdmission, groove::storage::Error> {
+        self.inner.admission()
+    }
+
     fn get(
         &self,
         cf: String,

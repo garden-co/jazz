@@ -138,7 +138,7 @@ where
             return Err(Error::InvalidStoredValue("unsupported query AST version"));
         }
         if let ShapeBody::Query(query) = &ast.body
-            && authorization::policy_uses_authorized_created_source(query)
+            && query.uses_authorized_created_sources()
         {
             return Err(Error::UnsupportedSyncMessage(
                 "authorized-created sources are supported only in INSERT policies",

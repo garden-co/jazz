@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 mod common;
 
-use duplex_transport::duplex;
+use groove::storage::BoxedStorage;
 use jazz::db::{
     ClientRelayScope, Db, DbConfig, DbIdentity, ExclusiveTxOps, Propagation, ReadOpts,
     SubscriptionEvent, TickScheduler, TickUrgency, Transport, block_on,
@@ -30,7 +30,7 @@ use jazz::tools::{
     ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder, TransactionId,
 };
 use jazz::tx::{DurabilityTier, Fate, Transaction, TxId, TxKind};
-use jazz_storage_rocksdb::RocksDbStorage;
+use duplex_transport::duplex;
 
 /// Mirror the production browser-worker upstream: the client side has already
 /// been admitted to forward one scope binding, and the authority side installs
@@ -372,13 +372,18 @@ fn assert_truthful_empty_local_opening(event: Option<SubscriptionEvent>) {
     assert!(removed.is_empty());
 }
 
-fn open_persistent_worker(path: &std::path::Path, node: u8, schema: &JazzSchema) -> Db {
+fn open_persistent_worker(
+    path: &std::path::Path,
+    node: u8,
+    schema: &JazzSchema,
+) -> Db<BoxedStorage> {
     let column_families = schema.column_families();
-    let refs = column_families
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    let storage = RocksDbStorage::open(path, &refs).expect("open persistent worker storage");
+    let storage = jazz::block_on(jazz::storage_codec_profile::open_node_storage(
+        &jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+        path.to_path_buf(),
+        column_families,
+    ))
+    .expect("open persistent worker storage");
     block_on(Db::open(DbConfig::new(
         schema.clone(),
         storage,
@@ -398,14 +403,14 @@ fn open_persistent_browser_worker(
     node: u8,
     author: AuthorSubject,
     schema: &JazzSchema,
-) -> Db {
+) -> Db<BoxedStorage> {
     let column_families = schema.column_families();
-    let refs = column_families
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    let storage =
-        RocksDbStorage::open(path, &refs).expect("open persistent browser worker storage");
+    let storage = jazz::block_on(jazz::storage_codec_profile::open_node_storage(
+        &jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+        path.to_path_buf(),
+        column_families,
+    ))
+    .expect("open persistent browser worker storage");
     let db = block_on(Db::open(DbConfig::new(
         schema.clone(),
         storage,
@@ -428,14 +433,14 @@ fn open_persistent_scope_isolated_browser_worker(
     node: u8,
     author: AuthorSubject,
     schema: &JazzSchema,
-) -> Db {
+) -> Db<BoxedStorage> {
     let column_families = schema.column_families();
-    let refs = column_families
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    let storage =
-        RocksDbStorage::open(path, &refs).expect("open scoped persistent browser worker storage");
+    let storage = jazz::block_on(jazz::storage_codec_profile::open_node_storage(
+        &jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+        path.to_path_buf(),
+        column_families,
+    ))
+    .expect("open scoped persistent browser worker storage");
     let scope = unsafe {
         ClientRelayScope::from_admitted_storage_owner("browser-test-profile".to_owned(), author)
     };

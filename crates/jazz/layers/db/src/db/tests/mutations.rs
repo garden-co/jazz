@@ -2,203 +2,6 @@
 
 use super::*;
 
-#[cfg(feature = "testing")]
-async fn create_parent_child_exclusively(
-    include_created: bool,
-) -> (crate::db::Db<groove::storage::TestStorage>, crate::tx::Fate) {
-    use crate::db::{Db, DbConfig, DbIdentity, ExclusiveTxOps};
-    use groove::storage::TestStorage;
-
-    let correlation = PublicPolicyExpr::eq_session(
-        "id",
-        vec!["__jazz_outer_row".to_owned(), "parent_id".to_owned()],
-    );
-    let child_policy = if include_created {
-        PublicPolicyExpr::exists_including_created("parents", correlation)
-    } else {
-        PublicPolicyExpr::Exists {
-            table: "parents".to_owned(),
-            condition: Box::new(correlation),
-        }
-    };
-    let schema = PublicSchemaBuilder::new()
-        .table(
-            PublicTableSchemaBuilder::new("parents")
-                .column("title", PublicColumnType::Text)
-                .policies(
-                    PublicTablePolicies::new()
-                        .with_select(PublicPolicyExpr::True)
-                        .with_insert(PublicPolicyExpr::eq_session(
-                            "$createdBy",
-                            vec!["user".to_owned()],
-                        )),
-                ),
-        )
-        .table(
-            PublicTableSchemaBuilder::new("children")
-                .fk_column("parent_id", "parents")
-                .column("title", PublicColumnType::Text)
-                .policies(
-                    PublicTablePolicies::new()
-                        .with_select(PublicPolicyExpr::True)
-                        .with_insert(child_policy),
-                ),
-        )
-        .build();
-    let schema = crate::schema::JazzSchema::new(&schema).expect("compile public policies");
-    let families = schema.column_families();
-    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-    let author = crate::ids::AuthorSubject::authenticated("https://issuer.example", "alice")
-        .expect("valid Alice principal")
-        .with_account(crate::account_registry::AccountId(uuid::Uuid::from_u128(1)));
-    let alice = Db::open(DbConfig::new(
-        schema.clone(),
-        TestStorage::new(&refs),
-        DbIdentity {
-            node: crate::ids::NodeUuid::from_bytes([0xa1; 16]),
-            author,
-        },
-    ))
-    .await
-    .expect("open Alice's local database");
-    let authority = Db::open_history_complete(DbConfig::new(
-        schema,
-        TestStorage::new(&refs),
-        DbIdentity {
-            node: crate::ids::NodeUuid::from_bytes([0xc1; 16]),
-            author: crate::ids::AuthorSubject::SYSTEM,
-        },
-    ))
-    .await
-    .expect("open real core authority");
-    let (upstream, downstream) = duplex();
-    alice.connect_upstream(upstream).await;
-    let _peer = authority.accept_subscriber(downstream, author);
-    for _ in 0..32 {
-        alice.tick().await.expect("progress Alice's handshake");
-        authority
-            .tick()
-            .await
-            .expect("progress authority handshake");
-    }
-    let tx_id = crate::tools::OpenTransactionId::new();
-    alice
-        .begin_exclusive(tx_id)
-        .await
-        .expect("open exclusive create");
-    let tx = alice.exclusive_tx_ref(tx_id);
-    // Both upserts capture exact absence; neither row is seeded outside the bundle.
-    tx.upsert(
-        "parents",
-        crate::ids::RowUuid(uuid::Uuid::from_u128(10)),
-        BTreeMap::from([(
-            "title".to_owned(),
-            Value::String("Alice's parent".to_owned()),
-        )]),
-        Default::default(),
-    )
-    .await
-    .expect("stage independently authorized parent");
-    tx.upsert(
-        "children",
-        crate::ids::RowUuid(uuid::Uuid::from_u128(11)),
-        BTreeMap::from([
-            (
-                "parent_id".to_owned(),
-                Value::Uuid(uuid::Uuid::from_u128(10)),
-            ),
-            (
-                "title".to_owned(),
-                Value::String("Alice's child".to_owned()),
-            ),
-        ]),
-        Default::default(),
-    )
-    .await
-    .expect("stage child dependent on the same exclusive bundle");
-    let committed = alice
-        .commit_exclusive_handle(tx_id)
-        .await
-        .expect("publish exclusive bundle");
-    for _ in 0..128 {
-        alice.tick().await.expect("send exclusive bundle");
-        authority.tick().await.expect("process exclusive bundle");
-        if !matches!(
-            alice.write_state(committed).expect("read settlement").fate,
-            crate::tx::Fate::Pending
-        ) {
-            break;
-        }
-    }
-    let state = alice.write_state(committed).expect("read final settlement");
-    assert!(
-        !matches!(state.fate, crate::tx::Fate::Pending),
-        "real authority must settle the bundle"
-    );
-    (alice, state.fate)
-}
-
-/// Alice can atomically create a parent and its dependent child when the
-/// child's INSERT policy explicitly admits independently authorized creates.
-///
-/// alice -- exclusive parent + child, exact absence --> authority
-///       <-- whole bundle accepted; both public rows visible --
-#[cfg(feature = "testing")]
-#[tokio::test]
-async fn candidate_exists_accepts_authorized_parent_child_exclusive_create() {
-    let (alice, fate) = create_parent_child_exclusively(true).await;
-    assert_eq!(
-        fate,
-        crate::tx::Fate::Accepted,
-        "authorized parent and dependent child must be accepted atomically"
-    );
-    assert_eq!(
-        alice
-            .local_current_row("parents", crate::ids::RowUuid(uuid::Uuid::from_u128(10)))
-            .await
-            .unwrap()
-            .map(|row| (row.row_uuid(), row.cell_at(0))),
-        Some((
-            crate::ids::RowUuid(uuid::Uuid::from_u128(10)),
-            Some(Value::String("Alice's parent".to_owned()))
-        )),
-    );
-    assert_eq!(
-        alice
-            .local_current_row("children", crate::ids::RowUuid(uuid::Uuid::from_u128(11)))
-            .await
-            .unwrap()
-            .map(|row| (row.row_uuid(), row.cell_at(0), row.cell_at(1))),
-        Some((
-            crate::ids::RowUuid(uuid::Uuid::from_u128(11)),
-            Some(Value::Uuid(uuid::Uuid::from_u128(10))),
-            Some(Value::String("Alice's child".to_owned())),
-        )),
-    );
-}
-
-/// Alice's otherwise identical bundle stays denied with ordinary EXISTS:
-/// an unmarked source must not see a parent created by that same commit.
-#[cfg(feature = "testing")]
-#[tokio::test]
-async fn unmarked_exists_denies_parent_child_exclusive_create() {
-    let (alice, fate) = create_parent_child_exclusively(false).await;
-    assert_eq!(
-        fate,
-        crate::tx::Fate::Rejected(crate::tx::RejectionReason::AuthorizationDenied)
-    );
-    for (table, id) in [("parents", 10), ("children", 11)] {
-        assert!(
-            alice
-                .local_current_row(table, crate::ids::RowUuid(uuid::Uuid::from_u128(id)))
-                .await
-                .unwrap()
-                .is_none(),
-            "rejected bundle must expose no {table}"
-        );
-    }
-}
-
 /// Test-only capability wrapper for a transport whose remote endpoint was
 /// authenticated and admitted as a trusted backend.  The transport capability
 /// is deliberately separate from `accept_subscriber_with_trust`: accepting a
@@ -6116,9 +5919,17 @@ fn staged_streaming_rollback_drop_and_overwrite_release_claims() {
     });
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReopenReadChange {
+    None,
+    Absence,
+    Point,
+    Predicate,
+}
+
 /// Reopening a pending publication must replay its original observations, not
 /// re-read current authority state or reconstruct empty exclusive evidence.
-fn pending_exclusive_reopen_replay(changed_absence: bool) {
+fn pending_exclusive_reopen_replay(change: ReopenReadChange, dependent: bool) {
     block_on(async {
         let schema = doctest_support::schema();
         let dir = tempfile::tempdir().unwrap();
@@ -6213,6 +6024,47 @@ fn pending_exclusive_reopen_replay(changed_absence: bool) {
             .await
             .unwrap();
         let committed = db.commit_exclusive_handle(tx).await.unwrap();
+        let dependent_commit = if dependent {
+            // The second unit has no version-history parent edge to the first:
+            // it reads the first new root and writes a different root row.
+            let next = OpenTransactionId::new();
+            db.begin_exclusive(next).await.unwrap();
+            assert_eq!(
+                db.exclusive_tx_ref(next)
+                    .read("todos", published_row)
+                    .await
+                    .unwrap(),
+                Some(doctest_support::todo_cells("published after restart", true)),
+            );
+            let query = db
+                .prepare_query(
+                    &Query::from("todos").filter(eq(col("title"), lit("published after restart"))),
+                )
+                .unwrap();
+            let rows = db
+                .exclusive_tx_ref(next)
+                .all_prepared(&query)
+                .await
+                .unwrap();
+            assert_eq!(
+                rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+                vec![published_row]
+            );
+            db.exclusive_tx_ref(next)
+                .insert(
+                    "todos",
+                    doctest_support::todo_cells("dependent after restart", false),
+                    InsertOptions {
+                        row_id: Some(row(0xee)),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            Some(db.commit_exclusive_handle(next).await.unwrap())
+        } else {
+            None
+        };
         // Deliberately do not tick the authority again on this connection.
         // Capture the real upload, but close before it can receive any fate.
         for _ in 0..32 {
@@ -6256,6 +6108,31 @@ fn pending_exclusive_reopen_replay(changed_absence: bool) {
                 .any(|read| { read.table == "todos" && read.row_uuid == absent_row })
         );
         assert_eq!(original_tx.predicate_read_set.as_ref().unwrap().len(), 1);
+        // A repair carrier deliberately redacts read evidence. Use the existing
+        // request-bound node seam because app reads cannot manufacture such a
+        // receipt; the subsequent public reopen/replay must retain the original.
+        let mut redacted = original_tx.clone();
+        redacted.base_snapshot = None;
+        redacted.row_read_set = None;
+        redacted.absent_read_set = None;
+        redacted.predicate_read_set = None;
+        db.node
+            .node
+            .lock()
+            .await
+            .apply_row_version_payloads_for_requests(
+                &[RowVersionRef::new("todos", published_row, committed)],
+                vec![VersionBundle {
+                    tx: redacted,
+                    versions: original_versions.clone(),
+                    scope: VersionBundleScope::ViewScoped,
+                    fate: Fate::Pending,
+                    global_time: None,
+                    durability: DurabilityTier::Local,
+                }],
+            )
+            .await
+            .unwrap();
         assert_eq!(
             db.write_state(committed).unwrap(),
             WriteState {
@@ -6271,22 +6148,71 @@ fn pending_exclusive_reopen_replay(changed_absence: bool) {
                 .iter()
                 .all(|row| row.row_uuid() != published_row)
         );
+        let original_dependent = dependent_commit.map(|dependent| {
+            assert_eq!(db.write_state(dependent).unwrap().fate, Fate::Pending);
+            assert_eq!(
+                db.write_state(dependent).unwrap().durability,
+                DurabilityTier::Local
+            );
+            let unit = sent
+                .borrow()
+                .iter()
+                .find(|message| {
+                    matches!(message,
+                SyncMessage::CommitUnit { tx, .. } if tx.tx_id == dependent)
+                })
+                .cloned()
+                .unwrap();
+            let SyncMessage::CommitUnit { tx, versions } = &unit else {
+                unreachable!()
+            };
+            assert!(
+                tx.row_read_set
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .any(|read| read.row_uuid == published_row && read.version == committed)
+            );
+            assert!(versions.iter().all(|version| version.parents().is_empty()));
+            unit
+        });
         db.detach_connection(&upstream);
         drop(upstream);
         drop(peer);
         drop(sent);
         drop(db);
 
-        if changed_absence {
-            // This is not a write/write conflict: the new row is only an
-            // observed absence and does not match the recorded predicate.
-            server
-                .insert_with_id(
-                    "todos",
-                    absent_row,
-                    doctest_support::todo_cells("concurrent", false),
-                )
-                .unwrap();
+        match change {
+            ReopenReadChange::None => {}
+            ReopenReadChange::Absence => {
+                // Outside the predicate and not a write/write conflict.
+                server
+                    .insert_with_id(
+                        "todos",
+                        absent_row,
+                        doctest_support::todo_cells("concurrent", false),
+                    )
+                    .unwrap();
+            }
+            ReopenReadChange::Point => {
+                server
+                    .insert_with_id(
+                        "todos",
+                        observed_row,
+                        doctest_support::todo_cells("observed", true),
+                    )
+                    .unwrap();
+            }
+            ReopenReadChange::Predicate => {
+                // A matching phantom not named by either point/absence set.
+                server
+                    .insert_with_id(
+                        "todos",
+                        row(0xed),
+                        doctest_support::todo_cells("observed", false),
+                    )
+                    .unwrap();
+            }
         }
         let reopened = open().await.unwrap();
         assert_eq!(reopened.write_state(committed).unwrap().fate, Fate::Pending);
@@ -6298,8 +6224,21 @@ fn pending_exclusive_reopen_replay(changed_absence: bool) {
             CommitUnitTrust::TrustedBackend,
         );
         let mut replay = None;
+        let mut replayed_units = Vec::new();
         for _ in 0..128 {
             reopened.tick().await.unwrap();
+            for message in replayed.borrow().iter() {
+                if let SyncMessage::CommitUnit { tx, .. } = message
+                    && (tx.tx_id == committed || Some(tx.tx_id) == dependent_commit)
+                    && !replayed_units.iter().any(|seen| {
+                        matches!(seen,
+                            SyncMessage::CommitUnit { tx: seen, .. } if seen.tx_id == tx.tx_id
+                        )
+                    })
+                {
+                    replayed_units.push(message.clone());
+                }
+            }
             if replay.is_none() {
                 replay = replayed
                     .borrow()
@@ -6339,18 +6278,20 @@ fn pending_exclusive_reopen_replay(changed_absence: bool) {
             .local_current_row("todos", published_row)
             .await
             .unwrap();
-        if changed_absence {
+        if change != ReopenReadChange::None {
             assert_eq!(
                 state.fate,
                 Fate::Rejected(RejectionReason::ExclusiveConflict)
             );
             assert!(authority_row.is_none());
             assert!(local_row.is_none());
-            assert!(
-                authority_rows
-                    .iter()
-                    .any(|row| row.row_uuid() == absent_row)
-            );
+            if change == ReopenReadChange::Absence {
+                assert!(
+                    authority_rows
+                        .iter()
+                        .any(|row| row.row_uuid() == absent_row)
+                );
+            }
         } else {
             assert_eq!(state.fate, Fate::Accepted);
             assert_eq!(state.durability, DurabilityTier::Global);
@@ -6362,18 +6303,88 @@ fn pending_exclusive_reopen_replay(changed_absence: bool) {
                 );
             }
         }
+        if let Some(dependent) = dependent_commit {
+            let units = replayed_units.iter().collect::<Vec<_>>();
+            let ids = units
+                .iter()
+                .map(|message| match message {
+                    SyncMessage::CommitUnit { tx, .. } => tx.tx_id,
+                    _ => unreachable!(),
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                ids,
+                vec![committed, dependent],
+                "original identities first replay in authoring order"
+            );
+            assert_eq!(
+                units[1],
+                original_dependent.as_ref().unwrap(),
+                "dependent evidence is not re-read"
+            );
+            let state = reopened.write_state(dependent).unwrap();
+            assert_eq!(state.fate, Fate::Accepted);
+            assert_eq!(state.durability, DurabilityTier::Global);
+            assert!(state.global_time > reopened.write_state(committed).unwrap().global_time);
+            assert_eq!(
+                server
+                    .read(&server.table("todos"))
+                    .unwrap()
+                    .iter()
+                    .find(|visible| visible.row_uuid() == row(0xee))
+                    .unwrap()
+                    .cell(&schema.tables()[0], "title"),
+                Some(Value::String("dependent after restart".into()))
+            );
+        }
         reopened.detach_connection(&upstream);
+        drop(upstream);
+        drop(peer);
+        drop(reopened);
+        let settled_reopen = open().await.unwrap();
+        // Fate updates are durable mutations of the transaction row; they must
+        // not erase the evidence needed by a later explicit retry/audit.
+        let SyncMessage::CommitUnit { tx: retained, .. } = settled_reopen
+            .node
+            .node
+            .lock()
+            .await
+            .commit_unit_for(committed)
+            .await
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        assert_eq!(retained.base_snapshot, original_tx.base_snapshot);
+        assert_eq!(retained.row_read_set, original_tx.row_read_set);
+        assert_eq!(retained.absent_read_set, original_tx.absent_read_set);
+        assert_eq!(retained.predicate_read_set, original_tx.predicate_read_set);
     });
 }
 
 #[test]
 fn pending_exclusive_reopen_replays_exact_evidence_and_accepts() {
-    pending_exclusive_reopen_replay(false);
+    pending_exclusive_reopen_replay(ReopenReadChange::None, false);
 }
 
 #[test]
 fn pending_exclusive_reopen_rejects_changed_absence() {
-    pending_exclusive_reopen_replay(true);
+    pending_exclusive_reopen_replay(ReopenReadChange::Absence, false);
+}
+
+#[test]
+fn pending_exclusive_reopen_rejects_changed_point() {
+    pending_exclusive_reopen_replay(ReopenReadChange::Point, false);
+}
+
+#[test]
+fn pending_exclusive_reopen_rejects_changed_predicate() {
+    pending_exclusive_reopen_replay(ReopenReadChange::Predicate, false);
+}
+
+#[test]
+fn pending_exclusive_reopen_replays_dependent_new_roots_in_original_order() {
+    pending_exclusive_reopen_replay(ReopenReadChange::None, true);
 }
 
 /// Alice's authority rejects the whole publication after Bob changes a read
@@ -6382,13 +6393,12 @@ fn pending_exclusive_reopen_rejects_changed_absence() {
 /// the only operation in this flow that removes the retained payload.
 ///
 /// Alice: stage -> read absence -> Bob: insert -> Alice: commit -> rejection
-///       -> reopen -> proofless retry rejected -> discard
+///       -> reopen -> exact-evidence retry conflicts -> discard
 #[test]
 fn staged_streaming_rejection_retains_payload_across_reopen_and_retry() {
     block_on(async {
-        // The live exclusive envelope belongs to the upload outbox, not the
-        // durable transaction row. Observe the actual protocol send while
-        // forwarding every message unchanged to the real authority.
+        // Observe the original upload independently of the durable transaction
+        // codec while forwarding it unchanged to the real authority.
         struct CaptureExclusiveUnit {
             inner: Box<dyn Transport>,
             unit: Rc<RefCell<Option<SyncMessage>>>,
@@ -6591,12 +6601,19 @@ fn staged_streaming_rejection_retains_payload_across_reopen_and_retry() {
             panic!("expected reconstructed transaction")
         };
         assert_eq!(tx.kind, crate::tx::TxKind::Exclusive);
-        assert!(tx.base_snapshot.is_none());
-        let SyncMessage::CommitUnit { versions, .. } = original else {
+        let SyncMessage::CommitUnit {
+            tx: original_tx,
+            versions,
+        } = original
+        else {
             panic!("expected original unit")
         };
-        // A fresh retry identity must not turn missing restart evidence into
-        // an empty, apparently valid read set or a mergeable write.
+        assert_eq!(tx.base_snapshot, original_tx.base_snapshot);
+        assert_eq!(tx.row_read_set, original_tx.row_read_set);
+        assert_eq!(tx.absent_read_set, original_tx.absent_read_set);
+        assert_eq!(tx.predicate_read_set, original_tx.predicate_read_set);
+        // Even an explicit fresh retry identity retains the original absence;
+        // reopening cannot erase or refresh it to bypass the authority conflict.
         tx.tx_id = TxId::new(TxTime(tx.tx_id.time.0 + 2), tx.tx_id.node);
         let retry_id = tx.tx_id;
         let outcomes = server
@@ -6605,7 +6622,7 @@ fn staged_streaming_rejection_retains_payload_across_reopen_and_retry() {
             .apply_sync_message_settled(SyncMessage::CommitUnit { tx, versions })
             .unwrap();
         assert!(outcomes.iter().any(|outcome| matches!(outcome,
-            SyncMessage::FateUpdate { tx_id, fate: Fate::Rejected(_), .. } if *tx_id == retry_id)));
+            SyncMessage::FateUpdate { tx_id, fate: Fate::Rejected(RejectionReason::ExclusiveConflict), .. } if *tx_id == retry_id)));
         assert!(
             reopened
                 .node

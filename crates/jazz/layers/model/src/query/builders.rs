@@ -696,14 +696,17 @@ impl Query {
         self
     }
 
-    /// Validate and canonicalize this query against a Jazz schema.
-    pub fn validate(&self, schema: &JazzSchema) -> Result<ValidatedQuery, QueryError> {
-        if self.joins.iter().any(join_has_created_source)
+    pub(crate) fn uses_authorized_created_sources(&self) -> bool {
+        self.joins.iter().any(join_has_created_source)
             || self
                 .policy_branches
                 .iter()
                 .any(|branch| branch.joins.iter().any(join_has_created_source))
-        {
+    }
+
+    /// Validate and canonicalize this query against a Jazz schema.
+    pub fn validate(&self, schema: &JazzSchema) -> Result<ValidatedQuery, QueryError> {
+        if self.uses_authorized_created_sources() {
             return Err(QueryError::UnsupportedRelationQuery(
                 "authorized-created sources are supported only in INSERT policies".to_owned(),
             ));

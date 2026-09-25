@@ -8,6 +8,22 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    /// Reject partial evidence before a malformed receipt can mutate clocks,
+    /// aliases, parked units, or an existing transaction's fate.
+    pub(super) async fn validate_incoming_exclusive_evidence(
+        &mut self,
+        tx: &Transaction,
+    ) -> Result<(), Error> {
+        if let Err(error) = super::exclusive_read_evidence::validate_presence(tx) {
+            return if self.query_transaction(tx.tx_id).await?.is_some() {
+                Err(Error::ConflictingCommitUnit(tx.tx_id))
+            } else {
+                Err(error)
+            };
+        }
+        Ok(())
+    }
+
     /// All constraint inserts/updates pass here so the conservative absence
     /// proof includes staged rows before any later read or suspension.
     pub(super) fn stage_pending_parent_constraint(
@@ -19,7 +35,9 @@ where
         replace: bool,
     ) -> Result<(), Error> {
         let values = pending_edge_values(child.0, child.1, parent.0, parent.1, coordinate)?;
-        self.rejections.pending_parent_time_bound.observe(parent.1.time);
+        self.rejections
+            .pending_parent_time_bound
+            .observe(parent.1.time);
         if replace {
             batch.update("jazz_pending_edges", values);
         } else {
@@ -52,7 +70,9 @@ where
             if self.version_tx_id(&candidate)? != parent
                 || !self.version_row_matches_parent_coordinate(&candidate, coordinate)?
             {
-                return Err(Error::InvalidStoredValue("parent history key does not match stored coordinate"));
+                return Err(Error::InvalidStoredValue(
+                    "parent history key does not match stored coordinate",
+                ));
             }
             return Ok(ParentCoordinateValidation::Exact);
         }
@@ -60,8 +80,7 @@ where
         // an invalid parent. Other retained rows provide no evidence about
         // this coordinate. Avoid loading that fragment for every missing
         // parent; retain the pending coordinate constraint instead.
-        if parent_tx.view_scoped_cardinality
-            && !self.query.tx_versions_cache.contains_key(&parent)
+        if parent_tx.view_scoped_cardinality && !self.query.tx_versions_cache.contains_key(&parent)
         {
             return Ok(ParentCoordinateValidation::Inconclusive);
         }
@@ -121,7 +140,10 @@ where
                 == coordinate.physical_table_id)
     }
 
-    #[cfg_attr(feature = "cold-settle-attribution", tracing::instrument(skip_all, name = "cold.phase.parent_completion"))]
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.parent_completion")
+    )]
     async fn complete_parent_versions<V: std::borrow::Borrow<VersionRecord>>(
         &mut self,
         tx: &Transaction,
@@ -163,7 +185,11 @@ where
         parent: TxId,
         complete_versions: &[VersionRecord],
     ) -> Result<(), Error> {
-        if self.rejections.pending_parent_time_bound.excludes(parent.time) {
+        if self
+            .rejections
+            .pending_parent_time_bound
+            .excludes(parent.time)
+        {
             self.database.ensure_usable()?;
             return Ok(());
         }
@@ -188,26 +214,26 @@ where
         let mut constraints = Vec::with_capacity(raw_constraints.len());
         for raw in raw_constraints {
             let record = raw.borrowed();
-            let parent_alias = NodeAlias(
-                record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_NODE_ID_IDX)?,
-            );
+            let parent_alias =
+                NodeAlias(record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_NODE_ID_IDX)?);
             let stored_parent = TxId::new(
                 TxTime(record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_TIME_IDX)?),
-                self.node_for_alias(parent_alias).ok_or(Error::InvalidStoredValue(
-                    "pending edge parent alias must exist",
-                ))?,
+                self.node_for_alias(parent_alias)
+                    .ok_or(Error::InvalidStoredValue(
+                        "pending edge parent alias must exist",
+                    ))?,
             );
             if stored_parent != parent {
                 continue;
             }
-            let child_alias = NodeAlias(
-                record.get_u64(PendingEdgeRowRecord::FIELD_CHILD_NODE_ID_IDX)?,
-            );
+            let child_alias =
+                NodeAlias(record.get_u64(PendingEdgeRowRecord::FIELD_CHILD_NODE_ID_IDX)?);
             let child = TxId::new(
                 TxTime(record.get_u64(PendingEdgeRowRecord::FIELD_CHILD_TIME_IDX)?),
-                self.node_for_alias(child_alias).ok_or(Error::InvalidStoredValue(
-                    "pending edge child alias must exist",
-                ))?,
+                self.node_for_alias(child_alias)
+                    .ok_or(Error::InvalidStoredValue(
+                        "pending edge child alias must exist",
+                    ))?,
             );
             constraints.push((
                 child_alias,
@@ -237,13 +263,7 @@ where
             }
             batch.delete(
                 "jazz_pending_edges",
-                pending_edge_primary_key(
-                    child_alias,
-                    child,
-                    parent_alias,
-                    parent,
-                    &coordinate,
-                )?,
+                pending_edge_primary_key(child_alias, child, parent_alias, parent, &coordinate)?,
             );
         }
         Ok(())
@@ -267,7 +287,10 @@ where
         if raw_constraints.is_empty() {
             return Ok(());
         }
-        let parents = complete_parents.iter().map(|(parent, _)| *parent).collect::<BTreeSet<_>>();
+        let parents = complete_parents
+            .iter()
+            .map(|(parent, _)| *parent)
+            .collect::<BTreeSet<_>>();
         let mut by_parent = BTreeMap::<TxId, Vec<OwnedRecord>>::new();
         for raw in raw_constraints {
             let record = raw.record();
@@ -279,7 +302,10 @@ where
                 ))?,
             );
             if parents.contains(&parent) {
-                by_parent.entry(parent).or_default().push(raw.owned_record());
+                by_parent
+                    .entry(parent)
+                    .or_default()
+                    .push(raw.owned_record());
             }
         }
         // This boundary only reads constraints and stages matching deletes;
@@ -331,7 +357,9 @@ where
             return Ok(());
         }
         if parents.iter().all(|parent| {
-            self.rejections.pending_parent_time_bound.excludes(parent.time)
+            self.rejections
+                .pending_parent_time_bound
+                .excludes(parent.time)
         }) {
             self.database.ensure_usable()?;
             return Ok(());
@@ -430,7 +458,13 @@ where
         durability: DurabilityTier,
     ) -> Result<(), Error> {
         self.ingest_transaction_and_versions_with_current_indexes(
-            tx, versions, fate, global_time, durability, true, false,
+            tx,
+            versions,
+            fate,
+            global_time,
+            durability,
+            true,
+            false,
         )
         .await
     }
@@ -444,7 +478,13 @@ where
         durability: DurabilityTier,
     ) -> Result<(), Error> {
         self.ingest_transaction_and_versions_with_current_indexes(
-            tx, versions, fate, global_time, durability, false, true,
+            tx,
+            versions,
+            fate,
+            global_time,
+            durability,
+            false,
+            true,
         )
         .await
     }
@@ -458,7 +498,13 @@ where
         durability: DurabilityTier,
     ) -> Result<(), Error> {
         self.ingest_transaction_and_versions_with_current_indexes(
-            tx, versions, fate, global_time, durability, true, true,
+            tx,
+            versions,
+            fate,
+            global_time,
+            durability,
+            true,
+            true,
         )
         .await
     }
@@ -509,18 +555,19 @@ where
     ) -> Result<PublishedTransaction, Error> {
         let tx_id = tx.tx_id;
         let mut batch = self.database.open_batch();
-        let _ = self.stage_transaction_and_versions_with_current_indexes(
-            &mut batch,
-            tx,
-            versions,
-            Fate::Pending,
-            None,
-            durability,
-            true,
-            false,
-            None,
-        )
-        .await?;
+        let _ = self
+            .stage_transaction_and_versions_with_current_indexes(
+                &mut batch,
+                tx,
+                versions,
+                Fate::Pending,
+                None,
+                durability,
+                true,
+                false,
+                None,
+            )
+            .await?;
         let persistence = self.database.apply_batch(batch).await?;
         self.invalidate_tx_version_table_names_cache(tx_id);
         self.pending_persistence.insert(tx_id);
@@ -528,7 +575,10 @@ where
     }
 
     async fn prepare_exact_history_version(
-        &mut self, tx_node_alias: NodeAlias, tx_time: TxTime, version: &VersionRecord,
+        &mut self,
+        tx_node_alias: NodeAlias,
+        tx_time: TxTime,
+        version: &VersionRecord,
     ) -> Result<VersionRow, Error> {
         let author_schema = version.schema_version();
         // Fail with TableNotFound before allocating aliases or resolving authored
@@ -579,12 +629,8 @@ where
             self.complete_parent_versions(&tx, &versions).await?
         };
         if let Some(complete_parent_versions) = complete_parent_versions.as_deref() {
-            self.preflight_complete_parent_constraints(
-                &mut batch,
-                tx_id,
-                complete_parent_versions,
-            )
-            .await?;
+            self.preflight_complete_parent_constraints(&mut batch, tx_id, complete_parent_versions)
+                .await?;
         }
         // Staging owns the decoded records and derived-index working set. Keep
         // it behind an async allocation boundary so admission does not retain
@@ -660,6 +706,7 @@ where
         view_scoped_cardinality: bool,
         staged_content_versions: Option<&mut Vec<VersionRow>>,
     ) -> Result<(Vec<VersionRow>, Fate, Option<GlobalTime>, Option<RejectedTransaction>), Error> {
+        self.validate_incoming_exclusive_evidence(&tx).await?;
         // Provenance operation identities participate in merge deduplication.
         // Admit them before accepting staged values or writing any derived
         // transaction/current state, on every local, remote, and view ingress.
@@ -680,10 +727,14 @@ where
         for parent_node in parent_nodes {
             self.ensure_node_alias(parent_node).await?;
         }
-        for schema in versions.iter().map(VersionRecord::schema_version).collect::<BTreeSet<_>>() {
+        for schema in versions
+            .iter()
+            .map(VersionRecord::schema_version)
+            .collect::<BTreeSet<_>>()
+        {
             self.ensure_schema_version_alias(schema).await?;
         }
-        let stored_tx = self.query_transaction(tx.tx_id).await?;
+        let mut stored_tx = self.query_transaction(tx.tx_id).await?;
         let (fate, global_time, durability) = if let Some(mut stored) = stored_tx.clone() {
             stored.reconcile_fate(fate, global_time, Some(durability))?;
             (stored.fate, stored.global_time, stored.durability)
@@ -735,11 +786,25 @@ where
             && stored_tx
                 .as_ref()
                 .is_some_and(|stored| !stored.view_scoped_cardinality);
-        let storage_tx = if preserve_authoritative_cardinality {
-            &stored_tx.as_ref().expect("checked above").tx
-        } else {
-            &tx
-        };
+        if stored_tx
+            .as_ref()
+            .is_some_and(|stored| !super::exclusive_read_evidence::compatible(&stored.tx, &tx))
+        {
+            return Err(Error::ConflictingCommitUnit(tx.tx_id));
+        }
+        // Existing evidence and attribution are immutable, even for a fragment
+        // whose view-local cardinality may grow. Never backfill a legacy proof.
+        if let Some(stored) = stored_tx.as_mut()
+            && stored.view_scoped_cardinality
+        {
+            if !super::exclusive_read_evidence::is_absent(&stored.tx)
+                && stored.tx.n_total_writes != tx.n_total_writes
+            {
+                return Err(Error::ConflictingCommitUnit(tx.tx_id));
+            }
+            stored.tx.n_total_writes = tx.n_total_writes;
+        }
+        let storage_tx = stored_tx.as_ref().map_or(&tx, |stored| &stored.tx);
         let contribution_merge = if std::ptr::eq(storage_tx, &tx) {
             contribution_merge
         } else {
@@ -791,8 +856,7 @@ where
                 tx_node_alias,
                 schema_version_alias,
                 tx.tx_id.time,
-                (author_schema != self.catalogue.local_schema_version_id)
-                    .then_some(author_schema),
+                (author_schema != self.catalogue.local_schema_version_id).then_some(author_schema),
             )?;
             let table_id = self.physical_table_id_for_schema(author_schema, version.table())?;
             let layer = VersionLayer::for_record(&version);
@@ -897,9 +961,13 @@ where
             }
         }
         for (parent, coordinate) in &pending_parent_constraints {
-            let parent_alias = self.node_aliases.get(&parent.node).copied().ok_or(
-                Error::InvalidStoredValue("pending edge parent alias must exist"),
-            )?;
+            let parent_alias =
+                self.node_aliases
+                    .get(&parent.node)
+                    .copied()
+                    .ok_or(Error::InvalidStoredValue(
+                        "pending edge parent alias must exist",
+                    ))?;
             self.stage_pending_parent_constraint(
                 batch,
                 (tx_node_alias, tx.tx_id),
@@ -979,7 +1047,10 @@ where
     /// but a known schema must never accept a descriptor borrowed from another
     /// version: that would make the omitted trailing columns indistinguishable
     /// from an authored value and reintroduce partial-row sync semantics.
-    fn malformed_authored_version_reason<V: std::borrow::Borrow<VersionRecord>>(&self, versions: &[V]) -> Option<String> {
+    fn malformed_authored_version_reason<V: std::borrow::Borrow<VersionRecord>>(
+        &self,
+        versions: &[V],
+    ) -> Option<String> {
         for version in versions {
             let version = version.borrow();
             for (field, physical_ms) in [
@@ -1022,11 +1093,9 @@ where
                     version.table()
                 ));
             }
-            if let Some(reason) = Self::malformed_authored_branch_key_reason(
-                &schema.schema,
-                table,
-                version,
-            ) {
+            if let Some(reason) =
+                Self::malformed_authored_branch_key_reason(&schema.schema, table, version)
+            {
                 return Some(reason);
             }
         }
@@ -1120,7 +1189,8 @@ where
                     "row version provenance exceeds packed HLC physical-millisecond range",
                 ));
             }
-            if Self::malformed_authored_branch_key_reason(&schema.schema, table, version).is_some() {
+            if Self::malformed_authored_branch_key_reason(&schema.schema, table, version).is_some()
+            {
                 return Err(Error::MalformedViewUpdate(
                     "row version does not carry a valid authored branch key",
                 ));
@@ -1179,7 +1249,10 @@ where
 
         let authored_variants = versions
             .iter()
-            .map(|version| { let version = version.borrow(); (version.table().to_owned(), version.schema_version()) })
+            .map(|version| {
+                let version = version.borrow();
+                (version.table().to_owned(), version.schema_version())
+            })
             .collect::<BTreeSet<_>>();
         let mut registered_mapping = false;
         for (table, schema_version) in authored_variants {
@@ -1205,6 +1278,7 @@ where
         tx: Transaction,
         fate: Fate,
     ) -> Result<(), Error> {
+        self.validate_incoming_exclusive_evidence(&tx).await?;
         let contribution_merge = self.admit_contribution_merge_for_storage(&tx)?;
         if self.query_transaction(tx.tx_id).await?.is_some() {
             return self.apply_fate_update(tx.tx_id, fate, None, None).await;
@@ -1223,8 +1297,8 @@ where
             )?,
         );
         let applied = self.database.apply_batch(batch).await?;
-let persisted = self.database.persist_with_progress(&applied).await;
-self.database.finish_persistence(persisted)?;
+        let persisted = self.database.persist_with_progress(&applied).await;
+        self.database.finish_persistence(persisted)?;
         Ok(())
     }
 }

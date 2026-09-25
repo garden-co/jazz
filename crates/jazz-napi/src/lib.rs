@@ -81,6 +81,7 @@ use jazz::db::{
     WireTransportAdapter as CoreWireTransportAdapter, WriteHandle, block_on as core_block_on,
 };
 use jazz::groove::records::Value as CoreValue;
+use jazz::groove::storage::BoxedStorage as CorePersistentStorage;
 use jazz::groove::storage::{
     MemoryStorage as CoreMemoryStorage, OrderedKvStorage as CoreOrderedKvStorage,
     ReopenableStorage as CoreReopenableStorage,
@@ -95,7 +96,7 @@ use jazz::protocol::{
     ReadViewSpec as CoreReadViewSpec,
 };
 use jazz::schema::JazzSchema;
-use jazz::storage_codec_profile::epoch_1_storage_codec_profile;
+use jazz::storage_codec_profile::open_node_storage;
 use jazz::tools::OpenTransactionId as CoreOpenTransactionId;
 use jazz::tools::identity;
 use jazz::tools::{AppId, TransactionId};
@@ -109,9 +110,7 @@ use jazz_server::{
     JazzServer as CoreJazzServer, ServerBuilder, ServerDataDir, StorageBackend, TEST_JWT_AUDIENCE,
     TEST_JWT_ISSUER, TestJwtIssuer as JazzTestJwtIssuer, TestJwtOptions,
 };
-use jazz_storage_rocksdb::{
-    Durability as CoreRocksDbDurability, RocksDbStorage as CoreRocksDbStorage,
-};
+use jazz_storage_rocksdb::RocksDbStorageFactory;
 
 /// Exact build/ABI fingerprint for the generated native artifact.
 #[napi]
@@ -4102,25 +4101,16 @@ fn decode_public_schema(schema: &[u8]) -> napi::Result<JazzSchema> {
         .map_err(napi::Error::from_reason)
 }
 
-/// Open the one durable store owned by a public NAPI runtime.
-///
-/// This is deliberately the Jazz profile rather than the adapter's generic
-/// Groove-only convenience open: the runtime can persist every Jazz codec
-/// family in `epoch_1_storage_codec_profile`, so its root must declare all of
-/// them before any bytes are admitted.
+/// Admit or upgrade the durable root before constructing an ordinary Jazz Db.
 fn open_persistent_core_storage(
     data_path: String,
     schema: &JazzSchema,
-) -> napi::Result<CoreRocksDbStorage> {
-    let refs = schema.column_families();
-    let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-    let codec_profile = epoch_1_storage_codec_profile().map_err(napi_error)?;
-    CoreRocksDbStorage::open_with_durability_and_codec_profile(
-        data_path,
-        &refs,
-        CoreRocksDbDurability::WalNoSync,
-        &codec_profile,
-    )
+) -> napi::Result<CorePersistentStorage> {
+    core_block_on(open_node_storage(
+        &RocksDbStorageFactory::default(),
+        data_path.into(),
+        schema.column_families(),
+    ))
     .map_err(napi_error)
 }
 
@@ -5229,7 +5219,7 @@ impl JazzServer {
             {
                 server_builder = server_builder
                     .with_storage_factory(std::sync::Arc::new(
-                        jazz_storage_rocksdb::RocksDbStorageFactory,
+                        jazz_storage_rocksdb::RocksDbStorageFactory::default(),
                     ))
                     .with_storage(StorageBackend::Persistent {
                         path: data_dir.clone().into(),

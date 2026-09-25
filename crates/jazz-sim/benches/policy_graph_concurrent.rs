@@ -12,6 +12,7 @@ use jazz::db::{
 };
 use jazz::groove::records::{EnumValue, Value};
 use jazz::groove::schema::ColumnType;
+use jazz::groove::storage::BoxedStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{CurrentRow, MergeableCommit, NodeState};
 use jazz::protocol::SyncMessage;
@@ -25,7 +26,7 @@ use jazz_sim::policy_graph_fixture::{
     SeedRow, member_seed_dump_from_path,
 };
 use jazz_sim::{emit_json_line, metadata_fields};
-use jazz_storage_rocksdb::{Durability, RocksDbStorage};
+use jazz_storage_rocksdb::Durability;
 use serde_json::{Value as JsonValue, json};
 
 const PUBLIC_FIXTURE_DIR: &str = "../../packages/jazz-tools/src/testing/fixtures/policy-graph-perf";
@@ -428,7 +429,7 @@ impl BenchIdentity {
 
 struct Seeded {
     _core_dir: Rc<tempfile::TempDir>,
-    core: Db,
+    core: Db<BoxedStorage>,
     schema: JazzSchema,
     member: AuthorSubject,
     claims: BTreeMap<String, Value>,
@@ -445,7 +446,7 @@ impl Seeded {
 
 struct DbNode {
     _dir: Rc<tempfile::TempDir>,
-    db: Db,
+    db: Db<BoxedStorage>,
 }
 
 struct OpenSubscription {
@@ -643,7 +644,7 @@ fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
     }
 }
 
-fn write_seed_rows(core: &Node, schema: &JazzSchema, rows: &[SeedRow]) {
+fn write_seed_rows(core: &Node<BoxedStorage>, schema: &JazzSchema, rows: &[SeedRow]) {
     let node = core.node();
     for (idx, row) in rows.iter().enumerate() {
         let table = find_table(schema, &row.table);
@@ -1333,11 +1334,15 @@ fn open_history_complete_db_at(
     schema: JazzSchema,
     node_uuid: NodeUuid,
     author: AuthorSubject,
-) -> Db {
+) -> Db<BoxedStorage> {
     open_db_at(path, schema, node_uuid, author, true)
 }
 
-fn open_history_complete_node_at(path: &Path, schema: JazzSchema, node_uuid: NodeUuid) -> Node {
+fn open_history_complete_node_at(
+    path: &Path,
+    schema: JazzSchema,
+    node_uuid: NodeUuid,
+) -> Node<BoxedStorage> {
     let storage = open_storage_at(path, &schema);
     let state = jazz::db::block_on(NodeState::new_history_complete(node_uuid, schema, storage))
         .expect("open seed node");
@@ -1350,7 +1355,7 @@ fn open_db_at(
     node_uuid: NodeUuid,
     author: AuthorSubject,
     history_complete: bool,
-) -> Db {
+) -> Db<BoxedStorage> {
     let storage = open_storage_at(path, &schema);
     let config = DbConfig {
         schema,
@@ -1368,11 +1373,14 @@ fn open_db_at(
     }
 }
 
-fn open_storage_at(path: &Path, schema: &JazzSchema) -> RocksDbStorage {
+fn open_storage_at(path: &Path, schema: &JazzSchema) -> BoxedStorage {
     let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    RocksDbStorage::open_with_durability(path.join("rocksdb"), &refs, Durability::WalNoSync)
-        .expect("open rocksdb storage")
+    jazz::block_on(jazz::storage_codec_profile::open_node_storage(
+        &jazz_storage_rocksdb::RocksDbStorageFactory::with_durability(Durability::WalNoSync),
+        path.join("rocksdb"),
+        cfs,
+    ))
+    .expect("open rocksdb storage")
 }
 
 fn find_table<'a>(schema: &'a JazzSchema, table: &str) -> &'a TableSchema {

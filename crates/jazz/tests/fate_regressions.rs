@@ -13,7 +13,7 @@ use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::{DurabilityTier, Fate};
 
-use jazz_storage_rocksdb::RocksDbStorage;
+use groove::storage::BoxedStorage;
 
 use common::compile_schema;
 
@@ -25,12 +25,16 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_node(byte: u8) -> (tempfile::TempDir, NodeState) {
+fn open_node(byte: u8) -> (tempfile::TempDir, NodeState<BoxedStorage>) {
     let schema = schema();
     let temp_dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+    let storage = jazz::block_on(jazz::storage_codec_profile::open_node_storage(
+        &jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+        temp_dir.path().to_path_buf(),
+        cfs,
+    ))
+    .unwrap();
     let node = jazz::block_on(NodeState::new(
         NodeUuid::from_bytes([byte; 16]),
         schema,

@@ -33,5 +33,5 @@ pub async fn connect(
 
 #[cfg(feature = "rocksdb")]
 pub fn persistent_storage_factory() -> std::sync::Arc<dyn groove::storage::StorageFactory> {
-    std::sync::Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory)
+    std::sync::Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory::default())
 }

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "purpose": "Epoch-one authoritative codec-family inventory. A family is not frozen merely by appearing in source: it must name its normative boundary, exact semantic-to-byte receipt, malformed/canonical rejection receipt, and reopen or backend evidence.",
+  "purpose": "Authoritative codec-family inventory with an immutable epoch-one profile and explicit epoch-two additions. Every family names its normative boundary, exact semantic-to-byte receipt, malformed/canonical rejection receipt, and reopen or backend evidence.",
   "families": [
     {
       "id": "groove.ordered-kv.v1",
@@ -112,6 +112,32 @@
         {
           "path": "crates/jazz-storage-sqlite/tests/ordered_kv.rs",
           "anchor": "rejects_wrong_sqlite_header_before_changing_foreign_store"
+        }
+      ]
+    },
+    {
+      "id": "groove.storage-admission-receipt.v1",
+      "boundary": "durable-storage",
+      "spec": {
+        "path": "crates/groove/SPEC/2_storage_model.md",
+        "anchor": "`JSA1` is the admission-receipt byte grammar."
+      },
+      "semantic_fixture": {
+        "path": "crates/groove/src/storage/manifest.rs",
+        "anchor": "fn admission_receipt_v1_corpus_binds_exact_manifests()"
+      },
+      "rejection_receipt": {
+        "path": "crates/groove/src/storage/manifest.rs",
+        "anchor": "fn admission_receipt_v1_corpus_binds_exact_manifests()"
+      },
+      "evidence": [
+        {
+          "path": "crates/jazz-storage-rocksdb/src/lib.rs",
+          "anchor": "fn staged_admission_preserves_rows_and_atomic_receipts()"
+        },
+        {
+          "path": "crates/jazz-storage-sqlite/src/lib.rs",
+          "anchor": "fn staged_admission_preserves_rows_and_atomic_receipts()"
         }
       ]
     },
@@ -418,6 +444,7 @@
     {
       "id": "jazz.exclusive-read-evidence.v1",
       "boundary": "durable-storage",
+      "profile": "jazz-epoch-2-additions",
       "spec": {
         "path": "crates/jazz/SPEC/2_data_model_identity.md",
         "anchor": "Positions 5 through 8 hold exclusive read evidence"
@@ -433,7 +460,7 @@
       "evidence": [
         {
           "path": "crates/jazz/layers/node/src/node/tests/exclusive_read_evidence.rs",
-          "anchor": "fn exclusive_evidence_is_stored_while_pending_and_cleared_at_settlement"
+          "anchor": "fn exclusive_evidence_survives_reopen_before_and_after_settlement"
         },
         {
           "path": "crates/jazz/layers/node/src/node/tests/exclusive_read_evidence.rs",
@@ -442,6 +469,14 @@
         {
           "path": "crates/jazz/layers/db/src/db/tests/node_runtime.rs",
           "anchor": "fn exclusive_transaction_in_flight_at_restart_replays_without_false_conflict"
+        },
+        {
+          "path": "crates/jazz/layers/db/src/db/tests/mutations.rs",
+          "anchor": "fn pending_exclusive_reopen_replays_exact_evidence_and_accepts()"
+        },
+        {
+          "path": "crates/jazz/layers/db/src/db/tests/mutations.rs",
+          "anchor": "fn pending_exclusive_reopen_rejects_changed_absence()"
         },
         {
           "path": "dev/proofs/exclusive-read-evidence-storage-compatibility.md",
@@ -488,8 +523,12 @@
       },
       "evidence": [
         {
-          "path": "packages/jazz-tools/tests/browser/indexeddb-physical-epoch.test.ts",
-          "anchor": "opens a manually committed epoch-one page-v1 fixture read-only, writes current data, and reopens"
+          "path": "crates/idb-tree/src/page.rs",
+          "anchor": "page_v1_encoding_has_golden_bytes_for_every_variant"
+        },
+        {
+          "path": "packages/jazz-tools/tests/browser/indexeddb-jazz-compat.test.ts",
+          "anchor": "opens the pinned catalogue/history/branch/large-value corpus through public WasmDb"
         }
       ]
     },

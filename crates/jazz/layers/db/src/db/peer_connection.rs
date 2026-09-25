@@ -394,7 +394,7 @@ where
                         permission_subject,
                         session_claim_binding.1,
                         &versions,
-                        tx.tx_id,
+                        &tx,
                     )
                     .await?
                 } else {

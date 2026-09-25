@@ -4085,7 +4085,7 @@ fn terminal_commit_proof_keeps_same_author_sibling_claim_snapshot() {
                 alice,
                 a_state.session_claims.clone(),
                 &versions,
-                tx.tx_id,
+                &tx,
             ))
             .expect("A terminal proof remains valid after B updates the legacy cache");
         assert!(allowed, "A's editor snapshot authorizes the write");
@@ -4106,7 +4106,7 @@ fn terminal_commit_proof_keeps_same_author_sibling_claim_snapshot() {
                 alice,
                 a_state.session_claims.clone(),
                 &versions,
-                tx.tx_id,
+                &tx,
             ))
             .expect("a refreshed terminal proof uses the refreshed snapshot");
         assert!(!allowed, "the viewer snapshot denies the same write");
@@ -4125,7 +4125,7 @@ fn terminal_commit_proof_keeps_same_author_sibling_claim_snapshot() {
                 alice,
                 a_state.session_claims.clone(),
                 &versions,
-                tx.tx_id,
+                &tx,
             ))
             .expect("the next refreshed terminal proof uses the restored snapshot");
         assert!(allowed, "the restored editor snapshot authorizes it again");

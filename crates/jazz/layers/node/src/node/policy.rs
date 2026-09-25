@@ -24,30 +24,6 @@ fn version_provenance(version: &VersionRecord) -> RowProvenance {
     }
 }
 
-fn stored_version_provenance(version: &VersionRow) -> RowProvenance {
-    RowProvenance {
-        created_by: version.created_by(),
-        created_at: version.created_at().physical_ms(),
-        updated_by: version.updated_by(),
-        updated_at: version.updated_at().physical_ms(),
-    }
-}
-
-fn reconstructed_policy_subject_row(
-    table: &TableSchema,
-    row_uuid: RowUuid,
-    cells: &BTreeMap<String, Value>,
-    version: &VersionRow,
-) -> Result<CurrentRow, Error> {
-    current_row_from_cells_with_explicit_provenance(
-        table,
-        row_uuid,
-        cells,
-        stored_version_provenance(version),
-        Some((version.tx_time(), version.tx_node_alias())),
-    )
-}
-
 /// A reconstructed candidate without retained row metadata cannot prove a
 /// provenance ownership clause. Keep that case fail-closed instead of
 /// mistaking the incoming writer for the historic creator.
@@ -277,6 +253,40 @@ fn current_row_cells(table: &TableSchema, row: &CurrentRow) -> BTreeMap<String, 
         .collect()
 }
 
+/// Operation selection is reused by candidate capability dispatch and policy
+/// execution. A table's unselected INSERT clause cannot route an UPDATE.
+pub(in crate::node) struct SelectedWritePolicyVersion {
+    pub(in crate::node) schema: SchemaVersionId,
+    pub(in crate::node) table: TableSchema,
+    pub(in crate::node) row: RowUuid,
+    pub(in crate::node) cells: BTreeMap<String, Value>,
+    pub(in crate::node) provenance: RowProvenance,
+    operation: SelectedWriteOperation,
+}
+
+enum SelectedWriteOperation {
+    Insert,
+    Update(CurrentRow),
+    Delete(CurrentRow),
+    Denied,
+}
+
+impl SelectedWritePolicyVersion {
+    pub(in crate::node) fn is_insert(&self) -> bool {
+        matches!(self.operation, SelectedWriteOperation::Insert)
+    }
+
+    pub(in crate::node) fn uses_authorized_created_sources(&self) -> bool {
+        self.is_insert()
+            && self
+                .table
+                .write_policies
+                .insert_check
+                .as_ref()
+                .is_some_and(JazzQuery::uses_authorized_created_sources)
+    }
+}
+
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
@@ -403,10 +413,63 @@ where
         &mut self,
         versions: &[VersionRecord],
         author: AuthorSubject,
-        candidate_tx_id: TxId,
+        tx: &Transaction,
     ) -> Result<UnitWritePolicyDecision, Error> {
+        let mut created = if author == AuthorSubject::SYSTEM {
+            None
+        } else {
+            match self.prepare_authorized_created_evidence(tx, versions, author).await {
+                Ok(evidence) => evidence,
+                Err(Error::QueryCapability(_)) => return Ok(UnitWritePolicyDecision::Denied),
+                Err(error) => return Err(error),
+            }
+        };
         let evidence =
-            Box::pin(self.candidate_unit_evidence(versions, author, candidate_tx_id)).await?;
+            Box::pin(self.candidate_unit_evidence(versions, author, tx.tx_id)).await?;
+        let mut post_state = None;
+        let decision = match self.ground_commit_unit_write_policies(
+            versions, author, tx.tx_id, &evidence, created.as_mut(), &mut post_state,
+        ).await {
+            Ok(decision) => decision,
+            Err(Error::QueryCapability(_)) if created.is_some() => {
+                return Ok(UnitWritePolicyDecision::Denied);
+            }
+            Err(error) => return Err(error),
+        };
+        if decision != UnitWritePolicyDecision::Allowed {
+            return Ok(decision);
+        }
+        if let Some(created) = created.as_mut()
+            && evidence.rows.iter().any(CandidateEvidenceRow::replaces_committed)
+        {
+            let overlay = match post_state {
+                Some(overlay) => overlay,
+                None => {
+                    let mut tables = OverlayTables::new();
+                    evidence.rebuild_tables(&mut tables, &vec![true; evidence.rows.len()], None);
+                    TransactionWriteOverlay::from_tables(Arc::new(tables))
+                }
+            };
+            match self.revalidate_authorized_created_evidence(created, author, &overlay).await {
+                Ok(true) => {}
+                Ok(false) | Err(Error::QueryCapability(_)) => {
+                    return Ok(UnitWritePolicyDecision::Denied);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(UnitWritePolicyDecision::Allowed)
+    }
+
+    async fn ground_commit_unit_write_policies(
+        &mut self,
+        versions: &[VersionRecord],
+        author: AuthorSubject,
+        candidate_tx_id: TxId,
+        evidence: &CandidateUnitEvidence,
+        mut created: Option<&mut super::query_eval::AuthorizedCreatedEvidence>,
+        post_state: &mut Option<TransactionWriteOverlay>,
+    ) -> Result<UnitWritePolicyDecision, Error> {
         if evidence.rows.is_empty() {
             // No write can see another unit row: committed state alone
             // decides each write.
@@ -511,6 +574,9 @@ where
                     candidate_tx_id,
                     &mut reads[index],
                     &mut spent,
+                    &own_row,
+                    &grounded,
+                    created.as_deref_mut(),
                 ))
                 .await?
                 else {
@@ -587,6 +653,9 @@ where
         grounded.fill(true);
         evidence.rebuild_tables(&mut tables, &grounded, None);
         let overlay = TransactionWriteOverlay::from_tables(Arc::new(tables));
+        if created.is_some() {
+            *post_state = Some(overlay.clone());
+        }
         for index in final_pass {
             let Some(allowed) = Box::pin(self.unit_write_policy_check(
                 versions,
@@ -598,6 +667,9 @@ where
                 candidate_tx_id,
                 &mut reads[index],
                 &mut spent,
+                &own_row,
+                &grounded,
+                created.as_deref_mut(),
             ))
             .await?
             else {
@@ -684,6 +756,9 @@ where
         candidate_tx_id: TxId,
         reads: &mut BTreeSet<(SchemaVersionId, String)>,
         spent: &mut usize,
+        own_rows: &[Option<usize>],
+        grounded: &[bool],
+        created: Option<&mut super::query_eval::AuthorizedCreatedEvidence>,
     ) -> Result<Option<bool>, Error> {
         if *spent > MAX_TRANSACTION_POLICY_EVIDENCE_ROWS {
             return Ok(None);
@@ -697,15 +772,45 @@ where
         }
         #[cfg(any(test, feature = "testing"))]
         WRITE_POLICY_VERSION_EVALUATIONS.with(|count| count.set(count.get() + 1));
-        let allowed = Box::pin(self.write_policy_allows_version_record_for_view(
-            version,
-            author,
-            None,
-            Some(candidate_tx_id),
-            versions,
-            &overlay,
-        ))
-        .await?;
+        let allowed = if let Some(created) = created
+            && created.selected[index].uses_authorized_created_sources()
+        {
+            if !created.allowed[index] {
+                false
+            } else {
+                let selection = &created.selected[index];
+                let policy = selection.table.write_policies.insert_check.as_ref()
+                    .expect("selected marked insert policy");
+                self.charge_candidate_policy(
+                    selection.schema, policy, true, &mut created.budget,
+                )?;
+                let mut sources = BTreeMap::new();
+                for (source, rows) in &created.sources[index] {
+                    created.budget.charge(rows.len())?;
+                    let rows = rows.iter().filter_map(|(dependency, row)| {
+                        own_rows[*dependency].is_some_and(|own| grounded[own])
+                            .then(|| row.clone())
+                    }).collect::<Vec<_>>();
+                    if !rows.is_empty() {
+                        sources.insert(source.clone(), rows);
+                    }
+                }
+                match self.policy_query_allows_candidate_with_provenance_for_schema(
+                    selection.schema, &selection.table, policy, selection.row,
+                    &selection.cells, author, true, selection.provenance,
+                    super::query_engine::PolicyDecisionRole::Write,
+                    Some(sources), &overlay.accepted_updates(),
+                ).await {
+                    Ok(allowed) => allowed,
+                    Err(Error::QueryCapability(_)) => false,
+                    Err(error) => return Err(error),
+                }
+            }
+        } else {
+            Box::pin(self.write_policy_allows_version_record_for_view(
+                version, author, None, Some(candidate_tx_id), versions, &overlay,
+            )).await?
+        };
         *reads = std::mem::take(
             &mut *recorder
                 .lock()
@@ -919,7 +1024,21 @@ where
         if author == AuthorSubject::SYSTEM {
             return Ok(true);
         }
-        let (policy_schema_version, table, cells) = if let Some(schema) = exact_view {
+        let selected = self
+            .select_version_write_policy(version, exact_view, candidate_tx_id, candidate_versions)
+            .await?;
+        self.evaluate_selected_write_policy(&selected, author, false, None, transaction_overlay)
+            .await
+    }
+
+    pub(in crate::node) async fn select_version_write_policy(
+        &mut self,
+        version: &VersionRecord,
+        exact_view: Option<&JazzSchema>,
+        candidate_tx_id: Option<TxId>,
+        candidate_versions: &[VersionRecord],
+    ) -> Result<SelectedWritePolicyVersion, Error> {
+        let (schema, table, cells) = if let Some(schema) = exact_view {
             let table = schema
                 .tables
                 .iter()
@@ -940,145 +1059,167 @@ where
         } else {
             self.policy_projection_for_version_record(version)?
         };
-        // Every user operation requires an explicit grant, including on a
-        // table with no policies at all. SYSTEM is the explicit bypass above.
-        if version.deletion() == Some(DeletionEvent::Deleted) {
-            let Some(policy) = table.write_policies.delete_using.clone() else {
-                return Ok(false);
-            };
-            let current = match self
-                .policy_delete_subject_row(
-                    policy_schema_version,
-                    &table,
-                    version,
-                    candidate_tx_id,
-                    candidate_versions,
-                )
-                .await?
-            {
-                Some(current) => current,
-                None => return Ok(false),
-            };
-            let current_cells = table
-                .columns
-                .iter()
-                .filter_map(|column| {
-                    current
-                        .cell(&table, &column.name)
-                        .map(|value| (column.name.clone(), value))
-                })
-                .collect();
-            let provenance = current.provenance()?.unwrap_or_else(unresolved_provenance);
-            return self
-                .write_policy_query_allows_candidate_over_transaction(
-                    policy_schema_version,
-                    &table,
-                    &policy,
-                    current.row_uuid(),
-                    &current_cells,
-                    author,
-                    false,
-                    provenance,
-                    &transaction_overlay.committed_view(),
-                )
-                .await;
-        }
-        let is_update = self
-            .policy_previous_content_subject_row(
-                policy_schema_version,
-                &table,
-                version,
-                candidate_tx_id,
-            )
-            .await?
-            .is_some();
-        if is_update {
-            let Some(previous) = self
-                .policy_previous_content_subject_row(
-                    policy_schema_version,
-                    &table,
-                    version,
-                    candidate_tx_id,
-                )
-                .await?
-            else {
-                return Ok(false);
-            };
-            let previous_cells = table
-                .columns
-                .iter()
-                .filter_map(|column| {
-                    previous
-                        .cell(&table, &column.name)
-                        .map(|value| (column.name.clone(), value))
-                })
-                .collect::<BTreeMap<_, _>>();
-            let previous_provenance = previous.provenance()?.unwrap_or_else(unresolved_provenance);
-            if let Some(policy) = table.write_policies.update_using.clone() {
-                if !self
-                    .write_policy_query_allows_candidate_over_transaction(
-                        policy_schema_version,
+        let operation = if version.deletion() == Some(DeletionEvent::Deleted) {
+            if table.write_policies.delete_using.is_none() {
+                SelectedWriteOperation::Denied
+            } else {
+                match self
+                    .policy_delete_subject_row(
+                        schema,
                         &table,
-                        &policy,
-                        previous.row_uuid(),
-                        &previous_cells,
-                        author,
-                        false,
-                        previous_provenance,
-                        &transaction_overlay.committed_view(),
+                        version,
+                        candidate_tx_id,
+                        candidate_versions,
                     )
                     .await?
                 {
-                    return Ok(false);
+                    Some(current) => SelectedWriteOperation::Delete(current),
+                    None => SelectedWriteOperation::Denied,
                 }
             }
-            if table.write_policies.update_using.is_none()
-                && table.write_policies.update_check.is_none()
+        } else {
+            match self
+                .policy_previous_content_subject_row(schema, &table, version, candidate_tx_id)
+                .await?
             {
-                return Ok(false);
+                Some(previous) => SelectedWriteOperation::Update(previous),
+                None => SelectedWriteOperation::Insert,
             }
-            let Some(policy) = table.write_policies.update_check.clone() else {
-                return Ok(true);
-            };
-            let mut effective_cells = previous_cells;
-            effective_cells.extend(cells.clone());
-            let update_check_provenance = RowProvenance {
-                created_by: previous_provenance.created_by,
-                created_at: previous_provenance.created_at,
-                updated_by: version.updated_by(),
-                updated_at: version.updated_at_ms(),
-            };
-            // WITH CHECK judges the row the transaction leaves behind, so its
-            // evidence includes the transaction's other writes (INV-RLS-9).
-            return self
-                .write_policy_query_allows_candidate_over_transaction(
-                    policy_schema_version,
-                    &table,
-                    &policy,
-                    version.row_uuid(),
-                    &effective_cells,
+        };
+        Ok(SelectedWritePolicyVersion {
+            schema,
+            table,
+            cells,
+            operation,
+            row: version.row_uuid(),
+            provenance: version_provenance(version),
+        })
+    }
+
+    pub(in crate::node) async fn evaluate_selected_write_policy(
+        &mut self,
+        selected: &SelectedWritePolicyVersion,
+        author: AuthorSubject,
+        global_only: bool,
+        mut budget: Option<&mut super::query_eval::CandidateProofBudget>,
+        transaction_overlay: &TransactionWriteOverlay,
+    ) -> Result<bool, Error> {
+        if author == AuthorSubject::SYSTEM {
+            return Ok(true);
+        }
+        let table = &selected.table;
+        match &selected.operation {
+            SelectedWriteOperation::Denied => Ok(false),
+            SelectedWriteOperation::Insert => {
+                let Some(policy) = &table.write_policies.insert_check else {
+                    return Ok(false);
+                };
+                self.write_policy_query_allows_candidate_in_proof_scope(
+                    selected.schema,
+                    table,
+                    policy,
+                    selected.row,
+                    &selected.cells,
                     author,
-                    false,
-                    update_check_provenance,
+                    true,
+                    selected.provenance,
+                    global_only,
+                    budget,
                     transaction_overlay,
                 )
-                .await;
+                .await
+            }
+            SelectedWriteOperation::Delete(current) => {
+                let policy = table
+                    .write_policies
+                    .delete_using
+                    .as_ref()
+                    .expect("selected delete policy");
+                let cells = table
+                    .columns
+                    .iter()
+                    .filter_map(|column| {
+                        current
+                            .cell(table, &column.name)
+                            .map(|value| (column.name.clone(), value))
+                    })
+                    .collect();
+                self.write_policy_query_allows_candidate_in_proof_scope(
+                    selected.schema,
+                    table,
+                    policy,
+                    current.row_uuid(),
+                    &cells,
+                    author,
+                    false,
+                    current.provenance()?.unwrap_or_else(unresolved_provenance),
+                    global_only,
+                    budget,
+                    &transaction_overlay.committed_view(),
+                )
+                .await
+            }
+            SelectedWriteOperation::Update(previous) => {
+                let mut cells = table
+                    .columns
+                    .iter()
+                    .filter_map(|column| {
+                        previous
+                            .cell(table, &column.name)
+                            .map(|value| (column.name.clone(), value))
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                let provenance = previous.provenance()?.unwrap_or_else(unresolved_provenance);
+                if let Some(policy) = &table.write_policies.update_using {
+                    if !self
+                        .write_policy_query_allows_candidate_in_proof_scope(
+                            selected.schema,
+                            table,
+                            policy,
+                            previous.row_uuid(),
+                            &cells,
+                            author,
+                            false,
+                            provenance,
+                            global_only,
+                            budget.as_deref_mut(),
+                            &transaction_overlay.committed_view(),
+                        )
+                        .await?
+                    {
+                        return Ok(false);
+                    }
+                }
+                if table.write_policies.update_using.is_none()
+                    && table.write_policies.update_check.is_none()
+                {
+                    return Ok(false);
+                }
+                let Some(policy) = &table.write_policies.update_check else {
+                    return Ok(true);
+                };
+                cells.extend(selected.cells.clone());
+                self.write_policy_query_allows_candidate_in_proof_scope(
+                    selected.schema,
+                    table,
+                    policy,
+                    selected.row,
+                    &cells,
+                    author,
+                    false,
+                    RowProvenance {
+                        created_by: provenance.created_by,
+                        created_at: provenance.created_at,
+                        updated_by: selected.provenance.updated_by,
+                        updated_at: selected.provenance.updated_at,
+                    },
+                    global_only,
+                    budget,
+                    transaction_overlay,
+                )
+                .await
+            }
         }
-        let Some(policy) = table.write_policies.insert_check.clone() else {
-            return Ok(false);
-        };
-        self.write_policy_query_allows_candidate_over_transaction(
-            policy_schema_version,
-            &table,
-            &policy,
-            version.row_uuid(),
-            &cells,
-            author,
-            true,
-            version_provenance(version),
-            transaction_overlay,
-        )
-        .await
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -1304,7 +1445,7 @@ where
         if projected_table.name != table.name {
             return Ok(None);
         }
-        reconstructed_policy_subject_row(table, row_uuid, &cells, &version).map(Some)
+        current_row_from_materialized_cells(table, &version, &cells).map(Some)
     }
 
     fn policy_projection_for_version_row(
@@ -1320,7 +1461,7 @@ where
         self.translate_policy_cells(source_schema, version.table(), cells)
     }
 
-    fn policy_projection_for_version_record(
+    pub(super) fn policy_projection_for_version_record(
         &mut self,
         version: &VersionRecord,
     ) -> Result<(SchemaVersionId, TableSchema, BTreeMap<String, Value>), Error> {
@@ -1548,13 +1689,8 @@ where
                 if projected_table.name != table.name {
                     continue;
                 }
-                return reconstructed_policy_subject_row(
-                    table,
-                    version.row_uuid(),
-                    &cells,
-                    &parent_version,
-                )
-                .map(Some);
+                return current_row_from_materialized_cells(table, &parent_version, &cells)
+                    .map(Some);
             }
         }
 
@@ -1583,13 +1719,8 @@ where
             let (_policy_schema_version, projected_table, cells) =
                 self.policy_projection_for_version_row(&current_version)?;
             if projected_table.name == table.name {
-                return reconstructed_policy_subject_row(
-                    table,
-                    version.row_uuid(),
-                    &cells,
-                    &current_version,
-                )
-                .map(Some);
+                return current_row_from_materialized_cells(table, &current_version, &cells)
+                    .map(Some);
             }
         }
 
@@ -1606,13 +1737,8 @@ where
                 let (_policy_schema_version, projected_table, cells) =
                     self.policy_projection_for_version_row(&current_version)?;
                 if projected_table.name == table.name {
-                    return reconstructed_policy_subject_row(
-                        table,
-                        version.row_uuid(),
-                        &cells,
-                        &current_version,
-                    )
-                    .map(Some);
+                    return current_row_from_materialized_cells(table, &current_version, &cells)
+                        .map(Some);
                 }
             }
         }
@@ -1636,7 +1762,10 @@ where
     }
 }
 
-fn policy_tables_are_directly_compatible(source: &TableSchema, target: &TableSchema) -> bool {
+pub(in crate::node) fn policy_tables_are_directly_compatible(
+    source: &TableSchema,
+    target: &TableSchema,
+) -> bool {
     source.name == target.name
         && source.columns.len() == target.columns.len()
         && source
