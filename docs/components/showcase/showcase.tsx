@@ -236,6 +236,8 @@ const suites: [prefix: string, label: string][] = [
   ["examples/todo-client-localfirst-ts/", "Todos"],
   ["examples/big-label/", "BigLabel"],
   ["examples/permissioned-resources/", "Permissioned resources"],
+  ["examples/band-chat/", "BandChat"],
+  ["examples/world-tour/", "World Tour"],
 ];
 const otherSuite = "Other benchmarks";
 

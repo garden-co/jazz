@@ -133,9 +133,23 @@ export const heroExamples: HeroExample[] = [
     ],
     video: null,
     plannedVideo: "Walkthrough capture is planned: two bandmates in a private room.",
-    metrics: [],
-    plannedMetrics:
-      "Benchmarked on CodSpeed in simulation mode (instruction counts), which this page doesn't show yet.",
+    metrics: [
+      {
+        benchmark: "band_chat_timeline_second_page[4096]",
+        label: "Scroll back in a room",
+        interpret: (s) =>
+          `Loading the second page of a busy room (25 messages, newest first) takes ${formatTime(s)}, with 4,096 messages across 256 rooms. Today this grows with the whole message table, not just the page (#1962).`,
+      },
+      {
+        benchmark: "band_chat_caught_up_fast_resume[10000]",
+        label: "Reconnect when up to date",
+        interpret: (s, lookup) => {
+          const small = lookup("band_chat_caught_up_fast_resume[100]");
+          const scale = small ? ` With 100 messages it takes ${formatTime(small)}.` : "";
+          return `A client that has already seen all 10,000 messages reconnects in ${formatTime(s)}: the server confirms it is current without resending any message.${scale}`;
+        },
+      },
+    ],
   },
   {
     id: "world-tour",
@@ -151,9 +165,14 @@ export const heroExamples: HeroExample[] = [
     video: null,
     plannedVideo:
       "Walkthrough capture is planned: planning a tour stop and checking the public calendar.",
-    metrics: [],
-    plannedMetrics:
-      "Benchmarked on CodSpeed in simulation mode (instruction counts), which this page doesn't show yet.",
+    metrics: [
+      {
+        benchmark: "world_tour_public_calendar_window[4096]",
+        label: "Open the public calendar",
+        interpret: (s) =>
+          `A fan's next three weeks (confirmed stops only, each with its venue) load in ${formatTime(s)} from a tour of 4,096 stops. Today this grows with the whole tour, not just the window (#1962).`,
+      },
+    ],
   },
   {
     id: "wequencer",
@@ -316,6 +335,12 @@ export const heroExamples: HeroExample[] = [
     video: null,
     plannedVideo: "Walkthrough capture is planned: sign-in, team setup and a bulk release import.",
     metrics: [
+      {
+        benchmark: "big_label_label_load[4096]",
+        label: "Open a label's releases",
+        interpret: (s) =>
+          `A label page loads all 512 of its releases, newest first, in ${formatTime(s)}, out of 4,096 releases across 8 labels.`,
+      },
       {
         benchmark: "ingest_walltime_10k",
         label: "Import 10,000 releases",
