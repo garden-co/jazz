@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::node::query_engine::RequestedSourceExpr;
-use groove::db::SubscriptionLifetime;
+use groove::db::{RootIndirectValues, SubscriptionLifetime};
 
 /// A first-result consumer owns exactly its subscription and, when needed,
 /// its prepared shape. Dropping a suspended read cannot keep a binding alive
@@ -1319,6 +1319,7 @@ where
             prepared_claim_binding_mode,
             progress_waker,
             SubscriptionLifetime::Retained,
+            RootIndirectValues::Materialize,
         )
         .await
         .map(|(subscription, _)| subscription)
@@ -1334,6 +1335,7 @@ where
         prepared_claim_binding_mode: PreparedClaimBindingMode,
         progress_waker: Option<&std::task::Waker>,
         lifetime: SubscriptionLifetime,
+        root_indirect_values: RootIndirectValues,
     ) -> Result<(MultisinkSubscription, Option<PreparedShapeId>), Error> {
         // Subscription opening performs one bounded IVM poll.  When that poll
         // finds cold storage, retain the node owner's wake route so the
@@ -1344,7 +1346,12 @@ where
             let sinks = lowered_program_sinks(&program);
             return self
                 .database
-                .subscribe_with_lifetime(sinks, lifetime, progress_waker)
+                .subscribe_with_lifetime_and_root_values(
+                    sinks,
+                    lifetime,
+                    root_indirect_values,
+                    progress_waker,
+                )
                 .map(|subscription| (subscription, None))
                 .map_err(|error| {
                     if crate::debug_env::covered_input_trace() {
@@ -1411,7 +1418,13 @@ where
         };
         let subscription = owner
             .database
-            .bind_shape_with_lifetime(prepared.id(), &values, lifetime, progress_waker)
+            .bind_shape_with_lifetime_and_root_values(
+                prepared.id(),
+                &values,
+                lifetime,
+                root_indirect_values,
+                progress_waker,
+            )
             .await
             .map_err(|error| {
                 if crate::debug_env::covered_input_trace() {
@@ -1423,10 +1436,14 @@ where
         Ok((subscription, Some(prepared.id())))
     }
 
+    /// `root_indirect_values` decides which root fields the result rebuilds
+    /// into logical large values. Callers that keep a field physical must
+    /// drop it, or hydrate it, before rows cross a public boundary.
     pub(super) async fn hydrate_lowered_program_once(
         &mut self,
         mut program: QueryProgram,
         binding: &Binding,
+        root_indirect_values: RootIndirectValues,
     ) -> Result<RecordDeltas, Error> {
         // Hydrate through the same live installation as a retained consumer.
         // The native CurrentRow boundary still consumes the compiler's
@@ -1457,6 +1474,7 @@ where
                 PreparedClaimBindingMode::Strict,
                 None,
                 SubscriptionLifetime::FirstResult,
+                root_indirect_values,
             )
             .await?;
         let mut owner = HydrationSubscription {

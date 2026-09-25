@@ -584,6 +584,27 @@ impl Database {
         I: IntoIterator<Item = (K, GraphBuilder)>,
         K: Into<String>,
     {
+        self.subscribe_with_lifetime_and_root_values(
+            sinks,
+            lifetime,
+            RootIndirectValues::Materialize,
+            progress_waker,
+        )
+    }
+
+    /// Like [`Self::subscribe_with_lifetime`], choosing how the initial
+    /// snapshot presents indirect root values; see [`RootIndirectValues`].
+    pub fn subscribe_with_lifetime_and_root_values<I, K>(
+        &mut self,
+        sinks: I,
+        lifetime: SubscriptionLifetime,
+        root_indirect_values: RootIndirectValues,
+        progress_waker: Option<&std::task::Waker>,
+    ) -> Result<MultisinkSubscription, Error>
+    where
+        I: IntoIterator<Item = (K, GraphBuilder)>,
+        K: Into<String>,
+    {
         self.ensure_not_poisoned()?;
         let overlay = Rc::new(StagedWriteOverlay::new_owned(
             Rc::clone(&self.storage),
@@ -594,7 +615,13 @@ impl Database {
             Rc::clone(&self.storage_read_metrics),
         ));
         self.ivm_runtime
-            .subscribe_with_lifetime(sinks, &storage, lifetime, progress_waker)
+            .subscribe_with_lifetime(
+                sinks,
+                &storage,
+                lifetime,
+                root_indirect_values,
+                progress_waker,
+            )
             .map_err(Error::IvmRuntime)
     }
 
@@ -999,8 +1026,33 @@ impl Database {
         shape: PreparedShapeId,
         binding_values: &[Value],
     ) -> Result<MultisinkSubscription, Error> {
+        self.bind_shape_with_root_values(shape, binding_values, RootIndirectValues::Materialize)
+            .await
+    }
+
+    /// Like [`Self::bind_shape`], choosing how the initial snapshot presents
+    /// indirect root values; see [`RootIndirectValues`].
+    pub async fn bind_shape_with_root_values(
+        &mut self,
+        shape: PreparedShapeId,
+        binding_values: &[Value],
+        root_indirect_values: RootIndirectValues,
+    ) -> Result<MultisinkSubscription, Error> {
+        // Physical root values are only valid for a first result: later
+        // retained updates arrive materialized and could not retract them.
+        let lifetime = if root_indirect_values == RootIndirectValues::Materialize {
+            SubscriptionLifetime::Retained
+        } else {
+            SubscriptionLifetime::FirstResult
+        };
         let subscription = self
-            .bind_shape_with_waker(shape, binding_values, None)
+            .bind_shape_with_lifetime_and_root_values(
+                shape,
+                binding_values,
+                lifetime,
+                root_indirect_values,
+                None,
+            )
             .await?;
         self.drive_resident_progress_now()?;
         Ok(subscription)
@@ -1032,6 +1084,26 @@ impl Database {
         lifetime: SubscriptionLifetime,
         progress_waker: Option<&std::task::Waker>,
     ) -> Result<MultisinkSubscription, Error> {
+        self.bind_shape_with_lifetime_and_root_values(
+            shape,
+            binding_values,
+            lifetime,
+            RootIndirectValues::Materialize,
+            progress_waker,
+        )
+        .await
+    }
+
+    /// Like [`Self::bind_shape_with_lifetime`], choosing how the initial
+    /// snapshot presents indirect root values; see [`RootIndirectValues`].
+    pub async fn bind_shape_with_lifetime_and_root_values(
+        &mut self,
+        shape: PreparedShapeId,
+        binding_values: &[Value],
+        lifetime: SubscriptionLifetime,
+        root_indirect_values: RootIndirectValues,
+        progress_waker: Option<&std::task::Waker>,
+    ) -> Result<MultisinkSubscription, Error> {
         self.ensure_not_poisoned()?;
         let overlay = Rc::new(StagedWriteOverlay::new_owned(
             Rc::clone(&self.storage),
@@ -1055,6 +1127,7 @@ impl Database {
                 binding_values,
                 &storage,
                 lifetime,
+                root_indirect_values,
                 progress_waker,
                 live,
             )
@@ -1138,11 +1211,22 @@ impl Database {
     /// # }).unwrap();
     /// ```
     pub async fn query_graph(&mut self, graph: GraphBuilder) -> Result<RecordDeltas, Error> {
+        self.query_graph_with_root_values(graph, RootIndirectValues::Materialize)
+            .await
+    }
+
+    /// Like [`Self::query_graph`], choosing how the result presents indirect
+    /// root values; see [`RootIndirectValues`].
+    pub async fn query_graph_with_root_values(
+        &mut self,
+        graph: GraphBuilder,
+        root_indirect_values: RootIndirectValues,
+    ) -> Result<RecordDeltas, Error> {
         self.ensure_not_poisoned()?;
         let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
         let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
         self.ivm_runtime
-            .query_snapshot(graph, &storage)
+            .query_snapshot_with_root_values(graph, &storage, root_indirect_values)
             .await
             .map_err(Error::IvmRuntime)
     }

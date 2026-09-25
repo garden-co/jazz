@@ -63,6 +63,8 @@ struct EvaluationSession<'a> {
     requests: EvaluationRequests<'a>,
     evaluation_inputs: EvaluationInputs,
     work_queue: EvaluationWorkQueue,
+    /// How root outputs present indirect values to the caller.
+    root_indirect_values: RootIndirectValues,
     /// Nodes that stay owned by the live runtime rather than this session.
     /// A binding attached to an already-maintained prepared shape brings the
     /// shared nodes up to date through an ordinary binding tick, then hydrates
@@ -1699,6 +1701,7 @@ impl<'a> EvaluationSession<'a> {
             requests,
             evaluation_inputs: EvaluationInputs::default(),
             work_queue,
+            root_indirect_values: RootIndirectValues::Materialize,
             borrowed: HashSet::default(),
         })
     }
@@ -1805,12 +1808,16 @@ impl<'a> EvaluationSession<'a> {
                 match result {
                     Ok(records) => {
                         if self.work_queue.is_root(node) {
+                            let materialized_fields = self
+                                .root_indirect_values
+                                .materialized_field_indices(&records.descriptor);
                             let mut materialized = Vec::with_capacity(records.deltas.len());
                             let mut blocked = false;
                             for delta in &records.deltas {
                                 match crate::large_values::materialize_record_borrowed_attempt(
                                     &records.descriptor,
                                     delta.raw(),
+                                    materialized_fields.as_deref(),
                                     &mut self.evaluation_inputs,
                                 ) {
                                     Ok(record) => materialized.push(RecordDelta {
@@ -2017,6 +2024,7 @@ impl IvmRuntime {
         binding_frontier_advance: Option<&str>,
         initial: Arc<Mutex<Option<MultisinkDeltas>>>,
         lifetime: SubscriptionLifetime,
+        root_indirect_values: RootIndirectValues,
         borrowed: HashSet<NodeId>,
     ) -> Result<(), IvmRuntimeError> {
         let mut seen_roots = HashSet::new();
@@ -2031,6 +2039,7 @@ impl IvmRuntime {
                 Ok::<_, IvmRuntimeError>(found || self.output_depends_on_aggregate(root)?)
             })?;
         let mut session = EvaluationSession::hydration(self, roots, storage)?;
+        session.root_indirect_values = root_indirect_values;
         if !borrowed.is_empty() {
             // The attach tick advanced every shared node. The subscription's
             // own nodes may be resident from an earlier binding of the same
@@ -3227,23 +3236,36 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
-        self.hydration_roots([output_node], storage, mode)
-            .await?
-            .remove(&output_node)
-            .ok_or(IvmRuntimeError::GraphNodeNotFound(output_node))
+        self.hydration_snapshot_with_root_values(
+            output_node,
+            storage,
+            mode,
+            RootIndirectValues::Materialize,
+        )
+        .await
     }
 
-    async fn hydration_roots<S>(
+    pub(super) async fn hydration_snapshot_with_root_values<S>(
         &mut self,
-        roots: impl IntoIterator<Item = NodeId>,
+        output_node: NodeId,
         storage: &S,
         mode: HydrationMode,
-    ) -> Result<HashMap<NodeId, RecordDeltas>, IvmRuntimeError>
+        root_indirect_values: RootIndirectValues,
+    ) -> Result<RecordDeltas, IvmRuntimeError>
     where
         S: OrderedKvStorage,
     {
-        self.hydration_roots_owned(roots, OwnedStorage::new(Rc::new(storage)), mode, None, None)
-            .await
+        self.hydration_roots_owned(
+            [output_node],
+            OwnedStorage::new(Rc::new(storage)),
+            mode,
+            None,
+            None,
+            root_indirect_values,
+        )
+        .await?
+        .remove(&output_node)
+        .ok_or(IvmRuntimeError::GraphNodeNotFound(output_node))
     }
 
     async fn hydration_roots_owned<'a>(
@@ -3253,6 +3275,7 @@ impl IvmRuntime {
         mode: HydrationMode,
         binding_snapshots: Option<Arc<BindingSnapshots>>,
         binding_frontier_advance: Option<&str>,
+        root_indirect_values: RootIndirectValues,
     ) -> Result<HashMap<NodeId, RecordDeltas>, IvmRuntimeError> {
         let roots = roots.into_iter().collect::<VecDeque<_>>();
         let binding_snapshots = binding_snapshots.unwrap_or_else(|| self.binding_snapshot_deltas());
@@ -3265,6 +3288,7 @@ impl IvmRuntime {
                 Ok::<_, IvmRuntimeError>(found || self.output_depends_on_aggregate(root)?)
             })?;
         let mut session = EvaluationSession::hydration(self, roots, owned_storage)?;
+        session.root_indirect_values = root_indirect_values;
         if let Some(shape) = binding_frontier_advance {
             session.advance_binding_input(&self.graph, shape);
         }
@@ -3323,6 +3347,7 @@ impl IvmRuntime {
                 mode,
                 binding_snapshots,
                 binding_frontier_advance,
+                RootIndirectValues::Materialize,
             )
             .await?;
         subscription_snapshot_from_hydrated(&self.graph, outputs, &hydrated, &HashMap::default())
