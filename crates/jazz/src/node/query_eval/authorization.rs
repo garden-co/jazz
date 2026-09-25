@@ -1470,6 +1470,22 @@ where
             &self.table_in_schema(table_name, policy_schema_version)?,
             operation,
         );
+        // A row-targeted action only needs the target row and the policy
+        // dependencies reachable from it, not every row the policy matches
+        // (#3468). Seeding the root keeps support proportional to one row.
+        let target_row = match action {
+            PermissionAdviceAction::Read { row, .. }
+            | PermissionAdviceAction::Update { row, .. }
+            | PermissionAdviceAction::Delete { row, .. } => Some(*row),
+            PermissionAdviceAction::Insert { .. } => None,
+        };
+        let policies = match target_row {
+            Some(row) => policies
+                .into_iter()
+                .map(|policy| policy.filter(eq(col("id"), lit(Value::Uuid(row.0)))))
+                .collect(),
+            None => policies,
+        };
         let claim_values = permission_scope_claim_values(writer, claims);
         // Authorization support is authority-current: historic/branch views
         // and weaker durability tiers cannot vouch for the authoritative edge.

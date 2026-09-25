@@ -1867,8 +1867,12 @@ fn permission_advice_uses_authenticated_link_identity_without_mutating() {
     assert_eq!(server.read(&Query::from("todos")).unwrap().len(), 1);
 }
 
+/// Internal: the hydration count is not observable through public advice.
+/// Each advice proof is seeded with its target row (#3468), so distinct rows
+/// hydrate separate one-row scopes, while asking about the same row again
+/// before any write reuses its cached scope.
 #[test]
-fn distinct_advice_actions_with_one_compiled_scope_hydrate_once() {
+fn advice_scopes_hydrate_once_per_row_and_reuse_until_a_write() {
     let schema = owner_read_schema();
     let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
     let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
@@ -1913,6 +1917,15 @@ fn distinct_advice_actions_with_one_compiled_scope_hydrate_once() {
     client.tick().unwrap();
     assert_eq!(block_on(second), PermissionAdvice::Denied);
 
+    let again = client.request_permission_advice(PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: allowed,
+    });
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(block_on(again), PermissionAdvice::Allowed);
+
     let hydration_count = match &subscriber.borrow().link {
         ConnectionLink::Subscriber(SubscriberConnectionState {
             authority_scope_hydration_count,
@@ -1921,8 +1934,65 @@ fn distinct_advice_actions_with_one_compiled_scope_hydrate_once() {
         ConnectionLink::Upstream(_) => unreachable!("server link is a subscriber"),
     };
     assert_eq!(
-        hydration_count, 1,
-        "candidate rows must share the compiled authority support hydration"
+        hydration_count, 2,
+        "each row hydrates its own one-row scope once; a repeat ask reuses it"
+    );
+}
+
+/// Internal: advice answers are identical whether the proof reads one row or
+/// the whole table, so only the storage counter shows the difference. After
+/// a write invalidates the cached scope, the next ask must re-prove only its
+/// own row (#3468), not rehydrate every row the policy could match.
+#[test]
+fn advice_after_a_write_reads_only_the_target_row() {
+    let schema = owner_read_schema();
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let mut target = None;
+    for n in 0..80 {
+        let row = server
+            .insert("todos", cells(&format!("owned {n}"), false, alice))
+            .unwrap()
+            .row_uuid();
+        if n == 40 {
+            target = Some(row);
+        }
+    }
+    let target = target.unwrap();
+    let client = open_db(0xa1, alice, &schema);
+    client.set_test_provider_claims(alice, test_provider_claims(alice));
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        alice,
+        NodeUuid::from_bytes([0xa1; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, alice);
+    let ask = |row| {
+        let advice = client.request_permission_advice(PermissionAdviceAction::Read {
+            table: "todos".to_owned(),
+            row,
+        });
+        client.tick().unwrap();
+        server.tick().unwrap();
+        client.tick().unwrap();
+        block_on(advice)
+    };
+    assert_eq!(ask(target), PermissionAdvice::Allowed);
+
+    server
+        .insert("todos", cells("invalidates the cached scope", false, alice))
+        .unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    server.server.node.borrow().reset_storage_read_metrics();
+    assert_eq!(ask(target), PermissionAdvice::Allowed);
+    let metrics = server.server.node.borrow().take_storage_read_metrics();
+    assert!(
+        metrics.total.reads <= 12,
+        "advice after a write must re-prove one row, not all 81: {metrics:?}"
     );
 }
 
