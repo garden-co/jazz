@@ -1462,39 +1462,68 @@ impl TickEvaluator<'_> {
     }
 
     fn node_depends_on_aggregate(&mut self, node: NodeId) -> Result<bool, IvmRuntimeError> {
-        if let Some(value) = self
-            .node_meta
-            .get(&node)
-            .and_then(|meta| meta.has_hydration_state_ancestor)
-        {
+        let cached = |meta: &HashMap<NodeId, NodeRuntimeMeta>, node: NodeId| {
+            meta.get(&node)
+                .and_then(|meta| meta.has_hydration_state_ancestor)
+        };
+        if let Some(value) = cached(self.node_meta, node) {
             return Ok(value);
         }
         // Node descriptors and input edges are immutable while installed. The
         // metadata is retired with the node; consumer attachment and runtime
         // state cleanup do not change this ancestor classification.
-        let mut ancestors = HashSet::new();
-        self.graph.mark_ancestors(node, &mut ancestors);
-        let mut depends = false;
-        for ancestor in ancestors {
+        //
+        // A node depends on an aggregate when it is one or any input does.
+        // Memoizing every visited node keeps a whole graph's classification
+        // linear; walking each node's full ancestor set separately was
+        // quadratic in graph depth across a subscription's nodes.
+        let mut pending = vec![(node, false)];
+        while let Some((current, expanded)) = pending.pop() {
+            if cached(self.node_meta, current).is_some() {
+                continue;
+            }
             let graph_node = self
                 .graph
-                .node(ancestor)
-                .ok_or(IvmRuntimeError::GraphNodeNotFound(ancestor))?;
-            if matches!(
-                graph_node.descriptor.operator,
-                OpType::Aggregate(_)
-                    | OpType::ArgMinBy(_)
-                    | OpType::ArgMaxBy(_)
-                    | OpType::Arrange(_)
-            ) {
-                depends = true;
-                break;
-            }
+                .node(current)
+                .ok_or(IvmRuntimeError::GraphNodeNotFound(current))?;
+            let depends = if holds_hydration_state(&graph_node.descriptor.operator) {
+                true
+            } else if expanded {
+                graph_node
+                    .descriptor
+                    .inputs
+                    .iter()
+                    .any(|input| cached(self.node_meta, *input) == Some(true))
+            } else {
+                pending.push((current, true));
+                pending.extend(
+                    graph_node
+                        .descriptor
+                        .inputs
+                        .iter()
+                        .filter(|input| cached(self.node_meta, **input).is_none())
+                        .map(|input| (*input, false)),
+                );
+                continue;
+            };
+            self.node_meta
+                .entry(current)
+                .or_default()
+                .has_hydration_state_ancestor = Some(depends);
         }
-        self.node_meta
-            .entry(node)
-            .or_default()
-            .has_hydration_state_ancestor = Some(depends);
+        let depends = cached(self.node_meta, node).expect("classified above");
+        // Tests check the memoized recursion against the full ancestor walk.
+        #[cfg(test)]
+        {
+            let mut ancestors = HashSet::new();
+            self.graph.mark_ancestors(node, &mut ancestors);
+            let expected = ancestors.iter().any(|ancestor| {
+                self.graph
+                    .node(*ancestor)
+                    .is_some_and(|node| holds_hydration_state(&node.descriptor.operator))
+            });
+            assert_eq!(depends, expected, "aggregate ancestry of {node:?}");
+        }
         Ok(depends)
     }
 
@@ -3635,4 +3664,13 @@ async fn cooperative_operator_yield() {
         }
     })
     .await
+}
+
+/// Operators whose hydration rebuilds retained state that a cached record
+/// batch downstream cannot vouch for.
+fn holds_hydration_state(operator: &OpType) -> bool {
+    matches!(
+        operator,
+        OpType::Aggregate(_) | OpType::ArgMinBy(_) | OpType::ArgMaxBy(_) | OpType::Arrange(_)
+    )
 }
