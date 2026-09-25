@@ -82,6 +82,27 @@ includes stacked #3489, whose unbounded path is not exercised by these
 `c77fefb0a9c1130515e7914ab7c2d3151dfc31cf22ced08f37d73ea1d4b430f8`.
 The six `main-f629fa7-` receipts contain row counts, bytes, and phases.
 
+On main `c5e405fa0`, after the merged projection, subscription root-position,
+SQLite, wire-encoding, and transaction-read changes, the stack was rebased
+without conflicts. A new matched native `perf` A/B used three alternating
+control/candidate runs. Both arms requested `resultOnly: true`; only the
+authority eligibility check was disabled in the control:
+
+| 39 pages, 879 rows | Run 1 | Run 2 | Run 3 | Median |
+| ------------------ | ----: | ----: | ----: | -----: |
+| Receiver coverage  | 1,562 | 1,609 | 1,543 |  1,562 |
+| Authority result   |   552 |   487 |   482 |    487 |
+
+The median gain is **3.21×**. All row and binding-byte oracle assertions pass;
+each run reports 368,989 total encoded result bytes. Candidate/control binary
+SHA-256 values are
+`c8bd9c2b95689004635504d2f20fc7f27f4da5974fa56dc14546db7242f31267` /
+`586300a66164044d7857487f168d165e9168f00ff19624e2431078b51d0e8093`.
+The six `main-c5e405f-` receipts record rows, bytes, and phase timings. The
+candidate binary includes stacked #3489, whose unbounded path is not exercised
+by these limited queries. The ordinary Global and live subscription paths do
+not request result-only delivery and are unchanged by this branch.
+
 Set `JAZZ_CUSTOMER_IDENTITY=member JAZZ_CUSTOMER_PHASES=cold
 JAZZ_CUSTOMER_NO_DIAGNOSTICS=1 JAZZ_CUSTOMER_CLIENT_ONESHOT=1
 JAZZ_CUSTOMER_QUERY_LIMIT=100 JAZZ_CUSTOMER_MAX_TICKS=200000`; add
