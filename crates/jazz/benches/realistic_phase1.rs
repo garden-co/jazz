@@ -2493,6 +2493,8 @@ fn session_upload_schema() -> JazzSchema {
 /// authorizes and persists the upload is timed; the writer's commit and its
 /// fate application stay outside the measurement.
 fn r14_session_upload(c: &mut Criterion) {
+    use jazz::db::MergeableTxOps as _;
+
     let mut group = c.benchmark_group("realistic_phase1/r14_session_upload");
 
     for rows in [1usize, 100] {
