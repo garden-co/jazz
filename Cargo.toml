@@ -36,7 +36,6 @@ members = [
   "examples/poster-shop/benchmarks",
   "examples/jamazon-warehouse/benchmarks",
   "examples/wequencer/benchmarks",
-  "examples/benchmarks/smoke",
   "examples/benchmarks/w1",
   "dev/benchmarks/storage/bench-core",
 ]
