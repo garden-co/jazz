@@ -1066,21 +1066,7 @@ impl<'a> IncrementalEvaluation<'a> {
             }
         }
         runtime.memo_use_clock = runtime.memo_use_clock.max(self.memo_use_clock);
-        // Retainers are owned by graph lifecycle operations, not by this
-        // evaluation snapshot. Preserve their current live value when a
-        // suspended continuation resumes after lifecycle activity.
-        for node in self.relevant_nodes.iter() {
-            match (self.node_meta.get_mut(node), runtime.node_meta.get(node)) {
-                (Some(meta), Some(live)) => {
-                    meta.retainers = live.retainers.clone();
-                    meta.input_generation = meta.input_generation.max(live.input_generation);
-                }
-                (None, Some(live)) => {
-                    self.node_meta.insert(*node, live.clone());
-                }
-                _ => {}
-            }
-        }
+        carry_live_node_lifecycle(&mut self.node_meta, runtime, &self.relevant_nodes);
         runtime
             .node_meta
             .extend(std::mem::take(&mut self.node_meta));
@@ -1974,22 +1960,7 @@ impl<'a> EvaluationSession<'a> {
             .map(|entry| entry.payload_bytes)
             .sum();
         runtime.memo_use_clock = runtime.memo_use_clock.max(self.memo_use_clock);
-        // Retainers are owned by graph lifecycle operations, not by this
-        // session's snapshot: a subscription may subscribe or unsubscribe
-        // while the hydration is suspended. Keep their live value, as the
-        // incremental install does.
-        for node in &self.relevant_nodes {
-            match (self.node_meta.get_mut(node), runtime.node_meta.get(node)) {
-                (Some(meta), Some(live)) => {
-                    meta.retainers = live.retainers.clone();
-                    meta.input_generation = meta.input_generation.max(live.input_generation);
-                }
-                (None, Some(live)) => {
-                    self.node_meta.insert(*node, live.clone());
-                }
-                _ => {}
-            }
-        }
+        carry_live_node_lifecycle(&mut self.node_meta, runtime, &self.relevant_nodes);
         for node in &self.relevant_nodes {
             runtime.node_meta.remove(node);
         }
@@ -3474,6 +3445,34 @@ fn bump_input_frontiers_staged(
     {
         let meta = node_meta.entry(node).or_default();
         meta.input_generation = meta.input_generation.wrapping_add(1);
+    }
+}
+
+/// Fold graph-lifecycle state into an evaluation's `node_meta` snapshot just
+/// before it replaces the live entries. Retainers are owned by lifecycle
+/// operations, not by the snapshot: a subscription may subscribe or
+/// unsubscribe while the evaluation is suspended, so keep their live value.
+/// A node the graph no longer has was collected meanwhile; drop its snapshot
+/// entry rather than resurrect metadata for a missing node.
+fn carry_live_node_lifecycle(
+    snapshot: &mut HashMap<NodeId, NodeRuntimeMeta>,
+    runtime: &IvmRuntime,
+    nodes: &HashSet<NodeId>,
+) {
+    for node in nodes {
+        match (snapshot.get_mut(node), runtime.node_meta.get(node)) {
+            (Some(meta), Some(live)) => {
+                meta.retainers = live.retainers.clone();
+                meta.input_generation = meta.input_generation.max(live.input_generation);
+            }
+            (None, Some(live)) => {
+                snapshot.insert(*node, live.clone());
+            }
+            (Some(_), None) if runtime.graph.node(*node).is_none() => {
+                snapshot.remove(node);
+            }
+            _ => {}
+        }
     }
 }
 
