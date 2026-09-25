@@ -45,9 +45,11 @@ fn exclusive_begin_resolves_sparse_global_dots_without_scanning_history_after_re
         vec![sparse]
     );
 
+    // Recovery recorded each sparse global time with its transaction, so
+    // opening the transaction reads no transaction rows or indexes (#3390).
     let metrics = reopened.take_storage_read_metrics();
-    assert_eq!(metrics.transactions_rows.reads, 1);
-    assert_eq!(metrics.transactions_indexes.ranges, 1);
+    assert_eq!(metrics.transactions_rows.reads, 0);
+    assert_eq!(metrics.transactions_indexes.ranges, 0);
 }
 
 #[test]

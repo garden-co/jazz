@@ -748,6 +748,7 @@ where
                 locally_minted_global_times: BTreeSet::new(),
                 committed_global_time: GlobalTime(0),
                 applied_global_times_after_frontier: BTreeSet::new(),
+                frontier_dots: BTreeMap::new(),
             },
             parking: Parking::default(),
             query: QueryServing {

@@ -640,7 +640,7 @@ where
         fate: Fate,
         global_time: Option<GlobalTime>,
         durability: DurabilityTier,
-        staged_global_times: &mut Vec<GlobalTime>,
+        staged_global_times: &mut Vec<(GlobalTime, TxId)>,
         staged_content_versions: &mut Vec<VersionRow>,
     ) -> Result<(), Error> {
         debug_assert!(
@@ -654,7 +654,8 @@ where
         // storage-ingress backstop for other direct callers.
         self.validate_view_payload_versions(&versions)?;
         self.merge_tx_time(tx.tx_id.time);
-        if self.query_transaction(tx.tx_id).await?.is_some() {
+        let tx_id = tx.tx_id;
+        if self.query_transaction(tx_id).await?.is_some() {
             return self
                 .ingest_known_transaction(tx, versions, fate, global_time, durability)
                 .await;
@@ -673,6 +674,7 @@ where
         .await?;
         self.finalize_staged_transaction_ingest(
             batch,
+            tx_id,
             fate,
             global_time,
             staged_global_times,
@@ -814,7 +816,7 @@ where
             self.merge_tx_time(tx.tx_id.time);
             let tx_node_alias = self.ensure_node_alias(tx.tx_id.node).await?;
             let global_time = first.global_time.expect("checked above");
-            applied_global_times.push(global_time);
+            applied_global_times.push((global_time, tx.tx_id));
             let contribution_merge = self.contribution_merge_storage_value(
                 tx.contribution_merge.as_ref(),
             )?;
@@ -964,8 +966,8 @@ where
         for tx_id in &loaded_tx_ids {
             self.invalidate_tx_version_tables_cache(*tx_id);
         }
-        for global_time in applied_global_times {
-            self.record_applied_global_time(global_time);
+        for (global_time, tx_id) in applied_global_times {
+            self.record_applied_global_time(global_time, tx_id);
         }
         Ok(loaded_tx_ids)
     }

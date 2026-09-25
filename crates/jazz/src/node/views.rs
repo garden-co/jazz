@@ -1691,8 +1691,8 @@ where
             for tx_id in &receiver_batch_tx_ids {
                 self.invalidate_tx_version_tables_cache(*tx_id);
             }
-            for global_time in receiver_batch_global_times {
-                self.record_applied_global_time(global_time);
+            for (global_time, tx_id) in receiver_batch_global_times {
+                self.record_applied_global_time(global_time, tx_id);
             }
             if let Some(tx_time) = receiver_batch_tx_ids.iter().map(|tx_id| tx_id.time).max() {
                 self.persist_storage_consistency_marker_through(tx_time)
@@ -2616,7 +2616,7 @@ where
         batch: &mut DatabaseBatch,
         bundle: &VersionBundle,
         staged_tx_ids: &mut BTreeSet<TxId>,
-        staged_global_times: &mut Vec<GlobalTime>,
+        staged_global_times: &mut Vec<(GlobalTime, TxId)>,
         staged_content_versions: &mut Vec<VersionRow>,
     ) -> Result<bool, Error> {
         validate_received_view_bundle_global_time_durability(

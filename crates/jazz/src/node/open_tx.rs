@@ -137,9 +137,14 @@ where
             .map_err(|_| Error::UnadmittedWriteAuthor)?
             .as_author_subject();
         let local_base = self.tx_time_high_water();
+        // Every time applied past the frontier was recorded with its
+        // transaction, so the base names them without a scan (#3390).
         let mut dots = Vec::with_capacity(self.clock.applied_global_times_after_frontier.len());
         for global_time in self.clock.applied_global_times_after_frontier.clone() {
-            dots.extend(self.transaction_ids_for_global_time(global_time).await?);
+            match self.clock.frontier_dots.get(&global_time) {
+                Some(tx_ids) => dots.extend(tx_ids.iter().copied()),
+                None => dots.extend(self.transaction_ids_for_global_time(global_time).await?),
+            }
         }
         let base_snapshot = Snapshot::exclusive_base(
             self.node_uuid,
@@ -1472,6 +1477,7 @@ where
     pub(super) fn record_applied_global_time(
         &mut self,
         global_time: GlobalTime,
+        tx_id: TxId,
     ) -> Vec<GlobalTime> {
         self.clock.global_time_register = self.clock.global_time_register.max(global_time);
         if global_time <= self.clock.committed_global_time {
@@ -1481,12 +1487,19 @@ where
             .clock
             .applied_global_times_after_frontier
             .insert(global_time);
+        let dots = self.clock.frontier_dots.entry(global_time).or_default();
+        if !dots.contains(&tx_id) {
+            dots.push(tx_id);
+        }
         let locally_minted = self.clock.locally_minted_global_times.remove(&global_time);
         if self.history_complete || locally_minted {
             self.clock.committed_global_time = global_time;
             self.clock
                 .applied_global_times_after_frontier
                 .retain(|applied| *applied > global_time);
+            self.clock
+                .frontier_dots
+                .retain(|applied, _| *applied > global_time);
         }
         newly_applied.then_some(global_time).into_iter().collect()
     }
@@ -1510,6 +1523,9 @@ where
         self.clock
             .applied_global_times_after_frontier
             .retain(|applied| *applied > settled_through);
+        self.clock
+            .frontier_dots
+            .retain(|applied, _| *applied > settled_through);
     }
 
     pub(crate) fn open_transaction_snapshot(

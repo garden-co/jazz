@@ -302,7 +302,20 @@ where
                 continue;
             }
             if let Some(global_time) = global_time {
-                accepted_global_times.push(GlobalTime(global_time));
+                let node = self
+                    .node_for_alias(NodeAlias(
+                        record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?,
+                    ))
+                    .ok_or(Error::InvalidStoredValue(
+                        "transaction node alias must exist",
+                    ))?;
+                accepted_global_times.push((
+                    GlobalTime(global_time),
+                    TxId::new(
+                        TxTime(record.get_u64(TransactionRowRecord::FIELD_TIME_IDX)?),
+                        node,
+                    ),
+                ));
             }
         }
         accepted_global_times.sort();
@@ -312,12 +325,13 @@ where
             receipt.accepted_global_times = accepted_global_times.len();
             receipt.global_time_records_scanned = global_time_records_scanned;
         }
-        for global_time in accepted_global_times {
-            self.record_applied_global_time(global_time);
+        for (global_time, tx_id) in accepted_global_times {
+            self.record_applied_global_time(global_time, tx_id);
         }
         if self.history_complete {
             self.clock.committed_global_time = self.clock.global_time_register;
             self.clock.applied_global_times_after_frontier.clear();
+            self.clock.frontier_dots.clear();
         }
         #[cfg(feature = "testing")]
         if let (Some(receipt), Some(started)) = (&mut receipt, started) {

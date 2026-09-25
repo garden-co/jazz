@@ -814,6 +814,9 @@ struct Clock {
     committed_global_time: GlobalTime,
     /// Global transactions held by a partial node outside its core frontier.
     applied_global_times_after_frontier: BTreeSet<GlobalTime>,
+    /// The transactions accepted at each of those times: an exclusive
+    /// transaction's base names them without an index scan per time.
+    frontier_dots: BTreeMap<GlobalTime, Vec<TxId>>,
 }
 
 impl Clock {

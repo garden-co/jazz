@@ -2005,19 +2005,7 @@ fn real_client_reordered_delivery_and_fate(repair: bool, _detach: bool) {
     let inbound = Rc::clone(&client_bytes.inbound);
     let sent = Rc::new(RefCell::new(Vec::new()));
     let client_adapter = WireTransportAdapter::current(client_bytes);
-    let receiver_credits = client_adapter
-        .shared_auxiliary_endpoint()
-        .unwrap()
-        .lock()
-        .unwrap()
-        .channel_credits();
     let server_adapter = WireTransportAdapter::current(server_bytes);
-    let sender_credits = server_adapter
-        .shared_auxiliary_endpoint()
-        .unwrap()
-        .lock()
-        .unwrap()
-        .channel_credits();
     let upstream = block_on(client.connect_upstream(Box::new(client_adapter)));
     let subscriber = server.accept_subscriber(
         Box::new(Tap {

@@ -55,7 +55,7 @@ where
         let advanced_global_times = if matches!(stored.fate, Fate::Accepted)
             && let Some(global_time) = stored.global_time
         {
-            self.record_applied_global_time(global_time)
+            self.record_applied_global_time(global_time, tx_id)
         } else {
             Vec::new()
         };

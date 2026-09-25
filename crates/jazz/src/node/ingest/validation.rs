@@ -52,9 +52,10 @@ where
         fate: Fate,
         global_time: Option<GlobalTime>,
         durability: DurabilityTier,
-        staged_global_times: &mut Vec<GlobalTime>,
+        staged_global_times: &mut Vec<(GlobalTime, TxId)>,
         staged_content_versions: &mut Vec<VersionRow>,
     ) -> Result<(), Error> {
+        let tx_id = tx.tx_id;
         let (staged_versions, fate, global_time) = self
             .stage_transaction_and_versions_with_current_indexes(
                 batch,
@@ -70,6 +71,7 @@ where
             .await?;
         self.finalize_staged_transaction_ingest(
             batch,
+            tx_id,
             fate,
             global_time,
             staged_global_times,
@@ -164,6 +166,7 @@ where
         let mut staged_global_times = Vec::new();
         self.finalize_staged_transaction_ingest(
             &mut batch,
+            tx_id,
             fate,
             global_time,
             &mut staged_global_times,
@@ -365,16 +368,17 @@ where
     async fn finalize_staged_transaction_ingest(
         &mut self,
         batch: &mut DatabaseBatch,
+        tx_id: TxId,
         fate: Fate,
         global_time: Option<GlobalTime>,
-        staged_global_times: &mut Vec<GlobalTime>,
+        staged_global_times: &mut Vec<(GlobalTime, TxId)>,
         staged_versions: &[VersionRow],
     ) -> Result<(), Error> {
         if matches!(fate, Fate::Accepted)
             && let Some(global_time) = global_time
         {
-            staged_global_times.push(global_time);
-            let advanced_global_times = self.record_applied_global_time(global_time);
+            staged_global_times.push((global_time, tx_id));
+            let advanced_global_times = self.record_applied_global_time(global_time, tx_id);
             self.cleanup_fated_ahead_current_for_versions(batch, staged_versions)?;
             if !advanced_global_times.is_empty() {
                 for advanced in advanced_global_times
