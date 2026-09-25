@@ -569,6 +569,7 @@ where
             catalogue_bootstrap_state,
             database,
             chunk_resolver,
+            detach_covered_chunk_waits,
             history_complete,
             authoritative_scalar_exit_refresh,
             ..
@@ -593,6 +594,7 @@ where
             .set_missing_chunk_resolver(chunk_resolver.clone());
         reopened.local_chunk_reader = reopened.database.local_chunk_reader();
         reopened.chunk_resolver = chunk_resolver;
+        reopened.detach_covered_chunk_waits = detach_covered_chunk_waits;
         reopened.content_runtime_provider = reopened.database.owned_chunk_provider();
         reopened.authoritative_scalar_exit_refresh = authoritative_scalar_exit_refresh;
         Ok(reopened)
@@ -871,6 +873,7 @@ where
             database: DatabaseSlot::new(database),
             local_chunk_reader,
             chunk_resolver,
+            detach_covered_chunk_waits: Rc::new(std::cell::Cell::new(false)),
             large_value_staging_policy: LargeValueStagingPolicy::default(),
             large_value_ingress: RefCell::new(LargeValueIngressState::default()),
             content_runtime_provider,
@@ -998,9 +1001,14 @@ where
         )?;
         lowered.tables.extend(current_tables);
         let layout = StorageLayout::jazz_class_v1();
-        Database::new_with_storage_layout(lowered, storage, layout)
-            .await
-            .map_err(Error::from)
+        let mut database = Database::new_with_storage_layout(lowered, storage, layout).await?;
+        // Jazz publishes plain ordered results from membership and version
+        // deltas and never reads their generic root positions; only root
+        // collectors' own positional edits reach its views. Collecting the
+        // positions would make every write to an ordered subscription
+        // proportional to its result size (#2086).
+        database.set_plain_output_root_positions_enabled(false);
+        Ok(database)
     }
 
     pub(crate) fn committed_global_time(&self) -> GlobalTime {
@@ -1251,6 +1259,16 @@ where
         self.local_chunk_reader
             .refresh_from(&self.database.local_chunk_reader());
         self.content_runtime_provider = runtime_provider;
+    }
+
+    /// The flag `Node` flips when its host drops pending ticks.
+    pub(crate) fn detach_covered_chunk_waits_handle(&self) -> Rc<std::cell::Cell<bool>> {
+        Rc::clone(&self.detach_covered_chunk_waits)
+    }
+
+    /// Whether covered receiver installs detach chunk-waiting evaluation.
+    pub(crate) fn detaches_covered_chunk_waits(&self) -> bool {
+        self.detach_covered_chunk_waits.get()
     }
 
     /// Install Jazz's sync-plane fallback for chunks absent from Groove's

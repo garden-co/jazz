@@ -239,6 +239,10 @@ pub struct IvmRuntime {
     next_shape_id: u64,
     logical_nodes_requested: u64,
     auto_direct_family_enabled: bool,
+    /// Whether plain ordered outputs receive generic root positions (insert
+    /// indices and moves). A consumer that never reads them turns this off,
+    /// so an unbounded TopBy keeps its delta-only path.
+    plain_output_root_positions: bool,
     collect_tick_runtime_stats: bool,
 }
 
@@ -305,6 +309,7 @@ impl IvmRuntime {
             next_shape_id: 1,
             logical_nodes_requested: 0,
             auto_direct_family_enabled: true,
+            plain_output_root_positions: true,
             collect_tick_runtime_stats: false,
             prepared_shapes: HashMap::default(),
             auto_direct_families: HashMap::default(),
@@ -389,6 +394,16 @@ impl IvmRuntime {
 
     pub fn set_auto_direct_family_enabled(&mut self, enabled: bool) {
         self.auto_direct_family_enabled = enabled;
+    }
+
+    /// Enable or disable generic root positions for plain ordered outputs.
+    /// Structured collectors are unaffected: they own their positional edits.
+    pub fn set_plain_output_root_positions_enabled(&mut self, enabled: bool) {
+        self.plain_output_root_positions = enabled;
+    }
+
+    pub fn plain_output_root_positions_enabled(&self) -> bool {
+        self.plain_output_root_positions
     }
 
     pub fn schema(&self) -> &DatabaseSchema {
@@ -480,6 +495,8 @@ pub enum IvmRuntimeError {
     InvalidPersistedIndex(String),
     #[error("intersected index sources currently require prefix scans")]
     UnsupportedIndexIntersectionScan,
+    #[error("candidate-filtered index sources require snapshot row projection and prefix scans")]
+    UnsupportedIndexCandidateFilter,
     #[error("join key arity mismatch: left={left}, right={right}")]
     JoinKeyArityMismatch { left: usize, right: usize },
     #[error("shape key field not found: {0}")]
@@ -496,6 +513,8 @@ pub enum IvmRuntimeError {
     PersistRecordMismatch,
     #[error("binding sources can only be evaluated through prepared shapes")]
     BindingSourceRequiresPrepare,
+    #[error("physical root values are only supported for first-result subscriptions")]
+    PhysicalRootValuesRequireFirstResult,
     #[error("multisink subscription must have at least one sink")]
     EmptyMultisinkSubscription,
     #[error("multisink sink already exists: {0}")]

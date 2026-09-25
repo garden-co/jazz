@@ -4,6 +4,11 @@ import { bigLabelBenchmarks } from "../../../examples/big-label/benchmarks/metad
 import { w1Benchmarks } from "../../../examples/benchmarks/w1/metadata.ts";
 import { coreBenchmarks } from "../../../crates/jazz/benches/metadata.ts";
 import { policyDocumentBenchmarks } from "../../../examples/policy-scoped-documents/benchmarks/metadata.ts";
+import { bandChatBenchmarks } from "../../../examples/band-chat/benchmarks/metadata.ts";
+import { worldTourBenchmarks } from "../../../examples/world-tour/benchmarks/metadata.ts";
+import { posterShopBenchmarks } from "../../../examples/poster-shop/benchmarks/metadata.ts";
+import { recordPlayerBenchmarks } from "../../../examples/record-player/benchmarks/metadata.ts";
+import { wequencerBenchmarks } from "../../../examples/wequencer/benchmarks/metadata.ts";
 export { metadataRevision, throughput, type BenchmarkMetadata } from "./types.ts";
 
 export const benchmarkMetadata = [
@@ -13,6 +18,11 @@ export const benchmarkMetadata = [
   ...w1Benchmarks,
   ...coreBenchmarks,
   ...policyDocumentBenchmarks,
+  ...bandChatBenchmarks,
+  ...worldTourBenchmarks,
+  ...posterShopBenchmarks,
+  ...recordPlayerBenchmarks,
+  ...wequencerBenchmarks,
 ];
 const byName = new Map(benchmarkMetadata.map((metadata) => [metadata.name, metadata]));
 if (byName.size !== benchmarkMetadata.length) throw new Error("Duplicate benchmark metadata name");

@@ -774,9 +774,6 @@ pub(super) struct RootOrderingWindows {
     entries: Vec<(Vec<u8>, GroupWindow)>,
     descriptor: Option<RecordDescriptor>,
     identity: Vec<usize>,
-    /// Field-0 positions across all groups, for outputs without a proven
-    /// identity: built once, first position wins, as before.
-    field_zero: std::cell::OnceCell<RootPositions>,
     /// Each group's first and last entry, so an output reaching a few groups
     /// does not scan every touched group's windows. Reset by `record`.
     group_entries: std::cell::OnceCell<HashMap<Vec<u8>, (usize, usize)>>,
@@ -789,12 +786,6 @@ type WindowPair<'a> = (&'a [WindowedRecord], &'a [WindowedRecord]);
 struct GroupWindow {
     before: Vec<WindowedRecord>,
     after: Vec<WindowedRecord>,
-}
-
-#[derive(Clone, Debug, Default)]
-struct RootPositions {
-    before: BTreeMap<Vec<u8>, usize>,
-    after: BTreeMap<Vec<u8>, usize>,
 }
 
 impl RootOrderingWindows {
@@ -818,40 +809,6 @@ impl RootOrderingWindows {
                 after: after.to_vec(),
             },
         ));
-    }
-
-    fn positions<'a>(
-        &self,
-        entries: impl Iterator<Item = &'a GroupWindow>,
-        key_fields: &[usize],
-    ) -> Result<RootPositions, IvmRuntimeError> {
-        let mut positions = RootPositions::default();
-        let Some(descriptor) = self.descriptor else {
-            return Ok(positions);
-        };
-        for window in entries {
-            extend_root_window_positions(
-                descriptor,
-                &window.before,
-                key_fields,
-                &mut positions.before,
-            )?;
-            extend_root_window_positions(
-                descriptor,
-                &window.after,
-                key_fields,
-                &mut positions.after,
-            )?;
-        }
-        Ok(positions)
-    }
-
-    fn field_zero(&self) -> Result<&RootPositions, IvmRuntimeError> {
-        if let Some(positions) = self.field_zero.get() {
-            return Ok(positions);
-        }
-        let positions = self.positions(self.entries.iter().map(|(_, window)| window), &[0])?;
-        Ok(self.field_zero.get_or_init(|| positions))
     }
 
     /// A group's window across this tick: its first before and last after.
@@ -1384,14 +1341,11 @@ impl TickEvaluator<'_> {
         let Some(windows) = self.root_ordering_windows.get(&ordering_node) else {
             return Ok(());
         };
+        // Positions are keyed by the TopBy's row identity. An output whose
+        // chain does not carry that identity keys its terminal edits by its
+        // own fields, so no position can address them: registration skips
+        // such outputs, and one sharing an ordering node gets no moves.
         let Some((identity, groups)) = identity else {
-            let positions = windows.field_zero()?;
-            apply_root_ordering_operations(
-                &positions.before,
-                &positions.after,
-                root_descriptor,
-                terminal,
-            );
             return Ok(());
         };
         let Some(descriptor) = windows.descriptor else {

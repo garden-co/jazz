@@ -7,7 +7,7 @@ use groove::schema::{
 };
 use groove::storage::{
     Error, LayoutStorage, OrderedKvStorage, OwnedWriteOperation, ReopenableStorage, ScanRequest,
-    StorageLayout, collect_scan,
+    StorageLayout, WriteManyOutcome, WriteOperation, collect_scan,
 };
 use jazz_storage_sqlite::SqliteStorage;
 use sha2::{Digest, Sha256};
@@ -870,4 +870,105 @@ fn rejects_foreign_table_shape_before_adopting_data() {
         SqliteStorage::open(&path, &["records"]),
         Err(Error::InvalidStorageLayout(_))
     ));
+}
+
+#[test]
+fn multi_page_scans_and_borrowed_batches_match_the_memory_oracle() {
+    block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = open(&dir);
+        let oracle = groove::storage::MemoryStorage::new(&["records"]).unwrap();
+        let keys = (0u16..700)
+            .map(|index| {
+                let mut key = b"p:".to_vec();
+                key.extend_from_slice(&index.to_be_bytes());
+                key
+            })
+            .chain([b"o:before".to_vec(), b"q:after".to_vec()])
+            .collect::<Vec<_>>();
+        let values = keys
+            .iter()
+            .map(|key| [key.as_slice(), b"=value"].concat())
+            .collect::<Vec<_>>();
+        let writes = keys
+            .iter()
+            .zip(&values)
+            .map(|(key, value)| WriteOperation::Set {
+                cf: "records",
+                key,
+                value,
+            })
+            .collect::<Vec<_>>();
+        // Every third key is then deleted through the borrowed path too.
+        let deletes = keys
+            .iter()
+            .step_by(3)
+            .map(|key| WriteOperation::Delete { cf: "records", key })
+            .collect::<Vec<_>>();
+        for batch in [writes, deletes] {
+            assert!(matches!(
+                storage.write_many_borrowed_outcome(batch.clone()).await,
+                WriteManyOutcome::Committed
+            ));
+            assert!(matches!(
+                oracle.write_many_borrowed_outcome(batch).await,
+                WriteManyOutcome::Committed
+            ));
+        }
+
+        let mut range_start = b"p:".to_vec();
+        range_start.extend_from_slice(&100u16.to_be_bytes());
+        let mut range_end = b"p:".to_vec();
+        range_end.extend_from_slice(&650u16.to_be_bytes());
+        for max_items in [
+            None,
+            Some(1),
+            Some(255),
+            Some(256),
+            Some(257),
+            Some(400),
+            Some(10_000),
+        ] {
+            for reversed in [false, true] {
+                for request in [
+                    ScanRequest::prefix("records".into(), b"p:".to_vec()),
+                    ScanRequest::prefix("records".into(), Vec::new()),
+                    ScanRequest::range("records".into(), range_start.clone(), range_end.clone()),
+                ] {
+                    let request = match max_items {
+                        Some(max_items) => request.with_max_items(max_items),
+                        None => request,
+                    };
+                    let request = if reversed {
+                        request.reversed()
+                    } else {
+                        request
+                    };
+                    let expected = collect_scan(oracle.scan(request.clone()).await.unwrap())
+                        .await
+                        .unwrap();
+                    let mut cursor = storage.scan(request).await.unwrap();
+                    let mut actual = Vec::new();
+                    while let Some(batch) = cursor.next_batch().await.unwrap() {
+                        assert!(!batch.is_empty() && batch.len() <= 256);
+                        actual.extend(batch);
+                    }
+                    assert_eq!(
+                        actual, expected,
+                        "max_items {max_items:?}, reversed {reversed}"
+                    );
+                }
+            }
+        }
+
+        assert!(matches!(
+            storage
+                .write_many_borrowed_outcome(vec![WriteOperation::Delete {
+                    cf: "missing",
+                    key: b"p:",
+                }])
+                .await,
+            WriteManyOutcome::Uncommitted(Error::ColumnFamilyNotFound(name)) if name == "missing"
+        ));
+    });
 }

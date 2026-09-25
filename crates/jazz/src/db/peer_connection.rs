@@ -1398,8 +1398,12 @@ where
                 rebind_pending = true;
                 continue;
             };
-            for subscription in refresh_subscribers {
-                let mut update = retarget_view_update(update.clone(), subscription);
+            let mut shared_update = Some(update);
+            let mut refresh_subscribers = refresh_subscribers.into_iter().peekable();
+            while let Some(subscription) = refresh_subscribers.next() {
+                let update =
+                    take_last_or_clone(&mut shared_update, refresh_subscribers.peek().is_some());
+                let mut update = retarget_view_update(update, subscription);
                 stamp_view_update_authorization_progress_from(
                     peer,
                     maintained_subscription,
@@ -1687,8 +1691,11 @@ where
                 *serve_dirty = true;
                 continue;
             };
-            for subscription in subscribers {
-                let mut update = retarget_view_update(update.clone(), subscription);
+            let mut shared_update = Some(update);
+            let mut subscribers = subscribers.into_iter().peekable();
+            while let Some(subscription) = subscribers.next() {
+                let update = take_last_or_clone(&mut shared_update, subscribers.peek().is_some());
+                let mut update = retarget_view_update(update, subscription);
                 stamp_view_update_authorization_progress_from(
                     peer,
                     group_subscription,
@@ -5956,8 +5963,14 @@ where
                                 summarize_subscription_key(group_subscription),
                                 summarize_sync_message(&update)
                             ));
-                            for subscription in group.subscribers.iter().copied() {
-                                let mut update = retarget_view_update(update.clone(), subscription);
+                            let mut shared_update = Some(update);
+                            let mut subscribers = group.subscribers.iter().copied().peekable();
+                            while let Some(subscription) = subscribers.next() {
+                                let update = take_last_or_clone(
+                                    &mut shared_update,
+                                    subscribers.peek().is_some(),
+                                );
+                                let mut update = retarget_view_update(update, subscription);
                                 stamp_view_update_authorization_progress_from(
                                     peer,
                                     group_subscription,
@@ -6089,13 +6102,13 @@ pub(super) fn schedule_tick_in(scheduler: &SharedTickScheduler, urgency: TickUrg
 fn serialized_sync_message_len(message: &SyncMessage) -> usize {
     #[cfg(feature = "cold-settle-attribution")]
     let started = Instant::now();
-    let encoded = encode_sync_message(message);
+    let len = crate::wire::encoded_sync_message_len(message).unwrap_or(0);
     #[cfg(feature = "cold-settle-attribution")]
     crate::cold_settle_attribution::record_preflight_payload(
         started.elapsed().as_nanos() as u64,
-        encoded.as_ref().map_or(0, Vec::len),
+        len,
     );
-    encoded.map_or(0, |bytes| bytes.len())
+    len
 }
 
 fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
@@ -6494,8 +6507,8 @@ where
                 .await
         }
         PermissionAdviceAction::Update { table, row, patch } => {
-            match node.current_rows(&table, DurabilityTier::Local).await {
-                Ok(rows) if rows.iter().any(|current| current.row_uuid() == row) => {
+            match node.local_current_row_exists(&table, row).await {
+                Ok(true) => {
                     node.dry_run_insert_allows(
                         MergeableCommit::new(table, row, 0)
                             .made_by(identity)
@@ -6504,7 +6517,7 @@ where
                     )
                     .await
                 }
-                Ok(_) => Ok(false),
+                Ok(false) => Ok(false),
                 Err(error) => Err(error),
             }
         }
@@ -7326,7 +7339,7 @@ where
         "transport send {}",
         summarize_sync_message(&message)
     ));
-    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some()
+    if crate::debug_env::covered_input_trace()
         && let SyncMessage::ViewUpdate(payload) = &message
     {
         eprintln!(
@@ -7663,6 +7676,17 @@ fn stamp_view_update_authorization_progress_from(
         return;
     }
     peer_payload_inventory.authorization_progress = Some(source_progress);
+}
+
+/// Hand one generated update to each sibling subscriber: every sibling but
+/// the last gets a clone, and the last takes the original, so the common
+/// single-subscriber group never deep-copies its (often large) snapshot.
+fn take_last_or_clone(slot: &mut Option<SyncMessage>, more_follow: bool) -> SyncMessage {
+    if more_follow {
+        slot.clone().expect("update remains for later siblings")
+    } else {
+        slot.take().expect("update remains for the last sibling")
+    }
 }
 
 fn retarget_view_update(mut message: SyncMessage, target: SubscriptionKey) -> SyncMessage {

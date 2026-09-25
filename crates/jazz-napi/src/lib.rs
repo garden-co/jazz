@@ -796,6 +796,12 @@ impl CoreTickScheduler for NapiTickScheduler {
         );
     }
 
+    fn drops_pending_ticks(&self) -> bool {
+        // `tick` polls `Db::tick` once through `core_poll_once` and drops it
+        // if it is still pending.
+        true
+    }
+
     fn query_runtime_waker(&self) -> Option<Waker> {
         Some(waker(std::sync::Arc::new(NapiQueryRuntimeWake {
             callback: self.callback.clone(),
@@ -1235,7 +1241,7 @@ pub struct SubscriptionInvalidAuthoritySourceClosureReason {
 #[napi(object)]
 pub struct SubscriptionTerminalOperation {
     #[napi(js_name = "root_key")]
-    pub root_key: Vec<u32>,
+    pub root_key: Uint8Array,
     pub path: Vec<SubscriptionTerminalPathSegment>,
     pub edit: SubscriptionTerminalEdit,
 }
@@ -1249,7 +1255,7 @@ pub struct SubscriptionTerminalCollectionPathSegment {
 #[napi(object)]
 pub struct SubscriptionTerminalKeyPathSegment {
     #[napi(js_name = "Key")]
-    pub key: Vec<u32>,
+    pub key: Uint8Array,
 }
 
 #[napi(object)]
@@ -1261,8 +1267,8 @@ pub struct SubscriptionTerminalInsertEdit {
 #[napi(object)]
 pub struct SubscriptionTerminalInsert {
     pub index: f64,
-    pub key: Vec<u32>,
-    pub value: Vec<u32>,
+    pub key: Uint8Array,
+    pub value: Uint8Array,
 }
 
 #[napi(object)]
@@ -1273,8 +1279,8 @@ pub struct SubscriptionTerminalUpdateEdit {
 
 #[napi(object)]
 pub struct SubscriptionTerminalUpdate {
-    pub key: Vec<u32>,
-    pub value: Vec<u32>,
+    pub key: Uint8Array,
+    pub value: Uint8Array,
 }
 
 #[napi(object)]
@@ -1285,7 +1291,7 @@ pub struct SubscriptionTerminalRemoveEdit {
 
 #[napi(object)]
 pub struct SubscriptionTerminalRemove {
-    pub key: Vec<u32>,
+    pub key: Uint8Array,
 }
 
 #[napi(object)]
@@ -1296,7 +1302,7 @@ pub struct SubscriptionTerminalMoveEdit {
 
 #[napi(object)]
 pub struct SubscriptionTerminalMove {
-    pub key: Vec<u32>,
+    pub key: Uint8Array,
     pub index: f64,
 }
 
@@ -4488,8 +4494,8 @@ mod test_fixture_export {
 
 /// Convert terminal edits without serde_json so binary subscription deltas keep
 /// their typed-array representation. Root descriptors retain the upstream
-/// postcard encoding; ordered keys and edit payloads retain their number-array
-/// representation for the existing TypeScript terminal consumer.
+/// postcard encoding; ordered keys and edit payloads cross as one `Uint8Array`
+/// each, not one N-API element per byte (#3369).
 fn core_terminal_operation_to_napi(
     operation: &jazz::groove::ivm::TerminalOperation,
 ) -> napi::Result<SubscriptionTerminalOperation> {
@@ -4510,7 +4516,7 @@ fn core_terminal_operation_to_napi(
                 })
             }
             TerminalPathSegment::Key(key) => Either::B(SubscriptionTerminalKeyPathSegment {
-                key: terminal_bytes_to_numbers(key),
+                key: terminal_bytes(key),
             }),
         })
         .collect();
@@ -4518,38 +4524,38 @@ fn core_terminal_operation_to_napi(
         TerminalEdit::Insert { index, key, value } => Either4::A(SubscriptionTerminalInsertEdit {
             insert: SubscriptionTerminalInsert {
                 index: *index as f64,
-                key: terminal_bytes_to_numbers(key),
-                value: terminal_bytes_to_numbers(value),
+                key: terminal_bytes(key),
+                value: terminal_bytes(value),
             },
         }),
         TerminalEdit::Update { key, value } => Either4::B(SubscriptionTerminalUpdateEdit {
             update: SubscriptionTerminalUpdate {
-                key: terminal_bytes_to_numbers(key),
-                value: terminal_bytes_to_numbers(value),
+                key: terminal_bytes(key),
+                value: terminal_bytes(value),
             },
         }),
         TerminalEdit::Remove { key } => Either4::C(SubscriptionTerminalRemoveEdit {
             remove: SubscriptionTerminalRemove {
-                key: terminal_bytes_to_numbers(key),
+                key: terminal_bytes(key),
             },
         }),
         TerminalEdit::Move { key, index } => Either4::D(SubscriptionTerminalMoveEdit {
             move_edit: SubscriptionTerminalMove {
-                key: terminal_bytes_to_numbers(key),
+                key: terminal_bytes(key),
                 index: *index as f64,
             },
         }),
     };
 
     Ok(SubscriptionTerminalOperation {
-        root_key: terminal_bytes_to_numbers(&operation.root_key),
+        root_key: terminal_bytes(&operation.root_key),
         path,
         edit,
     })
 }
 
-fn terminal_bytes_to_numbers(bytes: &[u8]) -> Vec<u32> {
-    bytes.iter().copied().map(u32::from).collect()
+fn terminal_bytes(bytes: &[u8]) -> Uint8Array {
+    Uint8Array::new(bytes.to_vec())
 }
 
 // ============================================================================
@@ -7303,30 +7309,30 @@ mod tests {
         assert_eq!(payload.tier, "Global");
         assert_eq!(payload.terminal_operations.len(), 4);
         let insert = &payload.terminal_operations[0];
-        assert_eq!(insert.root_key, vec![0, 255]);
+        assert_eq!(insert.root_key.as_ref(), [0, 255]);
         assert!(matches!(
             insert.path.as_slice(),
             [Either::A(collection), Either::B(key)]
-                if collection.collection == "children" && key.key == vec![1, 254]
+                if collection.collection == "children" && key.key.as_ref() == [1, 254]
         ));
         assert!(matches!(
             &insert.edit,
             Either4::A(edit)
                 if edit.insert.index == 3.0
-                    && edit.insert.key == vec![2, 253]
-                    && edit.insert.value == (0_u32..=u8::MAX.into()).collect::<Vec<_>>()
+                    && edit.insert.key.as_ref() == [2, 253]
+                    && edit.insert.value.as_ref() == (0_u8..=u8::MAX).collect::<Vec<_>>()
         ));
         assert!(matches!(
             &payload.terminal_operations[1].edit,
-            Either4::B(edit) if edit.update.key == vec![5] && edit.update.value == vec![6]
+            Either4::B(edit) if edit.update.key.as_ref() == [5] && edit.update.value.as_ref() == [6]
         ));
         assert!(matches!(
             &payload.terminal_operations[2].edit,
-            Either4::C(edit) if edit.remove.key == vec![8]
+            Either4::C(edit) if edit.remove.key.as_ref() == [8]
         ));
         assert!(matches!(
             &payload.terminal_operations[3].edit,
-            Either4::D(edit) if edit.move_edit.key == vec![10] && edit.move_edit.index == 11.0
+            Either4::D(edit) if edit.move_edit.key.as_ref() == [10] && edit.move_edit.index == 11.0
         ));
     }
 

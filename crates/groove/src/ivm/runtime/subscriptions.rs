@@ -24,6 +24,67 @@ pub enum SubscriptionLifetime {
     Retained,
 }
 
+/// How indirect (large) scalar values appear in an *initial* root snapshot:
+/// a one-shot query result or a subscription's first published result.
+///
+/// Operators still materialize exactly the fields they inspect (filters,
+/// sorts, collectors), so this choice never changes which rows a graph
+/// produces. It only decides whether the root output rebuilds whole large
+/// values for its caller. Incremental updates of a retained subscription are
+/// always materialized, whatever its initial snapshot used.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum RootIndirectValues {
+    /// Rebuild every indirect root value into its logical scalar.
+    #[default]
+    Materialize,
+    /// Keep every indirect root value as its physical descriptor. The caller
+    /// must not treat those fields as logical scalars.
+    Physical,
+    /// Keep the named top-level root fields as physical descriptors and
+    /// materialize every other field. Names absent from the output are ignored.
+    PhysicalFields(Arc<BTreeSet<String>>),
+}
+
+impl RootIndirectValues {
+    /// Top-level field indices that must be materialized, or `None` for all.
+    pub(super) fn materialized_field_indices(
+        &self,
+        descriptor: &RecordDescriptor,
+    ) -> Option<Vec<usize>> {
+        match self {
+            Self::Materialize => None,
+            Self::Physical => Some(Vec::new()),
+            Self::PhysicalFields(physical) => Some(
+                descriptor
+                    .fields()
+                    .iter()
+                    .enumerate()
+                    // Match the storage name only: a public name can collide
+                    // with another column's storage name.
+                    .filter(|(_, field)| {
+                        !field
+                            .name
+                            .as_deref()
+                            .is_some_and(|name| physical.contains(name))
+                    })
+                    .map(|(index, _)| index)
+                    .collect(),
+            ),
+        }
+    }
+}
+
+impl RootIndirectValues {
+    /// Retained subscriptions always deliver materialized updates, so a
+    /// physical first snapshot could never be retracted by them.
+    fn check_lifetime(&self, lifetime: SubscriptionLifetime) -> Result<(), IvmRuntimeError> {
+        match (self, lifetime) {
+            (Self::Materialize, _) | (_, SubscriptionLifetime::FirstResult) => Ok(()),
+            _ => Err(IvmRuntimeError::PhysicalRootValuesRequireFirstResult),
+        }
+    }
+}
+
 impl SubscriptionLifetime {
     fn retainer(self, id: SubscriptionId) -> Retainer {
         match self {
@@ -838,12 +899,14 @@ pub(super) fn graph_builder_fingerprint(graph: &GraphBuilder) -> u64 {
                 index,
                 scan,
                 intersections,
+                candidate_filter,
                 row_projection,
             } => {
                 table.hash(&mut hasher);
                 index.hash(&mut hasher);
                 scan.hash(&mut hasher);
                 intersections.hash(&mut hasher);
+                candidate_filter.hash(&mut hasher);
                 row_projection.hash(&mut hasher);
             }
             GraphBuilder::FrontierSource { binding, output } => {
@@ -1084,16 +1147,18 @@ pub(crate) fn graph_builders_equal_with(
                     index: b,
                     scan: c,
                     intersections: d,
-                    row_projection: e,
+                    candidate_filter: e,
+                    row_projection: f,
                 },
                 GraphBuilder::Index {
                     table: x,
                     index: y,
                     scan: z,
                     intersections: w,
-                    row_projection: v,
+                    candidate_filter: v,
+                    row_projection: u,
                 },
-            ) if a == x && b == y && c == z && d == w && e == v => {}
+            ) if a == x && b == y && c == z && d == w && e == v && f == u => {}
             (
                 GraphBuilder::FrontierSource {
                     binding: a,
@@ -2892,6 +2957,38 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage + 'static,
     {
+        self.apply_input_source_deltas_in_mode(input_deltas, storage, InputSourceTickMode::Complete)
+            .await
+    }
+
+    /// Like the blocking form, but runnable work alone completes before this
+    /// returns: evaluation waiting on cold storage or a remote chunk is
+    /// retained as pending runtime progress for a later owner turn.
+    pub async fn apply_input_source_deltas_detaching_cold<S>(
+        &mut self,
+        input_deltas: impl IntoIterator<Item = InputSourceDelta>,
+        storage: &Rc<S>,
+    ) -> Result<TickMetrics, IvmRuntimeError>
+    where
+        S: OrderedKvStorage + 'static,
+    {
+        self.apply_input_source_deltas_in_mode(
+            input_deltas,
+            storage,
+            InputSourceTickMode::DetachCold,
+        )
+        .await
+    }
+
+    async fn apply_input_source_deltas_in_mode<S>(
+        &mut self,
+        input_deltas: impl IntoIterator<Item = InputSourceDelta>,
+        storage: &Rc<S>,
+        mode: InputSourceTickMode,
+    ) -> Result<TickMetrics, IvmRuntimeError>
+    where
+        S: OrderedKvStorage + 'static,
+    {
         let mut canonical = BTreeMap::<
             InputSourceId,
             (RecordDescriptor, BTreeSet<Vec<u8>>, BTreeSet<Vec<u8>>),
@@ -3003,13 +3100,7 @@ impl IvmRuntime {
         if deltas.is_empty() {
             return Ok(TickMetrics::default());
         }
-        self.tick_with_params(
-            Vec::new(),
-            deltas,
-            OwnedStorage::new(Rc::clone(storage)),
-            None,
-        )
-        .await
+        self.tick_input_sources(deltas, storage, mode).await
     }
 
     /// Atomically replace the complete record multisets of runtime-owned
@@ -3026,6 +3117,34 @@ impl IvmRuntime {
         &mut self,
         replacements: impl IntoIterator<Item = InputSourceReplacement>,
         storage: &Rc<S>,
+    ) -> Result<TickMetrics, IvmRuntimeError>
+    where
+        S: OrderedKvStorage + 'static,
+    {
+        self.replace_input_sources_in_mode(replacements, storage, InputSourceTickMode::Complete)
+            .await
+    }
+
+    /// Like the blocking form, but runnable work alone completes before this
+    /// returns: evaluation waiting on cold storage or a remote chunk is
+    /// retained as pending runtime progress for a later owner turn.
+    pub async fn replace_input_sources_detaching_cold<S>(
+        &mut self,
+        replacements: impl IntoIterator<Item = InputSourceReplacement>,
+        storage: &Rc<S>,
+    ) -> Result<TickMetrics, IvmRuntimeError>
+    where
+        S: OrderedKvStorage + 'static,
+    {
+        self.replace_input_sources_in_mode(replacements, storage, InputSourceTickMode::DetachCold)
+            .await
+    }
+
+    async fn replace_input_sources_in_mode<S>(
+        &mut self,
+        replacements: impl IntoIterator<Item = InputSourceReplacement>,
+        storage: &Rc<S>,
+        mode: InputSourceTickMode,
     ) -> Result<TickMetrics, IvmRuntimeError>
     where
         S: OrderedKvStorage + 'static,
@@ -3127,13 +3246,28 @@ impl IvmRuntime {
         if deltas.is_empty() {
             return Ok(TickMetrics::default());
         }
-        self.tick_with_params(
-            Vec::new(),
-            deltas,
-            OwnedStorage::new(Rc::clone(storage)),
-            None,
-        )
-        .await
+        self.tick_input_sources(deltas, storage, mode).await
+    }
+
+    async fn tick_input_sources<S>(
+        &mut self,
+        deltas: Vec<BindingDelta>,
+        storage: &Rc<S>,
+        mode: InputSourceTickMode,
+    ) -> Result<TickMetrics, IvmRuntimeError>
+    where
+        S: OrderedKvStorage + 'static,
+    {
+        let storage = OwnedStorage::new(Rc::clone(storage));
+        match mode {
+            InputSourceTickMode::Complete => {
+                self.tick_with_params(Vec::new(), deltas, storage, None)
+                    .await
+            }
+            InputSourceTickMode::DetachCold => {
+                self.tick_bindings_detaching_cold(deltas, storage).await
+            }
+        }
     }
 
     /// Retire runtime-owned input sources permanently.
@@ -3282,6 +3416,7 @@ impl IvmRuntime {
             vec![(DEFAULT_SINK.to_owned(), graph)],
             storage,
             SubscriptionLifetime::Retained,
+            RootIndirectValues::Materialize,
         )?;
         let subscription = self.single_sink_subscription(multisink, DEFAULT_SINK)?;
         self.poll_ready_subscription_work_now_with_waker(progress_waker)?;
@@ -3317,6 +3452,7 @@ impl IvmRuntime {
             sinks,
             storage,
             SubscriptionLifetime::Retained,
+            RootIndirectValues::Materialize,
             progress_waker,
         )
     }
@@ -3326,6 +3462,7 @@ impl IvmRuntime {
         sinks: I,
         storage: &Rc<S>,
         lifetime: SubscriptionLifetime,
+        root_indirect_values: RootIndirectValues,
         progress_waker: Option<&Waker>,
     ) -> Result<MultisinkSubscription, IvmRuntimeError>
     where
@@ -3333,11 +3470,12 @@ impl IvmRuntime {
         K: Into<String>,
         S: OrderedKvStorage + 'static,
     {
+        root_indirect_values.check_lifetime(lifetime)?;
         let sinks = sinks
             .into_iter()
             .map(|(sink, graph)| (sink.into(), graph))
             .collect::<Vec<_>>();
-        let subscription = self.subscribe_staged(sinks, storage, lifetime)?;
+        let subscription = self.subscribe_staged(sinks, storage, lifetime, root_indirect_values)?;
         self.poll_ready_subscription_work_now_with_waker(progress_waker)?;
         Ok(subscription)
     }
@@ -3375,6 +3513,7 @@ impl IvmRuntime {
         sinks: Vec<(String, GraphBuilder)>,
         storage: &Rc<S>,
         lifetime: SubscriptionLifetime,
+        root_indirect_values: RootIndirectValues,
     ) -> Result<MultisinkSubscription, IvmRuntimeError>
     where
         S: OrderedKvStorage + 'static,
@@ -3448,6 +3587,7 @@ impl IvmRuntime {
             None,
             Arc::clone(&initial),
             lifetime,
+            root_indirect_values,
             HashSet::default(),
         )?;
         Ok(MultisinkSubscription {
@@ -3593,24 +3733,28 @@ impl IvmRuntime {
         self.bind_shape_with_public_fields(shape_id, binding_values, BTreeMap::new(), storage, None)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn bind_shape_with_lifetime<S>(
         &mut self,
         shape_id: PreparedShapeId,
         binding_values: &[Value],
         storage: &Rc<S>,
         lifetime: SubscriptionLifetime,
+        root_indirect_values: RootIndirectValues,
         progress_waker: Option<&Waker>,
         live: Option<LiveAttach>,
     ) -> Result<MultisinkSubscription, IvmRuntimeError>
     where
         S: OrderedKvStorage + 'static,
     {
+        root_indirect_values.check_lifetime(lifetime)?;
         let subscription = self.bind_shape_with_public_fields_staged(
             shape_id,
             binding_values,
             BTreeMap::new(),
             storage,
             lifetime,
+            root_indirect_values,
             live,
         )?;
         self.poll_ready_subscription_work_now_with_waker(progress_waker)?;
@@ -3634,6 +3778,7 @@ impl IvmRuntime {
             public_fields,
             storage,
             SubscriptionLifetime::Retained,
+            RootIndirectValues::Materialize,
             None,
         )?;
         self.poll_ready_subscription_work_now_with_waker(progress_waker)?;
@@ -3644,6 +3789,7 @@ impl IvmRuntime {
         feature = "cold-settle-attribution",
         tracing::instrument(skip_all, name = "cold.phase.query_bind")
     )]
+    #[allow(clippy::too_many_arguments)]
     fn bind_shape_with_public_fields_staged<S>(
         &mut self,
         shape_id: PreparedShapeId,
@@ -3651,6 +3797,7 @@ impl IvmRuntime {
         public_fields: BTreeMap<String, Vec<String>>,
         storage: &Rc<S>,
         lifetime: SubscriptionLifetime,
+        root_indirect_values: RootIndirectValues,
         live: Option<LiveAttach>,
     ) -> Result<MultisinkSubscription, IvmRuntimeError>
     where
@@ -3665,6 +3812,7 @@ impl IvmRuntime {
             public_fields,
             storage,
             lifetime,
+            root_indirect_values,
             live,
         );
         if result.is_err()
@@ -3681,6 +3829,7 @@ impl IvmRuntime {
         result
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn bind_shape_with_public_fields_staged_inner<S>(
         &mut self,
         shape_id: PreparedShapeId,
@@ -3688,6 +3837,7 @@ impl IvmRuntime {
         public_fields: BTreeMap<String, Vec<String>>,
         storage: &Rc<S>,
         lifetime: SubscriptionLifetime,
+        root_indirect_values: RootIndirectValues,
         live: Option<LiveAttach>,
     ) -> Result<MultisinkSubscription, IvmRuntimeError>
     where
@@ -3842,6 +3992,7 @@ impl IvmRuntime {
             binding_frontier_advance,
             Arc::clone(&initial),
             lifetime,
+            root_indirect_values,
             borrowed,
         )?;
         Ok(MultisinkSubscription {
@@ -3957,6 +4108,7 @@ impl IvmRuntime {
             BTreeMap::new(),
             storage,
             SubscriptionLifetime::Retained,
+            RootIndirectValues::Materialize,
             live,
         )?;
         let subscription = self.single_sink_subscription(multisink, DEFAULT_SINK)?;
@@ -3990,6 +4142,7 @@ impl IvmRuntime {
             [(DEFAULT_SINK.to_owned(), public_fields)].into(),
             storage,
             SubscriptionLifetime::Retained,
+            RootIndirectValues::Materialize,
             live,
         )?;
         let subscription = self.single_sink_subscription(multisink, DEFAULT_SINK)?;
@@ -4053,13 +4206,18 @@ impl IvmRuntime {
         {
             return None;
         }
+        // A routed TopBy collects windows for its bound outputs before they
+        // are known to be touched; register only an output that applies them.
+        let root_ordering_node = bound.root_ordering_node.filter(|ordering| {
+            output_consumes_root_positions(&self.graph, bound.node, *ordering).unwrap_or(true)
+        });
         self.graph.add_route_barrier(
             shared_node,
             barrier,
             field_indices,
             field_types,
             key,
-            bound.root_ordering_node,
+            root_ordering_node,
         );
         Some(barrier)
     }
@@ -5016,4 +5174,11 @@ mod bounded_graph_traversal_tests {
             .join()
             .expect("normal-stack traversal test must not overflow");
     }
+}
+
+/// Whether an input-source tick waits for cold work or leaves it pending.
+#[derive(Clone, Copy)]
+enum InputSourceTickMode {
+    Complete,
+    DetachCold,
 }
