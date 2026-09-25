@@ -1149,9 +1149,9 @@ where
             for version in self.query_row_versions(&read.table, read.row_uuid).await? {
                 let tx_id = self.version_tx_id(&version)?;
                 let visible = self
-                    .query_transaction(tx_id)
+                    .query_transaction_state(tx_id)
                     .await?
-                    .is_some_and(|stored| !matches!(stored.fate, Fate::Rejected(_)));
+                    .is_some_and(|(fate, _, _)| !matches!(fate, Fate::Rejected(_)));
                 if visible && !self.snapshot_covers(tx_id, &open_tx.base_snapshot).await {
                     return Ok(false);
                 }
@@ -1164,9 +1164,9 @@ where
             {
                 let tx_id = self.version_tx_id(&version)?;
                 let visible = self
-                    .query_transaction(tx_id)
+                    .query_transaction_state(tx_id)
                     .await?
-                    .is_some_and(|stored| !matches!(stored.fate, Fate::Rejected(_)));
+                    .is_some_and(|(fate, _, _)| !matches!(fate, Fate::Rejected(_)));
                 if visible && !self.snapshot_covers(tx_id, &open_tx.base_snapshot).await {
                     return Ok(false);
                 }
@@ -1179,9 +1179,9 @@ where
             {
                 let tx_id = self.version_tx_id(&version)?;
                 let visible = self
-                    .query_transaction(tx_id)
+                    .query_transaction_state(tx_id)
                     .await?
-                    .is_some_and(|stored| !matches!(stored.fate, Fate::Rejected(_)));
+                    .is_some_and(|(fate, _, _)| !matches!(fate, Fate::Rejected(_)));
                 if visible && !self.snapshot_covers(tx_id, &open_tx.base_snapshot).await {
                     return Ok(false);
                 }
@@ -1192,9 +1192,9 @@ where
             for version in self.query_table_versions(&predicate.table).await? {
                 let tx_id = self.version_tx_id(&version)?;
                 let visible = self
-                    .query_transaction(tx_id)
+                    .query_transaction_state(tx_id)
                     .await?
-                    .is_some_and(|stored| !matches!(stored.fate, Fate::Rejected(_)));
+                    .is_some_and(|(fate, _, _)| !matches!(fate, Fate::Rejected(_)));
                 if visible && !self.snapshot_covers(tx_id, &open_tx.base_snapshot).await {
                     if comparison.is_none() {
                         let query = &predicate.shape;
@@ -1630,14 +1630,14 @@ where
     }
 
     pub(super) async fn snapshot_covers(&mut self, tx_id: TxId, snapshot: &Snapshot) -> bool {
-        self.query_transaction(tx_id)
+        // Coverage needs only the transaction's existence and global time, so
+        // read that projection instead of decoding the whole stored payload.
+        self.query_transaction_global_time(tx_id)
             .await
             .ok()
             .flatten()
-            .is_some_and(|stored| {
-                stored
-                    .global_time
-                    .is_some_and(|global_time| global_time <= snapshot.global_base)
+            .is_some_and(|global_time| {
+                global_time.is_some_and(|global_time| global_time <= snapshot.global_base)
                     || (tx_id.node == snapshot.owner && tx_id.time <= snapshot.local_base)
                     || snapshot.dots.contains(&tx_id)
             })

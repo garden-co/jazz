@@ -1006,6 +1006,19 @@ where
         .await
     }
 
+    /// The stored transaction's global time, if the transaction is stored.
+    pub(super) async fn query_transaction_global_time(
+        &mut self,
+        tx_id: TxId,
+    ) -> Result<Option<Option<GlobalTime>>, Error> {
+        self.query_transaction_fields(tx_id, |_, _, record| {
+            Ok(record
+                .get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_TIME_IDX)?
+                .map(GlobalTime))
+        })
+        .await
+    }
+
     async fn query_transaction_fields<T>(
         &mut self,
         tx_id: TxId,
