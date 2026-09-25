@@ -2345,7 +2345,7 @@ fn force_singleton_version_carriers() -> bool {
     if FORCE_SINGLETON_VERSION_CARRIERS_FOR_TESTS.load(AtomicOrdering::Relaxed) {
         return true;
     }
-    std::env::var_os("JAZZ_FORCE_SINGLETON_VERSION_CARRIERS").is_some()
+    crate::debug_env::force_singleton_version_carriers()
 }
 
 #[cfg(test)]

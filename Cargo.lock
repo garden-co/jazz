@@ -2118,6 +2118,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-example-auth-chat-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz",
+ "jazz-benchmark-guard",
+ "uuid",
+]
+
+[[package]]
 name = "jazz-example-band-chat-benchmark"
 version = "0.1.0"
 dependencies = [
@@ -2147,12 +2157,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-example-chat-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz",
+ "jazz-benchmark-guard",
+ "uuid",
+]
+
+[[package]]
 name = "jazz-example-epic-drop-benchmark"
 version = "0.1.0"
 dependencies = [
  "codspeed-divan-compat",
  "groove",
  "jazz",
+ "jazz-benchmark-guard",
 ]
 
 [[package]]
@@ -2161,6 +2182,7 @@ version = "0.1.0"
 dependencies = [
  "codspeed-divan-compat",
  "jazz",
+ "jazz-benchmark-guard",
 ]
 
 [[package]]
@@ -2170,6 +2192,7 @@ dependencies = [
  "codspeed-divan-compat",
  "groove",
  "jazz",
+ "jazz-benchmark-guard",
 ]
 
 [[package]]
