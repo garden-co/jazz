@@ -694,6 +694,13 @@ impl<'a> EvaluationRequests<'a> {
         !self.pending.is_empty()
     }
 
+    /// Whether any in-flight request is a large-value chunk fetch.
+    pub(super) fn has_pending_chunk(&self) -> bool {
+        self.pending
+            .keys()
+            .any(|key| matches!(key, EvaluationRequestKey::Chunk(_)))
+    }
+
     pub(super) fn drain_ready(
         &mut self,
     ) -> Result<

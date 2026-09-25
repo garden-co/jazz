@@ -1229,7 +1229,12 @@ where
                 remote_propagate_upstream,
                 requires_authority_receipt,
                 settled_authority_result.as_ref(),
-            ) && (!subscription.has_covered_input_sources() || covered_closure_installed)
+            ) && (!subscription.has_covered_input_sources()
+                || (covered_closure_installed
+                    // An installed closure whose evaluation still waits (for
+                    // example on large-value chunks) has not produced its
+                    // rows yet; refresh publishes once it completes (#3349).
+                    && !node.covered_receiver_evaluation_pending(&subscription)))
         };
         // An empty local opening carries no observable result information at
         // a Global request.  Until the authority replies, publishing it
