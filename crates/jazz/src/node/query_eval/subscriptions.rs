@@ -1093,8 +1093,8 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         subscription: SubscriptionKey,
-        values: &[Value],
-        identity: AuthorSubject,
+        _values: &[Value],
+        _identity: AuthorSubject,
         policy_binding: Option<&(AuthorSubject, BTreeMap<String, Value>)>,
     ) -> Result<Option<KnownStateDeclaration>, Error> {
         let binding_view_key = BindingViewKey {
@@ -1170,39 +1170,10 @@ where
                 },
             }));
         }
-        // Without a process-local cursor, only a live exact receipt can justify an
-        // exact declaration. Locally authored/cached rows alone cannot do so.
-        if !self.has_settled_authority_result(&authority_result_key) {
-            return Ok(None);
-        }
-        // A live exact receipt without a fast watermark still proves which
-        // membership this process received, but cannot claim currentness at a
-        // global cursor. Fall through to the bounded exact version set.
-        let mut refs = Vec::new();
-        for row in self
-            .query_rows_for_link(shape, binding, DurabilityTier::Local, identity)
-            .await?
-        {
-            let Some(tx_id) = self.current_row_tx_id(&row).await else {
-                continue;
-            };
-            refs.push(RowVersionRef::new(
-                row.table().to_owned(),
-                row.row_uuid(),
-                tx_id,
-            ));
-        }
-        refs.sort();
-        refs.dedup();
-        if refs.is_empty() {
-            return Ok(None);
-        }
-        Ok(exact_known_state_declaration_if_within_limits(
-            shape.shape_id(),
-            subscription,
-            values,
-            refs,
-        ))
+        // Without a watermark there is no known state to declare: rows are
+        // identified by (row, row_seq), not by exact version sets, so the
+        // serving peer answers with a complete set.
+        Ok(None)
     }
 
     #[allow(dead_code)]

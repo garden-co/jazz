@@ -30,18 +30,6 @@ pub(super) fn policy_plan_cache_signature(
     )
 }
 
-pub(super) fn exact_known_state_declaration_if_within_limits(
-    _shape_id: ShapeId,
-    _subscription: SubscriptionKey,
-    _values: &[Value],
-    refs: Vec<RowVersionRef>,
-) -> Option<KnownStateDeclaration> {
-    if refs.len() > MAX_KNOWN_STATE_EXACT_REFS {
-        return None;
-    }
-    Some(KnownStateDeclaration::ExactVersionSet { versions: refs })
-}
-
 pub(super) fn query_binding_source_shape_for_prepared_params(
     params: &[PreparedQueryParam],
 ) -> String {

@@ -1328,6 +1328,7 @@ impl PeerState {
                         settled_through,
                         peer_complete_tx_payloads,
                         known_state,
+                        leave_scan_after: None,
                         complete_exclusive_payloads: self.ship_complete_exclusive_payloads
                             && self.role == PeerRole::Relay,
                         previous_result_set: previous_result_tx_ids,
@@ -1947,8 +1948,10 @@ impl PeerState {
                 &known_state,
                 read_view.is_default(),
                 maintained.single_physical_table(),
+                shape.query(),
                 maintained.supporting_rows(),
                 None,
+                authorization_matches,
             )
             .await?
         } else {
@@ -1994,6 +1997,7 @@ impl PeerState {
                         settled_through: watermark,
                         peer_complete_tx_payloads,
                         known_state: bundle_known_state,
+                        leave_scan_after: known_membership_position,
                         complete_exclusive_payloads: self.ship_complete_exclusive_payloads
                             && self.role == PeerRole::Relay,
                         previous_result_set: BTreeSet::new(),
@@ -2563,6 +2567,8 @@ impl PeerState {
         let (policy_identity, policy_claims) =
             self.served_subscription_policy_binding(target_subscription)?;
         let settled_through = self.maintained_publication_cut(node, maintained_subscription);
+        let catch_up_authorization_matches =
+            self.fast_cursor_authorization_matches(target_subscription, &known_state);
         let catch_up = {
             let canonical = self
                 .publication_states
@@ -2577,8 +2583,10 @@ impl PeerState {
                         &known_state,
                         read_view.is_default(),
                         view.maintained.single_physical_table(),
+                        shape.query(),
                         view.maintained.supporting_rows(),
                         canonical.supporting_revision,
+                        catch_up_authorization_matches,
                     )
                     .await?
                 }
@@ -2588,6 +2596,7 @@ impl PeerState {
         if catch_up.is_some() {
             self.settle_watermark_declaration(target_subscription);
         }
+        let leave_scan_after = fast_current_membership_position(&known_state);
         let (known_state, target_result_member_removes) = if catch_up.is_some() {
             (Some(known_state).flatten(), Vec::new())
         } else {
@@ -2618,6 +2627,7 @@ impl PeerState {
                         settled_through,
                         peer_complete_tx_payloads,
                         known_state,
+                        leave_scan_after,
                         complete_exclusive_payloads: self.ship_complete_exclusive_payloads
                             && self.role == PeerRole::Relay,
                         previous_result_set: BTreeSet::new(),
@@ -2820,6 +2830,8 @@ impl PeerState {
         let (policy_identity, policy_claims) =
             self.served_subscription_policy_binding(target_subscription)?;
         let settled_through = self.maintained_publication_cut(node, maintained_subscription);
+        let catch_up_authorization_matches =
+            self.fast_cursor_authorization_matches(target_subscription, &known_state);
         let catch_up = {
             let canonical = self
                 .publication_states
@@ -2834,8 +2846,10 @@ impl PeerState {
                         &known_state,
                         read_view.is_default(),
                         view.maintained.single_physical_table(),
+                        shape.query(),
                         view.maintained.supporting_rows(),
                         canonical.supporting_revision,
+                        catch_up_authorization_matches,
                     )
                     .await?
                 }
@@ -2845,6 +2859,7 @@ impl PeerState {
         if catch_up.is_some() {
             self.settle_watermark_declaration(target_subscription);
         }
+        let leave_scan_after = fast_current_membership_position(&known_state);
         let (known_state, target_result_member_removes) = if catch_up.is_some() {
             (Some(known_state).flatten(), Vec::new())
         } else {
@@ -2875,6 +2890,7 @@ impl PeerState {
                         settled_through,
                         peer_complete_tx_payloads,
                         known_state,
+                        leave_scan_after,
                         complete_exclusive_payloads: self.ship_complete_exclusive_payloads
                             && self.role == PeerRole::Relay,
                         previous_result_set: BTreeSet::new(),
@@ -2919,8 +2935,10 @@ async fn watermark_catch_up<'a, S: OrderedKvStorage>(
     known_state: &Option<KnownStateDeclaration>,
     default_read_view: bool,
     single_table: Option<(&str, crate::ids::GlobalPhysicalTableId)>,
+    query: &crate::query::Query,
     rows: impl Iterator<Item = &'a crate::protocol::SupportingRow>,
     revision: Option<[u8; 16]>,
+    authorization_matches: bool,
 ) -> Result<Option<crate::protocol::SupportingRowsUpdate>, Error> {
     let Some(KnownStateDeclaration::Watermark {
         position,
@@ -2933,6 +2951,26 @@ async fn watermark_catch_up<'a, S: OrderedKvStorage>(
     let (true, Some((table, physical_table))) = (default_read_view, single_table) else {
         return Ok(None);
     };
+    // A read policy can hide or reveal a row without moving its seq (claims
+    // or policy changes). Only a receiver that echoes this link's current
+    // authorization progress may skip the rows that did not move.
+    // Unmoved rows keep their membership only when it depends on nothing
+    // but the row itself: no window, join or aggregate over other rows.
+    if !row_local_membership(query) {
+        return Ok(None);
+    }
+    let read_policy = node.table(table)?.read_policy.clone();
+    if !read_policy.as_ref().is_none_or(row_local_membership) {
+        return Ok(None);
+    }
+    // Claims can change without any row moving, so a claims-dependent view
+    // may skip unmoved rows only for a receiver that echoes this link's
+    // current authorization progress.
+    if !authorization_matches
+        && (query_uses_claims(query) || read_policy.as_ref().is_some_and(query_uses_claims))
+    {
+        return Ok(None);
+    }
     let mut update = node
         .supporting_catch_up_after(table, physical_table, rows, *position, *supporting_revision)
         .await?;
@@ -2944,4 +2982,59 @@ async fn watermark_catch_up<'a, S: OrderedKvStorage>(
         *revision = pinned;
     }
     Ok(Some(update))
+}
+
+/// A read policy with no conditions: readability never changes, so a catch-up
+/// needs no authorization receipt.
+pub(crate) fn read_policy_admits_every_row(policy: &crate::query::Query) -> bool {
+    policy.joins.is_empty()
+        && policy.flat_join.is_none()
+        && policy.policy_branches.is_empty()
+        && policy.reachable.is_empty()
+        && policy.inherits.is_empty()
+        && policy.relation.is_none()
+        && policy.filters.iter().all(
+            |filter| matches!(filter, crate::query::Predicate::All(all) if all.is_empty()),
+        )
+}
+
+/// Membership of a row in this query depends only on the row's own image.
+fn row_local_membership(query: &crate::query::Query) -> bool {
+    let scalar_filters = query.filters.is_empty()
+        || crate::node::simple_scalar_exit_query(&crate::query::Query {
+            select: None,
+            ..query.clone()
+        });
+    scalar_filters
+        && query.joins.is_empty()
+        && query.flat_join.is_none()
+        && query.policy_branches.is_empty()
+        && query.reachable.is_empty()
+        && query.inherits.is_empty()
+        && query.includes.is_empty()
+        && query.array_subqueries.is_empty()
+        && query.aggregate.is_none()
+        && query.limit.is_none()
+        && query.offset == 0
+        && query.relation.is_none()
+}
+
+fn query_uses_claims(query: &crate::query::Query) -> bool {
+    fn operand(operand: &crate::query::Operand) -> bool {
+        matches!(operand, crate::query::Operand::Claim(_))
+    }
+    fn predicate(filter: &crate::query::Predicate) -> bool {
+        use crate::query::Predicate::*;
+        match filter {
+            All(children) | Any(children) => children.iter().any(predicate),
+            Not(child) => predicate(child),
+            Eq(a, b) | Ne(a, b) | Gt(a, b) | Gte(a, b) | Lt(a, b) | Lte(a, b) | Contains(a, b) => {
+                operand(a) || operand(b)
+            }
+            In(a, list) => operand(a) || list.iter().any(operand),
+            EnumMatch { payload, .. } => predicate(payload),
+            IsNull(a) => operand(a),
+        }
+    }
+    query.filters.iter().any(predicate)
 }

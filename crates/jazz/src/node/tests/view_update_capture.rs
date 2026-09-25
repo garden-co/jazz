@@ -573,6 +573,7 @@ impl MaintainedSubscriptionViewSubscription {
                 settled_through: core.committed_global_time(),
                 peer_complete_tx_payloads: self.peer_complete_tx_payloads.clone(),
                 known_state: None,
+                leave_scan_after: None,
                 complete_exclusive_payloads: false,
                 previous_result_set,
                 result_member_adds: result_member_adds

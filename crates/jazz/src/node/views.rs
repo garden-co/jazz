@@ -271,6 +271,10 @@ pub(crate) struct MaintainedViewBundleInputs<'a> {
     pub(crate) peer_complete_tx_payloads: BTreeSet<TxId>,
     /// Optional fast known-state declaration for this served subscription.
     pub(crate) known_state: Option<KnownStateDeclaration>,
+    /// The receiver's watermark, kept even when its declaration is dropped
+    /// for a full resend: rows that moved past it and left the set still
+    /// ship their current image so the receiver's copy stops matching.
+    pub(crate) leave_scan_after: Option<GlobalTime>,
     /// Ship complete accepted exclusive transaction payloads so the receiver can
     /// use refreshed rows as a write base for later exclusive transactions.
     pub(crate) complete_exclusive_payloads: bool,
@@ -625,6 +629,7 @@ where
                 result_member_removes,
                 peer_complete_tx_payloads,
                 known_state: None,
+                leave_scan_after: None,
                 complete_exclusive_payloads: false,
                 previous_result_set,
                 identity,
@@ -830,6 +835,7 @@ where
             settled_through,
             peer_complete_tx_payloads,
             known_state,
+            leave_scan_after,
             complete_exclusive_payloads,
             previous_result_set: _previous_result_set,
             result_member_adds,
@@ -1281,24 +1287,39 @@ where
             );
         // A reset from a known cursor cannot name the rows the reader holds,
         // so every source row that changed after the cursor is a candidate.
+        // One that is not in the new set left it: like a catch-up's leaving
+        // row, it ships its current image so the reader's copy stops matching.
+        let supporting_now = supporting_update
+            .added_rows()
+            .iter()
+            .filter_map(|row| {
+                let table = *logical_tables.get(&row.physical_table)?;
+                Some((table.to_owned(), row.row))
+            })
+            .collect::<BTreeSet<_>>();
+        let mut cursor_left = BTreeSet::new();
         if let (
             crate::protocol::SupportingRowsUpdate::Snapshot { .. }
             | crate::protocol::SupportingRowsUpdate::CatchUp { .. },
             Some(position),
-        ) = (&supporting_update, known_state_position)
-        {
+        ) = (
+            &supporting_update,
+            known_state_position.or(leave_scan_after),
+        ) {
             let tables = logical_tables.values().copied().collect::<BTreeSet<_>>();
             for table in tables {
                 for row_uuid in self.global_rows_changed_after(table, position).await? {
-                    removed_row_candidates
-                        .entry((table.to_owned(), row_uuid))
-                        .or_insert((None, false));
+                    let key = (table.to_owned(), row_uuid);
+                    if !supporting_now.contains(&key) {
+                        cursor_left.insert(key.clone());
+                    }
+                    removed_row_candidates.entry(key).or_insert((None, false));
                 }
             }
         }
         // Rows leaving by catch-up ship their current image, deleted or not,
         // so the receiver's copy stops matching the query.
-        let catch_up_left = match &supporting_update {
+        let mut catch_up_left = match &supporting_update {
             crate::protocol::SupportingRowsUpdate::CatchUp { left, .. } => left
                 .iter()
                 .filter_map(|row| {
@@ -1308,6 +1329,36 @@ where
                 .collect::<BTreeSet<_>>(),
             _ => BTreeSet::new(),
         };
+        catch_up_left.extend(cursor_left);
+        // A leaving row's live image is disclosed only when this reader may
+        // still read it; otherwise only a deletion ships.
+        let mut unreadable_left = BTreeSet::new();
+        for (table, row_uuid) in &catch_up_left {
+            if self
+                .table(table)?
+                .read_policy
+                .as_ref()
+                .is_none_or(crate::peer::read_policy_admits_every_row)
+            {
+                continue;
+            }
+            let (read_shape, read_binding) = self.whole_table_shape_binding(table)?;
+            let readable = self
+                .query_rows_for_link_physical_row(
+                    &read_shape,
+                    &read_binding,
+                    tier,
+                    identity,
+                    *row_uuid,
+                )
+                .await?
+                .iter()
+                .any(|row| row.row_uuid() == *row_uuid);
+            if !readable {
+                unreadable_left.insert((table.clone(), *row_uuid));
+            }
+        }
+        catch_up_left.retain(|key| !unreadable_left.contains(key));
         for ((entry_table, row_uuid), (old_tx_id, is_member)) in &removed_row_candidates {
             let entry_table = entry_table.as_str();
             let (content_winner, retained_deletion_winner) =

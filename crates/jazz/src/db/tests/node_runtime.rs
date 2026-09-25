@@ -2224,9 +2224,33 @@ fn single_upstream_tick_applies_multiple_subscription_updates() {
 
 #[test]
 fn warm_reconnect_catches_up_from_the_watermark_with_only_changed_rows() {
-    let schema = schema();
-    let owner = AuthorSubject::for_test_bytes([0xa2; 16]);
+    let (full_bytes, catch_up_bytes) = warm_reconnect_after_offline_changes(schema(), false);
+    assert!(
+        catch_up_bytes * 4 < full_bytes,
+        "a watermark catch-up carries only the three moved rows: full={full_bytes}, catch_up={catch_up_bytes}"
+    );
+}
+
+#[test]
+fn warm_reconnect_under_a_claims_policy_resends_and_drops_rows_that_left() {
+    // A fresh link cannot prove the reader's authorization is unchanged, so
+    // a claims-scoped view gets a full set. Rows that left the result while
+    // the client was away must still stop matching its local reads.
+    warm_reconnect_after_offline_changes(owner_read_schema(), true);
+}
+
+/// Subscribe to 40 open todos, then, while the client is away, rename one,
+/// close one and add one. Returns the initial and reconnect payload sizes.
+fn warm_reconnect_after_offline_changes(
+    schema: JazzSchema,
+    owned_by_client: bool,
+) -> (usize, usize) {
     let client_author = AuthorSubject::for_test_bytes([0xc3; 16]);
+    let owner = if owned_by_client {
+        client_author
+    } else {
+        AuthorSubject::for_test_bytes([0xa2; 16])
+    };
     let server = open_core(0x5f, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc3, client_author, &schema);
     let rows = (0..40)
@@ -2295,11 +2319,26 @@ fn warm_reconnect_catches_up_from_the_watermark_with_only_changed_rows() {
     assert!(titles.contains("todo 3 renamed"));
     assert!(titles.contains("todo 40"));
     assert!(!titles.contains("todo 7"));
+    // The app sees the catch-up as the three-row delta, not a 40-row reset.
+    let (mut added, mut updated, mut removed) = (0, 0, 0);
+    while let Some(event) = subscription.try_next_event() {
+        if let SubscriptionEvent::Delta {
+            reset,
+            added: a,
+            updated: u,
+            removed: r,
+            ..
+        } = event
+        {
+            assert!(!reset, "a watermark catch-up must not publish as a reset");
+            added += a.len();
+            updated += u.len();
+            removed += r.len();
+        }
+    }
+    assert_eq!((added, updated, removed), (1, 1, 1));
     let catch_up_bytes = resumed.borrow().last_resume_bytes().unwrap();
-    assert!(
-        catch_up_bytes * 4 < full_bytes,
-        "a watermark catch-up carries only the three moved rows: full={full_bytes}, catch_up={catch_up_bytes}"
-    );
+    (full_bytes, catch_up_bytes)
 }
 
 #[test]

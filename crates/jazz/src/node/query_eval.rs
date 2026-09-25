@@ -57,8 +57,8 @@ use crate::protocol::{
     AuthorizationOperationKey, AuthorizationScopeOperation, AuthorizationSupportScopeKey,
     BindingViewKey, KnownStateCompleteness, KnownStateDeclaration, PermissionAdviceAction,
     ProgramFactEntry, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, RelationEdgeEntry,
-    ResultMemberEntry, ResultMemberPayloadEntry, ResultRowLayer, RowVersionRef, RowVersionRefEntry,
-    ShapeAst, ShapeBody, Subscribe, SubscriptionKey, SyntheticReplacementToken,
+    ResultMemberEntry, ResultMemberPayloadEntry, ResultRowLayer, RowVersionRefEntry, ShapeAst,
+    ShapeBody, Subscribe, SubscriptionKey, SyntheticReplacementToken,
 };
 use crate::protocol_limits::MAX_KNOWN_STATE_EXACT_REFS;
 use crate::query::{
@@ -90,16 +90,6 @@ use query_result_rows::{
     aggregate_output_schema, aggregate_query_row_uuid, aggregate_record_field_index,
     aggregate_result_table, compare_optional_values, sort_aggregate_rows,
 };
-
-#[cfg(test)]
-pub(crate) fn exact_known_state_declaration_for_test(
-    shape_id: ShapeId,
-    subscription: SubscriptionKey,
-    values: &[Value],
-    refs: Vec<RowVersionRef>,
-) -> Option<KnownStateDeclaration> {
-    exact_known_state_declaration_if_within_limits(shape_id, subscription, values, refs)
-}
 
 pub(crate) const JAZZ_APP_ROWS_SINK: &str = "app_rows";
 const PENDING_BINDING_SOURCE_SHAPE: &str = "__jazz_pending_binding_source";
@@ -2371,6 +2361,7 @@ where
         Ok((shape, binding))
     }
 
+    #[cfg(test)]
     pub(crate) async fn query_rows_for_link(
         &mut self,
         shape: &ValidatedQuery,
