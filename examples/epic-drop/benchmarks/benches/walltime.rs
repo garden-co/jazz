@@ -20,7 +20,7 @@ fn main() {
 fn epic_drop_upload_4mb(bencher: divan::Bencher<'_, '_>) {
     bencher
         .with_inputs(UploadFixture::new)
-        .bench_local_values(|fixture| fixture.upload(0, 4 * MIB));
+        .bench_local_refs(|fixture| fixture.upload(0, 4 * MIB));
 }
 
 /// The same upload at 64 MiB: a long recording or a video.
@@ -28,11 +28,12 @@ fn epic_drop_upload_4mb(bencher: divan::Bencher<'_, '_>) {
 fn epic_drop_upload_64mb(bencher: divan::Bencher<'_, '_>) {
     bencher
         .with_inputs(UploadFixture::new)
-        .bench_local_values(|fixture| fixture.upload(0, 64 * MIB));
+        .bench_local_refs(|fixture| fixture.upload(0, 64 * MIB));
 }
 
-/// Open a folder of 100 files. Only metadata is read; file contents stay put.
-#[divan::bench]
+/// Open a folder of 100 files, projecting only metadata columns. Cost still
+/// grows with file size today (#3471).
+#[divan::bench(sample_count = 30)]
 fn epic_drop_folder_listing_100_files(bencher: divan::Bencher<'_, '_>) {
     let fixture = Fixture::with_files(100, 256 * 1024);
     bencher.bench_local(|| divan::black_box(fixture.list_folder()));
@@ -46,8 +47,9 @@ fn epic_drop_download_4mb(bencher: divan::Bencher<'_, '_>) {
 }
 
 /// Seek into the middle of a 64 MiB file and read a 64 KiB window, as an
-/// audio or video player does when the user scrubs.
-#[divan::bench]
+/// audio or video player does when the user scrubs. Cost still grows with
+/// file size today (#3471).
+#[divan::bench(sample_count = 20)]
 fn epic_drop_seek_64mb(bencher: divan::Bencher<'_, '_>) {
     let fixture = Fixture::new(64 * MIB);
     bencher.bench_local(|| divan::black_box(fixture.download_middle_range()));

@@ -23,6 +23,7 @@ fn checkout_fixture(order_history: usize) -> Fixture {
 }
 
 /// 100 consecutive checkouts against a store that already holds 1,000 orders.
+/// Cost currently grows with order history (#3476).
 /// Each is one exclusive transaction: idempotency lookup, stock, district
 /// counter and customer balance reads, three updates and three inserts.
 #[divan::bench(sample_count = 10)]

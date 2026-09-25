@@ -19,7 +19,7 @@ fn main() {
 
 /// Stream a 1,000-chunk assistant reply (24 bytes per chunk, roughly a few
 /// tokens each) onto a turn that is already a large value.
-#[divan::bench(sample_count = 10)]
+#[divan::bench(sample_count = 5)]
 fn music_agent_stream_reply_1000_chunks(bencher: divan::Bencher<'_, '_>) {
     bencher
         .with_inputs(Fixture::new)

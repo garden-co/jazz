@@ -33,10 +33,10 @@ export const epicDropBenchmarks: BenchmarkMetadata[] = [
     name: "epic_drop_folder_listing_100_files",
     title: "EpicDrop folder listing · 100 files",
     description:
-      "Read a folder's file list (id, name, type and size), ordered by name, as the browser view does. File contents are not read.",
+      "Read a folder's file list (id, name, type and size), ordered by name, as the browser view does. Only metadata columns are projected, but today the cost still grows with the size of the files in the folder (#3471), so this number should fall once that is fixed.",
     fixture: "One folder holding 100 streamed files of 256 KiB each.",
     storage,
-    includes: ["Prepared indexed metadata query", "Materializing 100 metadata rows"],
+    includes: ["Prepared metadata query over the folder", "Materializing 100 metadata rows"],
     excludes: ["Uploading the files", "Query preparation", "Rendering"],
     work: { count: 1, unit: "listings/s", explanation: "One full folder listing of 100 rows." },
     source,
@@ -60,13 +60,10 @@ export const epicDropBenchmarks: BenchmarkMetadata[] = [
     name: "epic_drop_seek_64mb",
     title: "EpicDrop seek · 64 KiB from a 64 MiB file",
     description:
-      "Read a 64 KiB window from the middle of a 64 MiB file, as an audio or video player does when the user scrubs.",
+      "Read a 64 KiB window from the middle of a 64 MiB file, as an audio or video player does when the user scrubs. Today the cost grows with the whole file's size rather than the window's (#3471), so this number should fall once that is fixed.",
     fixture: fileFixture("64 MiB"),
     storage,
-    includes: [
-      "Resolving the file's large-value reference",
-      "Reading only the intersecting chunks",
-    ],
+    includes: ["Resolving the file's large-value reference", "Reading the requested 64 KiB window"],
     excludes: ["Uploading the file", "Decoding the media"],
     work: { count: 1, unit: "seeks/s", explanation: "One 64 KiB range read per seek." },
     source,
