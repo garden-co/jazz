@@ -380,16 +380,31 @@ where
                         ));
                     }
                 }
+                // Only a relay's terminal ingest consumes this receipt. Every
+                // other trust evaluates the write policies itself at ingest, so
+                // it needs the support proof but not a discarded evaluation.
                 let admitted_write_authorization = {
                     let mut node = node.lock().await;
-                    peer.prove_terminal_commit_authorization(
-                        &mut node,
-                        permission_subject,
-                        session_claim_binding.1,
-                        &versions,
-                        tx.tx_id,
-                    )
-                    .await?
+                    if ingest_context.trust == CommitUnitTrust::Relay {
+                        peer.prove_terminal_commit_authorization(
+                            &mut node,
+                            permission_subject,
+                            session_claim_binding.1,
+                            &versions,
+                            tx.tx_id,
+                        )
+                        .await?
+                    } else {
+                        peer.prove_terminal_commit_support(
+                            &mut node,
+                            permission_subject,
+                            session_claim_binding.1,
+                            &versions,
+                            tx.tx_id,
+                        )
+                        .await?;
+                        false
+                    }
                 };
                 Ok(node
                     .lock()

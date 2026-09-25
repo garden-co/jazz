@@ -715,6 +715,8 @@ where
         candidate_tx_id: TxId,
         candidate_versions: &[VersionRecord],
     ) -> Result<bool, Error> {
+        #[cfg(test)]
+        WRITE_POLICY_VERSION_EVALUATIONS.with(|count| count.set(count.get() + 1));
         self.write_policy_allows_version_record(
             version,
             author,
