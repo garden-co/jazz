@@ -430,7 +430,7 @@ impl RowDescriptor {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TableSchema {
     /// Row structure definition.
     pub columns: RowDescriptor,
@@ -445,13 +445,16 @@ pub struct TableSchema {
     /// equality while the following column supplies the query's sort order.
     ///
     /// Column order inside one index is significant. The set of indexes is
-    /// not: it serializes in canonical order (lexicographic over the columns'
-    /// UTF-8 bytes), the order [`SchemaHash`] hashes, so a schema's
-    /// content-addressed catalogue bytes never depend on declaration order.
+    /// not: the builder and deserializer keep it in canonical order
+    /// (lexicographic over the columns' UTF-8 bytes), and equality,
+    /// serialization, [`SchemaHash`], and schema compilation all apply that
+    /// order themselves, so a hand-built, unsorted `Vec` is equivalent to the
+    /// sorted one everywhere schemas are compared, hashed, or encoded.
     #[serde(
         default,
         skip_serializing_if = "Vec::is_empty",
-        serialize_with = "serialize_composite_indexes_canonically"
+        serialize_with = "serialize_composite_indexes_canonically",
+        deserialize_with = "deserialize_composite_indexes_canonically"
     )]
     pub composite_indexes: Vec<Vec<ColumnName>>,
     /// Access control policies.
@@ -462,16 +465,52 @@ pub struct TableSchema {
     pub branch_by: Vec<ColumnName>,
 }
 
+impl PartialEq for TableSchema {
+    fn eq(&self, other: &Self) -> bool {
+        self.columns == other.columns
+            && self.indexed_columns == other.indexed_columns
+            && canonical_composite_index_order(&self.composite_indexes)
+                == canonical_composite_index_order(&other.composite_indexes)
+            && self.policies == other.policies
+            && self.branch_by == other.branch_by
+    }
+}
+
 /// Canonical order of a table's composite indexes: lexicographic over each
 /// index's column names compared as UTF-8 bytes (equivalently, Unicode code
 /// points). TypeScript's `structuralSchemaHash` must use the same comparator.
 pub(crate) fn canonical_composite_index_order(indexes: &[Vec<ColumnName>]) -> Vec<Vec<&str>> {
     let mut sorted = indexes
         .iter()
-        .map(|columns| columns.iter().map(|column| column.as_str()).collect::<Vec<_>>())
+        .map(|columns| {
+            columns
+                .iter()
+                .map(|column| column.as_str())
+                .collect::<Vec<_>>()
+        })
         .collect::<Vec<_>>();
     sorted.sort_unstable();
     sorted
+}
+
+/// Sort a table's composite indexes into [`canonical_composite_index_order`],
+/// so structural equality of two schemas agrees with their [`SchemaHash`].
+fn canonicalize_composite_indexes(mut indexes: Vec<Vec<ColumnName>>) -> Vec<Vec<ColumnName>> {
+    indexes.sort_unstable_by(|left, right| {
+        left.iter()
+            .map(ColumnName::as_str)
+            .cmp(right.iter().map(ColumnName::as_str))
+    });
+    indexes
+}
+
+fn deserialize_composite_indexes_canonically<'de, D>(
+    deserializer: D,
+) -> Result<Vec<Vec<ColumnName>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Vec::<Vec<ColumnName>>::deserialize(deserializer).map(canonicalize_composite_indexes)
 }
 
 fn serialize_composite_indexes_canonically<S>(
@@ -673,7 +712,7 @@ impl TableSchemaBuilder {
         TableSchema {
             columns: RowDescriptor::new(self.columns),
             indexed_columns: self.indexed_columns,
-            composite_indexes: self.composite_indexes,
+            composite_indexes: canonicalize_composite_indexes(self.composite_indexes),
             policies: self.policies,
             branch_by: self.branch_by,
         }
@@ -685,7 +724,7 @@ impl TableSchemaBuilder {
         let schema = TableSchema {
             columns: RowDescriptor::new(self.columns),
             indexed_columns: self.indexed_columns,
-            composite_indexes: self.composite_indexes,
+            composite_indexes: canonicalize_composite_indexes(self.composite_indexes),
             policies: self.policies,
             branch_by: self.branch_by,
         };
