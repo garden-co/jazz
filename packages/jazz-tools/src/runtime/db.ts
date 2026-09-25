@@ -39,7 +39,8 @@ import {
   isPublicQueryReadTier,
   resolveEffectiveQueryExecutionOptions,
   resolveReadTier,
-  ReadTier,
+  isLocalFirstUnlessEmptyTier,
+  type RuntimeReadTier,
   type BranchSelector,
   type BranchView,
   type OpenTransactionId,
@@ -50,7 +51,12 @@ import {
 import { type RuntimeSource, type RuntimeTokenOptions } from "./runtime-source.js";
 import type { AuthFailureReason } from "./auth-state.js";
 import { translateQuery } from "./query-adapter.js";
-import { applyColumnTransforms, transformRow, transformRows } from "./row-transformer.js";
+import {
+  applyColumnTransforms,
+  createRowTransformer,
+  transformRow,
+  transformRows,
+} from "./row-transformer.js";
 import { toValue, toWriteRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
 import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
@@ -235,6 +241,15 @@ export interface DbDeltaSubscriptionCallbacks<T extends { id: string }> {
  * must not be able to select local-only propagation or a deferred own-write
  * overlay by adding private fields to an options object.
  */
+/**
+ * Readiness to await before a read. The core Db gates a
+ * local-first-unless-empty opening itself, so such a read needs only local
+ * readiness and never blocks on the server transport.
+ */
+function readinessTier(tier: RuntimeReadTier): DurabilityTier {
+  return tier === "local-first-unless-empty" ? "local" : tier;
+}
+
 function lowerPublicDbQueryOptions(options?: QueryOptions): InternalDbQueryOptions | undefined {
   if (!options) return undefined;
   const candidate = options as QueryOptions & {
@@ -500,7 +515,7 @@ export interface ActiveQuerySubscriptionTrace {
   query: string;
   table: string;
   branches: string[];
-  tier: DurabilityTier;
+  tier: RuntimeReadTier;
   propagation: QueryPropagation;
   createdAt: string;
   stack?: string;
@@ -2541,14 +2556,12 @@ export class Db {
     options?: InternalDbQueryOptions,
   ): Promise<T[]> {
     const client = this.getClient(query._schema);
-    // A newly attached browser-worker follower has no authoritative
-    // namespace-wide explicit-offline state until its init handshake resolves.
-    // Established runtimes return null here, preserving their synchronous
-    // operation-start tier snapshot even if disconnect happens later.
-    const initialOfflineState =
-      options?.tier === ReadTier.RemoteIfPossible
-        ? this.connection.initialExplicitOfflineState()
-        : null;
+    // A newly attached browser-worker follower learns the namespace-wide
+    // connection state during its init handshake. The core read gate needs
+    // that state before it decides whether an empty result may wait.
+    const initialOfflineState = isLocalFirstUnlessEmptyTier(options?.tier)
+      ? this.connection.initialExplicitOfflineState()
+      : null;
     if (initialOfflineState) await initialOfflineState;
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson));
@@ -2556,9 +2569,6 @@ export class Db {
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = requireSchemaWithTable(query._schema, outputTable);
     const queryOptions = nativeDbQueryOptions(query._schema, builtQuery.table, options);
-    const remoteIfPossibleOffline =
-      options?.tier === ReadTier.RemoteIfPossible && this.connection.isExplicitlyOffline();
-    if (remoteIfPossibleOffline) queryOptions.tier = "local";
     const wasmQuery = translateQuery(builderJson, planningSchema);
     const usesRelationTraversal = queryUsesRelationTraversal(builtQuery);
     const context = this.getRuntimeOperationContext();
@@ -2566,7 +2576,7 @@ export class Db {
       { ...this.config, defaultDurabilityTier: this.runtimeSource.defaultDurabilityTier },
       queryOptions,
     ).tier;
-    await this.ensureReady(effectiveTier);
+    await this.ensureReady(readinessTier(effectiveTier));
     const rows =
       context || usesRelationTraversal
         ? await client.queryInternal(
@@ -2697,20 +2707,17 @@ export class Db {
     const outputRelationNames = Object.keys(outputIncludes);
     const wasmQuery = translateQuery(builderJson, planningSchema);
 
+    const transformSubscriptionRow = createRowTransformer<Record<string, unknown>>(
+      outputSchema,
+      outputTable,
+      outputIncludes,
+      builtQuery.select,
+      query._columnTransformsByTable,
+      false,
+    );
     const transform = (row: WasmRow): T =>
       applyColumnTransforms(
-        applyPartialValueSelections(
-          transformRow(
-            row,
-            outputSchema,
-            outputTable,
-            outputIncludes,
-            builtQuery.select,
-            query._columnTransformsByTable,
-            false,
-          ),
-          builtQuery.partialSelect,
-        ),
+        applyPartialValueSelections(transformSubscriptionRow(row), builtQuery.partialSelect),
         outputTransforms,
         outputRelationNames,
       ) as T;
@@ -2718,9 +2725,6 @@ export class Db {
     const bufferedDeltas: SubscriptionDelta<T>[] = [];
 
     const queryOptions = nativeDbQueryOptions(query._schema, builtQuery.table, options);
-    const remoteIfPossibleOffline =
-      options?.tier === ReadTier.RemoteIfPossible && this.connection.isExplicitlyOffline();
-    if (remoteIfPossibleOffline) queryOptions.tier = "local";
     const context = this.getRuntimeOperationContext();
     type NativeSubscription = {
       id: number | null;
@@ -2944,13 +2948,18 @@ export class Db {
     // changes. Do not fabricate an empty opening or race it with a one-shot
     // cache read: that snapshot may be older than deltas already delivered.
     if (
-      this.connection.shouldDeferSubscriptionStart(resolveReadTier(queryOptions.tier ?? "local"))
+      this.connection.shouldDeferSubscriptionStart(
+        readinessTier(resolveReadTier(queryOptions.tier ?? "local")),
+      )
     ) {
       // The worker can only classify the initial authority-tier snapshot as
       // settled after its own server transport is attached. Delay native
       // subscription creation until that topology is ready; the native stream
       // then owns the settled-snapshot gate and remains the sole data source.
-      void this.ensureReady(resolveReadTier(queryOptions.tier ?? "local"), readyAbort.signal)
+      void this.ensureReady(
+        readinessTier(resolveReadTier(queryOptions.tier ?? "local")),
+        readyAbort.signal,
+      )
         .then(() => startNativeSubscription(initialSubscription))
         .catch((error: unknown) => {
           if (unsubscribed || readyAbort.signal.aborted || this.isShuttingDown) return;
@@ -2959,38 +2968,6 @@ export class Db {
     } else {
       startNativeSubscription(initialSubscription);
     }
-    // Connectivity changes select inputs, not a second result merger. Retire
-    // the old generation immediately so late local/remote callbacks cannot
-    // cross the transition. Reconnecting waits for a fresh remote opening.
-    if (options?.tier === ReadTier.RemoteIfPossible) {
-      let selectedOffline = remoteIfPossibleOffline;
-      this.connection.onExplicitOfflineChange((offline) => {
-        if (
-          offline === selectedOffline ||
-          unsubscribed ||
-          terminalized ||
-          activeSubscription === null
-        )
-          return;
-        selectedOffline = offline;
-        const retired = activeSubscription;
-        const replacement = createSubscriptionGeneration();
-        retireNativeSubscription(retired);
-        bufferedDeltas.length = 0;
-        const replacementOptions = {
-          ...queryOptions,
-          tier: offline ? ("local" as const) : ReadTier.RemoteIfPossible,
-        };
-        if (offline) {
-          startNativeSubscription(replacement, replacementOptions);
-        } else {
-          void this.ensureReady("global", readyAbort.signal)
-            .then(() => startNativeSubscription(replacement, replacementOptions))
-            .catch((error: unknown) => terminalizeSubscription(replacement, error));
-        }
-      }, readyAbort.signal);
-    }
-
     const handle = unsubscribe as SubscriptionHandle;
     if (ready) Object.defineProperty(handle, "ready", { value: ready });
     return handle;

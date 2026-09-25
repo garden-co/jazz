@@ -1,6 +1,7 @@
 import type { WasmSchema, Value } from "../../drivers/types.js";
 import type { RuntimeSourcesConfig } from "../context.js";
 import type { MutationErrorEvent } from "../client.js";
+import type { RemoteLinkState } from "../remote-link-state.js";
 import type { NativeSelfSignedClientProof } from "./native-codec.js";
 
 /** Local lifecycle classification, never inferred from a relayed error's name or message. */
@@ -553,6 +554,12 @@ export type BrowserFollowerPortEvent =
    * owns the one upstream server connection shared by all attached tabs.
    */
   | { type: "transport-state"; explicitlyDisconnected: boolean }
+  /**
+   * Live reachability of the worker's upstream server. Tabs use it only to
+   * decide whether an empty local-first-unless-empty opening may wait for a
+   * remote answer; older tabs ignore it.
+   */
+  | { type: "remote-link"; state: RemoteLinkState }
   | {
       type: "result";
       id: number;
