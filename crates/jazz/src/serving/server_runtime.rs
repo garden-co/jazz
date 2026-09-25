@@ -3023,4 +3023,112 @@ mod tests {
         );
         assert_eq!(shutdown_blocking(&inner), waiter_result);
     }
+
+    // Measurement probe for #3374: mirrors the websocket route's socket loop
+    // (every session re-requests a tick whenever runtime activity changes)
+    // and counts shell ticks caused by one activity notification.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "#3374: measurement probe, run manually with --ignored"]
+    async fn wake_storm_probe_3374() {
+        let schema = JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(TableSchemaBuilder::new("todos").column("title", ColumnType::Text))
+                .build(),
+        )
+        .unwrap();
+        let sizes: Vec<usize> = std::env::var("PROBE_SESSIONS")
+            .unwrap_or_else(|_| "1,10,50,100".to_owned())
+            .split(',')
+            .map(|n| n.parse().unwrap())
+            .collect();
+        for sessions in sizes {
+            let runtime = ServerRuntimeHandle::start_with_storage(
+                schema.clone(),
+                StorageConfig::InMemory,
+                None,
+            )
+            .unwrap();
+            let features = crate::wire::current_wire_features();
+            let mut loops = Vec::new();
+            for index in 0..sessions {
+                let mut identity = [0u8; 16];
+                identity[..8].copy_from_slice(&(index as u64 + 1).to_be_bytes());
+                let session = runtime
+                    .open_with_session_context(
+                        AuthorSubject::for_test_bytes(identity),
+                        BTreeMap::new(),
+                        CommitUnitTrust::Session,
+                        features,
+                        None,
+                        crate::serving::ServerLinkAdmission::OrdinarySession,
+                    )
+                    .await
+                    .unwrap();
+                let mut stream = runtime.open_wire_stream(session).unwrap();
+                let mut activity = runtime.subscribe_activity();
+                let socket_runtime = runtime.clone();
+                loops.push(tokio::spawn(async move {
+                    loop {
+                        tokio::select! {
+                            changed = activity.changed() => {
+                                if changed.is_err()
+                                    || socket_runtime.request_wire_tick(session).is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            frames = stream.recv() => {
+                                if frames.is_none() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }));
+            }
+            let ticks = |runtime: ServerRuntimeHandle| async move {
+                runtime
+                    .run_async(|shell| Box::pin(async move { Ok(shell.metrics_snapshot().ticks) }))
+                    .await
+                    .unwrap()
+            };
+            let settle = |runtime: ServerRuntimeHandle| async move {
+                let mut last = ticks(runtime.clone()).await;
+                loop {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    let now = ticks(runtime.clone()).await;
+                    if now == last {
+                        return now;
+                    }
+                    last = now;
+                }
+            };
+            settle(runtime.clone()).await;
+            let rounds = 5u64;
+            let mut storm_ticks = 0;
+            let mut storm_time = Duration::ZERO;
+            for _ in 0..rounds {
+                let before = settle(runtime.clone()).await;
+                let started = std::time::Instant::now();
+                runtime.notify_activity();
+                // Time until the expected per-session wave has run, then
+                // confirm nothing further follows it.
+                while ticks(runtime.clone()).await < before + sessions as u64 {
+                    tokio::time::sleep(Duration::from_micros(200)).await;
+                }
+                storm_time += started.elapsed();
+                let after = settle(runtime.clone()).await;
+                storm_ticks += after - before;
+            }
+            println!(
+                "wake_storm sessions={sessions} ticks_per_notification={} wall_ms_per_notification~{:.2}",
+                storm_ticks as f64 / rounds as f64,
+                storm_time.as_secs_f64() * 1000.0 / rounds as f64
+            );
+            for handle in loops {
+                handle.abort();
+            }
+            runtime.shutdown().await.unwrap();
+        }
+    }
 }
