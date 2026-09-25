@@ -8,7 +8,7 @@ use futures::executor::block_on;
 /// a peer rehydrates it; an unscoped test `Subscribe` followed by a SYSTEM
 /// peer would exercise the deliberately rejected scope-replacement path.
 fn subscribe_query_binding_as_system(
-    node: &mut NodeState,
+    node: &mut NodeState<BoxedStorage>,
     shape: &ValidatedQuery,
     binding: &Binding,
     opts: &RegisterShapeOptions,

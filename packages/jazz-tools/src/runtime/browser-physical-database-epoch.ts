@@ -35,8 +35,24 @@ const liveEpochs = new WeakMap<
     databaseName: string;
     active: () => boolean;
     claimed: boolean;
+    storeClaimed: boolean;
   }
 >();
+
+/** Consume one page-store claim, separately from the later reclamation claim.
+ * Failed borrowed-epoch admission requires owner release and a new epoch.
+ */
+export function claimBrowserStorageAdmissionOwnership(
+  epoch: BrowserPhysicalDatabaseEpoch,
+  databaseName: string,
+): () => boolean {
+  const state = liveEpochs.get(epoch);
+  if (!state || state.databaseName !== databaseName || !state.active() || state.storeClaimed) {
+    throw new Error("IndexedDB admission requires an unclaimed live database Web Lock");
+  }
+  state.storeClaimed = true;
+  return state.active;
+}
 
 /** Consume the live lock proof once, for one page-store/tree owner. */
 export function claimBrowserReclamationOwnership(
@@ -110,7 +126,12 @@ export async function acquireBrowserPhysicalDatabaseEpoch(
             return lockReleased;
           },
         };
-        liveEpochs.set(owner, { databaseName, active: () => !releaseRequested, claimed: false });
+        liveEpochs.set(owner, {
+          databaseName,
+          active: () => !releaseRequested,
+          claimed: false,
+          storeClaimed: false,
+        });
         resolveEpoch(owner);
         await released;
       },

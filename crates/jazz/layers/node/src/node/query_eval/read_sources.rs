@@ -23,6 +23,9 @@ pub(super) struct JazzSourceGraphPreparer<'a, S> {
     pub(super) node: &'a mut NodeState<S>,
     pub(super) read_view: &'a ReadView<RequestedSourceStage>,
     pub(super) inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
+    /// Commit-scoped, independently authorized rows. Never substitutes for the
+    /// accepted source, and never applies to a same-table sibling occurrence.
+    pub(super) created_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
     /// Per-occurrence projections of receiver-local shared scope/table inputs.
     /// The compiler grants each occurrence its exact row shape; sharing an
     /// input never combines different authority scopes or downstream operators.
@@ -84,6 +87,7 @@ pub(in crate::node) struct TransactionWriteOverlay {
     excluded: Option<(SchemaVersionId, String, RowUuid)>,
     reads: Option<Arc<Mutex<BTreeSet<(SchemaVersionId, String)>>>>,
     evidence_tier: DurabilityTier,
+    accepted_updates_only: bool,
 }
 
 impl Default for TransactionWriteOverlay {
@@ -94,6 +98,7 @@ impl Default for TransactionWriteOverlay {
             excluded: None,
             reads: None,
             evidence_tier: DurabilityTier::Local,
+            accepted_updates_only: false,
         }
     }
 }
@@ -156,6 +161,7 @@ impl TransactionWriteOverlay {
             excluded: None,
             reads: None,
             evidence_tier: DurabilityTier::Global,
+            accepted_updates_only: false,
         }
     }
 
@@ -163,6 +169,20 @@ impl TransactionWriteOverlay {
     /// commit unit decision's checks that do not see the unit's own writes.
     pub(in crate::node) fn accepted_state() -> Self {
         Self::from_tables(Arc::default())
+    }
+
+    /// A strict creation proof may observe replacements of accepted rows,
+    /// never new rows from the ordinary transaction overlay.
+    pub(in crate::node) fn accepted_updates(&self) -> Self {
+        Self {
+            evidence_tier: DurabilityTier::Global,
+            accepted_updates_only: true,
+            ..self.clone()
+        }
+    }
+
+    pub(in crate::node) fn accepted_updates_only(&self) -> bool {
+        self.accepted_updates_only
     }
 
     /// This overlay's committed view with nothing overlaid, excluded or
@@ -193,6 +213,7 @@ impl TransactionWriteOverlay {
             excluded: Some((schema, table.to_owned(), row_uuid)),
             reads: self.reads.clone(),
             evidence_tier: self.evidence_tier,
+            accepted_updates_only: self.accepted_updates_only,
         }
     }
 
@@ -207,6 +228,7 @@ impl TransactionWriteOverlay {
             excluded: self.excluded.clone(),
             reads: Some(reads),
             evidence_tier: self.evidence_tier,
+            accepted_updates_only: self.accepted_updates_only,
         }
     }
 
@@ -2387,6 +2409,95 @@ where
                 self.boxed_overlay_transaction_writes(request, &mut resolved)
                     .await?;
             }
+            if let Some(rows) = self.created_sources.get(&request.source) {
+                if request.visibility != RowVisibility::Visible
+                    || self.inline_sources.contains_key(&request.source)
+                    || !matches!(request.authorization, SourceAuthorizationRequest::System)
+                    || !matches!(
+                        self.read_view.sources.get(&request.source),
+                        Some(SourceExpr::VisibleCurrent {
+                            tier: DurabilityTier::Global,
+                            ..
+                        })
+                    )
+                {
+                    return Err(source_resolution_error(request, SourceGap::Coverage));
+                }
+                let alias = self
+                    .node
+                    .ensure_schema_version_alias(self.read_view.read_schema)
+                    .await
+                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                // Storage-backed current graphs can retain bookkeeping that
+                // this source occurrence did not request. Project both arms
+                // to the complete requested shape, retaining the accepted
+                // graph's physical field identities and nested value types.
+                let physical = self
+                    .node
+                    .database
+                    .graph_output_descriptor(&resolved.graph)
+                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                let fields = resolved
+                    .row_shape
+                    .descriptor
+                    .fields()
+                    .iter()
+                    .map(|requested| {
+                        physical
+                            .fields()
+                            .iter()
+                            .find(|field| field.name == requested.name)
+                            .cloned()
+                            .ok_or_else(|| source_resolution_error(request, SourceGap::Coverage))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let descriptor = RecordDescriptor::new_with_fields(fields);
+                let projection =
+                    descriptor
+                        .fields()
+                        .iter()
+                        .map(|field| {
+                            let name = field.name.clone().ok_or_else(|| {
+                                source_resolution_error(request, SourceGap::Coverage)
+                            })?;
+                            let identity = field.identity.clone().ok_or_else(|| {
+                                source_resolution_error(request, SourceGap::Coverage)
+                            })?;
+                            Ok(ProjectField {
+                                expression: groove::ivm::ProjectExpr::Field(
+                                    groove::ivm::FieldRef::stored_name(&name),
+                                ),
+                                output_name: name,
+                                output_identity: identity,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, SourceResolutionError>>()?;
+                resolved.graph = resolved.graph.project_fields(projection);
+                let records = rows
+                    .iter()
+                    .map(|row| {
+                        inline_current_record_for_output(
+                            &resolved.table_schema,
+                            &descriptor,
+                            row,
+                            alias,
+                            "authorized-created",
+                            &request.requirements,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                let created = GraphBuilder::inline_records(descriptor, records);
+                // Exact absence was validated by admission; retain explicit
+                // coordinate exclusion so the union never amplifies a row.
+                let created = GraphBuilder::anti_join(
+                    created,
+                    resolved.graph.clone().project(["row_uuid"]),
+                    ["row_uuid"],
+                    ["row_uuid"],
+                );
+                resolved.graph = GraphBuilder::union([resolved.graph, created]);
+            }
             if let Some(scope) = exclusion_scope
                 && !self.excludes_below_pending(request)
             {
@@ -2533,6 +2644,16 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
                 .filter(|(row_uuid, _)| keep(row_uuid))
                 .map(|(_, record)| record.clone()),
         );
+        let live = if self.transaction_overlay.accepted_updates_only() {
+            GraphBuilder::semi_join(
+                live,
+                resolved.graph.clone().project([row_field.clone()]),
+                [row_field.clone()],
+                [row_field.clone()],
+            )
+        } else {
+            live
+        };
         let committed = GraphBuilder::anti_join(
             resolved.graph.clone(),
             GraphBuilder::inline_records(

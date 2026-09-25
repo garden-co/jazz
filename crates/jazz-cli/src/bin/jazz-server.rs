@@ -28,7 +28,7 @@ fn start_loopback_server(
         {
             return LoopbackWebSocketServer::start_with_config_and_storage_factory(
                 config,
-                std::sync::Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory),
+                std::sync::Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory::default()),
             );
         }
     }

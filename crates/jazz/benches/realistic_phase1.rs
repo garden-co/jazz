@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 mod schema_fixture;
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use groove::storage::BoxedStorage;
 use jazz::db::{
     Db, DbConfig, DbIdentity, LocalUpdates, Propagation, ReadOpts, SeededRowIdSource,
     SubscriptionEvent, WireTransportAdapter, block_on,
@@ -38,11 +39,10 @@ use jazz::wire::{
     FEATURE_SESSION_FRAME, FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, TransportError,
     WIRE_PROTOCOL_VERSION, WireSession, WireTransport,
 };
-use jazz_storage_rocksdb::RocksDbStorage;
 use tempfile::TempDir;
 
-type BenchDb = Db;
-type RocksBenchDb = Db;
+type BenchDb = Db<MemoryStorage>;
+type RocksBenchDb = Db<BoxedStorage>;
 
 fn author() -> AuthorSubject {
     schema_fixture::account_author_uuid(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"))
@@ -223,7 +223,10 @@ fn open_db_with_schema(
         author,
         history_complete,
         schema,
-        |refs| MemoryStorage::new(refs).expect("valid memory storage families"),
+        |families| {
+            let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+            MemoryStorage::new(&refs).expect("valid memory storage families")
+        },
         "open core realistic benchmark db",
     )
 }
@@ -239,7 +242,14 @@ fn open_rocks_db_with_author(
         author,
         history_complete,
         schema(),
-        |refs| RocksDbStorage::open(path, refs).expect("open realistic RocksDB storage"),
+        |families| {
+            jazz::block_on(jazz::storage_codec_profile::open_node_storage(
+                &jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+                path.to_path_buf(),
+                families,
+            ))
+            .expect("open realistic RocksDB storage")
+        },
         "open core realistic RocksDB benchmark db",
     )
 }
@@ -249,21 +259,17 @@ fn open_db_with_storage<S>(
     author: AuthorSubject,
     history_complete: bool,
     schema: JazzSchema,
-    storage: impl FnOnce(&[&str]) -> S,
+    storage: impl FnOnce(Vec<String>) -> S,
     context: &str,
 ) -> Db
 where
     S: OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
 {
     let column_families = schema.column_families();
-    let refs = column_families
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
 
     let config = DbConfig::new(
         schema,
-        storage(&refs),
+        storage(column_families),
         DbIdentity {
             node: NodeUuid::from_bytes([seed as u8; 16]),
             author,
@@ -1392,14 +1398,14 @@ fn open_rocks_db_with_phases(
 ) -> (RocksBenchDb, Duration, Duration, Option<R3OpenBreakdown>) {
     let schema = schema();
     let column_families = schema.column_families();
-    let refs = column_families
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
 
     let storage_started = Instant::now();
-    let storage =
-        RocksDbStorage::open(path, &refs).expect("open realistic RocksDB phase receipt storage");
+    let storage = jazz::block_on(jazz::storage_codec_profile::open_node_storage(
+        &jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+        path.to_path_buf(),
+        column_families,
+    ))
+    .expect("open realistic RocksDB phase receipt storage");
     let storage_open = storage_started.elapsed();
 
     let config = DbConfig::new(

@@ -9,6 +9,7 @@ mod common;
 #[path = "../../jazz-testkit/src/duplex_transport.rs"]
 mod duplex_transport;
 
+use groove::storage::BoxedStorage;
 use jazz::block_on;
 use jazz::db::{
     Db, DbConfig, DbIdentity, LocalUpdates, MergeableTxOps, Propagation, ReadOpts,
@@ -21,7 +22,6 @@ use jazz::query::{ArraySubquery, OrderDirection, Query};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
-use jazz_storage_rocksdb::RocksDbStorage;
 
 use common::{allow_all_policies, compile_schema};
 
@@ -162,11 +162,18 @@ fn open_history_complete_db_with_schema(scale: usize, schema: JazzSchema) -> Db 
     .expect("open history-complete canary db")
 }
 
-fn open_rocks_db_with_schema(scale: usize, schema: JazzSchema) -> (tempfile::TempDir, Db) {
+fn open_rocks_db_with_schema(
+    scale: usize,
+    schema: JazzSchema,
+) -> (tempfile::TempDir, Db<BoxedStorage>) {
     let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let dir = tempfile::tempdir().expect("temp rocks dir");
-    let storage = RocksDbStorage::open(dir.path(), &refs).expect("open rocks canary storage");
+    let storage = jazz::block_on(jazz::storage_codec_profile::open_node_storage(
+        &jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+        dir.path().to_path_buf(),
+        cfs,
+    ))
+    .expect("open rocks canary storage");
     let db = block_on(Db::open(
         DbConfig::new(
             schema,
@@ -550,7 +557,7 @@ fn write_cells(parent: RowUuid, index: usize) -> BTreeMap<String, Value> {
     ])
 }
 
-fn seed_rocks_write_fixture(db: &Db, child_rows: usize) -> RowUuid {
+fn seed_rocks_write_fixture(db: &Db<BoxedStorage>, child_rows: usize) -> RowUuid {
     let parent = row(50_000_000);
     block_on(db.insert(
         "parents",

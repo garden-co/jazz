@@ -103,6 +103,9 @@ declare module "jazz-wasm" {
       appId: string,
       claimedAuthor: string,
     ): WasmDb;
+    /** Private host bridge: reads only, before E1-to-E2 manifest publication. */
+    static preflightBrowserEpochOne(pageStore: unknown): Promise<void>;
+    static __browserStorageAdmissionReceipt(completed: boolean): Uint8Array;
     /** Host-only relay open; `storageOwner` is supplied by broker ownership admission. */
     static openBrowser(
       pageStore: unknown,

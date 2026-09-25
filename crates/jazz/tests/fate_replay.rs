@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 mod common;
 
 use futures::executor::block_on;
+use groove::storage::BoxedStorage;
 use jazz::groove::records::Value;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState, SKEW_TOLERANCE_MS};
@@ -19,7 +20,6 @@ use jazz::tools::{
     TableSchema,
 };
 use jazz::tx::{DurabilityTier, Fate, TxId};
-use jazz_storage_rocksdb::RocksDbStorage;
 
 fn node(byte: u8) -> NodeUuid {
     NodeUuid::from_bytes([byte; 16])
@@ -44,11 +44,19 @@ fn schema() -> JazzSchema {
     JazzSchema::new(&source.allow_all()).expect("fate replay public schema compiles")
 }
 
-async fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, NodeState) {
+async fn open_node(
+    node_uuid: NodeUuid,
+    schema: JazzSchema,
+) -> (tempfile::TempDir, NodeState<BoxedStorage>) {
     let temp_dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+    let storage = jazz::storage_codec_profile::open_node_storage(
+        &jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+        temp_dir.path().to_path_buf(),
+        cfs,
+    )
+    .await
+    .unwrap();
     let node = NodeState::new_with_shared_test_catalogue(node_uuid, schema, storage)
         .await
         .unwrap();
@@ -59,10 +67,15 @@ async fn reopen_node(
     temp_dir: &tempfile::TempDir,
     node_uuid: NodeUuid,
     schema: JazzSchema,
-) -> NodeState {
+) -> NodeState<BoxedStorage> {
     let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+    let storage = jazz::storage_codec_profile::open_node_storage(
+        &jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+        temp_dir.path().to_path_buf(),
+        cfs,
+    )
+    .await
+    .unwrap();
     NodeState::new_with_shared_test_catalogue(node_uuid, schema, storage)
         .await
         .unwrap()
@@ -76,7 +89,7 @@ fn task_cells(title: &str, count: i32) -> BTreeMap<String, Value> {
 }
 
 async fn commit(
-    client: &mut NodeState,
+    client: &mut NodeState<BoxedStorage>,
     author: AuthorSubject,
     row_uuid: RowUuid,
     made_at: u64,
@@ -100,7 +113,7 @@ async fn commit(
     (tx_id, message)
 }
 
-async fn relay_ingest(node: &mut NodeState, message: &SyncMessage) {
+async fn relay_ingest(node: &mut NodeState<BoxedStorage>, message: &SyncMessage) {
     let SyncMessage::CommitUnit { tx, versions } = message else {
         panic!("expected commit unit");
     };
@@ -109,12 +122,15 @@ async fn relay_ingest(node: &mut NodeState, message: &SyncMessage) {
         .unwrap();
 }
 
-async fn core_ingest(node: &mut NodeState, message: &SyncMessage) -> SyncMessage {
+async fn core_ingest(node: &mut NodeState<BoxedStorage>, message: &SyncMessage) -> SyncMessage {
     let [fate] = core_ingest_all(node, message).await.try_into().unwrap();
     fate
 }
 
-async fn core_ingest_all(node: &mut NodeState, message: &SyncMessage) -> Vec<SyncMessage> {
+async fn core_ingest_all(
+    node: &mut NodeState<BoxedStorage>,
+    message: &SyncMessage,
+) -> Vec<SyncMessage> {
     let SyncMessage::CommitUnit { tx, versions } = message else {
         panic!("expected commit unit");
     };
@@ -125,12 +141,15 @@ async fn core_ingest_all(node: &mut NodeState, message: &SyncMessage) -> Vec<Syn
     node.persist_and_settle_outcome(outcome).await.unwrap()
 }
 
-async fn apply_message(node: &mut NodeState, message: SyncMessage) {
+async fn apply_message(node: &mut NodeState<BoxedStorage>, message: SyncMessage) {
     let outcome = node.apply_sync_message(message).await.unwrap();
     node.persist_and_settle_outcome(outcome).await.unwrap();
 }
 
-async fn task_rows(node: &mut NodeState, tier: DurabilityTier) -> Vec<(RowUuid, Value, Value)> {
+async fn task_rows(
+    node: &mut NodeState<BoxedStorage>,
+    tier: DurabilityTier,
+) -> Vec<(RowUuid, Value, Value)> {
     let schema = schema();
     let table = &schema.tables[0];
     node.current_rows("tasks", tier)

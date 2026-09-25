@@ -131,6 +131,10 @@ fn expected_profile_ids() -> BTreeMap<&'static str, Vec<String>> {
                 .collect(),
         ),
         (
+            "jazz-epoch-2-additions",
+            vec!["jazz.exclusive-read-evidence.v1".to_owned()],
+        ),
+        (
             "server-catalogue-root",
             vec!["jazz.server-catalogue-entry.v1".to_owned()],
         ),
@@ -156,7 +160,9 @@ fn validate_registry_with_profiles(
         }
         if !matches!(
             family.profile.as_deref(),
-            None | Some("groove-root" | "jazz-root" | "server-catalogue-root")
+            None | Some(
+                "groove-root" | "jazz-root" | "jazz-epoch-2-additions" | "server-catalogue-root"
+            )
         ) {
             return Err(format!("{} has an unknown codec profile", family.id));
         }
@@ -197,6 +203,7 @@ fn validate_registry_with_profiles(
     for required in [
         "groove.typed-record.v1",
         "groove.storage-epoch-manifest.v1",
+        "groove.storage-admission-receipt.v1",
         "groove.jazz-physical-class.v1",
         "jazz.history-version-current.v1",
         "jazz.contribution-provenance.v1",
@@ -220,6 +227,29 @@ fn validate_registry(registry: &Registry) -> Result<(), String> {
 #[test]
 fn authoritative_persistent_codec_family_registry_is_complete_and_current() {
     validate_registry(&registry()).expect("codec registry must remain complete and current");
+}
+
+#[test]
+fn epoch_two_profile_composes_frozen_epoch_one_with_registered_additions() {
+    let registry = registry();
+    let mut registered = profile_ids(&registry, "groove-root");
+    registered.extend(profile_ids(&registry, "jazz-root"));
+    let legacy = jazz::storage_codec_profile::epoch_1_storage_codec_profile().unwrap();
+    registered.sort();
+    assert_eq!(
+        registered,
+        legacy.codec_ids().map(str::to_owned).collect::<Vec<_>>()
+    );
+    registered.extend(profile_ids(&registry, "jazz-epoch-2-additions"));
+    registered.sort();
+    assert_eq!(
+        registered,
+        jazz::storage_codec_profile::epoch_2_storage_codec_profile()
+            .unwrap()
+            .codec_ids()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]

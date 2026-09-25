@@ -359,7 +359,7 @@ async fn connect_client(
         data_dir,
         storage: jazz::tools::ClientStorage::Persistent,
         storage_factory: Some(std::sync::Arc::new(
-            jazz_storage_rocksdb::RocksDbStorageFactory,
+            jazz_storage_rocksdb::RocksDbStorageFactory::default(),
         )),
         account_id: None,
         jwt_token: None,

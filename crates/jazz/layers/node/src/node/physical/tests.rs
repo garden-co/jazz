@@ -9,7 +9,7 @@ mod variant_case_tests {
         EnumCaseDescriptor as PublicEnumCaseDescriptor, SchemaBuilder as PublicSchemaBuilder,
         TableSchemaBuilder as PublicTableSchemaBuilder,
     };
-    use jazz_storage_rocksdb::RocksDbStorage;
+    use groove::storage::BoxedStorage;
     use std::path::Path;
 
     fn schema(byte: u8) -> SchemaVersionId {
@@ -44,14 +44,18 @@ mod variant_case_tests {
                 tables: BTreeMap::from([(
                     "entries".to_owned(),
                     PhysicalTableIdentity {
-                        id: crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_u128(table_id as u128 + 1)),
+                        id: crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_u128(
+                            table_id as u128 + 1,
+                        )),
                         columns: columns
                             .iter()
                             .map(|(name, id)| {
                                 (
                                     name.to_string(),
                                     PhysicalColumnIdentity {
-                                        id: crate::ids::GlobalPhysicalColumnId(uuid::Uuid::from_u128(*id as u128 + 100)),
+                                        id: crate::ids::GlobalPhysicalColumnId(
+                                            uuid::Uuid::from_u128(*id as u128 + 100),
+                                        ),
                                         enum_variants: BTreeMap::new(),
                                     },
                                 )
@@ -91,39 +95,74 @@ mod variant_case_tests {
     #[test]
     fn physical_projection_names_match_storage_layouts_without_building_them() {
         let public = PublicSchemaBuilder::new()
-            .table(PublicTableSchemaBuilder::new("entries")
-                .column("body", PublicColumnType::Text)
-                .column("status", PublicColumnType::ScalarEnum {
-                    name: "state".to_owned(),
-                    variants: vec!["open".to_owned(), "closed".to_owned()],
-                }))
+            .table(
+                PublicTableSchemaBuilder::new("entries")
+                    .column("body", PublicColumnType::Text)
+                    .column(
+                        "status",
+                        PublicColumnType::ScalarEnum {
+                            name: "state".to_owned(),
+                            variants: vec!["open".to_owned(), "closed".to_owned()],
+                        },
+                    ),
+            )
             .build();
         let schema = JazzSchema::new(&public).unwrap();
         let table = &schema.tables[0];
         let mut mapping = mapping(7, &[]).tables.remove("entries").unwrap();
         for (index, column) in table.columns.iter().enumerate() {
-            mapping.columns.insert(column.name.clone(), PhysicalColumnId(index as u64 + 100));
+            mapping
+                .columns
+                .insert(column.name.clone(), PhysicalColumnId(index as u64 + 100));
         }
         let storage_tables = [
             table.history_storage_table(),
             table.global_current_storage_tables().remove(0),
             table.rejected_versions_storage_table(),
         ];
-        let prefixes = [HistoryRowRecord::USER_CELLS, GlobalCurrentRowRecord::USER_CELLS,
-            RejectedVersionRowRecord::USER_CELLS];
-        let all = table.columns.iter().map(|column| column.name.clone()).collect();
-        for present in [None, Some(BTreeSet::new()), Some(BTreeSet::from(["body".to_owned()])), Some(all)] {
+        let prefixes = [
+            HistoryRowRecord::USER_CELLS,
+            GlobalCurrentRowRecord::USER_CELLS,
+            RejectedVersionRowRecord::USER_CELLS,
+        ];
+        let all = table
+            .columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect();
+        for present in [
+            None,
+            Some(BTreeSet::new()),
+            Some(BTreeSet::from(["body".to_owned()])),
+            Some(all),
+        ] {
             let actual = [
                 physical_history_field_names_for_case(table, &mapping, present.as_ref()).unwrap(),
                 physical_current_field_names_for_case(table, &mapping, present.as_ref()).unwrap(),
-                physical_rejected_version_field_names_for_case(table, &mapping, present.as_ref()).unwrap(),
+                physical_rejected_version_field_names_for_case(table, &mapping, present.as_ref())
+                    .unwrap(),
             ];
             for ((actual, storage), prefix) in actual.iter().zip(&storage_tables).zip(prefixes) {
-                let mut expected = storage.columns[..prefix].iter().map(|c| c.name.clone()).collect::<Vec<_>>();
-                expected.extend(table.columns.iter()
-                    .filter(|column| present.as_ref().is_none_or(|set| set.contains(&column.name)))
-                    .map(|column| physical_user_column_field(mapping.columns[&column.name])));
-                expected.extend(storage.columns[prefix + table.columns.len()..].iter().map(|c| c.name.clone()));
+                let mut expected = storage.columns[..prefix]
+                    .iter()
+                    .map(|c| c.name.clone())
+                    .collect::<Vec<_>>();
+                expected.extend(
+                    table
+                        .columns
+                        .iter()
+                        .filter(|column| {
+                            present
+                                .as_ref()
+                                .is_none_or(|set| set.contains(&column.name))
+                        })
+                        .map(|column| physical_user_column_field(mapping.columns[&column.name])),
+                );
+                expected.extend(
+                    storage.columns[prefix + table.columns.len()..]
+                        .iter()
+                        .map(|c| c.name.clone()),
+                );
                 assert_eq!(*actual, expected);
             }
         }
@@ -135,7 +174,9 @@ mod variant_case_tests {
         let none = BTreeSet::new();
         assert!(physical_current_field_names_for_case(table, &mapping, Some(&none)).is_ok());
         assert!(physical_history_field_names_for_case(table, &mapping, Some(&none)).is_ok());
-        assert!(physical_rejected_version_field_names_for_case(table, &mapping, Some(&none)).is_ok());
+        assert!(
+            physical_rejected_version_field_names_for_case(table, &mapping, Some(&none)).is_ok()
+        );
     }
 
     #[test]
@@ -165,7 +206,10 @@ mod variant_case_tests {
         let reopened = mappings
             .iter()
             .map(|(version, mapping)| {
-                Ok((*version, codec::decode_physical_mapping(&codec::encode_physical_mapping(mapping)?)?))
+                Ok((
+                    *version,
+                    codec::decode_physical_mapping(&codec::encode_physical_mapping(mapping)?)?,
+                ))
             })
             .collect::<Result<BTreeMap<_, _>, Error>>()
             .unwrap();
@@ -218,14 +262,19 @@ mod variant_case_tests {
         // payload must never turn that unknown identity into a local tag.
         let known = schema(1);
         let mut corrupt = mapping(7, &[("state", 1)]);
-        corrupt.tables.get_mut("entries").unwrap().scalar_enum_cases.insert(
-            PhysicalColumnId(1),
-            vec![GlobalScalarEnumCaseId {
-                id: crate::ids::GlobalPhysicalEnumVariantId(uuid::Uuid::nil()),
-                introducing_schema: known,
-                introducing_ordinal: 0,
-            }],
-        );
+        corrupt
+            .tables
+            .get_mut("entries")
+            .unwrap()
+            .scalar_enum_cases
+            .insert(
+                PhysicalColumnId(1),
+                vec![GlobalScalarEnumCaseId {
+                    id: crate::ids::GlobalPhysicalEnumVariantId(uuid::Uuid::nil()),
+                    introducing_schema: known,
+                    introducing_ordinal: 0,
+                }],
+            );
         assert!(matches!(
             validate_physical_mapping_registries(
                 &BTreeMap::from([(known, corrupt)]),
@@ -238,17 +287,22 @@ mod variant_case_tests {
 
         let identity = case(known, 0);
         let mut duplicate = mapping(8, &[("state", 2)]);
-        duplicate.tables.get_mut("entries").unwrap().scalar_enum_cases.insert(
-            PhysicalColumnId(2),
-            vec![
-                identity.clone(),
-                GlobalScalarEnumCaseId {
-                    id: identity.id,
-                    introducing_schema: schema(2),
-                    introducing_ordinal: 9,
-                },
-            ],
-        );
+        duplicate
+            .tables
+            .get_mut("entries")
+            .unwrap()
+            .scalar_enum_cases
+            .insert(
+                PhysicalColumnId(2),
+                vec![
+                    identity.clone(),
+                    GlobalScalarEnumCaseId {
+                        id: identity.id,
+                        introducing_schema: schema(2),
+                        introducing_ordinal: 9,
+                    },
+                ],
+            );
         assert!(matches!(
             validate_physical_mapping_registries(
                 &BTreeMap::from([(known, duplicate)]),
@@ -273,8 +327,15 @@ mod variant_case_tests {
         let direct_id = crate::ids::GlobalPhysicalEnumVariantId(uuid::Uuid::from_u128(71));
         let nested_id = crate::ids::GlobalPhysicalEnumVariantId(uuid::Uuid::from_u128(72));
         let mut mapping = mapping(7, &[("payload", 1)]);
-        mapping.identities.tables.get_mut("entries").unwrap().columns
-            .get_mut("payload").unwrap().enum_variants = BTreeMap::from([
+        mapping
+            .identities
+            .tables
+            .get_mut("entries")
+            .unwrap()
+            .columns
+            .get_mut("payload")
+            .unwrap()
+            .enum_variants = BTreeMap::from([
             ("root".to_owned(), vec![direct_id]),
             ("root/record/detail".to_owned(), vec![nested_id]),
         ]);
@@ -303,11 +364,8 @@ mod variant_case_tests {
             (origin, SchemaVersionAlias(1)),
             (schema(8), SchemaVersionAlias(2)),
         ]);
-        validate_payload_enum_case_provenance(
-            &mappings,
-            &aliases,
-        )
-        .expect("canonical direct and nested provenance is accepted");
+        validate_payload_enum_case_provenance(&mappings, &aliases)
+            .expect("canonical direct and nested provenance is accepted");
 
         // A later manifest legitimately retains an inherited UUID at this
         // coordinate, but it did not introduce the identity and may not move
@@ -341,9 +399,18 @@ mod variant_case_tests {
             .unwrap()[0]
             .introducing_schema = origin;
 
-        mappings.get_mut(&origin).unwrap().tables.get_mut("entries").unwrap()
-            .nested_payload_enum_cases.get_mut(&PhysicalColumnId(1)).unwrap()
-            .get_mut("root/record/detail").unwrap()[0].introducing_ordinal = 1;
+        mappings
+            .get_mut(&origin)
+            .unwrap()
+            .tables
+            .get_mut("entries")
+            .unwrap()
+            .nested_payload_enum_cases
+            .get_mut(&PhysicalColumnId(1))
+            .unwrap()
+            .get_mut("root/record/detail")
+            .unwrap()[0]
+            .introducing_ordinal = 1;
         assert!(matches!(
             validate_payload_enum_case_provenance(&mappings, &aliases),
             Err(Error::InvalidStoredValue(
@@ -361,8 +428,15 @@ mod variant_case_tests {
         let direct_id = crate::ids::GlobalPhysicalEnumVariantId(uuid::Uuid::from_u128(91));
         let nested_id = crate::ids::GlobalPhysicalEnumVariantId(uuid::Uuid::from_u128(92));
         let mut mapping = mapping(9, &[("state", 1)]);
-        mapping.identities.tables.get_mut("entries").unwrap().columns
-            .get_mut("state").unwrap().enum_variants = BTreeMap::from([
+        mapping
+            .identities
+            .tables
+            .get_mut("entries")
+            .unwrap()
+            .columns
+            .get_mut("state")
+            .unwrap()
+            .enum_variants = BTreeMap::from([
             ("root".to_owned(), vec![direct_id]),
             ("root/record/detail".to_owned(), vec![nested_id]),
         ]);
@@ -391,9 +465,18 @@ mod variant_case_tests {
         validate_scalar_enum_case_provenance(&mappings, &aliases)
             .expect("canonical direct and nested scalar provenance is accepted");
 
-        mappings.get_mut(&origin).unwrap().tables.get_mut("entries").unwrap()
-            .nested_scalar_enum_cases.get_mut(&PhysicalColumnId(1)).unwrap()
-            .get_mut("root/record/detail").unwrap()[0].introducing_ordinal = 1;
+        mappings
+            .get_mut(&origin)
+            .unwrap()
+            .tables
+            .get_mut("entries")
+            .unwrap()
+            .nested_scalar_enum_cases
+            .get_mut(&PhysicalColumnId(1))
+            .unwrap()
+            .get_mut("root/record/detail")
+            .unwrap()[0]
+            .introducing_ordinal = 1;
         assert!(matches!(
             validate_scalar_enum_case_provenance(&mappings, &aliases),
             Err(Error::InvalidStoredValue(
@@ -458,8 +541,7 @@ mod variant_case_tests {
                 a2_case.clone(),
                 b_case.clone(),
             ];
-            registry
-                .sort_by(|left, right| compare_scalar_enum_cases(&aliases, left, right));
+            registry.sort_by(|left, right| compare_scalar_enum_cases(&aliases, left, right));
             assert_eq!(
                 registry,
                 vec![
@@ -525,10 +607,7 @@ mod variant_case_tests {
         let base = schema(1);
         let archived = schema(2);
         let snoozed = schema(3);
-        let base_cases = [
-            case(base, 0),
-            case(base, 1),
-        ];
+        let base_cases = [case(base, 0), case(base, 1)];
         let archived_cases = base_cases
             .iter()
             .cloned()
@@ -757,18 +836,14 @@ mod variant_case_tests {
 
     #[test]
     fn payload_enum_catalogue_mapping_preserves_root_and_nested_u32_ordinals() {
-        let empty_payload = || {
-            records::RecordDescriptor::new(Vec::<(String, records::ValueType)>::new())
-        };
+        let empty_payload =
+            || records::RecordDescriptor::new(Vec::<(String, records::ValueType)>::new());
         let nested_payload = records::ValueType::Enum(Box::new(
             records::EnumSchema::new(
                 "detail",
                 (0..257).map(|ordinal| {
                     let payload = if ordinal == 256 {
-                        records::RecordDescriptor::new([(
-                            "message",
-                            records::ValueType::String,
-                        )])
+                        records::RecordDescriptor::new([("message", records::ValueType::String)])
                     } else {
                         empty_payload()
                     };
@@ -783,10 +858,7 @@ mod variant_case_tests {
                     "wide",
                     (0..case_count).map(|ordinal| {
                         let payload = if ordinal == 256 {
-                            records::RecordDescriptor::new([(
-                                "detail",
-                                nested_payload.clone(),
-                            )])
+                            records::RecordDescriptor::new([("detail", nested_payload.clone())])
                         } else {
                             empty_payload()
                         };
@@ -820,10 +892,7 @@ mod variant_case_tests {
         )
         .unwrap();
         assert_eq!(registries["root"][0], payload_case(introducing, 0));
-        assert_eq!(
-            registries["root"][256],
-            payload_case(introducing, 256)
-        );
+        assert_eq!(registries["root"][256], payload_case(introducing, 256));
         let nested_path = format!(
             "{}/record/detail",
             global_case_path("root", &payload_case(introducing, 256))
@@ -856,10 +925,7 @@ mod variant_case_tests {
         );
         let reopened: BTreeMap<String, Vec<GlobalEnumCaseId>> =
             serde_json::from_slice(&serde_json::to_vec(&registries).unwrap()).unwrap();
-        assert_eq!(
-            reopened["root"][256],
-            payload_case(introducing, 256)
-        );
+        assert_eq!(reopened["root"][256], payload_case(introducing, 256));
         assert_eq!(
             reopened[&nested_path][256].id,
             payload_case(schema(4), 256).id
@@ -954,10 +1020,7 @@ mod variant_case_tests {
                 ),
             ]),
             payload_children: BTreeMap::from([
-                (
-                    "root".to_owned(),
-                    children("root", &registries["root"]),
-                ),
+                ("root".to_owned(), children("root", &registries["root"])),
                 (
                     nested_path.clone(),
                     children(&nested_path, &registries[&nested_path]),
@@ -1153,7 +1216,10 @@ mod variant_case_tests {
                 groove::large_values::LargeValueKind::Json,
             )
         );
-        assert_ne!(physical_storage_value_type(&text), physical_storage_value_type(&json));
+        assert_ne!(
+            physical_storage_value_type(&text),
+            physical_storage_value_type(&json)
+        );
         assert!(physical_storage_value_type(&json).is_internal_storage_type());
         assert!(
             std::panic::catch_unwind(|| {
@@ -1163,18 +1229,18 @@ mod variant_case_tests {
             "the physical descriptor constructor cannot be smuggled back into a public Jazz schema"
         );
 
-        let text_cell = records::RecordDescriptor::new([(
-            "cell",
-            physical_storage_value_type(&text),
-        )]);
-        let json_cell = records::RecordDescriptor::new([(
-            "cell",
-            physical_storage_value_type(&json),
-        )]);
+        let text_cell =
+            records::RecordDescriptor::new([("cell", physical_storage_value_type(&text))]);
+        let json_cell =
+            records::RecordDescriptor::new([("cell", physical_storage_value_type(&json))]);
         let same_json_shaped_bytes = Value::String(r#"{"title":"same bytes"}"#.to_owned());
         assert_eq!(
-            text_cell.create(std::slice::from_ref(&same_json_shaped_bytes)).unwrap(),
-            json_cell.create(std::slice::from_ref(&same_json_shaped_bytes)).unwrap(),
+            text_cell
+                .create(std::slice::from_ref(&same_json_shaped_bytes))
+                .unwrap(),
+            json_cell
+                .create(std::slice::from_ref(&same_json_shaped_bytes))
+                .unwrap(),
             "inline payloads stay compact because the containing schema supplies their kind"
         );
 
@@ -1185,11 +1251,15 @@ mod variant_case_tests {
         .unwrap();
         let json_root = json_prepared.value_ref.clone();
         assert!(
-            json_cell.create(&[Value::Large(Box::new(json_root.clone()))]).is_ok(),
+            json_cell
+                .create(&[Value::Large(Box::new(json_root.clone()))])
+                .is_ok(),
             "the JSON physical descriptor accepts its schema-derived large value"
         );
         assert!(
-            text_cell.create(&[Value::Large(Box::new(json_root.clone()))]).is_err(),
+            text_cell
+                .create(&[Value::Large(Box::new(json_root.clone()))])
+                .is_err(),
             "a JSON descriptor must not enter text physical storage"
         );
 
@@ -1304,29 +1374,27 @@ mod variant_case_tests {
         path: &Path,
         node_uuid: NodeUuid,
         genesis: &JazzSchema,
-    ) -> NodeState {
+    ) -> NodeState<BoxedStorage> {
         let column_families = genesis.column_families();
-        let refs = column_families
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-        let storage = RocksDbStorage::open(path, &refs).expect("open receipt storage");
-        crate::local_executor::block_on(NodeState::new(node_uuid, genesis.clone(), storage))
+        let storage = crate::db::block_on(crate::storage_codec_profile::open_node_storage(
+            &jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+            path.to_path_buf(),
+            column_families,
+        ))
+        .expect("open receipt storage");
+        crate::db::block_on(NodeState::new(node_uuid, genesis.clone(), storage))
             .expect("open receipt node")
     }
 
     fn overwrite_schema_mapping(
-        node: &mut NodeState,
+        node: &mut NodeState<BoxedStorage>,
         schema: SchemaVersionId,
         mapping: &SchemaPhysicalMapping,
     ) {
         let alias = node.catalogue.schema_version_aliases[&schema];
         let mut batch = node.database.open_batch();
         NodeState::<BoxedStorage>::write_schema_version_mapping_to_batch(
-            &mut batch,
-            alias,
-            schema,
-            mapping,
+            &mut batch, alias, schema, mapping,
         )
         .expect("encode corrupted mapping fixture");
         let applied = crate::local_executor::block_on(node.database.apply_batch(batch))
@@ -1349,12 +1417,8 @@ mod variant_case_tests {
         };
         let payload = event_schema.cases[256].payload.clone();
         Value::Enum(
-            records::EnumValue::create(
-                256,
-                payload,
-                &[Value::String("wide-payload".to_owned())],
-            )
-            .expect("create case 256 payload"),
+            records::EnumValue::create(256, payload, &[Value::String("wide-payload".to_owned())])
+                .expect("create case 256 payload"),
         )
     }
 
@@ -1370,7 +1434,7 @@ mod variant_case_tests {
     }
 
     fn assert_wide_payload_receipt(
-        node: &mut NodeState,
+        node: &mut NodeState<BoxedStorage>,
         schema: &JazzSchema,
         shape: &crate::query::ValidatedQuery,
         binding: &crate::query::Binding,
@@ -1390,9 +1454,8 @@ mod variant_case_tests {
                 .expect("current event cell"),
         );
 
-        let queried =
-            crate::local_executor::block_on(node.query_rows(shape, binding, DurabilityTier::Local))
-                .expect("read projected query rows");
+        let queried = crate::db::block_on(node.query_rows(shape, binding, DurabilityTier::Local))
+            .expect("read projected query rows");
         assert_eq!(queried.len(), 1);
         assert_eq!(queried[0].row_uuid(), expected_row);
         assert_payload_case_256(
@@ -1436,9 +1499,8 @@ mod variant_case_tests {
             Vec::<String>::new(),
         )
         .expect("author wide payload lineage");
-        let expected_case_id =
-            publication.physical_identities.tables["events"].columns["event"].enum_variants
-                ["root"][256];
+        let expected_case_id = publication.physical_identities.tables["events"].columns["event"]
+            .enum_variants["root"][256];
         node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
             author: AuthorSubject::SYSTEM,
             catalogue_seq: 1,
@@ -1476,32 +1538,26 @@ mod variant_case_tests {
             })
             .validate(&evolved_schema)
             .expect("validate wide payload query");
-        let binding = shape.bind(BTreeMap::new()).expect("bind wide payload query");
+        let binding = shape
+            .bind(BTreeMap::new())
+            .expect("bind wide payload query");
         assert_wide_payload_receipt(&mut node, &evolved_schema, &shape, &binding, row_uuid);
 
         crate::local_executor::block_on(node.close()).expect("close durable receipt storage");
         drop(node);
         let mut reopened = open_receipt_node(dir.path(), node_uuid, &base);
-        let reopened_physical =
-            &reopened.catalogue.physical_mappings[&evolved.id].tables["events"];
+        let reopened_physical = &reopened.catalogue.physical_mappings[&evolved.id].tables["events"];
         let reopened_event_column = reopened_physical.columns["event"];
         assert_eq!(
             reopened_physical.payload_enum_cases[&reopened_event_column][256].id,
             expected_case_id
         );
         assert_eq!(
-            reopened_physical.payload_enum_cases[&reopened_event_column][256]
-                .introducing_ordinal,
+            reopened_physical.payload_enum_cases[&reopened_event_column][256].introducing_ordinal,
             256
         );
-        assert_wide_payload_receipt(
-            &mut reopened,
-            &evolved_schema,
-            &shape,
-            &binding,
-            row_uuid,
-        );
-        crate::local_executor::block_on(reopened.close()).expect("close reopened receipt storage");
+        assert_wide_payload_receipt(&mut reopened, &evolved_schema, &shape, &binding, row_uuid);
+        crate::db::block_on(reopened.close()).expect("close reopened receipt storage");
     }
 
     #[test]
@@ -1517,8 +1573,13 @@ mod variant_case_tests {
         let schema_id = schema.version_id();
         let mut corrupt = node.catalogue.physical_mappings[&schema_id].clone();
         let event = corrupt.tables["events"].columns["event"];
-        let cases = corrupt.tables.get_mut("events").unwrap()
-            .payload_enum_cases.get_mut(&event).unwrap();
+        let cases = corrupt
+            .tables
+            .get_mut("events")
+            .unwrap()
+            .payload_enum_cases
+            .get_mut(&event)
+            .unwrap();
         assert_eq!(cases.len(), 2, "fixture has two canonical payload cases");
         cases.swap(0, 1);
         // Preserve canonical registry ordering while binding each UUID to the
@@ -1531,9 +1592,13 @@ mod variant_case_tests {
         drop(node);
 
         let cfs = schema.column_families();
-        let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage = RocksDbStorage::open(dir.path(), &refs).expect("reopen corrupted storage");
-        let error = match crate::local_executor::block_on(NodeState::new(node_uuid, schema, storage)) {
+        let storage = crate::db::block_on(crate::storage_codec_profile::open_node_storage(
+            &jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+            dir.path().to_path_buf(),
+            cfs,
+        ))
+        .expect("reopen corrupted storage");
+        let error = match crate::db::block_on(NodeState::new(node_uuid, schema, storage)) {
             Ok(_) => panic!("forged payload provenance must fail before descriptor rebuild"),
             Err(error) => error,
         };
@@ -1556,8 +1621,13 @@ mod variant_case_tests {
         let schema_id = schema.version_id();
         let mut corrupt = node.catalogue.physical_mappings[&schema_id].clone();
         let status = corrupt.tables["events"].columns["status"];
-        let cases = corrupt.tables.get_mut("events").unwrap()
-            .scalar_enum_cases.get_mut(&status).unwrap();
+        let cases = corrupt
+            .tables
+            .get_mut("events")
+            .unwrap()
+            .scalar_enum_cases
+            .get_mut(&status)
+            .unwrap();
         assert_eq!(cases.len(), 2, "fixture has two canonical scalar cases");
         cases.swap(0, 1);
         cases[0].introducing_ordinal = 0;
@@ -1567,9 +1637,13 @@ mod variant_case_tests {
         drop(node);
 
         let cfs = schema.column_families();
-        let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage = RocksDbStorage::open(dir.path(), &refs).expect("reopen corrupted storage");
-        let error = match crate::local_executor::block_on(NodeState::new(node_uuid, schema, storage)) {
+        let storage = crate::db::block_on(crate::storage_codec_profile::open_node_storage(
+            &jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+            dir.path().to_path_buf(),
+            cfs,
+        ))
+        .expect("reopen corrupted storage");
+        let error = match crate::db::block_on(NodeState::new(node_uuid, schema, storage)) {
             Ok(_) => panic!("forged scalar provenance must fail before descriptor rebuild"),
             Err(error) => error,
         };
@@ -1592,7 +1666,8 @@ mod variant_case_tests {
         let source_identities = node.catalogue.physical_mappings[&base.version_id()]
             .identities
             .clone();
-        let publication = wide_scalar_sibling_publication(&base, &source_identities, evolved.clone());
+        let publication =
+            wide_scalar_sibling_publication(&base, &source_identities, evolved.clone());
         let expected_id = publication.physical_identities.tables["events"].columns["status"]
             .enum_variants["root"][255];
         node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
@@ -1626,7 +1701,8 @@ mod variant_case_tests {
             physical.scalar_enum_cases[&status][255].introducing_ordinal,
             255
         );
-        crate::local_executor::block_on(reopened.close()).expect("close reopened scalar lineage receipt storage");
+        crate::db::block_on(reopened.close())
+            .expect("close reopened scalar lineage receipt storage");
     }
 
     #[test]
@@ -1640,9 +1716,8 @@ mod variant_case_tests {
         let source_identities = node.catalogue.physical_mappings[&base.version_id()]
             .identities
             .clone();
-        let publication = |target| {
-            wide_scalar_sibling_publication(&base, &source_identities, target)
-        };
+        let publication =
+            |target| wide_scalar_sibling_publication(&base, &source_identities, target);
 
         node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
             author: AuthorSubject::SYSTEM,
@@ -1661,9 +1736,7 @@ mod variant_case_tests {
             .expect_err("257th physical scalar case must be rejected");
         assert!(matches!(
             error,
-            Error::InvalidCatalogueUpdate(
-                "physical scalar enum registry exceeds u8 capacity"
-            )
+            Error::InvalidCatalogueUpdate("physical scalar enum registry exceeds u8 capacity")
         ));
         assert_eq!(node.active_catalogue_seq(), 1);
         assert!(!node.catalogue.catalogue_schemas.contains_key(&sibling_b.id));
@@ -1676,8 +1749,18 @@ mod variant_case_tests {
         drop(node);
         let mut reopened = open_receipt_node(dir.path(), node_uuid, &base);
         assert_eq!(reopened.active_catalogue_seq(), 1);
-        assert!(reopened.catalogue.catalogue_schemas.contains_key(&sibling_a.id));
-        assert!(!reopened.catalogue.catalogue_schemas.contains_key(&sibling_b.id));
+        assert!(
+            reopened
+                .catalogue
+                .catalogue_schemas
+                .contains_key(&sibling_a.id)
+        );
+        assert!(
+            !reopened
+                .catalogue
+                .catalogue_schemas
+                .contains_key(&sibling_b.id)
+        );
         assert!(reopened.catalogue.pending_lineages.is_empty());
         assert!(reopened.catalogue.staged_lineages.is_empty());
         assert_eq!(reopened.catalogue.next_physical_table_id, next_table);
@@ -1749,8 +1832,18 @@ mod variant_case_tests {
         drop(node);
         let mut reopened = open_receipt_node(dir.path(), node_uuid, &base);
         assert_eq!(reopened.active_catalogue_seq(), 1);
-        assert!(reopened.catalogue.catalogue_schemas.contains_key(&sibling_a.id));
-        assert!(!reopened.catalogue.catalogue_schemas.contains_key(&sibling_b.id));
+        assert!(
+            reopened
+                .catalogue
+                .catalogue_schemas
+                .contains_key(&sibling_a.id)
+        );
+        assert!(
+            !reopened
+                .catalogue
+                .catalogue_schemas
+                .contains_key(&sibling_b.id)
+        );
         assert!(reopened.catalogue.pending_lineages.is_empty());
         assert!(reopened.catalogue.staged_lineages.is_empty());
         assert_eq!(reopened.catalogue.next_physical_table_id, next_table);

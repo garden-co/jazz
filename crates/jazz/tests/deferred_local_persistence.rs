@@ -7,6 +7,7 @@ use std::task::{Context, Poll};
 use futures::StreamExt;
 use futures::executor::block_on;
 use futures::task::noop_waker;
+use groove::storage::BoxedStorage;
 use jazz::db::{
     Db, DbConfig, DbIdentity, ErrorCode, MergeableTxOps, ReadOpts, StreamingMutationKind,
     SubscriptionEvent,
@@ -17,7 +18,6 @@ use jazz::row;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, OpenTransactionId, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
-use jazz_storage_rocksdb::RocksDbStorage;
 
 fn schema() -> JazzSchema {
     let source = SchemaBuilder::new()
@@ -34,9 +34,13 @@ fn empty_schema() -> JazzSchema {
 fn rocksdb_writes_are_resident_before_the_sync_call_returns() {
     let schema = schema();
     let families = schema.column_families();
-    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     let directory = tempfile::tempdir().expect("temporary RocksDB directory");
-    let storage = RocksDbStorage::open(directory.path(), &family_refs).expect("open RocksDB");
+    let storage = jazz::block_on(jazz::storage_codec_profile::open_node_storage(
+        &jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+        directory.path().to_path_buf(),
+        families,
+    ))
+    .expect("open RocksDB");
     let owner = block_on(Db::open_history_complete(DbConfig::new(
         empty_schema(),
         storage,
@@ -912,13 +916,17 @@ fn retained_streaming_uploads_cannot_mutate_storage_after_sibling_owner_close_st
 fn reopened_reservation_clock_dominates_durable_local_history() {
     let schema = schema();
     let families = schema.column_families();
-    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     let directory = tempfile::tempdir().expect("temporary RocksDB directory");
     let identity = DbIdentity {
         node: NodeUuid::from_bytes([0x56; 16]),
         author: AuthorSubject::for_test_bytes([0x66; 16]),
     };
-    let storage = RocksDbStorage::open(directory.path(), &family_refs).expect("open RocksDB");
+    let storage = jazz::block_on(jazz::storage_codec_profile::open_node_storage(
+        &jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+        directory.path().to_path_buf(),
+        families.clone(),
+    ))
+    .expect("open RocksDB");
     let first = block_on(Db::open(DbConfig::new(
         schema.clone(),
         storage,
@@ -941,7 +949,12 @@ fn reopened_reservation_clock_dominates_durable_local_history() {
     block_on(first.close()).expect("close first database");
     drop(first);
 
-    let storage = RocksDbStorage::open(directory.path(), &family_refs).expect("reopen RocksDB");
+    let storage = jazz::block_on(jazz::storage_codec_profile::open_node_storage(
+        &jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+        directory.path().to_path_buf(),
+        families,
+    ))
+    .expect("reopen RocksDB");
     let reopened =
         block_on(Db::open(DbConfig::new(schema, storage, identity))).expect("reopen database");
     let second_write = reopened

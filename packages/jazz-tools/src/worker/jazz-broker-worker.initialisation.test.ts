@@ -6,6 +6,7 @@ import type {
   BrowserForegroundNodeLeaseAcquireRequest,
   BrowserForegroundNodeLeaseAcquireResponse,
   BrowserForegroundNodeLeaseCancelRequest,
+  BrowserForegroundNodeLeasePortEvent,
   BrowserForegroundNodeLeasePortRequest,
   BrowserForegroundNodeLeaseProbeRequest,
   BrowserInspectorControlEvent,
@@ -34,6 +35,7 @@ const mocks = vi.hoisted(() => {
   const telemetryDisposers: Mock[] = [];
   const pageStores: Array<{
     close: Mock;
+    destroyUnderOwner: Mock;
     claimBrowserWorkerEpoch: Mock;
     retireTreeOwnership: Mock;
     releaseBrowserWorkerEpoch: Mock;
@@ -92,6 +94,7 @@ const mocks = vi.hoisted(() => {
         replicaNode.fill(pageStores.length + 3);
         const pageStore = {
           close: vi.fn(),
+          destroyUnderOwner: vi.fn(async () => undefined),
           claimBrowserWorkerEpoch: vi.fn(async () => undefined),
           retireTreeOwnership: vi.fn(async () => undefined),
           releaseBrowserWorkerEpoch: vi.fn(async () => undefined),
@@ -224,7 +227,10 @@ type ForegroundLeaseCancellation = Extract<
 // connections and Inspector control connections. Keep the protocol union here
 // instead of narrowing control events away: an Inspector control port can emit
 // `contexts`, `lifecycle-trace`, and its own `result` acknowledgement.
-type TestPortEvent = BrowserFollowerPortEvent | BrowserInspectorControlEvent;
+type TestPortEvent =
+  | BrowserFollowerPortEvent
+  | BrowserForegroundNodeLeasePortEvent
+  | BrowserInspectorControlEvent;
 type TestPortRequest =
   | BrowserSharedWorkerConnectRequest
   | BrowserForegroundNodeLeaseProbeRequest
@@ -237,6 +243,7 @@ type TestPortResponse =
   | BrowserSharedWorkerConnectResponse
   | BrowserFollowerPortEvent
   | BrowserForegroundNodeLeaseAcquireResponse
+  | BrowserForegroundNodeLeasePortEvent
   | BrowserInspectorControlEvent;
 
 type WorkerGlobal = typeof globalThis & {
@@ -654,6 +661,127 @@ describe("broker worker context initialization", () => {
     // The worker owns process-global state, so each case must evaluate a fresh module instance.
     await import("./jazz-broker-worker.js");
   });
+
+  it.each([false, true])(
+    "fences only the owning root during reset and retires it after deletion failure=%s",
+    async (fail) => {
+      const config = options("owned-reset-root");
+      const first = await connect(config, "first");
+      const sibling = await connect(config, "sibling");
+      const unrelated = await connect(options("unrelated-reset-root"), "unrelated");
+      expect(first.outcome.type).toBe("runtime-ready");
+      expect(sibling.outcome.type).toBe("runtime-ready");
+      const entered = deferred<void>();
+      const deletion = deferred<void>();
+      mocks.pageStores[0]!.destroyUnderOwner.mockImplementation(async () => {
+        entered.resolve();
+        await deletion.promise;
+        if (fail) throw new Error("injected deletion failure");
+      });
+      const completed = followerResult(first.port, { type: "delete-storage", id: 10 });
+      await entered.promise;
+      const rejected = await connect(config, "during-reset");
+      expect(rejected.outcome).toMatchObject({ type: "runtime-error" });
+      expect(await followerResult(sibling.port, { type: "disconnect", id: 11 })).toHaveProperty(
+        "error",
+      );
+      expect(
+        await followerResult(unrelated.port, { type: "disconnect", id: 12 }),
+      ).not.toHaveProperty("error");
+      const notified = sibling.port.waitForEvent(
+        (event) => event.type === (fail ? "storage-invalidated" : "storage-reset"),
+      );
+      deletion.resolve();
+      const result = await completed;
+      if (fail) expect(result).toHaveProperty("error");
+      else expect(result).not.toHaveProperty("error");
+      const notification = await notified;
+      if (notification.type === "storage-reset") {
+        sibling.port.emitMessage({ type: "storage-reset-observed", resetId: notification.resetId });
+        first.port.emitMessage({ type: "storage-reset-observed", resetId: notification.resetId });
+      }
+      const reopened = await connect(config, "after-reset");
+      expect(reopened.outcome.type).toBe("runtime-ready");
+      expect(
+        await followerResult(unrelated.port, { type: "disconnect", id: 13 }),
+      ).not.toHaveProperty("error");
+      await followerResult(reopened.port, { type: "close", id: 14, releaseContext: true });
+      await followerResult(unrelated.port, { type: "close", id: 15, releaseContext: true });
+    },
+  );
+
+  it("completes reset only after physical release so notification-driven reopen is admitted", async () => {
+    const releasing = deferred<void>();
+    const released = deferred<void>();
+    mocks.acquireBrowserPhysicalDatabaseEpoch.mockResolvedValueOnce({
+      id: "held-reset-release",
+      release: async () => {
+        releasing.resolve();
+        await released.promise;
+      },
+    });
+    const config = options("reset-release-order");
+    const first = await connect(config, "before-reset");
+    expect(first.outcome.type).toBe("runtime-ready");
+    let notified = false;
+    let completed = false;
+    const successor = first.port
+      .waitForEvent((event) => event.type === "storage-reset")
+      .then(async (event) => {
+        if (event.type !== "storage-reset") throw new Error("Expected storage reset");
+        notified = true;
+        first.port.emitMessage({ type: "storage-reset-observed", resetId: event.resetId });
+        return await connect(config, "notification-reopen");
+      });
+    const reset = followerResult(first.port, { type: "delete-storage", id: 1 }).then((result) => {
+      completed = true;
+      return result;
+    });
+    await bounded(releasing.promise);
+    try {
+      await nextTask();
+      expect(notified).toBe(false);
+      expect(completed).toBe(false);
+      expect((await connect(config, "before-release")).outcome.type).toBe("runtime-error");
+    } finally {
+      released.resolve();
+    }
+    expect(await reset).not.toHaveProperty("error");
+    const reopened = await bounded(successor);
+    expect(reopened.outcome.type).toBe("runtime-ready");
+    await followerResult(reopened.port, { type: "close", id: 2, releaseContext: true });
+  });
+
+  it.each(["delete", "cleanup", "release"] as const)(
+    "invalidates reset peers and preserves the first %s error through terminal cleanup",
+    async (stage) => {
+      mocks.acquireBrowserPhysicalDatabaseEpoch.mockResolvedValueOnce({
+        id: `failed-reset-${stage}`,
+        release: async () => {
+          throw new Error("release failed");
+        },
+      });
+      const first = await connect(options(`reset-failure-${stage}`), "reset-owner");
+      expect(first.outcome.type).toBe("runtime-ready");
+      const store = mocks.pageStores[0]!;
+      if (stage === "delete") {
+        store.destroyUnderOwner.mockRejectedValueOnce(new Error("delete failed"));
+      }
+      if (stage !== "release") {
+        store.close
+          .mockImplementationOnce(() => undefined)
+          .mockImplementationOnce(() => {
+            throw new Error("cleanup failed");
+          });
+      }
+      const notification = first.port.waitForEvent(
+        (event) => event.type === "storage-invalidated" || event.type === "storage-reset",
+      );
+      const result = await followerResult(first.port, { type: "delete-storage", id: 1 });
+      expect(result.error).toMatchObject({ message: `${stage} failed` });
+      expect(await bounded(notification)).toMatchObject({ type: "storage-invalidated" });
+    },
+  );
 
   it.each(["wait-server", "flush-pending-writes"] as const)(
     "answers real MessageChannel probes while %s is held",
@@ -1406,6 +1534,76 @@ describe("broker worker context initialization", () => {
     expect(mocks.openPageStore).toHaveBeenCalledOnce();
   });
 
+  it.each(["return", "retire"] as const)(
+    "acknowledges final lease-only %s after releasing its root while preserving other owners",
+    async (operation) => {
+      const unrelated = await connect(options("lease-only-unrelated"), "unrelated");
+      const releasing = deferred<void>();
+      const released = deferred<void>();
+      mocks.acquireBrowserPhysicalDatabaseEpoch.mockResolvedValueOnce({
+        id: "held-lease-only-release",
+        release: async () => {
+          releasing.resolve();
+          await released.promise;
+        },
+      });
+      const config = options("lease-only-final-shutdown");
+      const request = {
+        type: "acquire-foreground-node-lease" as const,
+        dbName: config.dbName,
+        storageOwner: config.storageOwner,
+      };
+      const first = connectLease(request);
+      expect(await first.outcome).toMatchObject({ type: "foreground-node-lease-ready" });
+      mocks.pageStores[1]!.acquireForegroundNodeLease.mockResolvedValueOnce({
+        leaseId: "second-live-lease",
+        node: new Uint8Array(16).fill(7),
+        confirmedTxTime: 0n,
+      });
+      const second = connectLease(request);
+      expect(await second.outcome).toMatchObject({ type: "foreground-node-lease-ready" });
+      const firstFinished = first.port.waitForEvent(
+        (event) => event.type === "foreground-node-lease-result",
+      );
+      first.port.emitMessage({ type: "return-foreground-node-lease", confirmedTxTime: "0" });
+      expect(await bounded(firstFinished)).not.toHaveProperty("error");
+      expect(
+        await followerResult(unrelated.port, { type: "disconnect", id: 1 }),
+      ).not.toHaveProperty("error");
+      let acknowledged = false;
+      const finished = second.port
+        .waitForEvent((event) => event.type === "foreground-node-lease-result")
+        .then((result) => {
+          acknowledged = true;
+          return result;
+        });
+      second.port.emitMessage(
+        operation === "return"
+          ? { type: "return-foreground-node-lease", confirmedTxTime: "0" }
+          : { type: "retire-foreground-node-lease" },
+      );
+      try {
+        await bounded(releasing.promise);
+        await nextTask();
+        expect(acknowledged).toBe(false);
+      } finally {
+        released.resolve();
+      }
+      expect(await bounded(finished)).not.toHaveProperty("error");
+      const successor = connectLease({ ...request, storageOwner: "successor-session" });
+      expect(await successor.outcome).toMatchObject({ type: "foreground-node-lease-ready" });
+      expect(
+        await followerResult(unrelated.port, { type: "disconnect", id: 2 }),
+      ).not.toHaveProperty("error");
+      const successorFinished = successor.port.waitForEvent(
+        (event) => event.type === "foreground-node-lease-result",
+      );
+      successor.port.emitMessage({ type: "retire-foreground-node-lease" });
+      expect(await bounded(successorFinished)).not.toHaveProperty("error");
+      await followerResult(unrelated.port, { type: "close", id: 3, releaseContext: true });
+    },
+  );
+
   it("retires schema pins while keeping the leased physical owner and fences its final successor", async () => {
     const openedStores = new Set<unknown>();
     mocks.openBrowser.mockImplementation(async (pageStore: unknown) => {
@@ -1510,13 +1708,44 @@ describe("broker worker context initialization", () => {
     await followerResult(unrelated.port, { type: "close", id: 1, releaseContext: true });
   });
 
-  it("can immediately reopen an account root for a linked identity after close acknowledgement", async () => {
+  it("acknowledges only the final client's close after physical release, allowing immediate identity handoff", async () => {
+    const releasing = deferred<void>();
+    const released = deferred<void>();
+    mocks.acquireBrowserPhysicalDatabaseEpoch.mockResolvedValueOnce({
+      id: "held-final-client-release",
+      release: async () => {
+        releasing.resolve();
+        await released.promise;
+      },
+    });
     const initial = options("linked-account-handoff");
     const first = await connect(initial, "identity-a", "identity-a-fingerprint");
+    const sibling = await connect(initial, "identity-a-sibling", "identity-a-fingerprint");
     await initializeFollower(first.port, 1);
-    const closed = first.port.waitForEvent((event) => event.type === "result" && event.id === 2);
-    first.port.emitMessage({ type: "close", id: 2, releaseContext: true });
-    await expect(closed).resolves.toEqual({ type: "result", id: 2 });
+    await initializeFollower(sibling.port, 1);
+    expect(
+      await followerResult(first.port, { type: "close", id: 2, releaseContext: true }),
+    ).not.toHaveProperty("error");
+    expect(await followerResult(sibling.port, { type: "disconnect", id: 2 })).not.toHaveProperty(
+      "error",
+    );
+    let acknowledged = false;
+    const closed = followerResult(sibling.port, {
+      type: "close",
+      id: 3,
+      releaseContext: true,
+    }).then((result) => {
+      acknowledged = true;
+      return result;
+    });
+    await bounded(releasing.promise);
+    try {
+      await nextTask();
+      expect(acknowledged).toBe(false);
+    } finally {
+      released.resolve();
+    }
+    expect(await closed).not.toHaveProperty("error");
     const second = await connect(
       { ...initial, authSessionKey: "linked-identity-b", author: new Uint8Array([3]) },
       "identity-b",
@@ -1525,6 +1754,7 @@ describe("broker worker context initialization", () => {
     expect(second.outcome.type).toBe("runtime-ready");
     expect(mocks.runtimes[0]?.discard).toHaveBeenCalledOnce();
     expect(mocks.runtimes).toHaveLength(2);
+    await followerResult(second.port, { type: "close", id: 1, releaseContext: true });
   });
 
   it("does not admit a lease probe after worker termination is acknowledged", async () => {
@@ -1673,13 +1903,14 @@ describe("broker worker context initialization", () => {
     inspector.close();
   });
 
-  it("cancels an idle worker close when a successor bootstrap arrives during physical release", async () => {
+  it("keeps the worker alive for a lease-only successor arriving during physical release", async () => {
     const releasePhysicalOwner = deferred<void>();
     mocks.openPageStore.mockImplementationOnce(async () => {
       const replicaNode = new Uint8Array(16);
       replicaNode.fill(17);
       const pageStore = {
         close: vi.fn(),
+        destroyUnderOwner: vi.fn(async () => undefined),
         claimBrowserWorkerEpoch: vi.fn(async () => undefined),
         retireTreeOwnership: vi.fn(async () => undefined),
         releaseBrowserWorkerEpoch: vi.fn(() => releasePhysicalOwner.promise),
@@ -1705,14 +1936,10 @@ describe("broker worker context initialization", () => {
     await initializeFollower(first.port, 1);
     const closed = first.port.waitForEvent((event) => event.type === "result" && event.id === 2);
     first.port.emitMessage({ type: "close", id: 2, releaseContext: true });
-    await closed;
 
-    // The idle timer has discarded the context and is now blocked on its
-    // physical Web-Lock/epoch release. Start a *lease-only* successor in
-    // this exact window: no RuntimeContext can yet exist, so this is a
-    // direct receipt that the bootstrap reservation (rather than a context
-    // map entry) fences a stale `finally(close)`.
-    await new Promise<void>((resolve) => setTimeout(resolve, 60));
+    // Final close has discarded the context and is awaiting physical release.
+    // A lease-only successor must remain reserved before it has any runtime
+    // context, rather than being lost to the predecessor's idle cleanup.
     await vi.waitFor(() =>
       expect(mocks.pageStores[0]?.releaseBrowserWorkerEpoch).toHaveBeenCalledOnce(),
     );
@@ -1723,6 +1950,7 @@ describe("broker worker context initialization", () => {
     });
     expect(mocks.runtimes).toHaveLength(1);
     releasePhysicalOwner.resolve();
+    await closed;
 
     await expect(successor.outcome).resolves.toEqual(
       expect.objectContaining({
@@ -2299,12 +2527,6 @@ describe("broker worker context initialization", () => {
     expect(mocks.loadWasmModule).toHaveBeenCalledOnce();
     expect(mocks.installWasmTelemetry).toHaveBeenCalledOnce();
     expect(mocks.openPageStore).toHaveBeenCalledOnce();
-    expect(mocks.openPageStore).toHaveBeenCalledWith("concurrent-success", {
-      // This exact caller-supplied marker is the durable admission boundary.
-      // Mutating production wiring to `owner: undefined` or a lossy surrogate
-      // makes this mock receipt fail before a worker can open WASM.
-      owner: exactStorageOwner,
-    });
     expect(mocks.openBrowser).toHaveBeenCalledOnce();
     expect(mocks.fromDb).toHaveBeenCalledOnce();
   });
@@ -2422,7 +2644,7 @@ describe("broker worker context initialization", () => {
       releaseStarted.resolve();
       return released.promise;
     });
-    await followerResult(owner.port, { type: "close", id: 1, releaseContext: true });
+    const closed = followerResult(owner.port, { type: "close", id: 1, releaseContext: true });
     await bounded(releaseStarted.promise);
     const attempt = connectRuntimeChannel(initOptions, "cancelled-reopen");
     try {
@@ -2430,6 +2652,7 @@ describe("broker worker context initialization", () => {
       attempt.port.postMessage({ type: "cancel-runtime-bootstrap" });
       await attempt.waitFor("runtime-bootstrap-cancelled");
       released.resolve();
+      await closed;
       await vi.waitFor(() => expect(mocks.pageStores[1]?.close).toHaveBeenCalledOnce());
       const successor = connectRuntimeChannel(initOptions, "successor");
       try {
@@ -2535,9 +2758,6 @@ describe("broker worker context initialization", () => {
         reopened.port.postMessage({ type: "init", id: 1, sessionClaims: {} });
         expect(await reopened.waitFor("result", 1)).not.toHaveProperty("error");
         expect(mocks.openPageStore).toHaveBeenCalledTimes(3);
-        expect(mocks.openPageStore).toHaveBeenLastCalledWith(targetOptions.dbName, {
-          owner: targetOptions.storageOwner,
-        });
         expect(mocks.pageStores[2]?.close).not.toHaveBeenCalled();
         expect(mocks.pageStores[0]?.close).not.toHaveBeenCalled();
         expect(

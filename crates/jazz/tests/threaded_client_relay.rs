@@ -5,6 +5,7 @@ use std::time::Duration;
 
 mod common;
 
+use groove::storage::BoxedStorage;
 use jazz::block_on;
 use jazz::groove::records::Value;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
@@ -20,7 +21,6 @@ use jazz::wire::{
     FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireEnvelope, WireFrame, decode_frame,
     decode_sync_message, encode_frame, encode_sync_message,
 };
-use jazz_storage_rocksdb::RocksDbStorage;
 
 use common::{compile_schema, session_eq};
 
@@ -122,11 +122,18 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, NodeState) {
+fn open_node(
+    node_uuid: NodeUuid,
+    schema: JazzSchema,
+) -> (tempfile::TempDir, NodeState<BoxedStorage>) {
     let temp_dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+    let storage = jazz::block_on(jazz::storage_codec_profile::open_node_storage(
+        &jazz_storage_rocksdb::RocksDbStorageFactory::default(),
+        temp_dir.path().to_path_buf(),
+        cfs,
+    ))
+    .unwrap();
     let node = block_on(NodeState::new_with_shared_test_catalogue(
         node_uuid, schema, storage,
     ))
@@ -141,7 +148,7 @@ fn cells(title: impl Into<String>, owner: AuthorSubject) -> BTreeMap<String, Val
     ])
 }
 
-fn install_session_claims(node: &mut NodeState, identity: AuthorSubject) {
+fn install_session_claims(node: &mut NodeState<BoxedStorage>, identity: AuthorSubject) {
     if identity != AuthorSubject::SYSTEM {
         node.admit_test_session_claims(identity, BTreeMap::new());
     }
@@ -154,14 +161,14 @@ fn peer_summary(peer: &PeerState) -> LinkSummary {
     }
 }
 
-fn apply_message(node: &mut NodeState, message: SyncMessage) -> Vec<SyncMessage> {
+fn apply_message(node: &mut NodeState<BoxedStorage>, message: SyncMessage) -> Vec<SyncMessage> {
     block_on(async {
         let outcome = node.apply_sync_message(message).await.unwrap();
         node.persist_and_settle_outcome(outcome).await.unwrap()
     })
 }
 
-fn commit_unit(node: &mut NodeState, commit: MergeableCommit) -> (TxId, SyncMessage) {
+fn commit_unit(node: &mut NodeState<BoxedStorage>, commit: MergeableCommit) -> (TxId, SyncMessage) {
     block_on(async {
         let (published, unit) = node.commit_mergeable_unit(commit).await.unwrap();
         let tx_id = node
@@ -172,13 +179,13 @@ fn commit_unit(node: &mut NodeState, commit: MergeableCommit) -> (TxId, SyncMess
     })
 }
 
-fn send_view(node: &mut NodeState, peer: &mut PeerState, tx: &Sender<Wire>) {
+fn send_view(node: &mut NodeState<BoxedStorage>, peer: &mut PeerState, tx: &Sender<Wire>) {
     install_session_claims(node, peer.identity());
     let update = block_on(common::direct_query_update(node, peer, &schema(), TABLE));
     send_sync(tx, update);
 }
 
-fn relay_ingest(node: &mut NodeState, message: &SyncMessage) {
+fn relay_ingest(node: &mut NodeState<BoxedStorage>, message: &SyncMessage) {
     let SyncMessage::CommitUnit { tx, versions } = message else {
         panic!("expected commit unit");
     };
@@ -189,7 +196,7 @@ fn relay_ingest(node: &mut NodeState, message: &SyncMessage) {
 }
 
 fn process_downstream(
-    node: &mut NodeState,
+    node: &mut NodeState<BoxedStorage>,
     message: Wire,
     downstream_tx: &Sender<Wire>,
     downstream_peer: &mut PeerState,
@@ -215,7 +222,7 @@ fn process_downstream(
 }
 
 fn finish_node(
-    node: &mut NodeState,
+    node: &mut NodeState<BoxedStorage>,
     tx_ids: impl IntoIterator<Item = TxId>,
     downstream_peer: Option<LinkSummary>,
 ) -> ThreadResult {
@@ -338,7 +345,7 @@ fn relay_thread(
     }
 }
 
-fn drain_ui_downstream(node: &mut NodeState, rx: &Receiver<Wire>) {
+fn drain_ui_downstream(node: &mut NodeState<BoxedStorage>, rx: &Receiver<Wire>) {
     while let Ok(message) = rx.try_recv() {
         match message {
             Wire::Sync(_) | Wire::Frame(_) => {
@@ -444,7 +451,7 @@ fn ui_thread(
     UiResult { tx_ids, receipt }
 }
 
-fn global_rows(node: &mut NodeState) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
+fn global_rows(node: &mut NodeState<BoxedStorage>) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
     let schema = schema();
     let table = &schema.tables[0];
     block_on(node.current_rows(TABLE, DurabilityTier::Global))
@@ -454,7 +461,7 @@ fn global_rows(node: &mut NodeState) -> BTreeMap<RowUuid, BTreeMap<String, Value
         .collect()
 }
 
-fn local_rows(node: &mut NodeState) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
+fn local_rows(node: &mut NodeState<BoxedStorage>) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
     let schema = schema();
     let table = &schema.tables[0];
     block_on(node.current_rows(TABLE, DurabilityTier::Local))
@@ -464,7 +471,9 @@ fn local_rows(node: &mut NodeState) -> BTreeMap<RowUuid, BTreeMap<String, Value>
         .collect()
 }
 
-fn subscription_rows(node: &mut NodeState) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
+fn subscription_rows(
+    node: &mut NodeState<BoxedStorage>,
+) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
     let schema = schema();
     let table = &schema.tables[0];
     block_on(node.subscription_current_rows(TABLE, DurabilityTier::Global))

@@ -41,6 +41,7 @@ use jazz::db::{
 };
 use jazz::foreground_node_lease::{ForegroundNodeLease, ForegroundNodeLeasePool};
 use jazz::groove::records::Value;
+use jazz::groove::storage::BoxedStorage;
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{NodeUuid, RowUuid};
 use jazz::protocol::SyncMessage;
@@ -48,7 +49,7 @@ use jazz::protocol_limits::{MAX_LOGICAL_MESSAGE_BYTES, validate_logical_message_
 #[cfg(test)]
 use jazz::query::Query;
 use jazz::schema::JazzSchema;
-use jazz::storage_codec_profile::epoch_1_storage_codec_profile;
+use jazz::storage_codec_profile::open_node_storage;
 use jazz::time::TxTime;
 use jazz::tools::AppId;
 use jazz::tools::native_transport_connector::{
@@ -59,7 +60,9 @@ use jazz::tools::{OpenTransactionId, TransactionId};
 use jazz::tx::{DurabilityTier as CoreDurabilityTier, TxId};
 use jazz::wire::{TransportError, WireTransport, decode_sync_message, encode_sync_message};
 use jazz_native_transport::NativeWebSocketConnector;
-use jazz_storage_sqlite::{Durability as SqliteDurability, SqliteStorage};
+#[cfg(test)]
+use jazz_storage_sqlite::SqliteStorage;
+use jazz_storage_sqlite::SqliteStorageFactory;
 use thiserror::Error;
 
 /// The current native-relay ABI version. (The name is kept for the exported
@@ -5118,8 +5121,8 @@ struct ConnectedClient {
     next_foreground_handle: u64,
     // The core stores weak references for lifecycle ownership; retaining both
     // endpoints is what keeps the normal peer protocol connection alive.
-    _upstream: Rc<LocalMutex<PeerConnection>>,
-    _served: Option<Rc<LocalMutex<PeerConnection>>>,
+    _upstream: Rc<LocalMutex<PeerConnection<MemoryStorage>>>,
+    _served: Option<Rc<LocalMutex<PeerConnection<BoxedStorage>>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -5272,8 +5275,9 @@ type ForegroundOperationFuture =
     Pin<Box<dyn Future<Output = Result<ForegroundOperationResult, RelayError>> + 'static>>;
 
 type RelayTickFuture = Pin<Box<dyn Future<Output = Result<(), jazz::db::Error>>>>;
-type RelayAdmissionFuture =
-    Pin<Box<dyn Future<Output = Result<Rc<LocalMutex<PeerConnection>>, jazz::db::Error>>>>;
+type RelayAdmissionFuture = Pin<
+    Box<dyn Future<Output = Result<Rc<LocalMutex<PeerConnection<BoxedStorage>>>, jazz::db::Error>>>,
+>;
 
 /// A peer's chunk lane must progress even while its semantic tick or a
 /// foreground read owns the node. Retain both the endpoint and any suspended
@@ -5533,7 +5537,13 @@ impl ClosingForeground {
 type UpstreamTransition = Pin<
     Box<
         dyn Future<
-            Output = Result<Option<(Rc<LocalMutex<PeerConnection>>, NativeRelayWire)>, RelayError>,
+            Output = Result<
+                Option<(
+                    Rc<LocalMutex<PeerConnection<BoxedStorage>>>,
+                    NativeRelayWire,
+                )>,
+                RelayError,
+            >,
         >,
     >,
 >;
@@ -5551,6 +5561,7 @@ struct RelayWorker {
     pending_foreground_wakes: PendingForegroundWakes,
     foreground_wake_generations: BTreeMap<u64, Arc<AtomicU64>>,
     owner_wake_queued: Arc<AtomicBool>,
+    owner_commands: Weak<mpsc::SyncSender<RelayCommand>>,
     _upstream: Rc<LocalMutex<PeerConnection>>,
     upstream_attached: bool,
     socket_generation: u64,
@@ -5590,19 +5601,13 @@ impl RelayWorker {
         owner_commands: Weak<mpsc::SyncSender<RelayCommand>>,
     ) -> Result<Self, RelayError> {
         let column_families = config.schema.column_families();
-        let refs = column_families
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-        let codec_profile = epoch_1_storage_codec_profile().map_err(RelayError::Storage)?;
         let db_config = DbConfig {
             schema: config.schema.clone(),
-            storage: SqliteStorage::open_with_durability_and_codec_profile(
+            storage: block_on(open_node_storage(
+                &SqliteStorageFactory::default(),
                 config.sqlite_path,
-                &refs,
-                SqliteDurability::WalNoSync,
-                &codec_profile,
-            )
+                column_families,
+            ))
             .map_err(RelayError::Storage)?,
             identity: config.identity,
             id_source: None,

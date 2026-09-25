@@ -78,7 +78,7 @@ fn local_first_context(
     ctx.storage = storage;
     if storage == ClientStorage::Persistent {
         ctx.storage_factory = Some(std::sync::Arc::new(
-            jazz_storage_rocksdb::RocksDbStorageFactory,
+            jazz_storage_rocksdb::RocksDbStorageFactory::default(),
         ));
     }
     ctx

@@ -29,7 +29,7 @@ async fn shutdown_releases_persistent_storage_for_reopen_impl() {
     let mut context = server.make_client_context_for_user(test_schema(), "storage-release-user");
     context.storage = ClientStorage::Persistent;
     context.storage_factory = Some(std::sync::Arc::new(
-        jazz_storage_rocksdb::RocksDbStorageFactory,
+        jazz_storage_rocksdb::RocksDbStorageFactory::default(),
     ));
     context.data_dir = data_dir.path().to_path_buf();
 
