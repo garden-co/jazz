@@ -9,6 +9,7 @@
 
 mod activation;
 mod execution_layout;
+pub(crate) mod routes;
 mod template;
 pub use template::{
     TemplateBindingError, TemplateGraphInput, TemplateScalarArgument, TypedGraphTemplate,

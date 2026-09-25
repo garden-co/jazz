@@ -218,12 +218,19 @@ where
     /// execution, and binding hydration all remain owned by the core. The
     /// release callback lets a host defer attachment cleanup when dropping a
     /// pending operation while its runtime owner is already borrowed.
+    ///
+    /// An [`EmptyOpening::AwaitRemote`] request from a client-local read
+    /// outside a transaction applies the shared one-shot rule of
+    /// [`Db::read_local_first_unless_empty`]: the local-first read runs with
+    /// the caller's coverage requirement, and the strict remote read (Global
+    /// tier, immediate local updates) always requires coverage. Each phase
+    /// releases its own attachment through `release_coverage`.
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub async fn all_serialized_query<F, E>(
         &self,
         query: &[u8],
-        opts: ReadOpts,
+        mut opts: ReadOpts,
         open_tx: Option<OpenTransactionId>,
         request_scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
         author: Option<AuthorSubject>,
@@ -232,9 +239,91 @@ where
         release_coverage: F,
     ) -> Result<SerializedReadResult, Error>
     where
-        F: FnOnce(QueryAttachment),
+        F: Fn(QueryAttachment),
         E: Fn() -> bool,
     {
+        let await_remote = std::mem::take(&mut opts.empty_opening) == EmptyOpening::AwaitRemote
+            && open_tx.is_none()
+            && author.is_none()
+            && opts.propagation == Propagation::Full
+            && effective_read_tier(&opts) == DurabilityTier::Local;
+        if !await_remote {
+            return self
+                .all_serialized_query_once(
+                    query,
+                    opts,
+                    open_tx,
+                    request_scope,
+                    author,
+                    require_coverage,
+                    &coverage_expired,
+                    &release_coverage,
+                )
+                .await;
+        }
+        let windowed = crate::wire::decode_postcard_exact::<Query>(query)
+            .map_err(|error| Error::new(ErrorCode::Query, format!("decode query: {error}")))?
+            .offset
+            > 0;
+        let remote_opts = ReadOpts {
+            tier: DurabilityTier::Global,
+            local_updates: LocalUpdates::Immediate,
+            ..opts.clone()
+        };
+        let remote_scope = request_scope.clone();
+        // Boxed: the gated read nests two full one-shot reads, which would
+        // otherwise multiply this future's size and every host poll frame.
+        Box::pin(self.read_local_first_unless_empty(
+            windowed,
+            || {
+                self.all_serialized_query_once(
+                    query,
+                    opts,
+                    None,
+                    request_scope,
+                    None,
+                    require_coverage,
+                    &coverage_expired,
+                    &release_coverage,
+                )
+            },
+            || {
+                self.all_serialized_query_once(
+                    query,
+                    remote_opts,
+                    None,
+                    remote_scope,
+                    None,
+                    true,
+                    &coverage_expired,
+                    &release_coverage,
+                )
+            },
+            |result| match result {
+                SerializedReadResult::Rows(rows) => rows.is_empty(),
+                SerializedReadResult::Relation(snapshot) => snapshot.root_count == 0,
+            },
+        ))
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn all_serialized_query_once<F, E>(
+        &self,
+        query: &[u8],
+        opts: ReadOpts,
+        open_tx: Option<OpenTransactionId>,
+        request_scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+        author: Option<AuthorSubject>,
+        require_coverage: bool,
+        coverage_expired: &E,
+        release_coverage: &F,
+    ) -> Result<SerializedReadResult, Error>
+    where
+        F: Fn(QueryAttachment),
+        E: Fn() -> bool,
+    {
+        let release_coverage = |attachment| release_coverage(attachment);
         {
             let admission = self.await_open_schema_for_read(&opts);
             let mut admission = std::pin::pin!(admission);

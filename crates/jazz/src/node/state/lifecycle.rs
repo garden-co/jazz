@@ -457,6 +457,83 @@ where
         Ok((meta_database.into_storage(), schema))
     }
 
+    /// Choose the schema a server runtime reopens an existing store with.
+    ///
+    /// A server's administrative catalogue can record schemas that never
+    /// reached its runtime store: a schema published without a lens, or one
+    /// whose lens bridge failed, is not admitted here. Reopening with such a
+    /// schema fails the durable genesis check on every restart. Keep
+    /// `requested` when this store's catalogue already holds it, and on a
+    /// fresh store. Otherwise reopen with the store's own current schema: its
+    /// active selection, else its write pointer, else its genesis.
+    #[cfg(feature = "runtime")]
+    pub(crate) async fn select_durable_reopen_schema(
+        storage: S,
+        requested: JazzSchema,
+    ) -> Result<(BoxedStorage, JazzSchema), Error>
+    where
+        S: ReopenableStorage + 'static,
+    {
+        let meta_schema = JazzSchema::empty().lower_catalogue_meta_to_groove();
+        let meta_database =
+            Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v1())
+                .await?;
+        let mut genesis = None;
+        let mut active = None;
+        let mut schemas = BTreeMap::new();
+        for raw in meta_database
+            .primary_key_scan_raw("jazz_catalogue", &[])
+            .await?
+        {
+            let record = raw.record();
+            match codec::CatalogueRecordKind::from_key(
+                record.get_u64(CatalogueRowRecord::FIELD_KIND_IDX)?,
+            )? {
+                codec::CatalogueRecordKind::Genesis => {
+                    genesis = Some(SchemaVersionId(
+                        record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?,
+                    ));
+                }
+                codec::CatalogueRecordKind::ActiveSchema => {
+                    active = Some(
+                        codec::decode_active_schema(
+                            record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
+                        )?
+                        .schema,
+                    );
+                }
+                codec::CatalogueRecordKind::Schema => {
+                    let schema = codec::decode_catalogue_schema(
+                        record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
+                    )?;
+                    schemas.insert(schema.id, schema.schema);
+                }
+                _ => {}
+            }
+        }
+        let pointer = meta_database
+            .primary_key_last_raw("jazz_catalogue_pointer", &[])
+            .await?
+            .map(|raw| {
+                Ok::<_, Error>(SchemaVersionId(
+                    raw.record()
+                        .get_uuid(CataloguePointerRowRecord::FIELD_SCHEMA_IDX)?,
+                ))
+            })
+            .transpose()?;
+        let storage = meta_database.into_storage();
+        if genesis.is_none() || schemas.contains_key(&requested.version_id()) {
+            return Ok((storage, requested));
+        }
+        // The full open validates the recovered catalogue; an unusable
+        // candidate here only falls through to that open's own error.
+        let own = [active, pointer, genesis]
+            .into_iter()
+            .flatten()
+            .find_map(|id| schemas.remove(&id));
+        Ok((storage, own.unwrap_or(requested)))
+    }
+
     /// Open or create a node that is known to hold complete settled history.
     ///
     /// This is the authority/local-complete constructor for historical reads.
@@ -485,6 +562,7 @@ where
             catalogue_bootstrap_state,
             database,
             chunk_resolver,
+            detach_covered_chunk_waits,
             history_complete,
             authoritative_scalar_exit_refresh,
             ..
@@ -509,6 +587,7 @@ where
             .set_missing_chunk_resolver(chunk_resolver.clone());
         reopened.local_chunk_reader = reopened.database.local_chunk_reader();
         reopened.chunk_resolver = chunk_resolver;
+        reopened.detach_covered_chunk_waits = detach_covered_chunk_waits;
         reopened.content_runtime_provider = reopened.database.owned_chunk_provider();
         reopened.authoritative_scalar_exit_refresh = authoritative_scalar_exit_refresh;
         Ok(reopened)
@@ -791,6 +870,7 @@ where
             database: DatabaseSlot::new(database),
             local_chunk_reader,
             chunk_resolver,
+            detach_covered_chunk_waits: Rc::new(std::cell::Cell::new(false)),
             large_value_staging_policy: LargeValueStagingPolicy::default(),
             large_value_ingress: RefCell::new(LargeValueIngressState::default()),
             content_runtime_provider,
@@ -803,7 +883,7 @@ where
             authoritative_scalar_exit_refresh: false,
             relay_authority_session_owner: None,
             pending_persistence: BTreeSet::new(),
-            node_aliases: BTreeMap::new(),
+            node_aliases: NodeAliases::default(),
             absent_node_alias: None,
             ahead_current_keys: FxHashMap::default(),
             minting_global_time: false,
@@ -1165,6 +1245,16 @@ where
         self.local_chunk_reader
             .refresh_from(&self.database.local_chunk_reader());
         self.content_runtime_provider = runtime_provider;
+    }
+
+    /// The flag `Node` flips when its host drops pending ticks.
+    pub(crate) fn detach_covered_chunk_waits_handle(&self) -> Rc<std::cell::Cell<bool>> {
+        Rc::clone(&self.detach_covered_chunk_waits)
+    }
+
+    /// Whether covered receiver installs detach chunk-waiting evaluation.
+    pub(crate) fn detaches_covered_chunk_waits(&self) -> bool {
+        self.detach_covered_chunk_waits.get()
     }
 
     /// Install Jazz's sync-plane fallback for chunks absent from Groove's

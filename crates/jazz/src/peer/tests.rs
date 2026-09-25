@@ -4599,6 +4599,41 @@ fn maintained_subscription_view_policy_view_exclusive_delta_ships_identity_scope
     assert!(read_metrics.policy_authorized_source_joins > 0);
 }
 
+/// Internal: a direct peer rehydrate is not reachable as a distinct client
+/// action; this pins that only retiring a published view counts as a
+/// full-diff fallback (#3292), while the first open and deltas do not.
+#[test]
+fn full_diff_fallbacks_count_only_rehydrates_of_published_views() {
+    let (_dir, mut core) = open_node_with_uuid(node(0x95));
+    let first = row(0x23);
+    let first_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", first, 1_000).cells(title_cells("match")),
+        )
+        .unwrap();
+    accept_global(&mut core, first_tx, 1);
+    let (shape, binding) = title_shape_binding("match");
+    let mut peer = PeerState::new();
+
+    peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    let second_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(0x24), 2_000).cells(title_cells("match")),
+        )
+        .unwrap();
+    accept_global(&mut core, second_tx, 2);
+    peer.query_update(&mut core, &shape, &binding).unwrap();
+    assert_eq!(
+        peer.maintained_subscription_view_metrics().full_diff_fallbacks,
+        FullDiffFallbackMetrics::default()
+    );
+
+    peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    let fallbacks = peer.maintained_subscription_view_metrics().full_diff_fallbacks;
+    assert_eq!(fallbacks.query_reopens, 1, "{fallbacks:?}");
+    assert_eq!(fallbacks.total(), 1, "{fallbacks:?}");
+}
+
 #[test]
 fn maintained_subscription_view_rehydrate_replaces_subscription_and_fresh_indexes() {
     let mut expected_snapshots = ExpectedSupportingSnapshots::new();

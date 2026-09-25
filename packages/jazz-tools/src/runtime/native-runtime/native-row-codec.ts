@@ -1,4 +1,5 @@
 import { Utf8Decoder } from "../utf8.js";
+import { bytesToHex, formatUuidAt } from "../hex.js";
 import type {
   ColumnDescriptor,
   ColumnType,
@@ -449,9 +450,9 @@ export function decodeNativeRowValues(
   columns: readonly ColumnDescriptor[],
   raw: Uint8Array,
 ): Value[] {
-  const descriptor = descriptorFromColumns(columns);
+  const decodeField = createRecordValueDecoder(descriptorFromColumns(columns));
   return columns.map((column, index) => {
-    const bytes = decodeRecordValue(descriptor, raw, index);
+    const bytes = decodeField(raw, index);
     if (bytes == null) return { type: "Null" };
     return decodeBytes(column.column_type, bytes);
   });
@@ -461,13 +462,13 @@ export function decodeNativeRowValuesByColumn(
   columns: readonly ColumnDescriptor[],
   raw: Uint8Array,
 ): Map<string, Value> {
-  const descriptor = descriptorFromColumns(columns);
+  const decodeField = createRecordValueDecoder(descriptorFromColumns(columns));
   const valuesByColumn = new Map<string, Value>();
 
   for (let i = 0; i < columns.length; i++) {
     const column = columns[i];
     if (!column) continue;
-    const bytes = decodeRecordValue(descriptor, raw, i);
+    const bytes = decodeField(raw, i);
     valuesByColumn.set(
       column.name,
       bytes == null ? { type: "Null" } : decodeBytes(column.column_type, bytes),
@@ -482,16 +483,29 @@ export function decodeNativeRow(
   columns: readonly ColumnDescriptor[],
   raw: Uint8Array,
 ): WasmRow {
-  const row = {
-    id,
-    values: decodeNativeRowValues(columns, raw),
-  };
+  const values = decodeNativeRowValues(columns, raw);
+  const row = { id, values };
   Object.defineProperty(row, "valuesByColumn", {
-    value: decodeNativeRowValuesByColumn(columns, raw),
+    value: namedValues(columns, values),
     enumerable: false,
     configurable: true,
   });
   return row;
+}
+
+/**
+ * Name the positional values decoded for `columns`. The map shares each Value
+ * object with the positional array, as terminal rows already do, instead of
+ * decoding the record a second time.
+ */
+function namedValues(columns: readonly ColumnDescriptor[], values: Value[]): Map<string, Value> {
+  const valuesByColumn = new Map<string, Value>();
+  for (let i = 0; i < columns.length; i++) {
+    const column = columns[i];
+    if (!column) continue;
+    valuesByColumn.set(column.name, values[i]!);
+  }
+  return valuesByColumn;
 }
 
 const terminalRowKeyColumn: ColumnDescriptor = {
@@ -539,12 +553,13 @@ export function decodeNativeTerminalRowWithDescriptor(
 ): WasmRow {
   assertTerminalRootDescriptorCompatible(descriptor, columns);
   assertRecordLayoutIsComplete(descriptor, raw);
-  const key = decodeRecordValue(descriptor, raw, 0);
+  const decodeField = createRecordValueDecoder(descriptor);
+  const key = decodeField(raw, 0);
   if (key == null || formatUuid(key) !== id) {
     throw new Error("terminal record key does not match addressed key");
   }
   const values = columns.map((column, index) => {
-    const bytes = decodeRecordValue(descriptor, raw, index + 1);
+    const bytes = decodeField(raw, index + 1);
     return bytes == null
       ? ({ type: "Null" } satisfies Value)
       : decodeTerminalColumnBytes(column, bytes, descriptor[index + 1]?.valueType);
@@ -572,15 +587,16 @@ export function compileNativeTerminalRootDecoder(
   assertTerminalRootLayoutCompatible(descriptor, columns, layout);
   const fieldsByName = new Map(layout.publicFields.map((field) => [field.name, field]));
   const slots = columns.map((column) => fieldsByName.get(column.name)!.slot);
+  const decodeField = createRecordValueDecoder(descriptor);
   return (id, raw) => {
     assertRecordLayoutIsComplete(descriptor, raw);
-    const key = decodeRecordValue(descriptor, raw, layout.rootKeySlot);
+    const key = decodeField(raw, layout.rootKeySlot);
     if (key == null || formatUuid(key) !== id) {
       throw new Error("terminal record key does not match addressed key");
     }
     const values = columns.map((column, index) => {
       const slot = slots[index]!;
-      const bytes = decodeRecordValue(descriptor, raw, slot);
+      const bytes = decodeField(raw, slot);
       return bytes == null
         ? ({ type: "Null" } satisfies Value)
         : decodeTerminalColumnBytes(column, bytes, descriptor[slot]?.valueType);
@@ -850,9 +866,10 @@ function decodeTerminalColumnBytes(
     assertRecordLayoutIsComplete(descriptor, bytes);
     const columns = column.column_type.columns;
     const offset = descriptor.length === columns.length ? 0 : 1;
+    const decodeField = createRecordValueDecoder(descriptor);
     const values = columns.map((nested, index): Value => {
       const fieldIndex = index + offset;
-      const payload = decodeRecordValue(descriptor, bytes, fieldIndex);
+      const payload = decodeField(bytes, fieldIndex);
       return payload == null
         ? { type: "Null" }
         : decodeTerminalColumnBytes(nested, payload, descriptor[fieldIndex]?.valueType);
@@ -860,7 +877,7 @@ function decodeTerminalColumnBytes(
     if (column.name === "$createdBy" || column.name === "$updatedBy") {
       validateStructuredAuthorValue({ type: "Row", value: { values } });
     }
-    const key = offset ? decodeRecordValue(descriptor, bytes, 0) : undefined;
+    const key = offset ? decodeField(bytes, 0) : undefined;
     return {
       type: "Row",
       value: {
@@ -957,8 +974,9 @@ function decodeNativeTerminalRowValues(
   raw: Uint8Array,
 ): Value[] {
   const descriptor = descriptorFromColumns(columns);
+  const decodeField = createRecordValueDecoder(descriptor);
   return columns.map((column, index) => {
-    const bytes = decodeRecordValue(descriptor, raw, index);
+    const bytes = decodeField(raw, index);
     if (bytes == null) return { type: "Null" };
     return decodeTerminalColumnBytes(column, bytes, descriptor[index]?.valueType);
   });
@@ -1013,7 +1031,7 @@ export function decodeNativeRowObject(
   columns: readonly ColumnDescriptor[],
   raw: Uint8Array,
 ): Record<string, unknown> {
-  const descriptor = descriptorFromColumns(columns);
+  const decodeField = createRecordValueDecoder(descriptorFromColumns(columns));
   const obj: Record<string, unknown> = {};
   if (id !== undefined) {
     obj.id = id;
@@ -1022,7 +1040,7 @@ export function decodeNativeRowObject(
   for (let i = 0; i < columns.length; i++) {
     const column = columns[i];
     if (!column) continue;
-    const bytes = decodeRecordValue(descriptor, raw, i);
+    const bytes = decodeField(raw, i);
     obj[column.name] =
       bytes == null ? null : decodePlainValue(column.column_type, bytes, column.name);
   }
@@ -1459,12 +1477,13 @@ function decodeRowValue(
   offset += 4;
   const raw = bytes.subarray(offset, offset + len);
   if (raw.byteLength !== len) throw new Error("invalid nested row value length");
+  const values = decodeNativeRowValues(columns, raw);
   const row: { id?: string; values: Value[]; valuesByColumn?: Map<string, Value> } = {
     id,
-    values: decodeNativeRowValues(columns, raw),
+    values,
   };
   Object.defineProperty(row, "valuesByColumn", {
-    value: decodeNativeRowValuesByColumn(columns, raw),
+    value: namedValues(columns, values),
     enumerable: false,
     configurable: true,
   });
@@ -1557,9 +1576,9 @@ function timestampToDate(value: number, _columnName?: string): Date {
 }
 
 function formatUuid(bytes: Uint8Array): string {
-  const hex = Array.from(bytes.subarray(0, 16), (byte) => byte.toString(16).padStart(2, "0")).join(
-    "",
-  );
+  if (bytes.length >= 16) return formatUuidAt(bytes, 0);
+  // Truncated input keeps the text the per-byte formatter produced.
+  const hex = bytesToHex(bytes);
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(
     16,
     20,

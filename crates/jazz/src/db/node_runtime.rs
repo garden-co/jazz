@@ -267,6 +267,8 @@ where
     pub(super) pending_relay_subscription_rejections: PendingRelaySubscriptionRejections,
     pub(super) connections: RefCell<Vec<Rc<LocalMutex<PeerConnection<S>>>>>,
     pub(super) scheduler: SharedTickScheduler,
+    /// Remote reachability for `EmptyOpening::AwaitRemote` reads.
+    pub(super) remote_link: Rc<RemoteLinkTracker>,
     query_runtime_wake_pending: Arc<AtomicBool>,
     query_runtime_waker: Rc<RefCell<Option<Waker>>>,
     pub(super) upload_retry_clock: SharedUploadRetryClock,
@@ -293,6 +295,7 @@ where
     pub(super) upstream_durability_floor: Cell<DurabilityTier>,
     pub(super) defer_local_persistence: Cell<bool>,
     pub(super) chunk_resolver: PeerChunkResolver,
+    detach_covered_chunk_waits: Rc<Cell<bool>>,
     pub(super) local_chunk_reader: groove::chunks::LocalChunkReader,
     pub(super) observed_chunk_completion_generation: Cell<u64>,
     local_subscription_dirty_generation: Cell<u64>,
@@ -346,6 +349,7 @@ where
             message,
             lease: None,
             authority_receipt_eligible,
+            receipts_validated: false,
         });
         self.schedule_tick(TickUrgency::Immediate);
         Ok(authority_receipt_eligible)
@@ -362,6 +366,7 @@ where
         let tx_time_reservation_clock = node.tx_time_reservation_clock();
         let node_uuid = node.node_uuid();
         node.set_missing_chunk_resolver(Rc::new(chunk_resolver.clone()));
+        let detach_covered_chunk_waits = node.detach_covered_chunk_waits_handle();
         let pending_mutation_errors = node
             .rejected_transactions()
             .into_iter()
@@ -370,6 +375,7 @@ where
                     .map(|rejected| (tx_id, mutation_error_event(rejected)))
             })
             .collect();
+        let scheduler: SharedTickScheduler = Rc::new(RefCell::new(None));
         Self {
             node: Rc::new(futures::lock::Mutex::new(node)),
             owner_release_wait: RefCell::new(None),
@@ -407,7 +413,8 @@ where
             relay_upstream_subscription_owners: Rc::new(RefCell::new(BTreeMap::new())),
             pending_relay_subscription_rejections: Rc::new(RefCell::new(BTreeMap::new())),
             connections: RefCell::new(Vec::new()),
-            scheduler: Rc::new(RefCell::new(None)),
+            scheduler: Rc::clone(&scheduler),
+            remote_link: Rc::new(RemoteLinkTracker::new(scheduler)),
             query_runtime_wake_pending: Arc::new(AtomicBool::new(false)),
             query_runtime_waker: Rc::new(RefCell::new(None)),
             upload_retry_clock: Rc::new(RefCell::new(Rc::new(MonotonicUploadRetryClock::new()))),
@@ -432,6 +439,7 @@ where
             upstream_durability_floor: Cell::new(DurabilityTier::Global),
             defer_local_persistence: Cell::new(false),
             chunk_resolver,
+            detach_covered_chunk_waits,
             local_chunk_reader,
             observed_chunk_completion_generation: Cell::new(0),
             local_subscription_dirty_generation: Cell::new(0),
@@ -906,6 +914,15 @@ where
             .contains(&tx_id)
     }
 
+    /// Declare this node the root authority for the uploads it accepts: once
+    /// its own ingest settles a subscriber upload terminally, there is no
+    /// upstream left to relay it to, so it is not retained in the outbox.
+    /// Attaching any upstream (before or after) revokes this for good.
+    #[cfg(any(test, feature = "runtime"))]
+    pub(crate) fn declare_upload_root(&self) {
+        self.outbox.borrow_mut().declare_root();
+    }
+
     #[cfg(any(test, feature = "runtime"))]
     pub(crate) fn enable_authoritative_scalar_exit_refresh(&self) {
         self.node
@@ -1223,8 +1240,18 @@ where
     }
 
     pub(super) fn set_scheduler(&self, scheduler: Option<Rc<dyn TickScheduler>>) {
+        self.detach_covered_chunk_waits.set(
+            scheduler
+                .as_ref()
+                .is_some_and(|scheduler| scheduler.drops_pending_ticks()),
+        );
         *self.scheduler.borrow_mut() = scheduler;
         self.query_runtime_waker.borrow_mut().take();
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub(super) fn set_drops_pending_ticks_for_test(&self, drops: bool) {
+        self.detach_covered_chunk_waits.set(drops);
     }
 
     #[cfg(test)]
@@ -1481,11 +1508,9 @@ where
                 let owner = Rc::downgrade(&state);
                 let mut state = state.borrow_mut();
                 state.scalar_reconciliation = ScalarReconciliation::default();
-                (
-                    state.local_subscription_cleanup.take(),
-                    std::mem::take(&mut state.upstream_subscription_handles),
-                    owner,
-                )
+                let mut upstream = std::mem::take(&mut state.upstream_subscription_handles);
+                upstream.append(&mut state.authority_witness);
+                (state.local_subscription_cleanup.take(), upstream, owner)
             } else {
                 (
                     command.opening_local.take(),
@@ -2113,6 +2138,7 @@ where
         mut transport: Box<dyn Transport>,
     ) -> Result<Rc<LocalMutex<PeerConnection<S>>>, Error> {
         transport.set_trusted_encoder(true);
+        self.outbox.borrow_mut().mark_upstream_attached();
         loop {
             // Connection installation mutates runtime metadata synchronously, but
             // first needs a coherent view of storage-owning node state. Evaluation
@@ -2397,6 +2423,7 @@ where
                 .with_shared_auxiliary_endpoint(shared_auxiliary_endpoint),
             }));
             self.connections.borrow_mut().push(Rc::clone(&connection));
+            self.remote_link.upstream_attached();
             self.schedule_tick(TickUrgency::Immediate);
             return Ok(connection);
         }
@@ -2704,6 +2731,7 @@ where
                     trust,
 
                     admitted_write_authorization: false,
+                    version_receipts_validated: false,
                 },
                 claims,
                 0,
@@ -3046,6 +3074,10 @@ where
         connections.retain(|candidate| !Rc::ptr_eq(candidate, connection));
         drop(connections);
         let detached = true;
+        if upstream_epoch.is_some() {
+            // Releases empty openings that were waiting on this link.
+            self.remote_link.upstream_detached();
+        }
         for request_id in terminal_permission_advice {
             if let Some(waiter) = self
                 .permission_advice_waiters
@@ -3164,6 +3196,7 @@ where
         // thread-affine. Consume the cross-thread marker only at this owner
         // boundary, before any connection tick can observe stale readiness.
         self.mark_subscriber_connections_dirty_after_query_runtime_wake();
+        self.remote_link.on_tick();
         self.drain_transaction_abandonments().await?;
         self.drain_subscription_finalizations().await?;
         let mut stats = DbTickStats::default();
@@ -3286,7 +3319,39 @@ where
         if !released_outbox_tx_ids.is_empty() {
             self.release_outbox_uploads(released_outbox_tx_ids);
         }
+        self.resolve_authority_witnesses().await;
         Ok(stats)
+    }
+
+    /// Settle local-first-unless-empty authority witnesses after this turn's
+    /// inputs were folded into every stream, and retire the witness coverage
+    /// of every gate that has released.
+    async fn resolve_authority_witnesses(&self) {
+        if !self.remote_link.has_witnesses() {
+            return;
+        }
+        let retired = {
+            let owner = self.node.lock().await;
+            self.remote_link.resolve_witnesses(|handles| {
+                !handles.is_empty()
+                    && handles.iter().all(|handle| {
+                        owner
+                            .authority_result_key_for_subscription(handle.subscription)
+                            .is_ok_and(|key| {
+                                owner.has_settled_authority_result(&key)
+                                    && !owner.opening_pending_for_authority_result(&key)
+                            })
+                    })
+            })
+        };
+        if !retired.is_empty() {
+            self.enqueue_subscription_finalization(PendingSubscriptionFinalization {
+                state: None,
+                opening_upstream: retired,
+                opening_local: None,
+                acknowledgement: None,
+            });
+        }
     }
 
     /// Both public local-first queries and relay-owned upstream scopes use
@@ -4435,6 +4500,7 @@ where
                             maintained.has_covered_input_sources(),
                         );
                     }
+                    let covered_authority = authoritative_result_key.is_some();
                     match node_ref
                         .drain_local_maintained_view_subscription_preserving_rows_with_waker(
                             maintained,
@@ -4444,6 +4510,17 @@ where
                         )
                         .await
                     {
+                        // The receiver's evaluation is still waiting (for
+                        // example on large-value chunks) and nothing was
+                        // drained. Publishing now would report an incomplete
+                        // authority state, so retry on a later turn (#3349).
+                        Ok((None, _))
+                            if covered_authority
+                                && node_ref.covered_receiver_evaluation_pending(maintained) =>
+                        {
+                            retained.push(Rc::downgrade(&state));
+                            continue;
+                        }
                         Ok(update) => update,
                         Err(crate::node::Error::MissingTransaction(_)) => {
                             node_ref.record_authoritative_reset_missing_payload_fallback();

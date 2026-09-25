@@ -810,13 +810,9 @@ where
             };
             let version_ref =
                 |time, alias, branch_or_prefix| -> Result<RowVersionRefEntry, Error> {
-                    let node = self
-                        .node_aliases
-                        .iter()
-                        .find_map(|(node, candidate)| (*candidate == alias).then_some(*node))
-                        .ok_or(Error::InvalidStoredValue(
-                            "relation edge node alias is missing",
-                        ))?;
+                    let node = self.node_aliases.node_for_alias(alias).ok_or(
+                        Error::InvalidStoredValue("relation edge node alias is missing"),
+                    )?;
                     Ok(RowVersionRefEntry {
                         tx: TxId::new(time, node),
                         schema_version: None,

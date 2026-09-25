@@ -53,11 +53,11 @@ where
                 versions.push(self.decode_history_owned_record(table, &storage_table, record)?);
             }
         }
-        let aliases = self.node_aliases.clone();
+        let aliases = &self.node_aliases;
         versions.sort_by_key(|version| {
             (
                 version.row_uuid(),
-                version_tx_id_from_aliases(version, &aliases).expect("valid version tx id"),
+                version_tx_id_from_aliases(version, aliases).expect("valid version tx id"),
             )
         });
         Ok(versions)
@@ -121,11 +121,11 @@ where
                 versions.push(self.decode_history_owned_record(table, &storage_table, raw)?);
             }
         }
-        let aliases = self.node_aliases.clone();
+        let aliases = &self.node_aliases;
         versions.sort_by_key(|version| {
             (
                 version.row_uuid(),
-                version_tx_id_from_aliases(version, &aliases).expect("valid version tx id"),
+                version_tx_id_from_aliases(version, aliases).expect("valid version tx id"),
             )
         });
         Ok(versions)
@@ -465,11 +465,11 @@ where
             }
         }
         let mut versions = versions_by_key.into_values().collect::<Vec<_>>();
-        let aliases = self.node_aliases.clone();
+        let aliases = &self.node_aliases;
         versions.sort_by_key(|version| {
             (
                 version.row_uuid(),
-                version_tx_id_from_aliases(version, &aliases).expect("valid version tx id"),
+                version_tx_id_from_aliases(version, aliases).expect("valid version tx id"),
             )
         });
         Ok(versions)
@@ -647,13 +647,12 @@ where
         let table_schema = self.table_in_schema_ref(&table, schema_version)?;
         let record_view = record.borrowed();
         let tx_node_alias = NodeAlias(record_view.get_u64(HistoryRowRecord::FIELD_TX_NODE_ID_IDX)?);
-        let tx_node = self
-            .node_aliases
-            .iter()
-            .find_map(|(node, alias)| (*alias == tx_node_alias).then_some(*node))
-            .ok_or(Error::InvalidStoredValue(
-                "history tx node alias must exist",
-            ))?;
+        let tx_node =
+            self.node_aliases
+                .node_for_alias(tx_node_alias)
+                .ok_or(Error::InvalidStoredValue(
+                    "history tx node alias must exist",
+                ))?;
         let tx_time = TxTime(record_view.get_u64(HistoryRowRecord::FIELD_TX_TIME_IDX)?);
         let _ = TxId::new(tx_time, tx_node);
         let version = VersionRow {

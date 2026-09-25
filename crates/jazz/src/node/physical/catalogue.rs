@@ -571,6 +571,17 @@ pub(super) fn physical_current_index_name(column_id: PhysicalColumnId) -> String
     format!("by_physical_app_v1_{}", column_id.0)
 }
 
+pub(super) fn physical_current_composite_index_name(column_ids: &[PhysicalColumnId]) -> String {
+    format!(
+        "by_physical_composite_v1_{}",
+        column_ids
+            .iter()
+            .map(|id| id.0.to_string())
+            .collect::<Vec<_>>()
+            .join("_")
+    )
+}
+
 pub(super) fn physical_user_column_field(column_id: PhysicalColumnId) -> String {
     format!("_app_{}", column_id.0)
 }

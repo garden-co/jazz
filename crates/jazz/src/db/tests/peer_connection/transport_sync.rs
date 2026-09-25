@@ -349,6 +349,7 @@ fn handoff_receive_pre_staged_view_update_is_ineligible_after_immediate_drain() 
                 lease: None,
                 message,
                 authority_receipt_eligible: true,
+                receipts_validated: false,
             });
         if is_view_update {
             break;
@@ -2273,5 +2274,318 @@ fn encoder_trust_is_assigned_by_connection_role() {
         let _subscriber =
             server.accept_subscriber_with_trust(Box::new(TrustProbe(probe.clone())), author, trust);
         assert_eq!(probe.get(), Some(expected), "{trust:?}");
+    }
+}
+
+/// Drive one `Db::tick` to completion, failing instead of spinning when the
+/// tick cannot finish without outside help. Host bindings poll a tick and
+/// then service the network, so a tick that waits for a peer reply which only
+/// a later turn can request never completes there (#3349).
+fn finish_tick_or_report_stall(db: &Db<RocksDbStorage>) -> Result<(), String> {
+    let mut tick = std::pin::pin!(db.tick());
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    for _ in 0..20_000 {
+        if let std::task::Poll::Ready(result) = tick.as_mut().poll(&mut cx) {
+            return result.map_err(|error| error.to_string());
+        }
+    }
+    let resolver = db.node.chunk_resolver.state.borrow();
+    Err(format!(
+        "tick never completed; unsent chunk requests={} pending chunks={}",
+        resolver.outbound.len(),
+        resolver.pending_by_chunk.len()
+    ))
+}
+
+/// Internal test: the public testkit client awaits its tick futures and pumps
+/// chunk traffic concurrently, so it never showed this hang. The NAPI binding
+/// polls a tick once and drops it while pending, which is what this drives.
+///
+/// A receiver that installs the server's covered closure must not hold its
+/// sync turn open for large-value chunks, since that same turn is what sends
+/// their requests. Both a fresh subscriber (reset install) and an open one
+/// (incremental install) must receive spilled rows, and neither may report a
+/// settled result before the spilled row is present.
+#[test]
+fn subscribers_receive_spilled_rows_without_blocking_the_sync_turn() {
+    let schema = schema();
+    let owner = AuthorSubject::for_test_bytes([0x81; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0x82; 16]);
+    let server = open_core(0x83, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0x84, client_author, &schema);
+    // Drive ticks the way a poll-once binding host (NAPI) does.
+    client.set_drops_pending_ticks_for_test(true);
+    let mut expected = BTreeMap::new();
+    for size in [60_000, 70_000, 800_000] {
+        let title = format!("{size}:{}", "y".repeat(size));
+        let row = seed(&server, "todos", cells(&title, false, owner));
+        expected.insert(row, title);
+    }
+
+    let (client_transport, server_transport) = duplex();
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, client_author);
+    let query = Query::from("todos");
+    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    let titles = |snapshot: &RelationSnapshot| {
+        snapshot
+            .rows
+            .iter()
+            .map(|row| (row.row_uuid(), row.cell(&schema.tables[0], "title")))
+            .collect::<BTreeMap<_, _>>()
+    };
+    let wanted = |expected: &BTreeMap<RowUuid, String>| {
+        expected
+            .iter()
+            .map(|(row, title)| (*row, Some(Value::String(title.clone()))))
+            .collect::<BTreeMap<_, _>>()
+    };
+
+    let mut received = RelationSnapshot::default();
+    let mut settled = false;
+    for _ in 0..64 {
+        finish_tick_or_report_stall(&client).unwrap();
+        server.tick().unwrap();
+        finish_tick_or_report_stall(&client).unwrap();
+        while let Some(event) = subscription.try_next_event() {
+            if event_settled(&event) {
+                settled = true;
+            }
+            apply_subscription_event(&mut received, event);
+            if settled {
+                assert_eq!(
+                    titles(&received),
+                    wanted(&expected),
+                    "a settled result must include every spilled row"
+                );
+            }
+        }
+        if settled {
+            break;
+        }
+    }
+    assert!(settled, "the fresh subscriber never settled");
+
+    let title = format!("later:{}", "z".repeat(70_000));
+    let row = seed(&server, "todos", cells(&title, false, owner));
+    expected.insert(row, title);
+    for _ in 0..64 {
+        finish_tick_or_report_stall(&client).unwrap();
+        server.tick().unwrap();
+        finish_tick_or_report_stall(&client).unwrap();
+        while let Some(event) = subscription.try_next_event() {
+            apply_subscription_event(&mut received, event);
+        }
+        if titles(&received) == wanted(&expected) {
+            return;
+        }
+    }
+    panic!(
+        "the open subscriber never received the later spilled row; rows={}",
+        received.rows.len()
+    );
+}
+
+/// Answers every chunk request the client receives with `Unavailable`, as a
+/// serving peer that lost the value (or a relay out of demand slots) would.
+struct UnavailableChunkResponses {
+    inner: Box<dyn Transport>,
+}
+
+impl UnavailableChunkResponses {
+    fn rewrite(message: SyncMessage) -> SyncMessage {
+        match message {
+            SyncMessage::ChunkResponseBatch(mut batch) => {
+                for response in &mut batch.responses {
+                    response.result = crate::protocol::ChunkResponse::Unavailable;
+                }
+                SyncMessage::ChunkResponseBatch(batch)
+            }
+            message => message,
+        }
+    }
+}
+
+impl Transport for UnavailableChunkResponses {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        self.inner.send(message)
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inner.try_recv().map(Self::rewrite)
+    }
+
+    fn try_recv_result(&mut self) -> Result<Option<SyncMessage>, TransportError> {
+        self.inner
+            .try_recv_result()
+            .map(|message| message.map(Self::rewrite))
+    }
+}
+
+/// A spilled row whose chunks cannot be fetched must end the subscription
+/// visibly. Waiting for the receiver's evaluation must not also wait on a
+/// failed one, or the subscriber stalls forever with no error (#3349 review).
+#[test]
+fn unavailable_spilled_value_chunks_end_the_subscription_visibly() {
+    let schema = schema();
+    let owner = AuthorSubject::for_test_bytes([0x91; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0x92; 16]);
+    let server = open_core(0x93, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0x94, client_author, &schema);
+    // Drive ticks the way a poll-once binding host (NAPI) does.
+    client.set_drops_pending_ticks_for_test(true);
+    seed(&server, "todos", cells(&"u".repeat(70_000), false, owner));
+
+    let (client_transport, server_transport) = duplex();
+    let client_transport = Box::new(UnavailableChunkResponses {
+        inner: client_transport,
+    });
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, client_author);
+    let query = Query::from("todos");
+    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+
+    for _ in 0..64 {
+        for tick in [
+            finish_tick_or_report_stall(&client),
+            server.tick().map(|_| ()).map_err(|error| error.to_string()),
+            finish_tick_or_report_stall(&client),
+        ] {
+            if let Err(error) = tick {
+                assert!(
+                    !error.contains("tick never completed"),
+                    "the sync turn must not wait on a failed chunk: {error}"
+                );
+                return;
+            }
+        }
+        while let Some(event) = subscription.try_next_event() {
+            match event {
+                SubscriptionEvent::Delta { settled, added, .. } => assert!(
+                    !settled || !added.is_empty(),
+                    "an unavailable spilled row must not settle as an empty result"
+                ),
+                SubscriptionEvent::Rejected { .. } | SubscriptionEvent::Closed => return,
+            }
+        }
+    }
+    panic!("the subscriber neither received the row nor saw its failure");
+}
+
+/// Closing while offline must not wait for a spilled value's chunks. The
+/// receiver's evaluation is detached waiting on them, and no later turn can
+/// deliver them once the runtime closes (#3349 review).
+#[test]
+fn close_while_offline_does_not_wait_for_detached_chunk_evaluation() {
+    let schema = schema();
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xa2; 16]);
+    let server = open_core(0xa3, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xa4, client_author, &schema);
+    // Drive ticks the way a poll-once binding host (NAPI) does.
+    client.set_drops_pending_ticks_for_test(true);
+    seed(&server, "todos", cells(&"c".repeat(70_000), false, owner));
+    let (client_transport, server_transport) = duplex();
+    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, client_author);
+    let query = Query::from("todos");
+    let _subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    // Deliver the server's result, but disconnect before any chunk response.
+    finish_tick_or_report_stall(&client).unwrap();
+    server.tick().unwrap();
+    finish_tick_or_report_stall(&client).unwrap();
+    assert!(
+        client.node.node.borrow().has_pending_query_runtime(),
+        "the receiver must be waiting on the spilled value's chunks"
+    );
+    assert!(client.detach_connection(&upstream));
+
+    let mut close = std::pin::pin!(client.close());
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    for _ in 0..20_000 {
+        if let std::task::Poll::Ready(result) = close.as_mut().poll(&mut cx) {
+            result.expect("close succeeds while offline");
+            return;
+        }
+    }
+    panic!("close waited for chunks that can no longer arrive");
+}
+
+/// Internal test for the same reason as
+/// `subscribers_receive_spilled_rows_without_blocking_the_sync_turn`.
+///
+/// A second subscriber can open while an earlier one's install is still
+/// waiting for large-value chunks, whether the earlier one is kept or dropped
+/// (as a one-shot read that timed out and retried would). It reuses the
+/// already-received authority closure, so its opening must not report a
+/// settled result until that install has produced the rows.
+#[test]
+fn a_subscriber_joining_a_pending_spilled_install_waits_for_its_rows() {
+    for drop_first in [false, true] {
+        let schema = schema();
+        let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let client_author = AuthorSubject::for_test_bytes([0xa2; 16]);
+        let server = open_core(0xa3, AuthorSubject::SYSTEM, &schema);
+        let client = open_db(0xa4, client_author, &schema);
+        // Drive ticks the way a poll-once binding host (NAPI) does.
+        client.set_drops_pending_ticks_for_test(true);
+        let mut expected = BTreeSet::new();
+        for size in [70_000, 180_000] {
+            expected.insert(seed(
+                &server,
+                "todos",
+                cells(&format!("{size}:{}", "y".repeat(size)), false, owner),
+            ));
+        }
+        expected.insert(seed(&server, "todos", cells("control", true, owner)));
+        let (client_transport, server_transport) = duplex();
+        let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+        let _subscriber = server.accept_subscriber(server_transport, client_author);
+        let query = Query::from("todos");
+        let mut first = Some(prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap());
+        // Two turns install the first closure and send its chunk requests,
+        // leaving the install waiting for their responses.
+        for _ in 0..2 {
+            finish_tick_or_report_stall(&client).unwrap();
+            server.tick().unwrap();
+        }
+        assert!(
+            crate::db::block_on(client.node.node.lock()).has_pending_query_runtime(),
+            "the first install should still be waiting for chunks"
+        );
+        if drop_first {
+            first.take();
+        }
+        let mut second = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+        let mut received = RelationSnapshot::default();
+        let mut settled = false;
+        for _ in 0..64 {
+            finish_tick_or_report_stall(&client).unwrap();
+            server.tick().unwrap();
+            finish_tick_or_report_stall(&client).unwrap();
+            while let Some(event) = second.try_next_event() {
+                settled |= event_settled(&event);
+                apply_subscription_event(&mut received, event);
+                if settled {
+                    assert_eq!(
+                        received
+                            .rows
+                            .iter()
+                            .map(|row| row.row_uuid())
+                            .collect::<BTreeSet<_>>(),
+                        expected,
+                        "a settled result must include every row (drop_first={drop_first})"
+                    );
+                }
+            }
+            if settled {
+                break;
+            }
+        }
+        assert!(
+            settled,
+            "the second subscriber never settled (drop_first={drop_first})"
+        );
+        drop(first);
     }
 }

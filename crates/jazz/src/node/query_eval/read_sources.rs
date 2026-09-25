@@ -32,6 +32,9 @@ pub(super) struct JazzSourceGraphPreparer<'a, S> {
     /// canonical enum/schema boundary.
     pub(super) covered_input_descriptors: BTreeMap<SourceId, RecordDescriptor>,
     pub(super) access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+    /// A one-shot ordered page can restrict deletion checks to its bounded
+    /// content candidates. Other sources retain the complete register.
+    pub(super) bounded_deletion_register: Option<(SourceId, GraphBuilder)>,
     /// Whether access-path metrics should account for this logical graph
     /// fragment. A policy proof specialized from its outer source reuses the
     /// same deduplicated physical source node, so only the outer fragment owns
@@ -55,13 +58,53 @@ pub(super) enum HydrationLifetime {
     Retained,
 }
 
+/// Which selector `guarded_current_access_path` runs inside its
+/// admission checks. Every selector goes through the same guard.
+#[derive(Clone, Copy)]
+pub(super) enum AccessPathSelector {
+    /// `select_current_access_path`: a primary-key point read, or
+    /// single-column equality probes intersected together.
+    Ordinary,
+    /// `select_composite_equality_access_path`: both equalities of a
+    /// declared two-column composite index as one prefix.
+    CompositeEquality,
+}
+
+/// A snapshot-only semijoin between two covered index keys, applied before a
+/// Global index source hydrates complete rows. The source keeps an index entry
+/// only when its covered `source_column` names a row in the candidate table's
+/// own index prefix (`column`/`order_column`/`prefix`, exactly as that
+/// source's admitted access path addresses it). The candidate prefix is a
+/// superset of rows that can pass the candidate source's own filters, so a
+/// dropped entry cannot contribute to the result; the ordinary graph still
+/// checks the join, every filter, visibility, policy, and deletion state.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct CurrentIndexCandidateFilter {
+    table: String,
+    column: String,
+    order_column: Option<String>,
+    prefix: Vec<Value>,
+    source_column: String,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum CurrentAccessPath {
     PrimaryKey(Vec<Value>),
     Index {
         column: String,
+        /// Second key of an explicitly declared two-column composite index.
+        /// When set, `prefix` addresses that composite index rather than the
+        /// single-column index on `column`.
+        order_column: Option<String>,
+        /// Scan the (composite) index prefix from its last key. Only a bounded
+        /// one-shot ordered-page probe sets this, together with `source_limit`.
+        reverse: bool,
         prefix: Vec<Value>,
         intersections: Vec<(String, Vec<Value>)>,
+        /// Snapshot-only cross-table covered-key filter before row hydration.
+        /// Only a Global first-result source attaches one; every other
+        /// source resolution ignores it and keeps the unfiltered prefix.
+        candidate_filter: Option<CurrentIndexCandidateFilter>,
         /// A maintained source keeps every equality probe as an ordinary IVM
         /// source and intersects them in the graph. The fused storage request
         /// is snapshot-only and cannot observe later transitions through a
@@ -1620,9 +1663,9 @@ where
         // the authored enum occurrence above.
         let descriptor = covered_input_descriptor.clone().unwrap_or(descriptor);
         let graph = if let Some(input_source) = covered_input_source {
-            // Online remote-if-possible composes the authority closure with the
-            // eligible local-current overlay before it enters the same
-            // maintained program. The input is shared, but overlay composition
+            // An online remote read with immediate local updates composes the
+            // authority closure with the eligible local-current overlay before
+            // it enters the same maintained program. The input is shared, but overlay composition
             // remains downstream of each occurrence's metadata projection.
             // Both sides can carry the same already-admitted version (the
             // local store retains received authority data), so select their
@@ -2407,6 +2450,8 @@ where
             }
             CurrentAccessPath::Index {
                 column,
+                order_column,
+                reverse,
                 prefix,
                 intersections,
                 source_limit,
@@ -2415,7 +2460,8 @@ where
                 if tier != DurabilityTier::Global {
                     return Ok(None);
                 }
-                let source_limit = (request.visibility == RowVisibility::IncludeDeleted)
+                let source_limit = (order_column.is_some()
+                    || request.visibility == RowVisibility::IncludeDeleted)
                     .then_some(source_limit)
                     .flatten();
                 let projection_target = self.current_projection_target(request, table)?;
@@ -2425,10 +2471,13 @@ where
                         table,
                         self.read_view.read_schema,
                         &column,
+                        order_column.as_deref(),
+                        reverse,
                         &prefix,
                         &intersections,
                         false,
                         source_limit,
+                        None,
                         &projection_target,
                     )
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
@@ -2768,23 +2817,33 @@ where
                     }
                     Some(CurrentAccessPath::Index {
                         column,
+                        order_column,
+                        reverse,
                         prefix,
                         intersections,
                         source_limit,
                         maintained,
+                        candidate_filter,
                     }) => {
-                        let source_limit = (!exclude_deleted).then_some(source_limit).flatten();
+                        // An ordered-page probe re-proves its page after the
+                        // deletion anti-join, so its cap survives it.
+                        let source_limit = (order_column.is_some() || !exclude_deleted)
+                            .then_some(source_limit)
+                            .flatten();
                         self.node.query_engine_read_metrics.source_index_probes +=
-                            1 + intersections.len() as u64;
+                            1 + intersections.len() as u64 + u64::from(candidate_filter.is_some());
                         self.node
                             .physical_global_current_source_for_index_scan(
                                 read_table,
                                 self.read_view.read_schema,
                                 &column,
+                                order_column.as_deref(),
+                                reverse,
                                 &prefix,
                                 &intersections,
                                 maintained,
                                 source_limit,
+                                candidate_filter.as_ref(),
                                 &projection_target,
                             )
                             .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
@@ -2857,10 +2916,17 @@ where
                 }
                 Some(CurrentAccessPath::Index {
                     column,
+                    order_column,
+                    reverse,
                     prefix,
                     intersections,
                     source_limit,
                     maintained,
+                    // A Local winner combines these settled candidates with
+                    // the ahead overlay, so a settled link outside the
+                    // candidate prefix may still be needed (#3340). Never
+                    // filter the settled side by another table's index.
+                    candidate_filter: _,
                 }) => {
                     // Select settled candidates before combining them with the
                     // corresponding Local ahead candidates below.
@@ -2872,10 +2938,13 @@ where
                             read_table,
                             self.read_view.read_schema,
                             column,
+                            order_column.as_deref(),
+                            *reverse,
                             prefix,
                             intersections,
                             *maintained,
                             source_limit,
+                            None,
                             &projection_target,
                             raw_global_output.clone(),
                         )
@@ -2954,6 +3023,12 @@ where
         request: &SourceRequest,
         tier: DurabilityTier,
     ) -> Result<GraphBuilder, SourceResolutionError> {
+        if tier == DurabilityTier::Global
+            && let Some((source, graph)) = &self.bounded_deletion_register
+            && *source == request.source
+        {
+            return Ok(graph.clone());
+        }
         let table_id = self
             .node
             .physical_table_id_for_schema(self.read_view.read_schema, &request.source.table)
@@ -3977,34 +4052,78 @@ where
 
         let mut paths = BTreeMap::new();
         for (source, equalities) in equalities_by_source {
-            let Some(tier) = read_view.source_current_tier(&source) else {
-                continue;
-            };
-            let table = self.table_in_schema(&source.table, read_view.read_schema)?;
-            let Some(mut path) = select_current_access_path(&table, &equalities) else {
-                continue;
-            };
-            // Authorization dependencies are cached by policy shape and claim
-            // schema, not by a resolved claim value. A secondary-index prefix
-            // derived from this request could therefore make a later identity
-            // reuse another identity's candidate set. Keep those reusable
-            // graphs identity-neutral; maintained root views are compiled for
-            // this concrete request and may safely select their own index.
-            if !allow_secondary_indexes && matches!(path, CurrentAccessPath::Index { .. }) {
-                continue;
-            }
-            if !allow_local && let CurrentAccessPath::Index { maintained, .. } = &mut path {
-                *maintained = true;
-            }
-            // Local sources still combine the selected settled candidates
-            // with the complete ahead overlay before choosing a winner, so a
-            // newer row which leaves an equality prefix cannot leave behind a
-            // stale settled match.
-            if matches!(tier, DurabilityTier::Global | DurabilityTier::Local) {
+            if let Some(path) = self.guarded_current_access_path(
+                read_view,
+                &source,
+                &equalities,
+                allow_local,
+                allow_secondary_indexes,
+                AccessPathSelector::Ordinary,
+                None,
+            )? {
                 paths.insert(source, path);
             }
         }
         Ok(paths)
+    }
+
+    /// The single admission guard for a physical current-source access path.
+    /// Every selector, including specialised first-result narrowings, must go
+    /// through this so none can obtain an index path that the ordinary
+    /// normalized-program selector would refuse.
+    ///
+    /// `covered_column` lets a caller that needs a covered key accept a
+    /// declared `[equality, covered_column]` composite index when no ordinary
+    /// path exists; that candidate passes exactly the same admission checks.
+    fn guarded_current_access_path(
+        &self,
+        read_view: &ReadView<RequestedSourceStage>,
+        source: &SourceId,
+        equalities: &BTreeMap<String, Value>,
+        allow_local: bool,
+        allow_secondary_indexes: bool,
+        selector: AccessPathSelector,
+        covered_column: Option<&str>,
+    ) -> Result<Option<CurrentAccessPath>, Error> {
+        let Some(tier) = read_view.source_current_tier(source) else {
+            return Ok(None);
+        };
+        // Local sources still combine the selected settled candidates
+        // with the complete ahead overlay before choosing a winner, so a
+        // newer row which leaves an equality prefix cannot leave behind a
+        // stale settled match. Any other tier keeps its full source.
+        if !matches!(tier, DurabilityTier::Global | DurabilityTier::Local) {
+            return Ok(None);
+        }
+        let table = self.table_in_schema(&source.table, read_view.read_schema)?;
+        let selected = match selector {
+            AccessPathSelector::Ordinary => {
+                select_current_access_path(&table, equalities).or_else(|| {
+                    covered_column.and_then(|covered| {
+                        select_composite_leading_equality_access_path(&table, equalities, covered)
+                    })
+                })
+            }
+            AccessPathSelector::CompositeEquality => {
+                select_composite_equality_access_path(&table, equalities)
+            }
+        };
+        let Some(mut path) = selected else {
+            return Ok(None);
+        };
+        // Authorization dependencies are cached by policy shape and claim
+        // schema, not by a resolved claim value. A secondary-index prefix
+        // derived from this request could therefore make a later identity
+        // reuse another identity's candidate set. Keep those reusable
+        // graphs identity-neutral; maintained root views are compiled for
+        // this concrete request and may safely select their own index.
+        if !allow_secondary_indexes && matches!(path, CurrentAccessPath::Index { .. }) {
+            return Ok(None);
+        }
+        if !allow_local && let CurrentAccessPath::Index { maintained, .. } = &mut path {
+            *maintained = true;
+        }
+        Ok(Some(path))
     }
 
     pub(super) fn one_shot_access_paths(
@@ -4103,8 +4222,8 @@ where
                 // Preserve bounded current ID reads. The policy-point guard
                 // from #2187 applies to future deletion delivery, not an
                 // initial snapshot whose owner releases it before any writes.
-                // Do not inherit snapshot-only secondary-index intersections
-                // or source limits: both consumers use live index graphs below.
+                // Select initial paths below from the executing binding; the
+                // generic cache must not retain binding-specific prefixes.
                 let tier = request
                     .reads
                     .primary
@@ -4121,6 +4240,206 @@ where
                 .into_iter()
                 .filter(|(_, path)| matches!(path, CurrentAccessPath::Index { .. })),
         );
+        if matches!(lifetime, HydrationLifetime::FirstResult) {
+            let query = shape.query();
+            let root = root_source_id(&query.table);
+            // A conjunctive root equality applies to every result even when
+            // includes or an existential join add relational nodes to the
+            // normalized program. The generic selector declines the whole
+            // program in that case; select only this root occurrence here.
+            // Policy alternatives and relation unions can reuse the same
+            // source identity for arms with different predicates.
+            if query.flat_join.is_none()
+                && query.policy_branches.is_empty()
+                && query.reachable.is_empty()
+                && query.inherits.is_empty()
+                && query.array_subqueries.is_empty()
+                && query.aggregate.is_none()
+                && query.relation.is_none()
+            {
+                if !paths.contains_key(&root) {
+                    let equalities = root_literal_equalities(query, binding)?;
+                    // Same admission guard as the ordinary selector and the
+                    // junction narrowing below.
+                    if let Some(path @ CurrentAccessPath::Index { .. }) = self
+                        .guarded_current_access_path(
+                            &request.reads.primary,
+                            &root,
+                            &equalities,
+                            true,
+                            true,
+                            AccessPathSelector::Ordinary,
+                            None,
+                        )?
+                    {
+                        paths.insert(root.clone(), path);
+                    }
+                }
+                // An unordered, unbounded first result may address a
+                // declared `(a, b)` composite index with both equalities as
+                // one prefix. It is admitted by the same guard, and replaces
+                // only a plain equality probe (never a primary-key point
+                // read, an ordered path, or a capped source), whose candidate
+                // set it narrows. Local reads keep the guard's settled
+                // candidates plus complete ahead overlay; the pre-existing
+                // stale Local index read (#3340) is unchanged by this.
+                let replaceable = match paths.get(&root) {
+                    None => true,
+                    Some(CurrentAccessPath::Index {
+                        order_column,
+                        source_limit,
+                        ..
+                    }) => order_column.is_none() && source_limit.is_none(),
+                    Some(_) => false,
+                };
+                if replaceable && query.limit.is_none() && query.order_by.is_empty() {
+                    let equalities = root_literal_equalities(query, binding)?;
+                    if let Some(CurrentAccessPath::Index {
+                        column,
+                        order_column,
+                        reverse,
+                        prefix,
+                        intersections,
+                        maintained,
+                        source_limit,
+                        candidate_filter,
+                    }) = self.guarded_current_access_path(
+                        &request.reads.primary,
+                        &root,
+                        &equalities,
+                        true,
+                        true,
+                        AccessPathSelector::CompositeEquality,
+                        None,
+                    )? {
+                        let maintained = match paths.get(&root) {
+                            Some(CurrentAccessPath::Index {
+                                maintained: kept, ..
+                            }) => *kept || maintained,
+                            _ => maintained,
+                        };
+                        paths.insert(
+                            root.clone(),
+                            CurrentAccessPath::Index {
+                                column,
+                                order_column,
+                                reverse,
+                                prefix,
+                                intersections,
+                                maintained,
+                                source_limit,
+                                candidate_filter,
+                            },
+                        );
+                    }
+                }
+            }
+            if matches!(
+                request.reads.primary.source_current_tier(&root),
+                Some(DurabilityTier::Global | DurabilityTier::Local)
+            ) && let Some(CurrentAccessPath::Index {
+                maintained,
+                intersections,
+                ..
+            }) = paths.get_mut(&root)
+                && !intersections.is_empty()
+            {
+                // A first-result owner retires this graph after hydration.
+                // Intersect durable index keys before fetching complete rows;
+                // retained consumers still use live IVM semi-joins so later
+                // writes can enter or leave either equality prefix.
+                *maintained = false;
+            }
+            if query.joins.len() == 1
+                && query.flat_join.is_none()
+                && query.policy_branches.is_empty()
+                && query.reachable.is_empty()
+                && query.inherits.is_empty()
+                && query.array_subqueries.is_empty()
+                && query.relation.is_none()
+            {
+                let join = &query.joins[0];
+                if join.target == JoinTarget::Column
+                    && join.source_column.is_none()
+                    && join.source_lookup.is_none()
+                    && join.correlated_filters.is_empty()
+                    && join.nested_joins.is_empty()
+                {
+                    // An exact root id fixes the junction's foreign key. Without
+                    // one, a conjunctive junction filter can still narrow this
+                    // occurrence before the ordinary join, deletion, and policy
+                    // graphs evaluate it. Keep the root-id probe when available
+                    // rather than intersecting it with a potentially broad tag
+                    // index; retained subscriptions keep their live path.
+                    let bound_root_id = match root_literal_equalities(query, binding)?.get("id") {
+                        Some(Value::Uuid(row_id)) => Some(*row_id),
+                        _ => None,
+                    };
+                    let equalities = match bound_root_id {
+                        Some(row_id) => {
+                            BTreeMap::from([(join.on_column.clone(), Value::Uuid(row_id))])
+                        }
+                        None => literal_equalities_for_filters(&join.filters, binding)?,
+                    };
+                    // Key the path by the occurrence normalization actually
+                    // emitted rather than re-spelling its alias scheme here: a
+                    // stale spelling would silently drop the probe, or narrow
+                    // a different occurrence of the same table.
+                    //
+                    // Admission uses the same guard as the ordinary selector:
+                    // the junction source's own read tier must be Global or
+                    // Local, and secondary indexes must be allowed. It passes
+                    // `allow_local` like `one_shot_access_paths`, so the
+                    // admitted path keeps the exact shape
+                    // `select_current_access_path` produces for this one-shot
+                    // read.
+                    //
+                    // Without a bound root id, a Global read of a broad
+                    // junction prefix may instead compare covered join keys
+                    // against the root's own index prefix before hydrating
+                    // links. Only then may the guard consider a declared
+                    // `[filter column, on_column]` composite index.
+                    if let Some(join_source) = single_root_join_source(request, &join.table) {
+                        let both_global = [&root, join_source].into_iter().all(|source| {
+                            request.reads.primary.source_current_tier(source)
+                                == Some(DurabilityTier::Global)
+                        });
+                        let covered_join_key = (bound_root_id.is_none()
+                            && both_global
+                            && query.limit.is_none()
+                            && query.order_by.is_empty()
+                            && query.aggregate.is_none())
+                        .then_some(join.on_column.as_str());
+                        if let Some(mut path @ CurrentAccessPath::Index { .. }) = self
+                            .guarded_current_access_path(
+                                &request.reads.primary,
+                                join_source,
+                                &equalities,
+                                true,
+                                true,
+                                AccessPathSelector::Ordinary,
+                                covered_join_key,
+                            )?
+                        {
+                            if let Some(on_column) = covered_join_key {
+                                let join_table = self.table_in_schema(
+                                    &join.table,
+                                    request.reads.primary.read_schema,
+                                )?;
+                                attach_covered_join_key_filter(
+                                    &join_table,
+                                    on_column,
+                                    &query.table,
+                                    paths.get(&root),
+                                    &mut path,
+                                );
+                            }
+                            paths.insert(join_source.clone(), path);
+                        }
+                    }
+                }
+            }
+        }
         Ok(paths)
     }
 
@@ -4215,20 +4534,26 @@ where
         table: &TableSchema,
         schema_version: SchemaVersionId,
         column: &str,
+        order_column: Option<&str>,
+        reverse: bool,
         prefix: &[Value],
         intersections: &[(String, Vec<Value>)],
         maintained: bool,
         source_limit: Option<usize>,
+        candidate_filter: Option<&CurrentIndexCandidateFilter>,
         projection_target: &str,
     ) -> Result<GraphBuilder, Error> {
         self.physical_global_current_source_for_index_scan_with_output(
             table,
             schema_version,
             column,
+            order_column,
+            reverse,
             prefix,
             intersections,
             maintained,
             source_limit,
+            candidate_filter,
             projection_target,
             table.global_current_storage_table().record_schema(),
         )
@@ -4239,10 +4564,13 @@ where
         table: &TableSchema,
         schema_version: SchemaVersionId,
         column: &str,
+        order_column: Option<&str>,
+        reverse: bool,
         prefix: &[Value],
         intersections: &[(String, Vec<Value>)],
         maintained: bool,
         source_limit: Option<usize>,
+        candidate_filter: Option<&CurrentIndexCandidateFilter>,
         projection_target: &str,
         _output: RecordDescriptor,
     ) -> Result<GraphBuilder, Error> {
@@ -4272,6 +4600,14 @@ where
         };
         let scan_prefix = index_prefix(prefix);
         let scan = match source_limit {
+            Some(max_items) if reverse => StaticScanSpec::ReversePrefixLimit {
+                prefix: scan_prefix
+                    .iter()
+                    .cloned()
+                    .map(LiteralValue::from)
+                    .collect(),
+                max_items,
+            },
             Some(max_items) => StaticScanSpec::PrefixLimit {
                 prefix: scan_prefix
                     .iter()
@@ -4310,7 +4646,19 @@ where
                 ))
             })
             .collect::<Result<Vec<_>, Error>>()?;
-        let primary_index = physical_current_index_name(column_id);
+        let primary_index = if let Some(order_column) = order_column {
+            let order_column_id =
+                mapping
+                    .columns
+                    .get(order_column)
+                    .copied()
+                    .ok_or(Error::InvalidStoredValue(
+                        "physical current ordered index column mapping missing",
+                    ))?;
+            physical_current_composite_index_name(&[column_id, order_column_id])
+        } else {
+            physical_current_index_name(column_id)
+        };
         if maintained {
             // `IndexedRowsIntersection` is a hydration request, not a live
             // source.  Model each equality as an index source and express the
@@ -4332,6 +4680,59 @@ where
                 graph = GraphBuilder::semi_join(graph, right, ["row_uuid"], ["row_uuid"]);
             }
             Ok(graph)
+        } else if let Some(filter) = candidate_filter
+            && intersections.is_empty()
+            && source_limit.is_none()
+        {
+            // The candidate scan and this source are separate storage reads,
+            // so this shape is only for a first-result snapshot; a maintained
+            // source took the live branch above.
+            let candidate_mapping = self
+                .catalogue
+                .physical_mappings
+                .get(&schema_version)
+                .and_then(|mapping| mapping.tables.get(&filter.table))
+                .ok_or(Error::InvalidStoredValue(
+                    "candidate index table mapping missing",
+                ))?;
+            let candidate_column = |column: &str| {
+                candidate_mapping
+                    .columns
+                    .get(column)
+                    .copied()
+                    .ok_or(Error::InvalidStoredValue(
+                        "candidate index column mapping missing",
+                    ))
+            };
+            let candidate_column_id = candidate_column(&filter.column)?;
+            let candidate_index = match &filter.order_column {
+                Some(second) => physical_current_composite_index_name(&[
+                    candidate_column_id,
+                    candidate_column(second)?,
+                ]),
+                None => physical_current_index_name(candidate_column_id),
+            };
+            let source_column_id = mapping.columns.get(&filter.source_column).copied().ok_or(
+                Error::InvalidStoredValue("candidate-filtered source column mapping missing"),
+            )?;
+            Ok(GraphBuilder::variant_index_candidate_scan(
+                storage_table,
+                primary_index,
+                scan,
+                groove::ivm::IndexCandidateFilter {
+                    table: physical_global_current_table_name(candidate_mapping.table_id),
+                    index: candidate_index,
+                    scan: StaticScanSpec::Prefix(
+                        index_prefix(&filter.prefix)
+                            .into_iter()
+                            .map(LiteralValue::from)
+                            .collect(),
+                    ),
+                    source_column: physical_user_column_field(source_column_id),
+                    candidate_column: "row_uuid".to_owned(),
+                },
+                projection_target,
+            ))
         } else {
             Ok(GraphBuilder::variant_index_intersection_scan(
                 storage_table,
@@ -5076,6 +5477,56 @@ pub(super) fn maintained_view_history_storage_field_names(table: &TableSchema) -
     fields
 }
 
+/// A first-result equality conjunction can use both columns of an explicitly
+/// declared two-column composite index as one prefix. The ordinary selector
+/// above keeps its single-column probes for live sources and ordered-page
+/// planning. Other indexed equalities stay as intersections, so a query that
+/// previously intersected three or more single indexes is never widened. An
+/// `id` equality keeps the primary-key probe instead.
+///
+/// Private to this file so that, outside it, the compiler rejects any call
+/// that skips `guarded_current_access_path`'s tier and secondary-index
+/// admission. Within this file only the guard (and the unit test) call it.
+fn select_composite_equality_access_path(
+    table: &TableSchema,
+    equalities: &BTreeMap<String, Value>,
+) -> Option<CurrentAccessPath> {
+    if equalities.contains_key("id") {
+        return None;
+    }
+    table.composite_indexes.iter().find_map(|columns| {
+        let [first, second] = columns.as_slice() else {
+            return None;
+        };
+        let first_value = equalities.get(first)?.clone();
+        let second_value = equalities.get(second)?.clone();
+        let intersections = table
+            .global_current_indexed_columns()
+            .into_iter()
+            .filter(|column| column != first && column != second)
+            .filter_map(|column| {
+                equalities.get(&column).cloned().map(|value| {
+                    let prefix = vec![physical_current_index_value(table, &column, value)];
+                    (column, prefix)
+                })
+            })
+            .collect();
+        Some(CurrentAccessPath::Index {
+            column: first.clone(),
+            order_column: Some(second.clone()),
+            reverse: false,
+            prefix: vec![
+                physical_current_index_value(table, first, first_value),
+                physical_current_index_value(table, second, second_value),
+            ],
+            intersections,
+            maintained: false,
+            candidate_filter: None,
+            source_limit: None,
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5091,6 +5542,69 @@ mod tests {
             select_current_access_path(&table, &equalities),
             Some(CurrentAccessPath::PrimaryKey(values)) if values == vec![Value::Uuid(row_id)]
         ));
+    }
+
+    /// Internal planner assertion: which composite prefix is chosen is only
+    /// observable as read work. Both equalities of a declared two-column
+    /// composite become one prefix, other indexed equalities stay
+    /// intersections, an `id` equality keeps the primary-key probe, and a
+    /// longer composite or a missing equality declines.
+    #[test]
+    fn composite_equality_selector_keeps_other_probes_and_declines_otherwise() {
+        let mut table = TableSchema::new(
+            "issues",
+            ["group", "state", "assignee"].map(|name| ColumnSchema::new(name, ColumnType::String)),
+        );
+        table.indexed_columns = BTreeSet::from(["group".to_owned(), "assignee".to_owned()]);
+        table.composite_indexes = BTreeSet::from([
+            vec![
+                "group".to_owned(),
+                "state".to_owned(),
+                "assignee".to_owned(),
+            ],
+            vec!["group".to_owned(), "state".to_owned()],
+        ]);
+        let text = |value: &str| Value::String(value.to_owned());
+        let equalities = BTreeMap::from([
+            ("group".to_owned(), text("wanted")),
+            ("state".to_owned(), text("open")),
+            ("assignee".to_owned(), text("ann")),
+        ]);
+        let Some(CurrentAccessPath::Index {
+            column,
+            order_column,
+            prefix,
+            intersections,
+            source_limit,
+            ..
+        }) = select_composite_equality_access_path(&table, &equalities)
+        else {
+            panic!("the (group, state) composite should be selected");
+        };
+        assert_eq!(column, "group");
+        assert_eq!(order_column.as_deref(), Some("state"));
+        assert_eq!(prefix.len(), 2);
+        assert_eq!(
+            intersections
+                .iter()
+                .map(|(column, _)| column.as_str())
+                .collect::<Vec<_>>(),
+            ["assignee"]
+        );
+        assert_eq!(source_limit, None);
+
+        let mut with_id = equalities.clone();
+        with_id.insert("id".to_owned(), Value::Uuid(uuid::Uuid::from_u128(1)));
+        assert_eq!(
+            select_composite_equality_access_path(&table, &with_id),
+            None
+        );
+        let mut group_only = equalities.clone();
+        group_only.remove("state");
+        assert_eq!(
+            select_composite_equality_access_path(&table, &group_only),
+            None
+        );
     }
 
     /// This is an internal planner assertion because the fallback is only
@@ -5154,4 +5668,82 @@ fn append_author_projection_values(
         values.push(value);
     }
     Ok(())
+}
+
+/// The normalized source occurrence of a query's only root-level `join_via`.
+///
+/// Returns `None` unless normalization recorded exactly one root join
+/// contribution and it reads `join_table`, so a caller never guesses which
+/// occurrence an access path applies to.
+/// Attach a covered-key candidate filter to an admitted junction index path.
+/// Both paths were admitted by `guarded_current_access_path`; this only
+/// decides whether the junction's index entries carry `on_column` and whether
+/// the root path names a plain, uncapped snapshot prefix to compare against.
+/// Any other shape leaves the junction path unchanged.
+fn attach_covered_join_key_filter(
+    join_table: &TableSchema,
+    on_column: &str,
+    root_table: &str,
+    root_path: Option<&CurrentAccessPath>,
+    join_path: &mut CurrentAccessPath,
+) {
+    let Some(CurrentAccessPath::Index {
+        column: root_column,
+        order_column: root_order_column,
+        prefix: root_prefix,
+        maintained: false,
+        source_limit: None,
+        ..
+    }) = root_path
+    else {
+        return;
+    };
+    let CurrentAccessPath::Index {
+        column,
+        order_column,
+        reverse: false,
+        prefix,
+        intersections,
+        candidate_filter,
+        maintained: false,
+        source_limit: None,
+    } = join_path
+    else {
+        return;
+    };
+    if prefix.len() != 1
+        || !intersections.is_empty()
+        || order_column
+            .as_deref()
+            .is_some_and(|second| second != on_column)
+        || !join_table
+            .composite_indexes
+            .iter()
+            .any(|columns| columns.as_slice() == [column.as_str(), on_column])
+    {
+        return;
+    }
+    *order_column = Some(on_column.to_owned());
+    *candidate_filter = Some(CurrentIndexCandidateFilter {
+        table: root_table.to_owned(),
+        column: root_column.clone(),
+        order_column: root_order_column.clone(),
+        prefix: root_prefix.clone(),
+        source_column: on_column.to_owned(),
+    });
+}
+
+fn single_root_join_source<'a>(
+    request: &'a QueryProgramRequest,
+    join_table: &str,
+) -> Option<&'a SourceId> {
+    let mut root_joins = request
+        .input
+        .shape
+        .join_contributions
+        .iter()
+        .filter(|contribution| contribution.parent.is_none());
+    let contribution = root_joins.next()?;
+    (root_joins.next().is_none() && contribution.source.table == join_table)
+        .then_some(&contribution.source)
 }

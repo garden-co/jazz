@@ -94,6 +94,11 @@ use query_result_rows::{
 
 pub(crate) const JAZZ_APP_ROWS_SINK: &str = "app_rows";
 const PENDING_BINDING_SOURCE_SHAPE: &str = "__jazz_pending_binding_source";
+/// Bounded attempts of one ordered page probe before the complete source.
+const ORDERED_PAGE_PROBE_ATTEMPTS: usize = 3;
+/// Largest prefix a retried ordered page probe reads, unless the requested
+/// page alone is larger.
+const ORDERED_PAGE_PROBE_MAX_CAP: usize = 4_096;
 
 #[cfg(test)]
 thread_local! {
@@ -568,6 +573,372 @@ where
         )?;
         self.compile_query_program_request_with_access_paths(request, access_paths)
             .await
+    }
+
+    /// Compile one bounded ordered-page probe at the Global tier.
+    ///
+    /// The probe never selects an index itself. It narrows the root path that
+    /// first-result hydration already admitted through
+    /// `guarded_current_access_path`, and only when that path is exactly the
+    /// single-column equality probe whose column leads the declared
+    /// `(equality_column, order_column)` composite index. Re-addressing that
+    /// prefix through the composite index keeps the same candidate domain and
+    /// only orders it, so the cap can be re-proved after the graph applies
+    /// every filter, deletion check, and policy. Any other admitted shape,
+    /// including no admitted path at all, declines the probe.
+    async fn compile_ordered_page_probe_program(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorSubject,
+        equality_column: &str,
+        cap: usize,
+    ) -> Result<Option<(QueryProgram, bool)>, Error> {
+        let request = self.current_query_program_request(
+            shape,
+            binding,
+            DurabilityTier::Global,
+            identity,
+            CurrentQueryProgramOutput::AppRows,
+            &ReadViewSpec::default(),
+            None,
+            QueryAuthorizationMode::TrustedServing,
+        )?;
+        let root = root_source_id(&shape.query().table);
+        if request.reads.primary.source_current_tier(&root) != Some(DurabilityTier::Global) {
+            return Ok(None);
+        }
+        let mut access_paths = self.current_query_hydration_access_paths(
+            &request,
+            shape,
+            binding,
+            HydrationLifetime::FirstResult,
+        )?;
+        let Some(CurrentAccessPath::Index {
+            column,
+            order_column,
+            reverse,
+            prefix,
+            intersections,
+            source_limit,
+            maintained,
+            // A covered-key filter is only attached to join paths; a root
+            // path carrying one is not a plain ordered-page candidate.
+            candidate_filter: None,
+        }) = access_paths.get_mut(&root)
+        else {
+            return Ok(None);
+        };
+        if column != equality_column
+            || order_column.is_some()
+            || prefix.len() != 1
+            || !intersections.is_empty()
+            || source_limit.is_some()
+        {
+            return Ok(None);
+        }
+        let order = &shape.query().order_by[0];
+        *order_column = Some(order.column.clone());
+        *reverse = order.direction == OrderDirection::Desc;
+        *source_limit = Some(cap);
+        // A first-result owner retires this graph after hydration.
+        *maintained = false;
+        let path = access_paths[&root].clone();
+        // The graph's content source reads exactly these capped composite
+        // index entries, so only their deletion winners can affect the page.
+        // Policy subplans that specialise this occurrence inherit the same
+        // capped path and therefore the same register.
+        let (register, exhausted) = self
+            .bounded_deletion_register_for_ordered_page(shape, &path, cap)
+            .await?;
+        let program = self
+            .compile_query_program_request_with_bounded_deletion_register(
+                request,
+                access_paths,
+                (root, register),
+            )
+            .await?;
+        Ok(Some((program, exhausted)))
+    }
+
+    /// Materialize only the deletion winners whose content rows can enter a
+    /// bounded ordered page probe. The caller holds the node's read lock over
+    /// both this snapshot and execution of the lowered query program.
+    ///
+    /// Also reports whether the physical index prefix is exhausted: it holds
+    /// fewer than `cap` raw entries, so the capped content source saw every
+    /// candidate the prefix can ever produce.
+    async fn bounded_deletion_register_for_ordered_page(
+        &mut self,
+        shape: &ValidatedQuery,
+        path: &CurrentAccessPath,
+        cap: usize,
+    ) -> Result<(GraphBuilder, bool), Error> {
+        let CurrentAccessPath::Index {
+            column,
+            order_column: Some(order_column),
+            reverse,
+            prefix,
+            intersections,
+            ..
+        } = path
+        else {
+            return Err(Error::InvalidStoredValue(
+                "ordered page probe requires a composite index",
+            ));
+        };
+        if !intersections.is_empty() {
+            return Err(Error::InvalidStoredValue(
+                "ordered page probe cannot intersect indexes",
+            ));
+        }
+        let mapping = self
+            .catalogue
+            .physical_mappings
+            .get(&shape.schema_version())
+            .and_then(|mapping| mapping.tables.get(&shape.query().table))
+            .ok_or(Error::InvalidStoredValue(
+                "ordered page probe has no physical table mapping",
+            ))?;
+        let column_id = *mapping
+            .columns
+            .get(column)
+            .ok_or(Error::InvalidStoredValue(
+                "ordered page probe has no equality column mapping",
+            ))?;
+        let order_column_id =
+            *mapping
+                .columns
+                .get(order_column)
+                .ok_or(Error::InvalidStoredValue(
+                    "ordered page probe has no order column mapping",
+                ))?;
+        let content_table = physical_global_current_table_name(mapping.table_id);
+        let index = physical_current_composite_index_name(&[column_id, order_column_id]);
+        let branch = Value::Bytes(BranchKey::default().canonical_bytes());
+        let scan_prefix = std::iter::once(branch.clone())
+            .chain(prefix.iter().cloned())
+            .map(LiteralValue::from)
+            .collect();
+        let scan = if *reverse {
+            StaticScanSpec::ReversePrefixLimit {
+                prefix: scan_prefix,
+                max_items: cap,
+            }
+        } else {
+            StaticScanSpec::PrefixLimit {
+                prefix: scan_prefix,
+                max_items: cap,
+            }
+        };
+        // Both this read and the query graph's content source cap the same
+        // raw composite index entries before projection. With no required
+        // fields this projection omits no more rows than the graph's own
+        // projection target, so every row the graph can admit keeps its
+        // deletion register.
+        let projection = self.ensure_physical_current_projection_for_enum_columns(
+            shape.schema_version(),
+            &shape.query().table,
+            &BTreeSet::new(),
+        )?;
+        let candidates = self
+            .database
+            .query_graph(
+                GraphBuilder::variant_index_scan(
+                    content_table.clone(),
+                    index.clone(),
+                    projection,
+                    scan.clone(),
+                )
+                .project(["row_uuid"]),
+            )
+            .await
+            .map_err(Error::Groove)?;
+        let row_uuids = candidates
+            .iter()
+            .map(|(row, _)| row.get_uuid(0))
+            .collect::<Result<Vec<_>, _>>()?;
+        // The projection may omit a schema-incompatible entry, so a short
+        // projected list does not prove the prefix is short. Only the raw
+        // entry count, which the content source caps identically, does. The
+        // recount runs only when the projected list is already short, and
+        // reads at most `cap` index entries.
+        let exhausted = row_uuids.len() < cap
+            && self
+                .database
+                .query_graph(GraphBuilder::index_scan(
+                    content_table,
+                    index.clone(),
+                    scan.clone(),
+                ))
+                .await
+                .map_err(Error::Groove)?
+                .deltas
+                .len()
+                < cap;
+        // Deletion markers live on the content rows themselves, so the
+        // register reads the same capped composite index entries through the
+        // winner projection, which needs only system fields.
+        let register = self
+            .physical_global_marker_index_graph(
+                shape.schema_version(),
+                &shape.query().table,
+                index,
+                scan,
+            )?
+            .project_fields(register_storage_fields_for_query_engine(""))
+            .filter(PredicateExpr::is_not_null("_deletion"));
+        Ok((register, exhausted))
+    }
+
+    /// Probe an ordered current index a page at a time. The query graph still
+    /// applies all filters, deletion checks, and policy. An extra visible row
+    /// with a sort key strictly worse than the page's last row proves that the
+    /// requested page is final, and so does an exhausted physical prefix. Ties and sparse visibility
+    /// retry with up to two larger bounded prefixes (4x each, at most
+    /// `max(4096, limit + 1)` entries) before falling back to the ordinary
+    /// complete source.
+    async fn try_ordered_page_probe(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorSubject,
+    ) -> Result<Option<Vec<CurrentRow>>, Error> {
+        let query = shape.query();
+        let Some(limit) = query.limit.filter(|limit| *limit > 0) else {
+            return Ok(None);
+        };
+        if query.offset != 0
+            || query.order_by.len() != 1
+            || query.select.is_some()
+            || !query.joins.is_empty()
+            || query.flat_join.is_some()
+            || !query.policy_branches.is_empty()
+            || !query.reachable.is_empty()
+            || !query.inherits.is_empty()
+            || !query.includes.is_empty()
+            || !query.array_subqueries.is_empty()
+            || query.aggregate.is_some()
+            || query.relation.is_some()
+        {
+            return Ok(None);
+        }
+        let order_column = &query.order_by[0].column;
+        let table = self.table_in_schema(&query.table, shape.schema_version())?;
+        // The probe is exact only when the physical index key order equals
+        // the query comparator for the order column. Admit only scalar types
+        // whose order-preserving key encoding and comparator agree; nullable,
+        // floating-point, composite, and physical-only encodings decline.
+        if !table.columns.iter().any(|column| {
+            column.name == *order_column
+                && matches!(
+                    column.column_type,
+                    ColumnType::U8
+                        | ColumnType::U16
+                        | ColumnType::U32
+                        | ColumnType::U64
+                        | ColumnType::I32
+                        | ColumnType::I64
+                        | ColumnType::Bool
+                        | ColumnType::String
+                        | ColumnType::Bytes
+                        | ColumnType::Uuid
+                )
+        }) {
+            return Ok(None);
+        }
+        let paths = self.one_shot_access_paths(shape, binding, DurabilityTier::Global)?;
+        let Some(CurrentAccessPath::Index {
+            column,
+            intersections,
+            ..
+        }) = paths.get(&root_source_id(&query.table))
+        else {
+            return Ok(None);
+        };
+        if !intersections.is_empty()
+            || !table
+                .composite_indexes
+                .contains(&vec![column.clone(), order_column.clone()])
+        {
+            return Ok(None);
+        }
+        // A conjunctive claim equality on another column makes this prefix
+        // sparse by construction. For example, scanning an organization page
+        // in timestamp order cannot efficiently find one user's owner rows.
+        // Alternative policy branches may still admit the ordered prefix.
+        if table.read_policy.as_ref().is_some_and(|policy| {
+            policy.policy_branches.is_empty()
+                && policy.filters.iter().any(|filter| {
+                    let claim_column = match filter {
+                        Predicate::Eq(Operand::Column(column), Operand::Claim(_))
+                        | Predicate::Eq(Operand::Claim(_), Operand::Column(column)) => Some(column),
+                        _ => None,
+                    };
+                    claim_column.is_some_and(|claim_column| claim_column != column)
+                })
+        }) {
+            return Ok(None);
+        }
+        let schema = self
+            .catalogue
+            .catalogue_schemas
+            .get(&shape.schema_version())
+            .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?
+            .schema
+            .clone();
+        let mut cap = limit.saturating_add(1);
+        let max_cap = cap.max(ORDERED_PAGE_PROBE_MAX_CAP);
+        for attempt in 0..ORDERED_PAGE_PROBE_ATTEMPTS {
+            let mut probe_query = query.clone();
+            probe_query.limit = Some(cap);
+            let probe_shape =
+                probe_query.validate_with_schema_version(&schema, shape.schema_version())?;
+            let probe_binding = probe_shape.bind(binding.values().clone())?;
+            let Some((program, exhausted)) = self
+                .compile_ordered_page_probe_program(
+                    &probe_shape,
+                    &probe_binding,
+                    identity,
+                    column,
+                    cap,
+                )
+                .await?
+            else {
+                return Ok(None);
+            };
+            let app_output = materialization_app_row_schema(None, Some(&program))?;
+            let deltas = self
+                .hydrate_lowered_program_once(program, &probe_binding)
+                .await?;
+            let mut rows = self.materialize_and_finalize_query_rows(
+                &probe_query,
+                shape.schema_version(),
+                &table,
+                &app_output,
+                &deltas,
+                None,
+            )?;
+            // The index yields every row tied with the page's last row
+            // before any strictly worse one, so one strictly worse visible
+            // row anywhere in the probe proves the whole tie group was read
+            // and the query's own comparator ordered it. The rows are sorted,
+            // so the last one is the worst.
+            let strictly_worse_row = rows.len() > limit
+                && rows.last().is_some_and(|last| {
+                    query_order_value(&rows[limit - 1], &table, order_column)
+                        != query_order_value(last, &table, order_column)
+                });
+            if strictly_worse_row || exhausted {
+                rows.truncate(limit);
+                return Ok(Some(rows));
+            }
+            if attempt + 1 == ORDERED_PAGE_PROBE_ATTEMPTS || cap >= max_cap {
+                break;
+            }
+            cap = cap.saturating_mul(4).min(max_cap);
+        }
+        Ok(None)
     }
 
     async fn compile_current_query_program_with_access_paths(
@@ -1415,6 +1786,14 @@ where
             let query = shape.query();
             self.finish_engine_query_rows_in_schema(query, shape.schema_version(), &mut rows)?;
             self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
+            return Ok(rows);
+        }
+        if authorization_mode == QueryAuthorizationMode::TrustedServing
+            && tier == DurabilityTier::Global
+            && let Some(rows) = self
+                .try_ordered_page_probe(shape, binding, identity)
+                .await?
+        {
             return Ok(rows);
         }
         let client_settled_binding_view = (authorization_mode

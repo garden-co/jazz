@@ -66,11 +66,12 @@ use jazz::db::LargeValueUpdate as CoreLargeValueUpdate;
 use jazz::db::StreamingMutationKind as CoreStreamingMutationKind;
 use jazz::db::{
     ConnectionSessionContext as CoreConnectionSessionContext, Db as CoreDb,
-    DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity,
+    DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, EmptyOpening as CoreEmptyOpening,
     InitialSyncFlushCadence as CoreInitialSyncFlushCadence, LocalUpdates as CoreLocalUpdates,
     MutationErrorCallback as CoreMutationErrorCallback, PeerConnection as CorePeerConnection,
-    Propagation as CorePropagation, ReadOpts as CoreReadOpts, RowCells as CoreRowCells,
-    SeededRowIdSource as CoreSeededRowIdSource, SerializedReadResult as CoreSerializedReadResult,
+    Propagation as CorePropagation, ReadOpts as CoreReadOpts, RemoteLinkHint as CoreRemoteLinkHint,
+    RowCells as CoreRowCells, SeededRowIdSource as CoreSeededRowIdSource,
+    SerializedReadResult as CoreSerializedReadResult,
     SerializedSubscriptionAuthorization as CoreSerializedSubscriptionAuthorization,
     StreamingValueUpload as CoreStreamingValueUpload,
     StreamingValueUploadCleanupTicket as CoreStreamingValueUploadCleanupTicket,
@@ -793,6 +794,12 @@ impl CoreTickScheduler for NapiTickScheduler {
             Ok(format!("after:{delay_ms}")),
             ThreadsafeFunctionCallMode::NonBlocking,
         );
+    }
+
+    fn drops_pending_ticks(&self) -> bool {
+        // `tick` polls `Db::tick` once through `core_poll_once` and drops it
+        // if it is still pending.
+        true
     }
 
     fn query_runtime_waker(&self) -> Option<Waker> {
@@ -3248,6 +3255,28 @@ impl NapiDb {
         Ok(())
     }
 
+    /// Report what the host knows about the path to the authoritative server
+    /// (`"none" | "attempting" | "live" | "failed"`; the TypeScript names
+    /// `"connecting" | "connected" | "unavailable"` are accepted as aliases).
+    /// Drives only `local-first-unless-empty` reads. The core timestamps each
+    /// `"attempting"` report as the start of a new attempt; until this is
+    /// first called, reachability is derived from this runtime's own upstream.
+    #[napi(js_name = "setRemoteLinkHint")]
+    pub fn set_remote_link_hint(&self, state: String) -> napi::Result<()> {
+        let hint = CoreRemoteLinkHint::from_host_str(&state).ok_or_else(|| {
+            napi::Error::from_reason(format!("unknown remote link state {state}"))
+        })?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => db.set_remote_link_hint(hint),
+            NapiDbInnerStorage::Persistent(db) => db.set_remote_link_hint(hint),
+        }
+        Ok(())
+    }
+
     #[napi(js_name = "connectUpstream")]
     pub fn connect_upstream(&self) -> napi::Result<Transport> {
         let db = self.inner.borrow();
@@ -4013,7 +4042,7 @@ fn core_read_opts_from_json(value: Option<JsonValue>) -> napi::Result<CoreReadOp
         return Ok(opts);
     }
     if let Some(tier) = optional_json_string_prop(&value, "tier")? {
-        opts.tier = core_read_tier_from_str(&tier)?;
+        (opts.tier, opts.empty_opening) = core_read_tier_from_str(&tier)?;
     }
     if let Some(local_updates) = optional_json_string_prop(&value, "local_updates")? {
         opts.local_updates = match local_updates.as_str() {
@@ -4305,16 +4334,18 @@ fn core_durability_tier_from_str(tier: &str) -> napi::Result<CoreDurabilityTier>
 
 /// Read-only binding lowering. Write waits keep the durability-tier parser so
 /// `remote` names cannot accidentally become a write settlement tier.
-fn core_read_tier_from_str(tier: &str) -> napi::Result<CoreDurabilityTier> {
+fn core_read_tier_from_str(tier: &str) -> napi::Result<(CoreDurabilityTier, CoreEmptyOpening)> {
     match tier {
-        "local-first" | "LocalFirst" => Ok(CoreDurabilityTier::Local),
-        // NAPI has no explicit-offline state of its own. The TypeScript
-        // connection manager resolves RemoteIfPossible before the ABI call;
-        // direct NAPI callers therefore retain strict remote behavior.
-        "remote" | "Remote" | "remote-if-possible" | "RemoteIfPossible" => {
-            Ok(CoreDurabilityTier::Global)
+        "local-first" | "LocalFirst" => Ok((CoreDurabilityTier::Local, CoreEmptyOpening::Deliver)),
+        // The core owns the local-first-unless-empty gate.
+        "local-first-unless-empty" | "LocalFirstUnlessEmpty" => {
+            Ok((CoreDurabilityTier::Local, CoreEmptyOpening::AwaitRemote))
         }
-        _ => core_durability_tier_from_str(tier),
+        "remote-if-possible" | "RemoteIfPossible" => Err(napi::Error::from_reason(
+            "the remote-if-possible tier was removed; use local-first-unless-empty, or remote for server-confirmed reads",
+        )),
+        "remote" | "Remote" => Ok((CoreDurabilityTier::Global, CoreEmptyOpening::Deliver)),
+        _ => core_durability_tier_from_str(tier).map(|tier| (tier, CoreEmptyOpening::Deliver)),
     }
 }
 
@@ -5238,12 +5269,31 @@ mod tests {
     fn read_tier_names_lower_to_existing_core_tiers() {
         assert_eq!(
             core_read_tier_from_str("local-first").expect("local-first read tier"),
-            jazz::tx::DurabilityTier::Local
+            (
+                jazz::tx::DurabilityTier::Local,
+                jazz::db::EmptyOpening::Deliver
+            )
         );
         assert_eq!(
-            core_read_tier_from_str("remote-if-possible").expect("strict remote read tier"),
-            jazz::tx::DurabilityTier::Global
+            core_read_tier_from_str("remote").expect("strict remote read tier"),
+            (
+                jazz::tx::DurabilityTier::Global,
+                jazz::db::EmptyOpening::Deliver
+            )
         );
+        for name in ["remote-if-possible", "RemoteIfPossible"] {
+            assert!(core_read_tier_from_str(name).is_err(), "{name} was removed");
+        }
+        for name in ["local-first-unless-empty", "LocalFirstUnlessEmpty"] {
+            assert_eq!(
+                core_read_tier_from_str(name).expect("local-first-unless-empty read tier"),
+                (
+                    jazz::tx::DurabilityTier::Local,
+                    jazz::db::EmptyOpening::AwaitRemote
+                ),
+                "{name} reads local-first with the core empty-opening gate"
+            );
+        }
         assert!(
             super::core_durability_tier_from_str("remote").is_err(),
             "write waits must not accept read-only tier names"

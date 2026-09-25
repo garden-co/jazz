@@ -56,7 +56,11 @@ successor remains an implementation transition, not an invariant condition.
 
 A **full-diff full recompute is sometimes correctness-preserving, not a failure**. For
 example, a permission change can make an old exclusive transaction newly
-visible, and the test expects exactly one `full_diff_recomputes_out`. Large reset
+visible. `MaintainedSubscriptionViewMetrics::full_diff_fallbacks` counts each
+recompute of an already-published view by cause (membership reconciliation,
+query reopen, authorization-support reopen); opening a view is not counted.
+`claim_refresh_counts_one_full_diff_fallback_and_incremental_deltas_count_none`
+pins one query reopen per claim refresh and none for incremental deltas. Large reset
 rehydrates deliberately avoid a duplicate groove hydration and full-diff from
 stored peer state thereafter. There is no `LARGE_REHYDRATE_RESULT_ROWS` constant.
 

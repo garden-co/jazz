@@ -324,6 +324,8 @@ mod descriptor_roles;
 mod eviction;
 mod global_state;
 mod ingest;
+mod node_aliases;
+pub(crate) use node_aliases::NodeAliases;
 pub(crate) mod maintained_subscription_view;
 mod merge_ops;
 mod open_tx;
@@ -528,6 +530,10 @@ pub struct NodeState<S> {
     database: DatabaseSlot,
     local_chunk_reader: groove::chunks::LocalChunkReader,
     chunk_resolver: Rc<dyn groove::chunks::MissingChunkResolver>,
+    /// Shared with the owning `Node`: whether covered receiver installs hand
+    /// a chunk-waiting evaluation to a later turn (#3349). Set for hosts that
+    /// drop a pending tick; hosts that await ticks keep installs complete.
+    detach_covered_chunk_waits: Rc<std::cell::Cell<bool>>,
     large_value_staging_policy: LargeValueStagingPolicy,
     large_value_ingress: RefCell<LargeValueIngressState>,
     /// Groove-owned verified cache retained across internal database rebuilds.
@@ -559,7 +565,7 @@ pub struct NodeState<S> {
     /// Resident transactions whose Groove persistence receipt has not settled.
     pending_persistence: BTreeSet<TxId>,
     /// Mapping from stable node UUIDs to compact on-disk aliases.
-    pub(crate) node_aliases: BTreeMap<NodeUuid, NodeAlias>,
+    pub(crate) node_aliases: NodeAliases,
     /// One completed catalogue scan proved this UUID absent. The sole alias
     /// writer invalidates it before any await; transaction absence is never
     /// memoized. Fixed size bounds memory under arbitrary peer UUID churn.
@@ -1378,6 +1384,39 @@ pub struct CommitUnitIngestContext {
     /// This may only be set by the peer-connection authority path immediately
     /// after that proof; wire messages cannot carry it.
     pub(crate) admitted_write_authorization: bool,
+    /// The connection's checked wire decoder has already validated every
+    /// version receipt in this upload. Set only by a peer connection whose
+    /// transport reports that it admits all inbound messages that way; wire
+    /// messages cannot carry it.
+    pub(crate) version_receipts_validated: bool,
+}
+
+impl CommitUnitIngestContext {
+    /// Same authenticated authority, ignoring how the receipts were checked.
+    ///
+    /// A parked unit resent over a different transport (checked wire vs. an
+    /// in-process semantic link) carries identical versions under the same
+    /// identity and trust, so it must not read as a conflicting unit. When
+    /// both deliveries are merged, "receipts already validated" is kept only
+    /// if both established it, so the unit never skips a validation it owes.
+    pub(crate) fn same_parked_authority(existing: Option<Self>, resent: Option<Self>) -> bool {
+        match (existing, resent) {
+            (Some(existing), Some(resent)) => {
+                Self {
+                    version_receipts_validated: resent.version_receipts_validated,
+                    ..existing
+                } == resent
+            }
+            (existing, resent) => existing == resent,
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Per-version write-policy evaluations, for work-accounting tests.
+    pub(crate) static WRITE_POLICY_VERSION_EVALUATIONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
 }
 
 /// Trust mode for an inbound commit-unit upload.

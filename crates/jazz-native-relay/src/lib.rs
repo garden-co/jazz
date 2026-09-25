@@ -34,7 +34,7 @@ use std::thread;
 
 use futures::lock::Mutex as LocalMutex;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, DeleteOptions, PeerConnection, PeerIoPump, ReadOpts,
+    Db, DbConfig, DbIdentity, DeleteOptions, PeerConnection, PeerIoPump, ReadOpts, RemoteLinkHint,
     SerializedReadResult, SerializedSubscriptionAuthorization, SubscriptionEvent,
     SubscriptionStream, TickScheduler, TickUrgency, Transport, UpdateOptions, UpsertOptions,
     block_on,
@@ -797,6 +797,11 @@ struct OpenedForeground {
     scope: RelayScope,
     relay: u64,
     client: u64,
+    /// Last native-socket reachability reported to this foreground's `Db`.
+    remote_link_hint: Option<RemoteLinkHint>,
+    /// This foreground was reported `Live` since it opened or last went
+    /// explicitly offline; a disconnected worker is then backing off.
+    link_was_live: bool,
     runtime_token: u64,
     wake: Option<Arc<ForegroundWakeState>>,
     lease: ForegroundNodeLease,
@@ -1429,12 +1434,77 @@ impl NativeRelayHost {
                 scope,
                 relay: relay_handle,
                 client: client_handle,
+                remote_link_hint: None,
+                link_was_live: false,
                 runtime_token,
                 wake: None,
                 lease,
             },
         );
         Ok(foreground)
+    }
+
+    /// Report the relay-owned native socket's reachability to the foreground
+    /// `Db`, which drives its `local-first-unless-empty` reads. The foreground's
+    /// own upstream is the local relay core, which is always attached, so it
+    /// cannot tell whether the authoritative server could answer. Only a
+    /// change is reported, so an `Attempting` report timestamps the start of
+    /// the attempt the relay first observed. Foregrounds without a native
+    /// socket session keep the core's derived state.
+    fn sync_foreground_remote_link(&mut self, foreground: u64) {
+        let Some(opened) = self.foregrounds.get(&foreground) else {
+            return;
+        };
+        let Some(relay) = self.relays.get(&opened.relay) else {
+            return;
+        };
+        if !self
+            .private_socket_sessions
+            .contains_key(&relay.admitted_scope)
+        {
+            return;
+        }
+        let scope = opened.scope.clone();
+        let previous = opened.remote_link_hint;
+        let explicitly_offline = self.explicitly_offline_scopes.contains(&scope);
+        if explicitly_offline
+            && opened.link_was_live
+            && let Some(opened) = self.foregrounds.get_mut(&foreground)
+        {
+            // Going back online after an explicit offline period is a fresh
+            // attempt.
+            opened.link_was_live = false;
+        }
+        let Some(opened) = self.foregrounds.get(&foreground) else {
+            return;
+        };
+        // A worker that is not connected after this foreground saw it live
+        // is backing off between retries: nothing waits on that, as on the
+        // TS and native-facade hosts. Only a first connection, or one after
+        // an explicit offline period, is an attempt.
+        let hint = if explicitly_offline {
+            RemoteLinkHint::Failed
+        } else {
+            match self.private_scope_workers.get(&scope) {
+                Some(worker) if worker.connected.load(Ordering::Acquire) => RemoteLinkHint::Live,
+                Some(_) if self.private_scope_terminal_error(&scope).is_some() => {
+                    RemoteLinkHint::Failed
+                }
+                Some(_) if opened.link_was_live => RemoteLinkHint::Failed,
+                Some(_) => RemoteLinkHint::Attempting,
+                None => RemoteLinkHint::Failed,
+            }
+        };
+        if previous == Some(hint) {
+            return;
+        }
+        let reported = self
+            .foreground_client(foreground)
+            .is_ok_and(|client| client.set_foreground_remote_link_hint(hint).is_ok());
+        if reported && let Some(opened) = self.foregrounds.get_mut(&foreground) {
+            opened.remote_link_hint = Some(hint);
+            opened.link_was_live |= hint == RemoteLinkHint::Live;
+        }
     }
 
     fn tick_foreground(&mut self, foreground: u64) -> Result<(), JazzNativeRelayStatus> {
@@ -2719,6 +2789,9 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
     {
         return JazzNativeRelayStatus::InvalidHandle;
     }
+    if !matches!(command, ForegroundDbCommandRequest::Close) {
+        host.sync_foreground_remote_link(foreground);
+    }
     let response = match command {
         ForegroundDbCommandRequest::NativeSessionMetadata => {
             let opened = match host.foregrounds.get(&foreground) {
@@ -3479,6 +3552,14 @@ impl NativeRelayClient {
         })
     }
 
+    fn set_foreground_remote_link_hint(&self, hint: RemoteLinkHint) -> Result<(), RelayError> {
+        let id = self.id;
+        self.relay.run(move |worker| {
+            worker.foreground_client(id)?.db.set_remote_link_hint(hint);
+            Ok(())
+        })
+    }
+
     fn subscribe_foreground_query_with_options(
         &self,
         query: Vec<u8>,
@@ -4084,6 +4165,25 @@ impl BoundedMessageQueue {
     }
 
     fn drain_messages(&mut self) -> Vec<SyncMessage> {
+        self.drain_queued()
+            .into_iter()
+            .map(|queued| queued.message)
+            .collect()
+    }
+
+    /// Return an unsent suffix of a drained batch to the head of the queue.
+    ///
+    /// The batch was admitted under this queue's bounds before it was drained,
+    /// so producers may briefly observe the queue above its bounds by at most
+    /// one drain batch; `push` rejects further admission until it drains.
+    fn restore_front(&mut self, unsent: Vec<QueuedMessage>) {
+        for queued in unsent.into_iter().rev() {
+            self.encoded_bytes = self.encoded_bytes.saturating_add(queued.encoded_len);
+            self.messages.push_front(queued);
+        }
+    }
+
+    fn drain_queued(&mut self) -> Vec<QueuedMessage> {
         let mut drained = Vec::new();
         let mut drained_bytes = 0_usize;
         while drained.len() < NATIVE_RELAY_DRAIN_MAX_MESSAGES {
@@ -4098,7 +4198,7 @@ impl BoundedMessageQueue {
             let queued = self.messages.pop_front().expect("front was present");
             drained_bytes += queued.encoded_len;
             self.encoded_bytes -= queued.encoded_len;
-            drained.push(queued.message);
+            drained.push(queued);
         }
         drained
     }
@@ -4275,26 +4375,62 @@ fn bridge_native_relay_wire_once_classified<T: WireTransport>(
     upstream: &mut jazz::db::WireTransportAdapter<T>,
 ) -> Result<bool, NativeRelayWireBridgeError> {
     let mut progressed = false;
-    for message in relay_wire
-        .take_outbound()
-        .map_err(NativeRelayWireBridgeError::Relay)?
+    let batch = {
+        let _terminal = relay_wire
+            .enter()
+            .map_err(NativeRelayWireBridgeError::Relay)?;
+        relay_wire
+            .outbound
+            .lock()
+            .map_err(|_| {
+                NativeRelayWireBridgeError::Relay(RelayError::Poisoned("upstream outbound queue"))
+            })?
+            .drain_queued()
+    };
+    let mut batch = batch.into_iter();
+    while let Some(QueuedMessage {
+        message,
+        encoded_len,
+    }) = batch.next()
     {
         let _live_connection = relay_wire
             .enter()
             .map_err(NativeRelayWireBridgeError::Relay)?;
-        upstream.send(message).map_err(|error| match error {
+        match upstream.offer(message) {
+            Ok(jazz::db::WireSendOutcome::Accepted) => progressed = true,
+            Ok(jazz::db::WireSendOutcome::Rejected(message)) => {
+                // Backpressure is transient: the adapter did not admit this
+                // message, so it and the rest of the drained batch go back to
+                // the head of the relay queue, in order, for the next turn.
+                let mut unsent = vec![QueuedMessage {
+                    message,
+                    encoded_len,
+                }];
+                unsent.extend(batch);
+                relay_wire
+                    .outbound
+                    .lock()
+                    .map_err(|_| {
+                        NativeRelayWireBridgeError::Relay(RelayError::Poisoned(
+                            "upstream outbound queue",
+                        ))
+                    })?
+                    .restore_front(unsent);
+                break;
+            }
             // `WebSocketTransport` exposes an already-retired peer through
             // this concrete transport state. Its terminal future decides
             // whether the socket worker reconnects; every other send error
             // remains a terminal foreground error.
-            TransportError::Failed(message) if message == "websocket pump is closed" => {
-                NativeRelayWireBridgeError::SocketPumpClosed
+            Err(TransportError::Failed(message)) if message == "websocket pump is closed" => {
+                return Err(NativeRelayWireBridgeError::SocketPumpClosed);
             }
-            error => NativeRelayWireBridgeError::Relay(RelayError::ForegroundCommand(format!(
-                "native upstream send: {error:?}"
-            ))),
-        })?;
-        progressed = true;
+            Err(error) => {
+                return Err(NativeRelayWireBridgeError::Relay(
+                    RelayError::ForegroundCommand(format!("native upstream send: {error:?}")),
+                ));
+            }
+        }
     }
     loop {
         match upstream.try_recv() {
@@ -6554,16 +6690,33 @@ fn foreground_read_opts_from_json(json: &str) -> Result<ReadOpts, RelayError> {
         } else {
             key.as_str()
         };
+        if key == "tier"
+            && matches!(
+                item.as_str(),
+                Some("remote-if-possible" | "RemoteIfPossible")
+            )
+        {
+            return Err(failure("the remote-if-possible tier was removed; use local-first-unless-empty, or remote for server-confirmed reads".to_owned()));
+        }
         if key == "tier" && matches!(item.as_str(), Some("edge" | "Edge")) {
             return Err(failure(
                 "the edge tier was removed; use remote or global for Core confirmation".to_owned(),
             ));
         }
+        if key == "tier"
+            && matches!(
+                item.as_str(),
+                Some("local-first-unless-empty" | "LocalFirstUnlessEmpty")
+            )
+        {
+            // The core owns the local-first-unless-empty gate.
+            value["tier"] = serde_json::Value::String("Local".to_owned());
+            value["empty_opening"] = serde_json::Value::String("AwaitRemote".to_owned());
+            continue;
+        }
         let normalized = match (key, item.as_str()) {
             ("tier", Some("local" | "Local" | "local-first" | "LocalFirst")) => Some("Local"),
-            ("tier", Some("remote" | "Remote" | "remote-if-possible" | "RemoteIfPossible")) => {
-                Some("Global")
-            }
+            ("tier", Some("remote" | "Remote")) => Some("Global"),
             ("tier", Some("global" | "Global" | "core" | "Core")) => Some("Global"),
             ("tier", Some("none" | "None")) => Some("None"),
             ("local_updates", Some("immediate" | "Immediate")) => Some("Immediate"),
@@ -13458,6 +13611,102 @@ mod tests {
             peer.try_recv_strict().unwrap(),
             None,
             "credits are not semantic messages"
+        );
+    }
+
+    // Internal bridge seam: a slow native socket is only observable here as
+    // `TransportError::Backpressure` from the adapter, and the public ClientDb
+    // path cannot deterministically stall the platform WebSocket pump.
+    #[test]
+    fn native_upstream_bridge_retains_drained_messages_under_backpressure() {
+        struct GatedWire {
+            open: Arc<AtomicBool>,
+            inbound: Arc<Mutex<VecDeque<Vec<u8>>>>,
+            outbound: Arc<Mutex<VecDeque<Vec<u8>>>>,
+        }
+        impl WireTransport for GatedWire {
+            fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
+                if !self.open.load(Ordering::Acquire) {
+                    return Err(TransportError::Backpressure);
+                }
+                self.outbound.lock().unwrap().push_back(frame);
+                Ok(())
+            }
+            fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+                self.inbound.lock().unwrap().pop_front()
+            }
+        }
+        struct DuplexWire {
+            inbound: Arc<Mutex<VecDeque<Vec<u8>>>>,
+            outbound: Arc<Mutex<VecDeque<Vec<u8>>>>,
+        }
+        impl WireTransport for DuplexWire {
+            fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
+                self.outbound.lock().unwrap().push_back(frame);
+                Ok(())
+            }
+            fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+                self.inbound.lock().unwrap().pop_front()
+            }
+        }
+        let message = |index: usize| SyncMessage::SessionClaims {
+            identity: AuthorSubject::for_test_bytes([0x70; 16]),
+            claims: BTreeMap::from([("n".to_owned(), Value::String(index.to_string()))]),
+        };
+
+        let open = Arc::new(AtomicBool::new(false));
+        let to_relay = Arc::new(Mutex::new(VecDeque::new()));
+        let to_peer = Arc::new(Mutex::new(VecDeque::new()));
+        let mut upstream = WireTransportAdapter::current(GatedWire {
+            open: Arc::clone(&open),
+            inbound: Arc::clone(&to_relay),
+            outbound: Arc::clone(&to_peer),
+        });
+        let mut peer = WireTransportAdapter::current(DuplexWire {
+            inbound: to_peer,
+            outbound: to_relay,
+        });
+        let relay_wire = NativeRelayWire::default();
+
+        // With the socket stalled, the adapter admits one ordered channel's
+        // bounded backlog and then reports Backpressure. Keep producing past
+        // that bound so a relay drain batch straddles the rejection.
+        let total = 2 * NATIVE_RELAY_QUEUE_MAX_MESSAGES;
+        let mut produced = 0;
+        let mut received = Vec::new();
+        let mut rounds = 0;
+        while received.len() < total {
+            while produced < total
+                && relay_wire
+                    .outbound
+                    .lock()
+                    .unwrap()
+                    .push(message(produced), "test relay outbound")
+                    .is_ok()
+            {
+                produced += 1;
+            }
+            bridge_native_relay_wire_once(&relay_wire, &mut upstream)
+                .expect("backpressure is a transient transport state");
+            rounds += 1;
+            if rounds == 64 {
+                // The stalled socket drains; the bridge must resume in order.
+                open.store(true, Ordering::Release);
+            }
+            if open.load(Ordering::Acquire) {
+                upstream.poll_flush().unwrap();
+            }
+            // Receiving also returns channel credit grants to `upstream`.
+            while let Some(message) = peer.try_recv_strict().unwrap() {
+                received.push(message);
+            }
+            assert!(rounds < 100_000, "bridge made no progress");
+        }
+        assert_eq!(relay_wire.queue_depths().unwrap().1, 0);
+        assert_eq!(
+            received,
+            (0..total).map(message).collect::<Vec<_>>(),
+            "every drained message is delivered exactly once, in order"
         );
     }
 

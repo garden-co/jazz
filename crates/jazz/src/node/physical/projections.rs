@@ -80,7 +80,7 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "physical current source schema alias missing",
             ))?;
-        let binding = physical_current_binding(
+        let storage_table = physical_current_source_table(
             &self.catalogue.catalogue_schemas,
             &self.catalogue.physical_mappings,
             schema_version,
@@ -88,7 +88,7 @@ where
             class,
         )?;
         Ok(GraphBuilder::variant_source_scan(
-            binding.storage_table,
+            storage_table,
             physical_current_projection_target(alias, logical_table),
             shared_branch_scan(None),
         ))
@@ -124,7 +124,7 @@ where
                 ))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let binding = physical_current_binding(
+        let storage_table = physical_current_source_table(
             &self.catalogue.catalogue_schemas,
             &self.catalogue.physical_mappings,
             schema_version,
@@ -132,9 +132,46 @@ where
             class,
         )?;
         Ok(GraphBuilder::variant_source_scan(
-            binding.storage_table,
+            storage_table,
             physical_current_winner_projection_target(mapping.table_id, &physical_fields),
             branch_scan(branch_key, None),
+        ))
+    }
+
+    /// Read the global winners that a capped composite index scan names,
+    /// through the same system-field winner projection as
+    /// `physical_current_marker_source_graph`.
+    pub(crate) fn physical_global_marker_index_graph(
+        &self,
+        schema_version: SchemaVersionId,
+        logical_table: &str,
+        index: String,
+        scan: groove::ivm::StaticScanSpec,
+    ) -> Result<GraphBuilder, Error> {
+        let mapping = self
+            .catalogue
+            .physical_mappings
+            .get(&schema_version)
+            .and_then(|mapping| mapping.tables.get(logical_table))
+            .cloned()
+            .ok_or(Error::InvalidStoredValue(
+                "physical current marker mapping missing",
+            ))?;
+        let table = self.table_in_schema_ref(logical_table, schema_version)?;
+        let physical_fields = physical_current_descriptor(table, &mapping)?
+            .fields()
+            .iter()
+            .map(|field| {
+                field.name.clone().ok_or(Error::InvalidStoredValue(
+                    "physical current winner field unnamed",
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(GraphBuilder::variant_index_scan(
+            physical_global_current_table_name(mapping.table_id),
+            index,
+            physical_current_winner_projection_target(mapping.table_id, &physical_fields),
+            scan,
         ))
     }
 
@@ -145,7 +182,7 @@ where
         class: PhysicalCurrentClass,
         projection_target: impl Into<String>,
     ) -> Result<GraphBuilder, Error> {
-        let binding = physical_current_binding(
+        let storage_table = physical_current_source_table(
             &self.catalogue.catalogue_schemas,
             &self.catalogue.physical_mappings,
             schema_version,
@@ -153,7 +190,7 @@ where
             class,
         )?;
         Ok(GraphBuilder::variant_source_scan(
-            binding.storage_table,
+            storage_table,
             projection_target,
             shared_branch_scan(None),
         ))
@@ -167,7 +204,7 @@ where
         projection_target: impl Into<String>,
         branch_key: &BranchKey,
     ) -> Result<GraphBuilder, Error> {
-        let binding = physical_current_binding(
+        let storage_table = physical_current_source_table(
             &self.catalogue.catalogue_schemas,
             &self.catalogue.physical_mappings,
             schema_version,
@@ -175,7 +212,7 @@ where
             class,
         )?;
         Ok(GraphBuilder::variant_source_scan(
-            binding.storage_table,
+            storage_table,
             projection_target,
             branch_scan(branch_key, None),
         ))
@@ -196,7 +233,7 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "physical current source schema alias missing",
             ))?;
-        let binding = physical_current_binding(
+        let storage_table = physical_current_source_table(
             &self.catalogue.catalogue_schemas,
             &self.catalogue.physical_mappings,
             schema_version,
@@ -204,7 +241,7 @@ where
             class,
         )?;
         Ok(GraphBuilder::variant_source_scan(
-            binding.storage_table,
+            storage_table,
             physical_current_projection_target(alias, logical_table),
             shared_branch_scan(Some(scan)),
         ))
@@ -218,7 +255,7 @@ where
         projection_target: impl Into<String>,
         scan: groove::ivm::StaticScanSpec,
     ) -> Result<GraphBuilder, Error> {
-        let binding = physical_current_binding(
+        let storage_table = physical_current_source_table(
             &self.catalogue.catalogue_schemas,
             &self.catalogue.physical_mappings,
             schema_version,
@@ -226,7 +263,7 @@ where
             class,
         )?;
         Ok(GraphBuilder::variant_source_scan(
-            binding.storage_table,
+            storage_table,
             projection_target,
             shared_branch_scan(Some(scan)),
         ))
@@ -276,7 +313,7 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "physical history source schema alias missing",
             ))?;
-        let binding = physical_history_binding(
+        let storage_table = physical_history_source_table(
             &self.catalogue.catalogue_schemas,
             &self.catalogue.schema_version_aliases,
             &self.catalogue.physical_mappings,
@@ -284,7 +321,7 @@ where
             logical_table,
         )?;
         Ok(GraphBuilder::variant_source(
-            binding.storage_table,
+            storage_table,
             physical_history_projection_target(alias, logical_table),
         ))
     }
@@ -1481,6 +1518,12 @@ fn branch_scan(
         Some(StaticScanSpec::Prefix(values)) => StaticScanSpec::Prefix(prepend(values)),
         Some(StaticScanSpec::PrefixLimit { prefix, max_items }) => {
             StaticScanSpec::PrefixLimit {
+                prefix: prepend(prefix),
+                max_items,
+            }
+        }
+        Some(StaticScanSpec::ReversePrefixLimit { prefix, max_items }) => {
+            StaticScanSpec::ReversePrefixLimit {
                 prefix: prepend(prefix),
                 max_items,
             }

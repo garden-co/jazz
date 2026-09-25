@@ -2850,7 +2850,7 @@ fn local_pending_inputs_reorder_locally_but_do_not_leak_into_strict_remote() {
         ReadOpts {
             tier: DurabilityTier::Global,
             // Public `remote` lowers to Deferred. Immediate deliberately
-            // includes local pending writes (the remote-if-possible overlay).
+            // includes local pending writes (the pending overlay).
             local_updates: jazz::db::LocalUpdates::Deferred,
             ..ReadOpts::default()
         },

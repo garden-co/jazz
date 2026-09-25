@@ -10,6 +10,7 @@ use groove::records::{
     BorrowedRecord, EnumValue, OwnedRecord, RecordDescriptor, RecordProjector, Value, ValueType,
 };
 
+use super::NodeAliases;
 use super::codec::{
     VersionRow, VersionRowParts, authored_column_ids_from_value, deletion_event_from_value,
     history_values_from_parts, nullable_value, runtime_result_identity_bytes,
@@ -22,7 +23,7 @@ use super::query_engine::{
     VersionedRowRefSchema,
 };
 use crate::db::{TerminalRootCarrier, TerminalRootLayout, TerminalRootPublicField};
-use crate::ids::{NodeAlias, NodeUuid, RowAuthor, RowUuid, SchemaVersionAlias};
+use crate::ids::{NodeAlias, RowAuthor, RowUuid, SchemaVersionAlias};
 use crate::node::{CurrentRowPublicationField, CurrentRowResultVisibility};
 #[cfg(test)]
 use crate::protocol::CoveredInputEntry;
@@ -100,6 +101,9 @@ pub(crate) struct MaintainedSubscriptionView {
     /// sequence key: one flat relation can validly contain more than one
     /// occurrence of the same root.
     structured_root_key_order: Vec<Vec<u8>>,
+    /// Counts key comparisons made while scanning `structured_root_key_order`
+    /// for membership. Any such scan on an insert path must bump it, so tests
+    /// can pin that opening N fresh rows stays linear.
     #[cfg(test)]
     root_order_insert_comparisons: usize,
     structured_app_row_descriptor: Option<RecordDescriptor>,
@@ -352,7 +356,7 @@ impl VersionPayload {
     fn prepare(
         row: VersionRow,
         identity: &VersionIdentity,
-        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+        node_aliases: &NodeAliases,
     ) -> Result<Arc<Self>, super::Error> {
         let tx_id = version_tx_id_from_aliases(&row, node_aliases).ok_or(
             super::Error::InvalidStoredValue("history tx node alias must exist"),
@@ -580,7 +584,7 @@ impl MaintainedSubscriptionView {
         &self,
         source: ProgramSourceId,
         row: &VersionRow,
-        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+        node_aliases: &NodeAliases,
     ) -> Result<SupportingRow, super::Error> {
         let physical_table =
             *self
@@ -644,7 +648,7 @@ impl MaintainedSubscriptionView {
         deltas: &RecordDeltas,
         schemas: &MaintainedTerminalSchemas,
         tables: &TableSchemas,
-        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+        node_aliases: &NodeAliases,
     ) -> Result<ResultTransitions, super::Error> {
         let kind = schemas.get(sink)?;
         let observed_result_delta_batch = !deltas.is_empty() && kind.is_result_terminal();
@@ -687,7 +691,7 @@ impl MaintainedSubscriptionView {
         deltas: MultisinkDeltas,
         schemas: &MaintainedTerminalSchemas,
         tables: &TableSchemas,
-        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+        node_aliases: &NodeAliases,
     ) -> Result<ResultTransitions, super::Error> {
         let mut transitions = ResultTransitions::default();
         // A single IVM drain may touch the same source fact through more than
@@ -842,7 +846,7 @@ impl MaintainedSubscriptionView {
     fn finalize_multisink_transitions(
         &mut self,
         transitions: &mut ResultTransitions,
-        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+        node_aliases: &NodeAliases,
     ) {
         // A multisink delta need not contain every terminal that participates
         // in one maintained result. In particular, a current-membership row
@@ -873,7 +877,7 @@ impl MaintainedSubscriptionView {
     fn apply_decoded_deltas(
         &mut self,
         rows: impl IntoIterator<Item = (DecodedMaintainedEvent, i64)>,
-        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+        node_aliases: &NodeAliases,
     ) -> Result<ResultTransitions, super::Error> {
         self.apply_decoded_delta_results(rows.into_iter().map(Ok), node_aliases)
     }
@@ -881,7 +885,7 @@ impl MaintainedSubscriptionView {
     fn apply_decoded_delta_results(
         &mut self,
         rows: impl IntoIterator<Item = Result<(DecodedMaintainedEvent, i64), super::Error>>,
-        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+        node_aliases: &NodeAliases,
     ) -> Result<ResultTransitions, super::Error> {
         // Decode into the net-change accumulator directly. No retained state
         // changes until the complete input has decoded successfully.
@@ -1027,11 +1031,24 @@ impl MaintainedSubscriptionView {
                         // Root-collector rows never reach this branch; they
                         // retain the exact opaque terminal key above.
                         let terminal_key = root.0.as_bytes().to_vec();
-                        self.structured_root_keys.insert(terminal_key.clone(), root);
+                        // Direct-row keys enter `structured_root_keys` and the
+                        // order together and are only removed together, so a
+                        // fresh key map entry is exactly a key not yet
+                        // ordered. Scanning the order instead made opening N
+                        // rows quadratic.
+                        let first_occurrence = self
+                            .structured_root_keys
+                            .insert(terminal_key.clone(), root)
+                            .is_none();
                         self.apply_structured_app_row_delta(terminal_key.clone(), record, weight);
-                        if !self.structured_root_key_order.contains(&terminal_key) {
+                        if first_occurrence {
                             self.structured_root_key_order.push(terminal_key);
                         }
+                        debug_assert_eq!(
+                            self.structured_root_keys.len(),
+                            self.structured_root_key_order.len(),
+                            "direct app-row key map and order must hold the same keys"
+                        );
                     }
                 }
             }
@@ -1538,7 +1555,7 @@ impl MaintainedSubscriptionView {
 
     fn reconcile_publishable_result_members(
         &mut self,
-        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+        node_aliases: &NodeAliases,
     ) -> (
         Vec<ResultMemberEntry>,
         Vec<ResultMemberEntry>,
@@ -1629,7 +1646,7 @@ impl MaintainedSubscriptionView {
     fn result_member_has_bundle_witness(
         &self,
         member: &ResultMemberEntry,
-        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+        node_aliases: &NodeAliases,
     ) -> bool {
         let Some((table, row_uuid, tx_id)) = member.as_row() else {
             // Synthetic aggregate output is self-contained in its payload
@@ -1791,7 +1808,7 @@ impl MaintainedSubscriptionView {
 fn covered_input_for_version(
     source: ProgramSourceId,
     row: &VersionRow,
-    node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    node_aliases: &NodeAliases,
 ) -> Result<CoveredInputEntry, super::Error> {
     let tx = version_tx_id_from_aliases(row, node_aliases).ok_or(
         super::Error::InvalidStoredValue("covered input tx node alias must exist"),
@@ -2379,7 +2396,7 @@ fn decode_typed_terminal_record(
     record: BorrowedRecord<'_>,
     kind: &MaintainedTerminalKind,
     tables: &TableSchemas,
-    node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    node_aliases: &NodeAliases,
     decode_plan_cache: &mut VersionDecodePlanCache,
     payload_plans: &mut std::collections::HashMap<
         RecordDescriptor,
@@ -2472,12 +2489,9 @@ fn decode_typed_terminal_record(
             };
             let tx_time = TxTime(record_u64(record, tx_time_field)?);
             let tx_node_alias = NodeAlias(record_u64(record, tx_node_field)?);
-            let tx_node = node_aliases
-                .iter()
-                .find_map(|(node, alias)| (*alias == tx_node_alias).then_some(*node))
-                .ok_or(super::Error::InvalidStoredValue(
-                    "result tx node alias must exist",
-                ))?;
+            let tx_node = node_aliases.node_for_alias(tx_node_alias).ok_or(
+                super::Error::InvalidStoredValue("result tx node alias must exist"),
+            )?;
             let settle_position = schema
                 .settle_position_field
                 .as_ref()
@@ -2891,7 +2905,7 @@ fn decode_typed_relation_edge(
     record: BorrowedRecord<'_>,
     schema: &RelationEdgeSchema,
     tables: &TableSchemas,
-    node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    node_aliases: &NodeAliases,
 ) -> Result<RelationEdgeEntry, super::Error> {
     let source_table = table_name_from_versioned_ref(record, &schema.source, tables)?;
     let target_table = table_name_from_versioned_ref(record, &schema.target, tables)?;
@@ -2945,19 +2959,19 @@ fn table_name_from_versioned_ref(
 fn decode_relation_edge_version(
     record: BorrowedRecord<'_>,
     schema: &VersionedRowRefSchema,
-    node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    node_aliases: &NodeAliases,
 ) -> Result<Option<RowVersionRefEntry>, super::Error> {
     let Some(ResultMembershipVersionSchema::Content(version)) = &schema.version else {
         return Ok(None);
     };
     let tx_time = TxTime(record_u64(record, &version.tx_time_field)?);
     let tx_node_alias = NodeAlias(record_u64(record, &version.tx_node_field)?);
-    let tx_node = node_aliases
-        .iter()
-        .find_map(|(node, alias)| (*alias == tx_node_alias).then_some(*node))
-        .ok_or(super::Error::InvalidStoredValue(
-            "relation edge tx node alias must exist",
-        ))?;
+    let tx_node =
+        node_aliases
+            .node_for_alias(tx_node_alias)
+            .ok_or(super::Error::InvalidStoredValue(
+                "relation edge tx node alias must exist",
+            ))?;
     let branch_or_prefix = schema
         .branch_or_prefix_field
         .as_deref()
@@ -3673,8 +3687,8 @@ mod tests {
         TxId::new(TxTime(time), node(byte))
     }
 
-    fn aliases() -> BTreeMap<NodeUuid, NodeAlias> {
-        BTreeMap::from([(node(1), NodeAlias(10)), (node(2), NodeAlias(20))])
+    fn aliases() -> NodeAliases {
+        NodeAliases::from_iter([(node(1), NodeAlias(10)), (node(2), NodeAlias(20))])
     }
 
     // Internal receipt: `row_digest` is a canonical runtime result identity, so
@@ -4061,6 +4075,55 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    // Internal mechanism test, like the collector one above: the public
+    // result cannot reveal a scan of the order for each direct app row.
+    #[test]
+    fn fresh_direct_app_rows_skip_order_scans_and_keep_first_occurrence_order() {
+        let descriptor = RecordDescriptor::new([("row_uuid", ValueType::Uuid)]);
+        let root = |i: u16| {
+            let mut bytes = [0_u8; 16];
+            bytes[..2].copy_from_slice(&i.to_be_bytes());
+            RowUuid::from_bytes(bytes)
+        };
+        let event = |i: u16, weight| {
+            (
+                DecodedMaintainedEvent::StructuredAppRow {
+                    root: root(i),
+                    record: OwnedRecord::new(
+                        descriptor.create(&[Value::Uuid(root(i).0)]).unwrap(),
+                        descriptor,
+                    ),
+                },
+                weight,
+            )
+        };
+        let mut maintained = test_maintained();
+        for i in 0..2000 {
+            maintained
+                .apply_decoded_deltas([event(i, 1)], &aliases())
+                .unwrap();
+        }
+        assert_eq!(maintained.root_order_insert_comparisons, 0);
+        assert_eq!(maintained.structured_root_key_order.len(), 2000);
+
+        // A root that leaves and returns keeps its first-occurrence slot and
+        // is never ordered twice.
+        maintained
+            .apply_decoded_deltas([event(7, -1)], &aliases())
+            .unwrap();
+        maintained
+            .apply_decoded_deltas([event(7, 1)], &aliases())
+            .unwrap();
+        assert_eq!(maintained.root_order_insert_comparisons, 0);
+        assert_eq!(maintained.structured_root_key_order.len(), 2000);
+        let roots: Vec<RowUuid> = maintained
+            .structured_app_rows()
+            .into_iter()
+            .map(|(root, _)| root)
+            .collect();
+        assert_eq!(roots, (0..2000).map(root).collect::<Vec<_>>());
     }
 
     #[test]
@@ -4863,7 +4926,8 @@ mod tests {
     #[test]
     fn selected_deletion_witness_replacement_releases_facts_and_versions() {
         let version = deletion(RowUuid(uuid::Uuid::from_u128(7)), 42);
-        let aliases = BTreeMap::from([(NodeUuid(uuid::Uuid::from_u128(10)), NodeAlias(10))]);
+        let aliases =
+            NodeAliases::from_iter([(NodeUuid(uuid::Uuid::from_u128(10)), NodeAlias(10))]);
         let input = covered_input_for_version(test_source(), &version, &aliases).unwrap();
         let tx = input.version.tx;
         let fact = physical_input(input);

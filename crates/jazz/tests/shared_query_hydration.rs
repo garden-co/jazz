@@ -385,3 +385,131 @@ fn first_result_policy_id_read_keeps_bounded_storage_work() {
     );
     block_on(db.close()).unwrap();
 }
+
+/// The public results and retained deltas are the behavioral oracle. The
+/// test-only storage counter is needed to distinguish a key intersection from
+/// fetching every row in both equality buckets before the graph joins them.
+#[test]
+fn first_result_intersects_index_keys_before_loading_rows() {
+    let schema = JazzSchema::new(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("documents")
+                    .column("owner", ColumnType::Uuid)
+                    .column("bucket", ColumnType::Text)
+                    .index_only(["owner", "bucket"])
+                    .policies(TablePolicies::new().with_select(PolicyExpr::True)),
+            )
+            .build(),
+    )
+    .unwrap();
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let db = block_on(Db::open_history_complete(
+        DbConfig::new(
+            schema,
+            TestStorage::new(&refs),
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x72; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        )
+        .with_id_source(SeededRowIdSource::new(72)),
+    ))
+    .unwrap();
+    let tx = block_on(db.mergeable_tx()).unwrap();
+    for n in 10..90 {
+        block_on(tx.insert(
+            "documents",
+            cells(jazz::row_input!(
+                "owner" => jazz::tools::ObjectId::from_uuid(user(2).test_uuid()),
+                "bucket" => "other"
+            )),
+            InsertOptions {
+                row_id: Some(row(n)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    }
+    for n in 90..170 {
+        block_on(tx.insert(
+            "documents",
+            cells(jazz::row_input!(
+                "owner" => jazz::tools::ObjectId::from_uuid(user(3).test_uuid()),
+                "bucket" => "wanted"
+            )),
+            InsertOptions {
+                row_id: Some(row(n)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    }
+    block_on(tx.insert(
+        "documents",
+        cells(jazz::row_input!(
+            "owner" => jazz::tools::ObjectId::from_uuid(user(2).test_uuid()),
+            "bucket" => "wanted"
+        )),
+        InsertOptions {
+            row_id: Some(row(200)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    let committed = block_on(tx.commit()).unwrap();
+    db.finalize_local_mergeable_commit_for_test(committed)
+        .unwrap();
+    let query = db
+        .prepare_query(
+            &Query::from("documents")
+                .filter(eq(
+                    col("owner"),
+                    jazz::query::lit(Value::Uuid(user(2).test_uuid())),
+                ))
+                .filter(eq(col("bucket"), jazz::query::lit("wanted"))),
+        )
+        .unwrap();
+    db.reset_storage_read_metrics_for_test();
+    let rows = block_on(db.all_for_identity(
+        &query,
+        ReadOpts {
+            tier: jazz::tx::DurabilityTier::Global,
+            ..opts()
+        },
+        user(2),
+    ))
+    .unwrap();
+    assert_eq!(
+        rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        vec![row(200)]
+    );
+    let metrics = db.take_storage_read_metrics_for_test();
+    assert!(metrics.global_current_indexes.reads >= 160, "{metrics:?}");
+    assert!(metrics.global_current_rows.reads <= 3, "{metrics:?}");
+
+    let mut stream = block_on(db.subscribe_for_identity(&query, opts(), user(2))).unwrap();
+    let mut state = BTreeSet::new();
+    assert_state(&db, &query, 2, &mut stream, &mut state, &[200]);
+    block_on(db.update(
+        "documents",
+        row(10),
+        cells(jazz::row_input!("bucket" => "wanted")),
+        Default::default(),
+    ))
+    .unwrap();
+    assert_state(&db, &query, 2, &mut stream, &mut state, &[10, 200]);
+    block_on(db.update(
+        "documents",
+        row(200),
+        cells(jazz::row_input!(
+            "owner" => jazz::tools::ObjectId::from_uuid(user(3).test_uuid())
+        )),
+        Default::default(),
+    ))
+    .unwrap();
+    assert_state(&db, &query, 2, &mut stream, &mut state, &[10]);
+    block_on(stream.close()).unwrap();
+    block_on(db.close()).unwrap();
+}

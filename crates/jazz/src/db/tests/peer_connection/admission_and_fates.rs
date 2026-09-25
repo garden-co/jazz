@@ -2193,6 +2193,88 @@ fn direct_whole_table_claim_refresh_reopens_under_new_binding() {
     );
 }
 
+/// Full-diff fallback counters (#3292). The serving link's counter is the
+/// same one the server shell reports as `subscription_full_diff_fallbacks`;
+/// it is read from the link because no client API exposes a server's
+/// recompute strategy.
+///
+/// alice opens todos ─► initial reset          (not a fallback)
+/// server inserts a row ─► incremental delta  (not a fallback)
+/// alice's claims change ─► retire + reopen    (one query reopen)
+#[test]
+fn claim_refresh_counts_one_full_diff_fallback_and_incremental_deltas_count_none() {
+    let schema = owner_read_schema();
+    let session_subject = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let allowed_owner = AuthorSubject::for_test_bytes([0xb1; 16]);
+    let denied_owner = AuthorSubject::for_test_bytes([0xb2; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let first = server
+        .insert("todos", cells("first", false, allowed_owner))
+        .unwrap()
+        .row_uuid();
+    let client = open_db(0xa1, session_subject, &schema);
+    let allowed_claims = test_provider_claims(allowed_owner);
+    let denied_claims = test_provider_claims(denied_owner);
+    client.set_test_provider_claims(session_subject, allowed_claims.clone());
+    let (client_transport, server_transport) = duplex();
+    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let subscriber =
+        server.accept_subscriber_with_claims(server_transport, session_subject, allowed_claims);
+    let query = Query::from("todos");
+    let tick_all = || {
+        for _ in 0..32 {
+            client.tick().unwrap();
+            server.tick().unwrap();
+            subscriber.borrow_mut().tick().unwrap();
+            upstream.borrow_mut().tick().unwrap();
+        }
+    };
+    let prepared = prepared(&client, &query);
+    let attachment = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .unwrap();
+    tick_all();
+    assert!(client.query_attachment_is_covered(&attachment));
+    assert_eq!(
+        row_ids(&prepared_all(&client, &query, global_subscribe_opts())),
+        vec![first]
+    );
+    assert_eq!(
+        subscriber.borrow().full_diff_fallbacks(),
+        Default::default(),
+        "opening a maintained view is ordinary hydration"
+    );
+
+    let second = server
+        .insert("todos", cells("second", false, allowed_owner))
+        .unwrap()
+        .row_uuid();
+    tick_all();
+    let mut expected = vec![first, second];
+    expected.sort();
+    let mut visible = row_ids(&prepared_all(&client, &query, global_subscribe_opts()));
+    visible.sort();
+    assert_eq!(visible, expected);
+    assert_eq!(
+        subscriber.borrow().full_diff_fallbacks(),
+        Default::default(),
+        "an incremental delta is not a fallback"
+    );
+
+    client.set_test_provider_claims(session_subject, denied_claims.clone());
+    subscriber
+        .borrow_mut()
+        .update_authenticated_session_claims(denied_claims);
+    tick_all();
+    assert!(
+        prepared_all(&client, &query, global_subscribe_opts()).is_empty(),
+        "the refreshed subscription must lose the old claims' rows"
+    );
+    let fallbacks = subscriber.borrow().full_diff_fallbacks();
+    assert_eq!(fallbacks.query_reopens, 1, "{fallbacks:?}");
+    assert_eq!(fallbacks.total(), 1, "{fallbacks:?}");
+}
+
 /// The maintained-group cursor consumes each accepted replacement reset once.
 /// The public admission contract normally gives one connection one exact
 /// `SubscriptionKey` per coverage group; this white-box pair exercises the
@@ -3555,6 +3637,213 @@ fn permission_advice_update_evaluates_post_patch_update_check() {
     server.tick().unwrap();
     client.tick().unwrap();
     assert_eq!(block_on(missing), PermissionAdvice::Denied);
+}
+
+/// The row lookup must find an existing, readable row: only an `Allowed`
+/// answer distinguishes a correct lookup from one that reports every row as
+/// missing, since both a violating patch and a missing row are `Denied`.
+#[test]
+fn permission_advice_update_allows_a_valid_patch_to_an_existing_row() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(PublicPolicyExpr::True)
+                        .with_update(None, public_literal_eq("done", PublicValue::Boolean(false))),
+                ),
+        ),
+    );
+    let author = AuthorSubject::for_test_bytes([0xa4; 16]);
+    let server = open_core(0x61, AuthorSubject::SYSTEM, &schema);
+    for title in ["other-1", "other-2"] {
+        server.insert("todos", cells(title, false, author)).unwrap();
+    }
+    let target = server
+        .insert("todos", cells("target", false, author))
+        .unwrap()
+        .row_uuid();
+    let client = open_db(0xa4, author, &schema);
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xa4; 16]),
+        1,
+        NodeUuid::from_bytes([0x61; 16]),
+        1,
+    );
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, author);
+    let mut ask = |row, patch| {
+        let advice = client.request_permission_advice(PermissionAdviceAction::Update {
+            table: "todos".to_owned(),
+            row,
+            patch,
+        });
+        client.tick().unwrap();
+        server.tick().unwrap();
+        client.tick().unwrap();
+        block_on(advice)
+    };
+    let rename = || BTreeMap::from([("title".to_owned(), Value::String("renamed".to_owned()))]);
+
+    assert_eq!(ask(target, rename()), PermissionAdvice::Allowed);
+    assert_eq!(
+        ask(
+            target,
+            BTreeMap::from([("done".to_owned(), Value::Bool(true))])
+        ),
+        PermissionAdvice::Denied
+    );
+    assert_eq!(ask(row(0xef), rename()), PermissionAdvice::Denied);
+}
+
+/// With an allow-all update policy, row existence alone decides update
+/// advice: a live row is Allowed, while a row that never existed or was
+/// deleted is Denied. Guards the #3386 point lookup against treating an
+/// absent or deleted row as present.
+#[test]
+fn permission_advice_update_denies_missing_and_deleted_rows_under_allow_all_policy() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(PublicPolicyExpr::True)
+                        .with_insert(PublicPolicyExpr::True)
+                        .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True)
+                        .with_delete(PublicPolicyExpr::True),
+                ),
+        ),
+    );
+    let author = AuthorSubject::for_test_bytes([0xa5; 16]);
+    let server = open_core(0x62, AuthorSubject::SYSTEM, &schema);
+    let live = server
+        .insert("todos", cells("live", false, author))
+        .unwrap()
+        .row_uuid();
+    let deleted = server
+        .insert("todos", cells("deleted", false, author))
+        .unwrap()
+        .row_uuid();
+    let client = open_db(0xa5, author, &schema);
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xa5; 16]),
+        1,
+        NodeUuid::from_bytes([0x62; 16]),
+        1,
+    );
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, author);
+    let ask = |row| {
+        let advice = client.request_permission_advice(PermissionAdviceAction::Update {
+            table: "todos".to_owned(),
+            row,
+            patch: BTreeMap::from([("title".to_owned(), Value::String("renamed".to_owned()))]),
+        });
+        client.tick().unwrap();
+        server.tick().unwrap();
+        client.tick().unwrap();
+        block_on(advice)
+    };
+
+    assert_eq!(ask(live), PermissionAdvice::Allowed);
+    assert_eq!(
+        ask(deleted),
+        PermissionAdvice::Allowed,
+        "live before deletion"
+    );
+    assert_eq!(ask(row(0xee)), PermissionAdvice::Denied, "never existed");
+
+    let _ = client.delete("todos", deleted, Default::default()).unwrap();
+    for _ in 0..3 {
+        client.tick().unwrap();
+        server.tick().unwrap();
+    }
+    assert_eq!(ask(deleted), PermissionAdvice::Denied, "deleted");
+    assert_eq!(
+        ask(live),
+        PermissionAdvice::Allowed,
+        "unrelated row stays live"
+    );
+}
+
+#[test]
+#[ignore = "#3386: timing probe, run manually with --ignored"]
+/// Server tick for one Update permission advice against a growing table,
+/// next to an idle tick. Before #3386 the row-existence check decoded the
+/// whole table, so the advice tick grew linearly with it.
+fn probe_3386_update_advice_latency() {
+    let policy = public_literal_eq("done", PublicValue::Boolean(false));
+    // No update policy: an update policy's support scope is hydrated over
+    // the whole table on every request and would mask the row lookup.
+    let policies = PublicTablePolicies::new().with_insert(policy);
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(policies),
+        ),
+    );
+    let author = AuthorSubject::for_test_bytes([0xa3; 16]);
+    let server = open_core(0x60, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xa3, author, &schema);
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xa3; 16]),
+        1,
+        NodeUuid::from_bytes([0x60; 16]),
+        1,
+    );
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, author);
+    let mut inserted = 0usize;
+    for size in [100usize, 1_000, 5_000] {
+        while inserted < size {
+            server
+                .insert("todos", cells(&format!("row {inserted}"), false, author))
+                .unwrap();
+            inserted += 1;
+        }
+        let mut total = std::time::Duration::ZERO;
+        const ASKS: u32 = 20;
+        for _ in 0..ASKS {
+            let advice = client.request_permission_advice(PermissionAdviceAction::Update {
+                table: "todos".to_owned(),
+                row: row(0xef),
+                patch: BTreeMap::from([("done".to_owned(), Value::Bool(false))]),
+            });
+            client.tick().unwrap();
+            let started = std::time::Instant::now();
+            server.tick().unwrap();
+            total += started.elapsed();
+            client.tick().unwrap();
+            assert_eq!(block_on(advice), PermissionAdvice::Denied);
+        }
+        eprintln!(
+            "PROBE rows={size} server_tick_us={}",
+            (total / ASKS).as_micros()
+        );
+        let mut idle = std::time::Duration::ZERO;
+        for _ in 0..ASKS {
+            client.tick().unwrap();
+            let started = std::time::Instant::now();
+            server.tick().unwrap();
+            idle += started.elapsed();
+        }
+        eprintln!(
+            "PROBE rows={size} idle_tick_us={}",
+            (idle / ASKS).as_micros()
+        );
+    }
 }
 
 #[test]

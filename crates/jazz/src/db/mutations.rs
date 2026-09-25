@@ -2950,6 +2950,7 @@ where
                             identity: AuthorSubject::SYSTEM,
                             trust: CommitUnitTrust::TrustedBackend,
                             admitted_write_authorization: false,
+                            version_receipts_validated: false,
                         }),
                     )
                     .await?;

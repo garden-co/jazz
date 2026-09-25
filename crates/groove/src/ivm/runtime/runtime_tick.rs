@@ -63,12 +63,18 @@ struct EvaluationSession<'a> {
     requests: EvaluationRequests<'a>,
     evaluation_inputs: EvaluationInputs,
     work_queue: EvaluationWorkQueue,
+    /// Nodes that stay owned by the live runtime rather than this session.
+    /// A binding attached to an already-maintained prepared shape brings the
+    /// shared nodes up to date through an ordinary binding tick, then hydrates
+    /// against only its own binding. Those nodes' session state then covers
+    /// one binding, so it must never replace the live state for all of them.
+    borrowed: HashSet<NodeId>,
 }
 
 pub(super) struct IncrementalEvaluation<'a> {
     table_deltas: Vec<TableDelta>,
     binding_deltas: Vec<BindingDelta>,
-    binding_snapshots: HashMap<BindingSourceKey, RecordDeltas>,
+    binding_snapshots: Arc<BindingSnapshots>,
     table_frontiers: HashMap<String, u64>,
     binding_frontiers: HashMap<BindingSourceKey, u64>,
     current_tick: u64,
@@ -86,7 +92,9 @@ pub(super) struct IncrementalEvaluation<'a> {
     /// Relational output retained while logical terminal materialization waits
     /// for immutable chunks. Re-evaluating after operator state advances can
     /// correctly yield an empty delta, so publication owns this exact value.
-    pending_subscription_outputs: HashMap<NodeId, Arc<RecordDeltas>>,
+    /// Each entry is the physical output and, once loaded, its materialized
+    /// form. TopBy root keys are taken from the physical form (#3309).
+    pending_subscription_outputs: HashMap<NodeId, (Arc<RecordDeltas>, Option<Arc<RecordDeltas>>)>,
     terminal_deltas: HashMap<NodeId, TerminalDeltas>,
     root_ordering_windows: HashMap<NodeId, RootOrderingWindows>,
     notification_publication: Option<PublicationId>,
@@ -111,6 +119,9 @@ pub(super) struct IncrementalEvaluation<'a> {
     /// No independent root remains after a scoped failure, so this tick must
     /// not publish its staged globals.
     discarded: bool,
+    /// Affected shared terminals whose route barriers await this tick's
+    /// deltas (#3288). Taken once the first frame completes.
+    routed_terminals: Vec<NodeId>,
 }
 
 #[derive(Clone)]
@@ -245,7 +256,7 @@ struct PendingSubscriptionHydration {
     outputs: BTreeMap<String, CompiledNode>,
     initial: Arc<Mutex<Option<MultisinkDeltas>>>,
     session: EvaluationSession<'static>,
-    binding_snapshots: HashMap<BindingSourceKey, RecordDeltas>,
+    binding_snapshots: Arc<BindingSnapshots>,
     hydrate_arrangements: bool,
     lifetime: SubscriptionLifetime,
     metrics: TickMetrics,
@@ -338,6 +349,10 @@ struct EvaluationWorkQueue {
     runnable: VecDeque<NodeId>,
     completed_events: Vec<NodeId>,
     temporal_waiting: Vec<usize>,
+    /// Nodes whose completion an earlier frame of this evaluation already
+    /// published (#3306). Temporal successors are released at most once per
+    /// evaluation, so re-completing one of these emits no second event.
+    released_by_earlier_frame: HashSet<NodeId>,
 }
 
 impl EvaluationWorkQueue {
@@ -376,6 +391,7 @@ impl EvaluationWorkQueue {
             request_dependents: std::collections::BTreeMap::new(),
             runnable: VecDeque::new(),
             completed_events: Vec::new(),
+            released_by_earlier_frame: HashSet::default(),
         };
         // Contract physical tasks, not graph identity. A globally shared or
         // explicitly retained intermediate remains independently executable.
@@ -559,9 +575,11 @@ impl EvaluationWorkQueue {
         if let Some(members) = self.pipelines.get(&node) {
             for member in members.iter().copied() {
                 self.entries[self.layout.slots[&member]] = EvaluationEntry::Complete;
-                self.completed_events.push(member);
+                if !self.released_by_earlier_frame.contains(&member) {
+                    self.completed_events.push(member);
+                }
             }
-        } else {
+        } else if !self.released_by_earlier_frame.contains(&node) {
             self.completed_events.push(node);
         }
         self.entries[slot] = EvaluationEntry::Complete;
@@ -722,9 +740,175 @@ impl EvaluationWorkQueue {
     fn drain_completed_events(&mut self) -> Vec<NodeId> {
         std::mem::take(&mut self.completed_events)
     }
+
+    /// Before an evaluation first registers as a temporal waiter, nothing it
+    /// completed has been released to anyone. Its incomplete nodes are about
+    /// to be registered, so each must emit its completion exactly once, even
+    /// one an earlier frame already evaluated.
+    fn discard_unregistered_completions(&mut self) {
+        self.completed_events.clear();
+        self.released_by_earlier_frame.clear();
+    }
+
+    /// Nodes this frame has completed (or abandoned).
+    fn complete_nodes(&self) -> impl Iterator<Item = NodeId> + '_ {
+        self.entries.iter().enumerate().filter_map(|(slot, entry)| {
+            (*entry == EvaluationEntry::Complete).then_some(self.layout.nodes[slot])
+        })
+    }
+
+    /// Seed a later frame of the same evaluation with the earlier frame's
+    /// completed nodes (#3306). `carried` tasks stay complete without being
+    /// scheduled again or re-emitting completion; their dependents see them
+    /// as satisfied inputs. Every node in `released` is suppressed from
+    /// emitting a completion event should this frame evaluate it again.
+    fn carry_earlier_frame(&mut self, carried: &HashSet<NodeId>, released: HashSet<NodeId>) {
+        let tails = (0..self.entries.len())
+            .filter(|&slot| {
+                self.task_slots[slot] == slot
+                    && match self.pipelines.get(&self.layout.nodes[slot]) {
+                        Some(members) => members.iter().all(|member| carried.contains(member)),
+                        None => carried.contains(&self.layout.nodes[slot]),
+                    }
+            })
+            .collect::<Vec<_>>();
+        // Mark every carried task complete before releasing dependents, so a
+        // carried dependent is never made runnable by a carried input.
+        for &slot in &tails {
+            if let Some(members) = self.pipelines.get(&self.layout.nodes[slot]) {
+                for member in members.iter() {
+                    self.entries[self.layout.slots[member]] = EvaluationEntry::Complete;
+                }
+            }
+            self.entries[slot] = EvaluationEntry::Complete;
+        }
+        let (entries, slots) = (&self.entries, &self.layout.slots);
+        self.runnable
+            .retain(|node| entries[slots[node]] != EvaluationEntry::Complete);
+        for &slot in &tails {
+            for index in 0..self.layout.dependents(slot).len() {
+                let dependent = self.layout.dependents(slot)[index];
+                self.slot_dependency_ready(dependent);
+            }
+        }
+        self.released_by_earlier_frame = released;
+    }
 }
 
 impl<'a> IncrementalEvaluation<'a> {
+    /// Second frame of a routed tick (#3288): activate exactly the route
+    /// barriers the shared terminals' deltas reached, with their downstream
+    /// closure, as if activation had reached them directly.
+    fn activate_route_barriers(
+        &mut self,
+        runtime: &IvmRuntime,
+        touched: HashSet<NodeId>,
+    ) -> Result<(), IvmRuntimeError> {
+        let closure = runtime.graph.downstream_through_routes(touched);
+        self.stage_newly_relevant_state(runtime, &closure)?;
+        let mut roots = self.work_queue.layout.roots.clone();
+        for node in &closure {
+            let mut meta = self
+                .node_meta
+                .get(node)
+                .or_else(|| runtime.node_meta.get(node))
+                .cloned()
+                .unwrap_or_default();
+            meta.input_generation = meta.input_generation.wrapping_add(1);
+            if meta
+                .retainers
+                .iter()
+                .any(|retainer| !matches!(retainer, Retainer::Hydration(_)))
+            {
+                roots.push(*node);
+            }
+            self.node_meta.insert(*node, meta);
+            for subscription in runtime
+                .subscriptions_by_output_node
+                .get(node)
+                .into_iter()
+                .flatten()
+            {
+                if self.affected_subscriptions.insert(*subscription) {
+                    self.metrics.subscriptions_considered += 1;
+                }
+                if let Some(state) = runtime.multisink_subscriptions.get(subscription) {
+                    for output in state.outputs.values().filter(|output| output.node == *node) {
+                        roots.extend(output.root_ordering_node);
+                    }
+                }
+            }
+        }
+        Arc::make_mut(&mut self.affected_nodes).extend(closure.iter().copied());
+        Arc::make_mut(&mut self.relevant_nodes).extend(closure.iter().copied());
+        roots.sort_unstable();
+        roots.dedup();
+        let mut queue =
+            EvaluationWorkQueue::discover_frame(&runtime.graph, &runtime.node_meta, roots, false)?;
+        // The first frame's completions were (or, via the carried events
+        // below, will be) released to temporal successors exactly once. A
+        // park before this frame lets a later evaluation take the head of
+        // those nodes' ordering queues, so this frame must neither schedule
+        // them again nor release them a second time (#3306). Only nodes the
+        // barriers reach are re-evaluated.
+        let released = self.work_queue.complete_nodes().collect::<HashSet<_>>();
+        let carried = released
+            .iter()
+            .copied()
+            .filter(|node| !closure.contains(node))
+            .collect::<HashSet<_>>();
+        queue.carry_earlier_frame(&carried, released);
+        queue.completed_events = self.work_queue.drain_completed_events();
+        self.eval_memo.set_layout(Arc::clone(&queue.layout));
+        self.work_queue = queue;
+        Ok(())
+    }
+
+    /// The first frame staged state only for the nodes its activation plan
+    /// reached, and installation replaces exactly `relevant_nodes`. Barriers
+    /// activated now (with their ancestors) must bring their live state into
+    /// this evaluation first: a stateful node below a barrier, such as a
+    /// binding's private collector (#3308), would otherwise evaluate from
+    /// empty state and install that over its live state.
+    fn stage_newly_relevant_state(
+        &mut self,
+        runtime: &IvmRuntime,
+        closure: &HashSet<NodeId>,
+    ) -> Result<(), IvmRuntimeError> {
+        let layout = runtime
+            .graph
+            .execution_layout(closure.iter().copied())
+            .map_err(IvmRuntimeError::GraphNodeNotFound)?;
+        let relevant = Arc::make_mut(&mut self.relevant_nodes);
+        for node in layout.nodes.iter().copied() {
+            if !relevant.insert(node) {
+                continue;
+            }
+            let key = OperatorStateKey {
+                scope: ScopeId::root(),
+                node,
+            };
+            if let Some(state) = runtime.operator_states.get(&key) {
+                self.operator_states.insert(key, state.clone());
+            }
+            if let Some(keys) = runtime.arrangement_keys_by_input.get(&node) {
+                for key in keys {
+                    if let Some(state) = runtime.arrangement_states.get(key) {
+                        self.arrangement_states.insert(key.clone(), state.clone());
+                        self.arrangement_keys_by_input
+                            .entry(node)
+                            .or_default()
+                            .insert(key.clone());
+                    }
+                }
+            }
+            if let Some(meta) = runtime.node_meta.get(&node) {
+                self.node_meta.entry(node).or_insert_with(|| meta.clone());
+            }
+        }
+        Ok(())
+    }
+
     fn poll_storage_flush(
         &mut self,
         indeterminate: &Rc<Cell<bool>>,
@@ -832,6 +1016,11 @@ impl<'a> IncrementalEvaluation<'a> {
         if self.discarded {
             return;
         }
+        // Installed operator state is root-scoped; recursive child scopes are
+        // scratch. Drop them here, from this evaluation's own states, rather
+        // than scanning every installed state afterwards.
+        self.operator_states
+            .retain(|key, _| key.scope == ScopeId::root());
         // Drop the committed entries before folding staged COW state. This
         // makes recursive closures and arrangement bases uniquely owned while
         // leaving unrelated graph state untouched.
@@ -888,21 +1077,7 @@ impl<'a> IncrementalEvaluation<'a> {
             }
         }
         runtime.memo_use_clock = runtime.memo_use_clock.max(self.memo_use_clock);
-        // Retainers are owned by graph lifecycle operations, not by this
-        // evaluation snapshot. Preserve their current live value when a
-        // suspended continuation resumes after lifecycle activity.
-        for node in self.relevant_nodes.iter() {
-            match (self.node_meta.get_mut(node), runtime.node_meta.get(node)) {
-                (Some(meta), Some(live)) => {
-                    meta.retainers = live.retainers.clone();
-                    meta.input_generation = meta.input_generation.max(live.input_generation);
-                }
-                (None, Some(live)) => {
-                    self.node_meta.insert(*node, live.clone());
-                }
-                _ => {}
-            }
-        }
+        carry_live_node_lifecycle(&mut self.node_meta, runtime, &self.relevant_nodes);
         runtime
             .node_meta
             .extend(std::mem::take(&mut self.node_meta));
@@ -1029,13 +1204,44 @@ impl<'a> IncrementalEvaluation<'a> {
             drop(evaluator);
             return self.poll(runtime, cx);
         }
+        if !self.routed_terminals.is_empty() && self.work_queue.roots_complete() {
+            let routed = std::mem::take(&mut self.routed_terminals);
+            let mut touched = touched_route_barriers(&mut evaluator, &runtime.graph, &routed, cx);
+            // A barrier that reaches durable state was already activated and
+            // evaluated in the first frame; activating it again would bump its
+            // input generation and re-evaluate it.
+            touched.retain(|barrier| !self.affected_nodes.contains(barrier));
+            if !touched.is_empty() {
+                self.terminal_deltas = std::mem::take(&mut evaluator.terminal_deltas);
+                self.root_ordering_windows = std::mem::take(&mut evaluator.root_ordering_windows);
+                drop(evaluator);
+                self.activate_route_barriers(runtime, touched)?;
+                return self.poll(runtime, cx);
+            }
+        }
 
+        // Until phase B has activated this tick's route barriers, a routed
+        // subscription's barrier-gated sinks have not produced their deltas.
+        // Publishing its other sinks now would mark it published, and phase B
+        // would then skip it, losing the routed delta (#3288).
+        let routes_pending = !self.routed_terminals.is_empty();
+        let awaits_route_barriers = |subscription: &MultisinkSubscriptionState| {
+            routes_pending
+                && matches!(
+                    &subscription.target,
+                    MultisinkSubscriptionTarget::RoutedShape { route_barriers, .. }
+                        if !route_barriers.is_empty()
+                )
+        };
         let mut terminal_consumers = HashMap::<NodeId, usize>::default();
         for subscription_id in &self.affected_subscriptions {
             let Some(subscription) = runtime.multisink_subscriptions.get(subscription_id) else {
                 continue;
             };
-            if subscription.failed || self.published_subscriptions.contains(subscription_id) {
+            if subscription.failed
+                || self.published_subscriptions.contains(subscription_id)
+                || awaits_route_barriers(subscription)
+            {
                 continue;
             }
             for output in subscription
@@ -1055,6 +1261,7 @@ impl<'a> IncrementalEvaluation<'a> {
             };
             if subscription.failed
                 || self.published_subscriptions.contains(subscription_id)
+                || awaits_route_barriers(subscription)
                 || subscription
                     .outputs
                     .values()
@@ -1073,10 +1280,10 @@ impl<'a> IncrementalEvaluation<'a> {
                 if !self.affected_nodes.contains(&output.node) {
                     continue;
                 }
-                let physical_records = if let Some(records) =
+                let (physical_records, materialized) = if let Some((physical, materialized)) =
                     self.pending_subscription_outputs.get(&output.node)
                 {
-                    Arc::clone(records)
+                    (Arc::clone(physical), materialized.clone())
                 } else {
                     let records = {
                         let mut future = evaluator.update_node(output.node);
@@ -1088,13 +1295,19 @@ impl<'a> IncrementalEvaluation<'a> {
                         }
                     };
                     self.pending_subscription_outputs
-                        .insert(output.node, Arc::clone(&records));
-                    records
+                        .insert(output.node, (Arc::clone(&records), None));
+                    (records, None)
                 };
-                let records = match evaluator.materialize_indirect_input(&physical_records) {
+                let materialized = match materialized {
+                    Some(records) => Ok(records),
+                    None => evaluator.materialize_indirect_input(&physical_records),
+                };
+                let records = match materialized {
                     Ok(records) => {
-                        self.pending_subscription_outputs
-                            .insert(output.node, Arc::clone(&records));
+                        self.pending_subscription_outputs.insert(
+                            output.node,
+                            (Arc::clone(&physical_records), Some(Arc::clone(&records))),
+                        );
                         records
                     }
                     Err(IvmRuntimeError::EvaluationBlocked) => {
@@ -1137,12 +1350,12 @@ impl<'a> IncrementalEvaluation<'a> {
                     }
                     Err(error) => return Poll::Ready(Err(error.into())),
                 };
-                prepared_outputs.push((sink, output, records));
+                prepared_outputs.push((sink, output, physical_records, records));
             }
 
             let mut sinks = BTreeMap::new();
             let mut terminal_sinks = BTreeMap::new();
-            for (sink, output, records) in prepared_outputs {
+            for (sink, output, physical_records, records) in prepared_outputs {
                 if !records.deltas.is_empty()
                     && !records.descriptor.registry_compatible_with(&output.output)
                 {
@@ -1151,7 +1364,31 @@ impl<'a> IncrementalEvaluation<'a> {
                 let structured = evaluator.output_is_structured_collect_by(output.node)?;
                 let public_root = evaluator.output_has_public_root(output.node)?;
                 let terminal_owned = output.root_ordering_node.is_some() || structured;
+                let identity = match output.root_ordering_node {
+                    Some(ordering) if !structured => {
+                        root_identity_fields(evaluator.graph, output.node, ordering)?
+                    }
+                    _ => None,
+                };
                 let records = records.as_ref().clone();
+                // Only the groups this output's own deltas reach take part in
+                // its root ordering; the group fields lead the identity.
+                let identity_groups = identity
+                    .as_ref()
+                    .map(|identity| {
+                        physical_records
+                            .deltas
+                            .iter()
+                            .map(|delta| {
+                                encoded_identity_key_part(
+                                    physical_records.descriptor,
+                                    delta.raw(),
+                                    &identity.fields[..identity.group_len],
+                                )
+                            })
+                            .collect::<Result<BTreeSet<_>, _>>()
+                    })
+                    .transpose()?;
                 if terminal_owned {
                     let terminal = if structured {
                         if let Some(node) = evaluator.terminal_delta_node_for_output(output.node)? {
@@ -1170,7 +1407,14 @@ impl<'a> IncrementalEvaluation<'a> {
                             None
                         }
                     } else if !records.is_empty() {
-                        Some(terminal_deltas_from_record_deltas(&records)?)
+                        Some(match &identity {
+                            Some(identity) => terminal_deltas_keyed_by_identity(
+                                &records,
+                                &physical_records,
+                                &identity.fields,
+                            )?,
+                            None => terminal_deltas_from_record_deltas(&records)?,
+                        })
                     } else if output.root_ordering_node.is_some() {
                         Some(TerminalDeltas {
                             operations: Vec::new(),
@@ -1189,6 +1433,7 @@ impl<'a> IncrementalEvaluation<'a> {
                             evaluator.apply_root_ordering(
                                 root_ordering_node,
                                 output.output,
+                                identity.as_ref().zip(identity_groups.as_ref()),
                                 &mut terminal,
                             )?;
                         }
@@ -1250,9 +1495,12 @@ impl<'a> IncrementalEvaluation<'a> {
             Poll::Ready(result) => result?,
         }
         self.install(runtime);
-        runtime
-            .operator_states
-            .retain(|key, _| key.scope == ScopeId::root());
+        debug_assert!(
+            runtime
+                .operator_states
+                .keys()
+                .all(|key| key.scope == ScopeId::root())
+        );
         let notifications = std::mem::take(&mut self.pending_notifications);
         let mut dropped_subscriptions = dropped_subscriptions;
         for (subscription_id, queued) in notifications {
@@ -1451,6 +1699,7 @@ impl<'a> EvaluationSession<'a> {
             requests,
             evaluation_inputs: EvaluationInputs::default(),
             work_queue,
+            borrowed: HashSet::default(),
         })
     }
 
@@ -1458,7 +1707,7 @@ impl<'a> EvaluationSession<'a> {
         let key = BindingSourceKey::prepared(shape);
         *self.binding_frontiers.entry(key.clone()).or_default() += 1;
         let affected = graph
-            .affected_nodes(std::iter::empty(), std::iter::once(&key))
+            .affected_nodes_through_routes(std::iter::empty(), std::iter::once(&key))
             .intersection(&self.relevant_nodes)
             .copied()
             .collect::<HashSet<_>>();
@@ -1471,7 +1720,7 @@ impl<'a> EvaluationSession<'a> {
     fn poll(
         &mut self,
         runtime: &IvmRuntime,
-        binding_snapshots: &HashMap<BindingSourceKey, RecordDeltas>,
+        binding_snapshots: &BindingSnapshots,
         hydrate_arrangements: bool,
         metrics: &mut TickMetrics,
         cx: &mut Context<'_>,
@@ -1665,6 +1914,25 @@ impl<'a> EvaluationSession<'a> {
     }
 
     fn install(mut self, runtime: &mut IvmRuntime) {
+        if !self.borrowed.is_empty() {
+            let borrowed = std::mem::take(&mut self.borrowed);
+            self.relevant_nodes.retain(|node| !borrowed.contains(node));
+            self.operator_states
+                .retain(|key, _| !borrowed.contains(&key.node));
+            let borrowed_keys = self
+                .arrangement_keys_by_input
+                .iter()
+                .filter(|(node, _)| borrowed.contains(node))
+                .flat_map(|(_, keys)| keys.iter().cloned())
+                .collect::<HashSet<_>>();
+            self.arrangement_keys_by_input
+                .retain(|node, _| !borrowed.contains(node));
+            self.arrangement_states
+                .retain(|key, _| !borrowed_keys.contains(key));
+            self.eval_memo
+                .retain(|key, _| !borrowed.contains(&key.node));
+            self.node_meta.retain(|node, _| !borrowed.contains(node));
+        }
         for node in &self.relevant_nodes {
             runtime.operator_states.remove(&OperatorStateKey {
                 scope: ScopeId::root(),
@@ -1691,7 +1959,11 @@ impl<'a> EvaluationSession<'a> {
                 collect_by.groups.commit_overlay();
             }
         }
-        runtime.operator_states.extend(self.operator_states);
+        runtime.operator_states.extend(
+            self.operator_states
+                .into_iter()
+                .filter(|(key, _)| key.scope == ScopeId::root()),
+        );
         for node in &self.relevant_nodes {
             if let Some(keys) = runtime.arrangement_keys_by_input.get(node) {
                 for key in keys {
@@ -1726,6 +1998,7 @@ impl<'a> EvaluationSession<'a> {
             .map(|entry| entry.payload_bytes)
             .sum();
         runtime.memo_use_clock = runtime.memo_use_clock.max(self.memo_use_clock);
+        carry_live_node_lifecycle(&mut self.node_meta, runtime, &self.relevant_nodes);
         for node in &self.relevant_nodes {
             runtime.node_meta.remove(node);
         }
@@ -1740,10 +2013,11 @@ impl IvmRuntime {
         subscription_id: SubscriptionId,
         outputs: BTreeMap<String, CompiledNode>,
         storage: OwnedStorage<'static>,
-        binding_snapshots: Option<HashMap<BindingSourceKey, RecordDeltas>>,
+        binding_snapshots: Option<Arc<BindingSnapshots>>,
         binding_frontier_advance: Option<&str>,
         initial: Arc<Mutex<Option<MultisinkDeltas>>>,
         lifetime: SubscriptionLifetime,
+        borrowed: HashSet<NodeId>,
     ) -> Result<(), IvmRuntimeError> {
         let mut seen_roots = HashSet::new();
         let roots = outputs
@@ -1757,6 +2031,22 @@ impl IvmRuntime {
                 Ok::<_, IvmRuntimeError>(found || self.output_depends_on_aggregate(root)?)
             })?;
         let mut session = EvaluationSession::hydration(self, roots, storage)?;
+        if !borrowed.is_empty() {
+            // The attach tick advanced every shared node. The subscription's
+            // own nodes may be resident from an earlier binding of the same
+            // value, with a memo that predates later writes; never reuse it.
+            let own = session
+                .relevant_nodes
+                .iter()
+                .filter(|node| !borrowed.contains(node))
+                .copied()
+                .collect::<Vec<_>>();
+            for node in own {
+                let meta = session.node_meta.entry(node).or_default();
+                meta.input_generation = meta.input_generation.wrapping_add(1);
+            }
+        }
+        session.borrowed = borrowed;
         if let Some(shape) = binding_frontier_advance {
             session.advance_binding_input(&self.graph, shape);
         }
@@ -1906,14 +2196,92 @@ impl IvmRuntime {
                     .with_install_observer(observer, failures)
             }),
         };
+        let (metrics, durable_writes) = self
+            .tick_detaching_cold(
+                table_deltas,
+                Vec::new(),
+                storage,
+                defer_notifications_until_durable,
+                Some(publication.clone()),
+                DetachOn::AnyRequest,
+            )
+            .await?;
+        Ok(ResidentTick {
+            metrics,
+            durable_writes,
+            publication,
+        })
+    }
+
+    /// Drive one tick of runtime-owned input changes without waiting for
+    /// remote chunks.
+    ///
+    /// Runnable work and storage reads complete before this returns. Work that
+    /// is waiting on a large-value chunk is retained as pending incremental
+    /// progress, in
+    /// order behind earlier pending evaluations, and finishes on a later
+    /// [`Self::poll_pending_incremental`] owner turn. Callers that must not
+    /// hold their own turn open for a remote fetch (for example a sync
+    /// receiver whose chunk requests leave through that same turn) use this
+    /// rather than [`Self::tick_with_params`].
+    pub(super) async fn tick_bindings_detaching_cold(
+        &mut self,
+        binding_deltas: Vec<BindingDelta>,
+        storage: OwnedStorage<'static>,
+    ) -> Result<TickMetrics, IvmRuntimeError> {
+        if self.persistence_indeterminate.get() {
+            return Err(IvmRuntimeError::PersistenceOutcomeIndeterminate);
+        }
+        let (metrics, _) = self
+            .tick_detaching_cold(
+                Vec::new(),
+                binding_deltas,
+                storage,
+                false,
+                None,
+                DetachOn::ChunkRequest,
+            )
+            .await?;
+        Ok(metrics)
+    }
+
+    async fn tick_detaching_cold(
+        &mut self,
+        table_deltas: Vec<TableDelta>,
+        binding_deltas: Vec<BindingDelta>,
+        storage: OwnedStorage<'static>,
+        defer_notifications_until_durable: bool,
+        publication: Option<PendingResidentPublication>,
+        detach_on: DetachOn,
+    ) -> Result<(TickMetrics, Rc<RefCell<StagedWriteState>>), IvmRuntimeError> {
         let changed_tables = table_deltas
             .iter()
             .map(|delta| delta.table.as_str())
             .collect::<HashSet<_>>();
-        let affected_nodes = self
-            .graph
-            .affected_nodes(changed_tables.iter().copied(), std::iter::empty());
-
+        // Beginning the tick folds queued binding retractions into it, so
+        // hydration admission must cover their graph slice too.
+        let changed_bindings = binding_deltas
+            .iter()
+            .chain(
+                (!binding_deltas.is_empty())
+                    .then_some(self.pending_binding_retractions.iter())
+                    .into_iter()
+                    .flatten(),
+            )
+            .map(|delta| &delta.key)
+            .collect::<HashSet<_>>();
+        let affected_nodes = Arc::clone(
+            &self
+                .graph
+                .activation_plan(
+                    changed_tables.iter().copied(),
+                    changed_bindings.iter().copied(),
+                )
+                .map_err(IvmRuntimeError::GraphNodeNotFound)?
+                .affected,
+        );
+        drop(changed_tables);
+        drop(changed_bindings);
         // Hydration evaluates an isolated snapshot and installs that snapshot
         // atomically. Do not begin a resident tick which overlaps its graph
         // slice: beginning mutates durable evaluator state and input
@@ -1968,11 +2336,11 @@ impl IvmRuntime {
         let mut evaluation = self
             .begin_tick_with_params_and_notification_policy(
                 table_deltas,
-                Vec::new(),
+                binding_deltas,
                 storage,
                 None,
                 defer_notifications_until_durable,
-                Some(publication.clone()),
+                publication,
             )
             .await?;
         evaluation
@@ -1996,6 +2364,16 @@ impl IvmRuntime {
                         // requests and follows the existing detached path.
                         return Poll::Pending;
                     }
+                    Poll::Pending
+                        if detach_on == DetachOn::ChunkRequest
+                            && !evaluation.requests.has_pending_chunk() =>
+                    {
+                        // Storage completes without this caller's turn, so
+                        // await it inline as a complete tick would. Only a
+                        // chunk fetch, which may need this very turn to be
+                        // sent, is worth detaching.
+                        return Poll::Pending;
+                    }
                     _ => return Poll::Ready(progress),
                 }
             }
@@ -2007,7 +2385,7 @@ impl IvmRuntime {
             Poll::Ready(Ok(())) => {}
             Poll::Ready(Err(failure)) => return Err(failure.into_error()),
             Poll::Pending => {
-                evaluation.work_queue.drain_completed_events();
+                evaluation.work_queue.discard_unregistered_completions();
                 evaluation.install_input_frontiers(self);
                 let mut pending = self.pending_incremental.0.borrow_mut();
                 let evaluation_id = pending.next_id;
@@ -2025,11 +2403,7 @@ impl IvmRuntime {
                 pending.order.push_back(evaluation_id);
             }
         };
-        Ok(ResidentTick {
-            metrics,
-            durable_writes,
-            publication,
-        })
+        Ok((metrics, durable_writes))
     }
 
     pub(crate) fn assign_resident_publication(
@@ -2376,12 +2750,18 @@ impl IvmRuntime {
     /// not hold a ready subscription's opening hostage).
     pub(crate) fn subscription_has_pending_progress(&self, id: SubscriptionId) -> bool {
         // A missing/failed receiver cannot prove a completed terminal.
-        if self.pending_incremental_polling
-            || self
-                .multisink_subscriptions
-                .get(&id)
-                .is_none_or(|s| s.failed)
-        {
+        self.multisink_subscriptions
+            .get(&id)
+            .is_none_or(|s| s.failed)
+            || self.subscription_has_pending_evaluation(id)
+    }
+
+    /// Whether admitted evaluation work (including notifications deferred
+    /// until durable) can still reach this subscription. Unlike
+    /// [`Self::subscription_has_pending_progress`], a failed or missing
+    /// subscription has none: its error is already queued for the receiver.
+    pub(crate) fn subscription_has_pending_evaluation(&self, id: SubscriptionId) -> bool {
+        if self.pending_incremental_polling {
             return true;
         }
         self.pending_incremental
@@ -2609,12 +2989,16 @@ impl IvmRuntime {
         }
         let current_tick = self.current_tick + 1;
         let durable_writes = Rc::new(RefCell::new(StagedWriteState::default()));
+        // Durable nodes run under `&self`, so the binding set cannot change
+        // before the incremental evaluation below reuses this snapshot.
+        let binding_snapshots = self.binding_snapshot_deltas();
         let table_delta_records = table_deltas
             .iter()
             .map(|delta| delta.deltas.len())
             .sum::<usize>();
         self.tick_durable_nodes(
             &table_deltas,
+            &binding_snapshots,
             &activation.durable,
             current_tick,
             storage.as_ref(),
@@ -2638,18 +3022,18 @@ impl IvmRuntime {
             &mut binding_frontiers,
             &mut node_meta,
         );
-        let metrics = TickMetrics {
-            tick: current_tick,
-            table_delta_records,
-            ..TickMetrics::default()
-        };
-        let binding_snapshots = self.binding_snapshot_deltas();
         let affected_subscriptions = affected_nodes
             .iter()
             .filter_map(|node| self.subscriptions_by_output_node.get(node))
             .flatten()
             .copied()
             .collect::<HashSet<_>>();
+        let metrics = TickMetrics {
+            tick: current_tick,
+            table_delta_records,
+            subscriptions_considered: affected_subscriptions.len(),
+            ..TickMetrics::default()
+        };
         // Structured collectors own their positional edits. Only plain outputs
         // consume the generic before/after maps. Union demand across consumers
         // because a TopBy node can be shared by both kinds of output. Preserve
@@ -2669,6 +3053,17 @@ impl IvmRuntime {
                 {
                     root_ordering_windows
                         .entry(ordering_node)
+                        .or_insert_with(RootOrderingWindows::default);
+                }
+            }
+        }
+        // A routed TopBy runs before its barriers are known to be touched, so
+        // it must collect positions for any bound output it may reach.
+        for terminal in &activation.routed {
+            if let Some(table) = self.graph.routes().table(*terminal) {
+                for node in &table.root_ordering_nodes {
+                    root_ordering_windows
+                        .entry(*node)
                         .or_insert_with(RootOrderingWindows::default);
                 }
             }
@@ -2737,6 +3132,7 @@ impl IvmRuntime {
             durable_writes,
             persist_flush: None,
             discarded: false,
+            routed_terminals: activation.routed.clone(),
         })
     }
 
@@ -2756,7 +3152,7 @@ impl IvmRuntime {
     }
 
     fn evict_eval_memo(&mut self) {
-        if self.eval_memo.keys().any(|key| key.tick_epoch.is_some()) {
+        if self.eval_memo.tick_entries() > 0 {
             let mut retained_bytes = 0usize;
             self.eval_memo.retain(|key, entry| {
                 let keep = key.tick_epoch.is_none();
@@ -2852,7 +3248,7 @@ impl IvmRuntime {
         roots: impl IntoIterator<Item = NodeId>,
         owned_storage: OwnedStorage<'a>,
         mode: HydrationMode,
-        binding_snapshots: Option<HashMap<BindingSourceKey, RecordDeltas>>,
+        binding_snapshots: Option<Arc<BindingSnapshots>>,
         binding_frontier_advance: Option<&str>,
     ) -> Result<HashMap<NodeId, RecordDeltas>, IvmRuntimeError> {
         let roots = roots.into_iter().collect::<VecDeque<_>>();
@@ -2904,7 +3300,7 @@ impl IvmRuntime {
         outputs: &BTreeMap<String, CompiledNode>,
         storage: &S,
         mode: HydrationMode,
-        binding_snapshots: Option<HashMap<BindingSourceKey, RecordDeltas>>,
+        binding_snapshots: Option<Arc<BindingSnapshots>>,
         binding_frontier_advance: Option<&str>,
     ) -> Result<MultisinkDeltas, IvmRuntimeError>
     where
@@ -2951,6 +3347,7 @@ impl IvmRuntime {
     async fn tick_durable_nodes(
         &self,
         table_deltas: &[TableDelta],
+        binding_snapshots: &BindingSnapshots,
         durable_nodes: &[NodeId],
         current_tick: u64,
         storage: &dyn OrderedKvStorage,
@@ -2965,7 +3362,6 @@ impl IvmRuntime {
         binding_frontiers: &HashMap<BindingSourceKey, u64>,
         durable_writes: &RefCell<StagedWriteState>,
     ) -> Result<(), IvmRuntimeError> {
-        let binding_snapshots = self.binding_snapshot_deltas();
         let durable_overlay = StagedWriteOverlay::new(storage, durable_writes);
         let mut metrics = TickMetrics::default();
         for &node in durable_nodes {
@@ -2986,7 +3382,7 @@ impl IvmRuntime {
                     variant_projections: &self.variant_projections,
                     table_deltas,
                     binding_deltas: &[],
-                    binding_snapshots: &binding_snapshots,
+                    binding_snapshots,
                     current_tick,
                     operator_states,
                     arrangement_states,
@@ -3110,6 +3506,60 @@ fn terminal_delta_for_hydrated_output(
     ))
 }
 
+/// Route barriers reached by this tick's shared-terminal deltas (#3288).
+/// Any terminal whose delta cannot be read or keyed conservatively touches
+/// all of its barriers, which is exactly the unrouted activation.
+fn touched_route_barriers(
+    evaluator: &mut TickEvaluator<'_>,
+    graph: &IvmGraph,
+    routed: &[NodeId],
+    cx: &mut Context<'_>,
+) -> HashSet<NodeId> {
+    let mut touched = HashSet::default();
+    for terminal in routed {
+        let Some(table) = graph.routes().table(*terminal) else {
+            continue;
+        };
+        let records = {
+            let mut future = evaluator.update_node(*terminal);
+            match Pin::new(&mut future).poll(cx) {
+                Poll::Ready(Ok(records)) => Some(records),
+                _ => None,
+            }
+        };
+        let records =
+            records.and_then(|records| evaluator.materialize_indirect_input(&records).ok());
+        let Some(records) = records else {
+            touched.extend(table.barriers());
+            continue;
+        };
+        // Route fields are indices into the terminal's compiled output. A
+        // delta in any other layout cannot be keyed by them safely.
+        let layout_matches = graph
+            .node(*terminal)
+            .is_some_and(|node| node.descriptor.output.records() == records.descriptor);
+        if !layout_matches {
+            touched.extend(table.barriers());
+            continue;
+        }
+        for delta in &records.deltas {
+            let record = crate::records::BorrowedRecord::new(&delta.record, &records.descriptor);
+            match table.key_of_record(&record) {
+                Some(key) => {
+                    if let Some(barriers) = table.by_key.get(&key) {
+                        touched.extend(barriers.iter().copied());
+                    }
+                }
+                None => {
+                    touched.extend(table.barriers());
+                    break;
+                }
+            }
+        }
+    }
+    touched
+}
+
 fn bump_input_frontiers_staged(
     graph: &IvmGraph,
     table_deltas: &[TableDelta],
@@ -3143,6 +3593,34 @@ fn bump_input_frontiers_staged(
     {
         let meta = node_meta.entry(node).or_default();
         meta.input_generation = meta.input_generation.wrapping_add(1);
+    }
+}
+
+/// Fold graph-lifecycle state into an evaluation's `node_meta` snapshot just
+/// before it replaces the live entries. Retainers are owned by lifecycle
+/// operations, not by the snapshot: a subscription may subscribe or
+/// unsubscribe while the evaluation is suspended, so keep their live value.
+/// A node the graph no longer has was collected meanwhile; drop its snapshot
+/// entry rather than resurrect metadata for a missing node.
+fn carry_live_node_lifecycle(
+    snapshot: &mut HashMap<NodeId, NodeRuntimeMeta>,
+    runtime: &IvmRuntime,
+    nodes: &HashSet<NodeId>,
+) {
+    for node in nodes {
+        match (snapshot.get_mut(node), runtime.node_meta.get(node)) {
+            (Some(meta), Some(live)) => {
+                meta.retainers = live.retainers.clone();
+                meta.input_generation = meta.input_generation.max(live.input_generation);
+            }
+            (None, Some(live)) => {
+                snapshot.insert(*node, live.clone());
+            }
+            (Some(_), None) if runtime.graph.node(*node).is_none() => {
+                snapshot.remove(node);
+            }
+            _ => {}
+        }
     }
 }
 
@@ -3367,4 +3845,14 @@ mod tests {
         assert_eq!(runtime.current_tick, before_tick);
         assert_eq!(runtime.table_frontiers, before_frontiers);
     }
+}
+
+/// Which pending requests let a detaching tick hand its evaluation to a later
+/// owner turn instead of awaiting it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DetachOn {
+    /// Any external request, storage or chunk (resident writes).
+    AnyRequest,
+    /// Only a large-value chunk fetch (covered receiver installs, #3349).
+    ChunkRequest,
 }

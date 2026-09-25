@@ -83,7 +83,7 @@ pub use routed_messages::ReceivedSyncMessage;
 mod wire_transport;
 #[cfg(test)]
 use wire_transport::{LogicalMessageReassembler, RECENT_COMPLETED_LOGICAL_MESSAGES};
-pub use wire_transport::{WireFlushStatus, WireTransportAdapter};
+pub use wire_transport::{WireFlushStatus, WireSendOutcome, WireTransportAdapter};
 
 /// Pragmatic single-threaded serialization boundary for canonical Jazz state.
 ///
@@ -557,6 +557,42 @@ impl PeerChunkResolver {
             }
         }
         debug_assert!(state.relay_chunk_obligations <= MAX_RELAY_CHUNK_OBLIGATIONS);
+    }
+
+    /// Fail every local chunk read that still waits on an upstream. Close
+    /// calls this before its final query flush: no later owner turn can
+    /// deliver those chunks, and a detached evaluation waiting on one would
+    /// otherwise hold close open until a reconnect that never comes.
+    fn fail_local_demand_for_close(&self) {
+        let mut state = self.state.borrow_mut();
+        let requests = state.pending_by_chunk.keys().cloned().collect::<Vec<_>>();
+        let mut failed = false;
+        for request in requests {
+            let Some(pending) = state.pending_by_chunk.get_mut(&request) else {
+                continue;
+            };
+            let waiters = std::mem::take(&mut pending.waiters);
+            for waiter in waiters {
+                match waiter {
+                    ChunkDemandWaiter::Local { sender, .. } => {
+                        failed = true;
+                        let _ = sender.send(Err(groove::chunks::ChunkError::Unavailable));
+                    }
+                    relay @ ChunkDemandWaiter::Relay { .. } => pending.waiters.push(relay),
+                }
+            }
+            if pending.waiters.is_empty() {
+                let upstream_id = pending.upstream_id;
+                state.pending_by_chunk.remove(&request);
+                state.chunk_by_upstream_id.remove(&upstream_id);
+                state
+                    .outbound
+                    .retain(|outbound| outbound.request_id != upstream_id);
+            }
+        }
+        if failed {
+            state.completion_generation = state.completion_generation.wrapping_add(1);
+        }
     }
 
     fn cancel_local(&self, request: &groove::chunks::ChunkRequest, waiter_id: u64) {
@@ -1569,6 +1605,18 @@ pub trait TickScheduler {
     fn query_runtime_waker(&self) -> Option<Waker> {
         None
     }
+
+    /// Whether this host polls a [`Db::tick`] once and drops it while still
+    /// pending, rather than awaiting it.
+    ///
+    /// Such a host cannot let a tick wait for a large-value chunk: the request
+    /// leaves through a later tick, and dropping the tick cancels the wait.
+    /// Covered subscription installs then hand chunk-waiting evaluation to a
+    /// later turn instead (#3349). Hosts that await their ticks keep the
+    /// default and complete installs inline.
+    fn drops_pending_ticks(&self) -> bool {
+        false
+    }
 }
 
 /// A locally-originated transaction rejection that was not consumed by an
@@ -1945,6 +1993,8 @@ struct StagedInboundMessage {
     message: SyncMessage,
     lease: Option<crate::wire::channel_credit::BufferLease>,
     authority_receipt_eligible: bool,
+    /// See [`ReceivedSyncMessage`]: set only from the checked wire decoder.
+    receipts_validated: bool,
 }
 
 struct PendingAuthorityViewUpdate {
@@ -2519,6 +2569,15 @@ fn direct_schema_view_lens(
                 ),
             ));
         }
+        if source_table.composite_indexes != target_table.composite_indexes {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                format!(
+                    "schema view changes composite indexes on {} without explicit index admission",
+                    target_table.name
+                ),
+            ));
+        }
         let mut ops = Vec::new();
         for target_column in &target_table.columns {
             match source_table
@@ -2827,9 +2886,29 @@ pub(super) type Outbox = Rc<RefCell<UploadOutbox>>;
 pub(super) struct UploadOutbox {
     entries: VecDeque<PendingUpload>,
     tx_ids: HashSet<TxId>,
+    /// Declared by a server shell that owns final authority for its writes.
+    declared_root: bool,
+    /// Sticky: set once any upstream attaches, including after the fact.
+    upstream_attached: bool,
 }
 
 impl UploadOutbox {
+    /// Whether a subscriber upload this node settled terminally has nobody
+    /// above it to forward to. Only a declared root that has never attached
+    /// an upstream qualifies; anything else must queue and relay as usual.
+    pub(super) fn settles_uploads_locally(&self) -> bool {
+        self.declared_root && !self.upstream_attached
+    }
+
+    #[cfg(any(test, feature = "runtime"))]
+    pub(super) fn declare_root(&mut self) {
+        self.declared_root = true;
+    }
+
+    pub(super) fn mark_upstream_attached(&mut self) {
+        self.upstream_attached = true;
+    }
+
     fn push(&mut self, pending: PendingUpload) -> bool {
         if !self.tx_ids.insert(pending.tx_id) {
             return false;
@@ -2844,6 +2923,10 @@ impl UploadOutbox {
 
     fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    pub(super) fn contains(&self, tx_id: TxId) -> bool {
+        self.tx_ids.contains(&tx_id)
     }
 
     fn retain(&mut self, mut keep: impl FnMut(&PendingUpload) -> bool) {
@@ -2885,10 +2968,12 @@ struct PendingUpload {
 /// recovery marker or an earlier same-transaction reconstruction.
 fn queue_pending_upload_in(outbox: &Outbox, tx_id: TxId, unit: Option<SyncMessage>) -> bool {
     let mut outbox = outbox.borrow_mut();
-    if let Some(pending) = outbox
-        .entries
-        .iter_mut()
-        .find(|pending| pending.tx_id == tx_id)
+    // `tx_ids` mirrors `entries`, so a new transaction skips the linear search.
+    if outbox.tx_ids.contains(&tx_id)
+        && let Some(pending) = outbox
+            .entries
+            .iter_mut()
+            .find(|pending| pending.tx_id == tx_id)
     {
         let Some(unit) = unit else {
             return false;
@@ -3051,6 +3136,9 @@ impl Drop for PermissionAdviceFuture {
 }
 
 mod catalogue;
+mod empty_opening;
+pub use empty_opening::{EmptyOpening, REMOTE_LINK_ATTEMPT_WINDOW, RemoteLinkHint};
+use empty_opening::{OpeningGate, OpeningRoute, RemoteLinkTracker};
 mod lifecycle;
 mod mutation_errors;
 mod mutations;
@@ -3142,6 +3230,10 @@ pub struct ReadOpts {
     pub include_deleted: bool,
     /// Semantic read view to evaluate against.
     pub read_view: ReadViewSpec,
+    /// What to do with an empty, unsettled opening. Host read-option state
+    /// only; an absent serde field is [`EmptyOpening::Deliver`].
+    #[serde(default)]
+    pub empty_opening: EmptyOpening,
 }
 
 impl Default for ReadOpts {
@@ -3152,6 +3244,7 @@ impl Default for ReadOpts {
             propagation: Propagation::Full,
             include_deleted: false,
             read_view: ReadViewSpec::default(),
+            empty_opening: EmptyOpening::Deliver,
         }
     }
 }
@@ -4769,7 +4862,8 @@ struct SubscriptionState {
     author: AuthorSubject,
     authorization_mode: QueryAuthorizationMode,
     read_tier: DurabilityTier,
-    /// Online remote-if-possible overlays pending changes on scoped inputs.
+    /// An online remote read with immediate local updates overlays pending
+    /// changes on scoped inputs.
     pending_overlay: bool,
     remote_read_tier: Option<DurabilityTier>,
     /// Once this stream has an upstream, cached durable state needs a receipt
@@ -4789,6 +4883,11 @@ struct SubscriptionState {
     /// A non-durable foreground has not yet received its local owner's answer.
     /// This gates only opening; later disconnections retain the published view.
     pending_initial_owner_result: bool,
+    /// Global coverage held only while a non-durable foreground's
+    /// local-first-unless-empty opening gate is armed: its settled authority
+    /// answer, relayed by the storage owner, is what may release an empty
+    /// opening. Retired as soon as the gate releases.
+    authority_witness: Vec<UpstreamCoverageHandle>,
     sender: SubscriptionSender,
 }
 
@@ -4807,6 +4906,14 @@ struct SubscriptionPublication {
     deferred: Option<SubscriptionPublicationSnapshot>,
     reset: bool,
     unresolved: BTreeSet<OutputOccurrenceId>,
+    /// Armed `EmptyOpening::AwaitRemote` gate, cleared once it releases.
+    opening_gate: Option<OpeningGate>,
+    /// This stream is an `EmptyOpening::AwaitRemote` offset window read as a
+    /// strict remote view, with a local-first fallback beside it.
+    remote_window: bool,
+    /// The remote window released unopened because its remote could no
+    /// longer answer; its stream now serves the local-first fallback.
+    window_fell_back: bool,
 }
 
 struct SubscriptionPublicationSnapshot {
@@ -4919,6 +5026,15 @@ impl SubscriptionSender {
             || !materialized
             || (self.requested_tier >= DurabilityTier::Global && !settled)
         {
+            // A strict remote window withholds its unsettled opening here;
+            // remember it so a link loss can still release that opening.
+            if publishable
+                && materialized
+                && !publication.opened
+                && let Some(gate) = publication.opening_gate.as_mut()
+            {
+                gate.withheld = true;
+            }
             if publication.opened
                 && publication.deferred.is_none()
                 && self.requested_tier >= DurabilityTier::Global
@@ -4936,6 +5052,25 @@ impl SubscriptionSender {
             // reset when the maintained result becomes materialized again.
             publication.reset |= reset || self.requested_tier < DurabilityTier::Global;
             return Ok(false);
+        }
+        if publication.opening_gate.is_some() {
+            // Local-first unless empty: withhold the opening while it is still
+            // empty and unanswered (unsettled, or for a non-durable foreground
+            // its authority witness unanswered). The first answered or
+            // non-empty result releases the gate and opens with a canonical
+            // reset below.
+            if !publication.opened
+                && publication
+                    .opening_gate
+                    .is_some_and(|gate| gate.awaits_answer(settled))
+                && snapshot.root_count == 0
+            {
+                if let Some(gate) = publication.opening_gate.as_mut() {
+                    gate.withheld = true;
+                }
+                return Ok(false);
+            }
+            publication.opening_gate = None;
         }
         if !publication.opened || publication.reset || (reset && publication.deferred.is_some()) {
             let current = SubscriptionPublicationSnapshot::capture(snapshot, index)?;
@@ -4973,11 +5108,40 @@ impl SubscriptionSender {
         &self,
         event: SubscriptionEvent,
     ) -> Result<(), futures_channel::mpsc::TrySendError<SubscriptionEvent>> {
-        if matches!(&event, SubscriptionEvent::Closed)
+        let terminal = matches!(&event, SubscriptionEvent::Closed)
             || matches!(&event, SubscriptionEvent::Rejected { reason }
-                if !matches!(reason, SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission))
-        {
-            self.publication.borrow_mut().deferred = None;
+                if !matches!(reason, SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission));
+        if terminal {
+            let mut publication = self.publication.borrow_mut();
+            publication.deferred = None;
+            // A rejection releases a withheld local-first opening: the
+            // caller sees the (empty) local result, then the rejection.
+            if let Some(gate) = publication.opening_gate.take()
+                && gate.withheld
+                && gate.route == OpeningRoute::LocalFirst
+                && !publication.opened
+                && publication.unresolved.is_empty()
+            {
+                publication.opened = true;
+                drop(publication);
+                let _ = self.sender.unbounded_send(SubscriptionEvent::Delta {
+                    reset: true,
+                    publishable: true,
+                    added: Vec::new(),
+                    updated: Vec::new(),
+                    removed: Vec::new(),
+                    terminal_operations: Vec::new(),
+                    settled: false,
+                    tier: self.requested_tier,
+                });
+            }
+        } else if matches!(&event, SubscriptionEvent::Delta { .. }) {
+            // Receipt-only transitions bypass `publish`; before a gated
+            // stream has opened there is no published view to transition.
+            let publication = self.publication.borrow();
+            if publication.opening_gate.is_some() && !publication.opened {
+                return Ok(());
+            }
         }
         self.sender.unbounded_send(event)
     }
@@ -5180,6 +5344,10 @@ pub struct SubscriptionStream {
     cleanup: Option<SubscriptionCleanup>,
     finalization: Option<SubscriptionFinalization>,
     terminated: bool,
+    /// The local-first read of a remote window. Dropped once the window
+    /// opens; served while the window cannot be answered, until it opens.
+    window_fallback: Option<Box<SubscriptionStream>>,
+    serving_fallback: bool,
 }
 
 struct CleanupGuard {
@@ -5215,6 +5383,14 @@ impl SubscriptionStream {
     /// so cancelling this caller future leaves a later `close` able to resume
     /// and await the same finalization command.
     pub async fn close(&mut self) -> Result<(), Error> {
+        self.close_own().await?;
+        if let Some(fallback) = self.window_fallback.as_mut() {
+            Box::pin(fallback.close()).await?;
+        }
+        Ok(())
+    }
+
+    async fn close_own(&mut self) -> Result<(), Error> {
         if self.finalization.is_none() {
             let Some(cleanup) = self.cleanup.take() else {
                 return Ok(());
@@ -5277,15 +5453,74 @@ impl SubscriptionStream {
 
     /// Await the next materialized subscription event.
     pub async fn next_event(&mut self) -> Option<SubscriptionEvent> {
-        if self.terminated {
-            return None;
+        std::future::poll_fn(|cx| Pin::new(&mut *self).poll_next(cx)).await
+    }
+
+    pub(super) fn is_remote_window(&self) -> bool {
+        self._state
+            .borrow()
+            .sender
+            .publication
+            .borrow()
+            .remote_window
+    }
+
+    /// Settle which side of a remote window this stream serves. Once the
+    /// window opens (or ends without opening) its fallback is dropped. Once
+    /// it falls back, the fallback serves while the window stays registered;
+    /// see [`Self::poll_window_fallback`].
+    fn sync_window_fallback(&mut self) {
+        if self.serving_fallback || self.window_fallback.is_none() {
+            return;
         }
+        let (fell_back, decided) = {
+            let state = self._state.borrow();
+            let publication = state.sender.publication.borrow();
+            (
+                publication.window_fell_back,
+                publication.opened || publication.opening_gate.is_none(),
+            )
+        };
+        if fell_back {
+            self.serving_fallback = true;
+        } else if decided {
+            self.window_fallback = None;
+        }
+    }
+
+    /// Serve a fallen-back window: the cached local-first page until the
+    /// still-registered remote window opens with the server's page, which
+    /// replaces it with one reset. From then on the stream is the window.
+    fn poll_window_fallback(&mut self, cx: &mut Context<'_>) -> Poll<Option<SubscriptionEvent>> {
         loop {
-            let event =
-                std::future::poll_fn(|cx| Pin::new(&mut self.receiver).poll_next(cx)).await?;
-            if subscription_event_is_publishable(&event) {
-                return Some(event);
+            match Pin::new(&mut self.receiver).poll_next(cx) {
+                Poll::Ready(Some(
+                    event @ SubscriptionEvent::Delta {
+                        reset: true,
+                        publishable: true,
+                        ..
+                    },
+                )) => {
+                    self.serving_fallback = false;
+                    self.window_fallback = None;
+                    return Poll::Ready(Some(event));
+                }
+                // Anything before the window's opening reset (its link wake,
+                // receipt-only transitions) describes no published view.
+                Poll::Ready(Some(SubscriptionEvent::Delta { .. })) => continue,
+                // A rejected window is reported like any rejected read; the
+                // fallback keeps serving the cached page afterwards.
+                Poll::Ready(Some(event @ SubscriptionEvent::Rejected { .. })) => {
+                    return Poll::Ready(Some(event));
+                }
+                // A closed window leaves the fallback serving.
+                Poll::Ready(Some(SubscriptionEvent::Closed)) => break,
+                Poll::Ready(None) | Poll::Pending => break,
             }
+        }
+        match self.window_fallback.as_mut() {
+            Some(fallback) => Pin::new(fallback.as_mut()).poll_next(cx),
+            None => Poll::Ready(None),
         }
     }
 
@@ -5324,6 +5559,14 @@ impl SubscriptionStream {
             return None;
         }
         loop {
+            self.sync_window_fallback();
+            if self.serving_fallback {
+                let mut context = Context::from_waker(Waker::noop());
+                return match self.poll_window_fallback(&mut context) {
+                    Poll::Ready(event) => event,
+                    Poll::Pending => None,
+                };
+            }
             let event = self.receiver.try_recv().ok()?;
             if subscription_event_is_publishable(&event) {
                 return Some(event);
@@ -5363,6 +5606,10 @@ impl Stream for SubscriptionStream {
             return Poll::Ready(None);
         }
         loop {
+            this.sync_window_fallback();
+            if this.serving_fallback {
+                return this.poll_window_fallback(cx);
+            }
             match Pin::new(&mut this.receiver).poll_next(cx) {
                 Poll::Ready(Some(event)) if subscription_event_is_publishable(&event) => {
                     return Poll::Ready(Some(event));

@@ -15,9 +15,10 @@ use std::time::Duration;
 use futures::task::{ArcWake, waker};
 
 use crate::db::{
-    Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, Error as CoreDbError,
-    ErrorCode as CoreDbErrorCode, ExclusiveTxOps, LocalUpdates as CoreLocalUpdates,
-    PeerConnection as CorePeerConnection, Propagation as CorePropagation, ReadOpts as CoreReadOpts,
+    Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity,
+    EmptyOpening as CoreEmptyOpening, Error as CoreDbError, ErrorCode as CoreDbErrorCode,
+    ExclusiveTxOps, LocalUpdates as CoreLocalUpdates, PeerConnection as CorePeerConnection,
+    Propagation as CorePropagation, ReadOpts as CoreReadOpts, RemoteLinkHint as CoreRemoteLinkHint,
     SubscriptionEvent as CoreSubscriptionEvent, SubscriptionOutputRow as CoreSubscriptionOutputRow,
     TickScheduler, TickUrgency, Transport as CoreTransport, WireTransportAdapter,
     WriteIdentity as CoreWriteIdentity,
@@ -641,6 +642,10 @@ impl Backend {
         self.0.detach_connection(connection)
     }
 
+    fn set_remote_link_hint(&self, hint: CoreRemoteLinkHint) {
+        self.0.set_remote_link_hint(hint);
+    }
+
     fn set_identity_claims(&self, identity: CoreAuthorSubject, claims: HashMap<String, CoreValue>) {
         self.0
             .set_identity_claims(identity, claims.into_iter().collect());
@@ -1098,6 +1103,10 @@ impl TickScheduler for TickSchedulerImpl {
 }
 
 impl ClientDb {
+    fn backend(&self) -> Result<Backend> {
+        self.inner.borrow().backend_clone()
+    }
+
     async fn open(
         schema: crate::schema::JazzSchema,
         public_schema: Schema,
@@ -1750,6 +1759,12 @@ impl ClientDbInner {
         self.upstream_generation = self.upstream_generation.wrapping_add(1);
         self.upstream_recovery_generation = None;
         self.upstream_state_notify.notify_waiters();
+        if let Some(db) = self.db.as_ref() {
+            // Explicit disconnects and recovery starts are not live, and
+            // recovery retries keep reporting `Failed`: nothing waits on a
+            // backoff. Only a fresh connect reports an attempt.
+            db.set_remote_link_hint(CoreRemoteLinkHint::Failed);
+        }
         let Some(connection) = self.upstream.take() else {
             return false;
         };
@@ -1798,6 +1813,9 @@ impl ClientDbInner {
     }
 
     fn record_tick_driver_failure(&mut self, error: String) {
+        if let Some(db) = self.db.as_ref() {
+            db.set_remote_link_hint(CoreRemoteLinkHint::Failed);
+        }
         self.upstream_recovery_generation = None;
         self.upstream_state_notify.notify_waiters();
         self.tick_driver_error = Some(error);
@@ -1985,7 +2003,7 @@ impl ClientDbInner {
         inner: &Weak<RefCell<Self>>,
         expected_generation: u64,
     ) -> Result<bool> {
-        let (db, identity, scheduler, config, state_notify) = {
+        let (db, identity, scheduler, config, state_notify, recovering) = {
             let Some(inner) = inner.upgrade() else {
                 return Ok(false);
             };
@@ -2006,9 +2024,17 @@ impl ClientDbInner {
                 Rc::clone(&inner_state.scheduler),
                 config,
                 Arc::clone(&inner_state.upstream_state_notify),
+                inner_state.upstream_recovery_generation == Some(expected_generation),
             )
         };
 
+        // The core empty-opening gate waits on an attempt, bounded from its
+        // start; a failed attempt or a backoff between retries never waits.
+        // A recovery retry after a lost link keeps the `Failed` reported at
+        // the loss, as the TS and RN hosts do.
+        if !recovering {
+            db.set_remote_link_hint(CoreRemoteLinkHint::Attempting);
+        }
         let wire_wake = Arc::new(tokio::sync::Notify::new());
         let connected = Self::await_native_admission(
             inner,
@@ -2019,7 +2045,12 @@ impl ClientDbInner {
             state_notify,
             Arc::clone(&wire_wake),
         )
-        .await?;
+        .await
+        .inspect_err(|_| {
+            if Self::is_current_disconnected_generation_weak(inner, expected_generation) {
+                db.set_remote_link_hint(CoreRemoteLinkHint::Failed);
+            }
+        })?;
         let Some(connected) = connected else {
             return Ok(false);
         };
@@ -2071,6 +2102,7 @@ impl ClientDbInner {
             }
             inner_state.upstream_generation = inner_state.upstream_generation.wrapping_add(1);
             inner_state.upstream = Some(connection);
+            db.set_remote_link_hint(CoreRemoteLinkHint::Live);
             if inner_state.upstream_recovery_generation == Some(expected_generation) {
                 inner_state.upstream_recovery_generation = None;
             }
@@ -3397,6 +3429,7 @@ impl JazzClient {
             propagation: CorePropagation::Full,
             include_deleted: false,
             read_view: CoreReadViewSpec::default(),
+            empty_opening: CoreEmptyOpening::Deliver,
         }
     }
 
@@ -3404,8 +3437,11 @@ impl JazzClient {
         let mut opts = Self::core_read_opts(Some(tier.legacy_durability_tier()));
         opts.local_updates = match tier {
             ReadTier::Remote => CoreLocalUpdates::Deferred,
-            ReadTier::LocalFirst | ReadTier::RemoteIfPossible => CoreLocalUpdates::Immediate,
+            ReadTier::LocalFirst | ReadTier::LocalFirstUnlessEmpty => CoreLocalUpdates::Immediate,
         };
+        if tier == ReadTier::LocalFirstUnlessEmpty {
+            opts.empty_opening = CoreEmptyOpening::AwaitRemote;
+        }
         opts
     }
 }
@@ -3901,9 +3937,11 @@ impl JazzClient {
 
     /// Subscribe using a product-level read tier.
     ///
-    /// `RemoteIfPossible` keeps a strict remote initial gate in the native Rust
-    /// facade because it has no public explicit-disconnect state; host bindings
-    /// can lower it to local only after their caller explicitly disconnects.
+    /// `LocalFirstUnlessEmpty` passes the core `EmptyOpening::AwaitRemote`
+    /// option through: the core stream withholds only an empty, unsettled
+    /// local opening while the server could answer, and then behaves exactly
+    /// like `LocalFirst`. An offset window is read as a strict remote view
+    /// while the server could answer.
     pub async fn subscribe_with_read_tier(
         &self,
         query: Query,
@@ -3928,8 +3966,36 @@ impl JazzClient {
     }
 
     /// One-shot query with read tier.
+    ///
+    /// `LocalFirstUnlessEmpty` uses the core one-shot rule: a non-empty local
+    /// result is returned as is; an empty one is replaced by the strict remote
+    /// result while the server could answer, falling back to the empty local
+    /// result (and dropping the pending remote read) if it cannot. An offset
+    /// window reads remote first while the server could answer.
     pub async fn query(&self, query: Query, tier: ReadTier) -> Result<Vec<QueryResult>> {
-        self.query_with_opts(query, Self::core_read_opts_for_read_tier(tier))
+        let in_transaction = self
+            .write_context
+            .as_ref()
+            .is_some_and(|ctx| ctx.transaction_id.is_some());
+        if tier != ReadTier::LocalFirstUnlessEmpty || in_transaction {
+            return self
+                .query_with_opts(query, Self::core_read_opts_for_read_tier(tier))
+                .await;
+        }
+        let backend = self.db.backend()?;
+        let local_opts = Self::core_read_opts_for_read_tier(ReadTier::LocalFirst);
+        let mut remote_opts = Self::core_read_opts_for_read_tier(ReadTier::Remote);
+        remote_opts.local_updates = CoreLocalUpdates::Immediate;
+        let windowed = query.offset > 0;
+        let remote_query = query.clone();
+        backend
+            .0
+            .read_local_first_unless_empty(
+                windowed,
+                || self.query_with_opts(query, local_opts),
+                || self.query_with_opts(remote_query, remote_opts),
+                |rows: &Vec<QueryResult>| rows.is_empty(),
+            )
             .await
     }
 
@@ -4840,9 +4906,9 @@ mod tests {
             DurabilityTier::GlobalServer
         );
         assert_eq!(
-            ReadTier::RemoteIfPossible.legacy_durability_tier(),
-            DurabilityTier::GlobalServer,
-            "the native facade has no explicit offline boundary"
+            ReadTier::LocalFirstUnlessEmpty.legacy_durability_tier(),
+            DurabilityTier::Local,
+            "the empty-opening gate is a read option, not a tier"
         );
         assert_eq!(
             JazzClient::core_read_opts_for_read_tier(ReadTier::LocalFirst).local_updates,
@@ -4853,8 +4919,12 @@ mod tests {
             CoreLocalUpdates::Deferred
         );
         assert_eq!(
-            JazzClient::core_read_opts_for_read_tier(ReadTier::RemoteIfPossible).local_updates,
+            JazzClient::core_read_opts_for_read_tier(ReadTier::LocalFirstUnlessEmpty).local_updates,
             CoreLocalUpdates::Immediate
+        );
+        assert_eq!(
+            JazzClient::core_read_opts_for_read_tier(ReadTier::LocalFirstUnlessEmpty).empty_opening,
+            CoreEmptyOpening::AwaitRemote
         );
         assert_eq!(
             core_legacy_read_tier(DurabilityTier::Local),

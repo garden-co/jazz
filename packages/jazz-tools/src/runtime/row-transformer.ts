@@ -19,11 +19,15 @@ export interface IncludeSpec {
   [relationName: string]: unknown;
 }
 
+type BaseColumn = { name: string; columnType: ColumnType };
+
 type IncludePlan = {
   relation: Relation;
   nested: IncludePlan[];
   projection?: readonly string[];
   nestedRelationNames: readonly string[];
+  /** Resolved on the first included row, then reused for every later row. */
+  baseColumns?: BaseColumn[];
 };
 
 type NamedRowValues = Map<string, WasmValue> | Record<string, WasmValue>;
@@ -57,7 +61,7 @@ function resolveBaseColumns(
   tableName: string,
   schema: WasmSchema,
   projection?: readonly string[],
-): Array<{ name: string; columnType: ColumnType }> {
+): BaseColumn[] {
   const table = schema[tableName];
   if (!table) {
     throw new Error(`Unknown table "${tableName}" in schema`);
@@ -75,7 +79,7 @@ function resolveBaseColumns(
       const column = table.columns.find((candidate) => candidate.name === columnName);
       return column ? { name: column.name, columnType: column.column_type } : null;
     })
-    .filter((column): column is { name: string; columnType: ColumnType } => column !== null);
+    .filter((column): column is BaseColumn => column !== null);
 }
 
 function toByteArray(value: unknown): Uint8Array {
@@ -177,13 +181,14 @@ function transformIncludedValue(
     const rowId = entry.value.id;
     const columnValues = entry.value.values;
     const valuesByColumn = (entry.value as RowValueWithNamedValues).valuesByColumn;
+    plan.baseColumns ??= resolveBaseColumns(plan.relation.toTable, schema, plan.projection);
     return transformRowValues(
       columnValues,
       schema,
       plan.relation.toTable,
       plan.nested,
+      plan.baseColumns,
       rowId,
-      plan.projection,
       valuesByColumn,
       transformsByTable,
       plan.nestedRelationNames,
@@ -198,8 +203,8 @@ function transformRowValues(
   schema: WasmSchema,
   tableName: string,
   includePlans: IncludePlan[],
+  baseColumns: BaseColumn[],
   rowId?: string,
-  projection?: readonly string[],
   valuesByColumn?: NamedRowValues,
   transformsByTable?: ReadColumnTransformRegistry,
   includedRelationNames: readonly string[] = [],
@@ -214,8 +219,6 @@ function transformRowValues(
   if (rowId !== undefined) {
     obj.id = rowId;
   }
-
-  const baseColumns = resolveBaseColumns(tableName, schema, projection);
 
   for (let i = 0; i < baseColumns.length; i++) {
     const col = baseColumns[i];
@@ -307,6 +310,54 @@ export function unwrapValue(v: WasmValue, columnType?: ColumnType, columnName?: 
   }
 }
 
+type PreparedRowTransform = {
+  includePlans: IncludePlan[];
+  includedRelationNames: readonly string[];
+  baseColumns?: BaseColumn[];
+};
+
+function prepareRowTransform(
+  schema: WasmSchema,
+  tableName: string,
+  includes: IncludeSpec,
+): PreparedRowTransform {
+  if (!schema[tableName]) {
+    throw new Error(`Unknown table "${tableName}" in schema`);
+  }
+  const includePlans =
+    Object.keys(includes).length === 0
+      ? []
+      : buildIncludePlans(tableName, normalizeIncludeEntries(includes), analyzeRelations(schema));
+  return {
+    includePlans,
+    includedRelationNames: includePlans.map((plan) => plan.relation.name),
+  };
+}
+
+function transformPreparedRow<T>(
+  prepared: PreparedRowTransform,
+  row: WasmRowWithNamedValues,
+  schema: WasmSchema,
+  tableName: string,
+  projection: readonly string[] | undefined,
+  transformsByTable: ReadColumnTransformRegistry | undefined,
+  applyRootTransforms: boolean,
+): T {
+  prepared.baseColumns ??= resolveBaseColumns(tableName, schema, projection);
+  return transformRowValues(
+    row.values as WasmValue[],
+    schema,
+    tableName,
+    prepared.includePlans,
+    prepared.baseColumns,
+    row.id,
+    row.valuesByColumn,
+    transformsByTable,
+    prepared.includedRelationNames,
+    applyRootTransforms,
+  ) as T;
+}
+
 /**
  * Transform WasmRow[] to typed objects using schema column order.
  *
@@ -325,30 +376,49 @@ export function transformRows<T>(
   transformsByTable?: ReadColumnTransformRegistry,
   applyRootTransforms = true,
 ): T[] {
-  if (!schema[tableName]) {
-    throw new Error(`Unknown table "${tableName}" in schema`);
-  }
-
-  const includePlans =
-    Object.keys(includes).length === 0
-      ? []
-      : buildIncludePlans(tableName, normalizeIncludeEntries(includes), analyzeRelations(schema));
-  const includedRelationNames = includePlans.map((plan) => plan.relation.name);
-
-  return rows.map((row: WasmRowWithNamedValues) => {
-    return transformRowValues(
-      row.values as WasmValue[],
+  const prepared = prepareRowTransform(schema, tableName, includes);
+  return rows.map((row: WasmRowWithNamedValues) =>
+    transformPreparedRow<T>(
+      prepared,
+      row,
       schema,
       tableName,
-      includePlans,
-      row.id,
       projection,
-      row.valuesByColumn,
       transformsByTable,
-      includedRelationNames,
       applyRootTransforms,
-    ) as T;
-  });
+    ),
+  );
+}
+
+/**
+ * Build a per-row transform for a long-lived consumer such as a subscription.
+ *
+ * Equivalent to calling {@link transformRow} with the same arguments for each
+ * row, but include plans (including the relation analysis of the whole
+ * schema) and resolved column lists are built once, on the first row, and
+ * reused. The schema must not be mutated while the transformer is in use.
+ */
+export function createRowTransformer<T>(
+  schema: WasmSchema,
+  tableName: string,
+  includes: IncludeSpec = {},
+  projection?: readonly string[],
+  transformsByTable?: ReadColumnTransformRegistry,
+  applyRootTransforms = true,
+): (row: WasmRow) => T {
+  let prepared: PreparedRowTransform | undefined;
+  return (row) => {
+    prepared ??= prepareRowTransform(schema, tableName, includes);
+    return transformPreparedRow<T>(
+      prepared,
+      row,
+      schema,
+      tableName,
+      projection,
+      transformsByTable,
+      applyRootTransforms,
+    );
+  };
 }
 
 export function transformRow<T>(

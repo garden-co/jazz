@@ -124,6 +124,10 @@ pub struct InMemoryServerShellConfig {
     /// catalogue if the opened store does not already carry a durable write
     /// pointer for it.
     pub bootstrap_runtime_schema: bool,
+    /// Whether a durable store that does not hold the constructor schema
+    /// reopens with its own current schema instead of failing its genesis
+    /// check. Fresh stores still open with the constructor schema.
+    pub reopen_with_durable_schema: bool,
     /// Target-shell factory used when [`StorageConfig`] selects durable storage.
     pub storage_factory: Option<Arc<dyn StorageFactory>>,
 }
@@ -138,6 +142,7 @@ impl InMemoryServerShellConfig {
             large_value_staging_policy: crate::node::LargeValueStagingPolicy::default(),
             role: NodeRole::Core,
             bootstrap_runtime_schema: false,
+            reopen_with_durable_schema: false,
             storage_factory: None,
         }
     }
@@ -177,6 +182,15 @@ impl InMemoryServerShellConfig {
         self.bootstrap_runtime_schema = true;
         self
     }
+
+    /// Reopen an existing durable store with its own current schema when it
+    /// does not hold the constructor schema. A dynamic-schema server uses this
+    /// because its administrative catalogue can name a schema its runtime
+    /// store never admitted; a fixed-schema server keeps the strict check.
+    pub fn with_durable_reopen_schema(mut self) -> Self {
+        self.reopen_with_durable_schema = true;
+        self
+    }
 }
 
 impl fmt::Debug for InMemoryServerShellConfig {
@@ -191,6 +205,10 @@ impl fmt::Debug for InMemoryServerShellConfig {
             )
             .field("role", &self.role)
             .field("bootstrap_runtime_schema", &self.bootstrap_runtime_schema)
+            .field(
+                "reopen_with_durable_schema",
+                &self.reopen_with_durable_schema,
+            )
             .field(
                 "storage_factory",
                 &self.storage_factory.as_ref().map(|_| "configured"),
@@ -236,6 +254,9 @@ struct InMemoryServerShellMetrics {
     tick_subscription_wakes: u64,
     tick_write_wakes: u64,
     last_tick: ShellTickStats,
+    /// Fallbacks of sessions closed without a resume cursor. Live sessions and
+    /// parked resume cursors still own theirs.
+    retired_full_diff_fallbacks: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -448,6 +469,13 @@ impl ShellDb {
         match self {
             Self::Memory(db) => db.enable_authoritative_scalar_exit_refresh(),
             Self::Durable(db) => db.enable_authoritative_scalar_exit_refresh(),
+        }
+    }
+
+    fn declare_upload_root(&self) {
+        match self {
+            Self::Memory(db) => db.declare_upload_root(),
+            Self::Durable(db) => db.declare_upload_root(),
         }
     }
 
@@ -736,6 +764,16 @@ impl ShellPeerConnection {
         }
     }
 
+    fn full_diff_fallbacks(&self) -> u64 {
+        match self {
+            Self::Memory(connection) | Self::Durable(connection) => {
+                crate::db::block_on(connection.lock())
+                    .full_diff_fallbacks()
+                    .total()
+            }
+        }
+    }
+
     #[cfg(test)]
     fn scope_relay_admission_epoch_for_test(&self) -> Option<u64> {
         match self {
@@ -800,16 +838,24 @@ impl InMemoryServerShell {
                         "durable server storage requires a target-shell storage factory".into(),
                     )
                 })?;
-                let mut db_config = DbConfig::new(
-                    config.schema,
-                    crate::db::block_on(factory.open(
-                        path.clone(),
-                        refs,
-                        epoch_1_storage_codec_profile().map_err(db_storage_error)?,
-                    ))
-                    .map_err(db_storage_error)?,
-                    config.identity,
-                );
+                let storage = crate::db::block_on(factory.open(
+                    path.clone(),
+                    refs,
+                    epoch_1_storage_codec_profile().map_err(db_storage_error)?,
+                ))
+                .map_err(db_storage_error)?;
+                let (storage, schema) = if config.reopen_with_durable_schema {
+                    crate::db::block_on(
+                        crate::node::NodeState::<BoxedStorage>::select_durable_reopen_schema(
+                            storage,
+                            config.schema,
+                        ),
+                    )
+                    .map_err(|error| ShellError::Db(error.to_string()))?
+                } else {
+                    (storage, config.schema)
+                };
+                let mut db_config = DbConfig::new(schema, storage, config.identity);
                 if let Some(row_id_seed) = config.row_id_seed {
                     db_config = db_config.with_id_source(SeededRowIdSource::new(row_id_seed));
                 }
@@ -823,6 +869,8 @@ impl InMemoryServerShell {
         };
         if role == NodeRole::Core {
             db.enable_authoritative_scalar_exit_refresh();
+            // A Core shell is the root until `connect_upstream` says otherwise.
+            db.declare_upload_root();
         }
         db.set_large_value_staging_policy(large_value_staging_policy);
 
@@ -1247,6 +1295,7 @@ impl InMemoryServerShell {
     /// Close a subscriber session without preserving a resume cursor.
     pub fn close_session(&mut self, session: ServerSession) -> ShellResult<()> {
         let state = self.take_session(session)?;
+        self.metrics.retired_full_diff_fallbacks += state.connection.full_diff_fallbacks();
         self.db.detach_connection(&state.connection);
         self.note_session_closed();
         Ok(())
@@ -1286,6 +1335,21 @@ impl InMemoryServerShell {
         }
     }
 
+    fn subscription_full_diff_fallbacks(&self) -> u64 {
+        let live: u64 = self
+            .sessions
+            .iter()
+            .flatten()
+            .map(|state| state.connection.full_diff_fallbacks())
+            .sum();
+        let parked: u64 = self
+            .resume_cursors
+            .values()
+            .map(|(_, cursor)| cursor.full_diff_fallbacks().total())
+            .sum();
+        self.metrics.retired_full_diff_fallbacks + live + parked
+    }
+
     /// Return live operational counters for the in-memory shell.
     pub fn metrics_snapshot(&self) -> MetricsSnapshot {
         MetricsSnapshot {
@@ -1306,7 +1370,7 @@ impl InMemoryServerShell {
             last_tick_subscription_wakes: u64::from(self.metrics.last_tick.subscription_wakes),
             last_tick_write_wakes: u64::from(self.metrics.last_tick.write_wakes),
             protocol_version_mismatches: 0,
-            subscription_full_diff_fallbacks: 0,
+            subscription_full_diff_fallbacks: self.subscription_full_diff_fallbacks(),
             storage_migrations_applied: 0,
         }
     }

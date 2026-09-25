@@ -21,6 +21,19 @@ use thiserror::Error;
 
 use super::op_types::*;
 
+/// Snapshot-only index-key filter: an indexed row is hydrated only when its
+/// `source_column` UUID also appears in the candidate index's `candidate_column`.
+/// The candidate side is a conservative superset; the ordinary graph still
+/// checks the complete join, visibility, policy, and deletion rules.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct IndexCandidateFilter {
+    pub table: String,
+    pub index: String,
+    pub scan: StaticScanSpec,
+    pub source_column: String,
+    pub candidate_column: String,
+}
+
 /// User-facing graph construction API before deduplication.
 ///
 /// Builders refer to table and field names directly; the runtime resolves those
@@ -189,6 +202,7 @@ pub enum GraphBuilder {
         /// Row projection sources intersect these encoded index entries before
         /// fetching table records, so surviving rows are decoded only once.
         intersections: Vec<(String, StaticScanSpec)>,
+        candidate_filter: Option<IndexCandidateFilter>,
         /// When present, fetch indexed table rows and project their variants
         /// instead of exposing the index's encoded key/value records.
         row_projection: Option<String>,
@@ -572,6 +586,7 @@ impl GraphBuilder {
             index: index.into(),
             scan: None,
             intersections: Vec::new(),
+            candidate_filter: None,
             row_projection: None,
         }
     }
@@ -586,6 +601,7 @@ impl GraphBuilder {
             index: index.into(),
             scan: Some(scan),
             intersections: Vec::new(),
+            candidate_filter: None,
             row_projection: None,
         }
     }
@@ -603,6 +619,7 @@ impl GraphBuilder {
             index: index.into(),
             scan: Some(scan),
             intersections: Vec::new(),
+            candidate_filter: None,
             row_projection: Some(projection_target.into()),
         }
     }
@@ -621,6 +638,26 @@ impl GraphBuilder {
             index: index.into(),
             scan: Some(scan),
             intersections: intersections.into_iter().collect(),
+            candidate_filter: None,
+            row_projection: Some(projection_target.into()),
+        }
+    }
+
+    /// Snapshot-only row source with a conservative index-key semijoin before
+    /// full-row hydration. A retained source must use the ordinary live graph.
+    pub fn variant_index_candidate_scan(
+        table: impl Into<String>,
+        index: impl Into<String>,
+        scan: StaticScanSpec,
+        candidate_filter: IndexCandidateFilter,
+        projection_target: impl Into<String>,
+    ) -> Self {
+        Self::Index {
+            table: table.into(),
+            index: index.into(),
+            scan: Some(scan),
+            intersections: Vec::new(),
+            candidate_filter: Some(candidate_filter),
             row_projection: Some(projection_target.into()),
         }
     }
@@ -1636,9 +1673,76 @@ pub struct IvmGraph {
     table_sources: HashMap<String, HashSet<NodeId>>,
     binding_sources: HashMap<BindingSourceKey, HashSet<NodeId>>,
     frontier_sources: HashMap<String, HashSet<NodeId>>,
+    /// Route barriers below shared prepared-shape terminals (#3288).
+    routes: super::routes::RouteIndex,
+    /// Nodes inserted since the runtime last drained them. Every new node is
+    /// unretained until an operation adds a retainer, so graph GC starts its
+    /// incremental sweep from these.
+    added_since_drain: Vec<NodeId>,
 }
 
 impl IvmGraph {
+    pub(crate) fn routes(&self) -> &super::routes::RouteIndex {
+        &self.routes
+    }
+
+    /// Mark `barrier` (a bound route filter over `terminal`) so activation
+    /// stops there and the tick routes `terminal`'s delta by key instead.
+    pub(crate) fn add_route_barrier(
+        &mut self,
+        terminal: NodeId,
+        barrier: NodeId,
+        field_indices: Vec<usize>,
+        field_types: Vec<ValueType>,
+        key: Vec<u8>,
+        root_ordering_node: Option<NodeId>,
+    ) {
+        if self.routes.add(
+            terminal,
+            barrier,
+            field_indices,
+            field_types,
+            key,
+            root_ordering_node,
+        ) {
+            self.activations.clear();
+        }
+    }
+
+    pub(crate) fn release_route_barrier(&mut self, barrier: NodeId) {
+        if self.routes.release(barrier) {
+            self.activations.clear();
+        }
+    }
+
+    /// Every descendant of `roots`, including those behind route barriers.
+    pub(crate) fn downstream_through_routes(
+        &self,
+        roots: impl IntoIterator<Item = NodeId>,
+    ) -> std::collections::HashSet<NodeId> {
+        let mut reached = std::collections::HashSet::new();
+        let mut pending = roots.into_iter().collect::<Vec<_>>();
+        while let Some(id) = pending.pop() {
+            if reached.insert(id)
+                && let Some(node) = self.nodes.get(&id)
+            {
+                pending.extend(node.children.iter().copied());
+            }
+        }
+        reached
+    }
+
+    /// Descendants of changed sources, crossing route barriers. Hydration uses
+    /// this: a binding change must invalidate every bound suffix it reaches.
+    pub(crate) fn affected_nodes_through_routes<'a>(
+        &self,
+        tables: impl IntoIterator<Item = &'a str>,
+        bindings: impl IntoIterator<Item = &'a BindingSourceKey>,
+    ) -> std::collections::HashSet<NodeId> {
+        let sources = self.source_nodes(tables, bindings);
+        self.downstream_through_routes(sources)
+    }
+
     pub(crate) fn execution_layout(
         &self,
         roots: impl IntoIterator<Item = NodeId>,
@@ -1706,7 +1810,15 @@ impl IvmGraph {
         descriptor: NodeDescriptor,
         durability: NodeDurability,
     ) -> NodeId {
-        self.activations.added(&descriptor.inputs);
+        self.added_since_drain.push(id);
+        // A durable node changes whether every route barrier above it keeps
+        // ordinary activation, including in plans that never reached its
+        // inputs because they stopped at such a barrier.
+        if matches!(durability, NodeDurability::Durable { .. }) {
+            self.activations.clear();
+        } else {
+            self.activations.added(&descriptor.inputs);
+        }
         for input in &descriptor.inputs {
             if let Some(input_node) = self.nodes.get_mut(input) {
                 input_node.children.insert(id);
@@ -1772,7 +1884,8 @@ impl IvmGraph {
         self.nodes.get(&id)
     }
 
-    pub fn node_mut(&mut self, id: NodeId) -> Option<&mut GraphNode> {
+    #[cfg(test)]
+    pub(crate) fn node_mut(&mut self, id: NodeId) -> Option<&mut GraphNode> {
         self.activations.clear();
         self.execution_layouts.invalidate(None);
         self.nodes.get_mut(&id)
@@ -1800,7 +1913,16 @@ impl IvmGraph {
         tables: impl IntoIterator<Item = &'a str>,
         bindings: impl IntoIterator<Item = &'a BindingSourceKey>,
     ) -> Result<std::sync::Arc<super::activation::ActivationPlan>, NodeId> {
-        let sources = tables
+        let sources = self.source_nodes(tables, bindings);
+        self.activations.get(self, sources)
+    }
+
+    fn source_nodes<'a>(
+        &self,
+        tables: impl IntoIterator<Item = &'a str>,
+        bindings: impl IntoIterator<Item = &'a BindingSourceKey>,
+    ) -> Vec<NodeId> {
+        tables
             .into_iter()
             .filter_map(|table| self.table_sources.get(table))
             .chain(bindings.into_iter().flat_map(|binding| {
@@ -1811,8 +1933,12 @@ impl IvmGraph {
                 )
             }))
             .flat_map(|nodes| nodes.iter().copied())
-            .collect::<Vec<_>>();
-        self.activations.get(self, sources)
+            .collect()
+    }
+
+    /// Nodes inserted since the previous call, including ones removed since.
+    pub(crate) fn take_added_nodes(&mut self) -> Vec<NodeId> {
+        std::mem::take(&mut self.added_since_drain)
     }
 
     pub fn mark_ancestors<S>(&self, id: NodeId, retained: &mut std::collections::HashSet<NodeId, S>)
@@ -1832,6 +1958,9 @@ impl IvmGraph {
 
     pub fn remove_node(&mut self, id: NodeId) {
         self.activations.removed(id);
+        if self.routes.remove(id) {
+            self.activations.clear();
+        }
         let Some(node) = self.nodes.remove(&id) else {
             return;
         };

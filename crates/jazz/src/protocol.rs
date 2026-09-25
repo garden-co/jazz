@@ -4600,20 +4600,43 @@ fn durable_public_schema_json(schema: &JazzSchema) -> Result<Vec<u8>, String> {
     serde_json::to_vec(schema.public_schema()).map_err(|error| error.to_string())
 }
 
-/// Canonical CATS v1 payload used by catalogue storage and publication identity.
+/// Frozen CATS schema envelope for schemas without composite indexes.
+pub(crate) const CATALOGUE_SCHEMA_V1: u8 = 1;
+/// CATS schema envelope for schemas that declare at least one composite
+/// index. The layout is identical to v1; the version byte exists so a reader
+/// that predates `composite_indexes` rejects the payload by version instead of
+/// silently dropping the unknown public-schema JSON field.
+pub(crate) const CATALOGUE_SCHEMA_V2_COMPOSITE_INDEXES: u8 = 2;
+
+/// The only CATS schema envelope version that may carry `schema`.
+///
+/// v1 bytes of every schema without composite indexes are unchanged; v2 is
+/// used exactly when some table declares one, so each schema has one
+/// canonical payload.
+pub(crate) fn catalogue_schema_payload_version(schema: &JazzSchema) -> u8 {
+    if schema
+        .public_schema()
+        .values()
+        .any(|table| !table.composite_indexes.is_empty())
+    {
+        CATALOGUE_SCHEMA_V2_COMPOSITE_INDEXES
+    } else {
+        CATALOGUE_SCHEMA_V1
+    }
+}
+
+/// Canonical CATS payload used by catalogue storage and publication identity.
 ///
 /// This is deliberately a small explicit envelope rather than the serde layout
-/// of `SchemaVersion`: version, raw schema UUID, little-endian JSON length, and
-/// the canonical public-schema JSON bytes.
-pub(crate) fn canonical_catalogue_schema_v1_bytes(
-    schema: &SchemaVersion,
-) -> Result<Vec<u8>, String> {
-    const CATALOGUE_SCHEMA_VERSION: u8 = 1;
+/// of `SchemaVersion`: version (see [`catalogue_schema_payload_version`]), raw
+/// schema UUID, little-endian JSON length, and the canonical public-schema
+/// JSON bytes.
+pub(crate) fn canonical_catalogue_schema_bytes(schema: &SchemaVersion) -> Result<Vec<u8>, String> {
     let public_schema = durable_public_schema_json(&schema.schema)?;
     let length = u32::try_from(public_schema.len())
         .map_err(|_| "catalogue public schema payload too large".to_owned())?;
     let mut payload = Vec::with_capacity(1 + 16 + 4 + public_schema.len());
-    payload.push(CATALOGUE_SCHEMA_VERSION);
+    payload.push(catalogue_schema_payload_version(&schema.schema));
     payload.extend_from_slice(schema.id.0.as_bytes());
     payload.extend_from_slice(&length.to_le_bytes());
     payload.extend_from_slice(&public_schema);
@@ -5448,7 +5471,7 @@ impl SchemaLineagePublication {
         put_str(&mut bytes, "jazz-schema-lineage-publication-v1");
         put_bytes(
             &mut bytes,
-            &canonical_catalogue_schema_v1_bytes(&self.schema)
+            &canonical_catalogue_schema_bytes(&self.schema)
                 .expect("schema publication has a canonical CATS v1 payload"),
         );
         put_bytes(&mut bytes, &canonical_lens_bytes(&self.lens));

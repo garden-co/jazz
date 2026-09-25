@@ -410,6 +410,1386 @@ fn seed_issue_project(db: &Db<RocksDbStorage>, author: AuthorSubject) {
     .unwrap();
 }
 
+/// A one-shot read pinned to one issue probes the junction's issue index while
+/// preserving the policy-scoped join result across unrelated links and deletion.
+/// This lives here because the index-path assertion needs the internal source
+/// metric; row correctness is checked through the public Db read API.
+/// alice: seed two issues and links -> bob reads one issue -> delete its link -> bob reads
+#[test]
+fn point_join_one_shot_uses_junction_index_and_tracks_deletion() {
+    let write_grants = || {
+        PublicTablePolicies::new()
+            .with_insert(PublicPolicyExpr::True)
+            .with_delete(PublicPolicyExpr::True)
+    };
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("issues")
+                    .column("title", PublicColumnType::Text)
+                    .policies(write_grants().with_select(PublicPolicyExpr::eq_literal(
+                        "title",
+                        PublicValue::Text("target".to_owned()),
+                    ))),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("issue_tags")
+                    .fk_column("issue", "issues")
+                    .column("tag", PublicColumnType::Text)
+                    .policies(write_grants().with_select(PublicPolicyExpr::True)),
+            ),
+    );
+    let alice = AuthorSubject::SYSTEM;
+    let bob = AuthorSubject::for_test_bytes([0xa8; 16]);
+    let db = block_on(Db::open_history_complete(DbConfig {
+        schema: schema.clone(),
+        storage: rocks_storage(&schema),
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xa7; 16]),
+            author: alice,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xa7))),
+    }))
+    .unwrap();
+    for (id, title) in [(row(1), "target"), (row(2), "other")] {
+        db.seed_settled_mergeable_for_bootstrap(
+            "issues",
+            id,
+            alice,
+            BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]),
+        )
+        .unwrap();
+    }
+    for (id, issue, tag) in [
+        (row(20), row(1), "wanted"),
+        (row(21), row(1), "other"),
+        (row(22), row(2), "wanted"),
+    ] {
+        db.seed_settled_mergeable_for_bootstrap(
+            "issue_tags",
+            id,
+            alice,
+            BTreeMap::from([
+                ("issue".to_owned(), Value::Uuid(issue.0)),
+                ("tag".to_owned(), Value::String(tag.to_owned())),
+            ]),
+        )
+        .unwrap();
+    }
+    let prepared = db
+        .prepare_query(
+            &Query::from("issues")
+                .filter(eq(col("id"), lit(Value::Uuid(row(1).0))))
+                .join_via("issue_tags", "issue", [eq(col("tag"), lit("wanted"))]),
+        )
+        .unwrap();
+    let read = |prepared| {
+        row_ids(
+            &block_on(db.all_for_identity(
+                prepared,
+                ReadOpts {
+                    tier: DurabilityTier::Global,
+                    local_updates: LocalUpdates::Deferred,
+                    propagation: Propagation::LocalOnly,
+                    include_deleted: false,
+                    ..ReadOpts::default()
+                },
+                bob,
+            ))
+            .unwrap(),
+        )
+    };
+    db.node.node.borrow_mut().reset_query_engine_read_metrics();
+    assert_eq!(read(&prepared), vec![row(1)]);
+    assert!(
+        db.node
+            .node
+            .borrow()
+            .query_engine_read_metrics()
+            .source_index_probes
+            >= 1,
+        "the first result should probe the indexed issue foreign key"
+    );
+    let hidden = db
+        .prepare_query(
+            &Query::from("issues")
+                .filter(eq(col("id"), lit(Value::Uuid(row(2).0))))
+                .join_via("issue_tags", "issue", [eq(col("tag"), lit("wanted"))]),
+        )
+        .unwrap();
+    assert!(read(&hidden).is_empty(), "bob cannot read the other issue");
+
+    let deleted = block_on(db.delete("issue_tags", row(20), Default::default())).unwrap();
+    block_on(deleted.wait(DurabilityTier::Local)).unwrap();
+    db.finalize_local_mergeable_commit_for_test(deleted.mergeable_tx_id())
+        .unwrap();
+    assert!(read(&prepared).is_empty());
+
+    db.seed_settled_mergeable_for_bootstrap(
+        "issue_tags",
+        row(23),
+        alice,
+        BTreeMap::from([
+            ("issue".to_owned(), Value::Uuid(row(1).0)),
+            ("tag".to_owned(), Value::String("wanted".to_owned())),
+        ]),
+    )
+    .unwrap();
+    assert_eq!(read(&prepared), vec![row(1)]);
+}
+
+/// The public result is the oracle. The internal probe count confirms that a
+/// broad first-result join uses both the root and junction filter indexes.
+#[test]
+fn filtered_join_one_shot_uses_both_source_indexes() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("issues")
+                    .column("group", PublicColumnType::Text)
+                    .index_only(["group"])
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("issue_tags")
+                    .fk_column("issue", "issues")
+                    .column("tag", PublicColumnType::Text)
+                    .index_only(["tag"])
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            ),
+    );
+    let db = block_on(Db::open_history_complete(DbConfig::new(
+        schema.clone(),
+        rocks_storage(&schema),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xb8; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+    for n in 1..=80 {
+        db.seed_settled_mergeable_for_bootstrap(
+            "issues",
+            row(n),
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([(
+                "group".to_owned(),
+                Value::String(if n <= 40 { "wanted" } else { "other" }.to_owned()),
+            )]),
+        )
+        .unwrap();
+        db.seed_settled_mergeable_for_bootstrap(
+            "issue_tags",
+            row(n + 100),
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([
+                ("issue".to_owned(), Value::Uuid(row(n).0)),
+                (
+                    "tag".to_owned(),
+                    Value::String(if n == 1 || n > 40 { "wanted" } else { "other" }.to_owned()),
+                ),
+            ]),
+        )
+        .unwrap();
+    }
+    let prepared = db
+        .prepare_query(
+            &Query::from("issues")
+                .filter(eq(col("group"), lit("wanted")))
+                .join_via("issue_tags", "issue", [eq(col("tag"), lit("wanted"))]),
+        )
+        .unwrap();
+    db.node.node.borrow_mut().reset_query_engine_read_metrics();
+    let rows = block_on(db.all_for_identity(
+        &prepared,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            propagation: Propagation::LocalOnly,
+            ..ReadOpts::default()
+        },
+        AuthorSubject::SYSTEM,
+    ))
+    .unwrap();
+    assert_eq!(row_ids(&rows), vec![row(1)]);
+    assert!(
+        db.node
+            .node
+            .borrow()
+            .query_engine_read_metrics()
+            .source_index_probes
+            >= 2,
+        "both filtered sources should probe indexes before joining"
+    );
+}
+
+/// Opens a history-complete store with two issues and a set of settled
+/// `issue_tags` links for the point-join equivalence tests below. The junction
+/// carries a `scope` column so a test can install a read policy that hides some
+/// links; `nullable` stores the junction foreign key as a nullable column.
+fn open_point_join_db(
+    nullable: bool,
+    junction_select: PublicPolicyExpr,
+    links: &[(RowUuid, RowUuid, &str, &str)],
+) -> Db<RocksDbStorage> {
+    let grants = || {
+        PublicTablePolicies::new()
+            .with_insert(PublicPolicyExpr::True)
+            .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True)
+            .with_delete(PublicPolicyExpr::True)
+    };
+    let tags = PublicTableSchemaBuilder::new("issue_tags");
+    let tags = if nullable {
+        tags.nullable_fk_column("issue", "issues")
+    } else {
+        tags.fk_column("issue", "issues")
+    };
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("issues")
+                    .column("title", PublicColumnType::Text)
+                    .policies(grants().with_select(PublicPolicyExpr::True)),
+            )
+            .table(
+                tags.column("tag", PublicColumnType::Text)
+                    .column("scope", PublicColumnType::Text)
+                    .policies(grants().with_select(junction_select)),
+            ),
+    );
+    let db = block_on(Db::open_history_complete(DbConfig {
+        schema: schema.clone(),
+        storage: rocks_storage(&schema),
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xd7; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xd7))),
+    }))
+    .unwrap();
+    for (id, title) in [(row(1), "one"), (row(2), "two")] {
+        db.seed_settled_mergeable_for_bootstrap(
+            "issues",
+            id,
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]),
+        )
+        .unwrap();
+    }
+    for &(id, issue, tag, scope) in links {
+        db.seed_settled_mergeable_for_bootstrap(
+            "issue_tags",
+            id,
+            AuthorSubject::SYSTEM,
+            point_join_link_cells(nullable, issue, tag, scope),
+        )
+        .unwrap();
+    }
+    db
+}
+
+fn point_join_link_cells(nullable: bool, issue: RowUuid, tag: &str, scope: &str) -> RowCells {
+    let issue = if nullable {
+        Value::Nullable(Some(Box::new(Value::Uuid(issue.0))))
+    } else {
+        Value::Uuid(issue.0)
+    };
+    BTreeMap::from([
+        ("issue".to_owned(), issue),
+        ("tag".to_owned(), Value::String(tag.to_owned())),
+        ("scope".to_owned(), Value::String(scope.to_owned())),
+    ])
+}
+
+/// Reads the indexed point join for `issue` and the same join without the
+/// root id filter (which leaves the junction unindexed), then filters the
+/// control by id afterwards. Asserts both agree and returns the point join's
+/// rows together with the number of secondary-index probes it made.
+fn point_join_matches_unindexed_control(
+    db: &Db<RocksDbStorage>,
+    issue: RowUuid,
+    opts: &ReadOpts,
+    reader: AuthorSubject,
+    label: &str,
+) -> (Vec<RowUuid>, u64) {
+    let read = |query: Query| {
+        let prepared = db.prepare_query(&query).unwrap();
+        let mut rows =
+            row_ids(&block_on(db.all_for_identity(&prepared, opts.clone(), reader)).unwrap());
+        rows.sort();
+        rows
+    };
+    let join =
+        |query: Query| query.join_via("issue_tags", "issue", [eq(col("tag"), lit("wanted"))]);
+    db.node.node.borrow_mut().reset_query_engine_read_metrics();
+    let indexed = read(join(
+        Query::from("issues").filter(eq(col("id"), lit(Value::Uuid(issue.0)))),
+    ));
+    let probes = db
+        .node
+        .node
+        .borrow()
+        .query_engine_read_metrics()
+        .source_index_probes;
+    let mut control = read(join(Query::from("issues")));
+    control.retain(|id| *id == issue);
+    assert_eq!(
+        indexed, control,
+        "{label}: indexed point join for {issue:?} diverges from the unindexed control"
+    );
+    (indexed, probes)
+}
+
+fn point_join_read_opts(tier: DurabilityTier, include_deleted: bool) -> ReadOpts {
+    ReadOpts {
+        tier,
+        local_updates: LocalUpdates::Immediate,
+        propagation: Propagation::LocalOnly,
+        include_deleted,
+        ..ReadOpts::default()
+    }
+}
+
+/// A read policy on the junction table itself must still hide links from an
+/// indexed point join: the index only narrows candidates, and the policy graph
+/// decides membership exactly as for the unindexed join.
+/// This lives here because the index-path assertion needs the internal source
+/// metric; row correctness is checked through the public Db read API.
+/// system: seed links, some private -> bob point-joins each issue -> matches control
+#[test]
+fn point_join_honours_junction_read_policy_like_unindexed_control() {
+    let db = open_point_join_db(
+        false,
+        PublicPolicyExpr::eq_literal("scope", PublicValue::Text("public".to_owned())),
+        &[
+            (row(20), row(1), "wanted", "public"),
+            (row(21), row(1), "wanted", "private"),
+            (row(22), row(1), "other", "public"),
+            (row(23), row(2), "wanted", "private"),
+            (row(24), row(2), "other", "public"),
+        ],
+    );
+    let bob = AuthorSubject::for_test_bytes([0xa8; 16]);
+    for tier in [DurabilityTier::Global, DurabilityTier::Local] {
+        let opts = point_join_read_opts(tier, false);
+        let label = format!("junction policy {tier:?}");
+        let (visible, probes) =
+            point_join_matches_unindexed_control(&db, row(1), &opts, bob, &label);
+        assert_eq!(visible, vec![row(1)], "{label}: only the public link joins");
+        assert!(probes >= 1, "{label}: the junction index should be probed");
+        let (hidden, _) = point_join_matches_unindexed_control(&db, row(2), &opts, bob, &label);
+        assert!(
+            hidden.is_empty(),
+            "{label}: issue 2's only wanted link is private"
+        );
+        let (missing, _) = point_join_matches_unindexed_control(&db, row(9), &opts, bob, &label);
+        assert!(missing.is_empty(), "{label}: no such issue");
+    }
+}
+
+/// Local-tier point joins over settled links agree with the unindexed control,
+/// for both a required and a nullable junction foreign key.
+/// This lives here because the index-path assertion needs the internal source
+/// metric; row correctness is checked through the public Db read API.
+/// system: seed links -> read each issue at Local tier -> matches control
+#[test]
+fn point_join_at_local_tier_matches_unindexed_control() {
+    for nullable in [false, true] {
+        let db = open_point_join_db(
+            nullable,
+            PublicPolicyExpr::True,
+            &[
+                (row(20), row(1), "wanted", "public"),
+                (row(21), row(1), "other", "public"),
+                (row(22), row(2), "wanted", "public"),
+                (row(24), row(1), "wanted", "public"),
+            ],
+        );
+        let opts = point_join_read_opts(DurabilityTier::Local, false);
+        let label = format!("local nullable={nullable}");
+        let reader = AuthorSubject::SYSTEM;
+        let (one, probes) =
+            point_join_matches_unindexed_control(&db, row(1), &opts, reader, &label);
+        assert_eq!(one, vec![row(1), row(1)], "{label}: two wanted links");
+        assert!(probes >= 1, "{label}: the junction index should be probed");
+        let (two, _) = point_join_matches_unindexed_control(&db, row(2), &opts, reader, &label);
+        assert_eq!(two, vec![row(2)], "{label}");
+    }
+}
+
+/// Unsettled link writes (an insert, a move to another issue, and a delete)
+/// must be reflected by a Local point join and ignored by a Global one, exactly
+/// as the unindexed join reflects them, and agree again once they settle.
+/// This lives here because settling needs the internal local-finalize hook and
+/// the index-path assertion needs the internal source metric; row correctness
+/// is checked through the public Db read API.
+/// system: seed -> pending insert/move/delete -> read Global/Local -> settle -> read
+#[test]
+fn point_join_tracks_unsettled_link_insert_move_and_delete_like_control() {
+    for nullable in [false, true] {
+        let db = open_point_join_db(
+            nullable,
+            PublicPolicyExpr::True,
+            &[
+                (row(20), row(1), "wanted", "public"),
+                (row(21), row(1), "other", "public"),
+                (row(22), row(2), "wanted", "public"),
+                (row(24), row(1), "wanted", "public"),
+            ],
+        );
+        let reader = AuthorSubject::SYSTEM;
+        let inserted = block_on(db.insert(
+            "issue_tags",
+            point_join_link_cells(nullable, row(2), "wanted", "public"),
+            crate::db::InsertOptions {
+                row_id: Some(row(30)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        let issue = if nullable {
+            Value::Nullable(Some(Box::new(Value::Uuid(row(2).0))))
+        } else {
+            Value::Uuid(row(2).0)
+        };
+        let moved = block_on(db.update(
+            "issue_tags",
+            row(20),
+            BTreeMap::from([("issue".to_owned(), issue)]),
+            Default::default(),
+        ))
+        .unwrap();
+        let deleted = block_on(db.delete("issue_tags", row(24), Default::default())).unwrap();
+
+        // Settled state only: the pending writes are invisible at Global.
+        // Local: row 20 moved away and row 24 is deleted; issue 2 gains both
+        // the moved link and the inserted one.
+        for (tier, one, two) in [
+            (DurabilityTier::Global, vec![row(1), row(1)], vec![row(2)]),
+            (DurabilityTier::Local, vec![], vec![row(2), row(2), row(2)]),
+        ] {
+            let label = format!("unsettled nullable={nullable} {tier:?}");
+            let opts = point_join_read_opts(tier, false);
+            let (rows, probes) =
+                point_join_matches_unindexed_control(&db, row(1), &opts, reader, &label);
+            assert_eq!(rows, one, "{label}: issue 1");
+            assert!(probes >= 1, "{label}: the junction index should be probed");
+            let (rows, _) =
+                point_join_matches_unindexed_control(&db, row(2), &opts, reader, &label);
+            assert_eq!(rows, two, "{label}: issue 2");
+            // Deleted-row visibility follows the same control either way.
+            let with_deleted = point_join_read_opts(tier, true);
+            for issue in [row(1), row(2)] {
+                point_join_matches_unindexed_control(&db, issue, &with_deleted, reader, &label);
+            }
+        }
+
+        for tx in [
+            inserted.mergeable_tx_id(),
+            moved.mergeable_tx_id(),
+            deleted.mergeable_tx_id(),
+        ] {
+            db.finalize_local_mergeable_commit_for_test(tx).unwrap();
+        }
+        for tier in [DurabilityTier::Global, DurabilityTier::Local] {
+            let label = format!("settled nullable={nullable} {tier:?}");
+            let opts = point_join_read_opts(tier, false);
+            let (rows, _) =
+                point_join_matches_unindexed_control(&db, row(1), &opts, reader, &label);
+            assert!(rows.is_empty(), "{label}: issue 1 lost both wanted links");
+            let (rows, _) =
+                point_join_matches_unindexed_control(&db, row(2), &opts, reader, &label);
+            assert_eq!(rows, vec![row(2), row(2), row(2)], "{label}: issue 2");
+            let with_deleted = point_join_read_opts(tier, true);
+            for issue in [row(1), row(2)] {
+                point_join_matches_unindexed_control(&db, issue, &with_deleted, reader, &label);
+            }
+        }
+    }
+}
+
+fn open_ordered_page_db() -> Db<RocksDbStorage> {
+    let grants = PublicTablePolicies::new()
+        .with_select(PublicPolicyExpr::True)
+        .with_insert(PublicPolicyExpr::True)
+        .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True)
+        .with_delete(PublicPolicyExpr::True);
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("entries")
+                .column("bucket", PublicColumnType::Text)
+                .column("rank", PublicColumnType::BigInt)
+                .column("flag", PublicColumnType::Boolean)
+                .index_only(["bucket"])
+                .composite_index(["bucket", "rank"])
+                .policies(grants),
+        ),
+    );
+    let db = block_on(Db::open_history_complete(DbConfig {
+        schema: schema.clone(),
+        storage: rocks_storage(&schema),
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xc3; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xc3))),
+    }))
+    .unwrap();
+    // Bucket "a" is long with rank ties (three rows per rank) and a sparse
+    // flag; bucket "b" is shorter than most requested pages.
+    for n in 1..=60u8 {
+        let (bucket, rank) = if n <= 54 {
+            ("a", i64::from(n / 3))
+        } else {
+            ("b", i64::from(n))
+        };
+        db.seed_settled_mergeable_for_bootstrap(
+            "entries",
+            row(n),
+            AuthorSubject::SYSTEM,
+            ordered_page_cells(bucket, rank, n % 7 == 0),
+        )
+        .unwrap();
+    }
+    db
+}
+
+fn ordered_page_cells(bucket: &str, rank: i64, flag: bool) -> RowCells {
+    BTreeMap::from([
+        ("bucket".to_owned(), Value::String(bucket.to_owned())),
+        ("rank".to_owned(), Value::I64(rank)),
+        ("flag".to_owned(), Value::Bool(flag)),
+    ])
+}
+
+/// Reads every page shape for `bucket` and compares it with the same query
+/// without a limit, truncated afterwards. The unlimited query never takes the
+/// bounded ordered-page probe, so it is the unbounded control.
+fn ordered_pages_match_unbounded_control(
+    db: &Db<RocksDbStorage>,
+    tier: DurabilityTier,
+    label: &str,
+) {
+    let opts = ReadOpts {
+        tier,
+        local_updates: LocalUpdates::Immediate,
+        propagation: Propagation::LocalOnly,
+        ..ReadOpts::default()
+    };
+    let read = |query: Query| {
+        let prepared = db.prepare_query(&query).unwrap();
+        row_ids(
+            &block_on(db.all_for_identity(&prepared, opts.clone(), AuthorSubject::SYSTEM)).unwrap(),
+        )
+    };
+    for bucket in ["a", "b", "missing"] {
+        for direction in [OrderDirection::Asc, OrderDirection::Desc] {
+            for sparse in [false, true] {
+                let query = || {
+                    let query = Query::from("entries")
+                        .filter(eq(col("bucket"), lit(bucket)))
+                        .order_by("rank", direction);
+                    if sparse {
+                        query.filter(eq(col("flag"), lit(true)))
+                    } else {
+                        query
+                    }
+                };
+                let control = read(query());
+                for limit in [1, 2, 3, 4, 5, 7, 20, 100] {
+                    let page = read(query().limit(limit));
+                    let expected = control.iter().copied().take(limit).collect::<Vec<_>>();
+                    assert_eq!(
+                        page, expected,
+                        "{label} {tier:?}: bucket={bucket} {direction:?} sparse={sparse} limit={limit}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// A bounded ordered-page probe over a declared `(bucket, rank)` composite
+/// index must return exactly the page of the unbounded query: across rank
+/// ties, short and empty buckets, sparse visibility, order-column updates that
+/// move rows across the page boundary, bucket moves, and deletions, both
+/// before and after those writes settle.
+/// This lives here because settling needs the internal local-finalize hook and
+/// the bounded-read assertion needs the internal storage metric; row
+/// correctness is checked through the public Db read API.
+/// system: seed -> pages match control -> pending rank/bucket/delete writes ->
+///   pages match control at Global and Local -> settle -> pages match again
+#[test]
+fn ordered_composite_pages_match_unbounded_query() {
+    let db = open_ordered_page_db();
+    ordered_pages_match_unbounded_control(&db, DurabilityTier::Global, "seeded");
+
+    // The probe is actually bounded: a one-row page of the 54-row bucket
+    // must not hydrate the whole bucket. Rank 18 holds only row 54, so the
+    // first extra row (rank 17) is strictly worse and proves the page.
+    let prepared = db
+        .prepare_query(
+            &Query::from("entries")
+                .filter(eq(col("bucket"), lit("a")))
+                .order_by("rank", OrderDirection::Desc)
+                .limit(1),
+        )
+        .unwrap();
+    db.node.node.borrow().reset_storage_read_metrics();
+    let rows = block_on(db.all_for_identity(
+        &prepared,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            propagation: Propagation::LocalOnly,
+            ..ReadOpts::default()
+        },
+        AuthorSubject::SYSTEM,
+    ))
+    .unwrap();
+    let reads = db.node.node.borrow().take_storage_read_metrics();
+    assert_eq!(row_ids(&rows), vec![row(54)]);
+    assert!(
+        reads.global_current_rows.reads < 20,
+        "a bounded ordered page should not hydrate the whole bucket: {reads:?}"
+    );
+
+    let mut writes = Vec::new();
+    // Move the current top row to the bottom, and a bottom row to the top.
+    for (id, rank) in [(54, -5), (1, 100), (30, 17)] {
+        writes.push(
+            block_on(db.update(
+                "entries",
+                row(id),
+                BTreeMap::from([("rank".to_owned(), Value::I64(rank))]),
+                Default::default(),
+            ))
+            .unwrap()
+            .mergeable_tx_id(),
+        );
+    }
+    // Delete the next rows at the top of the descending page, and a row in
+    // the middle of a tie group.
+    for id in [53, 52, 20] {
+        writes.push(
+            block_on(db.delete("entries", row(id), Default::default()))
+                .unwrap()
+                .mergeable_tx_id(),
+        );
+    }
+    // Move one row from the long bucket into the short one.
+    writes.push(
+        block_on(db.update(
+            "entries",
+            row(51),
+            BTreeMap::from([("bucket".to_owned(), Value::String("b".to_owned()))]),
+            Default::default(),
+        ))
+        .unwrap()
+        .mergeable_tx_id(),
+    );
+    for tier in [DurabilityTier::Global, DurabilityTier::Local] {
+        ordered_pages_match_unbounded_control(&db, tier, "pending");
+    }
+    for tx in writes {
+        db.finalize_local_mergeable_commit_for_test(tx).unwrap();
+    }
+    for tier in [DurabilityTier::Global, DurabilityTier::Local] {
+        ordered_pages_match_unbounded_control(&db, tier, "settled");
+    }
+    // Deletion checks stay bounded too: the page reads the registers of its
+    // capped candidates, not every register in the table. Ascending, row 54
+    // (rank -5) is followed by row 2 (rank 0), which proves the page.
+    let ascending = db
+        .prepare_query(
+            &Query::from("entries")
+                .filter(eq(col("bucket"), lit("a")))
+                .order_by("rank", OrderDirection::Asc)
+                .limit(1),
+        )
+        .unwrap();
+    db.node.node.borrow().reset_storage_read_metrics();
+    let rows = block_on(db.all_for_identity(
+        &ascending,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            propagation: Propagation::LocalOnly,
+            ..ReadOpts::default()
+        },
+        AuthorSubject::SYSTEM,
+    ))
+    .unwrap();
+    let reads = db.node.node.borrow().take_storage_read_metrics();
+    assert_eq!(row_ids(&rows), vec![row(54)]);
+    assert!(
+        reads.global_current_rows.reads < 20,
+        "a bounded ordered page should not hydrate the whole bucket: {reads:?}"
+    );
+    assert!(
+        reads.register_global_current_rows.reads <= 2,
+        "a bounded ordered page should read only its candidates' registers: {reads:?}"
+    );
+}
+
+fn open_composite_equality_db() -> Db<RocksDbStorage> {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("issues")
+                    .column("group", PublicColumnType::Text)
+                    .column("state", PublicColumnType::Text)
+                    .column("assignee", PublicColumnType::Text)
+                    .index_only(["group", "assignee"])
+                    .composite_index(["group", "state"])
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(PublicPolicyExpr::True)
+                            .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True)
+                            .with_delete(PublicPolicyExpr::True),
+                    ),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("issue_tags")
+                    .fk_column("issue", "issues")
+                    .column("tag", PublicColumnType::Text)
+                    .index_only(["tag"])
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            ),
+    );
+    let db = block_on(Db::open_history_complete(DbConfig::new(
+        schema.clone(),
+        rocks_storage(&schema),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xb9; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+    // Issues 1..=40 are in group "wanted", every fourth one open; assignees
+    // alternate. Issue 1 and issues 41..=80 carry the "wanted" tag.
+    for n in 1..=80u8 {
+        db.seed_settled_mergeable_for_bootstrap(
+            "issues",
+            row(n),
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([
+                (
+                    "group".to_owned(),
+                    Value::String(if n <= 40 { "wanted" } else { "other" }.to_owned()),
+                ),
+                (
+                    "state".to_owned(),
+                    Value::String(if n % 4 == 1 { "open" } else { "closed" }.to_owned()),
+                ),
+                (
+                    "assignee".to_owned(),
+                    Value::String(if n % 2 == 1 { "ann" } else { "bo" }.to_owned()),
+                ),
+            ]),
+        )
+        .unwrap();
+        db.seed_settled_mergeable_for_bootstrap(
+            "issue_tags",
+            row(n + 100),
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([
+                ("issue".to_owned(), Value::Uuid(row(n).0)),
+                (
+                    "tag".to_owned(),
+                    Value::String(if n == 1 || n > 40 { "wanted" } else { "other" }.to_owned()),
+                ),
+            ]),
+        )
+        .unwrap();
+    }
+    db
+}
+
+/// Every query shape that can take the composite `(group, state)` prefix,
+/// compared with the same query under a limit no page reaches. A limit makes
+/// the first result decline composite-equality selection, so it is the
+/// control.
+fn composite_equality_reads_match_control(
+    db: &Db<RocksDbStorage>,
+    tier: DurabilityTier,
+    label: &str,
+) {
+    let opts = ReadOpts {
+        tier,
+        local_updates: LocalUpdates::Immediate,
+        propagation: Propagation::LocalOnly,
+        ..ReadOpts::default()
+    };
+    let read = |query: &Query| {
+        let prepared = db.prepare_query(query).unwrap();
+        let mut rows = row_ids(
+            &block_on(db.all_for_identity(&prepared, opts.clone(), AuthorSubject::SYSTEM)).unwrap(),
+        );
+        rows.sort();
+        rows
+    };
+    for assignee in [None, Some("ann")] {
+        for joined in [false, true] {
+            let mut query = Query::from("issues")
+                .filter(eq(col("group"), lit("wanted")))
+                .filter(eq(col("state"), lit("open")));
+            if let Some(assignee) = assignee {
+                query = query.filter(eq(col("assignee"), lit(assignee)));
+            }
+            if joined {
+                query = query.join_via("issue_tags", "issue", [eq(col("tag"), lit("wanted"))]);
+            }
+            assert_eq!(
+                read(&query),
+                read(&query.clone().limit(100_000)),
+                "{label} {tier:?}: assignee={assignee:?} joined={joined}"
+            );
+        }
+    }
+}
+
+/// A first-result equality conjunction over both columns of a declared
+/// `(group, state)` composite index reads only that prefix, and keeps other
+/// indexed equalities as intersections. It is admitted by the same guard as
+/// every other index path: only sources read at Local or Global may use it,
+/// so a read at tier `None` keeps its complete source. Results match the
+/// unindexed control at every tier, with pending edits that move rows into
+/// and out of the prefix, and after they settle.
+///
+/// The storage counter is needed because choosing the composite prefix is
+/// observable only as read work.
+///
+/// ```text
+/// seed: wanted/open = {1, 5, .., 37}; tag wanted = {1, 41..=80}
+/// Global join read -> [1], reads <= 55 (not the other 30 group rows)
+/// pending: 1 -> closed, 2 -> open, 41 -> wanted/open, delete 5; Local join read -> [41]
+/// tiers None, Local, Global == control -> settle -> == control again
+/// ```
+#[test]
+fn first_result_uses_guarded_composite_equality_index() {
+    let db = open_composite_equality_db();
+    let joined = Query::from("issues")
+        .filter(eq(col("group"), lit("wanted")))
+        .filter(eq(col("state"), lit("open")))
+        .join_via("issue_tags", "issue", [eq(col("tag"), lit("wanted"))]);
+    let (rows, reads) = global_page_with_reads(&db, joined.clone());
+    assert_eq!(rows, vec![row(1)]);
+    assert!(
+        reads.global_current_rows.reads <= 55,
+        "composite equality should avoid hydrating the other 30 group rows: {reads:?}"
+    );
+    for tier in [
+        DurabilityTier::None,
+        DurabilityTier::Local,
+        DurabilityTier::Global,
+    ] {
+        composite_equality_reads_match_control(&db, tier, "seeded");
+    }
+
+    let mut writes = Vec::new();
+    for (id, cells) in [
+        (1, vec![("state", "closed")]),
+        (2, vec![("state", "open")]),
+        (41, vec![("group", "wanted"), ("state", "open")]),
+    ] {
+        writes.push(
+            block_on(
+                db.update(
+                    "issues",
+                    row(id),
+                    cells
+                        .into_iter()
+                        .map(|(column, value)| (column.to_owned(), Value::String(value.to_owned())))
+                        .collect(),
+                    Default::default(),
+                ),
+            )
+            .unwrap()
+            .mergeable_tx_id(),
+        );
+    }
+    writes.push(
+        block_on(db.delete("issues", row(5), Default::default()))
+            .unwrap()
+            .mergeable_tx_id(),
+    );
+    for tier in [
+        DurabilityTier::None,
+        DurabilityTier::Local,
+        DurabilityTier::Global,
+    ] {
+        composite_equality_reads_match_control(&db, tier, "pending");
+    }
+    let prepared = db.prepare_query(&joined).unwrap();
+    assert_eq!(
+        row_ids(&db.read(&prepared).unwrap()),
+        vec![row(41)],
+        "a Local winner leaving the composite prefix must retract, one entering must appear"
+    );
+    for tx in writes {
+        db.finalize_local_mergeable_commit_for_test(tx).unwrap();
+    }
+    for tier in [
+        DurabilityTier::None,
+        DurabilityTier::Local,
+        DurabilityTier::Global,
+    ] {
+        composite_equality_reads_match_control(&db, tier, "settled");
+    }
+}
+
+/// Reads `query` once at Global and returns its rows with the storage reads
+/// it took.
+fn global_page_with_reads(
+    db: &Db<RocksDbStorage>,
+    query: Query,
+) -> (Vec<RowUuid>, groove::db::StorageReadMetrics) {
+    let prepared = db.prepare_query(&query).unwrap();
+    db.node.node.borrow().reset_storage_read_metrics();
+    let rows = block_on(db.all_for_identity(
+        &prepared,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            propagation: Propagation::LocalOnly,
+            ..ReadOpts::default()
+        },
+        AuthorSubject::SYSTEM,
+    ))
+    .unwrap();
+    (
+        row_ids(&rows),
+        db.node.node.borrow().take_storage_read_metrics(),
+    )
+}
+
+/// A first bounded probe that finds no visible row, or only a tie, retries a
+/// larger bounded prefix instead of falling back to the whole bucket; a
+/// bucket shorter than the probe is complete without an extra row.
+///
+/// ```text
+/// bucket a, desc: rank 18 = [54], rank 17 = [53, 52, 51], rank 16 = [50, 49, 48]
+/// settle delete 54, 53
+/// desc limit 1: cap 2 -> [54 del, 53 del] -> retry cap 8 -> 52 | 51 tie | 50 worse
+/// settle delete 1..=40 in bucket a
+/// bucket b (6 rows), asc limit 20: cap 21 -> 6 entries -> exhausted, complete
+/// ```
+///
+/// Both pages equal the unbounded control and stay bounded: before retries
+/// and the exhausted proof, each fell back to the complete source.
+#[test]
+fn ordered_composite_pages_retry_past_deleted_ties_and_complete_short_buckets() {
+    let db = open_ordered_page_db();
+    let settle_deletes = |ids: Vec<u8>| {
+        let writes = ids
+            .into_iter()
+            .map(|id| {
+                block_on(db.delete("entries", row(id), Default::default()))
+                    .unwrap()
+                    .mergeable_tx_id()
+            })
+            .collect::<Vec<_>>();
+        for tx in writes {
+            db.finalize_local_mergeable_commit_for_test(tx).unwrap();
+        }
+    };
+    settle_deletes(vec![54, 53]);
+
+    let top = || {
+        Query::from("entries")
+            .filter(eq(col("bucket"), lit("a")))
+            .order_by("rank", OrderDirection::Desc)
+    };
+    let (control, _) = global_page_with_reads(&db, top());
+    let (page, reads) = global_page_with_reads(&db, top().limit(1));
+    assert_eq!(page, control[..1].to_vec());
+    assert!(
+        [row(52), row(51)].contains(&page[0]),
+        "the page holds a surviving rank-17 row: {page:?}"
+    );
+    // Two bounded attempts (2 then 8 entries) against 138 reads for the
+    // complete source.
+    assert!(
+        reads.global_current_rows.reads <= 30,
+        "a retried ordered page should not hydrate the whole bucket: {reads:?}"
+    );
+    ordered_pages_match_unbounded_control(&db, DurabilityTier::Global, "deleted top ties");
+
+    settle_deletes((1..=40).collect());
+    let short = || {
+        Query::from("entries")
+            .filter(eq(col("bucket"), lit("b")))
+            .order_by("rank", OrderDirection::Asc)
+    };
+    let (control, _) = global_page_with_reads(&db, short());
+    let (page, reads) = global_page_with_reads(&db, short().limit(20));
+    assert_eq!(page, control);
+    assert_eq!(page.len(), 6);
+    assert!(
+        reads.register_global_current_rows.reads <= 6,
+        "a short bucket should read only its own deletion registers: {reads:?}"
+    );
+    ordered_pages_match_unbounded_control(&db, DurabilityTier::Global, "short bucket");
+}
+
+/// The public result and live deltas guard semantics. The storage count checks
+/// that a first Global result compares covered join keys before loading link rows.
+#[test]
+fn first_result_join_filters_junction_keys_before_row_hydration() {
+    let link_row = |n: u8, replica: u8| {
+        let mut bytes = [0xbc; 16];
+        bytes[14] = replica;
+        bytes[15] = n;
+        RowUuid::from_bytes(bytes)
+    };
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("issues")
+                    .column("group", PublicColumnType::Text)
+                    .column("state", PublicColumnType::Text)
+                    .index_only(["group", "state"])
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("issue_tags")
+                    .fk_column("issue", "issues")
+                    .column("tag", PublicColumnType::Text)
+                    .composite_index(["tag", "issue"])
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            ),
+    );
+    let db = block_on(Db::open_history_complete(DbConfig::new(
+        schema.clone(),
+        rocks_storage(&schema),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xba; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+    for n in 1..=160 {
+        db.seed_settled_mergeable_for_bootstrap(
+            "issues",
+            row(n),
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([
+                (
+                    "group".to_owned(),
+                    Value::String(if n <= 80 { "wanted" } else { "other" }.to_owned()),
+                ),
+                (
+                    "state".to_owned(),
+                    Value::String(if n % 4 == 1 { "open" } else { "closed" }.to_owned()),
+                ),
+            ]),
+        )
+        .unwrap();
+        for replica in 0..if n > 81 { 7 } else { 1 } {
+            db.seed_settled_mergeable_for_bootstrap(
+                "issue_tags",
+                link_row(n, replica),
+                AuthorSubject::SYSTEM,
+                BTreeMap::from([
+                    ("issue".to_owned(), Value::Uuid(row(n).0)),
+                    (
+                        "tag".to_owned(),
+                        Value::String(if n == 1 || n > 80 { "wanted" } else { "other" }.to_owned()),
+                    ),
+                ]),
+            )
+            .unwrap();
+        }
+    }
+    let query = Query::from("issues")
+        .filter(eq(col("group"), lit("wanted")))
+        .filter(eq(col("state"), lit("open")))
+        .join_via("issue_tags", "issue", [eq(col("tag"), lit("wanted"))]);
+    let prepared = db.prepare_query(&query).unwrap();
+    db.node.node.borrow().reset_storage_read_metrics();
+    let rows = block_on(db.all_for_identity(
+        &prepared,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            propagation: Propagation::LocalOnly,
+            ..ReadOpts::default()
+        },
+        AuthorSubject::SYSTEM,
+    ))
+    .unwrap();
+    let reads = db.node.node.borrow().take_storage_read_metrics();
+    assert_eq!(row_ids(&rows), vec![row(1)]);
+    assert!(
+        reads.global_current_rows.reads <= 40,
+        "unmatched junction rows should not be hydrated: {reads:?}"
+    );
+
+    let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default()).unwrap();
+    let initial = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+    assert_eq!(row_ids(&initial.rows), vec![row(1)]);
+    let changed = block_on(db.update(
+        "issues",
+        row(81),
+        BTreeMap::from([("group".to_owned(), Value::String("wanted".to_owned()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    block_on(changed.wait(DurabilityTier::Local)).unwrap();
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
+    assert_eq!(row_ids(&added), vec![row(81)]);
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+    assert_eq!(row_ids(&db.read(&prepared).unwrap()), vec![row(1), row(81)]);
+
+    let deleted = block_on(db.delete("issue_tags", link_row(1, 0), Default::default())).unwrap();
+    block_on(deleted.wait(DurabilityTier::Local)).unwrap();
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
+    assert!(added.is_empty());
+    assert!(updated.is_empty());
+    assert_eq!(
+        removed.iter().map(|row| row.row_uuid).collect::<Vec<_>>(),
+        vec![row(1)]
+    );
+    assert_eq!(row_ids(&db.read(&prepared).unwrap()), vec![row(81)]);
+}
+
+fn covered_join_link_row(issue: u8, replica: u8) -> RowUuid {
+    let mut bytes = [0xce; 16];
+    bytes[14] = replica;
+    bytes[15] = issue;
+    RowUuid::from_bytes(bytes)
+}
+
+fn covered_join_link_cells(nullable: bool, issue: RowUuid, scope: &str) -> RowCells {
+    point_join_link_cells(nullable, issue, "wanted", scope)
+}
+
+/// Opens a store whose `issue_tags` declares `[tag, issue]`, so a broad
+/// `tag = "wanted"` junction prefix carries each link's issue in its index key.
+/// Issues 1..=40 are in group `wanted`; 41..=120 are not. Issues 1..=3 have
+/// one public wanted link each, and 41..=120 have seven wanted links each
+/// (replicas 0 and 1 public, the rest private). That is 563 wanted links, so
+/// a Global first result takes the covered-key filter rather than hydrating
+/// a small prefix directly. `tag_single_index` keeps the ordinary single-column
+/// tag index as well; without it the junction reaches the composite index only
+/// through the covered-key fallback.
+fn open_covered_join_db(
+    nullable: bool,
+    tag_single_index: bool,
+    junction_select: PublicPolicyExpr,
+) -> Db<RocksDbStorage> {
+    let grants = || {
+        PublicTablePolicies::new()
+            .with_insert(PublicPolicyExpr::True)
+            .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True)
+            .with_delete(PublicPolicyExpr::True)
+    };
+    let tags = PublicTableSchemaBuilder::new("issue_tags");
+    let tags = if nullable {
+        tags.nullable_fk_column("issue", "issues")
+    } else {
+        tags.fk_column("issue", "issues")
+    };
+    let tags = tags
+        .column("tag", PublicColumnType::Text)
+        .column("scope", PublicColumnType::Text)
+        .composite_index(["tag", "issue"])
+        .policies(grants().with_select(junction_select));
+    let tags = if tag_single_index {
+        tags
+    } else {
+        tags.index_only(["issue"])
+    };
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("issues")
+                    .column("group", PublicColumnType::Text)
+                    .index_only(["group"])
+                    .policies(grants().with_select(PublicPolicyExpr::True)),
+            )
+            .table(tags),
+    );
+    let db = block_on(Db::open_history_complete(DbConfig {
+        schema: schema.clone(),
+        storage: rocks_storage(&schema),
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xce; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xce))),
+    }))
+    .unwrap();
+    for n in 1..=120 {
+        let group = if n <= 40 { "wanted" } else { "other" };
+        db.seed_settled_mergeable_for_bootstrap(
+            "issues",
+            row(n),
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([("group".to_owned(), Value::String(group.to_owned()))]),
+        )
+        .unwrap();
+        let links = match n {
+            1..=3 => 1,
+            41.. => 7,
+            _ => 0,
+        };
+        for replica in 0..links {
+            let scope = if replica < 2 { "public" } else { "private" };
+            db.seed_settled_mergeable_for_bootstrap(
+                "issue_tags",
+                covered_join_link_row(n, replica),
+                AuthorSubject::SYSTEM,
+                covered_join_link_cells(nullable, row(n), scope),
+            )
+            .unwrap();
+        }
+    }
+    db
+}
+
+/// Reads the covered-key join and the same join with a limit far above the
+/// data, which declines the covered-key filter and its composite fallback but
+/// cannot drop a row. Asserts both agree and returns the sorted rows with the
+/// number of complete current rows the covered-key read hydrated.
+fn covered_join_matches_unfiltered_control(
+    db: &Db<RocksDbStorage>,
+    opts: &ReadOpts,
+    reader: AuthorSubject,
+    label: &str,
+) -> (Vec<RowUuid>, usize) {
+    let read = |query: Query| {
+        let prepared = db.prepare_query(&query).unwrap();
+        let mut rows =
+            row_ids(&block_on(db.all_for_identity(&prepared, opts.clone(), reader)).unwrap());
+        rows.sort();
+        rows
+    };
+    let query = Query::from("issues")
+        .filter(eq(col("group"), lit("wanted")))
+        .join_via("issue_tags", "issue", [eq(col("tag"), lit("wanted"))]);
+    db.node.node.borrow().reset_storage_read_metrics();
+    let filtered = read(query.clone());
+    let hydrated = db
+        .node
+        .node
+        .borrow()
+        .take_storage_read_metrics()
+        .global_current_rows
+        .reads;
+    let control = read(query.limit(100_000));
+    assert_eq!(
+        filtered, control,
+        "{label}: covered-key join diverges from the unfiltered control"
+    );
+    (filtered, hydrated)
+}
+
+/// The covered-key filter compares Global index keys only. A Local read
+/// combines settled candidates with the ahead overlay, so a pending root edit
+/// can move an issue into the root prefix while its settled links still
+/// point at an issue outside the Global candidate set (#3340 is the sibling
+/// stale-index hazard). Pending root and link writes must therefore appear at
+/// Local and stay invisible at Global, exactly as in the unfiltered join; a
+/// junction read policy still hides private links; and after settling, the
+/// filtered Global read follows the moved index entries.
+/// This lives here because settling needs the internal local-finalize hook;
+/// row correctness is checked through the public Db read API.
+/// system: seed -> bob reads -> pending root/link writes -> bob reads -> settle -> bob reads
+#[test]
+fn covered_join_key_filter_matches_unfiltered_join_across_tiers_and_pending_writes() {
+    for nullable in [false, true] {
+        for tag_single_index in [true, false] {
+            let db = open_covered_join_db(
+                nullable,
+                tag_single_index,
+                PublicPolicyExpr::eq_literal("scope", PublicValue::Text("public".to_owned())),
+            );
+            let bob = AuthorSubject::for_test_bytes([0xa9; 16]);
+            let case = format!("nullable={nullable} tag_single_index={tag_single_index}");
+            let expect = |tier: DurabilityTier, label: &str, expected: &[RowUuid]| {
+                let label = format!("{case} {label} {tier:?}");
+                let (rows, hydrated) = covered_join_matches_unfiltered_control(
+                    &db,
+                    &point_join_read_opts(tier, false),
+                    bob,
+                    &label,
+                );
+                assert_eq!(rows, expected, "{label}");
+                if tier == DurabilityTier::Global {
+                    // 40 root candidates plus the few surviving links, not
+                    // the 563 links of the broad `tag = "wanted"` prefix.
+                    assert!(
+                        hydrated < 100,
+                        "{label}: unmatched links should not be hydrated ({hydrated} rows)"
+                    );
+                }
+                covered_join_matches_unfiltered_control(
+                    &db,
+                    &point_join_read_opts(tier, true),
+                    bob,
+                    &format!("{label} include_deleted"),
+                );
+            };
+            for tier in [DurabilityTier::Global, DurabilityTier::Local] {
+                expect(tier, "seeded", &[row(1), row(2), row(3)]);
+            }
+
+            // Pending, unsettled: issue 50 enters the root prefix and issue 1
+            // leaves it; a new public link tags issue 4; one of issue 60's
+            // public links moves to issue 5; issue 2's only link is deleted.
+            let group = |value: &str| {
+                BTreeMap::from([("group".to_owned(), Value::String(value.to_owned()))])
+            };
+            let issue = |id: RowUuid| {
+                BTreeMap::from([(
+                    "issue".to_owned(),
+                    covered_join_link_cells(nullable, id, "public")["issue"].clone(),
+                )])
+            };
+            let writes = [
+                block_on(db.update("issues", row(50), group("wanted"), Default::default()))
+                    .unwrap(),
+                block_on(db.update("issues", row(1), group("other"), Default::default())).unwrap(),
+                block_on(db.insert(
+                    "issue_tags",
+                    covered_join_link_cells(nullable, row(4), "public"),
+                    crate::db::InsertOptions {
+                        row_id: Some(covered_join_link_row(4, 0)),
+                        ..Default::default()
+                    },
+                ))
+                .unwrap(),
+                block_on(db.update(
+                    "issue_tags",
+                    covered_join_link_row(60, 0),
+                    issue(row(5)),
+                    Default::default(),
+                ))
+                .unwrap(),
+                block_on(db.delete(
+                    "issue_tags",
+                    covered_join_link_row(2, 0),
+                    Default::default(),
+                ))
+                .unwrap(),
+            ];
+            expect(DurabilityTier::Global, "pending", &[row(1), row(2), row(3)]);
+            // Issue 50 joins through its two public links.
+            expect(
+                DurabilityTier::Local,
+                "pending",
+                &[row(3), row(4), row(5), row(50), row(50)],
+            );
+
+            for write in &writes {
+                db.finalize_local_mergeable_commit_for_test(write.mergeable_tx_id())
+                    .unwrap();
+            }
+            for tier in [DurabilityTier::Global, DurabilityTier::Local] {
+                expect(tier, "settled", &[row(3), row(4), row(5), row(50), row(50)]);
+            }
+        }
+    }
+}
+
 #[test]
 fn prepared_current_write_query_installs_and_reads_non_simple_plan() {
     let schema = issue_schema();

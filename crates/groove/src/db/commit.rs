@@ -137,8 +137,10 @@ impl Database {
         let mut accepted_staging = Vec::new();
         for staged_id in &accepted_large_values {
             let key = staged_large_value_key(*staged_id);
+            // Read through resident writes: an earlier batch whose persistence
+            // is still pending may already have consumed this id.
             let encoded = self
-                .storage
+                .resident_storage()
                 .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
                 .await?
                 .ok_or_else(|| {
@@ -224,7 +226,7 @@ impl Database {
         for staged_id in accepted_large_values {
             let key = staged_large_value_key(staged_id);
             if self
-                .storage
+                .resident_storage()
                 .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
                 .await?
                 .is_none()
@@ -238,8 +240,11 @@ impl Database {
                 key,
             });
             staged_operations.extend(
-                super::facade::completed_large_value_cleanup_operations(&self.storage, staged_id)
-                    .await?,
+                super::facade::completed_large_value_cleanup_operations(
+                    &self.resident_storage(),
+                    staged_id,
+                )
+                .await?,
             );
         }
         let mut accepted_roots = BTreeMap::<crate::large_values::NodeRef, u64>::new();
