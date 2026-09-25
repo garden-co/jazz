@@ -423,6 +423,12 @@ impl WireInboundContext {
         self.trusted_encoder = trusted;
     }
 
+    /// Whether semantic payloads admitted through this context pass the
+    /// checked decoder, which validates every carried version receipt.
+    pub(crate) fn validates_receipts(&self) -> bool {
+        !self.trusted_encoder
+    }
+
     pub(crate) fn decode_semantic_payload(&self, bytes: &[u8]) -> Result<SyncMessage, WireError> {
         if self.trusted_encoder {
             let message = decode_sync_message_trusted(bytes).map_err(|error| {
@@ -748,16 +754,13 @@ pub fn decode_sync_message(bytes: &[u8]) -> Result<SyncMessage, postcard::Error>
     if validate_logical_message_len(bytes.len()).is_err() {
         return Err(postcard::Error::DeserializeUnexpectedEnd);
     }
+    // Wire receipts and replay fixtures name bytes, not only deserialized
+    // values. `decode_postcard_exact` already rejects any alternate postcard
+    // representation of the same transaction/version message.
     let message: SyncMessage = decode_postcard_exact(bytes)?;
     message
         .validate_wire_contract()
         .map_err(|_| postcard::Error::DeserializeBadOption)?;
-    // Wire receipts and replay fixtures name bytes, not only deserialized
-    // values.  Do not accept an alternate postcard representation for the
-    // same transaction/version message.
-    if to_allocvec(&message)? != bytes {
-        return Err(postcard::Error::DeserializeBadOption);
-    }
     Ok(message)
 }
 
@@ -785,10 +788,47 @@ where
     T: Deserialize<'a> + Serialize,
 {
     let (value, remainder) = take_from_bytes(bytes)?;
-    if !remainder.is_empty() || to_allocvec(&value)? != bytes {
+    if !remainder.is_empty() || !encodes_exactly(&value, bytes) {
         Err(postcard::Error::DeserializeBadEncoding)
     } else {
         Ok(value)
+    }
+}
+
+/// Whether the canonical postcard encoding of `value` is exactly `expected`.
+///
+/// Equivalent to `to_allocvec(value)? == expected`, but compares while
+/// serializing: it allocates nothing and stops at the first differing byte.
+fn encodes_exactly<T: Serialize + ?Sized>(value: &T, expected: &[u8]) -> bool {
+    postcard::serialize_with_flavor(value, CanonicalBytesMatch { expected })
+        .is_ok_and(|remaining: &[u8]| remaining.is_empty())
+}
+
+/// Postcard output flavor that consumes `expected` instead of writing bytes.
+struct CanonicalBytesMatch<'a> {
+    expected: &'a [u8],
+}
+
+impl<'a> postcard::ser_flavors::Flavor for CanonicalBytesMatch<'a> {
+    /// The expected bytes the encoding did not reach.
+    type Output = &'a [u8];
+
+    fn try_push(&mut self, byte: u8) -> postcard::Result<()> {
+        self.try_extend(&[byte])
+    }
+
+    fn try_extend(&mut self, bytes: &[u8]) -> postcard::Result<()> {
+        match self.expected.split_at_checked(bytes.len()) {
+            Some((head, tail)) if head == bytes => {
+                self.expected = tail;
+                Ok(())
+            }
+            _ => Err(postcard::Error::SerializeBufferFull),
+        }
+    }
+
+    fn finalize(self) -> postcard::Result<Self::Output> {
+        Ok(self.expected)
     }
 }
 
@@ -860,7 +900,7 @@ fn take_canonical_postcard_usize(bytes: &mut &[u8]) -> Result<usize, postcard::E
     let source = *bytes;
     let (value, remaining) = take_from_bytes::<usize>(source)?;
     let consumed = source.len() - remaining.len();
-    if to_allocvec(&value)? != source[..consumed] {
+    if !encodes_exactly(&value, &source[..consumed]) {
         return Err(postcard::Error::DeserializeBadEncoding);
     }
     *bytes = remaining;

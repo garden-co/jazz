@@ -1526,6 +1526,11 @@ pub struct CommitUnitIngestContext {
     /// This may only be set by the peer-connection authority path immediately
     /// after that proof; wire messages cannot carry it.
     pub(crate) admitted_write_authorization: bool,
+    /// The connection's checked wire decoder has already validated every
+    /// version receipt in this upload. Set only by a peer connection whose
+    /// transport reports that it admits all inbound messages that way; wire
+    /// messages cannot carry it.
+    pub(crate) version_receipts_validated: bool,
 }
 
 /// Trust mode for an inbound commit-unit upload.

@@ -349,6 +349,7 @@ fn handoff_receive_pre_staged_view_update_is_ineligible_after_immediate_drain() 
                 lease: None,
                 message,
                 authority_receipt_eligible: true,
+                receipts_validated: false,
             });
         if is_view_update {
             break;

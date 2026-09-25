@@ -348,6 +348,7 @@ where
             message,
             lease: None,
             authority_receipt_eligible,
+            receipts_validated: false,
         });
         self.schedule_tick(TickUrgency::Immediate);
         Ok(authority_receipt_eligible)
@@ -2709,6 +2710,7 @@ where
                     trust,
 
                     admitted_write_authorization: false,
+                    version_receipts_validated: false,
                 },
                 claims,
                 0,
