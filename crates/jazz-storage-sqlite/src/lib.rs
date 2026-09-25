@@ -100,7 +100,9 @@ const SCAN_FROM_REVERSE: &str =
 const SCAN_FROM_BELOW_REVERSE: &str =
     "SELECT k, v FROM kv WHERE cf = ?1 AND k >= ?2 AND k < ?3 ORDER BY k DESC LIMIT ?4";
 
-/// A lazy, non-snapshot ordered scan, like the other raw storage cursors.
+/// A lazy, non-snapshot ordered scan: it pages 256 rows at a time and resumes
+/// after the last returned key, like the memory backend's cursor. The raw
+/// cursor contract permits this; RocksDB's cursor happens to read a snapshot.
 struct SqliteCursor<'a> {
     storage: &'a SqliteStorage,
     cf: i64,
