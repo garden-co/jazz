@@ -1148,21 +1148,6 @@ fn merge_physical_value_type(
     }
 }
 
-fn physical_history_descriptor(
-    table: &TableSchema,
-    mapping: &TablePhysicalMapping,
-    _alias: SchemaVersionAlias,
-) -> Result<records::RecordDescriptor, Error> {
-    let logical_descriptor = table.history_storage_table().record_schema();
-    let physical_names = physical_history_field_names(table, mapping)?;
-    if logical_descriptor.fields().len() != physical_names.len() {
-        return Err(Error::InvalidStoredValue(
-            "physical history descriptor width mismatch",
-        ));
-    }
-    physical_descriptor_with_enum_registries(table, logical_descriptor, physical_names, mapping)
-}
-
 fn physical_current_descriptor(
     table: &TableSchema,
     mapping: &TablePhysicalMapping,

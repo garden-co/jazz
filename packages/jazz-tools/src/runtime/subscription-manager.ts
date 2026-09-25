@@ -51,12 +51,66 @@ export type SubscriptionDelta<T> =
       reset: true;
     };
 
-type SubscriptionManagerSnapshot<T> = {
-  currentResults: Map<string, T>;
-  terminalRows: Map<string, WasmRow>;
-  terminalOccurrenceAddresses: Map<string, string>;
+const ABSENT: unique symbol = Symbol("jazz.subscriptionManager.absent");
+
+/**
+ * A Map that can record the first prior value of every key it changes, so a
+ * failed delta can be undone in time proportional to what it touched rather
+ * than to the size of the result.
+ */
+class JournaledMap<K, V> extends Map<K, V> {
+  private journal: Map<K, V | typeof ABSENT> | null = null;
+
+  beginJournal(): void {
+    this.journal = new Map();
+  }
+
+  endJournal(): void {
+    this.journal = null;
+  }
+
+  /** Put back every key changed since `beginJournal` and stop journaling. */
+  rollBack(): void {
+    const journal = this.journal;
+    this.journal = null;
+    if (!journal) return;
+    for (const [key, previous] of journal) {
+      if (previous === ABSENT) super.delete(key);
+      else super.set(key, previous);
+    }
+  }
+
+  override set(key: K, value: V): this {
+    const journal = this.journal;
+    if (journal && !journal.has(key)) {
+      journal.set(key, super.has(key) ? super.get(key)! : ABSENT);
+    }
+    return super.set(key, value);
+  }
+
+  override delete(key: K): boolean {
+    const journal = this.journal;
+    if (journal && !journal.has(key) && super.has(key)) journal.set(key, super.get(key)!);
+    return super.delete(key);
+  }
+
+  override clear(): void {
+    if (this.journal) throw new Error("journaled subscription state must be replaced, not cleared");
+    super.clear();
+  }
+}
+
+/**
+ * Rollback state for one `handleDelta` call. Field references are restored
+ * as they were; maps that existed at the start undo their own journals, and
+ * `orderedIds` is copied before its first in-place change.
+ */
+type SubscriptionManagerTransaction<T> = {
+  currentResults: JournaledMap<string, T>;
+  terminalRows: JournaledMap<string, WasmRow>;
+  terminalOccurrenceAddresses: JournaledMap<string, string>;
   orderedIds: string[];
-  orderedIdIndex: Map<string, number>;
+  orderedIdIndex: JournaledMap<string, number>;
   deferredTerminalOperations: RuntimeTerminalOperation[];
 };
 
@@ -284,21 +338,79 @@ export function resultIdentity(item: { id: string }): string {
  * @typeParam T - The typed object type (must have `id: string`)
  */
 export class SubscriptionManager<T extends { id: string }> {
-  private currentResults = new Map<string, T>();
-  private terminalRows = new Map<string, WasmRow>();
+  private currentResults = new JournaledMap<string, T>();
+  private terminalRows = new JournaledMap<string, WasmRow>();
   /** Exact ordered Groove root key -> opaque ResultKey V1 sidecar address. */
-  private terminalOccurrenceAddresses = new Map<string, string>();
+  private terminalOccurrenceAddresses = new JournaledMap<string, string>();
   private orderedIds: string[] = [];
-  private orderedIdIndex = new Map<string, number>();
+  private orderedIdIndex = new JournaledMap<string, number>();
   /** Child edits received before a non-durable browser root hydration. */
   private deferredTerminalOperations: RuntimeTerminalOperation[] = [];
+  /** Rollback state while `handleDelta` is applying a delta. */
+  private transaction: SubscriptionManagerTransaction<T> | null = null;
+
+  /** `orderedIds`, copied first if a rollback may still need the original. */
+  private writableOrderedIds(): string[] {
+    if (this.transaction && this.orderedIds === this.transaction.orderedIds) {
+      this.orderedIds = this.orderedIds.slice();
+    }
+    return this.orderedIds;
+  }
+
+  /**
+   * Lowest position whose `orderedIdIndex` entry may be stale, while a
+   * sequential delta is being applied; null when the index is exact.
+   * Positions below it are untouched since the index was last exact.
+   */
+  private staleFrom: number | null = null;
+  /**
+   * Splices since the index was last exact. Each moves any id by at most one
+   * position, so a stale entry is within this distance of its true position.
+   */
+  private staleSplices = 0;
+
+  private markStaleFrom(position: number, splices = 1): void {
+    if (this.staleFrom === null || position < this.staleFrom) this.staleFrom = position;
+    this.staleSplices += splices;
+  }
+
+  /** Current position of `id`, correct even while the index is stale. */
+  private positionOf(id: string): number | undefined {
+    const recorded = this.orderedIdIndex.get(id);
+    if (recorded === undefined) return undefined;
+    if (this.staleFrom === null || recorded < this.staleFrom) return recorded;
+    const orderedIds = this.orderedIds;
+    if (orderedIds[recorded] === id) return recorded;
+    // Everything before `staleFrom` is exact, so a stale id lies after it,
+    // within `staleSplices` of where it was recorded.
+    const low = Math.max(this.staleFrom, recorded - this.staleSplices);
+    const high = Math.min(orderedIds.length - 1, recorded + this.staleSplices);
+    for (let distance = 1; recorded - distance >= low || recorded + distance <= high; distance++) {
+      if (recorded + distance <= high && orderedIds[recorded + distance] === id) {
+        return recorded + distance;
+      }
+      if (recorded - distance >= low && orderedIds[recorded - distance] === id) {
+        return recorded - distance;
+      }
+    }
+    return undefined;
+  }
+
+  /** Bring `orderedIdIndex` back in line after a sequential delta. */
+  private refreshOrderedIdIndex(): void {
+    if (this.staleFrom === null) return;
+    const start = this.staleFrom;
+    this.staleFrom = null;
+    this.staleSplices = 0;
+    this.reindexOrderedIds(start);
+  }
 
   private removeId(id: string): void {
-    const index = this.orderedIdIndex.get(id);
+    const index = this.positionOf(id);
     if (index === undefined) return;
-    this.orderedIds.splice(index, 1);
+    this.writableOrderedIds().splice(index, 1);
     this.orderedIdIndex.delete(id);
-    this.reindexOrderedIds(index);
+    this.markStaleFrom(index);
   }
 
   /** Remove every id in `changes[start, end)` from the result in one pass. */
@@ -307,27 +419,40 @@ export class SubscriptionManager<T extends { id: string }> {
     for (let index = start; index < end; index++) {
       const id = changes[index]!.id;
       this.currentResults.delete(id);
-      const position = this.orderedIdIndex.get(id);
+      const position = this.positionOf(id);
       if (position === undefined) continue;
       this.orderedIdIndex.delete(id);
       if (position < first) first = position;
     }
     if (first === this.orderedIds.length) return;
+    const orderedIds = this.writableOrderedIds();
     let write = first;
-    for (let read = first; read < this.orderedIds.length; read++) {
-      const id = this.orderedIds[read]!;
+    for (let read = first; read < orderedIds.length; read++) {
+      const id = orderedIds[read]!;
       if (!this.orderedIdIndex.has(id)) continue;
-      this.orderedIds[write] = id;
-      this.orderedIdIndex.set(id, write);
+      orderedIds[write] = id;
       write++;
     }
-    this.orderedIds.length = write;
+    const removed = orderedIds.length - write;
+    orderedIds.length = write;
+    this.markStaleFrom(first, removed);
   }
 
   private insertIdAt(id: string, index: number): void {
     const clamped = Math.max(0, Math.min(index, this.orderedIds.length));
-    this.orderedIds.splice(clamped, 0, id);
-    this.reindexOrderedIds(clamped);
+    this.writableOrderedIds().splice(clamped, 0, id);
+    this.orderedIdIndex.set(id, clamped);
+    this.markStaleFrom(clamped);
+  }
+
+  /**
+   * Whether removing `id` and reinserting it at `index` would put it back
+   * where it is: an in-place change needs no splice or reindex.
+   */
+  private staysInPlace(id: string, index: number): boolean {
+    const position = this.positionOf(id);
+    if (position === undefined) return false;
+    return position === Math.max(0, Math.min(index, this.orderedIds.length - 1));
   }
 
   private reindexOrderedIds(start = 0): void {
@@ -348,7 +473,7 @@ export class SubscriptionManager<T extends { id: string }> {
     transform: (row: WasmRow) => T,
   ): SubscriptionDelta<T> {
     const reset = delta.reset === true;
-    const snapshot = this.snapshot();
+    this.beginTransaction();
     try {
       if (reset) {
         this.clearRows();
@@ -442,33 +567,63 @@ export class SubscriptionManager<T extends { id: string }> {
       for (const { id, address } of removedKeys) {
         if (!this.currentResults.has(id)) this.terminalOccurrenceAddresses.delete(address);
       }
+      this.commitTransaction();
       return result;
     } catch (error) {
-      this.restore(snapshot);
+      this.rollBackTransaction();
       throw error;
     }
   }
 
-  private snapshot(): SubscriptionManagerSnapshot<T> {
-    return {
-      currentResults: new Map(this.currentResults),
+  /**
+   * Start journaling so a throw can restore the state before this delta.
+   * This costs O(1) up front and O(touched keys) afterwards, instead of
+   * copying every map on every delta.
+   */
+  private beginTransaction(): void {
+    this.transaction = {
+      currentResults: this.currentResults,
       // Terminal application is copy-on-write, so retained roots remain safe
-      // to share with this rollback snapshot.
-      terminalRows: new Map(this.terminalRows),
-      terminalOccurrenceAddresses: new Map(this.terminalOccurrenceAddresses),
-      orderedIds: [...this.orderedIds],
-      orderedIdIndex: new Map(this.orderedIdIndex),
-      deferredTerminalOperations: [...this.deferredTerminalOperations],
+      // to share with the rollback state.
+      terminalRows: this.terminalRows,
+      terminalOccurrenceAddresses: this.terminalOccurrenceAddresses,
+      orderedIds: this.orderedIds,
+      orderedIdIndex: this.orderedIdIndex,
+      // Never mutated in place: readyTerminalOperations replaces the array.
+      deferredTerminalOperations: this.deferredTerminalOperations,
     };
+    this.currentResults.beginJournal();
+    this.terminalRows.beginJournal();
+    this.terminalOccurrenceAddresses.beginJournal();
+    this.orderedIdIndex.beginJournal();
   }
 
-  private restore(snapshot: SubscriptionManagerSnapshot<T>): void {
-    this.currentResults = snapshot.currentResults;
-    this.terminalRows = snapshot.terminalRows;
-    this.terminalOccurrenceAddresses = snapshot.terminalOccurrenceAddresses;
-    this.orderedIds = snapshot.orderedIds;
-    this.orderedIdIndex = snapshot.orderedIdIndex;
-    this.deferredTerminalOperations = snapshot.deferredTerminalOperations;
+  private commitTransaction(): void {
+    this.refreshOrderedIdIndex();
+    const transaction = this.transaction!;
+    this.transaction = null;
+    transaction.currentResults.endJournal();
+    transaction.terminalRows.endJournal();
+    transaction.terminalOccurrenceAddresses.endJournal();
+    transaction.orderedIdIndex.endJournal();
+  }
+
+  private rollBackTransaction(): void {
+    const transaction = this.transaction;
+    this.transaction = null;
+    this.staleFrom = null;
+    this.staleSplices = 0;
+    if (!transaction) return;
+    transaction.currentResults.rollBack();
+    transaction.terminalRows.rollBack();
+    transaction.terminalOccurrenceAddresses.rollBack();
+    transaction.orderedIdIndex.rollBack();
+    this.currentResults = transaction.currentResults;
+    this.terminalRows = transaction.terminalRows;
+    this.terminalOccurrenceAddresses = transaction.terminalOccurrenceAddresses;
+    this.orderedIds = transaction.orderedIds;
+    this.orderedIdIndex = transaction.orderedIdIndex;
+    this.deferredTerminalOperations = transaction.deferredTerminalOperations;
   }
 
   /** Preserve a child splice that raced ahead of its root hydration. */
@@ -504,7 +659,8 @@ export class SubscriptionManager<T extends { id: string }> {
     operations: RuntimeTerminalOperation[],
     transform: (row: WasmRow) => T,
   ): SubscriptionDelta<T> {
-    const beforeIndices = new Map(this.orderedIdIndex);
+    // Descendant edits never add, remove or reorder roots, so a root's index
+    // before these operations is its current `orderedIdIndex` entry.
     const affectedRoots = new Set<string>();
     const writableRoots = new Set<string>();
 
@@ -555,20 +711,13 @@ export class SubscriptionManager<T extends { id: string }> {
     }
 
     const delta = Array.from(affectedRoots).flatMap<RowDelta<T>>((id) => {
-      const beforeIndex = beforeIndices.get(id);
-      const index = this.orderedIdIndex.get(id);
+      const index = this.positionOf(id);
+      if (index === undefined) return [];
       const row = this.terminalRows.get(id);
-      if (beforeIndex !== undefined && (index === undefined || row === undefined)) {
-        return [{ kind: RowChangeKind.Removed, id, index: beforeIndex }];
-      }
-      if (index === undefined || row === undefined) return [];
+      if (row === undefined) return [{ kind: RowChangeKind.Removed, id, index }];
       const item = transform(row);
       this.currentResults.set(id, withResultIdentity(item, id));
-      return [
-        beforeIndex === undefined
-          ? { kind: RowChangeKind.Added, id, index, item }
-          : { kind: RowChangeKind.Updated, id, index, item },
-      ];
+      return [{ kind: RowChangeKind.Updated, id, index, item }];
     });
     return { delta, all: this.all() } as SubscriptionDelta<T>;
   }
@@ -660,11 +809,12 @@ export class SubscriptionManager<T extends { id: string }> {
       return { delta, all: this.all() } as SubscriptionDelta<T>;
     }
 
+    // Positions are looked up through `positionOf` and the index is rebuilt
+    // once at the end, instead of after every splice.
     for (let position = 0; position < delta.length; position++) {
       const change = delta[position]!;
       if (change.kind === RowChangeKind.Removed) {
-        // Removals by id commute, so a run of them is applied in one pass
-        // instead of splicing and reindexing the order once per removal.
+        // Removals by id commute, so a run of them is applied in one pass.
         const end = removedRunEnd(delta, position);
         if (end - position > 1) {
           this.removeIds(delta, position, end);
@@ -673,27 +823,32 @@ export class SubscriptionManager<T extends { id: string }> {
         }
       }
       switch (change.kind) {
-        case RowChangeKind.Added:
+        case RowChangeKind.Added: {
           const alreadyPresent = this.currentResults.has(change.id);
           this.currentResults.set(change.id, change.item);
+          if (alreadyPresent && this.staysInPlace(change.id, change.index)) break;
           if (alreadyPresent) {
             this.removeId(change.id);
           }
           this.insertIdAt(change.id, change.index);
           break;
+        }
         case RowChangeKind.Removed:
           this.currentResults.delete(change.id);
           this.removeId(change.id);
           break;
         case RowChangeKind.Updated:
-          this.removeId(change.id);
-          this.insertIdAt(change.id, change.index);
+          if (!this.staysInPlace(change.id, change.index)) {
+            this.removeId(change.id);
+            this.insertIdAt(change.id, change.index);
+          }
           if (change.item !== undefined) {
             this.currentResults.set(change.id, change.item);
           }
           break;
       }
     }
+    this.refreshOrderedIdIndex();
 
     return {
       delta,
@@ -702,7 +857,7 @@ export class SubscriptionManager<T extends { id: string }> {
   }
 
   private replaceWithResetDelta(delta: RowDelta<T>[]): SubscriptionDelta<T> {
-    this.currentResults = new Map();
+    this.currentResults = new JournaledMap();
     const placements: Array<{ id: string; index: number; item: T }> = [];
     for (const change of delta) {
       if (change.kind === RowChangeKind.Removed) continue;
@@ -719,7 +874,7 @@ export class SubscriptionManager<T extends { id: string }> {
       [],
       placements.map((placement) => ({ index: placement.index, item: placement.id })),
     );
-    this.orderedIdIndex = new Map();
+    this.orderedIdIndex = new JournaledMap();
     this.reindexOrderedIds();
     const all = this.orderedIds
       .map((id) => this.currentResults.get(id))
@@ -756,7 +911,7 @@ export class SubscriptionManager<T extends { id: string }> {
       baseIds,
       placements.map((placement) => ({ index: placement.index, item: placement.id })),
     );
-    this.orderedIdIndex = new Map();
+    this.orderedIdIndex = new JournaledMap();
     this.reindexOrderedIds();
   }
 
@@ -770,11 +925,12 @@ export class SubscriptionManager<T extends { id: string }> {
   }
 
   private clearRows(): void {
-    this.currentResults.clear();
-    this.terminalRows.clear();
-    this.terminalOccurrenceAddresses.clear();
+    // Replace rather than clear, so an in-flight rollback keeps the old state.
+    this.currentResults = new JournaledMap();
+    this.terminalRows = new JournaledMap();
+    this.terminalOccurrenceAddresses = new JournaledMap();
     this.orderedIds = [];
-    this.orderedIdIndex.clear();
+    this.orderedIdIndex = new JournaledMap();
   }
 
   all(): T[] {

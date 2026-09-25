@@ -107,7 +107,7 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "physical current source schema alias missing",
             ))?;
-        let storage_table = physical_current_source_storage_table(
+        let storage_table = physical_current_source_table(
             &self.catalogue.catalogue_schemas,
             &self.catalogue.physical_mappings,
             schema_version,
@@ -128,7 +128,7 @@ where
         class: PhysicalCurrentClass,
         projection_target: impl Into<String>,
     ) -> Result<GraphBuilder, Error> {
-        let storage_table = physical_current_source_storage_table(
+        let storage_table = physical_current_source_table(
             &self.catalogue.catalogue_schemas,
             &self.catalogue.physical_mappings,
             schema_version,
@@ -150,7 +150,7 @@ where
         projection_target: impl Into<String>,
         branch_key: &BranchKey,
     ) -> Result<GraphBuilder, Error> {
-        let storage_table = physical_current_source_storage_table(
+        let storage_table = physical_current_source_table(
             &self.catalogue.catalogue_schemas,
             &self.catalogue.physical_mappings,
             schema_version,
@@ -179,7 +179,7 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "physical current source schema alias missing",
             ))?;
-        let storage_table = physical_current_source_storage_table(
+        let storage_table = physical_current_source_table(
             &self.catalogue.catalogue_schemas,
             &self.catalogue.physical_mappings,
             schema_version,
@@ -201,7 +201,7 @@ where
         projection_target: impl Into<String>,
         scan: groove::ivm::StaticScanSpec,
     ) -> Result<GraphBuilder, Error> {
-        let storage_table = physical_current_source_storage_table(
+        let storage_table = physical_current_source_table(
             &self.catalogue.catalogue_schemas,
             &self.catalogue.physical_mappings,
             schema_version,
@@ -259,7 +259,7 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "physical history source schema alias missing",
             ))?;
-        let binding = physical_history_binding(
+        let storage_table = physical_history_source_table(
             &self.catalogue.catalogue_schemas,
             &self.catalogue.schema_version_aliases,
             &self.catalogue.physical_mappings,
@@ -267,7 +267,7 @@ where
             logical_table,
         )?;
         Ok(GraphBuilder::variant_source(
-            binding.storage_table,
+            storage_table,
             physical_history_projection_target(alias, logical_table),
         ))
     }
@@ -404,7 +404,7 @@ where
             ];
             for storage_table in &storage_tables {
                 let logical_output =
-                    target_table.global_current_content_storage_table().record_schema();
+                    target_table.global_current_storage_tables()[0].record_schema();
                 let physical_names = physical_current_field_names(&target_table, &target_mapping)?;
                 let output = widened_projection_descriptor(
                     &logical_output,
@@ -552,7 +552,7 @@ where
             physical_ahead_current_table_name(target_mapping.table_id),
         ];
         for storage_table in &storage_tables {
-            let logical_output = target_table.global_current_content_storage_table().record_schema();
+            let logical_output = target_table.global_current_storage_tables()[0].record_schema();
             // This query-local target is the semantic read boundary. Unlike
             // the durable all-fields storage target, it must expose the
             // authored descriptor itself: enum tags are translated into that
@@ -1255,10 +1255,9 @@ where
         let target_storage = match shape {
             ContentProjectionShape::History => target_table.history_storage_table(),
             ContentProjectionShape::Current => {
-                target_table.global_current_content_storage_table()
+                target_table.global_current_storage_tables()[0].clone()
             }
         };
-        let target_record = target_storage.record_schema();
         let user_cells = match shape {
             ContentProjectionShape::History => HistoryRowRecord::USER_CELLS,
             ContentProjectionShape::Current => GlobalCurrentRowRecord::USER_CELLS,
@@ -1293,16 +1292,17 @@ where
                 ContentProjectionShape::History => {
                     authored_history_projection_descriptor(&target_table)
                 }
-                ContentProjectionShape::Current => target_record.clone(),
+                ContentProjectionShape::Current => target_storage.record_schema(),
             }
         } else {
             widened_projection_descriptor(
-                &target_record,
+                &target_storage.record_schema(),
                 &physical_names,
                 self.database.table_schema(&physical_storage)?,
             )?
         };
-        let mut fields = target_record
+        let mut fields = target_storage
+            .record_schema()
             .fields()
             .iter()
             .take(user_cells)

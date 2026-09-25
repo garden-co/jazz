@@ -561,43 +561,34 @@ fn validate_payload_enum_cases(
     Ok(())
 }
 
-pub(super) fn physical_history_binding(
+/// Resolve the physical history table a registered logical table scans.
+///
+/// Source graphs name only the storage table; the table's variant
+/// projection supplies the descriptor, so none is derived here.
+pub(super) fn physical_history_source_table(
     catalogue_schemas: &BTreeMap<SchemaVersionId, SchemaVersion>,
     schema_version_aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,
     physical_mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
     schema_version: SchemaVersionId,
     logical_table: &str,
-) -> Result<PhysicalHistoryBinding, Error> {
+) -> Result<String, Error> {
     let schema = catalogue_schemas
         .get(&schema_version)
         .ok_or(Error::InvalidStoredValue("physical history schema missing"))?;
-    let table = schema
+    if !schema
         .schema
         .tables
         .iter()
-        .find(|table| table.name == logical_table)
-        .ok_or_else(|| Error::TableNotFound(logical_table.to_owned()))?;
-    let mapping = physical_mappings
-        .get(&schema_version)
-        .and_then(|mapping| mapping.tables.get(logical_table))
-        .ok_or(Error::InvalidStoredValue(
-            "physical history table mapping missing",
-        ))?;
-    let alias =
-        schema_version_aliases
-            .get(&schema_version)
-            .copied()
-            .ok_or(Error::InvalidStoredValue(
-                "physical history schema alias missing",
-            ))?;
-    Ok(PhysicalHistoryBinding {
-        storage_table: physical_history_storage_table(
-            physical_mappings,
-            schema_version,
-            logical_table,
-        )?,
-        descriptor: physical_history_descriptor(table, mapping, alias)?,
-    })
+        .any(|table| table.name == logical_table)
+    {
+        return Err(Error::TableNotFound(logical_table.to_owned()));
+    }
+    if !schema_version_aliases.contains_key(&schema_version) {
+        return Err(Error::InvalidStoredValue(
+            "physical history schema alias missing",
+        ));
+    }
+    physical_history_storage_table(physical_mappings, schema_version, logical_table)
 }
 
 pub(super) fn physical_history_storage_table(
@@ -614,10 +605,11 @@ pub(super) fn physical_history_storage_table(
     Ok(physical_history_table_name(mapping.table_id))
 }
 
-/// The storage table a current-row source scans. Source graphs carry only
-/// the table name; the row descriptor is resolved where rows are decoded, so
-/// it is not built here.
-pub(super) fn physical_current_source_storage_table(
+/// Resolve the physical current table a registered logical table scans.
+///
+/// Source graphs name only the storage table; the table's variant
+/// projection supplies the descriptor, so none is derived here.
+pub(super) fn physical_current_source_table(
     catalogue_schemas: &BTreeMap<SchemaVersionId, SchemaVersion>,
     physical_mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
     schema_version: SchemaVersionId,
