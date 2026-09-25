@@ -410,6 +410,33 @@ async fn account_still_admitted(
     }
 }
 
+/// Per-message admission check for a live account socket.
+///
+/// Every registry mutation runs on the registry owner thread and bumps
+/// `changes` before it replies, so an assignment that has not changed since
+/// the last check cannot have been revoked. Only a changed (or closed)
+/// registry needs the owner-thread lookup; this keeps one thread off every
+/// connection's message path (#3387).
+async fn account_admission_current(
+    state: &ServerState,
+    identity: Option<AuthorSubject>,
+    changes: &mut Option<tokio::sync::watch::Receiver<u64>>,
+) -> Result<(), super::accounts::AdmissionError> {
+    if identity.is_none() {
+        return Ok(());
+    }
+    if let Some(changes) = changes {
+        match changes.has_changed() {
+            Ok(false) => return Ok(()),
+            Ok(true) => {
+                changes.borrow_and_update();
+            }
+            Err(_) => {}
+        }
+    }
+    account_still_admitted(state, identity).await
+}
+
 fn session_claims(
     session: jazz::tools::public_schema::Session,
 ) -> Result<BTreeMap<String, CoreValue>, String> {
@@ -904,7 +931,7 @@ async fn handle_ws_connection(
                         break;
                     }
                 };
-                if let Err(error) = account_still_admitted(&state, account_identity).await {
+                if let Err(error) = account_admission_current(&state, account_identity, &mut account_changes).await {
                     drop(permit);
                     queue_ws_error(&writer_tx, error.into_wire());
                     break;
@@ -922,7 +949,7 @@ async fn handle_ws_connection(
             }
             msg = socket_reader.next() => match msg {
                 Some(Ok(Message::Binary(bytes))) => {
-                    if let Err(error) = account_still_admitted(&state, account_identity).await {
+                    if let Err(error) = account_admission_current(&state, account_identity, &mut account_changes).await {
                         queue_ws_error(&writer_tx, error.into_wire());
                         break;
                     }
@@ -3244,6 +3271,232 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// Alice holds a live account websocket. An unrelated registry change
+    /// (Bob enrolling) must not disconnect her, while revoking Alice's
+    /// identity must still close her socket promptly with an auth failure.
+    /// Guards #3387: the per-message registry lookup is skipped until the
+    /// registry reports a change, so revocation must arrive via that change.
+    #[cfg(feature = "embedded-server")]
+    #[tokio::test]
+    async fn revoking_an_account_closes_its_live_websocket_promptly() {
+        use crate::server::testing::{JazzServer, TEST_JWT_ISSUER, TestJwtIssuer};
+
+        let schema = SchemaBuilder::new()
+            .table(
+                PublicTableSchema::builder("todos")
+                    .column("title", ColumnType::Text)
+                    .policies(public_table_policies()),
+            )
+            .build();
+        let core = JazzServer::start_with_schema(schema)
+            .await
+            .expect("start test server");
+        let client = reqwest::Client::new();
+        let accounts = format!("{}/apps/{}/accounts", core.base_url(), core.app_id());
+        let alice = TestJwtIssuer::jwt_for_user("alice");
+        let registered: serde_json::Value = client
+            .post(format!("{accounts}/register"))
+            .bearer_auth(&alice)
+            .send()
+            .await
+            .expect("register Alice")
+            .json()
+            .await
+            .expect("Alice's account");
+        let account = jazz::account_registry::AccountId(
+            registered["account"]
+                .as_str()
+                .and_then(|value| uuid::Uuid::parse_str(value).ok())
+                .expect("account uuid"),
+        );
+        let identity = AuthorSubject::authenticated(TEST_JWT_ISSUER, "alice")
+            .expect("Alice's principal")
+            .with_account(account);
+
+        let (mut ws, _) = connect_async(format!(
+            "ws://127.0.0.1:{}/apps/{}/ws",
+            core.port(),
+            core.app_id()
+        ))
+        .await
+        .expect("connect Alice");
+        let prelude = serde_json::json!({
+            "peer_identity": identity.canonical(),
+            "auth": { "jwt_token": alice },
+        });
+        ws.send(WsMessage::Binary(prelude.to_string().into_bytes().into()))
+            .await
+            .expect("send prelude");
+        ws.send(WsMessage::Binary(
+            ws_client_hello_batch_with_features(current_wire_features()).into(),
+        ))
+        .await
+        .expect("send hello");
+        let first = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("server hello deadline")
+            .expect("server hello")
+            .expect("server hello message");
+        assert!(
+            matches!(
+                decode_ws_message(&first).as_slice(),
+                [WireFrame::Hello(_), ..]
+            ),
+            "Alice's account session must be admitted"
+        );
+
+        let bob = client
+            .post(format!("{accounts}/register"))
+            .bearer_auth(TestJwtIssuer::jwt_for_user("bob"))
+            .send()
+            .await
+            .expect("register Bob");
+        assert_eq!(bob.status(), axum::http::StatusCode::OK);
+        let quiet_until = tokio::time::Instant::now() + Duration::from_millis(300);
+        while let Ok(message) = tokio::time::timeout_at(quiet_until, ws.next()).await {
+            let message = message
+                .expect("Alice's socket stays open")
+                .expect("Alice's socket stays readable");
+            assert!(
+                !decode_ws_message(&message)
+                    .iter()
+                    .any(|frame| matches!(frame, WireFrame::Error(_))),
+                "an unrelated enrollment must not disconnect Alice"
+            );
+        }
+
+        let revoked = client
+            .post(format!("{accounts}/revoke"))
+            .bearer_auth(&alice)
+            .json(&serde_json::json!({
+                "identity": { "issuer": TEST_JWT_ISSUER, "subject": "alice" }
+            }))
+            .send()
+            .await
+            .expect("revoke Alice");
+        assert_eq!(revoked.status(), axum::http::StatusCode::NO_CONTENT);
+        // Application traffic after revocation must not be served either.
+        let _ = ws
+            .send(WsMessage::Binary(
+                postcard::to_allocvec(&Vec::<Vec<u8>>::new())
+                    .expect("empty batch")
+                    .into(),
+            ))
+            .await;
+        let rejected = tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(Ok(message)) = ws.next().await {
+                if decode_ws_message(&message).iter().any(|frame| {
+                    matches!(
+                        frame,
+                        WireFrame::Error(WireError {
+                            code: WireErrorCode::AuthFailed,
+                            ..
+                        })
+                    )
+                }) {
+                    return true;
+                }
+            }
+            false
+        })
+        .await
+        .expect("revocation closes Alice's socket promptly");
+        assert!(
+            rejected,
+            "Alice must receive an auth failure after revocation"
+        );
+        let closed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match ws.next().await {
+                    None | Some(Err(_)) | Some(Ok(WsMessage::Close(_))) => return,
+                    Some(Ok(_)) => {}
+                }
+            }
+        })
+        .await;
+        assert!(closed.is_ok(), "the revoked socket must close");
+        core.shutdown().await;
+    }
+
+    /// Timing receipt for #3387: the per-message admission cost of a live
+    /// account socket, before (a registry-thread lookup per message) and
+    /// after (a watch-version check). Run manually with `--ignored --nocapture`.
+    #[cfg(feature = "embedded-server")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[ignore = "#3387: timing probe, run manually with --ignored"]
+    async fn probe_3387_per_message_admission_cost() {
+        use crate::server::testing::{JazzServer, TEST_JWT_ISSUER, TestJwtIssuer};
+
+        const CHECKS_PER_SOCKET: usize = 2_000;
+        let core = JazzServer::builder()
+            .with_persistent_storage()
+            .with_storage_factory(std::sync::Arc::new(
+                jazz_storage_rocksdb::RocksDbStorageFactory,
+            ))
+            .start()
+            .await
+            .expect("start test server");
+        let client = reqwest::Client::new();
+        let accounts = format!("{}/apps/{}/accounts", core.base_url(), core.app_id());
+        let registered: serde_json::Value = client
+            .post(format!("{accounts}/register"))
+            .bearer_auth(TestJwtIssuer::jwt_for_user("alice"))
+            .send()
+            .await
+            .expect("register Alice")
+            .json()
+            .await
+            .expect("Alice's account");
+        let account = jazz::account_registry::AccountId(
+            uuid::Uuid::parse_str(registered["account"].as_str().expect("account"))
+                .expect("account uuid"),
+        );
+        let identity = Some(
+            AuthorSubject::authenticated(TEST_JWT_ISSUER, "alice")
+                .expect("Alice's principal")
+                .with_account(account),
+        );
+        let state = core.server_state();
+        for sockets in [1usize, 16, 64] {
+            for gated in [false, true] {
+                let started = std::time::Instant::now();
+                let mut tasks = Vec::new();
+                for _ in 0..sockets {
+                    let state = state.clone();
+                    tasks.push(tokio::spawn(async move {
+                        let mut changes =
+                            state.accounts.as_ref().map(|registry| registry.subscribe());
+                        for _ in 0..CHECKS_PER_SOCKET {
+                            let result = if gated {
+                                account_admission_current(&state, identity, &mut changes).await
+                            } else {
+                                account_still_admitted(&state, identity).await
+                            };
+                            result.expect("Alice stays admitted");
+                        }
+                    }));
+                }
+                for task in tasks {
+                    task.await.expect("probe task");
+                }
+                let elapsed = started.elapsed();
+                let checks = (sockets * CHECKS_PER_SOCKET) as f64;
+                println!(
+                    "probe_3387 sockets={sockets} path={} checks={checks} wall_ms={:.1} ns_per_check={:.0} checks_per_s={:.0}",
+                    if gated {
+                        "watch_gated"
+                    } else {
+                        "registry_lookup"
+                    },
+                    elapsed.as_secs_f64() * 1e3,
+                    elapsed.as_nanos() as f64 / checks,
+                    checks / elapsed.as_secs_f64(),
+                );
+            }
+        }
+        core.shutdown().await;
     }
 
     // Admission precedes context creation, so a forged authority claim is
