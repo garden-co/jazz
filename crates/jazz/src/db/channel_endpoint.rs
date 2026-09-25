@@ -114,6 +114,7 @@ impl ChannelEndpoint {
                 return Ok(Some(super::ReceivedSyncMessage {
                     message,
                     lease: Some(received.lease),
+                    receipts_validated: self.context.validates_receipts(),
                 }));
             }
             self.routing

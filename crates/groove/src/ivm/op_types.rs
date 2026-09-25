@@ -81,6 +81,15 @@ pub enum StaticScanSpec {
         prefix: Vec<LiteralValue>,
         max_items: usize,
     },
+    /// Read the last `max_items` entries under a prefix, in descending key
+    /// order, bounded before row decoding. Jazz emits this (and an ordered
+    /// `PrefixLimit`) only for a one-shot ordered-page probe whose caller
+    /// re-proves the page after every downstream filter, and falls back to an
+    /// unbounded source when it cannot.
+    ReversePrefixLimit {
+        prefix: Vec<LiteralValue>,
+        max_items: usize,
+    },
     Range {
         start: Vec<LiteralValue>,
         end: Vec<LiteralValue>,

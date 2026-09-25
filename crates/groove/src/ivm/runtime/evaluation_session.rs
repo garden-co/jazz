@@ -31,6 +31,7 @@ pub(super) enum StorageRequestKey {
         family: String,
         prefix: Vec<u8>,
         max_items: usize,
+        reversed: bool,
     },
     IndexedRowsPrefix {
         table: String,
@@ -42,6 +43,7 @@ pub(super) enum StorageRequestKey {
         index: String,
         prefix: Vec<u8>,
         max_items: usize,
+        reversed: bool,
     },
     IndexedRowsIntersection {
         table: String,
@@ -322,10 +324,14 @@ impl<'a> EvaluationRequests<'a> {
                 family,
                 prefix,
                 max_items,
+                reversed,
             }) => {
-                let future = storage.scan(
-                    ScanRequest::prefix(family.clone(), prefix.clone()).with_max_items(*max_items),
-                );
+                let mut request =
+                    ScanRequest::prefix(family.clone(), prefix.clone()).with_max_items(*max_items);
+                if *reversed {
+                    request = request.reversed();
+                }
+                let future = storage.scan(request);
                 Box::pin(async move {
                     future
                         .await
@@ -365,6 +371,7 @@ impl<'a> EvaluationRequests<'a> {
                 index,
                 prefix,
                 max_items,
+                reversed,
             }) => {
                 let table_schema = schema
                     .table(table)
@@ -377,10 +384,12 @@ impl<'a> EvaluationRequests<'a> {
                     .expect("compiled indexed-row source index exists")
                     .clone();
                 let index = index.clone();
-                let scan = storage.scan(
-                    ScanRequest::prefix("indices".to_owned(), prefix.clone())
-                        .with_max_items(*max_items),
-                );
+                let mut request = ScanRequest::prefix("indices".to_owned(), prefix.clone())
+                    .with_max_items(*max_items);
+                if *reversed {
+                    request = request.reversed();
+                }
+                let scan = storage.scan(request);
                 let storage = storage.clone();
                 Box::pin(async move {
                     let entries = scan.await?;

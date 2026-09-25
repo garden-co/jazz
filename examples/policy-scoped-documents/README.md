@@ -12,7 +12,7 @@ fixture data, not an adopter schema. See
 [#2985](https://github.com/garden-co/jazz/issues/2985) and the performance log
 [#2913](https://github.com/garden-co/jazz/issues/2913).
 
-## Measurement contract (fixture revision 2)
+## Measurement contract (fixture revision 3)
 
 Each sample reads the first page of 50 documents ordered by descending
 `updated_at`, with a literal equality on `owner_id` or `org_id`. All reads use
@@ -36,9 +36,11 @@ compare a missing-policy empty result as an equivalent workload.
 
 Owner 3 owns the newest documents in organization 0, so the measured organization
 page requires inherited access; it cannot pass through ownership alone.
-The declared indexes on owner, organization and timestamp are independent
-single-column indexes, **not** an ordered compound index. A requested page size
-is not evidence of bounded scan work.
+Revision 3 adds ordered `(owner_id, updated_at)` and `(org_id, updated_at)`
+indexes by default. The receipt's `single` mode keeps only the original
+independent single-column indexes as a matched control. Compare `single` and
+default results within revision 3; the requested page size alone does not
+prove bounded scan work.
 
 CodSpeed runs the 10k and 100k table scales, three samples of one first query
 each, with mimalloc and RocksDB WalNoSync. Each input reopens the seeded store
@@ -56,9 +58,15 @@ an authority settlement receipt this no-network fixture does not supply. The
 seed has no pending writes, but these remain separately named endpoints, not
 interchangeable timing samples. Subscription finalization is outside the timer.
 
-The standalone receipt reports seed, reopen, public preparation, query and
-close phases separately, plus **logical** storage read counters (not physical
-disk I/O). It sweeps limits 1/10/50 and includes the owner-policy org diagnostic.
+The standalone receipt reports seed, reopen split into RocksDB and Jazz
+recovery, public preparation, query and close phases separately, plus
+**logical** storage read counters (not physical disk I/O). It sweeps limits
+1/10/50 and includes the owner-policy org diagnostic. An optional fourth
+argument deletes that many trailing document rows before reads. This leaves
+the owner 2 and organization 0 pages intact while measuring the cost of a
+nonempty deletion register. A fifth `restore` argument restores those rows
+before reads, to measure the register cost with no currently deleted rows.
+The receipt reports mutation setup separately.
 Throughput means complete page queries/s, not scanned rows/s.
 
 The contributor's original benchmark timed reopen + query + close, omitted
@@ -73,12 +81,16 @@ cargo test -p jazz-example-policy-scoped-documents-benchmark --test pages
 cargo check -p jazz-example-policy-scoped-documents-benchmark --all-targets
 cargo bench --profile perf -p jazz-example-policy-scoped-documents-benchmark --features jazz-benchmark-guard/mimalloc --bench walltime
 cargo run --profile perf -p jazz-example-policy-scoped-documents-benchmark --features jazz-benchmark-guard/mimalloc --bin policy-read-receipt -- 10000
+cargo run --profile perf -p jazz-example-policy-scoped-documents-benchmark --features jazz-benchmark-guard/mimalloc --bin policy-read-receipt -- 100000 OwnerOrOrg single
+cargo run --profile perf -p jazz-example-policy-scoped-documents-benchmark --features jazz-benchmark-guard/mimalloc --bin policy-read-receipt -- 100000 OwnerOrOrg composite 1000
+cargo run --profile perf -p jazz-example-policy-scoped-documents-benchmark --features jazz-benchmark-guard/mimalloc --bin policy-read-receipt -- 100000 OwnerOrOrg composite 1000 restore
 ```
 
 Record checkout SHA, executable hash, features, allocator and host alongside
 local receipts. Do not time while builds/tests/profilers compete on the host.
-The `benchmark` label enables the CodSpeed native workload matrix. Baseline
-first, planner changes in a later PR. The fixture changes no storage or wire formats.
+The `benchmark` label enables the CodSpeed native workload matrix. The fixture
+uses only invented data. Composite indexes change the physical index layout;
+compare against a freshly seeded `single` fixture, not an old-format store.
 
 Correctness CI checks exact ordered IDs against an independent policy oracle,
 including direct owner, inherited-only access, non-members, empty pages and

@@ -381,11 +381,21 @@ export class SubscriptionManager<T extends { id: string }> {
           index: change.index,
         })),
       ];
+      // A root that this frame both removes and adds or updates stays in the
+      // result (see normalizeRowDelta), so it keeps its retained terminal row.
+      const materializedRoots = new Set(
+        decoded
+          .filter((change) => change.kind !== RowChangeKind.Removed)
+          .map((change) => change.id),
+      );
       // Root removals are applied before terminal operations. Keep their
       // full public occurrence identities so a later descendant teardown in
       // this frame can be recognized as subsumed by its root removal. The
       // registered address of a removed root is its public result key.
-      const removedRoots = new Set(removedKeys.map((key) => key.id));
+      const removedRoots = new Set<string>();
+      for (const key of removedKeys) {
+        if (!materializedRoots.has(key.id)) removedRoots.add(key.id);
+      }
       for (const change of decoded) {
         if (change.kind !== RowChangeKind.Removed && change.row) {
           // Retained roots are immutable. The first descendant edit in a
