@@ -192,7 +192,7 @@ pub struct IvmRuntime {
     ephemeral_graph_gc_pending: bool,
     prepared_shapes: HashMap<PreparedShapeId, RoutedMultisinkShapeState>,
     auto_direct_families: HashMap<AutoDirectFamilyKey, PreparedShapeId>,
-    binding_sources: HashMap<BindingSourceKey, BindingSourceState>,
+    binding_sources: subscriptions::BindingSources,
     input_source_runtime_namespace: u64,
     next_input_source_id: u64,
     /// Binding retractions discovered while routing notifications cannot tick
@@ -300,7 +300,7 @@ impl IvmRuntime {
             collect_tick_runtime_stats: false,
             prepared_shapes: HashMap::default(),
             auto_direct_families: HashMap::default(),
-            binding_sources: HashMap::default(),
+            binding_sources: subscriptions::BindingSources::default(),
             input_source_runtime_namespace: NEXT_INPUT_SOURCE_RUNTIME_NAMESPACE
                 .fetch_add(1, Ordering::Relaxed),
             next_input_source_id: 1,
