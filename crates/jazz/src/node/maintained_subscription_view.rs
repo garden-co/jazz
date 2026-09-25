@@ -315,6 +315,11 @@ impl IntoIterator for RetainedResultMembers {
 /// version, a replacement for a previously unreplaced row, a new alias) can
 /// only promote positive, unpublished members, all of which are `withheld`.
 /// Anything that could retract a witness drops the journal instead.
+///
+/// Every withheld member is revisited on each reconcile, so a reconcile costs
+/// O(changed + withheld). Single-row changes stay independent of result size
+/// only while few members wait for a witness; while a cold source is still
+/// arriving, each tick pays for the whole withheld set (#3533).
 #[derive(Clone, Debug)]
 struct WitnessGatedJournal {
     changed: BTreeSet<ResultMemberEntry>,

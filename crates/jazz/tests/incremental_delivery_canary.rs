@@ -445,8 +445,10 @@ fn measure_ordered_root_single_insert(scale: usize) -> AllocSnapshot {
 fn ordered_root_single_row_insert_is_scale_independent() {
     // INV-INC-1 for an ordered root collector: one inserted row must not
     // renumber, re-index, or reconcile every unchanged root in the
-    // subscription snapshot. Allocation counts are deterministic witnesses
-    // of such whole-result rebuilds (each rebuild allocates per root).
+    // subscription snapshot. Allocation counts and bytes are deterministic
+    // witnesses of such whole-result rebuilds (each rebuild allocates per
+    // root). The limits sit close to 1 so that a rebuild which allocates only
+    // once per root, rather than per field, still fails.
     let small = measure_ordered_root_single_insert(250);
     let large = measure_ordered_root_single_insert(4_000);
     let alloc_ratio = large.allocs as f64 / small.allocs.max(1) as f64;
@@ -455,7 +457,7 @@ fn ordered_root_single_row_insert_is_scale_independent() {
         "ordered root canary small={small:?} large={large:?} alloc_ratio={alloc_ratio:.2} byte_ratio={byte_ratio:.2}"
     );
     assert!(
-        alloc_ratio <= 3.0 && byte_ratio <= 3.0,
+        alloc_ratio <= 1.5 && byte_ratio <= 1.5,
         "INV-INC-1 violation: ordered root single-row insert allocation scaled with result size: \
          small={small:?}, large={large:?}, alloc_ratio={alloc_ratio:.2}, byte_ratio={byte_ratio:.2}"
     );
