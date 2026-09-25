@@ -1028,6 +1028,67 @@ fn later_resident_tick_runs_while_earlier_recursive_tick_is_suspended() {
 }
 
 #[test]
+fn unsubscribing_while_incremental_work_is_queued_releases_its_graph_after_drain() {
+    let (storage, control) = TestStorage::controlled(&["albums", "edges"]);
+    let mut database = block_on(Database::new(albums_and_edges_schema(), storage.clone())).unwrap();
+    let mut seed = database.open_batch();
+    seed.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
+    seed.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(3)]);
+    block_on(database.commit_batch(seed)).unwrap();
+    let albums = block_on(database.subscribe_one_sink(GraphBuilder::table("albums"))).unwrap();
+    assert!(
+        block_on(database.next_subscription(&albums))
+            .unwrap()
+            .is_empty()
+    );
+    let before = database.runtime_stats();
+
+    let reach = block_on(database.subscribe_one_sink(reachability_graph())).unwrap();
+    assert_eq!(
+        block_on(database.next_subscription(&reach))
+            .unwrap()
+            .deltas
+            .len(),
+        3
+    );
+    assert!(database.runtime_stats().graph_nodes > before.graph_nodes);
+
+    // Queue incremental work for the recursive terminal: its retraction needs
+    // a cold scan, while the resident albums terminal publishes at once.
+    storage.evict_scans("edges");
+    control.pause_on(TestStorageOperation::ScanOpen);
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("Speak No Evil".into())],
+    );
+    batch.delete("edges", PrimaryKeyValue::U64(2));
+    let mut apply = Box::pin(database.apply_batch(batch));
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    let applied = match apply.as_mut().poll(&mut context) {
+        Poll::Ready(Ok(applied)) => applied,
+        _ => panic!("resident application must complete immediately"),
+    };
+    drop(apply);
+    assert_eq!(albums.try_recv().unwrap().deltas.len(), 1);
+
+    // Graph size is only observable through runtime stats: the contract is
+    // that a subscription released while queued work still references its
+    // nodes is collected once that work drains, not leaked.
+    assert!(database.unsubscribe(reach.id()));
+    drop(reach);
+    control.resume_operation(TestStorageOperation::ScanOpen);
+    block_on(database.drive_progress()).unwrap();
+    let persistence = block_on(applied.persist());
+    database.finish_persistence(persistence).unwrap();
+
+    let after = database.runtime_stats();
+    assert_eq!(after.graph_nodes, before.graph_nodes);
+    assert_eq!(after.active_subscriptions, before.active_subscriptions);
+}
+
+#[test]
 fn completed_stateful_branch_is_not_reapplied_while_sibling_is_blocked() {
     let (storage, control) = TestStorage::controlled(&["left_metrics", "right_metrics"]);
     let mut database = block_on(Database::new(two_metrics_schema(), storage)).unwrap();

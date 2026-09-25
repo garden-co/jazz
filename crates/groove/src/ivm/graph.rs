@@ -1638,6 +1638,10 @@ pub struct IvmGraph {
     frontier_sources: HashMap<String, HashSet<NodeId>>,
     /// Route barriers below shared prepared-shape terminals (#3288).
     routes: super::routes::RouteIndex,
+    /// Nodes inserted since the runtime last drained them. Every new node is
+    /// unretained until an operation adds a retainer, so graph GC starts its
+    /// incremental sweep from these.
+    added_since_drain: Vec<NodeId>,
 }
 
 impl IvmGraph {
@@ -1769,6 +1773,7 @@ impl IvmGraph {
         descriptor: NodeDescriptor,
         durability: NodeDurability,
     ) -> NodeId {
+        self.added_since_drain.push(id);
         // A durable node changes whether every route barrier above it keeps
         // ordinary activation, including in plans that never reached its
         // inputs because they stopped at such a barrier.
@@ -1892,6 +1897,11 @@ impl IvmGraph {
             }))
             .flat_map(|nodes| nodes.iter().copied())
             .collect()
+    }
+
+    /// Nodes inserted since the previous call, including ones removed since.
+    pub(crate) fn take_added_nodes(&mut self) -> Vec<NodeId> {
+        std::mem::take(&mut self.added_since_drain)
     }
 
     pub fn mark_ancestors<S>(&self, id: NodeId, retained: &mut std::collections::HashSet<NodeId, S>)
