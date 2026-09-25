@@ -4205,17 +4205,17 @@ where
         if !matches!(tier, DurabilityTier::Global | DurabilityTier::Local) {
             return Ok(None);
         }
-        let table = self.table_in_schema(&source.table, read_view.read_schema)?;
+        let table = self.table_in_schema_ref(&source.table, read_view.read_schema)?;
         let selected = match selector {
             AccessPathSelector::Ordinary => {
-                select_current_access_path(&table, equalities).or_else(|| {
+                select_current_access_path(table, equalities).or_else(|| {
                     covered_column.and_then(|covered| {
-                        select_composite_leading_equality_access_path(&table, equalities, covered)
+                        select_composite_leading_equality_access_path(table, equalities, covered)
                     })
                 })
             }
             AccessPathSelector::CompositeEquality => {
-                select_composite_equality_access_path(&table, equalities)
+                select_composite_equality_access_path(table, equalities)
             }
         };
         let Some(mut path) = selected else {
@@ -4298,7 +4298,7 @@ where
             return Ok(paths);
         }
         let root = root_source_id(&query.table);
-        let table = self.table_in_schema(&query.table, shape.schema_version())?;
+        let table = self.table_in_schema_ref(&query.table, shape.schema_version())?;
         if table.has_any_policy() {
             return Ok(paths);
         }
@@ -4561,7 +4561,7 @@ where
         let query = shape.query();
         let mut access_paths = BTreeMap::new();
         let equalities = root_literal_equalities(query, binding)?;
-        let table = self.table_in_schema(&query.table, shape.schema_version())?;
+        let table = self.table_in_schema_ref(&query.table, shape.schema_version())?;
         // A maintained authorization scope reacts to both the content winner
         // and its deletion register. The point source is only incrementally
         // complete for an unscoped row: inside a policy graph, its content cap
@@ -4629,7 +4629,7 @@ where
         binding: &Binding,
         access_paths: &mut BTreeMap<SourceId, CurrentAccessPath>,
     ) -> Result<(), Error> {
-        let table = self.table_in_schema(table_name, schema_version)?;
+        let table = self.table_in_schema_ref(table_name, schema_version)?;
         let equalities = literal_equalities_for_filters(filters, binding)?;
         if let Some(access_path) = select_current_access_path(&table, &equalities)
             && matches!(access_path, CurrentAccessPath::PrimaryKey(_))

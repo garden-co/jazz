@@ -2852,7 +2852,7 @@ where
         // authored cells were replaced by typed nulls.
         // Only synthetic rows need a reconstructed descriptor. Ordinary rows
         // returned above already carry the immutable store's authored layout.
-        let authored_table = self.table_in_schema(version.table(), authored_schema)?;
+        let authored_table = self.table_in_schema_ref(version.table(), authored_schema)?;
         let authored_descriptor = if version.layer() == VersionLayer::Deletion {
             authored_table.register_storage_table().record_schema()
         } else {

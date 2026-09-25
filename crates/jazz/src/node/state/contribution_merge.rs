@@ -139,7 +139,7 @@ where
                     "contribution operation must belong to the content layer",
                 ));
             }
-            let table = self.table_in_schema(&coordinate.table, schema_version)?;
+            let table = self.table_in_schema_ref(&coordinate.table, schema_version)?;
             let column_schema = table
                 .columns
                 .iter()

@@ -1600,7 +1600,7 @@ where
             if !settled {
                 continue;
             }
-            let table = self.table_in_schema(
+            let table = self.table_in_schema_ref(
                 &source_request.source.table,
                 request.reads.primary.read_schema,
             )?;
@@ -1617,7 +1617,7 @@ where
             occurrences.push((source_request.source, descriptor));
         }
         for (table_name, metadata) in table_metadata {
-            let table = self.table_in_schema(&table_name, request.reads.primary.read_schema)?;
+            let table = self.table_in_schema_ref(&table_name, request.reads.primary.read_schema)?;
             let descriptor =
                 read_sources::current_row_descriptor_with_hidden_source_fields_for_current_storage(
                     &table, &metadata,
@@ -2220,7 +2220,7 @@ where
             let mut current_table_name = root_table.to_owned();
             for segment in include.path.split('.') {
                 let current_table = self
-                    .table_in_schema(&current_table_name, read_schema_version)
+                    .table_in_schema_ref(&current_table_name, read_schema_version)
                     .ok()?;
                 let target_table = current_table.references.get(segment)?.clone();
                 tables.insert(target_table.clone());
@@ -2299,7 +2299,7 @@ where
             )
         } else {
             let table = self
-                .table_in_schema(&lowered_shape.query().table, lowered_shape.schema_version())?
+                .table_in_schema_ref(&lowered_shape.query().table, lowered_shape.schema_version())?
                 .clone();
             self.materialize_historical_query_rows(table, deltas)
         }
@@ -2341,7 +2341,7 @@ where
             )?
         } else {
             let table = self
-                .table_in_schema(&lowered_shape.query().table, lowered_shape.schema_version())?
+                .table_in_schema_ref(&lowered_shape.query().table, lowered_shape.schema_version())?
                 .clone();
             self.materialize_historical_query_rows(table, deltas)?
         };
@@ -2373,7 +2373,7 @@ where
         let table = if query.aggregate.is_some() {
             self.query_output_table(query, lowered_shape.schema_version())?
         } else {
-            self.table_in_schema(&query.table, lowered_shape.schema_version())?
+            self.table_in_schema_ref(&query.table, lowered_shape.schema_version())?
                 .clone()
         };
         let binding = lowered_shape.bind(BTreeMap::new())?;
@@ -2938,7 +2938,7 @@ where
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<Vec<CurrentRow>, Error> {
         let table = self
-            .table_in_schema(&shape.query().table, shape.schema_version())?
+            .table_in_schema_ref(&shape.query().table, shape.schema_version())?
             .clone();
         let access_paths = BTreeMap::from([(
             root_source_id(&shape.query().table),
@@ -2997,7 +2997,7 @@ where
         row_uuid: RowUuid,
     ) -> Result<Vec<CurrentRow>, Error> {
         let table = self
-            .table_in_schema(&shape.query().table, shape.schema_version())?
+            .table_in_schema_ref(&shape.query().table, shape.schema_version())?
             .clone();
         let program = self
             .compile_include_deleted_query_program_in_authorization_mode(
@@ -3050,7 +3050,7 @@ where
         identity: AuthorSubject,
     ) -> Result<Vec<CurrentRow>, Error> {
         let table = self
-            .table_in_schema(&shape.query().table, shape.schema_version())?
+            .table_in_schema_ref(&shape.query().table, shape.schema_version())?
             .clone();
         let request = self.current_query_program_request(
             shape,
@@ -3220,17 +3220,12 @@ where
             if presentation_query.order_by.is_empty() || presentation_query.aggregate.is_some() {
                 None
             } else {
-                Some(self.table_in_schema(
+                Some(self.table_in_schema_ref(
                     &presentation_query.table,
                     self.catalogue.active_schema.schema,
                 )?)
             };
-        Self::sort_query_rows_with_occurrences(
-            &presentation_query,
-            table.as_ref(),
-            rows,
-            occurrence_ids,
-        )
+        Self::sort_query_rows_with_occurrences(&presentation_query, table, rows, occurrence_ids)
     }
 
     fn apply_projection(

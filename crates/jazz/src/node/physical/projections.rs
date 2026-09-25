@@ -294,7 +294,7 @@ where
                 .ok_or(Error::InvalidStoredValue(
                     "physical projection target schema alias missing",
                 ))?;
-            let target_table = self.table_in_schema(&target_table_name, target_schema)?;
+            let target_table = self.table_in_schema_ref(&target_table_name, target_schema)?;
             let projection_target =
                 physical_history_projection_target(target_alias, &target_table_name);
             let logical_output = target_table.history_storage_table().record_schema();
@@ -654,7 +654,7 @@ where
             physical_global_current_table_name(target_mapping.table_id),
             physical_ahead_current_table_name(target_mapping.table_id),
         ];
-        let target_table = self.table_in_schema(target_table_name, target_schema)?;
+        let target_table = self.table_in_schema_ref(target_table_name, target_schema)?;
         let authored_output = physical_current_descriptor(&target_table, &target_mapping)?;
         let physical_fields = authored_output
             .fields()
@@ -832,7 +832,7 @@ where
         output_name: String,
         output_type: records::ValueType,
     ) -> Result<Option<ProjectField>, Error> {
-        let source_table = self.table_in_schema(source_table_name, source_schema)?;
+        let source_table = self.table_in_schema_ref(source_table_name, source_schema)?;
         let mut cells = source_table
             .columns
             .iter()
@@ -893,7 +893,7 @@ where
                             ),
                         )?;
                     let target_column_type = self
-                        .table_in_schema(target_table_name, target_schema)?
+                        .table_in_schema_ref(target_table_name, target_schema)?
                         .columns
                         .iter()
                         .find(|column| column.name == target_column)
@@ -965,7 +965,7 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "target post-winner physical mapping missing",
             ))?;
-        let target_table = self.table_in_schema(target_table_name, target_schema)?;
+        let target_table = self.table_in_schema_ref(target_table_name, target_schema)?;
         let required_enum_columns = target_table
             .columns
             .iter()
@@ -1203,7 +1203,7 @@ where
             Literal(Value),
         }
 
-        let source_table = self.table_in_schema(source_table_name, source_schema)?;
+        let source_table = self.table_in_schema_ref(source_table_name, source_schema)?;
         let target_table = self.table_in_schema(target_table_name, target_schema)?;
         let mut cells = source_table
             .columns
