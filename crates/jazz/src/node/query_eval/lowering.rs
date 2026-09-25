@@ -16,6 +16,9 @@ struct HydrationSubscription<'a> {
     database: &'a mut groove::db::Database,
     subscription: Option<MultisinkSubscription>,
     prepared_shape: Option<PreparedShapeId>,
+    /// The shape came from `prepare_shared`: other retained bindings may hold
+    /// it, so release it only if none does.
+    shared_shape: bool,
 }
 
 impl HydrationSubscription<'_> {
@@ -24,9 +27,13 @@ impl HydrationSubscription<'_> {
             self.database.unsubscribe(subscription.id());
         }
         if let Some(shape) = self.prepared_shape.take() {
-            self.database
-                .retire_prepared_shape(shape)
-                .map_err(Error::Groove)?;
+            if self.shared_shape {
+                self.database.release_shared_prepared_shape(shape);
+            } else {
+                self.database
+                    .retire_prepared_shape(shape)
+                    .map_err(Error::Groove)?;
+            }
         }
         Ok(())
     }
@@ -1392,11 +1399,20 @@ where
                 .with_route_value_indices(route_value_indices))
             })
             .collect::<Result<Vec<_>, Error>>()?;
-        let prepared = self
-            .database
-            .prepare(terminals, binding_source_shape, binding_descriptor)
-            .await
-            .map_err(|error| {
+        // Retained subscribers of identical terminals share one prepared
+        // shape, which retires itself with its last retained binding. A
+        // first-result read owns a private shape and retires it on return.
+        let shared_shape = lifetime == SubscriptionLifetime::Retained;
+        let prepared = if shared_shape {
+            self.database
+                .prepare_shared(terminals, binding_source_shape, binding_descriptor)
+                .await
+        } else {
+            self.database
+                .prepare(terminals, binding_source_shape, binding_descriptor)
+                .await
+        }
+        .map_err(|error| {
                 if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
                     eprintln!(
                         "JAZZ_COVERED_INPUT_TRACE stage=prepare_receiver_error error={error:?}"
@@ -1410,6 +1426,7 @@ where
             database: &mut self.database,
             subscription: None,
             prepared_shape: Some(prepared.id()),
+            shared_shape,
         };
         let subscription = owner
             .database
@@ -1465,6 +1482,7 @@ where
             database: &mut self.database,
             subscription: Some(subscription),
             prepared_shape,
+            shared_shape: false,
         };
         let result = futures::future::poll_fn(|cx| {
             let subscription = owner
