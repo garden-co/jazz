@@ -7449,7 +7449,7 @@ fn bound_view_update_inline_bodies(message: &mut SyncMessage) -> Result<(), Erro
     }
     let budget = super::routed_messages::max_routed_payload_bytes();
     let encoded_len = |message: &SyncMessage| {
-        postcard::experimental::serialized_size(message).unwrap_or(usize::MAX)
+        crate::wire::encoded_sync_message_len(message).unwrap_or(usize::MAX)
     };
     // A size walk without allocation; ordinary updates stop here unchanged.
     let size = encoded_len(message);
