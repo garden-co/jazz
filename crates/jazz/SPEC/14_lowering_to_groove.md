@@ -48,6 +48,7 @@ Invariant digest:
 - `INV-LOWER-26`: A structured query MUST expose one authoritative terminal output relation. Groove MUST assemble nested paths into that terminal; a child change semantically replaces or patches its owning root output, and public carriers MUST NOT require a second relation-edge delta stream.
 - `INV-LOWER-27`: An enum case's authored discriminant is scoped to its row `SchemaVersionId`; lowering MUST translate it through the persistent case identity of its physical occurrence before using a local storage tag, predicate, grouping key, or ordering key.
 - `INV-LOWER-28`: An additive enum case MUST be a row-level incompatibility for an older read schema, never a query or subscription error. For a current read, Global/Ahead candidates first choose their single canonical winner; the compatibility boundary then removes that unrepresentable winner before any semantic consumer (filter, ordering, grouping, aggregation, policy, relation requirement, pagination, or maintained delta) observes it. It MUST NOT fall back to an older compatible candidate. Unused enum occurrences remain undecoded and do not affect row visibility.
+- `INV-LOWER-30`: A table's declared composite indexes MUST be part of its `SchemaVersionId` (a distinct id domain used only when some table declares one, so plain schema ids never change) and its `v2` CATS schema envelope, and MUST lower to `by_physical_composite_v1_<column ids>` on both ahead-current and global-current tables keyed by `branch_key` then each indexed column in declared order; declaration order of distinct indexes is not identity.
 
 ## Details
 
@@ -530,8 +531,11 @@ key columns are `branch_key` followed by each `_app_<id>` field in that order;
 entries use groove's ordinary persisted-index key encoding. The `v1` spelling
 is part of the durable key namespace: changing the name or column order is a
 new index version, not a respelling. `crates/jazz/tests/composite_indexes.rs`
-pins the exact entry key bytes. Every read of such an index is admitted
-through the same current-access-path guard as single-column indexes.
+pins the exact entry key bytes on both tiers (`INV-LOWER-30`). Every read of
+such an index is admitted through the same current-access-path guard as
+single-column indexes. The index's logical global-current descriptor name is
+`by_composite_<len>_<column>...`, outside the `by_app_<column>` namespace of
+single-column indexes, so no column name can spell it.
 
 ### Established policy-lowering boundary
 
