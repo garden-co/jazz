@@ -2252,7 +2252,7 @@ impl ClientDbInner {
                         "remote one-shot subscription closed before settlement".to_owned(),
                     )
                 })?;
-                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                if crate::debug_env::covered_input_trace() {
                     match &event {
                         CoreSubscriptionEvent::Delta {
                             reset,
@@ -2280,14 +2280,14 @@ impl ClientDbInner {
                         let snapshot = stream
                             .settled_receiver_local_snapshot()
                             .map_err(|error| {
-                                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                                if crate::debug_env::covered_input_trace() {
                                     eprintln!(
                                         "JAZZ_COVERED_INPUT_TRACE stage=remote_one_shot_snapshot_error error={error}"
                                     );
                                 }
                                 JazzError::Query(error.to_string())
                             })?;
-                        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                        if crate::debug_env::covered_input_trace() {
                             eprintln!(
                                 "JAZZ_COVERED_INPUT_TRACE stage=remote_one_shot_settled roots={} rows={}",
                                 snapshot.root_count,
@@ -3240,7 +3240,7 @@ fn aggregate_public_values(
         .into_iter()
         .map(|(public_column, physical_column, column_type)| {
             let idx = descriptor.fields().iter().position(|field| field.name.as_deref() == Some(physical_column.as_str())).ok_or_else(|| {
-                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                if crate::debug_env::covered_input_trace() {
                     eprintln!(
                         "JAZZ_COVERED_INPUT_TRACE stage=aggregate_field_missing wanted={physical_column} descriptor_fields={:?}",
                         descriptor
@@ -3687,7 +3687,7 @@ impl PublicQueryDecoder {
                     .map(|result| result.fields)
                     .unwrap_or_default(),
                 Err(error) => {
-                    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                    if crate::debug_env::covered_input_trace() {
                         eprintln!(
                             "JAZZ_COVERED_INPUT_TRACE stage=subscription_public_fields_error error={error}"
                         );
