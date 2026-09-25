@@ -267,19 +267,6 @@ export const heroExamples: HeroExample[] = [
     plannedMetrics: "Its benchmark variant exists but doesn't run on CodSpeed yet.",
   },
   {
-    id: "moon-lander",
-    title: "Moon Lander",
-    tagline: "A multiplayer game: positions, fuel and inventory synced with no netcode.",
-    description:
-      "Players descend onto a shared lunar surface, collect fuel, share it with nearby astronauts and launch back into space. Positions, fuel deposits, inventory and chat all sync through Jazz, with no custom networking code.",
-    highlights: ["Two players land on the same moon", "Share fuel with a nearby astronaut"],
-    sources: [{ label: "React app", path: "examples/moon-lander-react" }],
-    video: null,
-    plannedVideo: "Walkthrough capture is planned: two players landing and sharing fuel.",
-    metrics: [],
-    plannedMetrics: "This example has no benchmark variant yet.",
-  },
-  {
     id: "task-board",
     title: "Team task board",
     tagline: "A permissioned project tracker with boards, task details, comments and activity.",
