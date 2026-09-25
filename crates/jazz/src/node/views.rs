@@ -1264,6 +1264,33 @@ where
                     acc
                 },
             );
+        // A joined occurrence leaves when one of its joined rows is deleted,
+        // while its root row stays live. Nothing else names that joined row,
+        // so offer it as a candidate: the storage probe below ships its
+        // deleted image, and skips it when it is still live.
+        let joined_tables = logical_tables
+            .values()
+            .copied()
+            .filter(|table| *table != shape.query().table)
+            .collect::<BTreeSet<_>>();
+        if !joined_tables.is_empty() {
+            for member in &result_member_removes {
+                let Some(row) = member.as_real_row() else {
+                    continue;
+                };
+                let Some(occurrence) = &row.occurrence_id else {
+                    continue;
+                };
+                for joined in occurrence.joined_sources() {
+                    let row_uuid = RowUuid(*joined.uuid());
+                    for table in &joined_tables {
+                        removed_row_candidates
+                            .entry(((*table).to_owned(), row_uuid))
+                            .or_insert((None, false));
+                    }
+                }
+            }
+        }
         // A reset from a known cursor cannot name the rows the reader holds,
         // so every source row that changed after the cursor is a candidate.
         // One that is not in the new set left it: like a catch-up's leaving

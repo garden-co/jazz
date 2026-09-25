@@ -2080,6 +2080,13 @@ impl PeerState {
             source_authority_result: source_authority_result_key,
             initial_received: true,
         };
+        // Whichever frame shape was chosen (full reset, membership delta, or
+        // Q-at-W catch-up), the receiver now holds exactly the current
+        // membership. Record it as the baseline so the next rehydrate can
+        // express a joined-row removal as a member remove: there is no
+        // deletion witness left to carry it.
+        let current_members = current_member_result_set.into_iter().collect::<Vec<_>>();
+        self.apply_outgoing_view_delta(subscription, true, &current_members, &[]);
         self.replace_maintained_subscription_view(node, subscription, maintained_subscription);
         self.record_outgoing_view_update(node, shape.schema_version(), &update)?;
         self.publication_states
