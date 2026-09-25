@@ -535,7 +535,8 @@ where
             )
             .await?
         } else {
-            self.query_rows_for_link_physical_row(
+            // Only row identity is inspected: keep large values physical.
+            self.query_row_visibility_for_link_physical_row(
                 &shape,
                 &binding,
                 DurabilityTier::Local,

@@ -24,6 +24,52 @@ pub enum SubscriptionLifetime {
     Retained,
 }
 
+/// How indirect (large) scalar values appear in an *initial* root snapshot:
+/// a one-shot query result or a subscription's first published result.
+///
+/// Operators still materialize exactly the fields they inspect (filters,
+/// sorts, collectors), so this choice never changes which rows a graph
+/// produces. It only decides whether the root output rebuilds whole large
+/// values for its caller. Incremental updates of a retained subscription are
+/// always materialized, whatever its initial snapshot used.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum RootIndirectValues {
+    /// Rebuild every indirect root value into its logical scalar.
+    #[default]
+    Materialize,
+    /// Keep every indirect root value as its physical descriptor. The caller
+    /// must not treat those fields as logical scalars.
+    Physical,
+    /// Keep the named top-level root fields as physical descriptors and
+    /// materialize every other field. Names absent from the output are ignored.
+    PhysicalFields(Arc<BTreeSet<String>>),
+}
+
+impl RootIndirectValues {
+    /// Top-level field indices that must be materialized, or `None` for all.
+    pub(super) fn materialized_field_indices(
+        &self,
+        descriptor: &RecordDescriptor,
+    ) -> Option<Vec<usize>> {
+        match self {
+            Self::Materialize => None,
+            Self::Physical => Some(Vec::new()),
+            Self::PhysicalFields(physical) => Some(
+                descriptor
+                    .fields()
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, field)| {
+                        let named = |name: Option<&str>| name.is_some_and(|n| physical.contains(n));
+                        !named(field.name.as_deref()) && !named(field.logical_name())
+                    })
+                    .map(|(index, _)| index)
+                    .collect(),
+            ),
+        }
+    }
+}
+
 impl SubscriptionLifetime {
     fn retainer(self, id: SubscriptionId) -> Retainer {
         match self {
@@ -3272,6 +3318,7 @@ impl IvmRuntime {
             vec![(DEFAULT_SINK.to_owned(), graph)],
             storage,
             SubscriptionLifetime::Retained,
+            RootIndirectValues::Materialize,
         )?;
         let subscription = self.single_sink_subscription(multisink, DEFAULT_SINK)?;
         self.poll_ready_subscription_work_now_with_waker(progress_waker)?;
@@ -3307,6 +3354,7 @@ impl IvmRuntime {
             sinks,
             storage,
             SubscriptionLifetime::Retained,
+            RootIndirectValues::Materialize,
             progress_waker,
         )
     }
@@ -3316,6 +3364,7 @@ impl IvmRuntime {
         sinks: I,
         storage: &Rc<S>,
         lifetime: SubscriptionLifetime,
+        root_indirect_values: RootIndirectValues,
         progress_waker: Option<&Waker>,
     ) -> Result<MultisinkSubscription, IvmRuntimeError>
     where
@@ -3327,7 +3376,7 @@ impl IvmRuntime {
             .into_iter()
             .map(|(sink, graph)| (sink.into(), graph))
             .collect::<Vec<_>>();
-        let subscription = self.subscribe_staged(sinks, storage, lifetime)?;
+        let subscription = self.subscribe_staged(sinks, storage, lifetime, root_indirect_values)?;
         self.poll_ready_subscription_work_now_with_waker(progress_waker)?;
         Ok(subscription)
     }
@@ -3365,6 +3414,7 @@ impl IvmRuntime {
         sinks: Vec<(String, GraphBuilder)>,
         storage: &Rc<S>,
         lifetime: SubscriptionLifetime,
+        root_indirect_values: RootIndirectValues,
     ) -> Result<MultisinkSubscription, IvmRuntimeError>
     where
         S: OrderedKvStorage + 'static,
@@ -3438,6 +3488,7 @@ impl IvmRuntime {
             None,
             Arc::clone(&initial),
             lifetime,
+            root_indirect_values,
         )?;
         Ok(MultisinkSubscription {
             id: subscription_id,
@@ -3588,6 +3639,7 @@ impl IvmRuntime {
         binding_values: &[Value],
         storage: &Rc<S>,
         lifetime: SubscriptionLifetime,
+        root_indirect_values: RootIndirectValues,
         progress_waker: Option<&Waker>,
     ) -> Result<MultisinkSubscription, IvmRuntimeError>
     where
@@ -3599,6 +3651,7 @@ impl IvmRuntime {
             BTreeMap::new(),
             storage,
             lifetime,
+            root_indirect_values,
         )?;
         self.poll_ready_subscription_work_now_with_waker(progress_waker)?;
         Ok(subscription)
@@ -3621,6 +3674,7 @@ impl IvmRuntime {
             public_fields,
             storage,
             SubscriptionLifetime::Retained,
+            RootIndirectValues::Materialize,
         )?;
         self.poll_ready_subscription_work_now_with_waker(progress_waker)?;
         Ok(subscription)
@@ -3637,6 +3691,7 @@ impl IvmRuntime {
         public_fields: BTreeMap<String, Vec<String>>,
         storage: &Rc<S>,
         lifetime: SubscriptionLifetime,
+        root_indirect_values: RootIndirectValues,
     ) -> Result<MultisinkSubscription, IvmRuntimeError>
     where
         S: OrderedKvStorage + 'static,
@@ -3757,6 +3812,7 @@ impl IvmRuntime {
             Some(&shape.shape),
             Arc::clone(&initial),
             lifetime,
+            root_indirect_values,
         )?;
         Ok(MultisinkSubscription {
             id: subscription_id,
@@ -3870,6 +3926,7 @@ impl IvmRuntime {
             BTreeMap::new(),
             storage,
             SubscriptionLifetime::Retained,
+            RootIndirectValues::Materialize,
         )?;
         let subscription = self.single_sink_subscription(multisink, DEFAULT_SINK)?;
         self.poll_ready_subscription_work_now_with_waker(progress_waker)?;
@@ -3901,6 +3958,7 @@ impl IvmRuntime {
             [(DEFAULT_SINK.to_owned(), public_fields)].into(),
             storage,
             SubscriptionLifetime::Retained,
+            RootIndirectValues::Materialize,
         )?;
         let subscription = self.single_sink_subscription(multisink, DEFAULT_SINK)?;
         self.poll_ready_subscription_work_now_with_waker(progress_waker)?;
