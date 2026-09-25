@@ -27,197 +27,36 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  ingest-walltime:
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark')
-    name: BigLabel wall time
-    runs-on: codspeed-macro
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          toolchain: 1.93.1
-
-      # CodSpeed macro runners are ARM64, so never share their target artifacts
-      # with the x86_64 simulation job.
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          cache-bin: true
-          shared-key: codspeed-big-label-walltime-${{ runner.arch }}-v1
-          workspaces: . -> target
-
-      - name: Install cargo-codspeed
-        run: cargo install cargo-codspeed --version 5.0.1 --locked
-
-      - name: Build BigLabel wall-time benchmarks
-        run: cargo codspeed build --measurement-mode walltime --package jazz-example-big-label-benchmark --bench ingest_walltime --bench loads
-
-      - name: Run BigLabel wall-time benchmarks
-        uses: CodSpeedHQ/action@4296e51e7041e24dadb86d1d6e8b9320d223dbe8 # v5.0.3
-        with:
-          mode: walltime
-          run: cargo codspeed run --package jazz-example-big-label-benchmark --bench ingest_walltime --bench loads
-
-  w1-read-walltime:
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark')
-    name: W1 wall time (memory + RocksDB)
-    runs-on: codspeed-macro
-    # A cold ARM64 build plus both retained memory/RocksDB receipts can exceed
-    # the normal macro-job limit; keep the complete pair rather than dropping
-    # either backend from the regression signal.
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          toolchain: 1.93.1
-
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          cache-bin: true
-          shared-key: codspeed-w1-read-walltime-${{ runner.arch }}-v1
-          workspaces: . -> target
-
-      - name: Install cargo-codspeed
-        run: cargo install cargo-codspeed --version 5.0.1 --locked
-
-      - name: Build W1 memory and RocksDB benchmarks
-        run: cargo codspeed build --measurement-mode walltime --package jazz-example-benchmark-w1 --bench reads_memory_walltime --bench reads_rocksdb_walltime --bench ahead_current
-
-      - name: Run W1 memory and RocksDB benchmarks
-        uses: CodSpeedHQ/action@4296e51e7041e24dadb86d1d6e8b9320d223dbe8 # v5.0.3
-        with:
-          mode: walltime
-          run: cargo codspeed run --package jazz-example-benchmark-w1 --bench reads_memory_walltime --bench reads_rocksdb_walltime --bench ahead_current
-
-  route-subscription-walltime:
-    # #2129: this is the production-shaped same-query/many-binding receipt.
-    # Keep the issue's 100 bindings: it is large enough to expose accidental
-    # source-witness multiplication while remaining comfortably inside the
-    # hosted macro-run budget.
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark')
-    name: Route subscription wall time
-    runs-on: codspeed-macro
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          toolchain: 1.93.1
-
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          cache-bin: true
-          shared-key: codspeed-route-subscription-walltime-${{ runner.arch }}-v1
-          workspaces: . -> target
-
-      - name: Install cargo-codspeed
-        run: cargo install cargo-codspeed --version 5.0.1 --locked
-
-      - name: Build route subscription wall-time benchmark
-        run: cargo codspeed build --measurement-mode walltime --package jazz --features testing --bench route_subscription_curve
-
-      - name: Run route subscription wall-time benchmark
-        uses: CodSpeedHQ/action@4296e51e7041e24dadb86d1d6e8b9320d223dbe8 # v5.0.3
-        with:
-          mode: walltime
-          # Features are selected at `cargo codspeed build` time. `run` only
-          # executes that copied target; passing Cargo feature flags here is
-          # rejected by cargo-codspeed and used to leave this job reporting no
-          # walltime benchmarks.
-          run: cargo codspeed run --package jazz --bench route_subscription_curve
-
-  groove-pull-vs-snapshot-walltime:
-    # IVM-replacement experiment: hand-written index-probe (pull) plans versus
-    # Groove snapshot and prepared-bind one-shot reads, at two table sizes; and
-    # steady-state IVM versus rerun-and-diff (SQLite, pull, Groove snapshot).
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark')
-    name: Groove IVM experiment wall time
-    runs-on: codspeed-macro
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          toolchain: 1.93.1
-
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          cache-bin: true
-          shared-key: codspeed-groove-pull-vs-snapshot-${{ runner.arch }}-v1
-          workspaces: . -> target
-
-      - name: Install cargo-codspeed
-        run: cargo install cargo-codspeed --version 5.0.1 --locked
-
-      - name: Build Groove IVM experiment benchmarks
-        run: cargo codspeed build -m walltime --package groove --bench pull_vs_snapshot --bench steady_state
-
-      - name: Run Groove IVM experiment benchmarks
-        uses: CodSpeedHQ/action@4296e51e7041e24dadb86d1d6e8b9320d223dbe8 # v5.0.3
-        with:
-          mode: walltime
-          run: cargo codspeed run -m walltime --package groove --bench pull_vs_snapshot --bench steady_state
-
-  maintained-selective-hydration-walltime:
-    # This is the direct receipt for #2077: fixed owner/result cardinality
-    # while the persisted current table grows. Keep the deep 1M rung as an
-    # explicit local/nightly receipt; 10k and 100k fit the labelled PR job.
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark')
-    name: Maintained selective hydration wall time
-    runs-on: codspeed-macro
-    timeout-minutes: 35
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          toolchain: 1.93.1
-
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          cache-bin: true
-          shared-key: codspeed-maintained-selective-hydration-${{ runner.arch }}-v1
-          workspaces: . -> target
-
-      - name: Install cargo-codspeed
-        run: cargo install cargo-codspeed --version 5.0.1 --locked
-
-      - name: Build maintained selective-hydration benchmark
-        run: cargo codspeed build -m walltime --package jazz --features testing --bench selective_global_hydration
-
-      - name: Run maintained selective-hydration benchmark
-        uses: CodSpeedHQ/action@4296e51e7041e24dadb86d1d6e8b9320d223dbe8 # v5.0.3
-        with:
-          mode: walltime
-          run: cargo codspeed run -m walltime --package jazz --bench selective_global_hydration
-
   native-workloads-plan:
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark')
-    name: List native wall-time workloads
+    name: List wall-time workloads
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       contents: read
     outputs:
       workloads: ${{ steps.list.outputs.workloads }}
+      measure: ${{ steps.list.outputs.measure }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      # One list, in dev/benchmarks/codspeed-artifact.mjs, feeds both matrices
-      # below and the artifact verifier. Add an example workload there only.
+      # One table, in dev/benchmarks/codspeed-artifact.mjs, feeds both matrices
+      # below, each workload's build/run arguments and measurement settings, and
+      # the artifact verifier. Add a workload there only.
       - name: List workloads
         id: list
-        run: echo "workloads=$(node dev/benchmarks/codspeed-artifact.mjs matrix)" >> "$GITHUB_OUTPUT"
+        run: |
+          workloads="$(node dev/benchmarks/codspeed-artifact.mjs matrix)"
+          measure="$(node dev/benchmarks/codspeed-artifact.mjs measure)"
+          echo "workloads=$workloads" >> "$GITHUB_OUTPUT"
+          echo "measure=$measure" >> "$GITHUB_OUTPUT"
 
   native-workloads-build:
     needs: native-workloads-plan
     name: Build ${{ matrix.workload }} native benchmark
     # Match the measurement host's ABI, but do not spend macro-runner time on
-    # compilation. Separate Cargo invocations preserve per-workload features.
+    # compilation. One Cargo invocation per workload keeps each workload's
+    # package, benches and features exactly as measured; feature unification
+    # across workloads can never change a receipt.
     runs-on: blacksmith-16vcpu-ubuntu-2204-arm
     timeout-minutes: 45
     permissions:
@@ -238,18 +77,19 @@ jobs:
         with:
           cache-bin: true
           cache-targets: false
-          shared-key: codspeed-native-builder-${{ matrix.workload }}-${{ runner.arch }}-ubuntu2204-v4
+          shared-key: codspeed-native-builder-${{ matrix.workload }}-${{ runner.arch }}-ubuntu2204-v5
           workspaces: . -> target
       - name: Restore native compiler outputs
         id: native-build-cache
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: target/release
-          # Compatibility includes toolchain, CodSpeed, allocator, remap contract,
-          # lockfile and Cargo config. Only the save key includes source SHA.
-          key: codspeed-native-v4-${{ matrix.workload }}-${{ runner.os }}-${{ runner.arch }}-ubuntu2204-rust1.93.1-codspeed5.0.1-mimalloc-absolute-remap-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml') }}-${{ github.sha }}
+          # Compatibility includes toolchain, CodSpeed, workload (and so its
+          # features), remap contract, lockfile and Cargo config. Only the save
+          # key includes source SHA.
+          key: codspeed-native-v5-${{ matrix.workload }}-${{ runner.os }}-${{ runner.arch }}-ubuntu2204-rust1.93.1-codspeed5.0.1-per-workload-absolute-remap-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml') }}-${{ github.sha }}
           restore-keys: |
-            codspeed-native-v4-${{ matrix.workload }}-${{ runner.os }}-${{ runner.arch }}-ubuntu2204-rust1.93.1-codspeed5.0.1-mimalloc-absolute-remap-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml') }}-
+            codspeed-native-v5-${{ matrix.workload }}-${{ runner.os }}-${{ runner.arch }}-ubuntu2204-rust1.93.1-codspeed5.0.1-per-workload-absolute-remap-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml') }}-
       - name: Test benchmark artifact handoff
         run: node --test dev/benchmarks/codspeed-artifact.test.mjs
       - name: Install cargo-codspeed
@@ -272,7 +112,11 @@ jobs:
           # install rejects runner path drift; relative paths classify unknown.
           RUSTFLAGS="$(node dev/benchmarks/codspeed-artifact.mjs rustflags)"
           export RUSTFLAGS
-          /usr/bin/time -v cargo codspeed build -m walltime --package jazz-example-${{ matrix.workload }}-benchmark --bench walltime --features jazz-benchmark-guard/mimalloc --locked
+          # Assign first so an unknown workload fails the step instead of
+          # building every bench in the workspace.
+          args="$(node dev/benchmarks/codspeed-artifact.mjs build-args ${{ matrix.workload }})"
+          read -ra args <<<"$args"
+          /usr/bin/time -v cargo codspeed build -m walltime "${args[@]}" --locked
       - name: Save native compiler outputs
         if: steps.native-build-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
@@ -299,15 +143,22 @@ jobs:
 
   native-workloads-walltime:
     needs: [native-workloads-plan, native-workloads-build]
+    # A matrix `needs` waits for every build. Still measure the workloads that
+    # built when another failed; a missing bundle fails only its own download.
+    if: ${{ !cancelled() && needs.native-workloads-build.result != 'skipped' }}
     name: ${{ matrix.workload }} native wall time
     runs-on: codspeed-macro
-    timeout-minutes: 20
+    # Each workload keeps the limit its former build-and-run job had; the
+    # build no longer counts against it.
+    timeout-minutes: ${{ fromJSON(needs.native-workloads-plan.outputs.measure)[matrix.workload].timeout }}
     strategy:
       fail-fast: false
       matrix:
         workload: ${{ fromJSON(needs.native-workloads-plan.outputs.workloads) }}
     env:
-      RUST_MIN_STACK: 4194304
+      # Only the native examples raise the thread stack while measuring; an
+      # empty value is unset to Rust std.
+      RUST_MIN_STACK: ${{ fromJSON(needs.native-workloads-plan.outputs.measure)[matrix.workload].min_stack }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -319,9 +170,14 @@ jobs:
           name: codspeed-native-${{ matrix.workload }}-${{ github.sha }}
           path: target/codspeed-artifact-${{ matrix.workload }}/
       - name: Verify and install benchmark executables
-        run: node dev/benchmarks/codspeed-artifact.mjs install ${{ matrix.workload }}
+        id: install
+        run: |
+          node dev/benchmarks/codspeed-artifact.mjs install ${{ matrix.workload }}
+          args="$(node dev/benchmarks/codspeed-artifact.mjs run-args ${{ matrix.workload }})"
+          echo "run-args=$args" >> "$GITHUB_OUTPUT"
       - name: Run native workload
         uses: CodSpeedHQ/action@4296e51e7041e24dadb86d1d6e8b9320d223dbe8 # v5.0.3
         with:
           mode: walltime
-          run: cargo codspeed run -m walltime --package jazz-example-${{ matrix.workload }}-benchmark --bench walltime
+          # Features were fixed at build time; cargo-codspeed rejects them on run.
+          run: cargo codspeed run -m walltime ${{ steps.install.outputs.run-args }}
