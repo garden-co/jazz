@@ -1488,11 +1488,8 @@ fn physical_table_id_for_publication_name(name: &str) -> Option<u64> {
         "register_ahead_current",
         "rejected_versions",
     ];
-    let rest = name.strip_prefix("jazz_physical_")?;
-    let (digits, suffix) = rest.split_once('_')?;
-    let id = digits.parse::<u64>().ok()?;
-    // Reject non-canonical spellings ("+1", "01") that formatting never makes.
-    (id.to_string() == digits && SUFFIXES.contains(&suffix)).then_some(id)
+    let (table_id, suffix) = split_physical_table_name(name)?;
+    SUFFIXES.contains(&suffix).then_some(table_id.0)
 }
 
 // Internal test: targeted refresh only works if parsing is the exact inverse of
@@ -1517,6 +1514,12 @@ mod publication_name_tests {
             ] {
                 assert_eq!(physical_table_id_for_publication_name(&name), Some(id), "{name}");
             }
+            let history = physical_history_table_name(table_id);
+            let register = physical_register_table_name(table_id);
+            assert_eq!(physical_version_table_id(&history, false), Some(table_id));
+            assert_eq!(physical_version_table_id(&register, true), Some(table_id));
+            assert_eq!(physical_version_table_id(&history, true), None);
+            assert_eq!(physical_version_table_id(&register, false), None);
         }
         for name in [
             SHARED_DELETION_HISTORY_TABLE,
