@@ -440,6 +440,57 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             },
         ),
         (
+            "remote_read_request_todos_first_page",
+            "RemoteReadRequest",
+            SyncMessage::RemoteReadRequest(jazz::protocol::RemoteReadRequest {
+                request_id: jazz::protocol::PermissionAdviceRequestId([0x78; 16]),
+                query: postcard::to_allocvec(&Query::from("todos").select(["title"]).limit(50))
+                    .expect("fixture query encodes"),
+                schema: schema_version,
+                delegated_session: None,
+            }),
+        ),
+        (
+            "remote_read_request_delegated_session_claim_snapshot",
+            "RemoteReadRequest",
+            SyncMessage::RemoteReadRequest(jazz::protocol::RemoteReadRequest {
+                request_id: jazz::protocol::PermissionAdviceRequestId([0x79; 16]),
+                query: postcard::to_allocvec(&Query::from("todos").select(["title"]).limit(50))
+                    .expect("fixture query encodes"),
+                schema: schema_version,
+                delegated_session: Some(DelegatedSessionBinding {
+                    identity: AuthorSubject::for_test_bytes([0x7a; 16]),
+                    claims: BTreeMap::from([(
+                        "user_id".to_owned(),
+                        Value::String("delegated-user".to_owned()),
+                    )]),
+                }),
+            }),
+        ),
+        (
+            "remote_read_response_rows",
+            "RemoteReadResponse",
+            SyncMessage::RemoteReadResponse(jazz::protocol::RemoteReadResponse {
+                request_id: jazz::protocol::PermissionAdviceRequestId([0x78; 16]),
+                rows: Some(vec![0x01, 0x02, 0x03]),
+            }),
+        ),
+        (
+            "remote_read_response_unavailable",
+            "RemoteReadResponse",
+            SyncMessage::RemoteReadResponse(jazz::protocol::RemoteReadResponse {
+                request_id: jazz::protocol::PermissionAdviceRequestId([0x78; 16]),
+                rows: None,
+            }),
+        ),
+        (
+            "remote_read_cancel",
+            "RemoteReadCancel",
+            SyncMessage::RemoteReadCancel {
+                request_id: jazz::protocol::PermissionAdviceRequestId([0x78; 16]),
+            },
+        ),
+        (
             "unsubscribe_todos_binding",
             "Unsubscribe",
             SyncMessage::Unsubscribe { subscription },
