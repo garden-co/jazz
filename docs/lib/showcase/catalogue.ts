@@ -7,6 +7,11 @@ export type HeroMetric = {
   /** Exact CodSpeed benchmark name; its reviewed definition lives in dev/benchmarks/metadata. */
   benchmark: string;
   label: string;
+  /**
+   * Show the headline per operation: the run's seconds ÷ `count`, labelled
+   * "per <unit>". For benchmarks that time many identical operations.
+   */
+  per?: { count: number; unit: string };
   /** One plain-language sentence about what the measured seconds mean for the app. */
   interpret: (seconds: number, lookup: Lookup) => string;
 };
@@ -64,14 +69,16 @@ export const heroExamples: HeroExample[] = [
       {
         benchmark: "sequential_insert_1350_rocksdb",
         label: "Add a todo",
+        per: { count: 1350, unit: "insert" },
         interpret: (s) =>
-          `Each insert is its own durable transaction and reaches the UI again in about ${each(1350, s)}${s / 1350 < frame ? ", well inside one 60 fps frame" : ""}.`,
+          `Each insert is its own durable transaction, persisted and delivered back to the live list${s / 1350 < frame ? " well inside one 60 fps frame" : ""}. Averaged over 1,350 inserts in a row (${formatTime(s)} total).`,
       },
       {
         benchmark: "sequential_update_1350_rocksdb",
         label: "Check off a todo",
+        per: { count: 1350, unit: "update" },
         interpret: (s) =>
-          `A single update, persisted and delivered back to the live list, takes about ${each(1350, s)}.`,
+          `Each check-off is its own transaction, persisted and delivered back to the live list. Averaged over 1,350 updates in a row (${formatTime(s)} total).`,
       },
       {
         benchmark: "batch_update_1350_rocksdb",

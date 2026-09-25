@@ -73,15 +73,22 @@ function MetricCard({
     );
   const { summary, bench } = entry;
   const previous = summary.history.at(-2);
+  const divisor = metric.per?.count ?? 1;
+  const headline = `${displayedTime(summary.headline.median / divisor, true)}${metric.per ? ` per ${metric.per.unit}` : ""}`;
   return (
     <div
       className="group relative rounded-xl border border-fd-border bg-fd-card p-4 outline-none focus-visible:ring-2 focus-visible:ring-fd-primary"
       tabIndex={0}
-      aria-label={`${metric.label}: ${displayedTime(summary.headline.median, true)}. Focus for history.`}
+      aria-label={`${metric.label}: ${headline}. Focus for history.`}
     >
       <div className="text-sm text-fd-muted-foreground">{metric.label}</div>
       <div className="mt-1 whitespace-nowrap text-2xl font-medium tabular-nums">
-        {displayedTime(summary.headline.median, true)}
+        {displayedTime(summary.headline.median / divisor, true)}
+        {metric.per && (
+          <span className="ml-1.5 text-base font-normal text-fd-muted-foreground">
+            per {metric.per.unit}
+          </span>
+        )}
       </div>
       <div className="mt-0.5 font-mono text-[11px] text-fd-muted-foreground">
         {basisText(summary)}
@@ -96,7 +103,12 @@ function MetricCard({
       <p className="mt-3 text-sm leading-relaxed">
         {metric.interpret(estimatedSeconds(summary.headline.median), lookup)}
       </p>
-      <HistoryPopover benchmarkId={bench.id} name={bench.name} summary={summary} />
+      <HistoryPopover
+        benchmarkId={bench.id}
+        name={bench.name}
+        summary={summary}
+        divisor={divisor}
+      />
     </div>
   );
 }
