@@ -86,24 +86,36 @@ impl AccountRegistryOwner {
                     match request {
                         Request::Execute(command, response) => {
                             let result = jazz::db::block_on(registry.execute(&command));
-                            // Announce every attempted mutation, including a
-                            // failed one: an error after the journal append
-                            // (for example a failed durable flush) may still
-                            // have changed or poisoned the registry, and live
-                            // sockets must re-check rather than keep trusting
-                            // their last successful lookup.
-                            notify.send_modify(|revision| *revision = revision.wrapping_add(1));
+                            // Announce a success, and any `Unavailable` failure:
+                            // it may come after the journal append (for example
+                            // a failed durable flush) and leaves the registry
+                            // poisoned, so live sockets must re-check rather than
+                            // trust their last lookup. `Decision` errors are
+                            // rejected before any write and change nothing, so
+                            // they stay silent (a spammed denied request must not
+                            // force a lookup on every live socket).
+                            if announces(&result) {
+                                notify.send_modify(|revision| *revision = revision.wrapping_add(1));
+                            }
                             let _ = response.send(result);
                         }
                         Request::LoginOrRegister(principal, response) => {
                             let result = jazz::db::block_on(registry.login_or_register(&principal));
-                            if result.as_ref().map_or(true, |result| result.created) {
+                            let created = result.as_ref().is_ok_and(|result| result.created);
+                            if created || matches!(result, Err(RegistryError::Unavailable(_))) {
                                 notify.send_modify(|revision| *revision = revision.wrapping_add(1));
                             }
                             let _ = response.send(result.map(|result| result.assignment));
                         }
                         Request::Login(principal, response) => {
-                            let _ = response.send(jazz::db::block_on(registry.login(&principal)));
+                            let result = jazz::db::block_on(registry.login(&principal));
+                            // A lookup never mutates, but an `Unavailable` one
+                            // poisons the registry (for example on detecting a
+                            // concurrent authority): make live sockets re-check.
+                            if matches!(result, Err(RegistryError::Unavailable(_))) {
+                                notify.send_modify(|revision| *revision = revision.wrapping_add(1));
+                            }
+                            let _ = response.send(result);
                         }
                         Request::Close(response) => {
                             let result = jazz::db::block_on(registry.close())
@@ -181,6 +193,11 @@ impl Drop for AccountRegistryOwner {
         let _ = self.close();
     }
 }
+/// Whether a registry command result may have changed what `login` answers.
+fn announces<T>(result: &Result<T, RegistryError>) -> bool {
+    !matches!(result, Err(RegistryError::Decision(_)))
+}
+
 fn unavailable() -> RegistryError {
     RegistryError::Unavailable("registry owner stopped".into())
 }
@@ -209,10 +226,13 @@ mod tests {
     }
 
     // Live sockets skip their per-message registry lookup while this watch is
-    // unchanged (#3387), so it must also announce failed mutations (which may
-    // have poisoned the registry) and close once the owner thread is gone.
+    // unchanged (#3387). A request the registry rejects before any write (a
+    // `Decision` error) changes nothing and must stay silent, so denied
+    // requests cannot force a lookup on every live socket; the watch must close
+    // once the owner thread is gone. (`Unavailable` failures are announced;
+    // the websocket failed-flush test covers them.)
     #[tokio::test]
-    async fn changes_announce_failed_mutations_and_close_with_the_owner() {
+    async fn changes_skip_rejected_requests_and_close_with_the_owner() {
         let owner = AccountRegistryOwner::open(None).unwrap();
         let mut changes = owner.subscribe();
         assert!(!changes.has_changed().unwrap());
@@ -223,15 +243,15 @@ mod tests {
         let failed = owner
             .execute(AccountCommand::Revoke {
                 approver: unknown.clone(),
-                target: unknown,
+                target: unknown.clone(),
             })
             .await;
-        assert!(failed.is_err(), "an unassigned approver cannot revoke");
         assert!(
-            changes.has_changed().unwrap(),
-            "a failed mutation is announced"
+            matches!(failed, Err(RegistryError::Decision(_))),
+            "an unassigned approver cannot revoke: {failed:?}"
         );
-        changes.borrow_and_update();
+        assert!(owner.login(unknown).await.is_err(), "no assignment exists");
+        assert!(!changes.has_changed().unwrap(), "rejections change nothing");
         owner.close().unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while changes.changed().await.is_ok() {}

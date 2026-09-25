@@ -3636,6 +3636,9 @@ mod tests {
             "the injected flush failure was consumed by the revoke"
         );
 
+        // The failed revoke was announced; a failed lookup on the poisoned
+        // registry must be announced too.
+        let mut observer = state.accounts.as_ref().map(|registry| registry.subscribe());
         // The poisoned registry now refuses every fresh lookup.
         let lookup = super::super::accounts::resolve_assignment(
             &core.server_state(),
@@ -3646,6 +3649,14 @@ mod tests {
         )
         .await;
         assert!(lookup.is_err());
+        assert!(
+            observer
+                .as_mut()
+                .expect("registry")
+                .has_changed()
+                .expect("owner alive"),
+            "a lookup on the poisoned registry is announced"
+        );
 
         // The per-message decision the reader/outgoing branches make, on a
         // receiver subscribed before the revoke (as the live socket's is).
