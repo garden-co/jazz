@@ -293,6 +293,7 @@ where
     pub(super) upstream_durability_floor: Cell<DurabilityTier>,
     pub(super) defer_local_persistence: Cell<bool>,
     pub(super) chunk_resolver: PeerChunkResolver,
+    detach_covered_chunk_waits: Rc<Cell<bool>>,
     pub(super) local_chunk_reader: groove::chunks::LocalChunkReader,
     pub(super) observed_chunk_completion_generation: Cell<u64>,
     local_subscription_dirty_generation: Cell<u64>,
@@ -362,6 +363,7 @@ where
         let tx_time_reservation_clock = node.tx_time_reservation_clock();
         let node_uuid = node.node_uuid();
         node.set_missing_chunk_resolver(Rc::new(chunk_resolver.clone()));
+        let detach_covered_chunk_waits = node.detach_covered_chunk_waits_handle();
         let pending_mutation_errors = node
             .rejected_transactions()
             .into_iter()
@@ -432,6 +434,7 @@ where
             upstream_durability_floor: Cell::new(DurabilityTier::Global),
             defer_local_persistence: Cell::new(false),
             chunk_resolver,
+            detach_covered_chunk_waits,
             local_chunk_reader,
             observed_chunk_completion_generation: Cell::new(0),
             local_subscription_dirty_generation: Cell::new(0),
@@ -1223,8 +1226,18 @@ where
     }
 
     pub(super) fn set_scheduler(&self, scheduler: Option<Rc<dyn TickScheduler>>) {
+        self.detach_covered_chunk_waits.set(
+            scheduler
+                .as_ref()
+                .is_some_and(|scheduler| scheduler.drops_pending_ticks()),
+        );
         *self.scheduler.borrow_mut() = scheduler;
         self.query_runtime_waker.borrow_mut().take();
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub(super) fn set_drops_pending_ticks_for_test(&self, drops: bool) {
+        self.detach_covered_chunk_waits.set(drops);
     }
 
     #[cfg(test)]

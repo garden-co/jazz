@@ -1608,6 +1608,18 @@ pub trait TickScheduler {
     fn query_runtime_waker(&self) -> Option<Waker> {
         None
     }
+
+    /// Whether this host polls a [`Db::tick`] once and drops it while still
+    /// pending, rather than awaiting it.
+    ///
+    /// Such a host cannot let a tick wait for a large-value chunk: the request
+    /// leaves through a later tick, and dropping the tick cancels the wait.
+    /// Covered subscription installs then hand chunk-waiting evaluation to a
+    /// later turn instead (#3349). Hosts that await their ticks keep the
+    /// default and complete installs inline.
+    fn drops_pending_ticks(&self) -> bool {
+        false
+    }
 }
 
 /// A locally-originated transaction rejection that was not consumed by an

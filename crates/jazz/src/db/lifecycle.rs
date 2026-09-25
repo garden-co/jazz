@@ -1092,6 +1092,14 @@ where
     }
 
     #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    /// Model a host that polls ticks once and drops them while pending (see
+    /// [`TickScheduler::drops_pending_ticks`]) without installing a scheduler.
+    pub fn set_drops_pending_ticks_for_test(&self, drops: bool) {
+        self.node.set_drops_pending_ticks_for_test(drops);
+    }
+
+    #[cfg(any(test, feature = "testing"))]
     /// Test-only access to the same host waker passed to Groove query
     /// evaluation. Native relay receipts use this to model a storage future
     /// becoming ready without introducing a second wake path.

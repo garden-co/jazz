@@ -2633,8 +2633,8 @@ fn finish_tick_or_report_stall(db: &Db<RocksDbStorage>) -> Result<(), String> {
 }
 
 /// Internal test: the public testkit client awaits its tick futures and pumps
-/// chunk traffic concurrently, so it never showed this hang. The NAPI and
-/// WASM bindings poll a tick without awaiting it, which is what this drives.
+/// chunk traffic concurrently, so it never showed this hang. The NAPI binding
+/// polls a tick once and drops it while pending, which is what this drives.
 ///
 /// A receiver that installs the server's covered closure must not hold its
 /// sync turn open for large-value chunks, since that same turn is what sends
@@ -2648,6 +2648,8 @@ fn subscribers_receive_spilled_rows_without_blocking_the_sync_turn() {
     let client_author = AuthorSubject::for_test_bytes([0x82; 16]);
     let server = open_core(0x83, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0x84, client_author, &schema);
+    // Drive ticks the way a poll-once binding host (NAPI) does.
+    client.set_drops_pending_ticks_for_test(true);
     let mut expected = BTreeMap::new();
     for size in [60_000, 70_000, 800_000] {
         let title = format!("{size}:{}", "y".repeat(size));
@@ -2765,6 +2767,8 @@ fn unavailable_spilled_value_chunks_end_the_subscription_visibly() {
     let client_author = AuthorSubject::for_test_bytes([0x92; 16]);
     let server = open_core(0x93, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0x94, client_author, &schema);
+    // Drive ticks the way a poll-once binding host (NAPI) does.
+    client.set_drops_pending_ticks_for_test(true);
     seed(&server, "todos", cells(&"u".repeat(70_000), false, owner));
 
     let (client_transport, server_transport) = duplex();
@@ -2813,6 +2817,8 @@ fn close_while_offline_does_not_wait_for_detached_chunk_evaluation() {
     let client_author = AuthorSubject::for_test_bytes([0xa2; 16]);
     let server = open_core(0xa3, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xa4, client_author, &schema);
+    // Drive ticks the way a poll-once binding host (NAPI) does.
+    client.set_drops_pending_ticks_for_test(true);
     seed(&server, "todos", cells(&"c".repeat(70_000), false, owner));
     let (client_transport, server_transport) = duplex();
     let upstream = crate::db::block_on(client.connect_upstream(client_transport));
@@ -2838,4 +2844,83 @@ fn close_while_offline_does_not_wait_for_detached_chunk_evaluation() {
         }
     }
     panic!("close waited for chunks that can no longer arrive");
+}
+
+/// Internal test for the same reason as
+/// `subscribers_receive_spilled_rows_without_blocking_the_sync_turn`.
+///
+/// A second subscriber can open while an earlier one's install is still
+/// waiting for large-value chunks, whether the earlier one is kept or dropped
+/// (as a one-shot read that timed out and retried would). It reuses the
+/// already-received authority closure, so its opening must not report a
+/// settled result until that install has produced the rows.
+#[test]
+fn a_subscriber_joining_a_pending_spilled_install_waits_for_its_rows() {
+    for drop_first in [false, true] {
+        let schema = schema();
+        let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let client_author = AuthorSubject::for_test_bytes([0xa2; 16]);
+        let server = open_core(0xa3, AuthorSubject::SYSTEM, &schema);
+        let client = open_db(0xa4, client_author, &schema);
+        // Drive ticks the way a poll-once binding host (NAPI) does.
+        client.set_drops_pending_ticks_for_test(true);
+        let mut expected = BTreeSet::new();
+        for size in [70_000, 180_000] {
+            expected.insert(seed(
+                &server,
+                "todos",
+                cells(&format!("{size}:{}", "y".repeat(size)), false, owner),
+            ));
+        }
+        expected.insert(seed(&server, "todos", cells("control", true, owner)));
+        let (client_transport, server_transport) = duplex();
+        let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+        let _subscriber = server.accept_subscriber(server_transport, client_author);
+        let query = Query::from("todos");
+        let mut first = Some(prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap());
+        // Two turns install the first closure and send its chunk requests,
+        // leaving the install waiting for their responses.
+        for _ in 0..2 {
+            finish_tick_or_report_stall(&client).unwrap();
+            server.tick().unwrap();
+        }
+        assert!(
+            crate::db::block_on(client.node.node.lock()).has_pending_query_runtime(),
+            "the first install should still be waiting for chunks"
+        );
+        if drop_first {
+            first.take();
+        }
+        let mut second = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+        let mut received = RelationSnapshot::default();
+        let mut settled = false;
+        for _ in 0..64 {
+            finish_tick_or_report_stall(&client).unwrap();
+            server.tick().unwrap();
+            finish_tick_or_report_stall(&client).unwrap();
+            while let Some(event) = second.try_next_event() {
+                settled |= event_settled(&event);
+                apply_subscription_event(&mut received, event);
+                if settled {
+                    assert_eq!(
+                        received
+                            .rows
+                            .iter()
+                            .map(|row| row.row_uuid())
+                            .collect::<BTreeSet<_>>(),
+                        expected,
+                        "a settled result must include every row (drop_first={drop_first})"
+                    );
+                }
+            }
+            if settled {
+                break;
+            }
+        }
+        assert!(
+            settled,
+            "the second subscriber never settled (drop_first={drop_first})"
+        );
+        drop(first);
+    }
 }

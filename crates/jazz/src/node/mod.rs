@@ -538,6 +538,10 @@ pub struct NodeState<S> {
     database: DatabaseSlot,
     local_chunk_reader: groove::chunks::LocalChunkReader,
     chunk_resolver: Rc<dyn groove::chunks::MissingChunkResolver>,
+    /// Shared with the owning `Node`: whether covered receiver installs hand
+    /// a chunk-waiting evaluation to a later turn (#3349). Set for hosts that
+    /// drop a pending tick; hosts that await ticks keep installs complete.
+    detach_covered_chunk_waits: Rc<std::cell::Cell<bool>>,
     large_value_staging_policy: LargeValueStagingPolicy,
     large_value_ingress: RefCell<LargeValueIngressState>,
     /// Groove-owned verified cache retained across internal database rebuilds.

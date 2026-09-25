@@ -737,10 +737,11 @@ where
             .is_some_and(|(key, _)| key == authority_result_key);
         if !installed_for_authority {
             return self
-                .replace_covered_input_receiver(
+                .replace_covered_input_receiver_in(
                     &mut local.covered_input_receiver,
                     local.result_schema_version,
                     authority_result_key,
+                    self.local_covered_install(),
                 )
                 .await;
         }
@@ -755,10 +756,11 @@ where
         // carries the predecessor-preserving incremental record below.
         if authority_result.source_incrementals.is_empty() {
             return self
-                .replace_covered_input_receiver(
+                .replace_covered_input_receiver_in(
                     &mut local.covered_input_receiver,
                     local.result_schema_version,
                     authority_result_key,
+                    self.local_covered_install(),
                 )
                 .await;
         }
@@ -872,13 +874,16 @@ where
                 }
             })
             .collect::<Vec<_>>();
-        let metrics = self
-            .database
-            // A receiver can need large-value chunks that only this sync
-            // turn can request. Never hold the turn open for them (#3349).
-            .apply_input_source_deltas_detaching_cold(deltas)
-            .await
-            .map_err(Error::Groove)?;
+        let metrics = match self.local_covered_install() {
+            // See `CoveredInstall::DetachCold` (#3349).
+            CoveredInstall::DetachCold => {
+                self.database
+                    .apply_input_source_deltas_detaching_cold(deltas)
+                    .await
+            }
+            CoveredInstall::Complete => self.database.apply_input_source_deltas(deltas).await,
+        }
+        .map_err(Error::Groove)?;
         if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
             eprintln!(
                 "JAZZ_COVERED_INPUT_TRACE stage=incremental_receiver_delta predecessor={} generation={} tick={} processed={}",
@@ -913,11 +918,40 @@ where
     }
     /// Install one exact authority closure into a receiver-owned source map.
     /// Both the facade and relay publication use this same source-only path.
+    /// This form completes the install's evaluation before returning, for
+    /// callers that read the result immediately (relay publication, one-shot
+    /// reads).
     pub(crate) async fn replace_covered_input_receiver(
         &mut self,
         receiver: &mut CoveredInputReceiver,
         result_schema_version: SchemaVersionId,
         authority_result_key: &AuthorityResultKey,
+    ) -> Result<bool, Error> {
+        self.replace_covered_input_receiver_in(
+            receiver,
+            result_schema_version,
+            authority_result_key,
+            CoveredInstall::Complete,
+        )
+        .await
+    }
+
+    /// How a local subscriber's covered install runs: detached only for a
+    /// host that drops pending ticks (see `CoveredInstall::DetachCold`).
+    fn local_covered_install(&self) -> CoveredInstall {
+        if self.detaches_covered_chunk_waits() {
+            CoveredInstall::DetachCold
+        } else {
+            CoveredInstall::Complete
+        }
+    }
+
+    async fn replace_covered_input_receiver_in(
+        &mut self,
+        receiver: &mut CoveredInputReceiver,
+        result_schema_version: SchemaVersionId,
+        authority_result_key: &AuthorityResultKey,
+        install: CoveredInstall,
     ) -> Result<bool, Error> {
         if receiver.sources.is_empty() {
             return Ok(false);
@@ -1022,13 +1056,16 @@ where
             })
             .collect::<Vec<_>>();
 
-        let replacement_metrics = self
-            .database
-            // A receiver can need large-value chunks that only this sync
-            // turn can request. Never hold the turn open for them (#3349).
-            .replace_input_sources_detaching_cold(replacements)
-            .await
-            .map_err(Error::Groove)?;
+        let replacement_metrics = match install {
+            // See `CoveredInstall::DetachCold` (#3349).
+            CoveredInstall::DetachCold => {
+                self.database
+                    .replace_input_sources_detaching_cold(replacements)
+                    .await
+            }
+            CoveredInstall::Complete => self.database.replace_input_sources(replacements).await,
+        }
+        .map_err(Error::Groove)?;
         if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
             eprintln!(
                 "JAZZ_COVERED_INPUT_TRACE stage=replaced sources={replacement_record_counts:?} tick={} processed={} notifications={} notification_records={}",
@@ -1549,4 +1586,16 @@ mod terminal_transition_tests {
         }
         assert!(drained_transition_is_empty(true, true, true, &[]));
     }
+}
+
+/// How a covered receiver install runs its evaluation.
+#[derive(Clone, Copy)]
+enum CoveredInstall {
+    /// Hand evaluation that waits on a large-value chunk to a later owner
+    /// turn; the caller must not publish until it completes. A host that
+    /// drops a pending tick needs this: the chunk request leaves through a
+    /// later tick, so waiting inside this one never ends (#3349).
+    DetachCold,
+    /// Complete the evaluation before returning.
+    Complete,
 }

@@ -2161,6 +2161,7 @@ impl IvmRuntime {
                 storage,
                 defer_notifications_until_durable,
                 Some(publication.clone()),
+                DetachOn::AnyRequest,
             )
             .await?;
         Ok(ResidentTick {
@@ -2171,10 +2172,11 @@ impl IvmRuntime {
     }
 
     /// Drive one tick of runtime-owned input changes without waiting for
-    /// cold storage or remote chunks.
+    /// remote chunks.
     ///
-    /// Runnable work completes before this returns. Work that is waiting on an
-    /// external request is retained as pending incremental progress, in
+    /// Runnable work and storage reads complete before this returns. Work that
+    /// is waiting on a large-value chunk is retained as pending incremental
+    /// progress, in
     /// order behind earlier pending evaluations, and finishes on a later
     /// [`Self::poll_pending_incremental`] owner turn. Callers that must not
     /// hold their own turn open for a remote fetch (for example a sync
@@ -2189,7 +2191,14 @@ impl IvmRuntime {
             return Err(IvmRuntimeError::PersistenceOutcomeIndeterminate);
         }
         let (metrics, _) = self
-            .tick_detaching_cold(Vec::new(), binding_deltas, storage, false, None)
+            .tick_detaching_cold(
+                Vec::new(),
+                binding_deltas,
+                storage,
+                false,
+                None,
+                DetachOn::ChunkRequest,
+            )
             .await?;
         Ok(metrics)
     }
@@ -2201,6 +2210,7 @@ impl IvmRuntime {
         storage: OwnedStorage<'static>,
         defer_notifications_until_durable: bool,
         publication: Option<PendingResidentPublication>,
+        detach_on: DetachOn,
     ) -> Result<(TickMetrics, Rc<RefCell<StagedWriteState>>), IvmRuntimeError> {
         let changed_tables = table_deltas
             .iter()
@@ -2310,6 +2320,16 @@ impl IvmRuntime {
                         // its wake drives the next bounded turn. By contrast,
                         // an empty runnable queue is waiting on external
                         // requests and follows the existing detached path.
+                        return Poll::Pending;
+                    }
+                    Poll::Pending
+                        if detach_on == DetachOn::ChunkRequest
+                            && !evaluation.requests.has_pending_chunk() =>
+                    {
+                        // Storage completes without this caller's turn, so
+                        // await it inline as a complete tick would. Only a
+                        // chunk fetch, which may need this very turn to be
+                        // sent, is worth detaching.
                         return Poll::Pending;
                     }
                     _ => return Poll::Ready(progress),
@@ -3752,4 +3772,14 @@ mod tests {
         assert_eq!(runtime.current_tick, before_tick);
         assert_eq!(runtime.table_frontiers, before_frontiers);
     }
+}
+
+/// Which pending requests let a detaching tick hand its evaluation to a later
+/// owner turn instead of awaiting it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DetachOn {
+    /// Any external request, storage or chunk (resident writes).
+    AnyRequest,
+    /// Only a large-value chunk fetch (covered receiver installs, #3349).
+    ChunkRequest,
 }
