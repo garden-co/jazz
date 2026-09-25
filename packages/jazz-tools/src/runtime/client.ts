@@ -375,7 +375,8 @@ export function isLocalFirstUnlessEmptyTier(
 const REMOVED_REMOTE_IF_POSSIBLE =
   'The "remote-if-possible" tier was removed. Use ReadTier.LocalFirstUnlessEmpty, or ReadTier.Remote for server-confirmed reads.';
 
-function rejectRemovedReadTier(tier: unknown): void {
+/** @internal Throw the migration error for read tiers removed in alpha.57. */
+export function rejectRemovedReadTier(tier: unknown): void {
   if (tier === "edge") {
     throw new Error('The "edge" tier was removed. Use ReadTier.Remote for Core-confirmed reads.');
   }
@@ -818,6 +819,22 @@ function copyWriteWaitReadiness<T extends WriteHandle<unknown, unknown>>(
   return target;
 }
 
+let warnedRemovedEdgeWriteTier = false;
+
+/**
+ * The write has already been applied by the time a caller picks a wait tier,
+ * so a removed tier must not reject: a caller that retries on rejection would
+ * duplicate the write. `"edge"` waits for the stronger `"global"` instead.
+ */
+function resolveWriteWaitTier(tier: unknown): DurabilityTier {
+  if (tier !== "edge") return tier as DurabilityTier;
+  if (!warnedRemovedEdgeWriteTier) {
+    warnedRemovedEdgeWriteTier = true;
+    console.warn('The "edge" tier was removed. wait({ tier: "edge" }) now waits for "global".');
+  }
+  return "global";
+}
+
 /**
  * Returned by upsert, update, delete, and transaction operations.
  * Allows waiting for the write to be persisted at a given durability tier.
@@ -842,8 +859,9 @@ export class WriteHandle<T = void, WaitResult = void> {
    * Rejects with a {@link PersistedWriteRejectedError} if the write is rejected.
    */
   async wait(options: { tier: DurabilityTier }): Promise<WaitResult> {
-    const ready = writeWaitReadiness.get(this)?.(options.tier);
-    return this.#client.waitForTransaction(this.txId, options.tier, ready) as Promise<WaitResult>;
+    const tier = resolveWriteWaitTier(options.tier);
+    const ready = writeWaitReadiness.get(this)?.(tier);
+    return this.#client.waitForTransaction(this.txId, tier, ready) as Promise<WaitResult>;
   }
 
   protected client(): JazzClient {
