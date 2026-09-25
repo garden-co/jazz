@@ -2464,13 +2464,17 @@ fn served_policy_point_subscription_follows_same_table_inherited_grant() {
     probe.step(&[], "parent deleted");
     restore_global(&mut probe.server, "folders", parent, 6, 6);
     probe.step(&[child], "parent restored");
+    delete_global(&mut probe.server, "folders", child, 7, 7);
+    probe.step(&[], "child deleted");
+    restore_global(&mut probe.server, "folders", child, 8, 8);
+    probe.step(&[child], "child restored");
     commit_global_cells(
         &mut probe.server,
         "folders",
         child,
         served_folder("c2", other, None),
-        7,
-        7,
+        9,
+        9,
     );
     probe.step(&[], "child detached from parent");
 }
