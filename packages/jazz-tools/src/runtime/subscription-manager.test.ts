@@ -847,6 +847,36 @@ describe("SubscriptionManager", () => {
     expect(current.find((item) => item.id === "D")?.name).toBe("D*");
   });
 
+  it("applies runs of removals around indexed inserts in order", () => {
+    const manager = new SubscriptionManager<TestItem>();
+    const ids = ["A", "B", "C", "D", "E", "F"];
+    const initial = handleDecodedDelta(
+      manager,
+      ids.map((id, index) => ({ kind: 0 as const, id, index, row: makeRow(id, id, index) })),
+      transform,
+    );
+    const result = handleDecodedDelta(
+      manager,
+      [
+        { kind: 1, id: "A", index: 0 },
+        { kind: 1, id: "C", index: 0 },
+        { kind: 0, id: "X", index: 1, row: makeRow("X", "X", 9) },
+        { kind: 1, id: "D", index: 2 },
+        { kind: 1, id: "F", index: 2 },
+        { kind: 1, id: "missing", index: 2 },
+      ],
+      transform,
+    );
+
+    expect(manager.all().map((item) => item.id)).toEqual(["B", "X", "E"]);
+    expect(reduceDeltas(initial, { delta: result.delta }).map((item) => item.id)).toEqual([
+      "B",
+      "X",
+      "E",
+    ]);
+    expect(manager.size).toBe(3);
+  });
+
   it("clears state", () => {
     const manager = new SubscriptionManager<TestItem>();
     handleDecodedDelta(

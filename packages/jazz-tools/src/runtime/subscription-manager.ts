@@ -89,7 +89,18 @@ function applySubscriptionDeltaSequentially<T extends { id: string }>(
   current: T[],
   delta: RowDelta<T>[],
 ): T[] {
-  for (const change of normalizeRowDelta(delta)) {
+  const changes = normalizeRowDelta(delta);
+  for (let position = 0; position < changes.length; position++) {
+    const change = changes[position]!;
+    if (change.kind === RowChangeKind.Removed) {
+      // Removals by id commute, so a run of them is applied in one pass.
+      const end = removedRunEnd(changes, position);
+      if (end - position > 1) {
+        removeIdsOnce(current, changes, position, end);
+        position = end - 1;
+        continue;
+      }
+    }
     switch (change.kind) {
       case RowChangeKind.Added:
         removeById(current, change.id);
@@ -201,6 +212,43 @@ function mergeIndexedPlacements<T>(base: T[], placements: Array<{ index: number;
   return next;
 }
 
+/** Index just past the run of consecutive removals starting at `start`. */
+function removedRunEnd(changes: readonly RowDelta<unknown>[], start: number): number {
+  let end = start;
+  while (end < changes.length && changes[end]!.kind === RowChangeKind.Removed) end++;
+  return end;
+}
+
+/**
+ * Apply `removeById` for each removal in `changes[start, end)` in one pass:
+ * each removal drops the first remaining item with its identity.
+ */
+function removeIdsOnce<T extends { id: string }>(
+  current: T[],
+  changes: readonly RowDelta<T>[],
+  start: number,
+  end: number,
+): void {
+  const pending = new Map<string, number>();
+  for (let index = start; index < end; index++) {
+    const id = changes[index]!.id;
+    pending.set(id, (pending.get(id) ?? 0) + 1);
+  }
+  let write = 0;
+  for (let read = 0; read < current.length; read++) {
+    const item = current[read]!;
+    const id = resultIdentity(item);
+    const remaining = pending.get(id);
+    if (remaining !== undefined && remaining > 0) {
+      pending.set(id, remaining - 1);
+      continue;
+    }
+    if (write !== read) current[write] = item;
+    write++;
+  }
+  if (write !== current.length) current.splice(write);
+}
+
 function removeById<T extends { id: string }>(current: T[], id: string): void {
   const index = current.findIndex((item) => resultIdentity(item) === id);
   if (index !== -1) current.splice(index, 1);
@@ -246,6 +294,29 @@ export class SubscriptionManager<T extends { id: string }> {
     this.orderedIds.splice(index, 1);
     this.orderedIdIndex.delete(id);
     this.reindexOrderedIds(index);
+  }
+
+  /** Remove every id in `changes[start, end)` from the result in one pass. */
+  private removeIds(changes: readonly RowDelta<T>[], start: number, end: number): void {
+    let first = this.orderedIds.length;
+    for (let index = start; index < end; index++) {
+      const id = changes[index]!.id;
+      this.currentResults.delete(id);
+      const position = this.orderedIdIndex.get(id);
+      if (position === undefined) continue;
+      this.orderedIdIndex.delete(id);
+      if (position < first) first = position;
+    }
+    if (first === this.orderedIds.length) return;
+    let write = first;
+    for (let read = first; read < this.orderedIds.length; read++) {
+      const id = this.orderedIds[read]!;
+      if (!this.orderedIdIndex.has(id)) continue;
+      this.orderedIds[write] = id;
+      this.orderedIdIndex.set(id, write);
+      write++;
+    }
+    this.orderedIds.length = write;
   }
 
   private insertIdAt(id: string, index: number): void {
@@ -574,7 +645,18 @@ export class SubscriptionManager<T extends { id: string }> {
       return { delta, all: this.all() } as SubscriptionDelta<T>;
     }
 
-    for (const change of delta) {
+    for (let position = 0; position < delta.length; position++) {
+      const change = delta[position]!;
+      if (change.kind === RowChangeKind.Removed) {
+        // Removals by id commute, so a run of them is applied in one pass
+        // instead of splicing and reindexing the order once per removal.
+        const end = removedRunEnd(delta, position);
+        if (end - position > 1) {
+          this.removeIds(delta, position, end);
+          position = end - 1;
+          continue;
+        }
+      }
       switch (change.kind) {
         case RowChangeKind.Added:
           const alreadyPresent = this.currentResults.has(change.id);
