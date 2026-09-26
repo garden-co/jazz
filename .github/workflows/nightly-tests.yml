@@ -125,18 +125,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          since="$(date -u +%FT%TZ)"
-          gh workflow run starters-e2e.yml --repo "${REPO}" --ref "${REF}"
-          run_id=""
-          for _ in $(seq 1 30); do
-            sleep 10
-            run_id="$(gh run list --repo "${REPO}" --workflow starters-e2e.yml --branch "${REF}" \
-              --event workflow_dispatch --json databaseId,createdAt \
-              --jq "[.[] | select(.createdAt >= \"${since}\")][0].databaseId // empty")"
-            [[ -n "${run_id}" ]] && break
-          done
-          if [[ -z "${run_id}" ]]; then
-            echo "::error::starters-e2e run did not appear after dispatch"
+          # return_run_details makes the dispatch return its own run ID, so
+          # this never waits on another dispatch of the same workflow.
+          run_id="$(gh api --method POST \
+            "repos/${REPO}/actions/workflows/starters-e2e.yml/dispatches" \
+            -f ref="${REF}" -F return_run_details=true --jq .workflow_run_id)"
+          if [[ ! "${run_id}" =~ ^[0-9]+$ ]]; then
+            echo "::error::starters-e2e dispatch returned no run ID (got '${run_id}')"
             exit 1
           fi
           echo "Watching starters-e2e run ${run_id}"
