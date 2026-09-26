@@ -5,9 +5,9 @@ name: Nightly tests
 # from a gate; each job names the suite it owns.
 #
 # - oracle-300: the canonical 300-seed maintained-vs-one-shot oracle
-#   (CLAUDE.md gate, including its 100000-operation churn curve). PR CI runs
-#   one bounded seed; the continuous simulation soak runs 50 seeds at churn
-#   depths 10 and 1000.
+#   (CLAUDE.md gate) at churn depths 10 and 1000, the depths the continuous
+#   simulation soak already budgets. The 100000 depth stays manual until its
+#   runtime is measured. PR CI runs one bounded seed.
 # - browser-soak: the two JAZZ_BROWSER_SOAK worker-bridge tests, which no
 #   other workflow enables.
 # - benchmark-api: benchmark-smoke.sh --compile-ci, whose only other home is
@@ -52,6 +52,7 @@ jobs:
       - name: Run the 300-seed oracle
         env:
           JAZZ_SEED_COUNT: "300"
+          JAZZ_DIFFERENTIAL_CHURN_DEPTHS: "10,1000"
         run: dev/t --exact node::tests::harness::m3_maintained_one_shot_differential_oracle -- --ignored
 
   browser-soak:
