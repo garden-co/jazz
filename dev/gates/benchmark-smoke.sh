@@ -61,7 +61,7 @@ required_features="$(
       '.packages[] | select(.name == $package) | .targets[] | select(.name == $bench and (.kind | index("bench"))) | .["required-features"][]?'
 )"
 if [[ -n "$required_features" ]]; then
-  feature_csv="$(paste -sd, <<<"$required_features")"
+  feature_csv="$(paste -sd, - <<<"$required_features")"
   cargo check -p "$1" --features "$feature_csv" --bench "$2"
 else
   cargo check -p "$1" --bench "$2"

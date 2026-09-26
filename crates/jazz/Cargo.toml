@@ -204,3 +204,8 @@ required-features = ["testing"]
 name = "indexed_read_wakes"
 harness = false
 required-features = ["testing"]
+
+[[bench]]
+name = "catalogue_announcements"
+harness = false
+required-features = ["testing"]

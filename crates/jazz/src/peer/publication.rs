@@ -223,8 +223,8 @@ impl PeerState {
         self.announced_catalogue_fingerprint.is_some()
     }
 
-    pub(crate) fn needs_catalogue_snapshot(&self, fingerprint: [u8; 32]) -> bool {
-        self.announced_catalogue_fingerprint != Some(fingerprint)
+    pub(crate) fn announced_catalogue_fingerprint(&self) -> Option<[u8; 32]> {
+        self.announced_catalogue_fingerprint
     }
 
     pub(crate) fn mark_catalogue_snapshot_announced(&mut self, fingerprint: [u8; 32]) {
