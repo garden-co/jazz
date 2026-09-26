@@ -233,6 +233,7 @@ impl PendingIncrementalState {
         &mut self,
         evaluation_id: u64,
         nodes: impl IntoIterator<Item = NodeId>,
+        retained_snapshot: Option<&IvmRuntime>,
     ) {
         for node in nodes {
             let Some(waiters) = self.waiters_by_node.get_mut(&node) else {
@@ -247,6 +248,17 @@ impl PendingIncrementalState {
             if let Some(successor) = successor
                 && let Some(later) = self.evaluations.get_mut(&successor)
             {
+                // A snapshot donor is supplied only after a successful retained
+                // hydration installs. Incremental completion, cancellation and
+                // failed/first-result hydration cannot donate mutable state.
+                if let Some(runtime) = retained_snapshot
+                    && let PendingEvaluation::SubscriptionHydration(hydration) =
+                        &mut later.evaluation
+                {
+                    hydration
+                        .session
+                        .reuse_completed_hydration_node(runtime, node);
+                }
                 later.work_queue_mut().temporal_ready(node);
             }
         }
@@ -1761,6 +1773,73 @@ impl<'a> EvaluationSession<'a> {
         })
     }
 
+    /// A queued hydration captured its private state before this predecessor
+    /// installed. Bring the still-blocked node up to that completed snapshot,
+    /// including the physical state which makes its retained memo reusable.
+    /// Binding/recursive contexts and advanced inputs keep their captured state.
+    fn reuse_completed_hydration_node(&mut self, runtime: &IvmRuntime, node: NodeId) {
+        let Some(&slot) = self.work_queue.layout.slots.get(&node) else {
+            return;
+        };
+        if self.work_queue.temporal_waiting[slot] == 0 || self.borrowed.contains(&node) {
+            return;
+        }
+        let Some(meta) = runtime.node_meta.get(&node) else {
+            return;
+        };
+        let Some(signature) = meta.input_signature.as_deref() else {
+            return;
+        };
+        let captured_generation = self
+            .node_meta
+            .get(&node)
+            .map_or(0, |meta| meta.input_generation);
+        let key = EvalMemoKey {
+            scope: ScopeId::root(),
+            node,
+            input_signature_hash: signature.hash,
+            tick_epoch: None,
+            sub_tick: 0,
+            context_digest: 0,
+        };
+        let live_entry = runtime.eval_memo.get(&key);
+        let eligible = captured_generation == meta.input_generation
+            && signature.bindings.is_empty()
+            && signature.frontier_bindings.is_empty()
+            && live_entry.is_some_and(|entry| entry.input_watermark == captured_generation);
+        if !eligible {
+            return;
+        }
+        let entry = live_entry.expect("validated hydration memo").clone();
+        let operator_key = OperatorStateKey {
+            scope: ScopeId::root(),
+            node,
+        };
+        self.operator_states.remove(&operator_key);
+        if let Some(state) = runtime.operator_states.get(&operator_key) {
+            self.operator_states.insert(operator_key, state.clone());
+        }
+        if let Some(keys) = self.arrangement_keys_by_input.remove(&node) {
+            for key in keys {
+                self.arrangement_states.remove(&key);
+            }
+        }
+        if let Some(keys) = runtime.arrangement_keys_by_input.get(&node) {
+            self.arrangement_keys_by_input.insert(node, keys.clone());
+            for key in keys {
+                if let Some(state) = runtime.arrangement_states.get(key) {
+                    self.arrangement_states.insert(key.clone(), state.clone());
+                }
+            }
+        }
+        self.node_meta.insert(node, meta.clone());
+        self.eval_memo_bytes += entry.payload_bytes;
+        if let Some(previous) = self.eval_memo.insert(key, entry) {
+            self.eval_memo_bytes -= previous.payload_bytes;
+        }
+        self.memo_use_clock = self.memo_use_clock.max(runtime.memo_use_clock);
+    }
+
     fn advance_binding_input(&mut self, graph: &IvmGraph, shape: &str) {
         let key = BindingSourceKey::prepared(shape);
         *self.binding_frontiers.entry(key.clone()).or_default() += 1;
@@ -2644,7 +2723,7 @@ impl IvmRuntime {
             // the whole session as one temporal barrier instead.
             if matches!(evaluation.evaluation, PendingEvaluation::Incremental(_)) {
                 let completed = evaluation.work_queue_mut().drain_completed_events();
-                state.release_temporal_successors(evaluation_id, completed);
+                state.release_temporal_successors(evaluation_id, completed, None);
             }
             match progress {
                 Poll::Ready(Ok(())) => {
@@ -2664,7 +2743,13 @@ impl IvmRuntime {
                         if hydration.lifetime == SubscriptionLifetime::Retained {
                             hydration.session.install(self);
                         }
-                        state.release_temporal_successors(evaluation_id, completed);
+                        state.release_temporal_successors(
+                            evaluation_id,
+                            completed,
+                            (hydration.lifetime == SubscriptionLifetime::Retained
+                                && snapshot.is_ok())
+                            .then_some(&*self),
+                        );
                         self.record_hydration_memo_metrics(&hydration.metrics);
                         self.evict_eval_memo();
                         match snapshot {
