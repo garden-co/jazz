@@ -480,27 +480,69 @@ fn insert_query_engine_read_metrics(
 }
 
 fn insert_process_metadata(fields: &mut Map<String, Value>) {
+    let git_status = git_output(["status", "--porcelain"]);
     fields.insert(
         "git_sha".to_owned(),
-        json!(git_output(["rev-parse", "HEAD"])),
+        json!(git_output(["rev-parse", "HEAD"]).unwrap_or_default()),
     );
-    fields.insert("git_dirty".to_owned(), json!(git_dirty()));
+    fields.insert(
+        "git_dirty".to_owned(),
+        json!(
+            git_status
+                .as_ref()
+                .map_or(true, |status| !status.is_empty())
+        ),
+    );
+    fields.insert(
+        "git_status_available".to_owned(),
+        json!(git_status.is_some()),
+    );
     fields.insert("hostname".to_owned(), json!(hostname()));
     fields.insert("knobs".to_owned(), json!(knob_env()));
 }
 
-fn git_dirty() -> bool {
-    !git_output(["status", "--porcelain"]).is_empty()
+#[cfg(test)]
+pub(super) fn process_metadata_for_test() -> Map<String, Value> {
+    let mut fields = Map::new();
+    insert_process_metadata(&mut fields);
+    fields
 }
 
-fn git_output<const N: usize>(args: [&str; N]) -> String {
+fn git_output<const N: usize>(args: [&str; N]) -> Option<String> {
     Command::new("git")
         .args(args)
         .output()
         .ok()
-        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .and_then(git_output_from_output)
+}
+
+fn git_output_from_output(output: std::process::Output) -> Option<String> {
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()
         .map(|text| text.trim().to_owned())
-        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod git_output_tests {
+    use super::*;
+
+    #[test]
+    fn git_output_conversion_rejects_failed_exit_and_invalid_utf8() {
+        let failed = Command::new("git")
+            .arg("--definitely-not-a-git-option")
+            .output()
+            .unwrap();
+        assert!(!failed.status.success());
+        assert_eq!(git_output_from_output(failed), None);
+
+        let mut invalid_utf8 = Command::new("git").arg("--version").output().unwrap();
+        assert!(invalid_utf8.status.success());
+        invalid_utf8.stdout = vec![0xff];
+        assert_eq!(git_output_from_output(invalid_utf8), None);
+    }
 }
 
 fn hostname() -> String {
