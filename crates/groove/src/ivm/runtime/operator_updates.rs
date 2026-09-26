@@ -35,9 +35,19 @@ impl NodeState {
                 prefix: Vec::new(),
             }),
             Some(StaticScanBounds::Prefix(prefix)) => {
-                Some(super::evaluation_session::StorageRequestKey::ScanPrefix {
-                    family: input.table.clone(),
-                    prefix,
+                Some(match scan_max_items(input.scan.as_ref()) {
+                    Some(max_items) => {
+                        super::evaluation_session::StorageRequestKey::ScanPrefixLimit {
+                            family: input.table.clone(),
+                            prefix,
+                            max_items,
+                            reversed: scan_reversed(input.scan.as_ref()),
+                        }
+                    }
+                    None => super::evaluation_session::StorageRequestKey::ScanPrefix {
+                        family: input.table.clone(),
+                        prefix,
+                    },
                 })
             }
             Some(StaticScanBounds::Range { start, end }) if start < end => {
