@@ -1,5 +1,29 @@
 # jazz-wasm
 
+## 2.0.0-alpha.57
+
+### Patch Changes
+
+- 1f58c62: Use declared composite indexes for Global-tier reads. With an `(owner, rank)` index, a page filtered by `owner` and ordered by `rank` with a `limit` reads only about `limit + 1` index entries and checks deletions for those candidates only, falling back to the ordinary read when it cannot prove the page complete. A first result that filters both columns of a two-column composite reads that index prefix. Results are unchanged, Local-tier reads keep their current path, and schemas without a composite index take none of the new paths.
+- 163799e: Declare ordered multi-column indexes with `s.table({...}).compositeIndex(["owner", "rank"])` in TypeScript or `TableSchemaBuilder::composite_index` in Rust. An index needs at least two distinct declared columns, and `bytea` columns cannot be indexed. The index is stored and backfilled when the schema is published through the usual migration. Declaring a composite index changes the schema id and needs a server on this version: `deploy` and `pushSchema` stop with `SchemaHashMismatchError` against an older server, which will already have stored the schema without the index; no migrations or permissions are published. A store that uses composite indexes cannot go back to an earlier version. Schemas without a composite index keep byte-identical ids and hashes.
+- 163799e: Answer first one-shot reads with fewer row loads: point joins by an exact id use the junction's foreign-key index, root and join equality filters are pushed into indexes, and two equality filters intersect their index keys before rows are loaded. Live subscriptions are unchanged.
+- f12b131: Fix intermittent browser startup failures with `IDBTree page … exceeds the configured page size` (PageTooLarge). When an IndexedDB B-tree page holding entries of very different sizes overflowed, it was split by entry count, which could leave one half still too large. Pages now split at a byte-balanced boundary where both halves fit. The IndexedDB storage format is unchanged.
+- 8cb386f: Fix a browser write cancelled while its IndexedDB commit was pending (for example by a torn-down page or a cancelled task). Reads could return the unsaved rows, and every later write failed until the page reloaded. Storage now reloads from IndexedDB on the next operation, so only writes IndexedDB confirmed are visible and later writes work normally. The IndexedDB page format is unchanged.
+- 163799e: Speed up IndexedDB storage. A cold scan in a fresh tab or worker reads one IndexedDB batch per tree level instead of one per page, and large write batches edit pages they already own in place instead of copying them. The page format is unchanged.
+- 163799e: In the browser, reads of data already in memory no longer wait while a write commits to IndexedDB. Outside a transaction they return the last committed state: the in-flight write becomes visible once its commit succeeds, and a failed commit never does. Inside a transaction, reads still see the transaction's own writes. Reads that need data not yet in memory still wait for the commit. The IndexedDB page format is unchanged.
+- d3d8ba5: Remove server edges. Clients connect to Core, which authorizes reads and writes and confirms global durability. Browser workers and native local persistence relays remain supported, as do local queries and optimistic writes.
+
+  For applications using the old durability options:
+  - Replace write waits using `{ tier: "edge" }` with `{ tier: "global" }` when the write must reach the server. Keep `{ tier: "local" }` for local persistence.
+  - Use `ReadTier.Remote` for reads that need Core confirmation, or `ReadTier.LocalFirst` for immediate local reads.
+  - Remove server upstream/edge configuration. A server now runs Core; a connection gateway may still route traffic without running a Jazz database.
+
+  Existing globally confirmed data keeps its storage encoding. Legacy edge durability is interpreted as local persistence. Locally authored edits accepted only by an old edge remain eligible for normal resubmission to Core, with their original authorship and transaction identity; that old acceptance does not bypass current write permissions. Do not clear local databases to migrate.
+
+  For a historical semantic-edge store, an edit can remain pending if Core lacks a parent created by another author or by the old edge. That parent must arrive through an authorized recovery path; reconnecting as the child’s author does not grant authority to upload someone else’s work. Keep the local store intact. Recovery for such shared-edge histories is tracked in [#3242](https://github.com/garden-co/jazz/issues/3242).
+
+- 163799e: Make writes cheaper when many subscriptions share one query shape with different parameters. A write now only evaluates the subscriptions whose parameters it touches, writes to tables no subscription reads no longer scale with the number of live subscriptions, and one-shot queries and unsubscribes no longer walk the whole subscription graph. Attaching another subscription to a query shape that is already live is incremental, so it costs about the same as the first instead of growing with the number of subscriptions already open.
+
 ## 2.0.0-alpha.56
 
 ## 2.0.0-alpha.55
