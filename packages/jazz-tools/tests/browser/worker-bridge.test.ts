@@ -1160,6 +1160,9 @@ describe("SharedWorker bridge with IndexedDB", () => {
   }
 
   afterEach(async () => {
+    // A liveness test that throws before its own finally must not leave
+    // later tests on the scaled probe policy.
+    setBrowserFollowerProbeTimingForTest();
     for (const listener of errorListeners) {
       globalThis.removeEventListener("error", listener);
     }
