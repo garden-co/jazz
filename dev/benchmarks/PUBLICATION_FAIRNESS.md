@@ -3,12 +3,24 @@
 `publication_fairness` measures whether independent completed query results
 wait behind other work in an owner poll. It opens every point subscription
 before pumping either database. The fixture uses public Db/query APIs,
-synthetic rows, memory storage, and SYSTEM admission. A history-complete owner
-serves a non-durable foreground receiver at Global tier.
+synthetic rows, memory storage, and SYSTEM admission. Both modes serve a fresh,
+non-durable foreground receiver:
 
-It reports setup, prepare, subscribe, timed owner polls, timed foreground
-turns, result extraction, first result, all results, and individual completed
-ViewUpdate queue delays. Setup is excluded from the endpoint. Owner/foreground
+- `JAZZ_FAIR_MODE=global-core` (default): a history-complete owner serves Global
+  reads with immediate own-write overlays. This preserves the original diagnostic.
+- `JAZZ_FAIR_MODE=local-relay`: accepted rows are seeded, the owner storage is
+  reopened as a host-admitted, scope-isolated client relay, and the foreground
+  opens Local reads. This exercises the ordinary browser read topology. It has
+  no upstream server during measurement and uses memory storage, so it measures
+  resident relay work rather than browser or IndexedDB startup latency.
+
+The read modes use different source graphs. A Global-overlay finding must not
+be attributed to a browser's default Local read without checking that path.
+
+It reports mode, setup, owner reopen, prepare, subscribe, timed owner polls,
+timed foreground turns, result extraction, first result, all results, and
+individual completed ViewUpdate queue delays. Owner reopen is part of setup;
+setup is excluded from the endpoint. Owner/foreground
 measurements are elapsed time around active polls, not operating-system CPU
 counters. The host allows receiver progress at each owner suspension boundary.
 No browser task latency, IndexedDB delay, authorization cost, or parallel-core
@@ -24,6 +36,12 @@ JAZZ_FAIR_ROWS=600 JAZZ_FAIR_QUERIES=1,12,60 \
   cargo bench -p jazz --profile perf --no-default-features \
   --features testing,transport-compression-zstd --bench publication_fairness
 ```
+
+Set `JAZZ_FAIR_MODE=local-relay` on the same command to measure Local reads.
+The [Local relay receipt](receipts/publication-fairness-local-relay.json) records
+both modes on the same runtime and fixture, with three runs per mode. These
+are topology baselines, not before/after optimization gains. The exact IDs and
+all returned field values agree across modes.
 
 `JAZZ_FAIR_QUERIES=600` amplifies the fanout for diagnosis. Run timing without
 other builds or tests. Sampling/debug runs must be kept outside timing receipts.
@@ -80,5 +98,16 @@ additional diagnostic output are preserved with the issue follow-up in
 [#3569](https://github.com/garden-co/jazz/issues/3569). The code here adds the
 reproducer only. No storage/wire representation or public behavior changes.
 
-Tooling friction: keep per-batch graph activation counts and CPU sampling
-beside the delivery-latency receipt; first-result latency alone hid extra work.
+A [source-identity follow-up](https://github.com/garden-co/jazz/issues/3569#issuecomment-5847776582)
+identified the broad Global current-row predecessor fence in the immediate
+pending overlay. The three history/transaction/change sources individually
+reached only 3–5 nodes; the predecessor source reached 1,143 operators and
+1,886 required states at 60 point subscriptions. Point-bounding both the
+pending arm and predecessor fence reduced 600-query receiver work but did not
+improve the common smaller cases. Combining it with the earlier selector and
+yield also regressed total completion. Both trials were removed. This diagnosis
+belongs to `global-core`; it does not establish the cause of default Local
+browser startup cost.
+
+Tooling friction: match the read mode and relay topology before extrapolating
+source traces; retain per-batch activation counts beside first/all-result latency.
