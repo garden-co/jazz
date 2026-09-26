@@ -281,9 +281,10 @@ where
         if self.catalogue.active_schema.schema == self.catalogue.local_schema_version_id {
             self.catalogue.active_schema.compiled = schema.clone();
         }
+        let local_schema_version_id = self.catalogue.local_schema_version_id;
         self.catalogue
             .catalogue_schemas
-            .get_mut(&self.catalogue.local_schema_version_id)
+            .get_mut(&local_schema_version_id)
             .expect("current schema is present in the test catalogue")
             .schema = schema;
     }
@@ -302,6 +303,31 @@ where
     /// temporary system-only layout must not leak through this API.
     pub fn current_write_schema(&self) -> Result<CurrentWriteSchema, Error> {
         self.try_current_write_schema()
+    }
+
+    /// Avoid rebuilding and serializing an unchanged catalogue on every
+    /// sync turn. This is a process-local announcement hint, not a durable key.
+    /// The owning catalogue invalidates it before any mutable access.
+    pub(crate) fn catalogue_snapshot_if_changed(
+        &self,
+        previous: Option<[u8; 32]>,
+    ) -> Result<Option<([u8; 32], crate::protocol::CatalogueSnapshot)>, Error> {
+        // A cached fingerprint never excuses an unusable or uninitialized node.
+        self.require_catalogue_ready()?;
+        let cached = self.catalogue.announcement_fingerprint();
+        if cached.is_some() && cached == previous {
+            return Ok(None);
+        }
+        let snapshot = self.catalogue_snapshot()?;
+        let fingerprint = cached.unwrap_or_else(|| {
+            *blake3::hash(
+                &serde_json::to_vec(&snapshot)
+                    .expect("catalogue snapshot serialization is infallible"),
+            )
+            .as_bytes()
+        });
+        self.catalogue.remember_announcement_fingerprint(fingerprint);
+        Ok((Some(fingerprint) != previous).then_some((fingerprint, snapshot)))
     }
 
     pub(crate) fn catalogue_snapshot(&self) -> Result<crate::protocol::CatalogueSnapshot, Error> {

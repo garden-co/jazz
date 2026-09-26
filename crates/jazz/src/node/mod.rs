@@ -6,6 +6,9 @@
 //! [`views`] for sync view payloads. In the layer map it is the core between the
 //! `Db` facade and groove storage/IVM.
 
+mod catalogue_state;
+use catalogue_state::SchemaCatalogue;
+
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::{Rc, Weak};
@@ -680,7 +683,7 @@ struct LargeValueIngressState {
 
 /// Schema catalogue and schema-version storage layout known by the node.
 #[derive(Clone, Debug)]
-struct SchemaCatalogue {
+struct SchemaCatalogueState {
     /// Schema version used for the node's base/local API schema.
     local_schema_version_id: SchemaVersionId,
     /// Compact alias for `local_schema_version_id` once recovered or allocated.

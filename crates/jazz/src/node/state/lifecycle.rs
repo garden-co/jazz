@@ -582,7 +582,7 @@ where
             CatalogueBootstrapState::Ready => {
                 NodeState::<BoxedStorage>::new_with_history_complete(
                     node_uuid,
-                    catalogue.schema,
+                    catalogue.into_state().schema,
                     storage,
                     history_complete,
                 )
@@ -805,7 +805,7 @@ where
         let mut node = Self {
             node_uuid,
             self_node_alias: None,
-            catalogue: SchemaCatalogue {
+            catalogue: SchemaCatalogueState {
                 local_schema_version_id,
                 local_schema_version_alias,
                 schema: active_schema,
@@ -824,7 +824,7 @@ where
                 compiled_lens_cache: BTreeMap::new(),
                 physical_write_plan_cache: BTreeMap::new(),
                 active_schema: selection,
-            },
+            }.into(),
             catalogue_bootstrap_state,
             catalogue_bootstrap_marker,
             clock: Clock {

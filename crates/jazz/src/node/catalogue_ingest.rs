@@ -554,7 +554,7 @@ where
                     &mut next_physical_column_id,
                 )?;
                 let genesis_id = genesis.id;
-                SchemaCatalogue {
+                SchemaCatalogueState {
                     local_schema_version_id: genesis_id,
                     local_schema_version_alias: Some(SchemaVersionAlias(1)),
                     schema: genesis.schema.clone(),
@@ -580,6 +580,7 @@ where
                         genesis.schema,
                     )?,
                 }
+                .into()
             }
             None => self.catalogue.clone(),
         };
@@ -590,18 +591,21 @@ where
             {
                 continue;
             }
-            let mapping = allocate_provisional_physical_mapping(
-                &schema.schema,
-                if schema.id == *genesis_id {
-                    genesis_physical_identities.clone()
-                } else {
-                    return Err(Error::InvalidCatalogueUpdate(
-                        "trusted catalogue snapshot schema has no identity publication",
-                    ));
-                },
-                &mut planned.next_physical_table_id,
-                &mut planned.next_physical_column_id,
-            )?;
+            let mapping = {
+                let planned = &mut *planned;
+                allocate_provisional_physical_mapping(
+                    &schema.schema,
+                    if schema.id == *genesis_id {
+                        genesis_physical_identities.clone()
+                    } else {
+                        return Err(Error::InvalidCatalogueUpdate(
+                            "trusted catalogue snapshot schema has no identity publication",
+                        ));
+                    },
+                    &mut planned.next_physical_table_id,
+                    &mut planned.next_physical_column_id,
+                )?
+            };
             let alias = next_schema_version_alias_in_catalogue(&planned)?;
             planned.catalogue_schemas.insert(schema.id, schema.clone());
             planned.physical_mappings.insert(schema.id, mapping);
@@ -683,12 +687,15 @@ where
                 &publication.new_tables,
                 &publication.dropped_tables,
             )?;
-            let fresh = allocate_provisional_physical_mapping(
-                &publication.schema.schema,
-                publication.physical_identities.clone(),
-                &mut planned.next_physical_table_id,
-                &mut planned.next_physical_column_id,
-            )?;
+            let fresh = {
+                let planned = &mut *planned;
+                allocate_provisional_physical_mapping(
+                    &publication.schema.schema,
+                    publication.physical_identities.clone(),
+                    &mut planned.next_physical_table_id,
+                    &mut planned.next_physical_column_id,
+                )?
+            };
             let mapping = Self::reconcile_physical_mapping_for_lens_payload_in_catalogue(
                 &planned,
                 &publication.lens,
@@ -837,9 +844,10 @@ where
                     .physical_mappings
                     .insert(lineage.publication.schema.id, mapping);
             }
-            for lineage in planned.active_lineages_by_target.values_mut() {
-                lineage.alias = planned.schema_version_aliases[&lineage.publication.schema.id];
-                lineage.mapping = planned.physical_mappings[&lineage.publication.schema.id].clone();
+            let state = &mut *planned;
+            for lineage in state.active_lineages_by_target.values_mut() {
+                lineage.alias = state.schema_version_aliases[&lineage.publication.schema.id];
+                lineage.mapping = state.physical_mappings[&lineage.publication.schema.id].clone();
             }
             for lineage in &mut activated_lineages {
                 lineage.alias = planned.schema_version_aliases[&lineage.publication.schema.id];
