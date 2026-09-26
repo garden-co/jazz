@@ -2505,8 +2505,15 @@ pub struct PolicyBindingKey {
 ///
 /// The comparison bytes are process-local bookkeeping only. Serde persists or
 /// transports the ordinary named Groove values and reconstructs them on read.
+/// Clones share the immutable admitted snapshot; creating different claims
+/// constructs a separate snapshot with its own exact comparison bytes.
 #[derive(Clone, Debug)]
 pub struct CanonicalPolicyClaims {
+    snapshot: std::sync::Arc<CanonicalPolicySnapshot>,
+}
+
+#[derive(Debug)]
+struct CanonicalPolicySnapshot {
     claims: BTreeMap<String, Value>,
     comparison_key: Vec<u8>,
 }
@@ -2520,20 +2527,22 @@ impl CanonicalPolicyClaims {
             put_value(&mut comparison_key, value);
         }
         Self {
-            claims,
-            comparison_key,
+            snapshot: std::sync::Arc::new(CanonicalPolicySnapshot {
+                claims,
+                comparison_key,
+            }),
         }
     }
 
     /// Borrow the ordinary durable/wire claims representation.
     pub fn claims(&self) -> &BTreeMap<String, Value> {
-        &self.claims
+        &self.snapshot.claims
     }
 }
 
 impl PartialEq for CanonicalPolicyClaims {
     fn eq(&self, other: &Self) -> bool {
-        self.comparison_key == other.comparison_key
+        self.snapshot.comparison_key == other.snapshot.comparison_key
     }
 }
 impl Eq for CanonicalPolicyClaims {}
@@ -2544,18 +2553,20 @@ impl PartialOrd for CanonicalPolicyClaims {
 }
 impl Ord for CanonicalPolicyClaims {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.comparison_key.cmp(&other.comparison_key)
+        self.snapshot
+            .comparison_key
+            .cmp(&other.snapshot.comparison_key)
     }
 }
 impl std::hash::Hash for CanonicalPolicyClaims {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.comparison_key.hash(state)
+        self.snapshot.comparison_key.hash(state)
     }
 }
 
 impl serde::Serialize for CanonicalPolicyClaims {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.claims.serialize(serializer)
+        self.snapshot.claims.serialize(serializer)
     }
 }
 impl<'de> serde::Deserialize<'de> for CanonicalPolicyClaims {
@@ -2640,7 +2651,7 @@ impl PolicyBindingKey {
     pub(crate) fn directory_digest(&self) -> [u8; 32] {
         let mut exact = Vec::new();
         put_str(&mut exact, self.identity.canonical());
-        exact.extend_from_slice(&self.canonical_claims.comparison_key);
+        exact.extend_from_slice(&self.canonical_claims.snapshot.comparison_key);
         blake3::derive_key("jazz.authority-policy-binding-directory.v1", &exact)
     }
 }

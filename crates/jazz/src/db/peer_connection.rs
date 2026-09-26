@@ -4774,16 +4774,18 @@ where
                             // withhold delivery pending upstream settlement, but
                             // the cursor retains the same usage-site ownership.
                             peer.declare_known_state(subscription, known_state.clone());
-                            peer.set_subscription_policy_binding(
+                            let subscription_policy_key = coverage.policy_binding.as_ref()
+                                .expect("admission installed the immutable policy key");
+                            peer.set_subscription_policy_key(
                                 subscription,
-                                subscription_policy_binding.clone(),
+                                subscription_policy_key.clone(),
                             );
                             // The group key owns the maintained evaluator;
                             // install the same admitted snapshot before any
                             // owner-loop rehydrate or delta can touch it.
-                            peer.set_subscription_policy_binding(
+                            peer.set_subscription_policy_key(
                                 group_subscription,
-                                subscription_policy_binding.clone(),
+                                subscription_policy_key.clone(),
                             );
                             let outcome = {
                                 let mut node = self.node.lock().await;
@@ -4792,10 +4794,7 @@ where
                                         subscription: group_subscription,
                                         ..subscribe
                                     },
-                                    crate::protocol::PolicyBindingKey::from_canonical_parts(
-                                        subscription_policy_binding.0,
-                                        subscription_policy_binding.1.clone(),
-                                    ),
+                                    subscription_policy_key.clone(),
                                 )?;
                                 crate::node::PublicationOutcome::settled(Vec::<SyncMessage>::new())
                             };
@@ -5491,10 +5490,14 @@ where
                         }
                         group.publication_runtime_token = Some(runtime_token);
                         let group_subscription = coverage_group_subscription_key(coverage);
-                        peer.set_subscription_policy_binding(
-                            group_subscription,
-                            group.policy_binding.clone(),
-                        );
+                        if let Some(policy_key) = &coverage.policy_binding {
+                            peer.set_subscription_policy_key(group_subscription, policy_key.clone());
+                        } else {
+                            peer.set_subscription_policy_binding(
+                                group_subscription,
+                                group.policy_binding.clone(),
+                            );
+                        }
                         // The maintained receiver is addressed by the
                         // policy-partitioned coverage-group key. Its
                         // membership source is the locally admitted

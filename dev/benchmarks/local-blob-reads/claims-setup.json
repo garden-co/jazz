@@ -1,0 +1,170 @@
+{
+  "control_head": "738203cbdcc0a4c2bca569da7e4a428b7df6f106",
+  "benchmark_sha256": "f64ab41304094aa007dda03c3894f0d9652924c4a34b1b72066d04c5519e36ac",
+  "arms": {
+    "control": {
+      "binary_sha256": "7c57b5c74479cd88655bb3626bb8ce1939aa39bbd49bdacdc5c7d7be90006e8a",
+      "patch_sha256": "ba68921c06bdfdda2d18ff64cad2c7bcecb8d1b9bf71b414b41d00752b8831f1"
+    },
+    "shared-claims": {
+      "binary_sha256": "93cb0da31d4e38fc53a78c856058a693b5e1304a4608c0c1c8e58e8c70ae7361",
+      "patch_sha256": "e3e3af0fe2dc8a8d5d5ce9e9f9d9e6a144d84f12694e91edbaffe181ff8fed38"
+    }
+  },
+  "processes_per_arm_and_case": 8,
+  "reads_per_process": 12,
+  "warm_reads_per_arm_and_case": 88,
+  "summary": [
+    {
+      "background_queries": 0,
+      "bytes": 32768,
+      "arms": {
+        "control": {
+          "elapsed_ms": 3.5918125,
+          "owner_tick_ms": 2.701334,
+          "foreground_tick_ms": 0.15514650000000002,
+          "read_poll_ms": 0.650979,
+          "full_materializations": 0.0,
+          "owner_messages": 1.0,
+          "foreground_messages": 2.0
+        },
+        "shared-claims": {
+          "elapsed_ms": 3.2835210000000004,
+          "owner_tick_ms": 2.5141869999999997,
+          "foreground_tick_ms": 0.138104,
+          "read_poll_ms": 0.6065415,
+          "full_materializations": 0.0,
+          "owner_messages": 1.0,
+          "foreground_messages": 2.0
+        }
+      },
+      "reduction_pct": 8.583173537037347
+    },
+    {
+      "background_queries": 0,
+      "bytes": 262144,
+      "arms": {
+        "control": {
+          "elapsed_ms": 5.20775,
+          "owner_tick_ms": 3.7714585000000005,
+          "foreground_tick_ms": 0.1344795,
+          "read_poll_ms": 1.214813,
+          "full_materializations": 3.0,
+          "owner_messages": 1.0,
+          "foreground_messages": 2.0
+        },
+        "shared-claims": {
+          "elapsed_ms": 4.986292,
+          "owner_tick_ms": 3.588687,
+          "foreground_tick_ms": 0.128583,
+          "read_poll_ms": 1.212749,
+          "full_materializations": 3.0,
+          "owner_messages": 1.0,
+          "foreground_messages": 2.0
+        }
+      },
+      "reduction_pct": 4.252469876626186
+    },
+    {
+      "background_queries": 0,
+      "bytes": 4194304,
+      "arms": {
+        "control": {
+          "elapsed_ms": 27.024021,
+          "owner_tick_ms": 18.0440205,
+          "foreground_tick_ms": 0.172458,
+          "read_poll_ms": 8.8022085,
+          "full_materializations": 3.0,
+          "owner_messages": 1.0,
+          "foreground_messages": 2.0
+        },
+        "shared-claims": {
+          "elapsed_ms": 27.0392085,
+          "owner_tick_ms": 18.032375000000002,
+          "foreground_tick_ms": 0.173375,
+          "read_poll_ms": 8.789750000000002,
+          "full_materializations": 3.0,
+          "owner_messages": 1.0,
+          "foreground_messages": 2.0
+        }
+      },
+      "reduction_pct": -0.056200000732675726
+    },
+    {
+      "background_queries": 36,
+      "bytes": 32768,
+      "arms": {
+        "control": {
+          "elapsed_ms": 4.4721045,
+          "owner_tick_ms": 3.555292,
+          "foreground_tick_ms": 0.1690625,
+          "read_poll_ms": 0.6731465,
+          "full_materializations": 0.0,
+          "owner_messages": 1.0,
+          "foreground_messages": 2.0
+        },
+        "shared-claims": {
+          "elapsed_ms": 3.409521,
+          "owner_tick_ms": 2.686521,
+          "foreground_tick_ms": 0.14641700000000002,
+          "read_poll_ms": 0.5717920000000001,
+          "full_materializations": 0.0,
+          "owner_messages": 1.0,
+          "foreground_messages": 2.0
+        }
+      },
+      "reduction_pct": 23.760256496689657
+    },
+    {
+      "background_queries": 36,
+      "bytes": 262144,
+      "arms": {
+        "control": {
+          "elapsed_ms": 6.233417,
+          "owner_tick_ms": 4.7562085,
+          "foreground_tick_ms": 0.1489165,
+          "read_poll_ms": 1.279646,
+          "full_materializations": 3.0,
+          "owner_messages": 1.0,
+          "foreground_messages": 2.0
+        },
+        "shared-claims": {
+          "elapsed_ms": 5.207125,
+          "owner_tick_ms": 3.8841669999999997,
+          "foreground_tick_ms": 0.137687,
+          "read_poll_ms": 1.198459,
+          "full_materializations": 3.0,
+          "owner_messages": 1.0,
+          "foreground_messages": 2.0
+        }
+      },
+      "reduction_pct": 16.464356547941527
+    },
+    {
+      "background_queries": 36,
+      "bytes": 4194304,
+      "arms": {
+        "control": {
+          "elapsed_ms": 27.9331665,
+          "owner_tick_ms": 18.9138745,
+          "foreground_tick_ms": 0.1830005,
+          "read_poll_ms": 8.811166500000002,
+          "full_materializations": 3.0,
+          "owner_messages": 1.0,
+          "foreground_messages": 2.0
+        },
+        "shared-claims": {
+          "elapsed_ms": 27.170854000000002,
+          "owner_tick_ms": 18.2054165,
+          "foreground_tick_ms": 0.17708249999999998,
+          "read_poll_ms": 8.780624,
+          "full_materializations": 3.0,
+          "owner_messages": 1.0,
+          "foreground_messages": 2.0
+        }
+      },
+      "reduction_pct": 2.729058662217898
+    }
+  ],
+  "scope": "Resident independent stores with fresh Local/Full reads; optional account claims, metadata schema and background queries. No browser, IDB, wire codec or rendering. Admitted local account scope; does not benchmark server policy enforcement."
+}

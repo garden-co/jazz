@@ -43,13 +43,21 @@ fn run(length: usize, repetitions: usize) {
     if with_reference {
         assets = assets.fk_column("folder", "folders");
     }
-    let schema = JazzSchema::new(
-        &SchemaBuilder::new()
-            .table(assets)
-            .table(TableSchemaBuilder::new("folders").column("name", ColumnType::Text))
-            .build(),
-    )
-    .unwrap();
+    let table_count =
+        std::env::var("JAZZ_BLOB_SCHEMA_TABLES").map_or(2, |value| value.parse::<usize>().unwrap());
+    assert!(table_count >= 2);
+    let mut schema_builder = SchemaBuilder::new()
+        .table(assets)
+        .table(TableSchemaBuilder::new("folders").column("name", ColumnType::Text));
+    for index in 2..table_count {
+        schema_builder = schema_builder.table(
+            TableSchemaBuilder::new(&format!("metadata_{index}"))
+                .column("label", ColumnType::Text)
+                .column("rank", ColumnType::BigInt)
+                .column("enabled", ColumnType::Boolean),
+        );
+    }
+    let schema = JazzSchema::new(&schema_builder.build()).unwrap();
     let table = schema
         .tables()
         .iter()
@@ -214,6 +222,12 @@ fn run_coverage(
     expected: &[u8],
     repetitions: usize,
 ) {
+    let account_identity = std::env::var_os("JAZZ_BLOB_ACCOUNT").is_some();
+    let author = if account_identity {
+        AuthorSubject::for_test_bytes([0x69; 16])
+    } else {
+        AuthorSubject::SYSTEM
+    };
     let config = |tag| {
         let storage = MemoryStorage::default();
         storage.import_snapshot(snapshot).unwrap();
@@ -222,17 +236,14 @@ fn run_coverage(
             storage,
             DbIdentity {
                 node: NodeUuid::from_bytes([tag; 16]),
-                author: AuthorSubject::SYSTEM,
+                author,
             },
         )
     };
     // SAFETY: only this fixture owns these synthetic stores and the sole
-    // foreground has the same admitted SYSTEM author as its local relay.
+    // foreground has the same admitted author as its local relay.
     let scope = unsafe {
-        ClientRelayScope::from_admitted_storage_owner(
-            "local-blob-coverage".to_owned(),
-            AuthorSubject::SYSTEM,
-        )
+        ClientRelayScope::from_admitted_storage_owner("local-blob-coverage".to_owned(), author)
     };
     let owner =
         block_on(unsafe { Db::open_scope_isolated_client_relay(config(0x66), scope) }).unwrap();
@@ -242,16 +253,13 @@ fn run_coverage(
     let b = Rc::new(RefCell::new(VecDeque::new()));
     let owner_sent = Rc::new(RefCell::new(0));
     let foreground_sent = Rc::new(RefCell::new(0));
-    let claims = if std::env::var_os("JAZZ_BLOB_CLAIMS").is_some() {
-        jazz::tools::policy_claims::canonical_policy_binding_claims(
-            &AuthorSubject::SYSTEM,
-            BTreeMap::new(),
-        )
+    let claims = if account_identity || std::env::var_os("JAZZ_BLOB_CLAIMS").is_some() {
+        jazz::tools::policy_claims::canonical_policy_binding_claims(&author, BTreeMap::new())
     } else {
         BTreeMap::new()
     };
     let claim_count = claims.len();
-    foreground.set_identity_claims(AuthorSubject::SYSTEM, claims.clone());
+    foreground.set_identity_claims(author, claims.clone());
     let _upstream = block_on(foreground.connect_upstream(Box::new(CachedPeer {
         incoming: a.clone(),
         outgoing: b.clone(),
@@ -263,7 +271,7 @@ fn run_coverage(
             outgoing: a,
             sent: owner_sent.clone(),
         }),
-        AuthorSubject::SYSTEM,
+        author,
         claims,
     );
     // Hold independent, already-covered metadata queries while opening the file.
@@ -368,6 +376,7 @@ fn run_coverage(
         println!(
             "{}",
             json!({"benchmark":"local_blob_reads", "phase":"cached_peer_coverage", "with_reference":std::env::var_os("JAZZ_BLOB_REFERENCE").is_some(),
+            "account_identity":account_identity, "schema_tables":schema.tables().len(),
             "claim_count":claim_count, "background_queries":background_count, "bytes":expected.len(), "repetition":repetition, "elapsed_ms":elapsed_ms,
             "read_poll_ms":read_ms, "owner_tick_ms":owner_ms, "foreground_tick_ms":foreground_ms,
             "turns":turns, "owner_messages":*owner_sent.borrow(), "foreground_messages":*foreground_sent.borrow(),
