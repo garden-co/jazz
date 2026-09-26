@@ -2168,6 +2168,27 @@ pub(crate) async fn validate_derived_upload(
         byte_length: tree.byte_length,
         utf16_length: tree.utf16_length,
     };
+    // The caller's `base` descriptor is only an unauthenticated edge into a
+    // retained root: that root was validated for some descriptor, not
+    // necessarily this one. Authenticate the edge against the root node
+    // itself (one node read), so every base claim below derives from content-
+    // addressed nodes and a forged base length, hash or kind fails closed.
+    let encoded_base_root = reader
+        .get(base.root.locator, base.root.object_hash)
+        .await
+        .map_err(crate::chunks::ChunkError::from)?;
+    record_finalize_validation_bytes(encoded_base_root.len());
+    let base_root = decode_node_for_format(
+        base.format_version,
+        base.kind,
+        base.root.object_hash,
+        &encoded_base_root,
+    )?;
+    if node_logical_hash(&base_root) != base_tree.logical_hash
+        || node_metrics(base.kind, &base_root)? != tree_metrics(&base_tree)
+    {
+        return Err(Error::DescriptorMismatch.into());
+    }
     let mut traversal = PhysicalTraversal::new(
         value.root.clone(),
         Some(tree_metrics(&tree)),

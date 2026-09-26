@@ -80,11 +80,12 @@ enum UploadValidation<'a> {
     DerivedFrom(&'a crate::large_values::LargeValueRef),
 }
 
-/// Whether `node_ref` is retained by an active large-value root: a staging
-/// receipt (issued only after validation) or a durably published row.
-async fn large_value_node_is_retained<S>(
+/// Whether `root` is an active large-value root: it holds a staging receipt
+/// (issued only after validation) or a durably published reference. A node
+/// that is merely reachable from some other root does not qualify.
+async fn large_value_root_is_active<S>(
     storage: &S,
-    node_ref: &crate::large_values::NodeRef,
+    root: &crate::large_values::NodeRef,
 ) -> Result<bool, Error>
 where
     S: OrderedKvStorage + ?Sized,
@@ -92,13 +93,14 @@ where
     let Some(encoded) = storage
         .get(
             LARGE_VALUE_METADATA_CF.to_owned(),
-            large_value_node_key(node_ref)?,
+            large_value_root_key(root)?,
         )
         .await?
     else {
         return Ok(false);
     };
-    Ok(decode_large_value_node_references(&encoded)?.references > 0)
+    let references = decode_large_value_root_references(&encoded)?;
+    Ok(references.durable > 0 || references.staged > 0)
 }
 
 /// Return the staged-receipt metadata transition without committing it. This
@@ -1381,14 +1383,16 @@ impl Database {
         let uploaded_chunks = upload.chunks.iter().cloned().collect();
         // JSON validity is a whole-document property, so JSON edits keep the
         // complete logical pass. (Groove only admits complete JSON
-        // replacement, which rewrites the whole value anyway.) A base whose
-        // root is not retained by an active root was never admitted here, so
-        // its validity cannot be inherited either.
+        // replacement, which rewrites the whole value anyway.) A base root
+        // with no staging receipt or durable reference was never admitted
+        // here, so its validity cannot be inherited either. The base
+        // descriptor itself is authenticated against that root node inside
+        // `validate_derived_upload`.
         let derived = match validation {
             UploadValidation::DerivedFrom(base)
                 if upload.descriptor.is_some()
                     && value_ref.kind != crate::large_values::LargeValueKind::Json
-                    && large_value_node_is_retained(&self.storage, &base.root).await? =>
+                    && large_value_root_is_active(&self.storage, &base.root).await? =>
             {
                 crate::large_values::validate_derived_upload(
                     &value_ref,
