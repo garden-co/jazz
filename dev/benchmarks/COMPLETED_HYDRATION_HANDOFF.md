@@ -48,6 +48,13 @@ Rust 1.93.1, `--profile perf`, no default features, and
 `testing,transport-compression-zstd`. The control is the frozen unchanged
 runtime binary; the final implementation contains no diagnostic switches.
 
+The measured native baseline is the local performance integration `8eb69d5330a1`
+plus the diagnostic harness, including the separate #3545 first-result changes.
+The port onto this PR stack has the same handoff patch but a different surrounding
+baseline. These measurements establish the effect in that integration; they are
+not an exact comparison of this PR head against its GitHub base. Qualification
+of the port and application endpoint remains separate.
+
 The staged Local fixture has 600 synthetic rows, 37 subscriptions and 17 tables.
 It opens the detail phase after the full list completes. Setup is excluded.
 Memory storage and manually driven owner turns isolate runtime work; this is
