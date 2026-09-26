@@ -5,6 +5,8 @@ use std::future::{Future, poll_fn};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use futures::{StreamExt, stream::FuturesUnordered};
+
 use crate::ivm::graph::NodeId;
 use crate::records::Value;
 use crate::schema::DatabaseSchema;
@@ -735,44 +737,37 @@ async fn load_indexed_rows(
     entries: Vec<KeyValue>,
 ) -> Result<StorageRequestOutput, super::IvmRuntimeError> {
     let primary_keys = indexed_primary_keys(&table, &index_name, &index_schema, &entries)?;
-    let mut reads = primary_keys
-        .into_iter()
-        .map(|primary_key| {
-            let read = storage.get(table.name.clone(), primary_key.clone());
-            (primary_key, read, None)
-        })
-        .collect::<Vec<_>>();
-    let rows = poll_fn(|cx| {
-        let mut all_ready = true;
-        for (_, read, output) in &mut reads {
-            if output.is_some() {
-                continue;
-            }
+    let mut rows = vec![(Vec::new(), Vec::new()); primary_keys.len()];
+    let mut reads = primary_keys.into_iter().enumerate();
+    let mut pending = FuturesUnordered::new();
+    // Resident rows need neither a per-row wake registration nor a queue
+    // allocation. Start every read in the first poll, retaining only the
+    // futures that actually suspend. The queue then registers their wakers.
+    poll_fn(|cx| {
+        for (slot, key) in reads.by_ref() {
+            let mut read = storage.get(table.name.clone(), key.clone());
             match read.as_mut().poll(cx) {
-                Poll::Ready(Ok(Some(record))) => *output = Some(record),
+                Poll::Ready(Ok(Some(record))) => rows[slot] = (key, record),
                 Poll::Ready(Ok(None)) => {
                     return Poll::Ready(Err(super::IvmRuntimeError::InvalidPersistedIndex(
                         index_name.clone(),
                     )));
                 }
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
-                Poll::Pending => all_ready = false,
+                Poll::Pending => pending.push(async move { (slot, key, read.await) }),
             }
         }
-        if !all_ready {
-            return Poll::Pending;
-        }
-        Poll::Ready(Ok(reads
-            .iter_mut()
-            .map(|(key, _, output)| {
-                (
-                    key.clone(),
-                    output.take().expect("all indexed row reads are ready"),
-                )
-            })
-            .collect()))
+        Poll::Ready(Ok(()))
     })
     .await?;
+    // One storage wake must not re-poll every other suspended row. Keep the
+    // original index order separately so any ready read (including an error)
+    // can finish without waiting for an earlier slot.
+    while let Some((slot, key, result)) = pending.next().await {
+        let record = result?
+            .ok_or_else(|| super::IvmRuntimeError::InvalidPersistedIndex(index_name.clone()))?;
+        rows[slot] = (key, record);
+    }
     Ok(StorageRequestOutput::Rows(rows))
 }
 
