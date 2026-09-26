@@ -372,6 +372,40 @@ impl<S: PageStore + Clone> IdbTree<S> {
         }
     }
 
+    /// Read a group of required keys, retaining request order and duplicates.
+    /// Returns `None` as soon as a requested key is known to be absent; an
+    /// empty request returns an empty group. Cold keys share each missing
+    /// page frontier within this operation, without depending on another
+    /// caller to drive a parked read.
+    pub async fn get_many_required(&self, keys: &[Vec<u8>]) -> Result<Option<Vec<Vec<u8>>>, Error> {
+        loop {
+            self.ensure_live()?;
+            let (rows, mut missing) = {
+                let tree = self.inner.borrow();
+                let mut rows = Vec::with_capacity(keys.len());
+                let mut missing = Vec::new();
+                for key in keys {
+                    let attempt = match self.read_root(&tree) {
+                        Some(root) => tree.try_get(root, key)?,
+                        None => Attempt::Ready(None),
+                    };
+                    match attempt {
+                        Attempt::Ready(Some(value)) => rows.push(value),
+                        Attempt::Ready(None) => return Ok(None),
+                        Attempt::Missing(page_id) => missing.push(page_id),
+                    }
+                }
+                (rows, missing)
+            };
+            if missing.is_empty() {
+                return Ok(Some(rows));
+            }
+            missing.sort_unstable();
+            missing.dedup();
+            self.hydrate_many_for_read(missing).await?;
+        }
+    }
+
     pub async fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), Error> {
         self.ensure_writable()?;
         loop {

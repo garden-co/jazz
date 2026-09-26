@@ -469,6 +469,23 @@ impl<S> OrderedKvStorage for MeteredStorage<'_, S>
 where
     S: OrderedKvStorage,
 {
+    fn get_many_required(
+        &self,
+        cf: String,
+        keys: Vec<Vec<u8>>,
+    ) -> crate::storage::StorageFuture<
+        '_,
+        Result<Option<Vec<crate::storage::Value>>, crate::storage::Error>,
+    > {
+        {
+            let mut metrics = self.metrics.borrow_mut();
+            for key in &keys {
+                metrics.record_point(&cf, key);
+            }
+        }
+        self.storage.get_many_required(cf, keys)
+    }
+
     fn permits_eager_read_retry(&self) -> bool {
         self.storage.permits_eager_read_retry()
     }

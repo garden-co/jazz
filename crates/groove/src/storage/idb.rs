@@ -319,6 +319,29 @@ where
         })
     }
 
+    fn get_many_required(
+        &self,
+        cf: String,
+        keys: Vec<Vec<u8>>,
+    ) -> StorageFuture<'_, Result<Option<Vec<Value>>, Error>> {
+        if keys.is_empty() {
+            return Box::pin(async { Ok(Some(Vec::new())) });
+        }
+        Box::pin(async move {
+            self.ensure_cf(&cf)?;
+            let keys = Rc::new(
+                keys.into_iter()
+                    .map(|key| self.encoded_key(&cf, &key))
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+            self.read_resident(|tree| {
+                let keys = Rc::clone(&keys);
+                async move { tree.get_many_required(keys.as_slice()).await }
+            })
+            .await
+        })
+    }
+
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
         Box::pin(async move {
             let key = self.encoded_key(&cf, &key)?;

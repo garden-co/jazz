@@ -1,11 +1,9 @@
 //! Owned work and request state for interruptible evaluation.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::future::{Future, poll_fn};
+use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-
-use futures::{StreamExt, stream::FuturesUnordered};
 
 use crate::ivm::graph::NodeId;
 use crate::records::Value;
@@ -737,38 +735,17 @@ async fn load_indexed_rows(
     entries: Vec<KeyValue>,
 ) -> Result<StorageRequestOutput, super::IvmRuntimeError> {
     let primary_keys = indexed_primary_keys(&table, &index_name, &index_schema, &entries)?;
-    let mut rows = vec![(Vec::new(), Vec::new()); primary_keys.len()];
-    let mut reads = primary_keys.into_iter().enumerate();
-    let mut pending = FuturesUnordered::new();
-    // Resident rows need neither a per-row wake registration nor a queue
-    // allocation. Start every read in the first poll, retaining only the
-    // futures that actually suspend. The queue then registers their wakers.
-    poll_fn(|cx| {
-        for (slot, key) in reads.by_ref() {
-            let mut read = storage.get(table.name.clone(), key.clone());
-            match read.as_mut().poll(cx) {
-                Poll::Ready(Ok(Some(record))) => rows[slot] = (key, record),
-                Poll::Ready(Ok(None)) => {
-                    return Poll::Ready(Err(super::IvmRuntimeError::InvalidPersistedIndex(
-                        index_name.clone(),
-                    )));
-                }
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
-                Poll::Pending => pending.push(async move { (slot, key, read.await) }),
-            }
-        }
-        Poll::Ready(Ok(()))
-    })
-    .await?;
-    // One storage wake must not re-poll every other suspended row. Keep the
-    // original index order separately so any ready read (including an error)
-    // can finish without waiting for an earlier slot.
-    while let Some((slot, key, result)) = pending.next().await {
-        let record = result?
-            .ok_or_else(|| super::IvmRuntimeError::InvalidPersistedIndex(index_name.clone()))?;
-        rows[slot] = (key, record);
+    if primary_keys.is_empty() {
+        return Ok(StorageRequestOutput::Rows(Vec::new()));
     }
-    Ok(StorageRequestOutput::Rows(rows))
+    let values = storage
+        .get_many_required(table.name, primary_keys.clone())
+        .await?
+        .filter(|values| values.len() == primary_keys.len())
+        .ok_or(super::IvmRuntimeError::InvalidPersistedIndex(index_name))?;
+    Ok(StorageRequestOutput::Rows(
+        primary_keys.into_iter().zip(values).collect(),
+    ))
 }
 
 fn indexed_uuid_values(

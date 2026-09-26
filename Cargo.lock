@@ -1882,6 +1882,7 @@ name = "idb-tree"
 version = "0.1.0"
 dependencies = [
  "futures",
+ "jazz-benchmark-guard",
  "js-sys",
  "thiserror",
  "wasm-bindgen",

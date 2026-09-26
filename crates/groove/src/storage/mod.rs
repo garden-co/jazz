@@ -20,11 +20,13 @@ mod memory;
 #[cfg(any(test, feature = "test"))]
 mod test;
 
+use futures::{StreamExt, stream::FuturesUnordered};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
+use std::task::Poll;
 
 use crate::records::{Record, RecordDescriptor};
 use thiserror::Error;
@@ -263,6 +265,15 @@ impl<'a> OwnedStorage<'a> {
         Box::pin(async move { storage.get(cf, key).await })
     }
 
+    pub(crate) fn get_many_required(
+        &self,
+        cf: String,
+        keys: Vec<Vec<u8>>,
+    ) -> StorageFuture<'a, Result<Option<Vec<Value>>, Error>> {
+        let storage = Rc::clone(&self.0);
+        Box::pin(async move { storage.get_many_required(cf, keys).await })
+    }
+
     pub(crate) fn scan(
         &self,
         request: ScanRequest,
@@ -362,6 +373,45 @@ pub trait OrderedKvStorage {
     }
 
     fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>>;
+
+    /// Read required keys in request order, preserving duplicates. Return
+    /// `None` as soon as one key is known absent, or all values when complete.
+    /// Backends may batch physical reads; the default keeps reads concurrent
+    /// and resumes only suspended futures whose wakers fired.
+    fn get_many_required(
+        &self,
+        cf: String,
+        keys: Vec<Vec<u8>>,
+    ) -> StorageFuture<'_, Result<Option<Vec<Value>>, Error>> {
+        Box::pin(async move {
+            let mut values = vec![Vec::new(); keys.len()];
+            let mut keys = keys.into_iter().enumerate();
+            let mut pending = FuturesUnordered::new();
+            let present = std::future::poll_fn(|cx| {
+                for (slot, key) in keys.by_ref() {
+                    let mut read = self.get(cf.clone(), key);
+                    match read.as_mut().poll(cx) {
+                        Poll::Ready(Ok(Some(value))) => values[slot] = value,
+                        Poll::Ready(Ok(None)) => return Poll::Ready(Ok(false)),
+                        Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                        Poll::Pending => pending.push(async move { (slot, read.await) }),
+                    }
+                }
+                Poll::Ready(Ok(true))
+            })
+            .await?;
+            if !present {
+                return Ok(None);
+            }
+            while let Some((slot, result)) = pending.next().await {
+                let Some(value) = result? else {
+                    return Ok(None);
+                };
+                values[slot] = value;
+            }
+            Ok(Some(values))
+        })
+    }
     /// Compare at the storage boundary. Backends can avoid cloning resident values.
     /// This is a read, not a conditional mutation or a cross-writer reservation.
     fn compare_value(
@@ -553,6 +603,14 @@ impl<S> OrderedKvStorage for Rc<S>
 where
     S: OrderedKvStorage,
 {
+    fn get_many_required(
+        &self,
+        cf: String,
+        keys: Vec<Vec<u8>>,
+    ) -> StorageFuture<'_, Result<Option<Vec<Value>>, Error>> {
+        self.as_ref().get_many_required(cf, keys)
+    }
+
     fn compare_value(
         &self,
         cf: String,
@@ -663,6 +721,14 @@ impl<S> OrderedKvStorage for &S
 where
     S: OrderedKvStorage,
 {
+    fn get_many_required(
+        &self,
+        cf: String,
+        keys: Vec<Vec<u8>>,
+    ) -> StorageFuture<'_, Result<Option<Vec<Value>>, Error>> {
+        S::get_many_required(*self, cf, keys)
+    }
+
     fn compare_value(
         &self,
         cf: String,
@@ -1059,6 +1125,24 @@ impl LayoutStorage {
 }
 
 impl OrderedKvStorage for LayoutStorage {
+    fn get_many_required(
+        &self,
+        cf: String,
+        keys: Vec<Vec<u8>>,
+    ) -> StorageFuture<'_, Result<Option<Vec<Value>>, Error>> {
+        if keys.is_empty() {
+            return Box::pin(async { Ok(Some(Vec::new())) });
+        }
+        Box::pin(async move {
+            let physical_cf = self.layout.map_cf(&cf)?.physical_cf.to_owned();
+            let keys = keys
+                .into_iter()
+                .map(|key| self.physical_key(&cf, &key).map(|(_, key)| key))
+                .collect::<Result<Vec<_>, _>>()?;
+            self.inner.get_many_required(physical_cf, keys).await
+        })
+    }
+
     fn compare_value(
         &self,
         cf: String,
@@ -1338,6 +1422,14 @@ impl BoxedStorage {
 }
 
 impl OrderedKvStorage for BoxedStorage {
+    fn get_many_required(
+        &self,
+        cf: String,
+        keys: Vec<Vec<u8>>,
+    ) -> StorageFuture<'_, Result<Option<Vec<Value>>, Error>> {
+        self.inner.get_many_required(cf, keys)
+    }
+
     fn compare_value(
         &self,
         cf: String,
@@ -2083,6 +2175,45 @@ impl<S: ?Sized> OrderedKvStorage for StagedWriteOverlay<'_, S>
 where
     S: OrderedKvStorage,
 {
+    fn get_many_required(
+        &self,
+        cf: String,
+        keys: Vec<Vec<u8>>,
+    ) -> StorageFuture<'_, Result<Option<Vec<Value>>, Error>> {
+        if self.staged_writes.borrow().is_empty() {
+            return self.base.get_many_required(cf, keys);
+        }
+        let mut values = vec![Vec::new(); keys.len()];
+        let mut missing_keys = Vec::new();
+        let mut slots = Vec::new();
+        for (slot, key) in keys.into_iter().enumerate() {
+            match self.staged_point_value(&cf, &key) {
+                StagedPointValue::Set(value) => values[slot] = value,
+                StagedPointValue::Delete => return Box::pin(async { Ok(None) }),
+                StagedPointValue::Miss => {
+                    slots.push(slot);
+                    missing_keys.push(key);
+                }
+            }
+        }
+        let read = self.base.get_many_required(cf, missing_keys);
+        Box::pin(async move {
+            let Some(base_values) = read.await? else {
+                return Ok(None);
+            };
+            if base_values.len() != slots.len() {
+                return Err(Error::Backend {
+                    backend: "ordered-kv",
+                    message: "required read returned a different number of values".into(),
+                });
+            }
+            for (slot, value) in slots.into_iter().zip(base_values) {
+                values[slot] = value;
+            }
+            Ok(Some(values))
+        })
+    }
+
     fn compare_value(
         &self,
         cf: String,
@@ -2175,6 +2306,18 @@ impl<S> OrderedKvStorage for StorageTransaction<'_, S>
 where
     S: OrderedKvStorage,
 {
+    fn get_many_required(
+        &self,
+        cf: String,
+        keys: Vec<Vec<u8>>,
+    ) -> StorageFuture<'_, Result<Option<Vec<Value>>, Error>> {
+        Box::pin(async move {
+            StagedWriteOverlay::new(self.base, &self.staged_writes)
+                .get_many_required(cf, keys)
+                .await
+        })
+    }
+
     fn put_if_absent(
         &self,
         _cf: String,
