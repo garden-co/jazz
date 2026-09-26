@@ -21,7 +21,9 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: PROD ? "pnpm exec next start" : "pnpm dev",
+    // Run the server binary directly: pnpm 12.6 `pnpm exec` starts its child in a
+    // new process group, which Playwright's shutdown does not kill, so the run hangs.
+    command: PROD ? "node node_modules/next/dist/bin/next start" : "pnpm dev",
     url: BASE_URL,
     reuseExistingServer: false,
     timeout: PROD ? 120_000 : 60_000,
