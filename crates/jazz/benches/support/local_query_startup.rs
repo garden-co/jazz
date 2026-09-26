@@ -7,6 +7,30 @@ use std::collections::BTreeSet;
 const AUX_ROWS: [usize; 15] = [1, 1, 4, 4, 250, 1, 4, 3, 4, 16, 2, 22, 0, 0, 8];
 const FIELDS: usize = 36;
 
+// Optional host wake ownership; this receipt's driver still runs each tick.
+struct ManualHostScheduler;
+impl jazz::db::TickScheduler for ManualHostScheduler {
+    fn schedule_tick(&self, _: jazz::db::TickUrgency) {}
+    fn schedule_tick_after(&self, _: u64) {}
+    fn query_runtime_waker(&self) -> Option<std::task::Waker> {
+        Some(noop_waker())
+    }
+}
+
+// Counter collection is outside the measured endpoint.
+fn runtime_work(db: &Db<MemoryStorage>) -> serde_json::Value {
+    let stats = db.runtime_stats_for_test();
+    json!({
+        "graph_nodes": stats.graph_nodes,
+        "hydration_memo_hits": stats.hydration_memo_hits,
+        "hydration_memo_computes": stats.hydration_memo_computes,
+        "hydration_memo_distinct_computed_nodes": stats.hydration_memo_distinct_computed_nodes,
+        "arrangement_rows": stats.arrangement_rows,
+        "arrangement_encoded_bytes": stats.arrangement_encoded_bytes,
+        "eval_memo_bytes": stats.eval_memo_bytes,
+    })
+}
+
 fn cells(table: &str, index: usize, width: usize) -> RowCells {
     let mut result = BTreeMap::from([
         ("sequence".to_owned(), Value::I64(index as i64)),
@@ -344,7 +368,13 @@ pub(super) fn run(rows: usize) {
     let owner = block_on(unsafe { Db::open_scope_isolated_client_relay(config(), scope) }).unwrap();
     let foreground = open(&schema, 0x74, false);
     foreground.set_non_durable_client();
+    let host_scheduler = std::env::var_os("JAZZ_FAIR_HOST_SCHEDULER").is_some();
+    if host_scheduler {
+        owner.set_tick_scheduler(Some(Rc::new(ManualHostScheduler)));
+        foreground.set_tick_scheduler(Some(Rc::new(ManualHostScheduler)));
+    }
     let cases = plan(rows);
+    let runtime_work_before = [runtime_work(&owner), runtime_work(&foreground)];
     let setup_ms = setup.elapsed().as_secs_f64() * 1000.;
     let began = Instant::now();
     let a = Rc::new(RefCell::new(VecDeque::new()));
@@ -419,14 +449,16 @@ pub(super) fn run(rows: usize) {
         "{}",
         json!({
             "benchmark":"publication_fairness", "layout":"mixed-local", "mode":"local-relay", "rows":rows, "width":width, "queries":driver.cases.len(),
-            "setup_ms":setup_ms, "elapsed_ms":elapsed_ms, "full_list_ms":driver.cases[8].completed_ms,
+            "host_scheduler":host_scheduler, "setup_ms":setup_ms, "elapsed_ms":elapsed_ms, "full_list_ms":driver.cases[8].completed_ms,
             "detail_ms":driver.cases.iter().find(|c| c.label == "detail").unwrap().completed_ms,
             "phases":driver.phases.iter().map(|p| json!({"prepare_ms":p.prepare_ms,"subscribe_ms":p.subscribe_ms,"owner_ms":p.owner_ms,"foreground_ms":p.foreground_ms,"extract_ms":p.extract_ms})).collect::<Vec<_>>(),
             "queries_completed":driver.cases.iter().map(|c| json!({"label":c.label,"rows":c.result.len(),"at_ms":c.completed_ms})).collect::<Vec<_>>(),
             "first_frame_sent_ms":timing.first_sent_ms, "first_frame_received_ms":timing.first_received_ms,
             "owner_poll_ms":polls, "frame_holds_ms":timing.frame_holds_ms,
             "result_signature":blake3::hash(&postcard::to_allocvec(&driver.cases.iter().map(|c| &c.result).collect::<Vec<_>>()).unwrap()).to_hex().to_string(),
-            "compilations":[owner.query_program_compilations_for_test(),foreground.query_program_compilations_for_test()]
+            "compilations":[owner.query_program_compilations_for_test(),foreground.query_program_compilations_for_test()],
+            "runtime_work_before":runtime_work_before,
+            "runtime_work":[runtime_work(&owner),runtime_work(&foreground)]
         })
     );
 }

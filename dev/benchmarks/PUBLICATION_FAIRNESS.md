@@ -157,3 +157,45 @@ Instrumented observations are excluded from this timing receipt.
 
 Tooling friction: preserve dependency stages and payload width alongside
 read topology; a point-only fanout obscures the list-to-detail setup cost.
+
+## Host-owned query wake scheduling
+
+Set `JAZZ_FAIR_HOST_SCHEDULER=1` with `JAZZ_FAIR_LAYOUT=mixed-local` to install a
+host-owned query progress waker in both databases. The existing manual driver
+still runs each tick and awaits pending ticks. This isolates the core's bounded
+owner-turn behavior; it does not simulate browser task delay, poll-once tick
+cancellation, or cold IndexedDB callbacks. With the variable absent, direct
+resident subscription opening drains its CPU continuations before returning.
+
+The [host wake receipt](receipts/publication-fairness-host-wake.json) compares
+both modes on one frozen binary with unchanged runtime code. It uses ABBAABBA,
+four process observations per mode and width after excluded warmups. Exact IDs,
+all selected values and result signatures agree. These are scheduling baselines,
+not optimization gains.
+
+| 600 rows, 37 subscriptions | Direct polling | Host waker | Host/direct latency |
+| -------------------------- | -------------: | ---------: | ------------------: |
+| All results, width 0       |     353.223 ms | 399.246 ms |              1.130× |
+| All results, width 256     |     397.140 ms | 461.605 ms |              1.162× |
+| Full list, width 256       |     309.786 ms | 374.171 ms |              1.208× |
+
+The owner takes 5 polls in direct mode and 17 with host waking; query-lowering
+entry counts stay 37 per database. `runtime_work_before` and `runtime_work`
+report owner/foreground counters outside the measured endpoint. At width 0,
+owner hydration computes increase from 1,453 to 1,680 over the same 1,453
+distinct nodes. This proves repeated evaluation exists in the scheduled path;
+it does not attribute the entire latency difference to those extra computes.
+Memo/arrangement byte counters are logical encoded payload accounting, not
+unique allocations, peak memory or storage I/O.
+
+Separate native samples put additional owner CPU in delayed maintained-result
+completion, evaluation and version-bundle assembly. A diagnostic that deferred
+eager work and explicitly woke the host completed all results but was essentially
+flat overall (width 0: 393.952→401.606 ms; width 256: 460.943→455.482 ms).
+That runtime change was removed. An earlier unconditional skip failed to deliver
+the initial queries because no continuation had been scheduled; it has no valid
+performance comparison. Follow-up and exact frozen sources are in
+[#3569](https://github.com/garden-co/jazz/issues/3569).
+
+Tooling friction: include host wake ownership in native fixtures and collect
+compute/reuse counters outside timing; direct polling can hide browser-path work.
