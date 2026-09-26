@@ -525,6 +525,87 @@ describe("NativeRuntimeAdapter server transport", () => {
     }
   });
 
+  it("does not reject a Global wait issued once a short outage ends", async () => {
+    vi.useFakeTimers();
+    // Worst-case jitter: every backoff step takes its full ceiling.
+    const random = vi.spyOn(Math, "random").mockReturnValue(1);
+    const sockets: FakeWebSocket[] = [];
+    let serverDown = false;
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+        if (serverDown) queueMicrotask(() => this.emitServerClose());
+      }
+    } as unknown as typeof WebSocket;
+    const settlement = deferred<void>();
+    const write = {
+      ...fakeWrite(),
+      wait: (tier: string) => (tier === "local" ? Promise.resolve() : settlement.promise),
+    };
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            insert: () => write,
+            connectUpstream: () => new FakeTransport([]),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    try {
+      const terminal = vi.fn();
+      runtime.onServerTransportError(terminal);
+      runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+      await runtime.waitForUpstreamServerConnection();
+
+      serverDown = true;
+      sockets[0]!.emitServerClose();
+      await vi.advanceTimersByTimeAsync(6_500);
+      serverDown = false;
+
+      // The server is back before the 7.5 s outage report. A wait issued now
+      // must follow the reconnect instead of inheriting a stale outage.
+      const txId = await committedTxId(
+        runtime.insert(
+          "todos",
+          { title: { type: "Text", value: "after short outage" } },
+          null,
+          "00000000-0000-0000-0000-000000000010",
+        ),
+      );
+      let outcome: unknown = "pending";
+      const wait = runtime.waitForTransaction(txId, "global").then(
+        () => {
+          outcome = "resolved";
+        },
+        (error: unknown) => {
+          outcome = error;
+        },
+      );
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(runtime.remoteLinkState()).toBe("connected");
+      settlement.resolve();
+      await vi.advanceTimersByTimeAsync(100);
+      await wait;
+      expect(outcome).toBe("resolved");
+      expect(terminal).not.toHaveBeenCalled();
+    } finally {
+      settlement.resolve();
+      random.mockRestore();
+      await runtime.close();
+      vi.useRealTimers();
+    }
+  });
+
   it("does not resurrect the previous account transport after replacement", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
