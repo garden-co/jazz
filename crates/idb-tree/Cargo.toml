@@ -22,3 +22,7 @@ wasm-bindgen-futures = "0.4"
 [[bench]]
 name = "batched_points"
 harness = false
+
+[[bench]]
+name = "selective_ranges"
+harness = false
