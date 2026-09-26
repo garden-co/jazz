@@ -37,6 +37,7 @@ import {
   type QueryPropagation,
   type QueryVisibility,
   isPublicQueryReadTier,
+  rejectRemovedReadTier,
   resolveEffectiveQueryExecutionOptions,
   resolveReadTier,
   isLocalFirstUnlessEmptyTier,
@@ -257,6 +258,7 @@ function lowerPublicDbQueryOptions(options?: QueryOptions): InternalDbQueryOptio
     branch?: unknown;
     base?: unknown;
   };
+  rejectRemovedReadTier(candidate.tier);
   const lowered: InternalDbQueryOptions = {};
   if (isPublicQueryReadTier(candidate.tier)) lowered.tier = candidate.tier;
   if (candidate.branch !== undefined) lowered.branch = candidate.branch as Branch;

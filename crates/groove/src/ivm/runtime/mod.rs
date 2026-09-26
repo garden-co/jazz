@@ -197,6 +197,7 @@ pub struct IvmRuntime {
     gc_candidates: HashSet<NodeId>,
     prepared_shapes: HashMap<PreparedShapeId, RoutedMultisinkShapeState>,
     auto_direct_families: HashMap<AutoDirectFamilyKey, PreparedShapeId>,
+    shared_prepared_shapes: HashMap<subscriptions::SharedShapeKey, PreparedShapeId>,
     binding_sources: subscriptions::BindingSources,
     input_source_runtime_namespace: u64,
     next_input_source_id: u64,
@@ -313,6 +314,7 @@ impl IvmRuntime {
             collect_tick_runtime_stats: false,
             prepared_shapes: HashMap::default(),
             auto_direct_families: HashMap::default(),
+            shared_prepared_shapes: HashMap::default(),
             binding_sources: subscriptions::BindingSources::default(),
             input_source_runtime_namespace: NEXT_INPUT_SOURCE_RUNTIME_NAMESPACE
                 .fetch_add(1, Ordering::Relaxed),

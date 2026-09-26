@@ -46,8 +46,9 @@ when opened in isolation and keep its measurement inputs explicit.
    cargo bench -p jazz-example-<app>-benchmark --bench walltime
    ```
 
-7. Add `<app>` to `workloads` in `dev/benchmarks/codspeed-artifact.mjs`. That
-   list feeds both native matrix jobs in `.github/workflows/codspeed.yml`:
+7. Add `"<app>": nativeExample("<app>")` to `workloadSpecs` in
+   `dev/benchmarks/codspeed-artifact.mjs`. That table feeds both native matrix
+   jobs in `.github/workflows/codspeed.yml`:
    an ARM64 Blacksmith runner compiles the suite with mimalloc, and CodSpeed's
    macro runner measures it in wall-clock mode without compiling.
 

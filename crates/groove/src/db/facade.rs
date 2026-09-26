@@ -2121,6 +2121,12 @@ impl Database {
         DatabaseBatch::default()
     }
 
+    /// Whether any binding currently holds the prepared binding source named
+    /// `shape` (see [`crate::ivm::IvmRuntime::prepared_binding_source_is_bound`]).
+    pub fn prepared_binding_source_is_bound(&self, shape: &str) -> bool {
+        self.ivm_runtime.prepared_binding_source_is_bound(shape)
+    }
+
     /// Test helper: bindings admitted onto a live prepared shape without a
     /// full hydration. Result equality alone cannot show which path ran.
     #[cfg(test)]
