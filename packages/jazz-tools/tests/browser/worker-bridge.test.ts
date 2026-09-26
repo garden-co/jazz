@@ -3515,8 +3515,8 @@ describe("SharedWorker bridge with IndexedDB", () => {
     await stopJazzServer(syncServer.serverUrl);
     const globalReadError = await withTimeout(
       db.all(allTodos, { tier: "global" }),
-      // The ten bounded reconnect attempts wait 7.5s in total before reporting
-      // terminal loss. Leave room for the handshakes and worker delivery too.
+      // An established link reports the outage after 7.5s of failed
+      // reconnects (and keeps retrying). Leave room for worker delivery too.
       15000,
       "global read did not observe the stopped server",
     ).then(
