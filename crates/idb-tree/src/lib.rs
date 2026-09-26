@@ -26,6 +26,30 @@ const MAX_JS_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 pub type KeyValue = (Vec<u8>, Vec<u8>);
 type LeafEntry = (Vec<u8>, ValueCell);
+
+/// Seek only partially covered leaf boundaries. Full scans need no binary
+/// searches within a leaf, and narrow scans never test every entry.
+fn range_leaf_entries<'a>(entries: &'a [LeafEntry], start: &[u8], end: &[u8]) -> &'a [LeafEntry] {
+    let first = if entries
+        .first()
+        .is_some_and(|(key, _)| key.as_slice() < start)
+    {
+        entries.partition_point(|(key, _)| key.as_slice() < start)
+    } else {
+        0
+    };
+    let remaining = &entries[first..];
+    let count = if remaining
+        .last()
+        .is_some_and(|(key, _)| key.as_slice() >= end)
+    {
+        remaining.partition_point(|(key, _)| key.as_slice() < end)
+    } else {
+        remaining.len()
+    };
+    &remaining[..count]
+}
+
 /// A resident root-to-leaf walk. `visited` belongs to the whole logical
 /// operation, rather than merely to the structural descent: an overflow chain
 /// must not alias a structural page, and a caller which goes on to inspect a
@@ -1164,22 +1188,23 @@ impl<S: PageStore> TreeCore<S> {
         };
         match page {
             Page::Leaf { .. } if !missing.is_empty() => {}
-            Page::Leaf { entries } => output.extend(
-                entries
-                    .iter()
-                    .filter(|(key, _)| key.as_slice() >= start && key.as_slice() < end)
-                    .take(limit - output.len())
-                    .cloned(),
-            ),
+            Page::Leaf { entries } => {
+                output.extend(
+                    range_leaf_entries(entries, start, end)
+                        .iter()
+                        .take(limit - output.len())
+                        .cloned(),
+                );
+            }
             Page::Internal { keys, children } => {
-                for (index, child) in children.iter().copied().enumerate() {
-                    let below_end = index == 0 || keys[index - 1].as_slice() < end;
-                    let above_start = index == keys.len() || keys[index].as_slice() > start;
-                    if below_end && above_start {
-                        self.collect_range_resident(
-                            child, start, end, limit, output, missing, visited,
-                        )?;
-                    }
+                // Separators belong to the child on their right. Only
+                // descend into children intersecting the half-open range.
+                let first = keys.partition_point(|key| key.as_slice() <= start);
+                let after_last = (keys.partition_point(|key| key.as_slice() < end) + 1).max(first);
+                for &child in &children[first..after_last] {
+                    self.collect_range_resident(
+                        child, start, end, limit, output, missing, visited,
+                    )?;
                     if output.len() == limit || Self::scan_stops_at_miss(limit, missing) {
                         break;
                     }
@@ -1219,29 +1244,22 @@ impl<S: PageStore> TreeCore<S> {
         };
         match page {
             Page::Leaf { .. } if !missing.is_empty() => {}
-            Page::Leaf { entries } => output.extend(
-                entries
-                    .iter()
-                    .rev()
-                    .filter(|(key, _)| key.as_slice() >= start && key.as_slice() < end)
-                    .take(limit - output.len())
-                    .cloned(),
-            ),
+            Page::Leaf { entries } => {
+                output.extend(
+                    range_leaf_entries(entries, start, end)
+                        .iter()
+                        .rev()
+                        .take(limit - output.len())
+                        .cloned(),
+                );
+            }
             Page::Internal { keys, children } => {
-                for index in (0..children.len()).rev() {
-                    let below_end = index == 0 || keys[index - 1].as_slice() < end;
-                    let above_start = index == keys.len() || keys[index].as_slice() > start;
-                    if below_end && above_start {
-                        self.collect_range_reverse_resident(
-                            children[index],
-                            start,
-                            end,
-                            limit,
-                            output,
-                            missing,
-                            visited,
-                        )?;
-                    }
+                let first = keys.partition_point(|key| key.as_slice() <= start);
+                let after_last = (keys.partition_point(|key| key.as_slice() < end) + 1).max(first);
+                for &child in children[first..after_last].iter().rev() {
+                    self.collect_range_reverse_resident(
+                        child, start, end, limit, output, missing, visited,
+                    )?;
                     if output.len() == limit || Self::scan_stops_at_miss(limit, missing) {
                         break;
                     }
