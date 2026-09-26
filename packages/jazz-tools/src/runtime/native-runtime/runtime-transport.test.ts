@@ -425,13 +425,15 @@ describe("NativeRuntimeAdapter server transport", () => {
     },
   );
 
-  it("exhausts network retries and rejects an already armed remote wait", async () => {
+  it("keeps reconnecting through an outage longer than ten seconds after reporting it", async () => {
+    vi.useFakeTimers();
     const sockets: FakeWebSocket[] = [];
+    let serverDown = false;
     globalThis.WebSocket = class extends FakeWebSocket {
       constructor(url: string) {
         super(url);
         sockets.push(this);
-        if (sockets.length > 1) queueMicrotask(() => this.emitServerClose());
+        if (serverDown) queueMicrotask(() => this.emitServerClose());
       }
     } as unknown as typeof WebSocket;
     const armed = deferred<void>();
@@ -449,6 +451,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         openMemory: () =>
           fakeDb({
             insert: () => write,
+            all: () => new Uint8Array([0]),
             connectUpstream: () => new FakeTransport([]),
             tick: () => undefined,
           }),
@@ -462,29 +465,65 @@ describe("NativeRuntimeAdapter server transport", () => {
       1,
       true,
     );
-    const terminal = vi.fn();
-    runtime.onServerTransportError(terminal);
-    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
-    await runtime.waitForUpstreamServerConnection();
-    const txId = await committedTxId(
-      runtime.insert(
-        "todos",
-        { title: { type: "Text", value: "pending during outage" } },
-        null,
-        "00000000-0000-0000-0000-000000000009",
-      ),
-    );
-    const pending = runtime.waitForTransaction(txId, "global");
-    const rejected = expect(pending).rejects.toThrow("websocket closed");
-    await armed.promise;
-    sockets[0]!.emitServerClose();
-    await expect(runtime.waitForUpstreamServerConnection()).rejects.toThrow("websocket closed");
-    await rejected;
-    expect(sockets).toHaveLength(11);
-    expect(terminal).toHaveBeenCalledTimes(1);
-    settlement.resolve();
-    await runtime.close();
-  }, 15_000);
+    try {
+      const terminal = vi.fn();
+      runtime.onServerTransportError(terminal);
+      runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+      await runtime.waitForUpstreamServerConnection();
+      expect(runtime.remoteLinkState()).toBe("connected");
+      const insertTodo = async () =>
+        await committedTxId(
+          runtime.insert(
+            "todos",
+            { title: { type: "Text", value: "pending during outage" } },
+            null,
+            "00000000-0000-0000-0000-000000000009",
+          ),
+        );
+      const txId = await insertTodo();
+      const duringOutage = runtime.waitForTransaction(txId, "global");
+      const rejected = expect(duringOutage).rejects.toThrow("websocket closed");
+      await armed.promise;
+
+      serverDown = true;
+      sockets[0]!.emitServerClose();
+      const readDuringOutage = runtime.query(JSON.stringify({ table: "todos" }), null, "global");
+      const readRejected = expect(readDuringOutage).rejects.toThrow("websocket closed");
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      // The outage is reported once so Global waits do not hang, but the
+      // client keeps retrying well past the former 10-attempt (~7.5 s) cutoff.
+      await rejected;
+      await readRejected;
+      expect(terminal).toHaveBeenCalledTimes(1);
+      expect(sockets.length).toBeGreaterThan(11);
+      expect(runtime.remoteLinkState()).toBe("unavailable");
+      await expect(runtime.waitForTransaction(txId, "global")).rejects.toThrow("websocket closed");
+      // Backoff is capped: an idle minute-long outage is not a reconnect storm.
+      expect(sockets.length).toBeLessThan(40);
+
+      serverDown = false;
+      const attemptsBeforeRecovery = sockets.length;
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(sockets.length).toBeGreaterThan(attemptsBeforeRecovery);
+      await runtime.waitForUpstreamServerConnection();
+      expect(runtime.remoteLinkState()).toBe("connected");
+      await expect(
+        runtime.query(JSON.stringify({ table: "todos" }), null, "global"),
+      ).resolves.toEqual([]);
+
+      // A Global wait armed after recovery settles normally.
+      const afterRecovery = runtime.waitForTransaction(await insertTodo(), "global");
+      settlement.resolve();
+      await vi.advanceTimersByTimeAsync(100);
+      await expect(afterRecovery).resolves.toBeUndefined();
+      expect(terminal).toHaveBeenCalledTimes(1);
+    } finally {
+      settlement.resolve();
+      await runtime.close();
+      vi.useRealTimers();
+    }
+  });
 
   it("does not resurrect the previous account transport after replacement", async () => {
     const sockets: FakeWebSocket[] = [];
