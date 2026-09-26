@@ -494,7 +494,7 @@ async fn root_position_maps_follow_plain_consumer_demand_for_shared_ordering() {
         plain.try_recv().unwrap().get("rows").unwrap().deltas.len(),
         1
     );
-    for (id, year, expected_index, expected_visits) in [(3, 1965, 1, 3), (2, 1959, 1, 5)] {
+    for (id, year, expected_index) in [(3, 1965, 1), (2, 1959, 1)] {
         insert_album(&mut db, id, "Album", year).await;
         let tick = plain.try_recv().unwrap();
         assert!(tick.terminal_sinks["rows"].operations.iter().any(|operation| {
@@ -502,10 +502,11 @@ async fn root_position_maps_follow_plain_consumer_demand_for_shared_ordering() {
         }));
         assert!(!structured.try_recv().unwrap().terminal_sinks["rows"].is_empty());
         let metrics = db.last_tick_metrics().unwrap();
-        // One shared TopBy: both consumers must not duplicate position work.
-        assert_eq!(metrics.root_ordering_position_records, expected_visits);
+        // One shared TopBy: only the plain consumer takes positions, and only
+        // the inserted row is ranked for it, not the whole window.
+        assert_eq!(metrics.root_ordering_position_records, 1);
         assert_eq!(metrics.root_ordering_position_records_skipped, 0);
-        assert_eq!(metrics.top_by_delta_membership_records, 0);
+        assert_eq!(metrics.top_by_delta_membership_records, 1);
     }
 
     let mut batch = db.open_batch();
@@ -563,7 +564,7 @@ async fn root_position_maps_follow_plain_consumer_demand_for_shared_ordering() {
         db.last_tick_metrics()
             .unwrap()
             .root_ordering_position_records,
-        9
+        1
     );
 }
 

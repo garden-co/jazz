@@ -1018,6 +1018,9 @@ impl<'a> IncrementalEvaluation<'a> {
         if self.discarded {
             return;
         }
+        // Root ordering snapshots share TopBy group state. Release them before
+        // folding overlays, or the fold would copy every touched group.
+        self.root_ordering_windows.clear();
         // Installed operator state is root-scoped; recursive child scopes are
         // scratch. Drop them here, from this evaluation's own states, rather
         // than scanning every installed state afterwards.
