@@ -395,9 +395,9 @@ async fn cold_subscription_open_retains_the_supplied_owner_waker() {
 }
 
 /// A cold hydration cannot monopolize the IVM worklist while a second
-/// subscription is being registered. The owner must return after the first
-/// pending evaluation, leaving storage to wake it before any later work is
-/// advanced.
+/// subscription is being registered. Each owner turn returns after its first
+/// suspended evaluation; later turns can start independent cold reads while
+/// that earlier storage request remains asleep.
 #[futures_test::test]
 async fn cold_hydration_yields_before_later_subscription_work() {
     use std::sync::Arc;
@@ -443,27 +443,57 @@ async fn cold_hydration_yields_before_later_subscription_work() {
         .subscribe([("artists", GraphBuilder::table("artists"))])
         .unwrap();
 
-    // The first owner turn has a cooperative IVM yield; the second reaches
-    // the paused album scan. The artist scan must remain untouched.
-    database
-        .drive_ready_progress_with_waker(Some(&owner_waker))
-        .await
-        .unwrap();
+    let scans_before = control
+        .observed()
+        .into_iter()
+        .filter(|operation| *operation == TestStorageOperation::ScanOpen)
+        .count();
+    // A turn can discover at most one new storage-blocked evaluation.
     database
         .drive_ready_progress_with_waker(Some(&owner_waker))
         .await
         .unwrap();
 
+    assert!(
+        control
+            .observed()
+            .into_iter()
+            .filter(|operation| *operation == TestStorageOperation::ScanOpen)
+            .count()
+            <= scans_before + 1,
+        "one owner turn stops after discovering a pending evaluation"
+    );
+    assert!(database.has_pending_progress());
+
+    // Subsequent owner turns must allow the independent scan to start even
+    // though the first scan has not completed.
+    for _ in 0..8 {
+        database
+            .drive_ready_progress_with_waker(Some(&owner_waker))
+            .await
+            .unwrap();
+    }
     assert_eq!(
         control
             .observed()
             .into_iter()
             .filter(|operation| *operation == TestStorageOperation::ScanOpen)
             .count(),
-        1,
-        "the first cold scan yields the worklist before the later hydration can open its scan"
+        2,
+        "independent cold queries both issue their storage reads",
     );
-    assert!(database.has_pending_progress());
+    assert!(albums.try_recv().is_err());
+    assert!(artists.try_recv().is_err());
+    let idle_wakes = wakes.0.load(Ordering::Acquire);
+    database
+        .drive_ready_progress_with_waker(Some(&owner_waker))
+        .await
+        .unwrap();
+    assert_eq!(
+        wakes.0.load(Ordering::Acquire),
+        idle_wakes,
+        "an entirely storage-blocked queue does not schedule a busy loop"
+    );
 
     control.resume_operation(TestStorageOperation::ScanOpen);
     for _ in 0..32 {

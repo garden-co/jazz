@@ -5,7 +5,11 @@ use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use std::task::{Context, Poll};
+
+use futures::task::{ArcWake, AtomicWaker, waker_ref};
 
 use super::evaluation_session::{
     EvaluationInputs, EvaluationRequestFailure, EvaluationRequestKey, EvaluationRequests,
@@ -180,7 +184,7 @@ impl From<IvmRuntimeError> for EvaluationFailure {
 
 #[derive(Default)]
 struct PendingIncrementalState {
-    evaluations: BTreeMap<u64, PendingEvaluation>,
+    evaluations: BTreeMap<u64, ScheduledEvaluation>,
     order: VecDeque<u64>,
     waiters_by_node: HashMap<NodeId, VecDeque<u64>>,
     next_id: u64,
@@ -196,8 +200,10 @@ impl PendingIncrementalState {
             .evaluations
             .iter()
             .filter_map(|(evaluation_id, evaluation)| {
-                (matches!(evaluation, PendingEvaluation::SubscriptionHydration(_))
-                    && evaluation.work_queue().overlaps(nodes))
+                (matches!(
+                    evaluation.evaluation,
+                    PendingEvaluation::SubscriptionHydration(_)
+                ) && evaluation.work_queue().overlaps(nodes))
                 .then_some(*evaluation_id)
             })
             .collect::<HashSet<_>>();
@@ -244,6 +250,55 @@ impl PendingIncrementalState {
                 later.work_queue_mut().temporal_ready(node);
             }
         }
+    }
+}
+
+/// A storage wake belongs to the evaluation that requested it. Keeping that
+/// readiness separate from queue order lets an owner skip sleeping queries
+/// without advancing more than one suspended evaluation in a turn.
+struct EvaluationReadiness {
+    ready: AtomicBool,
+    owner: AtomicWaker,
+}
+
+impl ArcWake for EvaluationReadiness {
+    fn wake_by_ref(readiness: &Arc<Self>) {
+        if !readiness.ready.swap(true, Ordering::AcqRel) {
+            readiness.owner.wake();
+        }
+    }
+}
+
+struct ScheduledEvaluation {
+    evaluation: PendingEvaluation,
+    readiness: Arc<EvaluationReadiness>,
+}
+
+impl ScheduledEvaluation {
+    fn new(evaluation: PendingEvaluation) -> Self {
+        Self {
+            evaluation,
+            readiness: Arc::new(EvaluationReadiness {
+                ready: AtomicBool::new(true),
+                owner: AtomicWaker::new(),
+            }),
+        }
+    }
+
+    fn work_queue(&self) -> &EvaluationWorkQueue {
+        self.evaluation.work_queue()
+    }
+
+    fn work_queue_mut(&mut self) -> &mut EvaluationWorkQueue {
+        self.evaluation.work_queue_mut()
+    }
+
+    fn has_resident_continuation(&self) -> bool {
+        self.evaluation.has_resident_continuation()
+    }
+
+    fn is_ready(&self) -> bool {
+        self.readiness.ready.load(Ordering::Acquire) || self.has_resident_continuation()
     }
 }
 
@@ -312,7 +367,7 @@ impl PendingIncrementalEvaluation {
             .borrow()
             .evaluations
             .values()
-            .any(PendingEvaluation::has_resident_continuation)
+            .any(ScheduledEvaluation::has_resident_continuation)
     }
 
     /// Nodes referenced by queued continuations remain graph-live until the
@@ -2088,7 +2143,9 @@ impl IvmRuntime {
                 .or_default()
                 .push_back(evaluation_id);
         }
-        pending.evaluations.insert(evaluation_id, evaluation);
+        pending
+            .evaluations
+            .insert(evaluation_id, ScheduledEvaluation::new(evaluation));
         pending.order.push_back(evaluation_id);
         Ok(())
     }
@@ -2321,7 +2378,7 @@ impl IvmRuntime {
                     pending
                         .evaluations
                         .get(id)
-                        .is_some_and(PendingEvaluation::has_resident_continuation)
+                        .is_some_and(ScheduledEvaluation::has_resident_continuation)
                 }) {
                     return Poll::Pending;
                 }
@@ -2406,9 +2463,10 @@ impl IvmRuntime {
                         .or_default()
                         .push_back(evaluation_id);
                 }
-                pending
-                    .evaluations
-                    .insert(evaluation_id, PendingEvaluation::Incremental(evaluation));
+                pending.evaluations.insert(
+                    evaluation_id,
+                    ScheduledEvaluation::new(PendingEvaluation::Incremental(evaluation)),
+                );
                 pending.order.push_back(evaluation_id);
             }
         };
@@ -2515,6 +2573,16 @@ impl IvmRuntime {
         if state.order.is_empty() {
             return self.finish_pending_incremental_poll(&slot, state, Poll::Ready(Ok(())));
         }
+        if !resident_only {
+            // A bounded turn may return before visiting a sleeping sibling.
+            // Rebind every selected continuation up front so that sibling's
+            // later I/O completion wakes this owner, not an expired opener.
+            for (id, entry) in &state.evaluations {
+                if selected_evaluations.is_none_or(|selected| selected.contains(id)) {
+                    entry.readiness.owner.register(cx.waker());
+                }
+            }
+        }
         let mut retained_order = VecDeque::new();
         while let Some(evaluation_id) = state.order.pop_front() {
             let mut evaluation = state
@@ -2531,35 +2599,58 @@ impl IvmRuntime {
                 retained_order.push_back(evaluation_id);
                 continue;
             }
-            let progress = match &mut evaluation {
-                PendingEvaluation::Incremental(incremental) => incremental.poll(self, cx),
-                PendingEvaluation::SubscriptionHydration(hydration) => hydration
-                    .session
-                    .poll(
-                        self,
-                        &hydration.binding_snapshots,
-                        hydration.hydrate_arrangements,
-                        &mut hydration.metrics,
-                        cx,
-                    )
-                    .map_err(|error| EvaluationFailure {
-                        kind: EvaluationFailureKind::Scoped,
-                        affected_nodes: hydration.session.work_queue.incomplete_nodes().collect(),
-                        error: Arc::new(error),
-                    }),
+            // Resident direct calls own only the continuation they advance;
+            // they must not replace sleeping siblings' durable owner wakes.
+            if resident_only {
+                evaluation.readiness.owner.register(cx.waker());
+            }
+            let was_ready = evaluation.readiness.ready.swap(false, Ordering::AcqRel);
+            if !resident_only && !was_ready && !evaluation.has_resident_continuation() {
+                state.evaluations.insert(evaluation_id, evaluation);
+                retained_order.push_back(evaluation_id);
+                continue;
+            }
+            let progress = {
+                let evaluation_waker = waker_ref(&evaluation.readiness);
+                let mut evaluation_cx = Context::from_waker(&evaluation_waker);
+                match &mut evaluation.evaluation {
+                    PendingEvaluation::Incremental(incremental) => {
+                        incremental.poll(self, &mut evaluation_cx)
+                    }
+                    PendingEvaluation::SubscriptionHydration(hydration) => hydration
+                        .session
+                        .poll(
+                            self,
+                            &hydration.binding_snapshots,
+                            hydration.hydrate_arrangements,
+                            &mut hydration.metrics,
+                            &mut evaluation_cx,
+                        )
+                        .map_err(|error| EvaluationFailure {
+                            kind: EvaluationFailureKind::Scoped,
+                            affected_nodes: hydration
+                                .session
+                                .work_queue
+                                .incomplete_nodes()
+                                .collect(),
+                            error: Arc::new(error),
+                        }),
+                }
             };
             // A hydration session owns a private snapshot of all reachable
             // state. Its completed interior nodes are not safe handoff points:
             // a later incremental evaluation would run against the old live
             // runtime, then lose its changes when hydration installs. Treat
             // the whole session as one temporal barrier instead.
-            if matches!(evaluation, PendingEvaluation::Incremental(_)) {
+            if matches!(evaluation.evaluation, PendingEvaluation::Incremental(_)) {
                 let completed = evaluation.work_queue_mut().drain_completed_events();
                 state.release_temporal_successors(evaluation_id, completed);
             }
             match progress {
                 Poll::Ready(Ok(())) => {
-                    if let PendingEvaluation::SubscriptionHydration(hydration) = evaluation {
+                    if let PendingEvaluation::SubscriptionHydration(hydration) =
+                        evaluation.evaluation
+                    {
                         let snapshot = subscription_snapshot_from_hydrated(
                             &self.graph,
                             &hydration.outputs,
@@ -2601,7 +2692,9 @@ impl IvmRuntime {
                     }
                 }
                 Poll::Ready(Err(failure)) => {
-                    if let PendingEvaluation::SubscriptionHydration(hydration) = &evaluation {
+                    if let PendingEvaluation::SubscriptionHydration(hydration) =
+                        &evaluation.evaluation
+                    {
                         if let Some(subscription) =
                             self.multisink_subscriptions.get(&hydration.subscription_id)
                         {
@@ -2627,20 +2720,22 @@ impl IvmRuntime {
                     }
                     // A failed first-result session has not published mutable
                     // state. Its scoped error cannot invalidate live siblings.
-                    if !matches!(&evaluation, PendingEvaluation::SubscriptionHydration(hydration)
+                    if !matches!(&evaluation.evaluation, PendingEvaluation::SubscriptionHydration(hydration)
                         if hydration.lifetime == SubscriptionLifetime::FirstResult)
                     {
                         self.fail_evaluation_nodes(&failure);
                     }
-                    let released_nodes =
-                        if matches!(&evaluation, PendingEvaluation::SubscriptionHydration(_)) {
-                            evaluation.work_queue().registered_nodes()
-                        } else {
-                            evaluation
-                                .work_queue()
-                                .incomplete_nodes()
-                                .collect::<Vec<_>>()
-                        };
+                    let released_nodes = if matches!(
+                        &evaluation.evaluation,
+                        PendingEvaluation::SubscriptionHydration(_)
+                    ) {
+                        evaluation.work_queue().registered_nodes()
+                    } else {
+                        evaluation
+                            .work_queue()
+                            .incomplete_nodes()
+                            .collect::<Vec<_>>()
+                    };
                     for node in released_nodes {
                         let Some(waiters) = state.waiters_by_node.get_mut(&node) else {
                             continue;
@@ -2667,13 +2762,16 @@ impl IvmRuntime {
                         // resident work later in the queue.
                         continue;
                     }
-                    // One owner turn advances at most one suspended
-                    // evaluation. In particular, a cold subscription
-                    // hydration must hand control back to the runtime owner
-                    // before it can drain unrelated queued work (such as
-                    // transport ingress and local write fates). The pending
-                    // storage future has just received this poll's durable
-                    // waker; cooperative in-memory yields wake it directly.
+                    // Preserve the bounded owner turn. A later ready query
+                    // gets a fresh turn even if this query has no storage wake
+                    // yet; an entirely sleeping queue schedules nothing.
+                    if state.evaluations.iter().any(|(id, entry)| {
+                        *id != evaluation_id
+                            && selected_evaluations.is_none_or(|selected| selected.contains(id))
+                            && entry.is_ready()
+                    }) {
+                        cx.waker().wake_by_ref();
+                    }
                     retained_order.append(&mut state.order);
                     state.order = retained_order;
                     return self.finish_pending_incremental_poll(&slot, state, Poll::Pending);
@@ -2725,16 +2823,27 @@ impl IvmRuntime {
         let mut pending = self.pending_incremental.0.borrow_mut();
         let order = pending.order.iter().copied().collect::<Vec<_>>();
         for id in order {
-            if let Some(PendingEvaluation::Incremental(evaluation)) =
-                pending.evaluations.get_mut(&id)
-            {
+            let entry = pending
+                .evaluations
+                .get_mut(&id)
+                .expect("queued evaluation exists");
+            if let PendingEvaluation::Incremental(evaluation) = &mut entry.evaluation {
+                let had_writes = evaluation.persist_flush.is_some()
+                    || !evaluation.durable_writes.borrow().is_empty();
                 match evaluation.poll_storage_flush(
                     &self.persistence_indeterminate,
                     Some(storage.clone()),
                     cx,
                 ) {
                     Poll::Pending => return Poll::Pending,
-                    Poll::Ready(result) => result?,
+                    Poll::Ready(result) => {
+                        result?;
+                        if had_writes {
+                            // Extraction can finish a flush outside the normal
+                            // evaluator poll. Resume its terminal publication.
+                            ArcWake::wake_by_ref(&entry.readiness);
+                        }
+                    }
                 }
             }
         }
@@ -2743,7 +2852,7 @@ impl IvmRuntime {
 
     pub(crate) fn has_pending_storage_writes(&self) -> bool {
         self.pending_incremental.0.borrow().evaluations.values().any(|evaluation| {
-            matches!(evaluation, PendingEvaluation::Incremental(evaluation)
+            matches!(&evaluation.evaluation, PendingEvaluation::Incremental(evaluation)
                 if evaluation.persist_flush.is_some() || !evaluation.durable_writes.borrow().is_empty())
         })
     }
@@ -2779,7 +2888,7 @@ impl IvmRuntime {
             .evaluations
             .values()
             .any(|evaluation| {
-                match evaluation {
+                match &evaluation.evaluation {
                     PendingEvaluation::SubscriptionHydration(hydration) => {
                         hydration.subscription_id == id
                     }
@@ -2822,7 +2931,7 @@ impl IvmRuntime {
         let cancelled = state
             .evaluations
             .iter()
-            .filter_map(|(evaluation_id, evaluation)| match evaluation {
+            .filter_map(|(evaluation_id, evaluation)| match &evaluation.evaluation {
                 PendingEvaluation::SubscriptionHydration(hydration)
                     if hydration.subscription_id == subscription_id =>
                 {
@@ -2860,7 +2969,17 @@ impl IvmRuntime {
         *slot.borrow_mut() = state;
     }
 
+    /// An explicit drain starts a new polling round, including integrations
+    /// which arrange readiness manually instead of retaining a host waker.
+    /// Automatic owner turns keep using per-evaluation storage wakeups.
+    pub(crate) fn request_pending_progress(&self) {
+        for entry in self.pending_incremental.0.borrow().evaluations.values() {
+            entry.readiness.ready.store(true, Ordering::Release);
+        }
+    }
+
     pub(crate) async fn drive_pending_incremental(&mut self) -> Result<(), IvmRuntimeError> {
+        self.request_pending_progress();
         std::future::poll_fn(|cx| self.poll_pending_incremental(cx)).await
     }
 

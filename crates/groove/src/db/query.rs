@@ -313,6 +313,7 @@ impl Database {
 
     /// Await completion of all currently suspended incremental evaluation.
     pub async fn drive_progress(&mut self) -> Result<(), Error> {
+        self.ivm_runtime.request_pending_progress();
         std::future::poll_fn(|cx| self.poll_progress(cx)).await
     }
 
