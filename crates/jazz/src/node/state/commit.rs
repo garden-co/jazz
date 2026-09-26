@@ -1129,9 +1129,9 @@ where
     ) -> Result<Option<TxId>, Error> {
         let table_schema = self.table_in_schema(table, schema_version)?;
         Ok(self
-            .local_current_content_row_candidate(&table_schema, row_uuid, schema_version)
+            .local_current_content_winner(&table_schema, row_uuid, schema_version)
             .await?
-            .map(|(_, (time, node))| TxId::new(time, node)))
+            .map(|(time, node)| TxId::new(time, node)))
     }
 
     pub(crate) async fn local_deletion_winner_tx_id(
@@ -1553,6 +1553,70 @@ where
         let record = BorrowedRecord::new(&delta.record, &result.descriptor);
         let tx = self.current_record_sort_key(&table.name, row_uuid, record)?;
         Ok(Some((decode_current_row(table, record)?, tx)))
+    }
+
+    /// The transaction that [`Self::local_current_content_row_candidate`]
+    /// would select, read directly from the two current registers. Only the
+    /// winner's identity is needed to parent a local write, so this never
+    /// decodes (and in particular never rebuilds large values in) its cells.
+    async fn local_current_content_winner(
+        &mut self,
+        table: &TableSchema,
+        row_uuid: RowUuid,
+        schema_version: SchemaVersionId,
+    ) -> Result<Option<(TxTime, NodeUuid)>, Error> {
+        let table_id = self.physical_table_id_for_schema(schema_version, &table.name)?;
+        // Global has one current register per row; ahead is ordered by
+        // (branch, row, tx_time, tx_node_id), so its last entry is the ahead
+        // maximum. Equal (tx_time, node alias) keys denote the same
+        // transaction, so arg-max's byte tie-break cannot change the result.
+        let prefix = [
+            Value::Bytes(BranchKey::default().canonical_bytes()),
+            Value::Uuid(row_uuid.0),
+        ];
+        let global = self
+            .database
+            .primary_key_get_raw(&physical_global_current_table_name(table_id), &prefix)
+            .await
+            .map_err(|error| Self::malformed_current_query_error(&table.name, row_uuid, error))?;
+        let ahead = self
+            .database
+            .primary_key_last_raw(&physical_ahead_current_table_name(table_id), &prefix)
+            .await
+            .map_err(|error| Self::malformed_current_query_error(&table.name, row_uuid, error))?;
+        let stored_key = |record: BorrowedRecord<'_>| -> Result<(u64, u64), Error> {
+            let malformed = |error| {
+                Self::malformed_current_query_error(
+                    &table.name,
+                    row_uuid,
+                    GrooveDbError::RecordEncoding(error),
+                )
+            };
+            Ok((
+                record
+                    .get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)
+                    .map_err(malformed)?,
+                record
+                    .get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)
+                    .map_err(malformed)?,
+            ))
+        };
+        let winner = match (&global, &ahead) {
+            (None, None) => return Ok(None),
+            (Some(value), None) | (None, Some(value)) => value,
+            (Some(global), Some(ahead)) => {
+                if stored_key(ahead.record())? > stored_key(global.record())? {
+                    ahead
+                } else {
+                    global
+                }
+            }
+        };
+        Ok(Some(self.current_record_sort_key(
+            &table.name,
+            row_uuid,
+            winner.record(),
+        )?))
     }
 
     async fn local_current_deletion_candidate(

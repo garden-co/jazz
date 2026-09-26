@@ -1837,5 +1837,18 @@ impl From<crate::storage::Error> for Error {
     }
 }
 
+impl From<crate::large_values::ReachabilityError> for Error {
+    fn from(error: crate::large_values::ReachabilityError) -> Self {
+        match error {
+            crate::large_values::ReachabilityError::LargeValue(error) => {
+                crate::ivm::runtime::IvmRuntimeError::from(error).into()
+            }
+            crate::large_values::ReachabilityError::Chunk(error) => {
+                crate::ivm::runtime::IvmRuntimeError::from(error).into()
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;
