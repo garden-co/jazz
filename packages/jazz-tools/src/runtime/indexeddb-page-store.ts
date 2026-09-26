@@ -170,6 +170,8 @@ export class IndexedDbPageStore {
   private nextTreeToken = 0;
   private readonly treeTransactions = new Set<Promise<unknown>>();
   private ownershipRevision = 0;
+  private readonly pendingOwnedPageReads = new Map<number, Promise<unknown>>();
+  private pendingPageReadTreeToken: number | null = null;
 
   /** One independently opened tree per exclusive owner; IdbTree clones share it. */
   claimTreeOwnership(): number {
@@ -553,6 +555,40 @@ export class IndexedDbPageStore {
     this.assertValid();
     for (const pageId of pageIds) assertPageId(pageId);
     if (pageIds.length === 0) return [];
+    // Only the exclusively owned tree can fence every page mutation through
+    // this handle. Other stores retain independent IndexedDB transactions.
+    if (!this.canReclaimObsoletePages) {
+      this.pendingOwnedPageReads.clear();
+      const values = await this.readPageValues(pageIds);
+      return values.map((value, index) => pageBytes(pageIds[index]!, value));
+    }
+    const treeToken = this.treeClaims.values().next().value!;
+    if (treeToken !== this.pendingPageReadTreeToken) {
+      this.pendingOwnedPageReads.clear();
+      this.pendingPageReadTreeToken = treeToken;
+    }
+    const missing = [...new Set(pageIds)].filter((id) => !this.pendingOwnedPageReads.has(id));
+    if (missing.length > 0) {
+      // The host drives this transaction even if the first Rust caller stops
+      // polling. Sharing must never depend on another query being resumed.
+      const batch = this.readPageValues(missing);
+      missing.forEach((id, index) => {
+        const read = batch.then((values) => values[index]);
+        this.pendingOwnedPageReads.set(id, read);
+        const settled = () => {
+          // A write or ownership handoff may already have installed a newer
+          // read. An old completion must not remove that request's entry.
+          if (this.pendingOwnedPageReads.get(id) === read) this.pendingOwnedPageReads.delete(id);
+        };
+        void read.then(settled, settled);
+      });
+    }
+    const values = await Promise.all(pageIds.map((id) => this.pendingOwnedPageReads.get(id)!));
+    // Each caller owns its bytes, including repeated ids within one batch.
+    return values.map((value, index) => pageBytes(pageIds[index]!, value));
+  }
+
+  private async readPageValues(pageIds: readonly number[]): Promise<unknown[]> {
     const tx = this.db.transaction(INDEXEDDB_BTREE_PAGES_STORE, "readonly");
     const done = transactionDone(tx);
     const store = tx.objectStore(INDEXEDDB_BTREE_PAGES_STORE);
@@ -564,7 +600,7 @@ export class IndexedDbPageStore {
       throw error;
     }
     await done;
-    return values.map((value, index) => pageBytes(pageIds[index]!, value));
+    return values;
   }
 
   async commit(commit: IndexedDbPageCommit, treeToken?: number): Promise<IndexedDbBtreeMetadata> {
@@ -577,6 +613,9 @@ export class IndexedDbPageStore {
     if (requiresOwnership && !this.canReclaimObsoletePages) {
       throw new Error("IndexedDB page reclamation ownership is not active");
     }
+    // Reads invoked after this write must queue behind its transaction rather
+    // than join a read that was admitted before it.
+    this.pendingOwnedPageReads.clear();
     const tx = relaxedReadWriteTransaction(this.db, [
       INDEXEDDB_BTREE_PAGES_STORE,
       INDEXEDDB_BTREE_METADATA_STORE,
@@ -679,6 +718,7 @@ export class IndexedDbPageStore {
   }
 
   close(): void {
+    this.pendingOwnedPageReads.clear();
     this.treeClaims.clear();
     this.invalidated = true;
     this.ownershipRevision++;
@@ -689,6 +729,9 @@ export class IndexedDbPageStore {
 
   async clear(): Promise<void> {
     this.assertValid();
+    // Reads invoked after this write must queue behind its transaction rather
+    // than join a read that was admitted before it.
+    this.pendingOwnedPageReads.clear();
     const tx = relaxedReadWriteTransaction(this.db, [
       INDEXEDDB_BTREE_PAGES_STORE,
       INDEXEDDB_BTREE_METADATA_STORE,
@@ -725,6 +768,7 @@ export class IndexedDbPageStore {
   private invalidate(): void {
     if (this.invalidated) return;
     this.invalidated = true;
+    this.pendingOwnedPageReads.clear();
     this.treeClaims.clear();
     this.reclamationOwnership = null;
     this.removeInvalidationListeners();
