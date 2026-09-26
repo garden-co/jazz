@@ -1799,3 +1799,97 @@ fn independent_column_enum_registries_evolve_additively_across_reopen() {
     );
     assert_eq!(reopened.query_table_versions("items").unwrap().len(), 3);
 }
+
+/// Internal because this boundary must activate a new catalogue while an old
+/// peer publication stays live. The observable contract is the source rows sent
+/// to each reader, including blob queries whose app collector can be omitted.
+#[test]
+fn blob_peer_keeps_old_enum_compatibility_after_catalogue_activation() {
+    let schema = |cases: &[&str]| {
+        build_public_test_schema(
+            PublicSchemaBuilder::new().table(
+                PublicTableSchemaBuilder::new("items")
+                    .column("contents", PublicColumnType::Bytea)
+                    .column("status", public_scalar_enum("status", cases)),
+            ),
+        )
+    };
+    let base = schema(&["open"]);
+    let evolved = SchemaVersion::new(schema(&["open", "closed"]));
+    let (_dir, mut core) = open_node_with_schema(node(0x7e), base.clone());
+    let known = row(0x7e);
+    let cells = |tag| {
+        BTreeMap::from([
+            ("contents".to_owned(), Value::Bytes(vec![0x5a; 300_000])),
+            ("status".to_owned(), Value::EnumTag(tag)),
+        ])
+    };
+    accept_global(
+        &mut core,
+        MergeableCommit::new("items", known, 1).cells(cells(0)),
+    );
+    let old = Query::from("items").validate(&base).unwrap();
+    let binding = old.bind(BTreeMap::new()).unwrap();
+    let mut peer = PeerState::new();
+    let mut observed =
+        crate::protocol::supporting_set_test_oracle::SupportingSetTestOracle::default();
+    let initial = observed.observe(&peer.rehydrate_query(&mut core, &old, &binding).unwrap());
+    assert_eq!(covered_input_rows(&initial).len(), 1);
+
+    publish_schema_lineage(
+        &mut core,
+        evolved.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            evolved.id,
+            vec![TableLens {
+                source_table: "items".to_owned(),
+                target_table: "items".to_owned(),
+                ops: vec![LensOp::TransformColumn {
+                    column: "status".to_owned(),
+                    transform: "jazz.identity".to_owned(),
+                }],
+            }],
+        )
+        .unwrap(),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: evolved.id,
+    })
+    .unwrap();
+    let unknown = row(0x7f);
+    accept_global(
+        &mut core,
+        MergeableCommit::new("items", unknown, 2).cells(cells(1)),
+    );
+    let update = observed.observe(&peer.query_update(&mut core, &old, &binding).unwrap());
+    assert_eq!(
+        covered_input_rows(&update)
+            .iter()
+            .map(|(row, _)| *row)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([known])
+    );
+
+    // Selecting only the blob does not require understanding the new enum case.
+    let blob_only = Query::from("items")
+        .select(["contents"])
+        .validate(&base)
+        .unwrap();
+    let binding = blob_only.bind(BTreeMap::new()).unwrap();
+    let mut peer = PeerState::new();
+    let update = peer
+        .rehydrate_query(&mut core, &blob_only, &binding)
+        .unwrap();
+    assert_eq!(
+        covered_input_rows(&update)
+            .iter()
+            .map(|(row, _)| *row)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([known, unknown])
+    );
+}

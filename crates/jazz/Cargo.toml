@@ -219,3 +219,8 @@ required-features = ["testing"]
 name = "publication_fairness"
 harness = false
 required-features = ["testing"]
+
+[[bench]]
+name = "local_blob_reads"
+harness = false
+required-features = ["testing"]
