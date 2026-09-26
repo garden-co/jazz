@@ -28,6 +28,8 @@ use std::{
     time::Instant,
 };
 
+#[path = "support/local_query_startup.rs"]
+mod local_query_startup;
 mod support;
 
 struct Envelope {
@@ -329,6 +331,12 @@ fn run(rows: usize, queries: usize, local_relay: bool) {
 fn main() {
     jazz_benchmark_guard::refuse_contaminated_measurement();
     let rows = support::env_usize("JAZZ_FAIR_ROWS", 600);
+    if std::env::var("JAZZ_FAIR_LAYOUT").as_deref() == Ok("mixed-local") {
+        for _ in 0..support::env_usize("JAZZ_FAIR_REPEATS", 1) {
+            local_query_startup::run(rows);
+        }
+        return;
+    }
     let mode = std::env::var("JAZZ_FAIR_MODE").unwrap_or_else(|_| "global-core".to_owned());
     assert!(
         matches!(mode.as_str(), "global-core" | "local-relay"),

@@ -111,3 +111,49 @@ browser startup cost.
 
 Tooling friction: match the read mode and relay topology before extrapolating
 source traces; retain per-batch activation counts beside first/all-result latency.
+
+## Staged Local list/detail diagnostic
+
+`JAZZ_FAIR_LAYOUT=mixed-local` selects a separate synthetic workload: 37
+subscriptions over 17 tables. Two startup reads complete before mixed empty,
+filtered, ordered and full lists are opened. The full list then opens a detail
+read, background reads, and 12 point projections from a reference table.
+Every result checks its exact IDs and all selected values, including the detail's
+columns omitted by the earlier list projection.
+
+This uses the resident Local relay topology above, public schema/query builders,
+SYSTEM admission and memory transport/storage. It models dependency stages, not
+a particular application's schema, scheduling, permissions, browser callbacks
+or document decoding. Setup includes seeding, owner reopen and foreground open,
+and is excluded from the timed query interval.
+
+```sh
+JAZZ_FAIR_LAYOUT=mixed-local JAZZ_FAIR_ROWS=600 JAZZ_FAIR_MIXED_WIDTH=256 \
+  cargo bench -p jazz --profile perf --no-default-features \
+  --features testing,transport-compression-zstd --bench publication_fairness
+```
+
+`JAZZ_FAIR_MIXED_WIDTH` controls the text payload padding per main-table field.
+`JAZZ_FAIR_REPEATS` repeats independent fixtures within one process for sampling;
+use separate process runs for timing. The point-query controls do not apply to
+this layout.
+
+The [staged receipt](receipts/publication-fairness-mixed-local.json) contains six
+process observations, three at each field width, with source/binary provenance.
+These are baselines on unchanged runtime `26e1d88d6`, not performance wins.
+
+| 600 rows, 37 subscriptions |    Width 0 |  Width 256 |
+| -------------------------- | ---------: | ---------: |
+| Full list                  | 272.458 ms | 319.540 ms |
+| Detail                     | 365.243 ms | 412.542 ms |
+| All results                | 365.257 ms | 412.557 ms |
+
+At width 256, the dependent stage spends median 38.439 ms opening subscriptions,
+41.085 ms polling the owner, and 6.935 ms in the foreground, plus preparation and
+extraction. These phase medians need not sum to the median endpoint difference.
+An independent native CPU sample points to graph installation/compilation in
+both query opening and serving, with additional initial receiver ingestion.
+Instrumented observations are excluded from this timing receipt.
+
+Tooling friction: preserve dependency stages and payload width alongside
+read topology; a point-only fanout obscures the list-to-detail setup cost.
