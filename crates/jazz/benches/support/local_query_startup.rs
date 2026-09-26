@@ -357,6 +357,13 @@ pub(super) fn run(rows: usize) {
     }
     block_on(seed.close()).unwrap();
     drop(seed);
+    let ownership = std::env::var("JAZZ_FAIR_OWNER_BINDING").ok();
+    assert!(matches!(
+        ownership.as_deref(),
+        None | Some("1" | "relay" | "client")
+    ));
+    let owner_binding = ownership.is_some();
+    let owner_client = ownership.as_deref() == Some("client");
     // SAFETY: fresh synthetic storage is owned exclusively by this fixture;
     // the only foreground is the admitted SYSTEM identity.
     let scope = unsafe {
@@ -365,38 +372,59 @@ pub(super) fn run(rows: usize) {
             AuthorSubject::SYSTEM,
         )
     };
-    let owner = block_on(unsafe { Db::open_scope_isolated_client_relay(config(), scope) }).unwrap();
-    let foreground = open(&schema, 0x74, false);
-    foreground.set_non_durable_client();
+    let owner = if owner_client {
+        block_on(Db::open(config())).unwrap()
+    } else {
+        block_on(unsafe { Db::open_scope_isolated_client_relay(config(), scope) }).unwrap()
+    };
+    // Diagnostic ownership comparison: use the same scope-isolated client's
+    // public subscription API directly, with no second replica. This measures
+    // an execution topology, not a browser implementation or RPC performance.
+    let foreground = (!owner_binding).then(|| {
+        let foreground = open(&schema, 0x74, false);
+        foreground.set_non_durable_client();
+        foreground
+    });
+    let reader = foreground.as_ref().unwrap_or(&owner);
     let host_scheduler = std::env::var_os("JAZZ_FAIR_HOST_SCHEDULER").is_some();
     if host_scheduler {
         owner.set_tick_scheduler(Some(Rc::new(ManualHostScheduler)));
-        foreground.set_tick_scheduler(Some(Rc::new(ManualHostScheduler)));
+        if let Some(foreground) = &foreground {
+            foreground.set_tick_scheduler(Some(Rc::new(ManualHostScheduler)));
+        }
     }
     let cases = plan(rows);
-    let runtime_work_before = [runtime_work(&owner), runtime_work(&foreground)];
+    let runtimes = std::iter::once(&owner)
+        .chain(foreground.iter())
+        .collect::<Vec<_>>();
+    let runtime_work_before = runtimes
+        .iter()
+        .map(|db| runtime_work(db))
+        .collect::<Vec<_>>();
     let setup_ms = setup.elapsed().as_secs_f64() * 1000.;
     let began = Instant::now();
     let a = Rc::new(RefCell::new(VecDeque::new()));
     let b = Rc::new(RefCell::new(VecDeque::new()));
     let timing = Rc::new(RefCell::new(Handoff::default()));
-    block_on(foreground.connect_upstream(Box::new(Carrier {
-        incoming: a.clone(),
-        outgoing: b.clone(),
-        timing: timing.clone(),
-        began,
-        serving: false,
-    })));
-    owner.accept_subscriber(
-        Box::new(Carrier {
-            incoming: b,
-            outgoing: a,
+    if let Some(foreground) = &foreground {
+        block_on(foreground.connect_upstream(Box::new(Carrier {
+            incoming: a.clone(),
+            outgoing: b.clone(),
             timing: timing.clone(),
             began,
-            serving: true,
-        }),
-        AuthorSubject::SYSTEM,
-    );
+            serving: false,
+        })));
+        owner.accept_subscriber(
+            Box::new(Carrier {
+                incoming: b,
+                outgoing: a,
+                timing: timing.clone(),
+                began,
+                serving: true,
+            }),
+            AuthorSubject::SYSTEM,
+        );
+    }
     let mut driver = Driver {
         cases,
         streams: Vec::new(),
@@ -404,16 +432,19 @@ pub(super) fn run(rows: usize) {
         stage: 0,
         began,
     };
-    driver.open_until(&foreground, 2);
+    driver.open_until(reader, 2);
     let waker = noop_waker();
     let mut cx = Context::from_waker(&waker);
     let mut polls = Vec::new();
     for turn in 0..1024 {
-        driver.pump_foreground(&foreground, &schema);
+        driver.pump_foreground(reader, &schema);
         if driver.cases.iter().all(|c| c.completed_ms.is_some()) {
             break;
         }
         assert!(turn < 1023, "all queries complete");
+        if owner_binding {
+            continue;
+        }
         let mut tick = Box::pin(owner.tick());
         for poll in 0..10000 {
             let phase = Instant::now();
@@ -426,7 +457,7 @@ pub(super) fn run(rows: usize) {
                 break;
             }
             assert!(poll < 9999, "bounded owner progress");
-            driver.pump_foreground(&foreground, &schema);
+            driver.pump_foreground(reader, &schema);
         }
     }
     let elapsed_ms = began.elapsed().as_secs_f64() * 1000.;
@@ -448,17 +479,17 @@ pub(super) fn run(rows: usize) {
     println!(
         "{}",
         json!({
-            "benchmark":"publication_fairness", "layout":"mixed-local", "mode":"local-relay", "rows":rows, "width":width, "queries":driver.cases.len(),
+            "benchmark":"publication_fairness", "layout":"mixed-local", "mode":if owner_client { "local-owner-client" } else if owner_binding { "local-owner-binding" } else { "local-relay" }, "runtime_count":runtimes.len(), "rows":rows, "width":width, "queries":driver.cases.len(),
             "host_scheduler":host_scheduler, "setup_ms":setup_ms, "elapsed_ms":elapsed_ms, "full_list_ms":driver.cases[8].completed_ms,
             "detail_ms":driver.cases.iter().find(|c| c.label == "detail").unwrap().completed_ms,
-            "phases":driver.phases.iter().map(|p| json!({"prepare_ms":p.prepare_ms,"subscribe_ms":p.subscribe_ms,"owner_ms":p.owner_ms,"foreground_ms":p.foreground_ms,"extract_ms":p.extract_ms})).collect::<Vec<_>>(),
+            "phases":driver.phases.iter().map(|p| json!({"prepare_ms":p.prepare_ms,"subscribe_ms":p.subscribe_ms,"owner_ms":p.owner_ms + if owner_binding { p.foreground_ms } else { 0. },"foreground_ms":if owner_binding { 0. } else { p.foreground_ms },"extract_ms":p.extract_ms})).collect::<Vec<_>>(),
             "queries_completed":driver.cases.iter().map(|c| json!({"label":c.label,"rows":c.result.len(),"at_ms":c.completed_ms})).collect::<Vec<_>>(),
             "first_frame_sent_ms":timing.first_sent_ms, "first_frame_received_ms":timing.first_received_ms,
             "owner_poll_ms":polls, "frame_holds_ms":timing.frame_holds_ms,
             "result_signature":blake3::hash(&postcard::to_allocvec(&driver.cases.iter().map(|c| &c.result).collect::<Vec<_>>()).unwrap()).to_hex().to_string(),
-            "compilations":[owner.query_program_compilations_for_test(),foreground.query_program_compilations_for_test()],
+            "compilations":runtimes.iter().map(|db| db.query_program_compilations_for_test()).collect::<Vec<_>>(),
             "runtime_work_before":runtime_work_before,
-            "runtime_work":[runtime_work(&owner),runtime_work(&foreground)]
+            "runtime_work":runtimes.iter().map(|db| runtime_work(db)).collect::<Vec<_>>()
         })
     );
 }
