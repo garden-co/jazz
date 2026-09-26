@@ -192,9 +192,8 @@ impl IvmRuntime {
             .unwrap_or(false)
     }
 
-    fn is_gc_root(&self, node: &crate::ivm::GraphNode, queued: &HashSet<NodeId>) -> bool {
+    fn is_retained_gc_root(&self, node: &crate::ivm::GraphNode) -> bool {
         node.is_durable()
-            || queued.contains(&node.id)
             || self
                 .node_meta
                 .get(&node.id)
@@ -229,7 +228,16 @@ impl IvmRuntime {
 
         // Decide consumers before their inputs: an iterative post-order over
         // `children`, restricted to the closure (the graph is acyclic).
-        let mut kept = HashMap::<NodeId, bool>::default();
+        // Queue membership is only a temporary root when no durable or
+        // retained consumer already keeps the node alive. Otherwise every
+        // cold-read wake would resweep the same live subscription graph.
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum Retention {
+            None,
+            Queued,
+            Retained,
+        }
+        let mut kept = HashMap::<NodeId, Retention>::default();
         let mut blocked_by_queue = false;
         for &start in &closure {
             if kept.contains_key(&start) {
@@ -250,20 +258,31 @@ impl IvmRuntime {
                     }
                     continue;
                 }
-                let root = self.is_gc_root(node, &queued);
-                blocked_by_queue |= queued.contains(&id);
-                let keep = root
+                let retention = if self.is_retained_gc_root(node)
                     || node
                         .children
                         .iter()
-                        .any(|child| !closure.contains(child) || kept[child]);
-                kept.insert(id, keep);
+                        .any(|child| !closure.contains(child) || kept[child] == Retention::Retained)
+                {
+                    Retention::Retained
+                } else if queued.contains(&id)
+                    || node
+                        .children
+                        .iter()
+                        .any(|child| kept[child] == Retention::Queued)
+                {
+                    Retention::Queued
+                } else {
+                    Retention::None
+                };
+                blocked_by_queue |= retention == Retention::Queued;
+                kept.insert(id, retention);
             }
         }
 
         let removable = kept
             .into_iter()
-            .filter_map(|(id, keep)| (!keep).then_some(id))
+            .filter_map(|(id, retention)| (retention == Retention::None).then_some(id))
             .collect::<Vec<_>>();
         for id in &removable {
             self.graph.remove_node(*id);

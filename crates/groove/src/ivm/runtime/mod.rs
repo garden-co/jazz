@@ -655,4 +655,6 @@ pub enum IvmRuntimeError {
 }
 
 #[cfg(test)]
+mod retained_gc_tests;
+#[cfg(test)]
 mod tests;
