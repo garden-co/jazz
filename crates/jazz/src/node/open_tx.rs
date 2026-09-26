@@ -1408,23 +1408,28 @@ where
             } else {
                 write.parents
             };
-            let (cells, authored_columns) = match write.cells {
-                PendingCells::Replace(cells) => (cells, None),
+            let (cells, authored_columns, patch_preimage) = match write.cells {
+                PendingCells::Replace(cells) => (cells, None, None),
                 PendingCells::Patch(patch) => {
                     let mut cells = BTreeMap::new();
-                    if let Some(existing) = self
+                    // The engine reads this preimage physically, so an
+                    // untouched large column is an indirect descriptor rather
+                    // than its logical scalar. Keep only the untouched cells
+                    // as engine-proven provenance: every authored patch value
+                    // still has to be a logical scalar (#3507).
+                    let mut preimage = self
                         .visible_current_cells_in_branch(
                             &write.table,
                             &write.branch,
                             write.row_uuid,
                         )
                         .await?
-                    {
-                        cells.extend(existing);
-                    }
+                        .unwrap_or_default();
+                    cells.extend(preimage.clone());
+                    preimage.retain(|column, _| !patch.contains_key(column));
                     let authored_columns = patch.keys().cloned().collect();
                     cells.extend(patch);
-                    (cells, Some(authored_columns))
+                    (cells, Some(authored_columns), Some(preimage))
                 }
             };
             let mut commit = MergeableCommit::new(
@@ -1438,6 +1443,9 @@ where
             .cells(cells);
             if let Some(inherited) = write.verified_inherited_cells.as_ref() {
                 commit = commit.verified_inherited_large_cells(inherited);
+            }
+            if let Some(preimage) = patch_preimage.as_ref() {
+                commit = commit.verified_inherited_large_cells(preimage);
             }
             if let Some(authored_columns) = authored_columns {
                 commit = commit.authored_columns(authored_columns);
