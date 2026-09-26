@@ -199,3 +199,8 @@ required-features = ["runtime"]
 [[test]]
 name = "fate_replay"
 required-features = ["testing"]
+
+[[bench]]
+name = "indexed_read_wakes"
+harness = false
+required-features = ["testing"]
