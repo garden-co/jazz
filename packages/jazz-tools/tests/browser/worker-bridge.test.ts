@@ -35,6 +35,7 @@ import {
   SharedBrowserForegroundNodeLease,
 } from "../../src/runtime/native-runtime/browser-shared-worker-connection.js";
 import { NativeRuntimeAdapter } from "../../src/runtime/native-runtime/native-runtime-adapter.js";
+import { setBrowserFollowerProbeTimingForTest } from "../../src/runtime/native-runtime/browser-follower-connection.js";
 import { createOpenTransactionId } from "../../src/runtime/client.js";
 import { loadWasmModule } from "../../src/runtime/wasm-loader.js";
 import { createBrowserStorageOwner } from "../../src/runtime/browser-worker-config.js";
@@ -150,6 +151,14 @@ async function terminateWorker(port: MessagePort): Promise<void> {
 // ---------------------------------------------------------------------------
 // Test schema — a simple "todos" table
 // ---------------------------------------------------------------------------
+
+// Liveness tests exercise the real worker, real probes and real pongs, but
+// with the page's probe policy scaled from 30s + 30s down to 2s + 2s. The
+// timer arithmetic itself is covered with fake timers in
+// src/runtime/native-runtime/browser-follower-connection.test.ts.
+const LIVENESS_TEST_PROBE_TIMING = { intervalMs: 2_000, replyMs: 2_000 } as const;
+// Comfortably above one interval plus one reply grace under CI load.
+const LIVENESS_TEST_SIGNAL_MS = 15_000;
 
 const schema = {
   projects: s.table(
@@ -1183,6 +1192,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
   it("keeps public shutdown alive with pongs then rejects after silent worker death", async () => {
     const capability = uniqueDbName("follower-fault");
+    setBrowserFollowerProbeTimingForTest(LIVENESS_TEST_PROBE_TIMING);
     const workerUrl = new URL(await workerFaultBundleUrl(), globalThis.location.href);
     workerUrl.searchParams.set("followerFault", capability);
     const control = new BroadcastChannel(capability);
@@ -1232,7 +1242,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       for (let index = 0; index < 3; index++) {
         await withTimeout(
           receive("pong-sent"),
-          45_000,
+          LIVENESS_TEST_SIGNAL_MS,
           "real worker did not answer its liveness probe",
         );
         expect(outcome).toBe("pending");
@@ -1240,7 +1250,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       control.postMessage({ type: "die" });
       const error = await withTimeout(
         shutdown,
-        75_000,
+        LIVENESS_TEST_SIGNAL_MS,
         "silent worker death left public shutdown pending",
       );
       expect(outcome).toBe("rejected");
@@ -1255,11 +1265,13 @@ describe("SharedWorker bridge with IndexedDB", () => {
       }
       control.postMessage({ type: "die" });
       control.close();
+      setBrowserFollowerProbeTimingForTest();
     }
-  }, 210_000);
+  }, 60_000);
 
   it("settles public shutdown after a pending follower operation rejects on silent worker death", async () => {
     const capability = uniqueDbName("follower-death-cleanup");
+    setBrowserFollowerProbeTimingForTest(LIVENESS_TEST_PROBE_TIMING);
     const workerUrl = new URL(await workerFaultBundleUrl(), globalThis.location.href);
     workerUrl.searchParams.set("followerFault", capability);
     const control = new BroadcastChannel(capability);
@@ -1298,7 +1310,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       control.postMessage({ type: "die" });
       const error = await withTimeout(
         pending,
-        75_000,
+        LIVENESS_TEST_SIGNAL_MS,
         "silent worker death left the follower operation pending",
       );
       if (!(error instanceof Error) || !(error.cause instanceof Error)) {
@@ -1325,8 +1337,9 @@ describe("SharedWorker bridge with IndexedDB", () => {
       }
       control.postMessage({ type: "die" });
       control.close();
+      setBrowserFollowerProbeTimingForTest();
     }
-  }, 100_000);
+  }, 45_000);
 
   it("exposes a bounded redacted worker lifecycle ledger to the owning inspector", async () => {
     const syncServer = await publishSyncServerSchemaAndPermissions("worker-lifecycle-ledger");
