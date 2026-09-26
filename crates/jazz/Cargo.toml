@@ -214,3 +214,8 @@ required-features = ["testing"]
 name = "overlapping_payloads"
 harness = false
 required-features = ["testing"]
+
+[[bench]]
+name = "publication_fairness"
+harness = false
+required-features = ["testing"]
