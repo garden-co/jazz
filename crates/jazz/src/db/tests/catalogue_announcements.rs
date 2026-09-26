@@ -1,7 +1,13 @@
-//! Public transport checks for catalogue announcements after live changes.
+//! Catalogue protocol checks at the public Node/Transport boundary.
+//!
+//! These live with the core tests because catalogue envelope emission and a
+//! transport's failed-send retry are not observable through application query
+//! results. The in-memory transport exposes those protocol events; the tests
+//! still run real Node state, public schema builders, and the production sync
+//! path. Application integration tests in crates/jazz/tests use JazzServer.
 #![cfg(feature = "testing")]
 
-use jazz::{
+use crate::{
     block_on,
     db::{Node, Transport},
     groove::{records::Value, storage::MemoryStorage},

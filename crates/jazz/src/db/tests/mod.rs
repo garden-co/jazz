@@ -138,6 +138,7 @@ use support::*;
 use wire_transport::byte_duplex_with_session;
 
 mod catalogue;
+mod catalogue_announcements;
 mod chunk_io_pump;
 mod lifecycle;
 mod mutations;
