@@ -398,16 +398,24 @@ impl PeerState {
         subscription: SubscriptionKey,
         binding: (AuthorSubject, BTreeMap<String, groove::records::Value>),
     ) {
+        self.set_subscription_policy_key(subscription,
+            crate::protocol::PolicyBindingKey::from_canonical_parts(binding.0, binding.1));
+    }
+
+    /// Carry an already-admitted canonical key through owner maintenance.
+    /// The coverage group has already encoded these exact immutable claims.
+    pub(crate) fn set_subscription_policy_key(
+        &mut self,
+        subscription: SubscriptionKey,
+        binding: crate::protocol::PolicyBindingKey,
+    ) {
         if crate::debug_env::covered_input_trace() {
             eprintln!(
                 "JAZZ_COVERED_INPUT_TRACE stage=served_policy_binding peer={:p} owner={} role={:?} subscription={subscription:?} identity={:?} claims={:?}",
-                self, self.publication_owner, self.role, binding.0, binding.1,
+                self, self.publication_owner, self.role, binding.identity, binding.claims(),
             );
         }
-        self.publication_states
-            .entry(subscription)
-            .or_default()
-            .policy_binding = Some(binding);
+        self.publication_states.entry(subscription).or_default().policy_binding = Some(binding);
     }
 
     /// Associate a relay-owned maintained receiver with the precise upstream
@@ -459,7 +467,8 @@ impl PeerState {
     ) -> Option<(AuthorSubject, BTreeMap<String, groove::records::Value>)> {
         self.publication_states
             .get(&subscription)
-            .and_then(|state| state.policy_binding.clone())
+            .and_then(|state| state.policy_binding.as_ref())
+            .map(|binding| (binding.identity, binding.claims().clone()))
     }
 
     /// Return the immutable policy snapshot for a served subscription.
@@ -472,7 +481,19 @@ impl PeerState {
         &self,
         subscription: SubscriptionKey,
     ) -> Result<(AuthorSubject, BTreeMap<String, groove::records::Value>), Error> {
-        self.subscription_policy_binding(subscription).ok_or_else(|| {
+        self.served_subscription_policy_key(subscription)
+            .map(|binding| (binding.identity, binding.claims().clone()))
+    }
+
+    /// Canonicalize at admission and retain that exact immutable snapshot. Peer
+    /// maintenance must not encode the same structured claims on every drain.
+    #[track_caller]
+    fn served_subscription_policy_key(
+        &self,
+        subscription: SubscriptionKey,
+    ) -> Result<&crate::protocol::PolicyBindingKey, Error> {
+        self.publication_states.get(&subscription)
+            .and_then(|state| state.policy_binding.as_ref()).ok_or_else(|| {
             if crate::debug_env::covered_input_trace() {
                 eprintln!(
                     "JAZZ_COVERED_INPUT_TRACE stage=missing_served_policy_binding peer={:p} owner={} role={:?} subscription={subscription:?} states={:?} caller={}",
@@ -617,7 +638,7 @@ impl PeerState {
         shape: &ValidatedQuery,
         binding: &Binding,
         opts: RegisterShapeOptions,
-        policy_binding: &(AuthorSubject, BTreeMap<String, groove::records::Value>),
+        policy_binding: &crate::protocol::PolicyBindingKey,
     ) -> Result<(), Error>
     where
         S: OrderedKvStorage,
@@ -634,10 +655,7 @@ impl PeerState {
                 known_state: None,
                 delegated_session: None,
             },
-            crate::protocol::PolicyBindingKey::from_canonical_parts(
-                policy_binding.0,
-                policy_binding.1.clone(),
-            ),
+            policy_binding.clone(),
         )?;
         Ok(())
     }
@@ -668,14 +686,14 @@ impl PeerState {
         // still have installed the admitted subscriber snapshot themselves.
         self.ensure_direct_internal_subscription_policy_binding(node, subscription)?;
         self.clear_stale_groove_runtime_handles(node, subscription);
-        let policy_binding = self.served_subscription_policy_binding(subscription)?;
+        let policy_binding = self.served_subscription_policy_key(subscription)?;
         self.ensure_query_subscription_registered(
             node,
             subscription,
             &shape,
             &binding,
             opts.clone(),
-            &policy_binding,
+            policy_binding,
         )?;
         let needs_prepare = self
             .publication_states
@@ -987,14 +1005,14 @@ impl PeerState {
                 .runtime_resets += 1;
         }
         self.clear_stale_groove_runtime_handles(node, subscription);
-        let policy_binding = self.served_subscription_policy_binding(subscription)?;
+        let policy_binding = self.served_subscription_policy_key(subscription)?;
         self.ensure_query_subscription_registered(
             node,
             subscription,
             shape,
             binding,
             opts.clone(),
-            &policy_binding,
+            policy_binding,
         )?;
         let Some(_) = self.publication_states.get(&subscription) else {
             return Ok(Some(MaintainedCanonicalUpdate {
@@ -2297,7 +2315,7 @@ impl PeerState {
             .publication_states
             .get(&subscription)
             .is_some_and(|state| state.awaiting_selected_authority_source);
-        let policy_binding = self.served_subscription_policy_binding(subscription)?;
+        let policy_binding = self.served_subscription_policy_key(subscription)?.clone();
         // Retire the old publication before retaining its replacement.  The
         // served policy helper creates a lightweight publication state, so
         // registering first would make this teardown release the just-created

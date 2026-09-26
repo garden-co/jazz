@@ -9,7 +9,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use groove::ivm::MultisinkSubscription;
-use groove::records::Value;
 
 use super::super::ids::AuthorSubject;
 use super::super::ids::SchemaVersionId;
@@ -20,8 +19,8 @@ use super::super::node::{
     CoveredInputReceiver, LocalAuthorityReconciliation, PreparedQueryPlanHandle,
 };
 use super::super::protocol::{
-    AuthorityResultKey, KnownStateCompleteness, KnownStateDeclaration, ReadViewSpec,
-    RegisterShapeOptions, ResultMemberEntry, SubscriptionKey,
+    AuthorityResultKey, KnownStateCompleteness, KnownStateDeclaration, PolicyBindingKey,
+    ReadViewSpec, RegisterShapeOptions, ResultMemberEntry, SubscriptionKey,
 };
 use super::super::query::{Binding, ValidatedQuery};
 use super::super::schema::TableSchema;
@@ -119,7 +118,7 @@ impl PeerRole {
 pub(super) struct PeerSubscriptionState {
     /// Immutable admitted policy context for this usage site. Relay links can
     /// multiplex sessions, so this must not be inferred from connection role.
-    pub(super) policy_binding: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+    pub(super) policy_binding: Option<PolicyBindingKey>,
     /// Exact upstream authority receipt consumed by this served usage site.
     ///
     /// A relay's maintained receiver has its own synthetic subscription key
