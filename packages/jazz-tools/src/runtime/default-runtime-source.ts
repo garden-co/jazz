@@ -1,4 +1,4 @@
-import { JazzClient, type ConnectRuntimeOptions } from "./client.js";
+import { JazzClient, type ConnectRuntimeOptions, type Runtime } from "./client.js";
 import { loadWasmModule, type WasmModule } from "./wasm-loader.js";
 import type { AppContext } from "./context.js";
 import { resolveDefaultPersistentDbName, type DbConfig } from "./db.js";
@@ -250,12 +250,12 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     );
   }
 
-  /** Private runtime sources may attach diagnostic reads to their admitted owner. */
+  /** Private runtime sources may bind an admitted runtime through a host port. */
   protected wrapClientRuntime(
     runtime: NativeRuntimeAdapter,
     _config: DbConfig,
     _schema: WasmSchema,
-  ): NativeRuntimeAdapter {
+  ): Runtime {
     return runtime;
   }
 
