@@ -1,0 +1,178 @@
+name: Nightly tests
+
+# The nightly tier (#1787): suites too long or too broad for every PR, run
+# once a day against the default branch. Moving a suite here never removes it
+# from a gate; each job names the suite it owns.
+#
+# - oracle-300: the canonical 300-seed maintained-vs-one-shot oracle
+#   (CLAUDE.md gate, including its 100000-operation churn curve). PR CI runs
+#   one bounded seed; the continuous simulation soak runs 50 seeds at churn
+#   depths 10 and 1000.
+# - browser-soak: the two JAZZ_BROWSER_SOAK worker-bridge tests, which no
+#   other workflow enables.
+# - benchmark-api: benchmark-smoke.sh --compile-ci, whose only other home is
+#   the realistic benchmark workflow on the self-hosted jazz-bench runner.
+# - starters: starters-e2e on the default branch, so a broken starter shows
+#   up before a release PR exists.
+#
+# A scheduled failure opens (or reopens) one issue per job.
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-tests
+  cancel-in-progress: false
+
+jobs:
+  oracle-300:
+    name: 300-seed maintained-vs-one-shot oracle
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 120
+    container:
+      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:dcb4ec5e4f5507b258805617d58ee6976f7dcee2e9afe1b05ae3d41cc185ef35
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    env:
+      RUST_MIN_STACK: "4194304"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-blacksmith
+        with:
+          sccache-s3: false
+      - name: Run the 300-seed oracle
+        env:
+          JAZZ_SEED_COUNT: "300"
+        run: dev/t --exact node::tests::harness::m3_maintained_one_shot_differential_oracle -- --ignored
+
+  browser-soak:
+    name: Worker-bridge browser soak
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 60
+    container:
+      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:dcb4ec5e4f5507b258805617d58ee6976f7dcee2e9afe1b05ae3d41cc185ef35
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-blacksmith
+        with:
+          sccache-s3: false
+      - name: Build correctness artifacts
+        run: node dev/gates/ensure-correctness-artifacts.mjs
+      - name: Run the soak tests
+        env:
+          JAZZ_BROWSER_SOAK: "1"
+          NO_COLOR: "1"
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm --dir packages/jazz-tools test:browser:focused -- \
+            tests/browser/worker-bridge.test.ts \
+            -t "survives (repeated durable writes across fresh SharedWorker lifecycles|randomized concurrent writes and SharedWorker restarts)" \
+            | tee "${RUNNER_TEMP}/browser-soak.log"
+          # A filter that silently matches nothing, or a soak flag that stops
+          # reaching the config, would otherwise pass with every test skipped.
+          grep -E "Tests +2 passed" "${RUNNER_TEMP}/browser-soak.log"
+
+  benchmark-api:
+    name: Benchmark API compile
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 45
+    container:
+      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:dcb4ec5e4f5507b258805617d58ee6976f7dcee2e9afe1b05ae3d41cc185ef35
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-blacksmith
+        with:
+          sccache-s3: false
+      - name: Compile maintained benchmark APIs
+        run: dev/gates/benchmark-smoke.sh --compile-ci
+
+  starters:
+    name: Starters E2E on the default branch
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Dispatch starters-e2e and wait for it
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          since="$(date -u +%FT%TZ)"
+          gh workflow run starters-e2e.yml --repo "${REPO}" --ref "${REF}"
+          run_id=""
+          for _ in $(seq 1 30); do
+            sleep 10
+            run_id="$(gh run list --repo "${REPO}" --workflow starters-e2e.yml --branch "${REF}" \
+              --event workflow_dispatch --json databaseId,createdAt \
+              --jq "[.[] | select(.createdAt >= \"${since}\")][0].databaseId // empty")"
+            [[ -n "${run_id}" ]] && break
+          done
+          if [[ -z "${run_id}" ]]; then
+            echo "::error::starters-e2e run did not appear after dispatch"
+            exit 1
+          fi
+          echo "Watching starters-e2e run ${run_id}"
+          gh run watch "${run_id}" --repo "${REPO}" --exit-status --interval 60 > /dev/null
+
+  report:
+    name: Report nightly failures
+    if: ${{ always() && github.event_name == 'schedule' }}
+    needs: [oracle-300, browser-soak, benchmark-api, starters]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        with:
+          script: |
+            const results = JSON.parse(process.env.RESULTS);
+            const url = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const failed = Object.entries(results).filter(([, job]) => job.result !== "success");
+            if (!failed.length) return;
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              ...context.repo,
+              state: "all",
+              per_page: 100,
+            });
+            for (const [job, { result }] of failed) {
+              const marker = `<!-- nightly-tests:${job} -->`;
+              const title = `Nightly tests failing: ${job}`;
+              const body = `🤖 The nightly \`${job}\` job ended \`${result}\` on \`${context.sha}\`.\n${marker}\n\n[Run](${url})`;
+              const existing = issues.find((issue) => issue.body?.includes(marker));
+              if (existing) {
+                await github.rest.issues.update({ ...context.repo, issue_number: existing.number, title, body, state: "open" });
+              } else {
+                await github.rest.issues.create({ ...context.repo, title, body });
+              }
+            }
