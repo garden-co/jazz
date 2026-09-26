@@ -54,3 +54,8 @@ harness = false
 [[bench]]
 name = "steady_state"
 harness = false
+
+[[bench]]
+name = "indexed_cold_pages"
+harness = false
+required-features = ["test"]
