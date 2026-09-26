@@ -237,6 +237,11 @@ mod lowering;
 use lowering::*;
 pub(crate) use lowering::{PolicyAuthorizationGraph, SupportedQueryProgram};
 
+enum MaintainedViewConsumer {
+    Application,
+    Peer,
+}
+
 enum CurrentQueryProgramOutput {
     AppRows,
     PolicyPredicate,
@@ -3808,6 +3813,7 @@ where
             None,
             PreparedClaimBindingMode::Strict,
             false,
+            MaintainedViewConsumer::Peer,
             progress_waker,
         )
         .await
@@ -3917,6 +3923,7 @@ where
                 Some(authority_result_key.clone()),
                 PreparedClaimBindingMode::Strict,
                 false,
+                MaintainedViewConsumer::Application,
                 progress_waker,
             )
             .await?;
@@ -4083,6 +4090,7 @@ where
             None,
             PreparedClaimBindingMode::FailClosedAuthorizationSupport,
             false,
+            MaintainedViewConsumer::Application,
             progress_waker,
         )
         .await
@@ -4117,6 +4125,7 @@ where
         settled_authority_result_key: Option<AuthorityResultKey>,
         prepared_claim_binding_mode: PreparedClaimBindingMode,
         pending_overlay: bool,
+        consumer: MaintainedViewConsumer,
         progress_waker: Option<&std::task::Waker>,
     ) -> Result<
         (
@@ -4180,6 +4189,36 @@ where
             prepared_claim_binding_mode,
             lone_client_local_source.is_some(),
         )?;
+        // A current-schema plain blob peer publishes membership and immutable
+        // version facts. Its receiver builds the application terminal; another
+        // app collector here needlessly reconstructs selected blobs. Preserve
+        // ordinary semantic lowering and remove only the unused execution sink.
+        // Older readers retain their compatibility projection, including the
+        // exclusion of newly added enum cases.
+        let omit_peer_app_rows = matches!(consumer, MaintainedViewConsumer::Peer)
+            && shape.schema_version() == self.catalogue.active_schema.wire_pointer().schema
+            && self
+                .table_in_schema(&shape.query().table, shape.schema_version())?
+                .columns
+                .iter()
+                .any(|column| {
+                    column.large_value_kind == crate::schema::LargeValueSemanticKind::Bytes
+                        && shape
+                            .query()
+                            .select
+                            .as_ref()
+                            .is_none_or(|selected| selected.contains(&column.name))
+                })
+            && read_view.is_default()
+            && shape.query().aggregate.is_none()
+            && shape.query().relation.is_none()
+            && shape.query().flat_join.is_none()
+            && shape.query().array_subqueries.is_empty()
+            && shape.query().includes.is_empty()
+            && shape.query().joins.is_empty()
+            && shape.query().reachable.is_empty()
+            && shape.query().inherits.is_empty()
+            && shape.query().policy_branches.is_empty();
         if let Some(authority_result_key) = settled_authority_result_key.as_ref() {
             for source in request.reads.primary.sources.values_mut() {
                 if let SourceExpr::SettledBindingView {
@@ -4229,7 +4268,7 @@ where
             } else {
                 (BTreeMap::new(), BTreeMap::new(), BTreeMap::new())
             };
-        let program = if runtime_sources.is_empty() {
+        let mut program = if runtime_sources.is_empty() {
             match self
                 .compile_query_program_request_with_access_paths(request, access_paths)
                 .await
@@ -4276,6 +4315,12 @@ where
             );
         }
 
+        if omit_peer_app_rows {
+            program
+                .lowered
+                .terminals
+                .retain(|terminal| terminal.sink != JAZZ_APP_ROWS_SINK);
+        }
         let tables = program.lowered.maintained_terminal_tables.clone();
         let targeted_refresh_tables = program.lowered.targeted_refresh_tables.clone();
         let targeted_refresh_uncertain = program.lowered.targeted_refresh_uncertain;

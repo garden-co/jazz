@@ -143,6 +143,7 @@ mod chunk_io_pump;
 mod lifecycle;
 mod mutations;
 mod node_runtime;
+mod peer_blob_reads;
 mod peer_connection;
 mod reads;
 mod reference_metadata_migration;

@@ -430,6 +430,7 @@ where
                 settled_authority_result_key.clone(),
                 PreparedClaimBindingMode::Strict,
                 pending_overlay,
+                MaintainedViewConsumer::Application,
                 progress_waker,
             )
             .await?;
