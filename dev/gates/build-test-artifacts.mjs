@@ -10,7 +10,6 @@
  */
 import { execFileSync, spawn } from "node:child_process";
 import { linkSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { availableParallelism } from "node:os";
 import { basename, isAbsolute, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
@@ -128,10 +127,7 @@ export function acquireArtifactBuildLock(lockPath = artifactLockPath()) {
   };
   const staging = `${lockPath}.acquiring-${owner.token}`;
   try {
-    writeFileSync(staging, `${JSON.stringify(owner)}\n`, {
-      mode: 0o600,
-      flag: "wx",
-    });
+    writeFileSync(staging, `${JSON.stringify(owner)}\n`, { mode: 0o600, flag: "wx" });
   } catch (error) {
     removeQuietly(staging);
     throw lockFilesystemError("create lock receipt", error);
@@ -344,9 +340,7 @@ export function command(command, args, label = [command, ...args].join(" "), opt
     const abort = () => {
       if (child.exitCode !== null) return;
       if (process.platform === "win32") {
-        spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
-          stdio: "ignore",
-        });
+        spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
       } else {
         try {
           process.kill(-child.pid, "SIGTERM");
@@ -383,22 +377,12 @@ export function command(command, args, label = [command, ...args].join(" "), opt
   });
 }
 
-/**
- * Overlap the NAPI and WASM compiles only where there are spare cores. The
- * 4-vCPU threshold that motivated serial builds stays serial; the 16-vCPU CI
- * runners and ordinary developer machines overlap.
- */
-export function defaultParallelNativeBuilds(cores = availableParallelism()) {
-  return cores >= 8;
-}
-
 export async function buildTestArtifacts(
   run = command,
   scope = createBuildScope(),
   lease = undefined,
   snapshot = () => {},
   sealProducerManifest = () => {},
-  { parallelNativeBuilds = defaultParallelNativeBuilds() } = {},
 ) {
   // Capture before any producer starts.  A dirty checkout is acceptable only
   // when it remains byte-for-byte the same through publication; otherwise a
@@ -412,12 +396,7 @@ export async function buildTestArtifacts(
   let firstBuildError;
   const guardedRun = (command, args, label, env) =>
     scope
-      .track(
-        run(command, args, label, {
-          env: { ...env, ...lease },
-          signal: scope.signal,
-        }),
-      )
+      .track(run(command, args, label, { env: { ...env, ...lease }, signal: scope.signal }))
       .catch((error) => {
         if (!firstBuildError) {
           firstBuildError = error;
@@ -440,27 +419,24 @@ export async function buildTestArtifacts(
     );
 
   // Keep every Cargo invocation in the default target directory restored by
-  // Swatinem/rust-cache. On a 4-vCPU runner, separate target directories
+  // Swatinem/rust-cache. On the 4-vCPU CI runner, separate target directories
   // discarded that cache and made three cold compilers contend for the same
-  // CPUs, so there NAPI (the long pole) runs alone and fast WASM follows it.
-  // With enough cores the two builds overlap instead: release NAPI and the
-  // wasm32 dev build lock different Cargo profile directories, and most of
-  // NAPI's tail is one crate's codegen that leaves cores idle. jazz-tools then
+  // CPUs. NAPI is the long pole and benefits most from running alone. Once it
+  // is complete, fast WASM uses the remaining compile window; jazz-tools then
   // consumes both runtime prerequisites. CLI builds are separate because no
   // correctness consumer loads the binary at runtime.
-  const napi = guardedRun(
+  await guardedRun(
     "pnpm",
     ["exec", "turbo", "run", "build", "--filter=jazz-napi", "--only"],
     "release NAPI",
   );
-  if (!parallelNativeBuilds) await napi;
   const wasm = guardedRun(
     "pnpm",
     ["exec", "turbo", "run", "build:fast", "--filter=jazz-wasm", "--only"],
     "fast WASM",
   );
   try {
-    await Promise.all([napi, wasm]);
+    await wasm;
   } catch (error) {
     await scope.drain();
     throw firstBuildError ?? error;

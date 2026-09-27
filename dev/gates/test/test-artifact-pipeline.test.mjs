@@ -7,7 +7,6 @@ import { join } from "node:path";
 import {
   acquireArtifactBuildLock,
   buildTestArtifacts,
-  defaultParallelNativeBuilds,
   command,
   unlockArtifactBuildLock,
   withArtifactBuildLock,
@@ -360,61 +359,25 @@ test("a strict Turbo-like child verifies the CI parent's runner-temp lease", asy
   }
 });
 
-const failNapiAndRecordAborts =
-  (aborted) =>
-  (unusedCommand, unusedArgs, label, { signal } = {}) => {
-    if (label === "release NAPI") return Promise.reject(new Error("simulated NAPI failure"));
-    return new Promise((resolve, reject) => {
-      signal.addEventListener(
-        "abort",
-        () => {
-          aborted.push(label);
-          reject(new Error(`${label} aborted`));
-        },
-        { once: true },
-      );
-    });
-  };
-
 test("a failed runtime artifact build releases its scope", async () => {
   const aborted = [];
   await assert.rejects(
-    buildTestArtifacts(
-      failNapiAndRecordAborts(aborted),
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      {
-        parallelNativeBuilds: false,
-      },
-    ),
+    buildTestArtifacts((unusedCommand, unusedArgs, label, { signal } = {}) => {
+      if (label === "release NAPI") return Promise.reject(new Error("simulated NAPI failure"));
+      return new Promise((resolve, reject) => {
+        signal.addEventListener(
+          "abort",
+          () => {
+            aborted.push(label);
+            reject(new Error(`${label} aborted`));
+          },
+          { once: true },
+        );
+      });
+    }),
     /simulated NAPI failure/,
   );
   assert.deepEqual(aborted, []);
-});
-
-test("a failed parallel NAPI build aborts the overlapping WASM build and reports NAPI", async () => {
-  const aborted = [];
-  await assert.rejects(
-    buildTestArtifacts(
-      failNapiAndRecordAborts(aborted),
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      {
-        parallelNativeBuilds: true,
-      },
-    ),
-    /simulated NAPI failure/,
-  );
-  assert.deepEqual(aborted, ["fast WASM"]);
-});
-
-test("native artifact builds overlap only when the machine has spare cores", () => {
-  assert.equal(defaultParallelNativeBuilds(4), false);
-  assert.equal(defaultParallelNativeBuilds(16), true);
 });
 
 test("real subprocess inherits the caller's cache-compatible Cargo target", async () => {
