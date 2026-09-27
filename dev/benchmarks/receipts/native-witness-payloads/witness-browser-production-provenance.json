@@ -1,0 +1,23 @@
+{
+  "method": "SHA-256 of git ls-tree lines for jazz/groove/jazz-wasm src, excluding tests directories and tests.rs; compare test-only follow-ups with their production source. All other workspace tracked files are also checked separately by git diff.",
+  "production_trees": {
+    "1d16705c174071f00ab253c816ffd14e4593438d": "27b7f569da73b72e7f7568368aa32d7770611b21410773f298be41090bb04af6",
+    "697377c11218be6cbdf29ab8cb919ae7d5e6f1cb": "27b7f569da73b72e7f7568368aa32d7770611b21410773f298be41090bb04af6",
+    "6f5e0b3abe5db24961359aeb0f33ddeaee8e141f": "2167b101712a0141bab8148f7aa9b709082c07c5cd3b965b1ff7561d6560a742",
+    "9e63d6f55b4ed7d99b21e9fb3106c0467bc76156": "2167b101712a0141bab8148f7aa9b709082c07c5cd3b965b1ff7561d6560a742"
+  },
+  "all_changed_paths": {
+    "1d16705c174071f00ab253c816ffd14e4593438d..697377c11218be6cbdf29ab8cb919ae7d5e6f1cb": [
+      "crates/jazz/benches/maintained_rehydrate_scaling.rs",
+      "crates/jazz/src/node/tests/eviction_redelivery.rs",
+      "crates/jazz/src/node/tests/harness.rs",
+      "packages/jazz-tools/tests/browser/witness-tradeoffs.abstract-bench.test.ts"
+    ],
+    "6f5e0b3abe5db24961359aeb0f33ddeaee8e141f..9e63d6f55b4ed7d99b21e9fb3106c0467bc76156": [
+      "crates/jazz/src/node/tests/eviction_redelivery.rs",
+      "crates/jazz/src/node/tests/harness.rs",
+      "crates/jazz/src/node/tests/native_witness_refs.rs",
+      "packages/jazz-tools/tests/browser/witness-tradeoffs.abstract-bench.test.ts"
+    ]
+  }
+}

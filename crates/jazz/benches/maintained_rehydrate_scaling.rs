@@ -118,6 +118,8 @@ fn run_rung(source_rows: usize) {
     let digest = result_digest(&maintained_result);
     let mut fields = phase_fields("maintained_vs_rehydrate", maintained_us + rehydrate_us);
     fields.insert("source_rows".to_owned(), json!(source_rows));
+    fields.insert("text_columns".to_owned(), json!(2 + extra_text_columns()));
+    fields.insert("extra_text_bytes".to_owned(), json!(extra_text_bytes()));
     fields.insert("view_rows".to_owned(), json!(expected_view_rows));
     fields.insert("changed_rows".to_owned(), json!(1));
     fields.insert("seed_us".to_owned(), json!(seed_us));
@@ -169,7 +171,9 @@ fn run_rung(source_rows: usize) {
 
 fn update_counts(update: &SyncMessage) -> (usize, usize, usize) {
     let SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-        version_carriers, ..
+        version_carriers,
+        supporting_rows,
+        ..
     }) = update
     else {
         panic!("expected one view update");
@@ -177,7 +181,11 @@ fn update_counts(update: &SyncMessage) -> (usize, usize, usize) {
     let bundles = expand_version_carriers(version_carriers)
         .expect("expand PERF-5 version carriers")
         .len();
-    (0, 0, bundles)
+    (
+        supporting_rows.added_rows().len(),
+        supporting_rows.removed_rows().len(),
+        bundles,
+    )
 }
 
 fn result_digest(result: &BTreeSet<TxId>) -> String {
@@ -266,14 +274,24 @@ fn core_ingest(
     fate
 }
 
+fn extra_text_columns() -> usize {
+    std::env::var("JAZZ_PERF5_EXTRA_TEXT_COLUMNS")
+        .map_or(0, |value| value.parse().expect("extra text column count"))
+}
+
+fn extra_text_bytes() -> usize {
+    std::env::var("JAZZ_PERF5_EXTRA_TEXT_BYTES")
+        .map_or(128, |value| value.parse().expect("extra text cell size"))
+}
+
 fn schema() -> JazzSchema {
-    schema_fixture::compile(
-        SchemaBuilder::new().table(
-            TableSchemaBuilder::new(TABLE)
-                .column("title", ColumnType::Text)
-                .column("status", ColumnType::Text),
-        ),
-    )
+    let mut table = TableSchemaBuilder::new(TABLE)
+        .column("title", ColumnType::Text)
+        .column("status", ColumnType::Text);
+    for column in 0..extra_text_columns() {
+        table = table.column(&format!("detail_{column}"), ColumnType::Text);
+    }
+    schema_fixture::compile(SchemaBuilder::new().table(table))
 }
 
 fn open_node(
@@ -295,13 +313,23 @@ fn open_node(
 }
 
 fn cells(index: usize, status: &str) -> BTreeMap<String, Value> {
-    BTreeMap::from([
+    let mut cells = BTreeMap::from([
         (
             "title".to_owned(),
             Value::String(format!("document-{index}")),
         ),
         ("status".to_owned(), Value::String(status.to_owned())),
-    ])
+    ]);
+    for column in 0..extra_text_columns() {
+        cells.insert(
+            format!("detail_{column}"),
+            Value::String(format!(
+                "row-{index}-field-{column}-{}",
+                "x".repeat(extra_text_bytes())
+            )),
+        );
+    }
+    cells
 }
 
 fn node(byte: u8) -> NodeUuid {

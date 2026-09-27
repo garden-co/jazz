@@ -1,0 +1,16 @@
+[
+  {
+    "source": "697377c11218be6cbdf29ab8cb919ae7d5e6f1cb",
+    "test": "authority_redelivery_repairs_manually_evicted_complete_transaction_body",
+    "exit_code": 101,
+    "wall_seconds": 656.5750129169901,
+    "test_source_sha256": "cacc0a2a7bdffff6bbb3026a50e73e929999b70746faae82b8103adc5e8e1292"
+  },
+  {
+    "source": "697377c11218be6cbdf29ab8cb919ae7d5e6f1cb",
+    "test": "authority_redelivery_repairs_budget_evicted_complete_transaction_body",
+    "exit_code": 101,
+    "wall_seconds": 0.8459078340092674,
+    "test_source_sha256": "cacc0a2a7bdffff6bbb3026a50e73e929999b70746faae82b8103adc5e8e1292"
+  }
+]

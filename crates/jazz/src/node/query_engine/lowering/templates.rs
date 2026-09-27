@@ -277,6 +277,7 @@ fn source_metadata_equal(left: &ResolvedQuerySources, right: &ResolvedQuerySourc
             .zip(right)
             .all(|((left_id, left), (right_id, right))| {
                 let ResolvedSource {
+                    native_witness_table,
                     stored_column_ids,
                     table_schema,
                     graph: _,
@@ -288,6 +289,7 @@ fn source_metadata_equal(left: &ResolvedQuerySources, right: &ResolvedQuerySourc
                     authorized_deletion_preimage,
                 } = left;
                 left_id == right_id
+                    && *native_witness_table == right.native_witness_table
                     && *stored_column_ids == right.stored_column_ids
                     && *table_schema == right.table_schema
                     && *row_shape == right.row_shape

@@ -71,3 +71,5 @@ include!("recovery.rs");
 include!("general.rs");
 include!("view_update_capture.rs");
 include!("native_storage_corpus.rs");
+include!("eviction_redelivery.rs");
+include!("native_witness_refs.rs");

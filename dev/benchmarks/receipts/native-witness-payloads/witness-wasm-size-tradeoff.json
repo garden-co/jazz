@@ -1,0 +1,25 @@
+{
+  "control": {
+    "source": "697377c11218be6cbdf29ab8cb919ae7d5e6f1cb",
+    "sha256": "164b11672b5797875fd26d16f784a0c1455cf7aac689684443a6b67d0c53b9d5",
+    "raw_bytes": 33176704,
+    "gzip_9_bytes": 9408894
+  },
+  "candidate": {
+    "source": "9e63d6f55b4ed7d99b21e9fb3106c0467bc76156",
+    "sha256": "94d24bd3ecb24e15ce1a6b9ba7d8c8fd55f00aad70a7389aacce745255c04baf",
+    "raw_bytes": 33311165,
+    "gzip_9_bytes": 9472332
+  },
+  "method": "Same checkout and release build profile/wasm-opt pipeline; WASM binary only. gzip.compress level 9, mtime 0. Not whole browser JavaScript bundle size.",
+  "deltas": {
+    "raw_bytes": {
+      "bytes": 134461,
+      "fraction": 0.00405287396843268
+    },
+    "gzip_9_bytes": {
+      "bytes": 63438,
+      "fraction": 0.006742343999199152
+    }
+  }
+}

@@ -398,8 +398,10 @@ impl PeerState {
         subscription: SubscriptionKey,
         binding: (AuthorSubject, BTreeMap<String, groove::records::Value>),
     ) {
-        self.set_subscription_policy_key(subscription,
-            crate::protocol::PolicyBindingKey::from_canonical_parts(binding.0, binding.1));
+        self.set_subscription_policy_key(
+            subscription,
+            crate::protocol::PolicyBindingKey::from_canonical_parts(binding.0, binding.1),
+        );
     }
 
     /// Carry an already-admitted canonical key through owner maintenance.
@@ -412,10 +414,17 @@ impl PeerState {
         if crate::debug_env::covered_input_trace() {
             eprintln!(
                 "JAZZ_COVERED_INPUT_TRACE stage=served_policy_binding peer={:p} owner={} role={:?} subscription={subscription:?} identity={:?} claims={:?}",
-                self, self.publication_owner, self.role, binding.identity, binding.claims(),
+                self,
+                self.publication_owner,
+                self.role,
+                binding.identity,
+                binding.claims(),
             );
         }
-        self.publication_states.entry(subscription).or_default().policy_binding = Some(binding);
+        self.publication_states
+            .entry(subscription)
+            .or_default()
+            .policy_binding = Some(binding);
     }
 
     /// Associate a relay-owned maintained receiver with the precise upstream
@@ -561,9 +570,9 @@ impl PeerState {
                 state
                     .groove_runtime_token
                     .is_some_and(|token| token != current_token)
-                    || state.physical_identity_generation.is_some_and(|generation| {
-                        generation != node.physical_identity_generation()
-                    })
+                    || state
+                        .physical_identity_generation
+                        .is_some_and(|generation| generation != node.physical_identity_generation())
             })
         {
             if let Some(state) = self.publication_states.get_mut(&subscription) {
@@ -988,9 +997,9 @@ impl PeerState {
                 state
                     .groove_runtime_token
                     .is_some_and(|token| token != node.groove_runtime_token())
-                    || state.physical_identity_generation.is_some_and(|generation| {
-                        generation != node.physical_identity_generation()
-                    })
+                    || state
+                        .physical_identity_generation
+                        .is_some_and(|generation| generation != node.physical_identity_generation())
             });
         if metadata_was_stale
             && self
@@ -1482,9 +1491,12 @@ impl PeerState {
                     .get_mut(&subscription)
                     .and_then(|state| state.maintained_subscription_view.as_mut())
                 {
-                    deletion_changes = view
-                        .maintained
-                        .replace_selected_deletion_witnesses(witnesses);
+                    deletion_changes = view.maintained.replace_selected_deletion_witnesses(
+                        witnesses
+                            .into_iter()
+                            .map(|(key, row)| (key, row.into()))
+                            .collect(),
+                    );
                 }
             }
         }
@@ -2205,11 +2217,7 @@ impl PeerState {
     /// Retiring a view that already published its initial result replaces
     /// incremental maintenance with a full recompute. A first open or a retry
     /// of a still-cold view is ordinary hydration and is not counted.
-    fn note_full_diff_reopen(
-        &mut self,
-        subscription: SubscriptionKey,
-        purpose: RehydratePurpose,
-    ) {
+    fn note_full_diff_reopen(&mut self, subscription: SubscriptionKey, purpose: RehydratePurpose) {
         let published = self
             .publication_states
             .get(&subscription)
@@ -2218,7 +2226,10 @@ impl PeerState {
         if !published {
             return;
         }
-        let fallbacks = &mut self.metrics.maintained_subscription_view.full_diff_fallbacks;
+        let fallbacks = &mut self
+            .metrics
+            .maintained_subscription_view
+            .full_diff_fallbacks;
         match purpose {
             RehydratePurpose::Query => fallbacks.query_reopens += 1,
             RehydratePurpose::AuthorizationSupport => fallbacks.authorization_support_reopens += 1,
