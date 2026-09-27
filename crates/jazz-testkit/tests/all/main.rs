@@ -1,4 +1,9 @@
-// Single integration-test binary (experiment).
+// One integration-test binary for the testkit's flat test files.
+//
+// Every flat file used to be its own test executable, each compiling and
+// linking the full Jazz dependency graph. Here they build as modules of one
+// binary; Nextest still runs each test in its own process. Add a new flat test
+// file here (dev/gates/test/rust-test-targets.test.mjs fails otherwise).
 #[path = "../admin_schema_api.rs"]
 mod admin_schema_api;
 #[path = "../aggregate_subscriptions.rs"]
