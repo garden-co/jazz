@@ -1670,7 +1670,10 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
               if (!canPublishAdmission()) throw new Error("Browser client admission was revoked");
               return admitBrowserClientRequest(request, author);
             },
-            flushLocal: () => activeRuntime.flushLocalSettlements(),
+            // This runtime owns persistence. The adapter's foreground-only
+            // settlement set is empty here; drain the core's queued local
+            // mutations before acknowledging the ordered application barrier.
+            flushLocal: () => activeRuntime.waitForPendingWrites("local"),
           });
           if (peer.context.explicitlyDisconnected)
             post(peer.port, { type: "transport-state", explicitlyDisconnected: true });
