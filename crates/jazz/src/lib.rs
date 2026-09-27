@@ -491,7 +491,7 @@ pub mod local_executor;
 pub mod model;
 /// Storage-backed node implementation and local API.
 pub mod node;
-#[doc(hidden)]
+/// Object, branch and query-result identifiers.
 // Moved out of `tools`, which keeps its existing documentation policy.
 #[allow(missing_docs)]
 pub mod object;

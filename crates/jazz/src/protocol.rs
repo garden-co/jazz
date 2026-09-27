@@ -7289,3 +7289,11 @@ mod tests {
 }
 #[cfg(test)]
 pub(crate) mod supporting_set_test_oracle;
+
+// Durable record-field encodings for these types. They live beside the types
+// so the impls stay coherent once this layer is its own crate.
+groove::impl_record_field_enum!(ResultRowLayer {
+    ResultRowLayer::Content = 0,
+    ResultRowLayer::Deletion = 1,
+    ResultRowLayer::ContentOrDeletion = 2,
+});

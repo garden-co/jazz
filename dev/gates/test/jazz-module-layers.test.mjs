@@ -84,3 +84,45 @@ test("super paths resolve through inline modules and test code is separated", ()
     ],
   );
 });
+
+test("super paths in an included file resolve from the includer's module", () => {
+  const src = crateFixture({
+    "lib.rs": "pub mod node;\npub mod db;\n",
+    "db.rs": "pub struct Handle;\n",
+    "node/mod.rs": 'include!("state/commit.rs");\n',
+    "node/state/commit.rs": "fn probe() { let _ = super::db::Handle; }\n",
+  });
+  assert.deepEqual(
+    analyze({ src }).map((v) => [v.from, v.line, v.to, v.path]),
+    [["node/state/commit.rs", 1, "db.rs", "super::db::Handle"]],
+  );
+});
+
+test("impls a split crate could not hold are reported", () => {
+  const src = crateFixture({
+    "lib.rs": "pub mod ids;\npub mod node;\n",
+    "ids.rs": "pub struct RowUuid;\npub struct Alias;\npub struct Tag;\n",
+    "node/mod.rs": [
+      "use crate::ids::{Alias, RowUuid, Tag};",
+      "pub struct Local;",
+      "pub trait NodeExt {}",
+      "impl RowUuid { fn inherent(&self) {} }",
+      "impl groove::records::RecordField for Alias {}",
+      "groove::impl_record_field_u64!(Tag);",
+      "impl NodeExt for RowUuid {}",
+      "impl From<Local> for RowUuid { fn from(_: Local) -> Self { RowUuid } }",
+      "impl Local {}",
+      "",
+    ].join("\n"),
+  });
+  assert.deepEqual(
+    analyze({ src })
+      .map((v) => [v.line, v.to, v.path])
+      .sort((a, b) => a[0] - b[0]),
+    [
+      [4, "ids.rs", "impl RowUuid"],
+      [5, "ids.rs", "impl groove::records::RecordField for Alias"],
+      [6, "ids.rs", "impl groove::records::RecordField for Tag"],
+    ],
+  );
+});

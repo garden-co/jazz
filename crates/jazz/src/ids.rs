@@ -1405,3 +1405,66 @@ mod tests {
         assert!(AuthorSubject::from_canonical(r#"["issuer","\ud83d\ude80"]"#).is_err());
     }
 }
+
+// Durable record-field encodings for these types. They live beside the types
+// so the impls stay coherent once this layer is its own crate.
+groove::impl_record_field_u64!(NodeAlias);
+groove::impl_record_field_u64!(SchemaVersionAlias);
+groove::impl_record_field_uuid!(NodeUuid);
+groove::impl_record_field_uuid!(SchemaFamilyId);
+groove::impl_record_field_uuid!(RowUuid);
+groove::impl_record_field_uuid!(SchemaVersionId);
+
+impl groove::records::RecordField for AuthorSubject {
+    fn read_raw(
+        bytes: &[u8],
+        value_type: &groove::records::ValueType,
+    ) -> Result<Self, groove::records::Error> {
+        AuthorSubject::from_value(
+            <groove::records::Value as groove::records::RecordField>::read_raw(bytes, value_type)?,
+        )
+        .map_err(|_| groove::records::Error::NonCanonicalRecord)
+    }
+    fn read(
+        record: &groove::records::BorrowedRecord<'_>,
+        idx: usize,
+    ) -> Result<Self, groove::records::Error> {
+        AuthorSubject::from_value(record.get_idx(idx)?)
+            .map_err(|_| groove::records::Error::NonCanonicalRecord)
+    }
+
+    fn to_value(&self) -> groove::records::Value {
+        (*self).to_value()
+    }
+
+    const COLUMN_KIND: groove::records::FieldKind = groove::records::FieldKind::Record;
+}
+
+impl groove::records::RecordField for RowAuthor {
+    fn read_raw(
+        bytes: &[u8],
+        value_type: &groove::records::ValueType,
+    ) -> Result<Self, groove::records::Error> {
+        let groove::records::ValueType::Record(descriptor) = value_type else {
+            return Err(groove::records::Error::TypeMismatch {
+                expected: value_type.clone(),
+            });
+        };
+        RowAuthor::from_record(descriptor.bind(bytes))
+            .map_err(|_| groove::records::Error::NonCanonicalRecord)
+    }
+
+    fn read(
+        record: &groove::records::BorrowedRecord<'_>,
+        idx: usize,
+    ) -> Result<Self, groove::records::Error> {
+        RowAuthor::from_record(record.get_record(idx)?)
+            .map_err(|_| groove::records::Error::NonCanonicalRecord)
+    }
+
+    fn to_value(&self) -> groove::records::Value {
+        (*self).to_value()
+    }
+
+    const COLUMN_KIND: groove::records::FieldKind = groove::records::FieldKind::Record;
+}

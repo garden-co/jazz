@@ -92,7 +92,9 @@ rebuilds Jazz a second time for the testkit.
 **Jazz module layers.** `crates/jazz/src` is being split into crates bottom-up.
 `dev/gates/jazz-module-layers.mjs` assigns each file to a layer (types → model
 → protocol → engine → node → peer → db → facade) and fails CI lint on any
-production `crate::`/`super::` reference to a higher layer. Basic types
+production `crate::`/`super::` reference to a higher layer, and on an inherent
+or foreign-trait `impl` whose type lives in a lower layer (it would break
+coherence once the layers are crates). Basic types
 (`object`, `app_id`, `identity`) sit at the crate root and the public data model
 lives in `model/`; `tools` only re-exports them. Put new code in the lowest layer
 that its dependencies allow. Test-only upward references are ratcheted in

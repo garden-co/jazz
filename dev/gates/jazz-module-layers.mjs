@@ -283,6 +283,61 @@ function lineAt(s, offset) {
   return line;
 }
 
+// `impl` headers: [offset, trait text or null, self type text]. Generic
+// parameter lists are skipped with angle-bracket depth, so `impl<T: A<B>>`
+// and `impl X for Y<Z>` both split at the top-level `for`.
+function implHeaders(s) {
+  const out = [];
+  for (const m of s.matchAll(/(?<![A-Za-z0-9_$])impl(?![A-Za-z0-9_])/g)) {
+    let k = m.index + 4;
+    while (/\s/.test(s[k] ?? "")) k++;
+    if (s[k] === "<") {
+      for (let depth = 0; k < s.length; k++) {
+        if (s[k] === "<") depth++;
+        else if (s[k] === ">" && s[k - 1] !== "-" && --depth === 0) break;
+      }
+      k++;
+    }
+    let depth = 0;
+    let end = k;
+    for (; end < s.length; end++) {
+      const ch = s[end];
+      if (ch === "<" || ch === "(" || ch === "[") depth++;
+      else if ((ch === ">" && s[end - 1] !== "-") || ch === ")" || ch === "]") depth--;
+      else if (depth === 0 && (ch === "{" || ch === ";")) break;
+    }
+    let header = s.slice(k, end).replace(/\s+/g, " ").trim();
+    header = header.replace(/ where .*$/, "");
+    const parts = splitTopLevel(header, " for ");
+    if (parts.length === 2) out.push([m.index, parts[0], parts[1]]);
+    else out.push([m.index, null, header]);
+  }
+  return out;
+}
+
+function splitTopLevel(text, sep) {
+  let depth = 0;
+  for (let k = 0; k < text.length; k++) {
+    const ch = text[k];
+    if (ch === "<" || ch === "(" || ch === "[") depth++;
+    else if ((ch === ">" && text[k - 1] !== "-") || ch === ")" || ch === "]") depth--;
+    else if (depth === 0 && text.startsWith(sep, k))
+      return [text.slice(0, k), text.slice(k + sep.length)];
+  }
+  return [text];
+}
+
+// The named type an impl targets: `&'a crate::x::Foo<T>` -> "Foo".
+function headName(type) {
+  const t = type.replace(/^&\s*('[A-Za-z_]+\s*)?(mut\s+)?/, "").replace(/^dyn\s+/, "");
+  const m = /^((?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*)([A-Za-z_][A-Za-z0-9_]*)/.exec(t);
+  return m ? m[2] : null;
+}
+
+function identifiers(text) {
+  return new Set(text.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []);
+}
+
 export function analyze({ includeTests = false, src = SRC } = {}) {
   const files = walk(src).map((full) => path.relative(src, full).split(path.sep).join("/"));
   const moduleFile = new Map(); // "a::b" -> rel
@@ -300,25 +355,63 @@ export function analyze({ includeTests = false, src = SRC } = {}) {
   const testModulePrefixes = new Set();
   const includedTestFiles = new Set();
   const scrubbed = new Map();
+  // An `include!("x.rs")`d file is spliced into its includer, so it lives in
+  // the includer's module (plus any inline `mod` around the include), not in
+  // the module its path suggests: target rel -> [includer rel, inline names].
+  const includedBy = new Map();
   for (const rel of files) {
     const raw = fs.readFileSync(path.join(src, rel), "utf8");
     const s = scrub(raw);
-    const { ranges, testMods } = testRanges(s);
-    scrubbed.set(rel, { s, ranges });
-    const own = modulePathOf(rel);
-    for (const name of testMods) testModulePrefixes.add([...own, name].join("::"));
-    // `include!("x.rs")` inside a #[cfg(test)] item makes x.rs test code.
+    const { ranges } = testRanges(s);
+    const spans = inlineModules(s);
+    scrubbed.set(rel, { s, ranges, spans });
     for (const m of raw.matchAll(/include!\(\s*"([^"]+\.rs)"\s*\)/g)) {
-      if (ranges.some(([a, b]) => m.index >= a && m.index < b))
-        includedTestFiles.add(path.posix.normalize(path.posix.join(path.posix.dirname(rel), m[1])));
+      const target = path.posix.normalize(path.posix.join(path.posix.dirname(rel), m[1]));
+      const inline = spans.filter(([a, b]) => m.index > a && m.index < b).map(([, , name]) => name);
+      includedBy.set(target, [rel, inline]);
+      // `include!` inside a #[cfg(test)] item makes the target test code.
+      if (ranges.some(([a, b]) => m.index >= a && m.index < b)) includedTestFiles.add(target);
     }
+  }
+  const moduleOfFile = (rel, seen = new Set()) => {
+    const inc = includedBy.get(rel);
+    if (!inc || seen.has(rel)) return modulePathOf(rel);
+    seen.add(rel);
+    return [...moduleOfFile(inc[0], seen), ...inc[1]];
+  };
+  for (const rel of files) {
+    const own = moduleOfFile(rel);
+    for (const name of testRanges(scrubbed.get(rel).s).testMods)
+      testModulePrefixes.add([...own, name].join("::"));
   }
   const isTestFile = (rel) => {
     if (includedTestFiles.has(rel)) return true;
-    const segs = modulePathOf(rel);
+    if (includedBy.has(rel) && isTestFile(includedBy.get(rel)[0])) return true;
+    const segs = moduleOfFile(rel);
     for (let k = 1; k <= segs.length; k++)
       if (testModulePrefixes.has(segs.slice(0, k).join("::"))) return true;
     return false;
+  };
+
+  // Where each type and trait name is defined. A name defined in several
+  // files maps to all of them; impl checks treat any same-layer definition as
+  // local, so a collision can hide a violation but never invent one.
+  const typeDefs = new Map();
+  const traitDefs = new Map();
+  for (const rel of files) {
+    const { s } = scrubbed.get(rel);
+    for (const m of s.matchAll(/\b(struct|enum|union|type|trait)\s+([A-Za-z_][A-Za-z0-9_]*)/g)) {
+      const map = m[1] === "trait" ? traitDefs : typeDefs;
+      if (!map.has(m[2])) map.set(m[2], new Set());
+      map.get(m[2]).add(rel);
+    }
+  }
+  const definedIn = (map, name, layer) => {
+    const where = [...(map.get(name) ?? [])];
+    return {
+      local: where.some((f) => layerOf(f) === layer),
+      lower: where.filter((f) => layerOf(f) !== layer),
+    };
   };
 
   const violations = [];
@@ -327,10 +420,9 @@ export function analyze({ includeTests = false, src = SRC } = {}) {
     if (testFile && !includeTests) continue;
     const from = layerOf(rel);
     const allowed = new Set([from, ...LAYERS[from].deps]);
-    const { s, ranges } = scrubbed.get(rel);
+    const { s, ranges, spans } = scrubbed.get(rel);
     const inTest = (offset) => testFile || ranges.some(([a, b]) => offset >= a && offset < b);
-    const own = modulePathOf(rel);
-    const spans = inlineModules(s);
+    const own = moduleOfFile(rel);
     const moduleAt = (offset) => [
       ...own,
       ...spans.filter(([a, b]) => offset > a && offset < b).map(([, , name]) => name),
@@ -354,6 +446,36 @@ export function analyze({ includeTests = false, src = SRC } = {}) {
             .filter(Boolean),
         ],
       ]);
+    }
+    // Coherence: once each layer is a crate, an inherent impl must sit with
+    // its type, and a trait impl needs a local trait or local type in it.
+    const implSites = implHeaders(s).map(([offset, trait, self]) => [
+      offset,
+      trait,
+      headName(self),
+      self,
+    ]);
+    for (const m of s.matchAll(/\bimpl_record_field_[a-z0-9_]+!\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)/g))
+      implSites.push([m.index, "groove::records::RecordField", m[1], m[1]]);
+    for (const [offset, trait, name, self] of implSites) {
+      if (!name || (!includeTests && inTest(offset))) continue;
+      const selfDef = definedIn(typeDefs, name, from);
+      if (selfDef.local || selfDef.lower.length === 0) continue;
+      if (trait) {
+        if (definedIn(traitDefs, headName(trait), from).local) continue;
+        const mentioned = [...identifiers(trait), ...identifiers(self)].filter((id) => id !== name);
+        if (mentioned.some((id) => definedIn(typeDefs, id, from).local)) continue;
+      }
+      const to = selfDef.lower[0];
+      violations.push({
+        from: rel,
+        line: lineAt(s, offset),
+        to,
+        fromLayer: from,
+        toLayer: layerOf(to),
+        path: trait ? `impl ${trait} for ${self}` : `impl ${self}`,
+        test: testFile || inTest(offset),
+      });
     }
     for (const [offset, segs] of refs) {
       if (!includeTests && inTest(offset)) continue;
