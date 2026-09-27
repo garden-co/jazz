@@ -374,7 +374,11 @@ evaluation closure.
 Postcard decoding alone is insufficient because it accepts a valid value with
 trailing bytes. Every path that interprets node structure MUST require an exact
 byte-for-byte canonical re-encoding, including metadata-only traversal before
-the caller has an expected logical kind. Evaluation additionally verifies the
+the caller has an expected logical kind. The comparison may stream canonical
+segments rather than allocate a second complete encoding. In V1, a leaf is
+exactly the canonical enum tag `0`, its two fixed `u8` fields and its sole raw
+bytes field; that field consumes the remaining payload and has no offset or
+length table. This equivalence is pinned against the ordinary record encoder. Evaluation additionally verifies the
 expected object hash, format, kind, logical hash, and metrics.
 
 The authenticated structure is a DAG, not necessarily a tree physically: one
