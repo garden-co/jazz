@@ -4887,7 +4887,6 @@ fn collect_operand_param(operand: &Operand, params: &mut BTreeSet<String>) {
 }
 
 #[cfg(any(test, feature = "testing"))]
-
 fn collect_join_read_tables(join: &crate::query::JoinVia, tables: &mut BTreeSet<String>) {
     tables.insert(join.table.clone());
     if let Some(source_lookup) = &join.source_lookup {

@@ -280,6 +280,7 @@ impl PeerState {
 /// Chosen by the topology boundary, rather than inferred from `PeerRole`.
 /// Multiplexed relays receive no retained-knowledge capability and must ask an
 /// authority to serve repairs.
+#[allow(clippy::manual_non_exhaustive)]
 pub enum RepairServingContext {
     #[doc(hidden)]
     Authority {

@@ -15,7 +15,3 @@ db/tests/subscriptions/structured.rs -> binding_codec.rs
 db/tests/support.rs -> tools/test_support.rs
 db/tests/transactions.rs -> binding_codec.rs
 db/tests/transactions.rs -> tools/test_support.rs
-node/query_eval/tests/mod.rs -> peer.rs
-node/query_eval/tests/subscriptions.rs -> peer.rs
-node/tests/harness.rs -> peer.rs
-node/tests/sync/repair.rs -> peer.rs
