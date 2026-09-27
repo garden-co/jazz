@@ -70,6 +70,33 @@ Build and preserve both executables before interleaving runs. The benchmark
 emits owner ticks, foreground ticks, read polling and complete elapsed time.
 The hashes identify the archived measured source before formatting.
 
+## Application comparison
+
+A separate packaged A/B/A check uses control
+`8eb69d5330a19d579bfc32233b474ea5a3f1550e` and candidate
+`558c07a7f74611d73d13b92b2f4e235b3416ac66`. These are integration builds with
+other performance changes; they are not this review branch's main-base result.
+The candidate adds the collector change and shared claims. The collector alone
+was flat on these files, as recorded in `README.md`.
+
+The same existing image and PDF were read through the unchanged application's
+whole-file adapter, with ordinary Local/Full coverage and all normal background
+queries active. Each run made twelve interleaved reads per file. Two runs per
+arm supply 22 warm observations per file after excluding the first read of each
+run. Every read checks size and media type; first reads also verify the exact
+content digest outside the timed interval. No builds or tests ran during timing.
+
+| File  |   Bytes | Control median | Candidate median | Time reduction |
+| ----- | ------: | -------------: | ---------------: | -------------: |
+| Image | 201,136 |       19.70 ms |         18.80 ms |           4.6% |
+| PDF   |  32,592 |       18.35 ms |         13.45 ms |          26.7% |
+
+The reverse control run returned to 20.0 ms / 18.4 ms. The image difference is
+small and its distributions overlap. Click-to-preview measurements did not
+establish a rendering improvement. These results support a PDF adapter-read
+benefit, not a general 20% image/preview or startup claim. No application query,
+authentication, stored data, history or permission behavior was changed.
+
 ## Rejected adjacent trial and qualification
 
 An additional shortcut for an exact live publication registration did not add
@@ -81,8 +108,14 @@ earlier SYSTEM-only policy-key experiment.
 
 The final source, after removing the registration shortcut, passed 2,255 library
 tests, all three incremental delivery canaries and five differential seeds at
-depths 10 and 1,000. The library uses the CI stack size of 4 MiB. Full canonical
-gates and application qualification remain required.
+depths 10 and 1,000. The library uses the CI stack size of 4 MiB.
+
+The later integration CI-equivalent attempt passed 4,684 workspace tests and
+failed one coverage-group scaling timing guard (15.82× against a 15× ceiling);
+14 tests were skipped. The exact failed binary passed a quiet rerun at 10.88×.
+No assertion changed. Downstream partitions did not run, and the private
+sensitive-data guard was unavailable. This is not a full-gate pass. Final review
+stack correctness and performance qualification remain required.
 
 Tooling friction: an account-bound fixture with active background subscriptions
 exposed repeated claim work hidden by the earlier SYSTEM-only fixture.
