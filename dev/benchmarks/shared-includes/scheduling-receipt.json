@@ -1,0 +1,560 @@
+{
+  "kind": "diagnostic scheduling experiment; no production changes",
+  "summary": [
+    {
+      "storage": "memory",
+      "lane": "include",
+      "control": {
+        "process_medians_ms": [366.0300000011921, 366.17500001192093],
+        "median_ms": 366.1025000065565
+      },
+      "message-channel": {
+        "process_medians_ms": [85.54749999940395, 86.02249999344349],
+        "median_ms": 85.78499999642372
+      },
+      "speedup": 4.267675001711475
+    },
+    {
+      "storage": "memory",
+      "lane": "flat",
+      "control": {
+        "process_medians_ms": [32.435000002384186, 32.57249999046326],
+        "median_ms": 32.50374999642372
+      },
+      "message-channel": {
+        "process_medians_ms": [32.26500000059605, 32.650000005960464],
+        "median_ms": 32.457500003278255
+      },
+      "speedup": 1.001424940095226
+    },
+    {
+      "storage": "persistent",
+      "lane": "include",
+      "control": {
+        "process_medians_ms": [511.82000002264977, 545.1375000029802],
+        "median_ms": 528.478750012815
+      },
+      "message-channel": {
+        "process_medians_ms": [245.6550000011921, 242.8525000065565],
+        "median_ms": 244.2537500038743
+      },
+      "speedup": 2.1636464128163126
+    },
+    {
+      "storage": "persistent",
+      "lane": "flat",
+      "control": {
+        "process_medians_ms": [128.7575000077486, 129.2800000011921],
+        "median_ms": 129.01875000447035
+      },
+      "message-channel": {
+        "process_medians_ms": [136.65750001370907, 135.24999998509884],
+        "median_ms": 135.95374999940395
+      },
+      "speedup": 0.9489900058294529
+    }
+  ],
+  "runs": [
+    {
+      "revision": "a086c1be807f85022032e7a210ca796087b34603",
+      "wasmSha256": "94d24bd3ecb24e15ce1a6b9ba7d8c8fd55f00aad70a7389aacce745255c04baf",
+      "storage": "memory",
+      "count": 1500,
+      "repetitions": 10,
+      "scheduling": "control",
+      "cpuProfile": false,
+      "scriptSha256": "e9b533a4279434fdb24613eb8f4674232cc0113a129292ac3daccb87810dbf6b",
+      "fixtureSha256": "365a348a1a683c6ad0329cc90c433dd294ba371358a7c0dc65dfd36af53e7962",
+      "adapterSha256": "f91eadbe1036406b1ebf07370c1bd16ebd749fe05bedd13d395ab8d6d6a56be7",
+      "results": [
+        {
+          "lane": "include",
+          "before": [380.7349999845028, 374.625, 371.4699999988079],
+          "measured": [
+            339.669999986887, 369.33500000834465, 368.88499999046326, 365.125, 368.1700000166893,
+            364.14999997615814, 367.9200000166893, 365.24000000953674, 366.27500000596046,
+            365.7849999964237
+          ],
+          "profiles": [],
+          "median_ms": 366.0300000011921
+        },
+        {
+          "lane": "flat",
+          "before": [40.44999998807907, 36.49500000476837, 32.270000010728836],
+          "measured": [
+            31.805000007152557, 35.375, 32.49500000476837, 35.74000000953674, 32.375,
+            32.02999997138977, 35.48499998450279, 31.919999986886978, 35.37999999523163,
+            31.74500000476837
+          ],
+          "profiles": [],
+          "median_ms": 32.435000002384186
+        }
+      ]
+    },
+    {
+      "revision": "a086c1be807f85022032e7a210ca796087b34603",
+      "wasmSha256": "94d24bd3ecb24e15ce1a6b9ba7d8c8fd55f00aad70a7389aacce745255c04baf",
+      "storage": "memory",
+      "count": 1500,
+      "repetitions": 10,
+      "scheduling": "message-channel",
+      "cpuProfile": false,
+      "scriptSha256": "e9b533a4279434fdb24613eb8f4674232cc0113a129292ac3daccb87810dbf6b",
+      "fixtureSha256": "365a348a1a683c6ad0329cc90c433dd294ba371358a7c0dc65dfd36af53e7962",
+      "adapterSha256": "f91eadbe1036406b1ebf07370c1bd16ebd749fe05bedd13d395ab8d6d6a56be7",
+      "results": [
+        {
+          "lane": "include",
+          "before": [129.63999998569489, 93.41499999165535, 92.66500002145767],
+          "measured": [
+            87.10499998927116, 86.31000000238419, 86.78499999642372, 81.73499998450279, 85.25,
+            83.33000001311302, 85.8449999988079, 84.875, 81.2999999821186, 86.1550000011921
+          ],
+          "profiles": [],
+          "median_ms": 85.54749999940395
+        },
+        {
+          "lane": "flat",
+          "before": [39.73499998450279, 33.375, 36.51500001549721],
+          "measured": [
+            32.224999994039536, 35.96500000357628, 32.25499999523163, 32.275000005960464,
+            34.599999994039536, 31.890000015497208, 35.21000000834465, 31.87000000476837,
+            31.569999992847443, 34.564999997615814
+          ],
+          "profiles": [],
+          "median_ms": 32.26500000059605
+        }
+      ]
+    },
+    {
+      "revision": "a086c1be807f85022032e7a210ca796087b34603",
+      "wasmSha256": "94d24bd3ecb24e15ce1a6b9ba7d8c8fd55f00aad70a7389aacce745255c04baf",
+      "storage": "memory",
+      "count": 1500,
+      "repetitions": 10,
+      "scheduling": "message-channel",
+      "cpuProfile": false,
+      "scriptSha256": "e9b533a4279434fdb24613eb8f4674232cc0113a129292ac3daccb87810dbf6b",
+      "fixtureSha256": "365a348a1a683c6ad0329cc90c433dd294ba371358a7c0dc65dfd36af53e7962",
+      "adapterSha256": "f91eadbe1036406b1ebf07370c1bd16ebd749fe05bedd13d395ab8d6d6a56be7",
+      "results": [
+        {
+          "lane": "include",
+          "before": [130.99500000476837, 94.22499999403954, 89.2199999988079],
+          "measured": [
+            86.125, 91.8250000178814, 86.44999998807907, 84.46500000357628, 87.39500001072884,
+            85.51499998569489, 87.06999999284744, 85.91999998688698, 82.22499999403954,
+            82.89500001072884
+          ],
+          "profiles": [],
+          "median_ms": 86.02249999344349
+        },
+        {
+          "lane": "flat",
+          "before": [43.53499999642372, 33.69999998807907, 33.00999999046326],
+          "measured": [
+            32.69499999284744, 32.13500002026558, 35.16499999165535, 32.605000019073486,
+            34.99500000476837, 31.53999999165535, 30.75499999523163, 36.46999999880791,
+            32.53000000119209, 34.60999998450279
+          ],
+          "profiles": [],
+          "median_ms": 32.650000005960464
+        }
+      ]
+    },
+    {
+      "revision": "a086c1be807f85022032e7a210ca796087b34603",
+      "wasmSha256": "94d24bd3ecb24e15ce1a6b9ba7d8c8fd55f00aad70a7389aacce745255c04baf",
+      "storage": "memory",
+      "count": 1500,
+      "repetitions": 10,
+      "scheduling": "control",
+      "cpuProfile": false,
+      "scriptSha256": "e9b533a4279434fdb24613eb8f4674232cc0113a129292ac3daccb87810dbf6b",
+      "fixtureSha256": "365a348a1a683c6ad0329cc90c433dd294ba371358a7c0dc65dfd36af53e7962",
+      "adapterSha256": "f91eadbe1036406b1ebf07370c1bd16ebd749fe05bedd13d395ab8d6d6a56be7",
+      "results": [
+        {
+          "lane": "include",
+          "before": [381.81999999284744, 375.17999997735023, 370.72999998927116],
+          "measured": [
+            341.7350000143051, 367.4800000190735, 365.330000013113, 368.72499999403954,
+            365.02500000596046, 368.2800000011921, 363.90499997138977, 368.07499998807907,
+            364.19999998807907, 367.02000001072884
+          ],
+          "profiles": [],
+          "median_ms": 366.17500001192093
+        },
+        {
+          "lane": "flat",
+          "before": [40.11999997496605, 35.99500000476837, 32.45000001788139],
+          "measured": [
+            34.67500001192093, 31.514999985694885, 32.179999977350235, 34.69999998807907,
+            32.59000000357628, 36.03499999642372, 32.554999977350235, 31.759999990463257,
+            34.860000014305115, 31.650000005960464
+          ],
+          "profiles": [],
+          "median_ms": 32.57249999046326
+        }
+      ]
+    },
+    {
+      "revision": "a086c1be807f85022032e7a210ca796087b34603",
+      "wasmSha256": "94d24bd3ecb24e15ce1a6b9ba7d8c8fd55f00aad70a7389aacce745255c04baf",
+      "storage": "persistent",
+      "count": 1500,
+      "repetitions": 10,
+      "scheduling": "control",
+      "cpuProfile": false,
+      "scriptSha256": "e9b533a4279434fdb24613eb8f4674232cc0113a129292ac3daccb87810dbf6b",
+      "fixtureSha256": "365a348a1a683c6ad0329cc90c433dd294ba371358a7c0dc65dfd36af53e7962",
+      "adapterSha256": "f91eadbe1036406b1ebf07370c1bd16ebd749fe05bedd13d395ab8d6d6a56be7",
+      "results": [
+        {
+          "lane": "include",
+          "before": [675.964999973774, 542.4449999928474, 525.6200000047684],
+          "measured": [
+            515.0250000059605, 526.7300000190735, 517.5699999928474, 514.3799999952316,
+            512.1000000238419, 506.99000000953674, 509.50999999046326, 506.6299999952316,
+            511.5400000214577, 508.3100000023842
+          ],
+          "profiles": [],
+          "median_ms": 511.82000002264977
+        },
+        {
+          "lane": "flat",
+          "before": [141.2999999821186, 130.19499999284744, 134.90999999642372],
+          "measured": [
+            145.91000002622604, 137.0300000011921, 128.46000000834465, 133.49000000953674,
+            124.22999998927116, 127.52500000596046, 127.86000001430511, 129.05500000715256,
+            128.0199999809265, 132.49000000953674
+          ],
+          "profiles": [],
+          "median_ms": 128.7575000077486
+        }
+      ]
+    },
+    {
+      "revision": "a086c1be807f85022032e7a210ca796087b34603",
+      "wasmSha256": "94d24bd3ecb24e15ce1a6b9ba7d8c8fd55f00aad70a7389aacce745255c04baf",
+      "storage": "persistent",
+      "count": 1500,
+      "repetitions": 10,
+      "scheduling": "message-channel",
+      "cpuProfile": false,
+      "scriptSha256": "e9b533a4279434fdb24613eb8f4674232cc0113a129292ac3daccb87810dbf6b",
+      "fixtureSha256": "365a348a1a683c6ad0329cc90c433dd294ba371358a7c0dc65dfd36af53e7962",
+      "adapterSha256": "f91eadbe1036406b1ebf07370c1bd16ebd749fe05bedd13d395ab8d6d6a56be7",
+      "results": [
+        {
+          "lane": "include",
+          "before": [467.83500000834465, 298.2150000035763, 255.41999998688698],
+          "measured": [
+            239.45500001311302, 246.91999998688698, 246.93000000715256, 268.94499999284744,
+            241.59999999403954, 249.74500000476837, 260.5450000166893, 244.3900000154972,
+            237.29000002145767, 236.87000000476837
+          ],
+          "profiles": [],
+          "median_ms": 245.6550000011921
+        },
+        {
+          "lane": "flat",
+          "before": [157.3149999976158, 266.91499999165535, 144.0649999976158],
+          "measured": [
+            135.31999999284744, 136.08499997854233, 140.21500000357628, 137.30500000715256,
+            136.92500001192093, 140.92500001192093, 128.31999999284744, 144.26000002026558,
+            130.4399999976158, 136.3900000154972
+          ],
+          "profiles": [],
+          "median_ms": 136.65750001370907
+        }
+      ]
+    },
+    {
+      "revision": "a086c1be807f85022032e7a210ca796087b34603",
+      "wasmSha256": "94d24bd3ecb24e15ce1a6b9ba7d8c8fd55f00aad70a7389aacce745255c04baf",
+      "storage": "persistent",
+      "count": 1500,
+      "repetitions": 10,
+      "scheduling": "message-channel",
+      "cpuProfile": false,
+      "scriptSha256": "e9b533a4279434fdb24613eb8f4674232cc0113a129292ac3daccb87810dbf6b",
+      "fixtureSha256": "365a348a1a683c6ad0329cc90c433dd294ba371358a7c0dc65dfd36af53e7962",
+      "adapterSha256": "f91eadbe1036406b1ebf07370c1bd16ebd749fe05bedd13d395ab8d6d6a56be7",
+      "results": [
+        {
+          "lane": "include",
+          "before": [468.77000001072884, 287, 292.4800000190735],
+          "measured": [
+            242.4350000023842, 243.27000001072884, 255.75, 274.8149999976158, 245.20500001311302,
+            244.06999999284744, 239.80499997735023, 237.27499997615814, 238.05500000715256,
+            233.8149999976158
+          ],
+          "profiles": [],
+          "median_ms": 242.8525000065565
+        },
+        {
+          "lane": "flat",
+          "before": [151.86500000953674, 137.91499999165535, 144.75499999523163],
+          "measured": [
+            167.1550000011921, 149.40999999642372, 159.25, 135.54499998688698, 133.28999999165535,
+            134.9549999833107, 138.24500000476837, 129.25999999046326, 131.0600000023842,
+            132.86500000953674
+          ],
+          "profiles": [],
+          "median_ms": 135.24999998509884
+        }
+      ]
+    },
+    {
+      "revision": "a086c1be807f85022032e7a210ca796087b34603",
+      "wasmSha256": "94d24bd3ecb24e15ce1a6b9ba7d8c8fd55f00aad70a7389aacce745255c04baf",
+      "storage": "persistent",
+      "count": 1500,
+      "repetitions": 10,
+      "scheduling": "control",
+      "cpuProfile": false,
+      "scriptSha256": "e9b533a4279434fdb24613eb8f4674232cc0113a129292ac3daccb87810dbf6b",
+      "fixtureSha256": "365a348a1a683c6ad0329cc90c433dd294ba371358a7c0dc65dfd36af53e7962",
+      "adapterSha256": "f91eadbe1036406b1ebf07370c1bd16ebd749fe05bedd13d395ab8d6d6a56be7",
+      "results": [
+        {
+          "lane": "include",
+          "before": [689.4450000226498, 553.2700000107288, 524.1650000214577],
+          "measured": [
+            524.3449999988079, 548.714999973774, 543.9499999880791, 546.3250000178814,
+            542.419999986887, 563.2150000035763, 549.7950000166893, 558.6299999952316,
+            541.3449999988079, 537.5250000059605
+          ],
+          "profiles": [],
+          "median_ms": 545.1375000029802
+        },
+        {
+          "lane": "flat",
+          "before": [141.00499999523163, 130.6550000011921, 134.75499999523163],
+          "measured": [
+            140.06999999284744, 128.52500000596046, 134.6899999976158, 130.03499999642372,
+            133.22499999403954, 128.45500001311302, 127.39000001549721, 126.86999997496605,
+            131.0949999988079, 128.24500000476837
+          ],
+          "profiles": [],
+          "median_ms": 129.2800000011921
+        }
+      ]
+    }
+  ],
+  "profiles": [
+    {
+      "run": "include-profile-release-memory",
+      "file": "memory-1500-include-page-0.cpuprofile",
+      "sha256": "4a77a82155d9387997223d2e735de492ec7ed5ca65093e7eef8e450802e90558",
+      "repetitions": 10,
+      "sampled_ms_per_read": {
+        "js/native": 20.4417,
+        "idle": 263.32939999999996,
+        "wasm": 68.57329999999999,
+        "gc": 2.6268000000000002
+      },
+      "duration_ms": 3550.062
+    },
+    {
+      "run": "include-host-yield-memory",
+      "file": "memory-1500-include-page-0.cpuprofile",
+      "sha256": "60be4ac8d3c3f70edacdb4142e8ce110fb45f853a5b66e1c5ec3d14f57afe0a1",
+      "repetitions": 10,
+      "sampled_ms_per_read": {
+        "js/native": 21.5928,
+        "idle": 0.09280000000000001,
+        "wasm": 71.1824,
+        "gc": 2.6854
+      },
+      "duration_ms": 956.133
+    },
+    {
+      "run": "include-trace-release-persistent",
+      "file": "persistent-1500-include-page-0.cpuprofile",
+      "sha256": "9f3369bef2fc041a8dbdfed008ea29df269fdd65d6d84c87c3dde5034e3e585e",
+      "repetitions": 5,
+      "sampled_ms_per_read": {
+        "js/native": 27.7382,
+        "idle": 423.9196,
+        "wasm": 93.3408,
+        "gc": 4.0200000000000005
+      },
+      "duration_ms": 2745.338
+    },
+    {
+      "run": "include-trace-release-persistent",
+      "file": "persistent-1500-include-shared_worker-1.cpuprofile",
+      "sha256": "27b2cf738cc718e3f2152b9e967fc5a93300305ab77400e4d2f3300abecf1882",
+      "repetitions": 5,
+      "sampled_ms_per_read": {
+        "idle": 400.4706,
+        "js/native": 6.2486,
+        "wasm": 136.3948,
+        "gc": 0.23359999999999997
+      },
+      "duration_ms": 2717.127
+    },
+    {
+      "run": "include-message-channel-persistent",
+      "file": "persistent-1500-include-page-0.cpuprofile",
+      "sha256": "36c9160ce291a28e171dba565ff896860a0ca8133a63beee2133332497c265a9",
+      "repetitions": 10,
+      "sampled_ms_per_read": {
+        "js/native": 142.6483,
+        "idle": 13.185599999999999,
+        "wasm": 107.76140000000001,
+        "gc": 5.7943
+      },
+      "duration_ms": 2694.119
+    },
+    {
+      "run": "include-message-channel-persistent",
+      "file": "persistent-1500-include-shared_worker-1.cpuprofile",
+      "sha256": "1799ec0a735aa82636269cb4aadf267655b4f46cea2a62aba6685ae19ddeee5e",
+      "repetitions": 10,
+      "sampled_ms_per_read": {
+        "idle": 119.88250000000001,
+        "js/native": 3.9488,
+        "wasm": 142.5585,
+        "gc": 0.3316
+      },
+      "duration_ms": 2667.345
+    },
+    {
+      "run": "include-profile-release-persistent",
+      "file": "persistent-1500-include-page-0.cpuprofile",
+      "sha256": "bb0de32e07fae1051563fea1375e173bd38870b1015bfa0996d7f8c4aad7a0de",
+      "repetitions": 10,
+      "sampled_ms_per_read": {
+        "js/native": 25.1852,
+        "idle": 386.7753,
+        "wasm": 92.1247,
+        "gc": 4.8522
+      },
+      "duration_ms": 5089.592
+    }
+  ],
+  "failed_trial": {
+    "scheduling": "host-yield",
+    "storage": "persistent",
+    "error": "NotObserved: Timed out waiting for query coverage",
+    "log_sha256": "280c48eede49b222b3cd4f95cec9f6c68df476e0723c06a71e758c817f59723b"
+  },
+  "timer_trace": {
+    "file": "include-trace-release-persistent/include-trace.json",
+    "sha256": "ac3af3eada06d04e1ad33cf557299401fdf3b52de2f610947de90089c9e49f44",
+    "reads": 5,
+    "foreground_clamped_timer_count": 483,
+    "median_timer_delay_ms": 4.186,
+    "interpretation": "Overlapping waits; their sum is not additive wall-clock attribution."
+  },
+  "checked_in_harness_validation": [
+    {
+      "revision": "a086c1be807f85022032e7a210ca796087b34603",
+      "wasmSha256": "94d24bd3ecb24e15ce1a6b9ba7d8c8fd55f00aad70a7389aacce745255c04baf",
+      "storage": "memory",
+      "count": 1500,
+      "repetitions": 5,
+      "scheduling": "control",
+      "cpuProfile": true,
+      "trace": true,
+      "setup": {
+        "open_ms": 277.8600000143051,
+        "empty_query_ms": 122.28500002622604,
+        "seed_ms": 181.31999999284744,
+        "local_settlement_ms": 1.7249999940395355
+      },
+      "scriptSha256": "f6cef18eaee0d9a25a3c8f592b2265b1d52ef1d4c6e2232c89005d1be6892912",
+      "fixtureSha256": "b37b1b1ced8626a3e3e3737e558e9273a1ea83555665cd8e5566b5a78ccbe67c",
+      "adapterSha256": "f91eadbe1036406b1ebf07370c1bd16ebd749fe05bedd13d395ab8d6d6a56be7",
+      "results": [
+        {
+          "lane": "include",
+          "before": [382.5949999988079, 376.625, 370.72999998927116],
+          "measured": [
+            330.14500001072884, 353.8250000178814, 354.5349999964237, 352.17999997735023,
+            354.72999998927116
+          ],
+          "profiles": [
+            {
+              "file": "memory-1500-include-page-0.cpuprofile",
+              "type": "page"
+            }
+          ]
+        },
+        {
+          "lane": "flat",
+          "before": [41.3299999833107, 37.04999998211861, 33.605000019073486],
+          "measured": [
+            39.229999989271164, 33.514999985694885, 34.75, 37.230000019073486, 33.84499999880791
+          ],
+          "profiles": [
+            {
+              "file": "memory-1500-flat-page-0.cpuprofile",
+              "type": "page"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "revision": "a086c1be807f85022032e7a210ca796087b34603",
+      "wasmSha256": "94d24bd3ecb24e15ce1a6b9ba7d8c8fd55f00aad70a7389aacce745255c04baf",
+      "storage": "persistent",
+      "count": 1500,
+      "repetitions": 5,
+      "scheduling": "message-channel",
+      "cpuProfile": true,
+      "trace": false,
+      "setup": {
+        "open_ms": 412.0600000023842,
+        "empty_query_ms": 523.2299999892712,
+        "seed_ms": 205.4549999833107,
+        "local_settlement_ms": 260.5900000035763
+      },
+      "scriptSha256": "3dba1ad32f4da0498a2b2ade68562eecbdce6c60e7cbb1cb9974a695ec5235d0",
+      "fixtureSha256": "b37b1b1ced8626a3e3e3737e558e9273a1ea83555665cd8e5566b5a78ccbe67c",
+      "adapterSha256": "f91eadbe1036406b1ebf07370c1bd16ebd749fe05bedd13d395ab8d6d6a56be7",
+      "results": [
+        {
+          "lane": "include",
+          "before": [472.02000001072884, 299.89500001072884, 268.0300000011921],
+          "measured": [
+            272.3700000047684, 272.57000002264977, 258.9050000011921, 292.40499997138977,
+            279.4249999821186
+          ],
+          "profiles": [
+            {
+              "file": "persistent-1500-include-page-0.cpuprofile",
+              "type": "page"
+            },
+            {
+              "file": "persistent-1500-include-shared_worker-1.cpuprofile",
+              "type": "shared_worker"
+            }
+          ]
+        },
+        {
+          "lane": "flat",
+          "before": [194.51000002026558, 156.58000001311302, 151.13999998569489],
+          "measured": [
+            153.2699999809265, 154.2650000154972, 145.82000002264977, 150.41999998688698,
+            153.4050000011921
+          ],
+          "profiles": [
+            {
+              "file": "persistent-1500-flat-page-0.cpuprofile",
+              "type": "page"
+            },
+            {
+              "file": "persistent-1500-flat-shared_worker-1.cpuprofile",
+              "type": "shared_worker"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
