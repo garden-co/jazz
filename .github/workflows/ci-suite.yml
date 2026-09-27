@@ -119,57 +119,6 @@ jobs:
         if: always()
         run: sccache --show-stats
 
-  # This runs a bounded real M3 oracle smoke separately from the workspace
-  # suite. The Rust test remains #[ignore] because its full randomized matrix
-  # is a long-running manual soak; CI deliberately invokes the bounded,
-  # deterministic canonical seed 11. Do not persist this randomized test
-  # job's target directory in the Rust artifact cache.
-  test-rust-differential:
-    # The full randomized matrix remains a long-running manual soak; this job
-    # intentionally exercises one bounded deterministic seed.
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 15
-    container:
-      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:dcb4ec5e4f5507b258805617d58ee6976f7dcee2e9afe1b05ae3d41cc185ef35
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - name: Authenticate trusted sccache writer
-        if: inputs.trusted-cache && inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != ''
-        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
-        with:
-          role-to-assume: ${{ vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN }}
-          aws-region: ${{ vars.SCCACHE_REGION }}
-      - name: Authenticate trusted sccache reader
-        if: inputs.trusted-cache && !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != ''
-        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
-        with:
-          role-to-assume: ${{ vars.SCCACHE_PR_READER_AWS_ROLE_ARN }}
-          aws-region: ${{ vars.SCCACHE_REGION }}
-      - name: Export trusted sccache configuration
-        if: inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '')
-        env:
-          CACHE_BUCKET: ${{ vars.SCCACHE_BUCKET }}
-          CACHE_REGION: ${{ vars.SCCACHE_REGION }}
-        run: |
-          echo "SCCACHE_BUCKET=${CACHE_BUCKET}" >> "${GITHUB_ENV}"
-          echo "SCCACHE_REGION=${CACHE_REGION}" >> "${GITHUB_ENV}"
-          echo "SCCACHE_S3_USE_SSL=true" >> "${GITHUB_ENV}"
-          echo "SCCACHE_S3_KEY_PREFIX=jazz-ci/v1/production/blacksmith-v1" >> "${GITHUB_ENV}"
-      - uses: ./.github/actions/setup-blacksmith
-        with:
-          sccache-s3: ${{ inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') }}
-          rust-cache: "false"
-      # The shared partition compiles the exact libtest first; its semantic
-      # watchdog still measures execution only, never a cold compile.
-      - name: Run CI-equivalent M3 differential partition
-        run: node dev/gates/local-ci-equivalent.mjs --ci-partition rust-differential
-      - name: Report sccache statistics
-        if: always()
-        run: sccache --show-stats
-
   # This is deliberately an exact, named historical-storage partition rather
   # than an incidental member of the broad nextest shard. A green Rust suite
   # must mean current code opened the pinned native and real-browser corpora.
@@ -214,15 +163,25 @@ jobs:
           sccache-s3: ${{ inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') }}
       - name: Run CI-equivalent native and browser storage compatibility partition
         run: node dev/gates/local-ci-equivalent.mjs --ci-partition storage-compat
+      # The bounded real M3 oracle smoke (canonical seed 11) shares this job
+      # because its libtest is the exact `jazz` lib-test unit the native corpus
+      # just built, so it costs one run instead of a second cold compile on its
+      # own runner. The Rust test remains #[ignore]: its full randomized matrix
+      # is the nightly/manual soak. It still runs when the corpus step fails so
+      # both results are always reported.
+      - name: Run CI-equivalent M3 differential partition
+        if: ${{ !cancelled() }}
+        run: node dev/gates/local-ci-equivalent.mjs --ci-partition rust-differential
       - name: Report sccache statistics
         if: always()
         run: sccache --show-stats
 
-  # Branch protection requires this stable check name. It aggregates both Rust
-  # correctness jobs and stays red whenever either dependency fails or is cancelled.
+  # Branch protection requires this stable check name. It aggregates the Rust
+  # correctness jobs and stays red whenever any dependency fails or is cancelled.
+  # test-storage-compat also runs the bounded M3 differential partition.
   test-rust:
     if: always()
-    needs: [test-rust-workspace, test-rust-differential, test-storage-compat]
+    needs: [test-rust-workspace, test-storage-compat]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 2
     permissions:
@@ -231,11 +190,9 @@ jobs:
       - name: Require all Rust partitions
         env:
           WORKSPACE_RESULT: ${{ needs.test-rust-workspace.result }}
-          DIFFERENTIAL_RESULT: ${{ needs.test-rust-differential.result }}
           STORAGE_COMPAT_RESULT: ${{ needs.test-storage-compat.result }}
         run: |
           test "${WORKSPACE_RESULT}" = success
-          test "${DIFFERENTIAL_RESULT}" = success
           test "${STORAGE_COMPAT_RESULT}" = success
 
   test-ts:

@@ -189,13 +189,7 @@ const assertSuiteS3ConfigurationBoundary = (source) => {
       `untrusted suite callers must not inherit ${name}`,
     );
 
-  for (const name of [
-    "lint",
-    "test-rust-workspace",
-    "test-rust-differential",
-    "test-storage-compat",
-    "test-ts",
-  ]) {
+  for (const name of ["lint", "test-rust-workspace", "test-storage-compat", "test-ts"]) {
     const parsedJob = document.jobs[name];
     assert.equal(parsedJob.env, undefined, `${name} must not configure S3 at job scope`);
     const exportIndex = parsedJob.steps.findIndex(
@@ -335,19 +329,19 @@ const assertTurboCredentialConditions = (typescriptJob) => {
 test("Rust CI uses pinned prebuilt tools without charging Rust-only jobs for wasm-pack", () => {
   const lint = job("lint");
   const workspaceRust = job("test-rust-workspace");
-  const differentialRust = job("test-rust-differential");
+  const storageCompatRust = job("test-storage-compat");
   const typescript = job("test-ts");
 
   assert.doesNotMatch(workflowSuite, /cargo install cargo-nextest/);
   assert.match(setupBlacksmithAction, /cargo-nextest --version \| grep -F "0\.9\.143"/);
   assert.match(setupBlacksmithAction, /wasm-pack --version \| grep -F "0\.13\.1"/);
-  for (const rust of [workspaceRust, differentialRust]) {
+  for (const rust of [workspaceRust, storageCompatRust]) {
     assert.doesNotMatch(rust, /install-rust-tool|ensure:rust-toolchain|wasm-pack/);
     assert.doesNotMatch(rust, /rust-components:/);
   }
   assert.doesNotMatch(lint, /install-rust-tool|ensure:rust-toolchain|wasm-pack/);
   assert.doesNotMatch(typescript, /install-rust-tool/);
-  for (const source of [lint, workspaceRust, differentialRust, typescript])
+  for (const source of [lint, workspaceRust, storageCompatRust, typescript])
     assert.match(source, /uses: \.\/\.github\/actions\/setup-blacksmith/);
 });
 
@@ -621,14 +615,18 @@ test("trusted runners consume the validated immutable tool bundle", () => {
 
 test("Rust CI keeps the bounded real differential oracle in its shared command partition", () => {
   const workspace = job("test-rust-workspace");
-  const differential = job("test-rust-differential");
   const storageCompat = job("test-storage-compat");
   const aggregate = job("test-rust");
   const localCi = fs.readFileSync(path.join(root, "dev/gates/local-ci-equivalent.mjs"), "utf8");
 
   assert.match(workspace, /local-ci-equivalent\.mjs --ci-partition rust-workspace/);
-  assert.match(differential, /local-ci-equivalent\.mjs --ci-partition rust-differential/);
   assert.match(storageCompat, /local-ci-equivalent\.mjs --ci-partition storage-compat/);
+  // The oracle reuses the lib-test unit the native corpus just built, and it
+  // still reports when the corpus step fails.
+  assert.match(
+    storageCompat,
+    /--ci-partition storage-compat\n[\s\S]*?if: \$\{\{ !cancelled\(\) \}\}\n\s+run: node dev\/gates\/local-ci-equivalent\.mjs --ci-partition rust-differential/,
+  );
   assert.match(
     localCi,
     /run-rust-tests\.mjs[\s\S]*--timeout-seconds[\s\S]*780[\s\S]*--nextest-profile[\s\S]*jazz-ci/,
@@ -647,14 +645,9 @@ test("Rust CI keeps the bounded real differential oracle in its shared command p
     /#\[ignore = "#\d+: manual randomized differential soak; bounded seed 11 runs in CI"\]\n(?:pub )?fn m3_maintained_one_shot_differential_oracle/,
   );
   assert.match(aggregate, /if: always\(\)/);
-  assert.match(
-    aggregate,
-    /needs: \[test-rust-workspace, test-rust-differential, test-storage-compat\]/,
-  );
+  assert.match(aggregate, /needs: \[test-rust-workspace, test-storage-compat\]/);
   assert.match(aggregate, /test "\$\{WORKSPACE_RESULT\}" = success/);
-  assert.match(aggregate, /test "\$\{DIFFERENTIAL_RESULT\}" = success/);
   assert.match(aggregate, /test "\$\{STORAGE_COMPAT_RESULT\}" = success/);
-  assert.match(differential, /rust-cache: "false"/);
   assert.throws(
     () => assert.match(localCi.replace("--exact --ignored", "--ignored"), /--exact --ignored/),
     /exact/,
@@ -1216,13 +1209,7 @@ test("Turbo cache uses its pinned OIDC policy only inside the trusted suite invo
 });
 
 test("shared Rust cache writes are main-only while trusted PRs receive read access", () => {
-  for (const name of [
-    "lint",
-    "test-rust-workspace",
-    "test-rust-differential",
-    "test-storage-compat",
-    "test-ts",
-  ]) {
+  for (const name of ["lint", "test-rust-workspace", "test-storage-compat", "test-ts"]) {
     const source = job(name);
     assert.match(source, /role-to-assume: \$\{\{ vars\.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN \}\}/);
     assert.match(source, /role-to-assume: \$\{\{ vars\.SCCACHE_PR_READER_AWS_ROLE_ARN \}\}/);

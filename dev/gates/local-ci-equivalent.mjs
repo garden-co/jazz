@@ -40,7 +40,7 @@ const allowedInheritedCiJazzEnv = new Set(ALLOWED_INHERITED_CI_JAZZ_ENV);
 export const ciPartitionJobs = Object.freeze({
   lint: "lint",
   "rust-workspace": "test-rust-workspace",
-  "rust-differential": "test-rust-differential",
+  "rust-differential": "test-storage-compat",
   "storage-compat": "test-storage-compat",
   typescript: "test-ts",
   "react-native": "test-react-native",

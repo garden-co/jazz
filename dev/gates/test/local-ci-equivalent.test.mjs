@@ -75,6 +75,12 @@ const isKnownAdminStep = (step) =>
 
 function assertCiSuiteUsesOnlySharedCorrectnessPartitions(model) {
   const expectedJobs = new Set(Object.values(ciPartitionJobs));
+  // A job may host several partitions (storage-compat also runs the M3
+  // differential on the lib-test unit it just built); every run step must still
+  // be one of that job's shared partition commands, each invoked exactly once.
+  const jobCommands = new Map();
+  for (const [partition, jobName] of Object.entries(ciPartitionJobs))
+    jobCommands.set(jobName, [...(jobCommands.get(jobName) ?? []), partitionCommand(partition)]);
   for (const [partition, jobName] of Object.entries(ciPartitionJobs)) {
     const job = model.jobs?.[jobName];
     assert.ok(job, `CI omits ${jobName} for shared ${partition} partition`);
@@ -85,8 +91,9 @@ function assertCiSuiteUsesOnlySharedCorrectnessPartitions(model) {
       1,
       `${jobName} must invoke its shared ${partition} partition exactly once`,
     );
+    const allowed = jobCommands.get(jobName);
     for (const step of runSteps) {
-      if (step.run === expected || isKnownAdminStep(step)) continue;
+      if (allowed.includes(step.run) || isKnownAdminStep(step)) continue;
       assert.fail(`${jobName} has an unshared direct run step: ${step.name ?? step.run}`);
     }
   }
@@ -96,11 +103,7 @@ function assertCiSuiteUsesOnlySharedCorrectnessPartitions(model) {
   const aggregateRuns = (aggregate.steps ?? []).filter(({ run }) => typeof run === "string");
   assert.deepEqual(
     aggregateRuns.map(({ run }) => run.trim()),
-    [
-      'test "${WORKSPACE_RESULT}" = success\n' +
-        'test "${DIFFERENTIAL_RESULT}" = success\n' +
-        'test "${STORAGE_COMPAT_RESULT}" = success',
-    ],
+    ['test "${WORKSPACE_RESULT}" = success\n' + 'test "${STORAGE_COMPAT_RESULT}" = success'],
     "the Rust aggregate may check partition statuses, but must not add a correctness command",
   );
 
