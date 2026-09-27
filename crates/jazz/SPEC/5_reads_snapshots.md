@@ -99,12 +99,20 @@ absent, and predicate reads at commit (ch. 3).
 The `dots` field is the escape hatch for the general snapshot model: a snapshot
 ref can name explicit transaction dots outside the contiguous/global and
 owner-local prefixes. A history-complete core needs no dots. A partial node's
-exclusive base may contain foreign dots, but only for locally held transactions
-already carrying an accepted global fate; those dots describe the actual read
-cut and authority validation evaluates the full dotted snapshot. They are not a
-claim that intervening global history is complete. Sync payload dedup and
-reconnect state remain separate (ch. 8): mere receipt of an unfated payload does
-not create a snapshot dot.
+exclusive base may contain foreign dots for locally held transactions already
+carrying an accepted global fate. There is one explicit local-ownership recovery
+case: a browser owner may adopt locally durable pending writes by its admitted
+author from older foreground node identities. Transactions opened by that same
+author include the recovered transaction ids as dots. A different session or
+backend attribution cannot inherit the recovery set. Recovery does not change a
+transaction's author, id, fate, or durability, and does not widen snapshots that
+were already open. Terminal recovery markers are retired through normal fate
+processing; existing snapshots retain their captured dots.
+
+Those dots describe the actual read cut, and authority validation evaluates the
+full dotted snapshot. They do not claim that intervening global history is
+complete. Sync payload dedup and reconnect state remain separate (ch. 8): mere
+receipt of an unfated foreign payload does not create a snapshot dot.
 
 ### 5.4 Reads inside an exclusive transaction
 

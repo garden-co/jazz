@@ -165,6 +165,28 @@ where
         Ok(())
     }
 
+    /// Complete snapshot admission for durable browser writes explicitly
+    /// recovered by the Db owner. Call only immediately after open, under the
+    /// same node lock, with that owner's recovery set. Receiving an unfated
+    /// foreign payload is not sufficient to admit it here.
+    pub(crate) fn include_recovered_local_snapshot_dots(
+        &mut self,
+        id: OpenTransactionId,
+        recovered: impl IntoIterator<Item = TxId>,
+    ) -> Result<(), Error> {
+        let snapshot = &mut self.open_tx_mut(id)?.base_snapshot;
+        let owner = snapshot.owner;
+        let before = snapshot.dots.len();
+        snapshot
+            .dots
+            .extend(recovered.into_iter().filter(|tx| tx.node != owner));
+        if snapshot.dots.len() != before {
+            snapshot.dots.sort_unstable();
+            snapshot.dots.dedup();
+        }
+        Ok(())
+    }
+
     /// Read a row inside an exclusive transaction.
     pub async fn tx_read(
         &mut self,

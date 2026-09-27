@@ -787,7 +787,9 @@ where
     /// Restore unsettled writes relayed from a browser client sharing this
     /// worker's author. Browser workers persist main-thread transactions whose
     /// node differs from the worker node, so ordinary local-origin recovery
-    /// cannot discover them after a cold worker restart.
+    /// cannot discover them after a cold worker restart. Transactions opened
+    /// afterwards by this admitted author also include the recovered local
+    /// writes in their frozen snapshot, without changing those writes' fate.
     #[doc(hidden)]
     pub async fn restore_browser_relay_pending_uploads(&self) -> Result<(), Error> {
         self.node

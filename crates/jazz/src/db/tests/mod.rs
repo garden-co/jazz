@@ -137,6 +137,7 @@ use support::block_on;
 use support::*;
 use wire_transport::byte_duplex_with_session;
 
+mod browser_recovery;
 mod catalogue;
 mod catalogue_announcements;
 mod chunk_io_pump;

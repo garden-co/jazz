@@ -34,6 +34,26 @@ where
             .await
     }
 
+    // Browser recovery explicitly adopts durable pending writes from older tab
+    // nodes for this Db's admitted author. Freeze those dots at transaction open;
+    // a different session/attribution cannot inherit the owner's recovery set.
+    fn include_browser_recovery_snapshot(
+        &self,
+        node: &mut NodeState<S>,
+        id: OpenTransactionId,
+        made_by: AuthorSubject,
+    ) -> Result<(), Error> {
+        if made_by != self.identity.author {
+            return Ok(());
+        }
+        let recovered = self.node.browser_relay_recovered_tx_ids.borrow();
+        if recovered.is_empty() {
+            return Ok(());
+        }
+        node.include_recovered_local_snapshot_dots(id, recovered.iter().copied())
+            .map_err(Into::into)
+    }
+
     async fn transaction_is_exclusive(&self, id: OpenTransactionId) -> Result<bool, Error> {
         self.lock_for_transaction_operation(id)
             .await?
@@ -129,11 +149,9 @@ where
             made_by,
             permission_subject,
         } = self.resolve_write_identity(identity)?;
-        self.lock_for_transaction_open(id)
-            .await?
-            .open_mergeable(id, made_by, permission_subject)
-            .await
-            .map_err(Into::into)
+        let mut node = self.lock_for_transaction_open(id).await?;
+        node.open_mergeable(id, made_by, permission_subject).await?;
+        self.include_browser_recovery_snapshot(&mut node, id, made_by)
     }
 
     /// Queue mergeable transaction admission behind earlier owner operations.
@@ -855,11 +873,10 @@ where
             made_by,
             permission_subject,
         } = self.resolve_write_identity(identity)?;
-        self.lock_for_transaction_open(id)
-            .await?
-            .open_exclusive_with_identity(id, made_by, permission_subject.unwrap_or(made_by))
-            .await
-            .map_err(Into::into)
+        let mut node = self.lock_for_transaction_open(id).await?;
+        node.open_exclusive_with_identity(id, made_by, permission_subject.unwrap_or(made_by))
+            .await?;
+        self.include_browser_recovery_snapshot(&mut node, id, made_by)
     }
 
     /// Queue exclusive snapshot admission behind earlier owner operations.
@@ -1607,10 +1624,8 @@ where
         id: OpenTransactionId,
         author: AuthorSubject,
     ) -> Result<(), Error> {
-        self.lock_for_transaction_open(id)
-            .await?
-            .open_exclusive_for_identity(id, author)
-            .await
-            .map_err(Into::into)
+        let mut node = self.lock_for_transaction_open(id).await?;
+        node.open_exclusive_for_identity(id, author).await?;
+        self.include_browser_recovery_snapshot(&mut node, id, author)
     }
 }
