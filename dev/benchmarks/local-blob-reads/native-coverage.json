@@ -1,0 +1,143 @@
+{
+  "format": 1,
+  "source": "552be68a526f4ed59d949d338989b56347db0579",
+  "benchmark_sha256": "76fc25eedaa6352b1e332f2b2ab263d68d421914f90a70f070c88d6c3fc470b1",
+  "candidate": {
+    "binary_sha256": "25cc0f8b3a7c7429e5e223c38c342072677f055dee84641287d9e86745c78fa8",
+    "patch_sha256": "f310eb22efbda92bd03419d788938a22a3b3db19789c7a412992b7cc6b8f1965",
+    "benchmark_sha256": "76fc25eedaa6352b1e332f2b2ab263d68d421914f90a70f070c88d6c3fc470b1"
+  },
+  "control": {
+    "binary_sha256": "2db4446605ea74058d310c0f02107476d84cd72c2be1ab61abd80655f0f96af2",
+    "source_sha256": {
+      "crates/jazz/src/node/query_eval.rs": "bfddd43b6f3b0a4d71893cf63e6d4d51e84d930832cf1d756c0675f499621666",
+      "crates/jazz/src/node/query_eval/maintained_views.rs": "6eed7bcaf775de5944a0cc160feb4a89adeb6e6a45e2f2fe44995dd798cf62f7"
+    }
+  },
+  "cases": {
+    "32768": {
+      "control": {
+        "elapsed_ms": 2.9207919999999996,
+        "owner_tick_ms": 2.23252,
+        "foreground_tick_ms": 0.15091700000000002,
+        "read_poll_ms": 0.4107715,
+        "full_materializations": 0.0,
+        "owner_messages": 1.0,
+        "foreground_messages": 2.0
+      },
+      "trial": {
+        "elapsed_ms": 3.339042,
+        "owner_tick_ms": 2.5933125,
+        "foreground_tick_ms": 0.16281250000000003,
+        "read_poll_ms": 0.467084,
+        "full_materializations": 0.0,
+        "owner_messages": 1.0,
+        "foreground_messages": 2.0
+      },
+      "post-lowering": {
+        "elapsed_ms": 2.6407914999999997,
+        "owner_tick_ms": 2.0021674999999997,
+        "foreground_tick_ms": 0.1313125,
+        "read_poll_ms": 0.40131300000000003,
+        "full_materializations": 0.0,
+        "owner_messages": 1.0,
+        "foreground_messages": 2.0
+      },
+      "speedup": 1.1060290068337466,
+      "reduction_percent": 9.586458056581915
+    },
+    "262144": {
+      "control": {
+        "elapsed_ms": 4.9906875,
+        "owner_tick_ms": 3.8539164999999995,
+        "foreground_tick_ms": 0.11943799999999999,
+        "read_poll_ms": 0.9901250000000001,
+        "full_materializations": 4.0,
+        "owner_messages": 1.0,
+        "foreground_messages": 2.0
+      },
+      "trial": {
+        "elapsed_ms": 4.952729,
+        "owner_tick_ms": 3.6693125,
+        "foreground_tick_ms": 0.132687,
+        "read_poll_ms": 1.055542,
+        "full_materializations": 3.0,
+        "owner_messages": 1.0,
+        "foreground_messages": 2.0
+      },
+      "post-lowering": {
+        "elapsed_ms": 4.258521,
+        "owner_tick_ms": 3.127208,
+        "foreground_tick_ms": 0.120291,
+        "read_poll_ms": 0.972896,
+        "full_materializations": 3.0,
+        "owner_messages": 1.0,
+        "foreground_messages": 2.0
+      },
+      "speedup": 1.1719297615298832,
+      "reduction_percent": 14.67065409324867
+    },
+    "4194304": {
+      "control": {
+        "elapsed_ms": 34.6998545,
+        "owner_tick_ms": 25.931125,
+        "foreground_tick_ms": 0.172146,
+        "read_poll_ms": 8.5772075,
+        "full_materializations": 4.0,
+        "owner_messages": 1.0,
+        "foreground_messages": 2.0
+      },
+      "trial": {
+        "elapsed_ms": 27.0313545,
+        "owner_tick_ms": 18.141854000000002,
+        "foreground_tick_ms": 0.17443750000000002,
+        "read_poll_ms": 8.693646000000001,
+        "full_materializations": 3.0,
+        "owner_messages": 1.0,
+        "foreground_messages": 2.0
+      },
+      "post-lowering": {
+        "elapsed_ms": 26.616437499999996,
+        "owner_tick_ms": 17.6021035,
+        "foreground_tick_ms": 0.170021,
+        "read_poll_ms": 8.656582499999999,
+        "full_materializations": 3.0,
+        "owner_messages": 1.0,
+        "foreground_messages": 2.0
+      },
+      "speedup": 1.3037001852708503,
+      "reduction_percent": 23.295247534827578
+    },
+    "16777216": {
+      "control": {
+        "elapsed_ms": 171.5441245,
+        "owner_tick_ms": 117.2341255,
+        "foreground_tick_ms": 0.177854,
+        "read_poll_ms": 54.11220899999999,
+        "full_materializations": 4.0,
+        "owner_messages": 1.0,
+        "foreground_messages": 2.0
+      },
+      "trial": {
+        "elapsed_ms": 139.064187,
+        "owner_tick_ms": 84.5278755,
+        "foreground_tick_ms": 0.179209,
+        "read_poll_ms": 54.0394795,
+        "full_materializations": 3.0,
+        "owner_messages": 1.0,
+        "foreground_messages": 2.0
+      },
+      "post-lowering": {
+        "elapsed_ms": 138.6401875,
+        "owner_tick_ms": 84.326188,
+        "foreground_tick_ms": 0.1789795,
+        "read_poll_ms": 54.082147000000006,
+        "full_materializations": 3.0,
+        "owner_messages": 1.0,
+        "foreground_messages": 2.0
+      },
+      "speedup": 1.2373333273225702,
+      "reduction_percent": 19.181034090153293
+    }
+  }
+}
