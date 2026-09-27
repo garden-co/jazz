@@ -350,7 +350,7 @@ Every principal Record has issuer String then subject String, preserving exact
 UTF-8, with each nonempty component limited to 16 KiB. Groove supplies enum
 framing, record offsets, strings, UUIDs, and integers; no account-specific byte
 tags or serializer defaults define their encoding. The command and descriptor
-bytes are pinned in `src/account_registry/command-v1.corpus` (five command lines,
+bytes are pinned in `layers/types/src/account_registry/command-v1.corpus` (five command lines,
 then the canonical descriptor). Roots must match the journal profile exactly;
 unknown profiles are rejected before replay. As in ordinary Groove records,
 a terminal String consumes its record remainder:

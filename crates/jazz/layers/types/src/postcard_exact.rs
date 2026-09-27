@@ -31,7 +31,7 @@ where
 ///
 /// Equivalent to `to_allocvec(value)? == expected`, but compares while
 /// serializing: it allocates nothing and stops at the first differing byte.
-pub(crate) fn encodes_exactly<T: Serialize + ?Sized>(value: &T, expected: &[u8]) -> bool {
+pub fn encodes_exactly<T: Serialize + ?Sized>(value: &T, expected: &[u8]) -> bool {
     postcard::serialize_with_flavor(value, CanonicalBytesMatch { expected })
         .is_ok_and(|remaining: &[u8]| remaining.is_empty())
 }

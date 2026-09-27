@@ -12,26 +12,26 @@ fn cached(slot: &'static OnceLock<bool>, name: &str) -> bool {
 }
 
 /// `JAZZ_COVERED_INPUT_TRACE`: covered-input and delivery tracing.
-pub(crate) fn covered_input_trace() -> bool {
+pub fn covered_input_trace() -> bool {
     static SLOT: OnceLock<bool> = OnceLock::new();
     cached(&SLOT, "JAZZ_COVERED_INPUT_TRACE")
 }
 
 /// `JAZZ_REHYDRATE_TRACE`: publication rehydration tracing.
-pub(crate) fn rehydrate_trace() -> bool {
+pub fn rehydrate_trace() -> bool {
     static SLOT: OnceLock<bool> = OnceLock::new();
     cached(&SLOT, "JAZZ_REHYDRATE_TRACE")
 }
 
 /// `JAZZ_QUERY_TEMPLATE_TRACE`: query template lowering tracing.
 #[cfg(any(test, feature = "testing"))]
-pub(crate) fn query_template_trace() -> bool {
+pub fn query_template_trace() -> bool {
     static SLOT: OnceLock<bool> = OnceLock::new();
     cached(&SLOT, "JAZZ_QUERY_TEMPLATE_TRACE")
 }
 
 /// `JAZZ_FORCE_SINGLETON_VERSION_CARRIERS`: disable outbound run building.
-pub(crate) fn force_singleton_version_carriers() -> bool {
+pub fn force_singleton_version_carriers() -> bool {
     static SLOT: OnceLock<bool> = OnceLock::new();
     cached(&SLOT, "JAZZ_FORCE_SINGLETON_VERSION_CARRIERS")
 }

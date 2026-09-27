@@ -23,7 +23,7 @@ pub fn start() -> Recording {
     Recording
 }
 
-pub(crate) fn record(event: impl FnOnce() -> String) {
+pub fn record(event: impl FnOnce() -> String) {
     if RECORDERS.load(Ordering::Relaxed) == 0 {
         return;
     }
@@ -45,7 +45,7 @@ pub fn snapshot() -> String {
         .join("\n")
 }
 
-pub(crate) fn opaque_hash(value: &impl std::hash::Hash) -> u64 {
+pub fn opaque_hash(value: &impl std::hash::Hash) -> u64 {
     use std::hash::Hasher;
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     value.hash(&mut hash);

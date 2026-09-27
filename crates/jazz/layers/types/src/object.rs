@@ -93,15 +93,15 @@ mod occurrence {
     }
 
     impl OutputOccurrenceId {
-        pub(crate) fn has_typed_discriminators(&self) -> bool {
+        pub fn has_typed_discriminators(&self) -> bool {
             !self.union_arms.is_empty()
         }
 
-        pub(crate) fn root_source(&self) -> ObjectId {
+        pub fn root_source(&self) -> ObjectId {
             self.root
         }
 
-        pub(crate) fn union_arms(&self) -> &[(usize, String)] {
+        pub fn union_arms(&self) -> &[(usize, String)] {
             &self.union_arms
         }
 
@@ -117,7 +117,7 @@ mod occurrence {
             }
         }
 
-        pub(crate) fn with_union_arms(
+        pub fn with_union_arms(
             root: ObjectId,
             joined: impl IntoIterator<Item = ObjectId>,
             union_arms: impl IntoIterator<Item = (usize, String)>,
@@ -146,7 +146,7 @@ mod occurrence {
         }
 
         /// Source rows contributed after the root, in declared join order.
-        pub(crate) fn joined_sources(&self) -> &[ObjectId] {
+        pub fn joined_sources(&self) -> &[ObjectId] {
             &self.joined
         }
 
@@ -206,7 +206,8 @@ mod occurrence {
     }
 }
 
-pub(crate) use occurrence::OutputOccurrenceId;
+#[doc(hidden)]
+pub use occurrence::OutputOccurrenceId;
 
 /// Stable, opaque identity of one query result.
 ///
@@ -323,7 +324,7 @@ impl ResultKey {
         OutputOccurrenceId::with_union_arms(root, joined, union_arms).map(Self)
     }
 
-    pub(crate) fn as_occurrence(&self) -> &OutputOccurrenceId {
+    pub fn as_occurrence(&self) -> &OutputOccurrenceId {
         &self.0
     }
 

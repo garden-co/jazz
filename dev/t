@@ -10,26 +10,35 @@ cd "$ROOT"
 
 usage() {
   cat >&2 <<'EOF'
-Usage: dev/t [--lib | --test TARGET] [--exact] FILTER [-- LIBTEST-OPTIONS...]
+Usage: dev/t [-p PACKAGE] [--lib | --test TARGET] [--exact] FILTER [-- LIBTEST-OPTIONS...]
 
 Runs exactly one focused Jazz test with -p jazz --no-default-features --features
 test. The default target is --lib. Cargo's --list inventory is authoritative:
 the wrapper resolves a unique canonical module-path test name from FILTER, then
 runs that resolved name with --exact. --exact requires FILTER itself to already
 be that full canonical name; without it FILTER is a literal substring.
+-p selects one of Jazz's layer crates (for example jazz-types) instead of
+jazz; it is built with --no-default-features --features testing.
 
 Examples:
   dev/t subscription::tests::reopens
   dev/t --exact db::tests::round_trips
   dev/t --test incremental_delivery_canary maintained_relation -- --nocapture
+  dev/t -p jazz-types ids::tests::row_author_rejects_noncanonical_system_origin
 EOF
 }
 
 target_kind="lib"
 target_name=""
+package="jazz"
 exact=false
 while (($#)); do
   case "$1" in
+    -p|--package)
+      (($# >= 2)) || { usage; exit 2; }
+      package="$2"
+      shift 2
+      ;;
     --lib)
       target_kind="lib"
       target_name=""
@@ -79,19 +88,21 @@ for required in cargo mktemp grep sed date; do
   }
 done
 
-cargo_args=(-p jazz --no-default-features --features testing,transport-compression-zstd)
+features="testing,transport-compression-zstd"
+[[ "$package" == "jazz" ]] || features="testing"
+cargo_args=(-p "$package" --no-default-features --features "$features")
 if [[ "$target_kind" == "lib" ]]; then
   cargo_args+=(--lib)
-  selected_binary="jazz lib tests"
+  selected_binary="$package lib tests"
 else
   cargo_args+=(--test "$target_name")
-  selected_binary="jazz integration test: $target_name"
+  selected_binary="$package integration test: $target_name"
 fi
 
 target_dir="${CARGO_TARGET_DIR:-$ROOT/target}"
 printf 'dev/t: target=%s\n' "$selected_binary"
-printf 'dev/t: features=no-default-features,testing,transport-compression-zstd; cache target=%s rustc_wrapper=%s sccache_dir=%s incremental=%s\n' \
-  "$target_dir" "${RUSTC_WRAPPER:-none}" "${SCCACHE_DIR:-none}" "${CARGO_INCREMENTAL:-default}"
+printf 'dev/t: features=no-default-features,%s; cache target=%s rustc_wrapper=%s sccache_dir=%s incremental=%s\n' \
+  "$features" "$target_dir" "${RUSTC_WRAPPER:-none}" "${SCCACHE_DIR:-none}" "${CARGO_INCREMENTAL:-default}"
 printf 'dev/t: inventory command:'
 printf ' %q' cargo test "${cargo_args[@]}" -- --list
 printf '\n'

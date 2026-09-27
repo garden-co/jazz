@@ -2043,6 +2043,7 @@ dependencies = [
  "jazz-compression",
  "jazz-storage-rocksdb",
  "jazz-storage-sqlite",
+ "jazz-types",
  "jsonschema",
  "jsonwebtoken",
  "libc",
@@ -2486,6 +2487,24 @@ dependencies = [
  "tokio",
  "uuid",
  "zstd",
+]
+
+[[package]]
+name = "jazz-types"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "ed25519-dalek",
+ "groove",
+ "internment",
+ "postcard",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "sha2 0.10.9",
+ "smallvec",
+ "thiserror",
+ "uuid",
 ]
 
 [[package]]

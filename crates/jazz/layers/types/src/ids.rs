@@ -1,7 +1,7 @@
 //! Wire-stable identifier newtypes for nodes, rows, schemas, branches, lenses,
 //! and compact storage aliases. This module owns identity vocabulary and UUID
 //! byte ordering only; allocation, alias persistence, and recovery live in
-//! [`crate::node::codec`] and [`crate::node::recovery`]. These ids are shared
+//! `jazz::node::codec` and `jazz::node::recovery`. These ids are shared
 //! across every layer from `Db` facade calls through protocol messages to groove
 //! storage keys.
 
@@ -467,7 +467,8 @@ impl RowAuthor {
         crate::groove::records::Value::Record(self.encoded_record().clone())
     }
 
-    pub(crate) fn encoded_record(self) -> &'static crate::groove::records::OwnedRecord {
+    /// The cached groove record encoding of this row author.
+    pub fn encoded_record(self) -> &'static crate::groove::records::OwnedRecord {
         let author = match self.0 {
             RowAuthorKind::SystemAt(author) | RowAuthorKind::Account(author) => author.as_ref(),
         };
@@ -499,7 +500,8 @@ impl RowAuthor {
         Self::from_record(record.borrowed())
     }
 
-    pub(crate) fn from_record(
+    /// Decode an author subject from its groove record encoding.
+    pub fn from_record(
         record: crate::groove::records::BorrowedRecord<'_>,
     ) -> Result<Self, AuthorSubjectError> {
         let bad = || AuthorSubjectError::InvalidCanonical("invalid row author record".into());
@@ -593,7 +595,7 @@ impl AuthorSubject {
     }
 
     /// Construct an identity in a Jazz-owned issuer namespace.
-    pub(crate) fn reserved(issuer: &str, subject: &str) -> Result<Self, AuthorSubjectError> {
+    pub fn reserved(issuer: &str, subject: &str) -> Result<Self, AuthorSubjectError> {
         if !principal_is_nonempty(subject) {
             return Err(AuthorSubjectError::MissingSubject);
         }
@@ -750,7 +752,8 @@ impl AuthorSubject {
         crate::groove::records::Value::Record(self.encoded_record().clone())
     }
 
-    pub(crate) fn encoded_record(self) -> &'static crate::groove::records::OwnedRecord {
+    /// The cached groove record encoding of this author.
+    pub fn encoded_record(self) -> &'static crate::groove::records::OwnedRecord {
         match self {
             Self::System => {
                 static RECORD: std::sync::OnceLock<crate::groove::records::OwnedRecord> =
@@ -983,7 +986,7 @@ impl AuthorSubject {
     }
 
     /// Whether this subject belongs to the read-only anonymous issuer.
-    pub(crate) fn is_anonymous(&self) -> bool {
+    pub fn is_anonymous(&self) -> bool {
         matches!(
             self,
             Self::Authenticated(value)
