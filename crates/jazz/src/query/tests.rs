@@ -5,7 +5,7 @@ mod tests {
         EnumCase, EnumSchema, EnumValue, OwnedRecord, RecordDescriptor, ValueType,
     };
     use groove::schema::{ColumnSchema, ColumnType};
-    use crate::tools::public_schema::{
+    use crate::model::public_schema::{
         ColumnDescriptor as PublicColumnDescriptor, ColumnType as PublicColumnType,
         EnumCaseDescriptor, SchemaBuilder as PublicSchemaBuilder,
         TableSchemaBuilder as PublicTableSchemaBuilder,

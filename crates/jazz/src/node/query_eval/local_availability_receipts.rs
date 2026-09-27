@@ -29,18 +29,7 @@ pub(crate) struct LocalAvailabilityRecord {
     pub watermark: LocalAvailabilityWatermark,
 }
 
-pub(crate) fn local_availability_record_descriptor() -> RecordDescriptor {
-    RecordDescriptor::new([
-        ("format_v1", ValueType::U8),
-        ("unavailable", ValueType::Bool),
-        ("core", ValueType::Uuid),
-        ("core_epoch", ValueType::U64),
-        ("claims_revision", ValueType::U64),
-        ("policy_epoch", ValueType::U64),
-        ("settled_through", ValueType::U64),
-        ("evaluation_seq", ValueType::U64),
-    ])
-}
+pub(crate) use crate::schema::local_availability_record_descriptor;
 
 impl LocalAvailabilityRecord {
     fn values(self) -> Vec<Value> {

@@ -12,14 +12,14 @@ fn settle_published<S>(
 where
     S: OrderedKvStorage,
 {
-    crate::db::block_on(node.persist_and_settle_transaction(published))
+    crate::local_executor::block_on(node.persist_and_settle_transaction(published))
 }
 
 fn settle_outcome<S, T>(node: &mut NodeState<S>, outcome: PublicationOutcome<T>) -> Result<T, Error>
 where
     S: OrderedKvStorage + ReopenableStorage,
 {
-    crate::db::block_on(node.persist_and_settle_outcome(outcome))
+    crate::local_executor::block_on(node.persist_and_settle_outcome(outcome))
 }
 fn version_bundles_for_update(update: &SyncMessage) -> Vec<VersionBundle> {
     match update {
@@ -297,7 +297,7 @@ where
         new_tables.into_iter().map(Into::into),
         dropped_tables.into_iter().map(Into::into),
     )?;
-    let outcome = crate::db::block_on(core.apply_trusted_catalogue_message(
+    let outcome = crate::local_executor::block_on(core.apply_trusted_catalogue_message(
         SyncMessage::PublishSchemaWithLens {
             author: AuthorSubject::SYSTEM,
             catalogue_seq: core.active_catalogue_seq().saturating_add(1),
@@ -1552,7 +1552,7 @@ fn node_summary(node: &mut NodeState<RocksDbStorage>, tx_ids: &BTreeSet<TxId>) -
         global_rows: node.current_rows("todos", DurabilityTier::Global).unwrap(),
         transaction_records: tx_ids
             .iter()
-            .map(|tx_id| (*tx_id, crate::db::block_on(node.transaction_record(*tx_id))))
+            .map(|tx_id| (*tx_id, crate::local_executor::block_on(node.transaction_record(*tx_id))))
             .collect(),
         sync_metrics: node.sync_metrics().clone(),
     }

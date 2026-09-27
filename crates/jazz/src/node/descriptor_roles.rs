@@ -685,8 +685,8 @@ mod tests {
     // query API. Exercise the role decoder directly to prove it rejects them.
     #[test]
     fn current_roles_bind_ordered_join_sources_and_union_discriminators() {
+        use crate::object::{ObjectId, OutputOccurrenceId};
         use crate::protocol::RealRowMemberEntry;
-        use crate::tools::{ObjectId, OutputOccurrenceId};
         let mut schema = current_schema(1, "_app_1");
         schema.occurrence_id_fields.extend([
             "__flat_join_row_1".to_owned(),

@@ -68,137 +68,145 @@ impl Ord for ObjectId {
     }
 }
 
-/// Stable identity of one rendered query-output occurrence.
-///
-/// The root source row is always first. `joined` contains contributing source
-/// rows in the query's declared join order. This is deliberately distinct from
-/// a source [`ObjectId`]: one source row can contribute to more than one output
-/// occurrence.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct OutputOccurrenceId {
-    root: ObjectId,
-    joined: SmallVec<[ObjectId; 2]>,
-    /// Stable typed derivation discriminators keyed by joined-source position.
-    /// Empty for the ordinary row-only identity and omitted from its wire form.
-    // The postcard OutputOccurrenceId carrier remains exactly `(root, joined)`.
-    // ResultKey owns the complete typed V1 sidecar envelope and must never add
-    // a positional postcard field here.
-    #[serde(skip)]
-    union_arms: SmallVec<[(usize, String); 1]>,
-}
+// A public type in a private module: nameable inside the crate, reachable
+// from outside only through `ResultKey` and row fields, as before the move.
+mod occurrence {
+    use super::*;
 
-impl OutputOccurrenceId {
-    pub(crate) fn has_typed_discriminators(&self) -> bool {
-        !self.union_arms.is_empty()
-    }
-
-    pub(crate) fn root_source(&self) -> ObjectId {
-        self.root
-    }
-
-    pub(crate) fn union_arms(&self) -> &[(usize, String)] {
-        &self.union_arms
-    }
-
-    /// Construct an occurrence from its root and joined source rows.
+    /// Stable identity of one rendered query-output occurrence.
     ///
-    /// `joined` must be in declared join order. The ordinary one- and two-hop
-    /// cases stay inline.
-    pub fn new(root: ObjectId, joined: impl IntoIterator<Item = ObjectId>) -> Self {
-        Self {
-            root,
-            joined: joined.into_iter().collect(),
-            union_arms: SmallVec::new(),
+    /// The root source row is always first. `joined` contains contributing source
+    /// rows in the query's declared join order. This is deliberately distinct from
+    /// a source [`ObjectId`]: one source row can contribute to more than one output
+    /// occurrence.
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+    pub struct OutputOccurrenceId {
+        pub(super) root: ObjectId,
+        pub(super) joined: SmallVec<[ObjectId; 2]>,
+        /// Stable typed derivation discriminators keyed by joined-source position.
+        /// Empty for the ordinary row-only identity and omitted from its wire form.
+        // The postcard OutputOccurrenceId carrier remains exactly `(root, joined)`.
+        // ResultKey owns the complete typed V1 sidecar envelope and must never add
+        // a positional postcard field here.
+        #[serde(skip)]
+        union_arms: SmallVec<[(usize, String); 1]>,
+    }
+
+    impl OutputOccurrenceId {
+        pub(crate) fn has_typed_discriminators(&self) -> bool {
+            !self.union_arms.is_empty()
+        }
+
+        pub(crate) fn root_source(&self) -> ObjectId {
+            self.root
+        }
+
+        pub(crate) fn union_arms(&self) -> &[(usize, String)] {
+            &self.union_arms
+        }
+
+        /// Construct an occurrence from its root and joined source rows.
+        ///
+        /// `joined` must be in declared join order. The ordinary one- and two-hop
+        /// cases stay inline.
+        pub fn new(root: ObjectId, joined: impl IntoIterator<Item = ObjectId>) -> Self {
+            Self {
+                root,
+                joined: joined.into_iter().collect(),
+                union_arms: SmallVec::new(),
+            }
+        }
+
+        pub(crate) fn with_union_arms(
+            root: ObjectId,
+            joined: impl IntoIterator<Item = ObjectId>,
+            union_arms: impl IntoIterator<Item = (usize, String)>,
+        ) -> Option<Self> {
+            let joined = joined.into_iter().collect::<SmallVec<[_; 2]>>();
+            let mut union_arms = union_arms.into_iter().collect::<SmallVec<[_; 1]>>();
+            union_arms.sort_by_key(|(position, _)| *position);
+            let valid = union_arms
+                .iter()
+                .all(|(position, label)| *position <= joined.len() && !label.is_empty())
+                && union_arms.windows(2).all(|pair| pair[0].0 != pair[1].0);
+            valid.then_some(Self {
+                root,
+                joined,
+                union_arms,
+            })
+        }
+
+        /// Construct the single-source occurrence used by plain-table output.
+        pub fn single_source(root: ObjectId) -> Self {
+            Self {
+                root,
+                joined: SmallVec::new(),
+                union_arms: SmallVec::new(),
+            }
+        }
+
+        /// Source rows contributed after the root, in declared join order.
+        pub(crate) fn joined_sources(&self) -> &[ObjectId] {
+            &self.joined
+        }
+
+        /// Canonical positional bytes for terminal-state keys and consolidation.
+        ///
+        /// Each component is a fixed-width UUID, so concatenating root followed by
+        /// joined rows is unambiguous; byte length records the number of joined
+        /// sources and component position records declared join position.
+        pub fn canonical_bytes(&self) -> SmallVec<[u8; 48]> {
+            if !self.union_arms.is_empty() {
+                return self.typed_canonical_bytes();
+            }
+            let mut bytes = SmallVec::with_capacity((self.joined.len() + 1) * 16);
+            bytes.extend_from_slice(self.root.uuid().as_bytes());
+            for id in &self.joined {
+                bytes.extend_from_slice(id.uuid().as_bytes());
+            }
+            bytes
+        }
+
+        pub(super) fn typed_canonical_bytes(&self) -> SmallVec<[u8; 48]> {
+            let mut bytes = SmallVec::new();
+            bytes.extend_from_slice(self.root.uuid().as_bytes());
+            bytes.extend_from_slice(&(self.joined.len() as u32).to_be_bytes());
+            for id in &self.joined {
+                bytes.extend_from_slice(id.uuid().as_bytes());
+            }
+            bytes.extend_from_slice(&(self.union_arms.len() as u32).to_be_bytes());
+            for (position, label) in &self.union_arms {
+                bytes.extend_from_slice(&(*position as u32).to_be_bytes());
+                bytes.extend_from_slice(&(label.len() as u32).to_be_bytes());
+                bytes.extend_from_slice(label.as_bytes());
+            }
+            bytes
         }
     }
 
-    pub(crate) fn with_union_arms(
-        root: ObjectId,
-        joined: impl IntoIterator<Item = ObjectId>,
-        union_arms: impl IntoIterator<Item = (usize, String)>,
-    ) -> Option<Self> {
-        let joined = joined.into_iter().collect::<SmallVec<[_; 2]>>();
-        let mut union_arms = union_arms.into_iter().collect::<SmallVec<[_; 1]>>();
-        union_arms.sort_by_key(|(position, _)| *position);
-        let valid = union_arms
-            .iter()
-            .all(|(position, label)| *position <= joined.len() && !label.is_empty())
-            && union_arms.windows(2).all(|pair| pair[0].0 != pair[1].0);
-        valid.then_some(Self {
-            root,
-            joined,
-            union_arms,
-        })
-    }
-
-    /// Construct the single-source occurrence used by plain-table output.
-    pub fn single_source(root: ObjectId) -> Self {
-        Self {
-            root,
-            joined: SmallVec::new(),
-            union_arms: SmallVec::new(),
+    impl From<ObjectId> for OutputOccurrenceId {
+        fn from(root: ObjectId) -> Self {
+            Self::single_source(root)
         }
     }
 
-    /// Source rows contributed after the root, in declared join order.
-    pub(crate) fn joined_sources(&self) -> &[ObjectId] {
-        &self.joined
+    /// Single-source occurrences compare equal to their compatibility root id.
+    /// Multi-source occurrences intentionally do not: treating either as a plain
+    /// row id would recreate the flat-join collapse this type prevents.
+    impl PartialEq<ObjectId> for OutputOccurrenceId {
+        fn eq(&self, other: &ObjectId) -> bool {
+            self.joined.is_empty() && self.union_arms.is_empty() && self.root == *other
+        }
     }
 
-    /// Canonical positional bytes for terminal-state keys and consolidation.
-    ///
-    /// Each component is a fixed-width UUID, so concatenating root followed by
-    /// joined rows is unambiguous; byte length records the number of joined
-    /// sources and component position records declared join position.
-    pub fn canonical_bytes(&self) -> SmallVec<[u8; 48]> {
-        if !self.union_arms.is_empty() {
-            return self.typed_canonical_bytes();
+    impl PartialEq<OutputOccurrenceId> for ObjectId {
+        fn eq(&self, other: &OutputOccurrenceId) -> bool {
+            other == self
         }
-        let mut bytes = SmallVec::with_capacity((self.joined.len() + 1) * 16);
-        bytes.extend_from_slice(self.root.uuid().as_bytes());
-        for id in &self.joined {
-            bytes.extend_from_slice(id.uuid().as_bytes());
-        }
-        bytes
-    }
-
-    fn typed_canonical_bytes(&self) -> SmallVec<[u8; 48]> {
-        let mut bytes = SmallVec::new();
-        bytes.extend_from_slice(self.root.uuid().as_bytes());
-        bytes.extend_from_slice(&(self.joined.len() as u32).to_be_bytes());
-        for id in &self.joined {
-            bytes.extend_from_slice(id.uuid().as_bytes());
-        }
-        bytes.extend_from_slice(&(self.union_arms.len() as u32).to_be_bytes());
-        for (position, label) in &self.union_arms {
-            bytes.extend_from_slice(&(*position as u32).to_be_bytes());
-            bytes.extend_from_slice(&(label.len() as u32).to_be_bytes());
-            bytes.extend_from_slice(label.as_bytes());
-        }
-        bytes
     }
 }
 
-impl From<ObjectId> for OutputOccurrenceId {
-    fn from(root: ObjectId) -> Self {
-        Self::single_source(root)
-    }
-}
-
-/// Single-source occurrences compare equal to their compatibility root id.
-/// Multi-source occurrences intentionally do not: treating either as a plain
-/// row id would recreate the flat-join collapse this type prevents.
-impl PartialEq<ObjectId> for OutputOccurrenceId {
-    fn eq(&self, other: &ObjectId) -> bool {
-        self.joined.is_empty() && self.union_arms.is_empty() && self.root == *other
-    }
-}
-
-impl PartialEq<OutputOccurrenceId> for ObjectId {
-    fn eq(&self, other: &OutputOccurrenceId) -> bool {
-        other == self
-    }
-}
+pub(crate) use occurrence::OutputOccurrenceId;
 
 /// Stable, opaque identity of one query result.
 ///

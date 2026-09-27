@@ -764,8 +764,8 @@ fn write_catalogue_record(
             Value::Bytes(payload),
         ],
     );
-    let applied = crate::db::block_on(node.database.apply_batch(batch)).unwrap();
-let persisted = crate::db::block_on(applied.persist());
+    let applied = crate::local_executor::block_on(node.database.apply_batch(batch)).unwrap();
+let persisted = crate::local_executor::block_on(applied.persist());
 node.database.finish_persistence(persisted).unwrap();
 }
 
@@ -791,7 +791,7 @@ fn catalogue_kernel_payload_corruption_rejects_reopen_before_resident_mutation()
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
     assert!(matches!(
-        crate::db::block_on(NodeState::new(node(0xa5), base, storage)),
+        crate::local_executor::block_on(NodeState::new(node(0xa5), base, storage)),
         Err(Error::InvalidStoredValue("invalid catalogue schema payload"))
     ));
 }
@@ -820,7 +820,7 @@ fn noncanonical_catalogue_public_schema_rejects_reopen_before_resident_mutation(
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
     assert!(matches!(
-        crate::db::block_on(NodeState::new(node(0xa6), base, storage)),
+        crate::local_executor::block_on(NodeState::new(node(0xa6), base, storage)),
         Err(Error::InvalidStoredValue(
             "non-canonical catalogue schema public schema"
         ))
@@ -847,7 +847,7 @@ fn pending_catalogue_write_pointer_reopen_requires_deterministic_row_id() {
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
     assert!(matches!(
-        crate::db::block_on(NodeState::new(node(0xa7), base, storage)),
+        crate::local_executor::block_on(NodeState::new(node(0xa7), base, storage)),
         Err(Error::InvalidStoredValue(
             "pending catalogue write-pointer id mismatch"
         ))
@@ -882,7 +882,7 @@ fn pending_catalogue_write_pointer_reopen_rejects_duplicate_revision() {
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
     assert!(matches!(
-        crate::db::block_on(NodeState::new(node(0xa8), base, storage)),
+        crate::local_executor::block_on(NodeState::new(node(0xa8), base, storage)),
         Err(Error::InvalidStoredValue(
             "duplicate pending catalogue write-pointer revision"
         ))
@@ -898,8 +898,8 @@ fn delete_catalogue_record(node: &mut NodeState<RocksDbStorage>, kind: &[u8], id
             groove::db::PrimaryKeyValue::Uuid(id),
         ]),
     );
-    let applied = crate::db::block_on(node.database.apply_batch(batch)).unwrap();
-let persisted = crate::db::block_on(applied.persist());
+    let applied = crate::local_executor::block_on(node.database.apply_batch(batch)).unwrap();
+let persisted = crate::local_executor::block_on(applied.persist());
 node.database.finish_persistence(persisted).unwrap();
 }
 
@@ -929,8 +929,8 @@ fn write_raw_catalogue_kind(
         "jazz_catalogue",
         vec![Value::U64(kind), Value::Uuid(id), Value::Bytes(Vec::new())],
     );
-    let applied = crate::db::block_on(node.database.apply_batch(batch)).unwrap();
-    let persisted = crate::db::block_on(applied.persist());
+    let applied = crate::local_executor::block_on(node.database.apply_batch(batch)).unwrap();
+    let persisted = crate::local_executor::block_on(applied.persist());
     node.database.finish_persistence(persisted).unwrap();
 }
 
@@ -987,8 +987,8 @@ fn delete_catalogue_pointer(node: &mut NodeState<RocksDbStorage>, revision: u64)
         "jazz_catalogue_pointer",
         groove::db::PrimaryKeyValue::U64(revision),
     );
-    let applied = crate::db::block_on(node.database.apply_batch(batch)).unwrap();
-let persisted = crate::db::block_on(applied.persist());
+    let applied = crate::local_executor::block_on(node.database.apply_batch(batch)).unwrap();
+let persisted = crate::local_executor::block_on(applied.persist());
 node.database.finish_persistence(persisted).unwrap();
 }
 
@@ -1003,8 +1003,8 @@ fn write_schema_mapping_record(
         &mut batch, alias, schema, mapping,
     )
     .unwrap();
-    let applied = crate::db::block_on(node.database.apply_batch(batch)).unwrap();
-let persisted = crate::db::block_on(applied.persist());
+    let applied = crate::local_executor::block_on(node.database.apply_batch(batch)).unwrap();
+let persisted = crate::local_executor::block_on(applied.persist());
 node.database.finish_persistence(persisted).unwrap();
 }
 
@@ -1014,8 +1014,8 @@ fn delete_schema_mapping_record(node: &mut NodeState<RocksDbStorage>, alias: Sch
         "jazz_schema_versions",
         groove::db::PrimaryKeyValue::U64(alias.0),
     );
-    let applied = crate::db::block_on(node.database.apply_batch(batch)).unwrap();
-let persisted = crate::db::block_on(applied.persist());
+    let applied = crate::local_executor::block_on(node.database.apply_batch(batch)).unwrap();
+let persisted = crate::local_executor::block_on(applied.persist());
 node.database.finish_persistence(persisted).unwrap();
 }
 
@@ -2238,7 +2238,7 @@ fn catalogue_snapshot_waits_for_external_publication_without_mutating_catalogue(
             .made_by(AuthorSubject::SYSTEM)
             .cells(BTreeMap::from([("title".to_owned(), Value::String("preserved".to_owned()))])),
     ).unwrap();
-    let result = crate::db::block_on(alice.apply_trusted_catalogue_snapshot(snapshot.clone()));
+    let result = crate::local_executor::block_on(alice.apply_trusted_catalogue_snapshot(snapshot.clone()));
     assert!(matches!(result, Err(Error::Groove(groove::db::Error::UnsettledPublications))));
     assert!(!alice.catalogue_activation_failed);
     assert_eq!(alice.groove_runtime_token(), before);

@@ -739,7 +739,7 @@ pub struct SchemaBuilder {
 }
 
 #[cfg(any(test, feature = "testing"))]
-impl crate::tools::test_support::AllowAll for SchemaBuilder {
+impl crate::model::test_support::AllowAll for SchemaBuilder {
     /// Grant all operations on tables already added to this builder.
     /// Call after adding the tables; replaces their existing policies.
     fn allow_all(mut self) -> Self {

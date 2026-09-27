@@ -83,15 +83,15 @@ impl LocalMaintainedViewSubscription {
     pub(crate) fn decoded_terminal_records(
         &self,
     ) -> Result<
-        BTreeMap<OutputOccurrenceId, crate::db::terminal_record::TerminalRecordState>,
-        crate::db::Error,
+        BTreeMap<OutputOccurrenceId, crate::node::terminal_record::TerminalRecordState>,
+        crate::node::api_error::Error,
     > {
         self.maintained
             .decoded_terminal_records()
             .iter()
             .map(|(key, record)| {
                 Ok((
-                    crate::db::terminal_root_occurrence_id_with_root_union(
+                    crate::node::terminal_root::terminal_root_occurrence_id_with_root_union(
                         key,
                         self.terminal_root_layout()
                             .is_some_and(|layout| layout.root_union_arm),
@@ -102,7 +102,9 @@ impl LocalMaintainedViewSubscription {
             .collect()
     }
 
-    pub(crate) fn terminal_root_layout(&self) -> Option<&crate::db::TerminalRootLayout> {
+    pub(crate) fn terminal_root_layout(
+        &self,
+    ) -> Option<&crate::node::terminal_root::TerminalRootLayout> {
         self.terminal_schemas.terminal_root_layout()
     }
 

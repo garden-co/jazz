@@ -377,7 +377,7 @@ fn large_write_pushes_staging_before_syncing_its_referencing_row() {
     let core = open_core(0xc0, AuthorSubject::SYSTEM, &schema);
     let writer = open_db(0xc1, author, &schema);
     let (writer_transport, core_transport) = duplex();
-    let _upstream = crate::db::block_on(writer.connect_upstream(writer_transport));
+    let _upstream = crate::local_executor::block_on(writer.connect_upstream(writer_transport));
     let _subscriber = core.accept_subscriber(core_transport, author);
     let title = "push-before-row/".repeat(8_000);
     writer
@@ -420,7 +420,7 @@ fn large_value_pushes_through_relay_then_pulls_from_core_after_relay_chunk_evict
     let (upload_relay_transport, core_upload_transport, upload_relay_to_core) =
         duplex_with_client_outbound_tap();
     let _upload_relay_upstream =
-        crate::db::block_on(upload_relay.connect_upstream(upload_relay_transport));
+        crate::local_executor::block_on(upload_relay.connect_upstream(upload_relay_transport));
     let _core_upload_relay = core.accept_subscriber_with_trust(
         core_upload_transport,
         AuthorSubject::SYSTEM,
@@ -428,7 +428,8 @@ fn large_value_pushes_through_relay_then_pulls_from_core_after_relay_chunk_evict
     );
     let (writer_transport, upload_relay_client_transport, writer_to_upload_relay) =
         duplex_with_client_outbound_tap();
-    let _writer_upstream = crate::db::block_on(writer.connect_upstream(writer_transport));
+    let _writer_upstream =
+        crate::local_executor::block_on(writer.connect_upstream(writer_transport));
     let _upload_relay_writer =
         upload_relay.accept_subscriber(upload_relay_client_transport, author);
 
@@ -526,8 +527,10 @@ fn large_value_pushes_through_relay_then_pulls_from_core_after_relay_chunk_evict
             .any(|message| matches!(message, SyncMessage::ChunkRequestBatch(_)))
             && let Some(event) = pending_event.as_mut()
         {
-            crate::db::block_on(upload_relay.hydrate_subscription_event_for_binding(event))
-                .unwrap();
+            crate::local_executor::block_on(
+                upload_relay.hydrate_subscription_event_for_binding(event),
+            )
+            .unwrap();
             apply_subscription_event(&mut snapshot, pending_event.take().unwrap());
         }
         received = snapshot.rows.first().and_then(|row| row.cell_at(0));
@@ -595,7 +598,7 @@ fn rate_limited_push_waits_then_retries_the_exact_batch_without_rejecting_the_wr
             core_node,
             1,
         );
-    let upstream = crate::db::block_on(writer.connect_upstream(writer_transport));
+    let upstream = crate::local_executor::block_on(writer.connect_upstream(writer_transport));
     let _subscriber = core.accept_subscriber(core_transport, author);
     let write = writer
         .insert(
@@ -660,7 +663,8 @@ fn rate_limited_push_waits_then_retries_the_exact_batch_without_rejecting_the_wr
             core_node,
             2,
         );
-    let _reconnected_upstream = crate::db::block_on(writer.connect_upstream(reconnected_transport));
+    let _reconnected_upstream =
+        crate::local_executor::block_on(writer.connect_upstream(reconnected_transport));
     let _reconnected_subscriber = core.accept_subscriber(reconnected_core_transport, author);
 
     // An unrelated immediate/manual host tick before the deadline must not
@@ -739,7 +743,7 @@ fn unauthenticated_reconnect_restarts_after_deadline_and_does_not_prevent_ttl_cl
     let scheduler = Rc::new(RecordingScheduler::default());
     writer.set_tick_scheduler(Some(scheduler.clone()));
     let (writer_transport, core_transport, writer_outbound) = duplex_with_client_outbound_tap();
-    let upstream = crate::db::block_on(writer.connect_upstream(writer_transport));
+    let upstream = crate::local_executor::block_on(writer.connect_upstream(writer_transport));
     let _subscriber = core.accept_subscriber(core_transport, author);
     let write = writer
         .insert(
@@ -793,7 +797,7 @@ fn unauthenticated_reconnect_restarts_after_deadline_and_does_not_prevent_ttl_cl
         });
     std::thread::sleep(std::time::Duration::from_millis(2));
     assert_eq!(
-        crate::db::block_on(core.server.evict_expired_staged_large_values()).unwrap(),
+        crate::local_executor::block_on(core.server.evict_expired_staged_large_values()).unwrap(),
         1,
         "the abandoned receiver-side staging claim expires"
     );
@@ -813,7 +817,8 @@ fn unauthenticated_reconnect_restarts_after_deadline_and_does_not_prevent_ttl_cl
 
     let (reconnected_transport, reconnected_core_transport, reconnected_outbound) =
         duplex_with_client_outbound_tap();
-    let _reconnected_upstream = crate::db::block_on(writer.connect_upstream(reconnected_transport));
+    let _reconnected_upstream =
+        crate::local_executor::block_on(writer.connect_upstream(reconnected_transport));
     let _reconnected_subscriber = core.accept_subscriber(reconnected_core_transport, author);
     writer.tick().unwrap();
     assert!(
@@ -868,7 +873,7 @@ fn assert_different_authenticated_destination_restarts_upload(
             core_node,
             1,
         );
-    let upstream = crate::db::block_on(writer.connect_upstream(writer_transport));
+    let upstream = crate::local_executor::block_on(writer.connect_upstream(writer_transport));
     let _subscriber = core.accept_subscriber(core_transport, author);
     let write = writer
         .insert(
@@ -905,7 +910,7 @@ fn assert_different_authenticated_destination_restarts_upload(
             reconnect_remote_node,
             2,
         );
-    let _reconnect = crate::db::block_on(writer.connect_upstream(reconnect_transport));
+    let _reconnect = crate::local_executor::block_on(writer.connect_upstream(reconnect_transport));
     let _reconnect_subscriber = core.accept_subscriber(reconnect_core_transport, author);
     writer.tick().unwrap();
     assert!(
@@ -977,14 +982,14 @@ fn core_later_client_upload_refreshes_earlier_peer_subscription_on_next_owner_tu
     // Keep the Core-to-peer queue observable, and accept this peer before
     // Alice so the ordering under test is fixed.
     let (peer_transport, core_transport, core_to_peer) = duplex_with_server_outbound_tap();
-    let _peer_upstream = crate::db::block_on(relay.connect_upstream(peer_transport));
+    let _peer_upstream = crate::local_executor::block_on(relay.connect_upstream(peer_transport));
     let _core_peer = core.accept_subscriber_with_trust(
         core_transport,
         AuthorSubject::SYSTEM,
         CommitUnitTrust::TrustedBackend,
     );
     let (bob_transport, peer_client_transport) = duplex();
-    let _bob_upstream = crate::db::block_on(bob.connect_upstream(bob_transport));
+    let _bob_upstream = crate::local_executor::block_on(bob.connect_upstream(bob_transport));
     let _peer_client = relay.accept_subscriber(peer_client_transport, bob_author);
 
     let query = bob.table("todos");
@@ -1009,7 +1014,8 @@ fn core_later_client_upload_refreshes_earlier_peer_subscription_on_next_owner_tu
 
     let alice_client = open_db(0xd4, alice, &schema);
     let (alice_transport, core_alice_transport) = duplex();
-    let _alice_upstream = crate::db::block_on(alice_client.connect_upstream(alice_transport));
+    let _alice_upstream =
+        crate::local_executor::block_on(alice_client.connect_upstream(alice_transport));
     let _core_alice = core.accept_subscriber(core_alice_transport, alice);
     let write = alice_client
         .insert(
@@ -1098,10 +1104,11 @@ fn relay_later_client_upload_flushes_earlier_upstream_in_same_tick() {
     let client = open_db(0xd2, alice, &schema);
 
     let (relay_transport, _core_transport, relay_to_core) = duplex_with_client_outbound_tap();
-    let _relay_upstream = crate::db::block_on(relay.connect_upstream(relay_transport));
+    let _relay_upstream = crate::local_executor::block_on(relay.connect_upstream(relay_transport));
 
     let (client_transport, relay_client_transport) = duplex();
-    let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _client_upstream =
+        crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _relay_client = relay.accept_subscriber(relay_client_transport, alice);
 
     let write = client
@@ -1518,7 +1525,7 @@ fn write_state_waiter_resolves_on_remote_fate_update() {
     let client = open_db(0xc1, client_author, &schema);
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, client_author);
 
     let write = client
@@ -1658,7 +1665,8 @@ fn db_sync_surface_client_session_read_policy_filters_private_table_query() {
     let reader = open_db(0xb2, bob, &schema);
 
     let (writer_transport, server_writer_transport) = duplex();
-    let _writer_upstream = crate::db::block_on(writer.connect_upstream(writer_transport));
+    let _writer_upstream =
+        crate::local_executor::block_on(writer.connect_upstream(writer_transport));
     let _writer_subscriber = server.accept_subscriber_with_claims(
         server_writer_transport,
         alice,
@@ -1689,7 +1697,8 @@ fn db_sync_surface_client_session_read_policy_filters_private_table_query() {
     );
 
     let (reader_transport, server_reader_transport) = duplex();
-    let _reader_upstream = crate::db::block_on(reader.connect_upstream(reader_transport));
+    let _reader_upstream =
+        crate::local_executor::block_on(reader.connect_upstream(reader_transport));
     let _reader_subscriber = server.accept_subscriber_with_claims(
         server_reader_transport,
         bob,
@@ -1764,7 +1773,8 @@ fn membership_grant_then_parent_query_keeps_disjunctive_read_proof(indexed: bool
     let client = open_db(0xa1, manager, &schema);
     let owner_client = open_db(0xb2, owner, &schema);
     let (owner_transport, server_owner_transport) = duplex();
-    let _owner_upstream = crate::db::block_on(owner_client.connect_upstream(owner_transport));
+    let _owner_upstream =
+        crate::local_executor::block_on(owner_client.connect_upstream(owner_transport));
     let _owner_subscriber = server.accept_subscriber_with_claims(
         server_owner_transport,
         owner,
@@ -1774,7 +1784,7 @@ fn membership_grant_then_parent_query_keeps_disjunctive_read_proof(indexed: bool
         )]),
     );
     let (client_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber_with_claims(
         server_transport,
         manager,
@@ -1982,7 +1992,8 @@ fn db_sync_surface_client_session_read_policy_filters_after_runtime_schema_publi
         .unwrap();
 
     let (writer_transport, server_writer_transport) = duplex();
-    let _writer_upstream = crate::db::block_on(writer.connect_upstream(writer_transport));
+    let _writer_upstream =
+        crate::local_executor::block_on(writer.connect_upstream(writer_transport));
     let _writer_subscriber = server.accept_subscriber_with_claims(
         server_writer_transport,
         alice,
@@ -2008,7 +2019,8 @@ fn db_sync_surface_client_session_read_policy_filters_after_runtime_schema_publi
     server.tick().unwrap();
 
     let (alice_transport, server_alice_transport) = duplex();
-    let _alice_upstream = crate::db::block_on(alice_reader.connect_upstream(alice_transport));
+    let _alice_upstream =
+        crate::local_executor::block_on(alice_reader.connect_upstream(alice_transport));
     let _alice_subscriber = server.accept_subscriber_with_claims(
         server_alice_transport,
         alice,
@@ -2042,7 +2054,8 @@ fn db_sync_surface_client_session_read_policy_filters_after_runtime_schema_publi
     );
 
     let (reader_transport, server_reader_transport) = duplex();
-    let _reader_upstream = crate::db::block_on(reader.connect_upstream(reader_transport));
+    let _reader_upstream =
+        crate::local_executor::block_on(reader.connect_upstream(reader_transport));
     let _reader_subscriber = server.accept_subscriber_with_claims(
         server_reader_transport,
         bob,
@@ -2073,7 +2086,7 @@ fn detached_subscriber_is_not_served_on_server_tick() {
     seed(&server, "todos", cells("from server", false, owner));
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let subscriber = server.accept_subscriber(server_transport, client_author);
 
     let query = Query::from("todos");
@@ -2102,7 +2115,7 @@ fn byte_wire_round_trips_subscription_to_client() {
 
     let (client_bytes, server_bytes) = byte_duplex_raw();
     let server_inbound = Rc::clone(&server_bytes.inbound);
-    let _upstream = crate::db::block_on(
+    let _upstream = crate::local_executor::block_on(
         client.connect_upstream(Box::new(WireTransportAdapter::current(client_bytes))),
     );
     let _subscriber = server.accept_subscriber(
@@ -2189,7 +2202,7 @@ fn single_upstream_tick_applies_multiple_subscription_updates() {
     );
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, client_author);
 
     let projects = Query::from("projects");
@@ -2235,7 +2248,7 @@ fn subscriber_connection_serves_current_rows_and_resumes_from_cursor() {
     seed(&server, "todos", cells("second", false, owner));
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let subscriber = server.accept_subscriber(server_transport, client_author);
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
@@ -2269,7 +2282,8 @@ fn subscriber_connection_serves_current_rows_and_resumes_from_cursor() {
     seed(&full_server, "todos", cells("third", true, owner));
     let full_client = open_db(0xc2, client_author, &schema);
     let (full_client_transport, full_server_transport) = duplex();
-    let _full_upstream = crate::db::block_on(full_client.connect_upstream(full_client_transport));
+    let _full_upstream =
+        crate::local_executor::block_on(full_client.connect_upstream(full_client_transport));
     let full_subscriber = full_server.accept_subscriber(full_server_transport, client_author);
     let mut full_subscription =
         prepared_subscribe(&full_client, &query, global_subscribe_opts()).unwrap();
@@ -2297,7 +2311,8 @@ fn subscriber_connection_serves_current_rows_and_resumes_from_cursor() {
 
     let cursor = subscriber.borrow_mut().take_resume_cursor().unwrap();
     let (client_transport, server_transport) = duplex();
-    let _resumed_upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _resumed_upstream =
+        crate::local_executor::block_on(client.connect_upstream(client_transport));
     let resumed = server.accept_subscriber_with_resume(server_transport, client_author, cursor);
 
     client.tick().unwrap();
@@ -2350,7 +2365,7 @@ fn current_rows_uses_its_connection_claim_snapshot_not_the_author_cache() {
     )]);
     let client = open_db(0xc1, author, &schema);
     let (client_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let subscriber =
         server.accept_subscriber_with_claims(server_transport, author, admitted.clone());
     let query = Query::from("todos");
@@ -2395,7 +2410,7 @@ fn byte_wire_subscriber_connection_serves_current_rows_and_resumes_from_cursor()
     seed(&server, "todos", cells("second", false, owner));
 
     let (client_transport, server_transport) = byte_duplex_with_session(client_author, 1);
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let subscriber = server.accept_subscriber(server_transport, client_author);
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
@@ -2429,7 +2444,8 @@ fn byte_wire_subscriber_connection_serves_current_rows_and_resumes_from_cursor()
     seed(&full_server, "todos", cells("third", true, owner));
     let full_client = open_db(0xc2, client_author, &schema);
     let (full_client_transport, full_server_transport) = byte_duplex_with_session(client_author, 3);
-    let _full_upstream = crate::db::block_on(full_client.connect_upstream(full_client_transport));
+    let _full_upstream =
+        crate::local_executor::block_on(full_client.connect_upstream(full_client_transport));
     let full_subscriber = full_server.accept_subscriber(full_server_transport, client_author);
     let mut full_subscription =
         prepared_subscribe(&full_client, &query, global_subscribe_opts()).unwrap();
@@ -2457,7 +2473,8 @@ fn byte_wire_subscriber_connection_serves_current_rows_and_resumes_from_cursor()
 
     let cursor = subscriber.borrow_mut().take_resume_cursor().unwrap();
     let (client_transport, server_transport) = byte_duplex_with_session(client_author, 2);
-    let _resumed_upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _resumed_upstream =
+        crate::local_executor::block_on(client.connect_upstream(client_transport));
     let resumed = server.accept_subscriber_with_resume(server_transport, client_author, cursor);
 
     client.tick().unwrap();
@@ -2504,7 +2521,7 @@ fn connect_upstream_announces_existing_subscriptions_on_first_tick() {
 
     let query = Query::from("todos").filter(eq(col("done"), lit(false)));
     let _subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
 
     client.tick().unwrap();
     let first = upstream_transport.try_recv().unwrap();
@@ -2533,7 +2550,7 @@ fn connect_upstream_waits_for_active_node_state_borrow() {
     let schema = schema();
     let client = open_db(0xc1, AuthorSubject::for_test_bytes([0xc1; 16]), &schema);
     let node = client.node.node();
-    let held_node = crate::db::block_on(node.lock());
+    let held_node = crate::local_executor::block_on(node.lock());
     let (client_transport, _server_transport) = duplex();
     let mut connection = pin!(client.connect_upstream(client_transport));
     let waker = Waker::noop();
@@ -2541,7 +2558,7 @@ fn connect_upstream_waits_for_active_node_state_borrow() {
 
     assert!(matches!(connection.as_mut().poll(&mut cx), Poll::Pending));
     drop(held_node);
-    let _connection = crate::db::block_on(connection);
+    let _connection = crate::local_executor::block_on(connection);
 }
 
 /// Test-only marker for an authenticated SYSTEM backend transport. Ordinary
@@ -2580,7 +2597,7 @@ fn repeated_identical_session_claims_emit_once_on_a_delegation_capable_connectio
     let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
     let (client_transport, mut upstream_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(Box::new(
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(Box::new(
         DelegationCapableTransport {
             inner: client_transport,
         },
@@ -2606,7 +2623,7 @@ fn ordinary_session_links_do_not_forward_claims() {
     let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
     let (client_transport, mut upstream_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     client.set_test_provider_claims(
         client_author,
         BTreeMap::from([("role".to_owned(), Value::String("reader".to_owned()))]),
@@ -2635,7 +2652,7 @@ fn current_session_claims_reach_late_and_reconnected_delegation_capable_upstream
 
     client.set_test_provider_claims(client_author, claims.clone());
     let (first_transport, mut first_upstream_transport) = duplex();
-    let first_upstream = crate::db::block_on(client.connect_upstream(Box::new(
+    let first_upstream = crate::local_executor::block_on(client.connect_upstream(Box::new(
         DelegationCapableTransport {
             inner: first_transport,
         },
@@ -2652,7 +2669,7 @@ fn current_session_claims_reach_late_and_reconnected_delegation_capable_upstream
     assert!(client.detach_connection(&first_upstream));
 
     let (reconnected_transport, mut reconnected_upstream_transport) = duplex();
-    let _reconnected_upstream = crate::db::block_on(client.connect_upstream(Box::new(
+    let _reconnected_upstream = crate::local_executor::block_on(client.connect_upstream(Box::new(
         DelegationCapableTransport {
             inner: reconnected_transport,
         },
@@ -2672,7 +2689,7 @@ fn changed_session_claims_advance_delivery_on_a_delegation_capable_connection() 
     let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
     let (client_transport, mut upstream_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(Box::new(
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(Box::new(
         DelegationCapableTransport {
             inner: client_transport,
         },
@@ -2715,7 +2732,7 @@ fn global_subscription_registers_array_subquery_upstream_coverage() {
     let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
     let (client_transport, mut upstream_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
 
     let query = Query::from("users").array_subquery(
         ArraySubquery::new("todos", "todos", "owner_id", "id")
@@ -2740,7 +2757,7 @@ fn array_subquery_attachment_registers_upstream_coverage() {
     let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
     let (client_transport, mut upstream_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
 
     let query = Query::from("users").array_subquery(
         ArraySubquery::new("todos", "todos", "owner_id", "id")
@@ -2773,7 +2790,7 @@ fn upload_is_not_marked_sent_after_one_shot_backpressure_and_retries() {
         outbound: Rc::clone(&outbound),
         failed: false,
     };
-    let _upstream = crate::db::block_on(client.connect_upstream(Box::new(transport)));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(Box::new(transport)));
 
     let tx_id = client
         .node
@@ -2829,7 +2846,7 @@ fn rejected_upload_is_not_replayed_after_reconnect() {
     let author = AuthorSubject::for_test_bytes([0xe1; 16]);
     let client = open_db(0xe1, author, &schema);
     let (client_transport, mut authority_transport) = duplex();
-    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
 
     let write = client
         .insert(
@@ -2857,13 +2874,14 @@ fn rejected_upload_is_not_replayed_after_reconnect() {
         })
         .expect("return terminal rejection");
     client.tick().expect("apply terminal rejection");
-    let rejected = crate::db::block_on(write.wait(DurabilityTier::Global))
+    let rejected = crate::local_executor::block_on(write.wait(DurabilityTier::Global))
         .expect_err("rejected upload stays terminal");
     assert_eq!(rejected.code, ErrorCode::WriteRejected);
 
     assert!(client.detach_connection(&upstream));
     let (reconnected_transport, mut replacement_authority) = duplex();
-    let _reconnected = crate::db::block_on(client.connect_upstream(reconnected_transport));
+    let _reconnected =
+        crate::local_executor::block_on(client.connect_upstream(reconnected_transport));
     client.tick().expect("tick replacement connection");
     assert!(
         std::iter::from_fn(|| replacement_authority.try_recv()).all(
@@ -2886,9 +2904,9 @@ fn upload_cursor_hole_replays_only_the_missing_entry_on_that_upstream() {
     let author = AuthorSubject::for_test_bytes([0xe2; 16]);
     let client = open_db(0xe2, author, &schema);
     let (first_transport, mut first_authority) = duplex();
-    let _first = crate::db::block_on(client.connect_upstream(first_transport));
+    let _first = crate::local_executor::block_on(client.connect_upstream(first_transport));
     let (second_transport, mut second_authority) = duplex();
-    let _second = crate::db::block_on(client.connect_upstream(second_transport));
+    let _second = crate::local_executor::block_on(client.connect_upstream(second_transport));
 
     let writes = ["first", "middle", "last"]
         .into_iter()
@@ -2922,7 +2940,7 @@ fn upload_cursor_hole_replays_only_the_missing_entry_on_that_upstream() {
         2,
         "fixture attached two independent links"
     );
-    let mut second = crate::db::block_on(connections[1].lock());
+    let mut second = crate::local_executor::block_on(connections[1].lock());
     let crate::db::peer_connection::ConnectionLink::Upstream(state) = &mut second.link else {
         panic!("second fixture link is upstream");
     };
@@ -2964,7 +2982,7 @@ fn accepted_upload_releases_outbox_only_after_global_durability_and_authority_ti
     let author = AuthorSubject::for_test_bytes([0xe3; 16]);
     let client = open_db(0xe3, author, &schema);
     let (client_transport, mut authority) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let write = client
         .insert(
             "todos",
@@ -3058,7 +3076,7 @@ fn local_missing_upload_body_still_kills_sync_driver() {
     let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
     let (client_transport, _server_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let missing_tx = TxId::new(
         crate::time::TxTime::from(client.next_now_ms()),
         NodeUuid::from_bytes([0xee; 16]),
@@ -3089,7 +3107,7 @@ fn detach_connection_removes_connection_from_db_ticks() {
 
     let query = Query::from("todos").filter(eq(col("done"), lit(false)));
     let _subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
-    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
 
     assert!(client.detach_connection(&upstream));
     assert!(!client.detach_connection(&upstream));
@@ -3120,7 +3138,7 @@ fn accepted_subscriber_is_served_under_subscriber_author_identity() {
     );
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, subscriber_author);
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
@@ -3169,7 +3187,7 @@ fn client_initial_sync_flush_cadence_preserves_public_snapshot_delivery() {
         ))
         .unwrap();
     let (client_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, client_author);
     let query = client.table("todos");
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
@@ -4921,12 +4939,12 @@ fn root_authority_does_not_retain_settled_subscriber_uploads() {
     let bob = open_db(0xb1, bob_author, &schema);
     let (alice_transport, core_alice) = duplex();
     let (bob_transport, core_bob) = duplex();
-    let _alice_upstream = crate::db::block_on(alice.connect_upstream(alice_transport));
-    let _bob_upstream = crate::db::block_on(bob.connect_upstream(bob_transport));
+    let _alice_upstream = crate::local_executor::block_on(alice.connect_upstream(alice_transport));
+    let _bob_upstream = crate::local_executor::block_on(bob.connect_upstream(bob_transport));
     let _alice_link = core.accept_subscriber(core_alice, alice_author);
     let _bob_link = core.accept_subscriber(core_bob, bob_author);
     let prepared = bob.prepare_query(&Query::from("todos")).unwrap();
-    let _bob_rows = crate::db::block_on(bob.subscribe(
+    let _bob_rows = crate::local_executor::block_on(bob.subscribe(
         &prepared,
         ReadOpts {
             tier: DurabilityTier::Global,
@@ -4958,11 +4976,11 @@ fn root_authority_does_not_retain_settled_subscriber_uploads() {
     }
 
     for write in &writes {
-        crate::db::block_on(write.wait(DurabilityTier::Global))
+        crate::local_executor::block_on(write.wait(DurabilityTier::Global))
             .expect("the root authority settles each upload globally");
     }
     assert_eq!(core.read(&core.table("todos")).unwrap().len(), WRITES);
-    let bob_rows = crate::db::block_on(bob.all(
+    let bob_rows = crate::local_executor::block_on(bob.all(
         &prepared,
         ReadOpts {
             tier: DurabilityTier::Global,
@@ -4999,14 +5017,14 @@ fn history_complete_node_with_an_upstream_still_relays_subscriber_uploads() {
     let alice = open_db(0xa5, alice_author, &schema);
 
     let (mid_transport, root_mid) = duplex();
-    let _mid_upstream = crate::db::block_on(mid.server.connect_upstream(mid_transport));
+    let _mid_upstream = crate::local_executor::block_on(mid.server.connect_upstream(mid_transport));
     let _root_mid = root.accept_subscriber_with_trust(
         root_mid,
         AuthorSubject::SYSTEM,
         CommitUnitTrust::TrustedBackend,
     );
     let (alice_transport, mid_alice) = duplex();
-    let _alice_upstream = crate::db::block_on(alice.connect_upstream(alice_transport));
+    let _alice_upstream = crate::local_executor::block_on(alice.connect_upstream(alice_transport));
     let _mid_alice = mid.accept_subscriber(mid_alice, alice_author);
     let settle = || {
         for _ in 0..8 {
@@ -5073,7 +5091,8 @@ fn probe_3378_opening_snapshot_serve_cost() {
             let client = open_db(0xc1, client_author, &schema);
             let (client_transport, server_transport) =
                 if byte_wire { byte_duplex() } else { duplex() };
-            let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+            let _upstream =
+                crate::local_executor::block_on(client.connect_upstream(client_transport));
             let subscriber = server.accept_subscriber(server_transport, client_author);
             let query = Query::from("todos");
             let mut subscription =

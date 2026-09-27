@@ -1134,7 +1134,7 @@ fn db_sync_surface_round_trips_subscription_to_client() {
     seed(&server, "todos", cells("from server", false, owner));
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, client_author);
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
@@ -1175,7 +1175,7 @@ fn persisted_upstream_batch_survives_subscription_refresh_failure_without_redeli
     seed(&server, "todos", cells("persisted upstream", false, owner));
 
     let (client_transport, server_transport) = duplex();
-    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, client_author);
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
@@ -1245,7 +1245,7 @@ fn globally_accepted_client_rows_survive_writer_disconnect_for_fresh_reader() {
     let writer = open_db(0xa1, writer_author, &schema);
 
     let (writer_transport, server_writer_transport) = duplex();
-    let upstream = crate::db::block_on(writer.connect_upstream(writer_transport));
+    let upstream = crate::local_executor::block_on(writer.connect_upstream(writer_transport));
     let writer_subscriber = server.accept_subscriber(server_writer_transport, writer_author);
 
     let mut expected_rows = Vec::new();
@@ -1280,7 +1280,8 @@ fn globally_accepted_client_rows_survive_writer_disconnect_for_fresh_reader() {
 
     let reader = open_db(0xb1, reader_author, &schema);
     let (reader_transport, server_reader_transport) = duplex();
-    let _reader_upstream = crate::db::block_on(reader.connect_upstream(reader_transport));
+    let _reader_upstream =
+        crate::local_executor::block_on(reader.connect_upstream(reader_transport));
     let _reader_subscriber = server.accept_subscriber(server_reader_transport, reader_author);
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&reader, &query, global_subscribe_opts()).unwrap();
@@ -1323,7 +1324,7 @@ fn large_logical_snapshot_crosses_byte_peer_transport_and_settles() {
     }
 
     let (client_transport, server_transport) = byte_duplex_uncompressed();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, client_author);
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
@@ -1379,7 +1380,7 @@ fn branch_view_subscription_projects_base_resumes_and_unsubscribes_exact_view() 
         .unwrap();
 
     let (client_transport, server_transport) = duplex();
-    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let subscriber = server.accept_subscriber(server_transport, client_author);
     let query = Query::from("todos");
     let opts = global_subscribe_opts()
@@ -1415,7 +1416,8 @@ fn branch_view_subscription_projects_base_resumes_and_unsubscribes_exact_view() 
     assert!(server.server.detach_connection(&subscriber));
     assert!(client.detach_connection(&upstream));
     let (client_transport, server_transport) = duplex();
-    let _resumed_upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _resumed_upstream =
+        crate::local_executor::block_on(client.connect_upstream(client_transport));
     let resumed = server.accept_subscriber_with_resume(server_transport, client_author, cursor);
     for _ in 0..10 {
         client.tick().unwrap();
@@ -1519,7 +1521,7 @@ fn branch_view_subscriptions_disambiguate_same_row_and_tx_by_branch() {
     }
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let subscriber = server.accept_subscriber(server_transport, client_author);
     let mut left_subscription = prepared_subscribe(
         &client,
@@ -1627,7 +1629,7 @@ fn default_current_subscription_reconciles_deletion_witness_without_reset() {
     );
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, client_author);
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
     assert!(subscription.try_next_event().is_none());
@@ -1716,7 +1718,7 @@ fn default_local_subscription_reconciles_deletion_witness_without_reset() {
     );
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, client_author);
     let mut subscription = prepared_subscribe(&client, &query, ReadOpts::default()).unwrap();
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
@@ -1828,7 +1830,7 @@ fn owner_local_subscription_reconciles_peer_delete_without_reset() {
     );
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, client_author);
     let mut subscription = prepared_subscribe(&client, &query, ReadOpts::default()).unwrap();
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
@@ -1968,7 +1970,7 @@ fn assert_account_owned_subscription_reconciles_peer_delete(opts: ReadOpts) {
     );
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, client_author);
     let mut subscription = prepared_subscribe(&client, &query, opts.clone()).unwrap();
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
@@ -2659,7 +2661,7 @@ fn subscribers_receive_spilled_rows_without_blocking_the_sync_turn() {
     }
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, client_author);
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
@@ -2776,7 +2778,7 @@ fn unavailable_spilled_value_chunks_end_the_subscription_visibly() {
     let client_transport = Box::new(UnavailableChunkResponses {
         inner: client_transport,
     });
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, client_author);
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
@@ -2822,7 +2824,7 @@ fn close_while_offline_does_not_wait_for_detached_chunk_evaluation() {
     client.set_drops_pending_ticks_for_test(true);
     seed(&server, "todos", cells(&"c".repeat(70_000), false, owner));
     let (client_transport, server_transport) = duplex();
-    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, client_author);
     let query = Query::from("todos");
     let _subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
@@ -2875,7 +2877,7 @@ fn a_subscriber_joining_a_pending_spilled_install_waits_for_its_rows() {
         }
         expected.insert(seed(&server, "todos", cells("control", true, owner)));
         let (client_transport, server_transport) = duplex();
-        let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+        let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
         let _subscriber = server.accept_subscriber(server_transport, client_author);
         let query = Query::from("todos");
         let mut first = Some(prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap());
@@ -2886,7 +2888,7 @@ fn a_subscriber_joining_a_pending_spilled_install_waits_for_its_rows() {
             server.tick().unwrap();
         }
         assert!(
-            crate::db::block_on(client.node.node.lock()).has_pending_query_runtime(),
+            crate::local_executor::block_on(client.node.node.lock()).has_pending_query_runtime(),
             "the first install should still be waiting for chunks"
         );
         if drop_first {

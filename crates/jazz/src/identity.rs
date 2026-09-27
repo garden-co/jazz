@@ -181,8 +181,8 @@ pub fn verify_client_runtime_author_at(
         if verified.issuer != LOCAL_FIRST_ISSUER {
             return Err("only local-first proofs can found accounts".into());
         }
-        let app = crate::tools::AppId::from_string(expected_audience)
-            .unwrap_or_else(|_| crate::tools::AppId::from_name(expected_audience));
+        let app = crate::app_id::AppId::from_string(expected_audience)
+            .unwrap_or_else(|_| crate::app_id::AppId::from_name(expected_audience));
         author.with_account(crate::account_registry::local_first_account_id(
             *app.uuid(),
             &verified.user_id,

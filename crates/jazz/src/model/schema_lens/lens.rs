@@ -5,10 +5,10 @@
 
 use uuid::Uuid;
 
-use crate::tools::object::ObjectId;
 #[cfg(test)]
-use crate::tools::public_api::types::ColumnDescriptor;
-use crate::tools::public_api::types::{ColumnType, RowDescriptor, SchemaHash, TableSchema, Value};
+use crate::model::public_api::types::ColumnDescriptor;
+use crate::model::public_api::types::{ColumnType, RowDescriptor, SchemaHash, TableSchema, Value};
+use crate::object::ObjectId;
 
 /// Direction for lens application.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

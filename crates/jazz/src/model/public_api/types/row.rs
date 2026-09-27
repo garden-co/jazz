@@ -5,10 +5,10 @@ use std::sync::Arc;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_bytes::ByteBuf;
 
-use crate::tools::Value;
-use crate::tools::metadata::RowProvenance;
-use crate::tools::object::ResultKey;
-use crate::tools::transaction::TransactionId;
+use crate::model::metadata::RowProvenance;
+use crate::model::public_schema::Value;
+use crate::model::transaction::TransactionId;
+use crate::object::ResultKey;
 
 /// One named, typed field in a materialized query result.
 #[derive(Debug, Clone, PartialEq)]

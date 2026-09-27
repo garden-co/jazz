@@ -627,7 +627,7 @@ impl PolicyExpressionDecodeBudget {
     where
         E: serde::de::Error,
     {
-        use crate::protocol_limits::{
+        use crate::query::policy_limits::{
             MAX_POLICY_EXPRESSION_DEPTH, MAX_POLICY_EXPRESSION_NODES, PolicyExpressionLimitError,
         };
 
@@ -653,7 +653,7 @@ impl PolicyExpressionDecodeBudget {
     where
         E: serde::de::Error,
     {
-        use crate::protocol_limits::{MAX_POLICY_EXPRESSION_NODES, PolicyExpressionLimitError};
+        use crate::query::policy_limits::{MAX_POLICY_EXPRESSION_NODES, PolicyExpressionLimitError};
 
         let remaining = MAX_POLICY_EXPRESSION_NODES - self.nodes;
         if children > remaining {

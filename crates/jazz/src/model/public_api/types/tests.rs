@@ -151,7 +151,7 @@ fn value_column_type() {
         Some(ColumnType::Timestamp)
     );
     assert_eq!(
-        Value::Uuid(crate::tools::object::ObjectId::from_uuid(Uuid::nil())).column_type(),
+        Value::Uuid(crate::object::ObjectId::from_uuid(Uuid::nil())).column_type(),
         Some(ColumnType::Uuid)
     );
     assert_eq!(
@@ -456,7 +456,7 @@ fn schema_hash_matches_default_values_cross_runtime_fixture() {
         (
             "uuid",
             ColumnType::Uuid,
-            Some(Value::Uuid(crate::tools::object::ObjectId::from_uuid(
+            Some(Value::Uuid(crate::object::ObjectId::from_uuid(
                 Uuid::from_u128(0x00112233445566778899aabbccddeeff),
             ))),
         ),

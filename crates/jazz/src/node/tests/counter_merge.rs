@@ -25,7 +25,7 @@ fn singleton_raw_frontier_is_quiescent_across_reopen() {
             core = reopen_node_at(&directory, node(0x94), schema.clone());
         }
         for _ in 0..3 {
-            let outcome = crate::db::block_on(core.create_merge_version_if_needed("counters", row)).unwrap();
+            let outcome = crate::local_executor::block_on(core.create_merge_version_if_needed("counters", row)).unwrap();
             assert_eq!(core.query_all_versions().unwrap().len(), 5, "singleton must not publish new history");
             settle_outcome(&mut core, outcome).unwrap();
             assert_eq!(core.query_all_versions().unwrap().len(), 5, "singleton must not synthesize history");
@@ -246,7 +246,7 @@ fn counter_merge_of_divergent_merges_sums_raw_frontier_once() {
     core.rebuild_merge_heads_from_history_for_test("counters", row)
         .unwrap();
     let outcome =
-        crate::db::block_on(core.create_merge_version_if_needed("counters", row)).unwrap();
+        crate::local_executor::block_on(core.create_merge_version_if_needed("counters", row)).unwrap();
     settle_outcome(&mut core, outcome).unwrap();
 
     let merge = merge_with_parent_set(&mut core, row, &[h1, h2, h3]);
@@ -291,7 +291,7 @@ fn lww_merge_of_divergent_merges_uses_raw_argmax() {
 
     core.rebuild_merge_heads_from_history_for_test("todos", row)
         .unwrap();
-    let outcome = crate::db::block_on(core.create_merge_version_if_needed("todos", row)).unwrap();
+    let outcome = crate::local_executor::block_on(core.create_merge_version_if_needed("todos", row)).unwrap();
     settle_outcome(&mut core, outcome).unwrap();
 
     let merge = merge_with_parent_set(&mut core, row, &[h1, h2, h3]);
@@ -322,7 +322,7 @@ fn raw_merge_heads_drop_transitive_ancestors_after_late_child() {
     );
     core.rebuild_merge_heads_from_history_for_test("todos", row)
         .unwrap();
-    let outcome = crate::db::block_on(core.create_merge_version_if_needed("todos", row)).unwrap();
+    let outcome = crate::local_executor::block_on(core.create_merge_version_if_needed("todos", row)).unwrap();
     settle_outcome(&mut core, outcome).unwrap();
     merge_with_parent_set(&mut core, row, &[left, right_parent]);
 
@@ -346,7 +346,7 @@ fn raw_merge_heads_drop_transitive_ancestors_after_late_child() {
     );
     core.rebuild_merge_heads_from_history_for_test("todos", row)
         .unwrap();
-    let outcome = crate::db::block_on(core.create_merge_version_if_needed("todos", row)).unwrap();
+    let outcome = crate::local_executor::block_on(core.create_merge_version_if_needed("todos", row)).unwrap();
     settle_outcome(&mut core, outcome).unwrap();
 
     merge_with_parent_set(&mut core, row, &[left, right_child]);
@@ -381,7 +381,7 @@ fn duplicate_merges_over_same_frontier_refold_to_identical_cells() {
 
     core.rebuild_merge_heads_from_history_for_test("todos", row)
         .unwrap();
-    let outcome = crate::db::block_on(core.create_merge_version_if_needed("todos", row)).unwrap();
+    let outcome = crate::local_executor::block_on(core.create_merge_version_if_needed("todos", row)).unwrap();
     settle_outcome(&mut core, outcome).unwrap();
 
     let first = core

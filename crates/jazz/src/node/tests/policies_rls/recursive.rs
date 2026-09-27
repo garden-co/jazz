@@ -77,16 +77,16 @@ fn scalar_frontier_doc_access_policy(max_depth: usize) -> PublicPolicyExpr {
     let PublicPolicyExpr::ExistsRel { rel } = &mut policy else {
         unreachable!("seeded recursive policy is an ExistsRel");
     };
-    let crate::tools::public_schema::RelExpr::Filter { input, .. } = rel else {
+    let crate::model::public_schema::RelExpr::Filter { input, .. } = rel else {
         unreachable!("seeded recursive policy correlates its access join");
     };
-    let crate::tools::public_schema::RelExpr::Join { left, .. } = input.as_mut() else {
+    let crate::model::public_schema::RelExpr::Join { left, .. } = input.as_mut() else {
         unreachable!("seeded recursive policy joins its scalar frontier to access");
     };
-    let crate::tools::public_schema::RelExpr::Gather { bound, .. } = left.as_mut() else {
+    let crate::model::public_schema::RelExpr::Gather { bound, .. } = left.as_mut() else {
         unreachable!("seeded recursive policy starts from Gather");
     };
-    *bound = crate::tools::public_schema::RelRecursionBound::MaxDepth(max_depth);
+    *bound = crate::model::public_schema::RelRecursionBound::MaxDepth(max_depth);
     policy
 }
 

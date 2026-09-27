@@ -23,9 +23,12 @@ use super::query_engine::{
     ResultMembershipSchema, ResultMembershipVersionSchema, TypedOutputField, VersionWitnessSchema,
     VersionedRowRefSchema,
 };
-use crate::db::{TerminalRootCarrier, TerminalRootLayout, TerminalRootPublicField};
 use crate::ids::{NodeAlias, RowAuthor, RowUuid, SchemaVersionAlias};
+use crate::node::terminal_root::{
+    TerminalRootCarrier, TerminalRootLayout, TerminalRootPublicField,
+};
 use crate::node::{CurrentRowPublicationField, CurrentRowResultVisibility};
+use crate::object::{ObjectId, OutputOccurrenceId};
 #[cfg(test)]
 use crate::protocol::CoveredInputEntry;
 use crate::protocol::{
@@ -35,7 +38,6 @@ use crate::protocol::{
 };
 use crate::schema::{RuntimeSchema, TableSchema};
 use crate::time::{GlobalTime, TxTime};
-use crate::tools::{ObjectId, OutputOccurrenceId};
 use crate::tx::TxId;
 
 type TableSchemas = BTreeMap<String, TableSchema>;
@@ -111,7 +113,8 @@ pub(crate) struct MaintainedSubscriptionView {
     structured_app_rows: BTreeMap<Vec<u8>, BTreeMap<Vec<u8>, i64>>,
     /// A root switches from its encoded seed to decoded state on its first
     /// descendant edit. Never retain a second encoded copy while it evolves.
-    structured_terminal_records: BTreeMap<Vec<u8>, crate::db::terminal_record::TerminalRecordState>,
+    structured_terminal_records:
+        BTreeMap<Vec<u8>, crate::node::terminal_record::TerminalRecordState>,
     /// Runtime terminal edits address roots by their opaque Groove key. Keep
     /// the compiler-emitted association solely to target a root's descendants;
     /// it must never be used to collapse retained occurrence records.
@@ -1345,7 +1348,7 @@ impl MaintainedSubscriptionView {
 
     pub(crate) fn decoded_terminal_records(
         &self,
-    ) -> &BTreeMap<Vec<u8>, crate::db::terminal_record::TerminalRecordState> {
+    ) -> &BTreeMap<Vec<u8>, crate::node::terminal_record::TerminalRecordState> {
         &self.structured_terminal_records
     }
 
@@ -1441,9 +1444,9 @@ impl MaintainedSubscriptionView {
                         "collector terminal root has non-unit multiplicity",
                     ));
                 }
-                let state = crate::db::terminal_record::TerminalRecordState::new(OwnedRecord::new(
-                    raw, descriptor,
-                ))
+                let state = crate::node::terminal_record::TerminalRecordState::new(
+                    OwnedRecord::new(raw, descriptor),
+                )
                 .map_err(|_| {
                     super::Error::InvalidStoredValue("invalid retained collector terminal record")
                 })?;

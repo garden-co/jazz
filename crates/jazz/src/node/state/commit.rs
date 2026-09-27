@@ -905,7 +905,7 @@ where
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<Option<BTreeMap<String, Value>>, Error> {
-        Ok(crate::db::block_on(
+        Ok(crate::local_executor::block_on(
             self.current_rows(table, DurabilityTier::Local),
         )?
             .into_iter()

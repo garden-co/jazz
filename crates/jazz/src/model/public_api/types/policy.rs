@@ -1,10 +1,10 @@
 use super::*;
-use crate::tools::object::ObjectId;
-use crate::tools::public_api::policy::{CmpOp, Operation, PolicyValue};
-use crate::tools::public_api::relation_ir::{
+use crate::model::public_api::policy::{CmpOp, Operation, PolicyValue};
+use crate::model::public_api::relation_ir::{
     ColumnRef, JoinCondition, JoinKind, KeyRef, PredicateCmpOp, PredicateExpr, ProjectColumn,
     ProjectExpr, RecursionBound, RelExpr, RowIdRef, ValueRef,
 };
+use crate::object::ObjectId;
 use serde::{Deserialize, Serialize};
 
 /// Policy for a specific operation (SELECT, INSERT, UPDATE, DELETE).

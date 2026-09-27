@@ -977,7 +977,9 @@ where
         self.node.borrow_mut().set_permissions_ready(ready);
         if ready {
             for connection in self.connections.borrow().iter() {
-                crate::db::block_on(connection.borrow_mut().rehydrate_subscriber_views())?;
+                crate::local_executor::block_on(
+                    connection.borrow_mut().rehydrate_subscriber_views(),
+                )?;
             }
         }
         Ok(())
@@ -2629,7 +2631,7 @@ where
             );
         }
         let (downstream_fates, startup_error) =
-            crate::db::block_on(self.subscriber_startup(identity, trust));
+            crate::local_executor::block_on(self.subscriber_startup(identity, trust));
         self.accept_subscriber_with_peer_and_startup(
             transport,
             identity,

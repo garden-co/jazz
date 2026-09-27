@@ -14,6 +14,9 @@ use thiserror::Error;
 use crate::ids::SchemaVersionId;
 use crate::schema::{ColumnSchema as JazzColumnSchema, JazzSchema, RuntimeSchema, TableSchema};
 
+/// Semantic limits on recursively encoded policy expressions.
+pub mod policy_limits;
+
 // Stable public syntax and relation-facade vocabulary.
 include!("query/ast.rs");
 include!("query/relation_codec.rs");

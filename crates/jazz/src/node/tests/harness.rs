@@ -4,6 +4,16 @@
 //! model comparisons use [`crate::oracle`].
 
 use super::*;
+use crate::model::public_schema::{
+    CmpOp as PublicCmpOp, ColumnDescriptor as PublicColumnDescriptor,
+    ColumnMergeStrategy as PublicColumnMergeStrategy, ColumnType as PublicColumnType,
+    EnumCaseDescriptor as PublicEnumCaseDescriptor, Operation as PublicOperation,
+    PolicyExpr as PublicPolicyExpr, PolicyValue as PublicPolicyValue,
+    RowDescriptor as PublicRowDescriptor, Schema as PublicSchema,
+    SchemaBuilder as PublicSchemaBuilder, TableName as PublicTableName,
+    TablePolicies as PublicTablePolicies, TableSchema as PublicTableSchema,
+    TableSchemaBuilder as PublicTableSchemaBuilder, Value as PublicValue,
+};
 use crate::oracle::{ModelRowVersion, Oracle, OracleTxState, ParallelMaterializationOracle};
 use crate::peer::{PeerMetrics, PeerState};
 use crate::protocol::{
@@ -14,16 +24,6 @@ use crate::query::{
     ArraySubquery, Binding, BindingId, Query, RelationColumnRef, RelationExpr,
     RelationJoinCondition, RelationJoinKind, RelationProjectColumn, RelationProjectExpr,
     RelationQuery, ShapeId, ValidatedQuery, claim, col, contains, eq, gt, lit, ne, not, param,
-};
-use crate::tools::public_schema::{
-    CmpOp as PublicCmpOp, ColumnDescriptor as PublicColumnDescriptor,
-    ColumnMergeStrategy as PublicColumnMergeStrategy, ColumnType as PublicColumnType,
-    EnumCaseDescriptor as PublicEnumCaseDescriptor, Operation as PublicOperation,
-    PolicyExpr as PublicPolicyExpr, PolicyValue as PublicPolicyValue,
-    RowDescriptor as PublicRowDescriptor, Schema as PublicSchema,
-    SchemaBuilder as PublicSchemaBuilder, TableName as PublicTableName,
-    TablePolicies as PublicTablePolicies, TableSchema as PublicTableSchema,
-    TableSchemaBuilder as PublicTableSchemaBuilder, Value as PublicValue,
 };
 use crate::tx::MergeAspect;
 use groove::schema::{ColumnSchema, ColumnType};

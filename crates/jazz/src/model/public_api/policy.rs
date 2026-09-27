@@ -511,7 +511,7 @@ impl PolicyExpr {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::public_api::relation_ir::{
+    use crate::model::public_api::relation_ir::{
         ColumnRef, PredicateCmpOp, PredicateExpr, ValueRef,
     };
     use serde_json::json;

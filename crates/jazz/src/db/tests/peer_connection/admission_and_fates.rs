@@ -506,11 +506,12 @@ fn upstream_row_version_fetch_retries_after_bounded_transport_backpressure() {
     let schema = schema();
     let client = open_db(0xc3, identity, &schema);
     let outbound = Rc::new(RefCell::new(VecDeque::new()));
-    let upstream =
-        crate::db::block_on(client.connect_upstream(Box::new(BackpressureOnceTransport {
+    let upstream = crate::local_executor::block_on(client.connect_upstream(Box::new(
+        BackpressureOnceTransport {
             outbound: Rc::clone(&outbound),
             failed: false,
-        })));
+        },
+    )));
     let request = RowVersionRef::new(
         "todos",
         RowUuid::from_bytes([0xc3; 16]),
@@ -801,7 +802,7 @@ fn upstream_authorization_scope_intent_retries_after_bounded_transport_backpress
         NodeUuid::from_bytes([0x5e; 16]),
         1,
     );
-    let upstream = crate::db::block_on(client.connect_upstream(transport));
+    let upstream = crate::local_executor::block_on(client.connect_upstream(transport));
     let session_context = upstream
         .borrow()
         .transport
@@ -922,7 +923,7 @@ fn backpressured_scope_intent_claim_transition_closes_before_reconnect() {
         NodeUuid::from_bytes([0x5e; 16]),
         1,
     );
-    let upstream = crate::db::block_on(client.connect_upstream(first_transport));
+    let upstream = crate::local_executor::block_on(client.connect_upstream(first_transport));
     let session_context = upstream
         .borrow()
         .transport
@@ -978,7 +979,7 @@ fn backpressured_scope_intent_claim_transition_closes_before_reconnect() {
         NodeUuid::from_bytes([0x5e; 16]),
         2,
     );
-    let retry_upstream = crate::db::block_on(client.connect_upstream(retry_transport));
+    let retry_upstream = crate::local_executor::block_on(client.connect_upstream(retry_transport));
     let retry_subscriber =
         server.accept_subscriber_with_claims(retry_server_transport, author, a_claims.clone());
     retry_subscriber
@@ -1075,7 +1076,7 @@ fn backpressured_scope_intent_claim_transition_closes_on_same_connection() {
         NodeUuid::from_bytes([0x5e; 16]),
         1,
     );
-    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let subscriber = server.accept_subscriber_with_claims(server_transport, author, a_claims);
     let original_transport = {
         let mut connection = upstream.borrow_mut();
@@ -1142,7 +1143,7 @@ fn scope_intent_retries_after_upstream_reconnect() {
         NodeUuid::from_bytes([0x5e; 16]),
         1,
     );
-    let first = crate::db::block_on(client.connect_upstream(first_transport));
+    let first = crate::local_executor::block_on(client.connect_upstream(first_transport));
     let advice = client.request_permission_advice(PermissionAdviceAction::Read {
         table: "todos".to_owned(),
         row: row(4),
@@ -1161,7 +1162,7 @@ fn scope_intent_retries_after_upstream_reconnect() {
         NodeUuid::from_bytes([0x5e; 16]),
         2,
     );
-    let _second = crate::db::block_on(client.connect_upstream(second_transport));
+    let _second = crate::local_executor::block_on(client.connect_upstream(second_transport));
     client.tick().unwrap();
     let request_id = match try_recv_subscriber_payload(second_authority.as_mut()) {
         Some(SyncMessage::AuthorizationScopeIntent { request_id, .. }) => request_id,
@@ -1186,7 +1187,7 @@ fn reconnect_replays_live_scope_waiters_once_and_drops_cancelled_ones() {
         NodeUuid::from_bytes([0x5e; 16]),
         1,
     );
-    let first = crate::db::block_on(client.connect_upstream(first_transport));
+    let first = crate::local_executor::block_on(client.connect_upstream(first_transport));
     let action = PermissionAdviceAction::Read {
         table: "todos".to_owned(),
         row: row(5),
@@ -1216,7 +1217,7 @@ fn reconnect_replays_live_scope_waiters_once_and_drops_cancelled_ones() {
         NodeUuid::from_bytes([0x5e; 16]),
         2,
     );
-    let _second = crate::db::block_on(client.connect_upstream(second_transport));
+    let _second = crate::local_executor::block_on(client.connect_upstream(second_transport));
     client.tick().unwrap();
     let request_id = match try_recv_subscriber_payload(second_authority.as_mut()) {
         Some(SyncMessage::AuthorizationScopeIntent {
@@ -1590,7 +1591,7 @@ fn admitted_duplex_context_binds_peer_epochs_and_rejects_cross_wiring() {
     let server_node = NodeUuid::from_bytes([0x73; 16]);
     let (client_transport, server_transport) =
         duplex_with_admitted_session_context(identity, client_node, 41, server_node, 97);
-    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let subscriber = server.accept_subscriber(server_transport, identity);
     assert_eq!(upstream.borrow().connection_epoch, 41);
     assert_eq!(subscriber.borrow().connection_epoch, 97);
@@ -1642,7 +1643,7 @@ fn admitted_duplex_context_binds_peer_epochs_and_rejects_cross_wiring() {
 
     let (reconnected_client, reconnected_server) =
         duplex_with_admitted_session_context(identity, client_node, 42, server_node, 98);
-    let reconnect = crate::db::block_on(client.connect_upstream(reconnected_client));
+    let reconnect = crate::local_executor::block_on(client.connect_upstream(reconnected_client));
     let resumed = server.accept_subscriber(reconnected_server, identity);
     assert_ne!(
         upstream.borrow().connection_epoch,
@@ -1695,7 +1696,7 @@ fn backend_permission_advice_keeps_concurrent_delegated_claim_scopes_separate_af
         NodeUuid::from_bytes([0x5e; 16]),
         1,
     );
-    let upstream = crate::db::block_on(backend.connect_upstream(backend_transport));
+    let upstream = crate::local_executor::block_on(backend.connect_upstream(backend_transport));
     let _subscriber = authority.server.accept_subscriber_with_claims_and_trust(
         authority_transport,
         AuthorSubject::SYSTEM,
@@ -1743,7 +1744,7 @@ fn backend_permission_advice_keeps_concurrent_delegated_claim_scopes_separate_af
             2,
         );
     let _reconnected_upstream =
-        crate::db::block_on(backend.connect_upstream(reconnected_backend_transport));
+        crate::local_executor::block_on(backend.connect_upstream(reconnected_backend_transport));
     let _reconnected_subscriber = authority.server.accept_subscriber_with_claims_and_trust(
         reconnected_authority_transport,
         AuthorSubject::SYSTEM,
@@ -1833,7 +1834,8 @@ fn permission_advice_uses_authenticated_link_identity_without_mutating() {
         NodeUuid::from_bytes([0x5e; 16]),
         1,
     );
-    let _alice_upstream = crate::db::block_on(alice_client.connect_upstream(alice_transport));
+    let _alice_upstream =
+        crate::local_executor::block_on(alice_client.connect_upstream(alice_transport));
     let _alice_subscriber = server.accept_subscriber(alice_server_transport, alice);
     let alice_advice = alice_client.request_permission_advice(PermissionAdviceAction::Read {
         table: "todos".to_owned(),
@@ -1849,7 +1851,8 @@ fn permission_advice_uses_authenticated_link_identity_without_mutating() {
         NodeUuid::from_bytes([0x5e; 16]),
         2,
     );
-    let _mallory_upstream = crate::db::block_on(mallory_client.connect_upstream(mallory_transport));
+    let _mallory_upstream =
+        crate::local_executor::block_on(mallory_client.connect_upstream(mallory_transport));
     let _mallory_subscriber = server.accept_subscriber(mallory_server_transport, mallory);
     let mallory_advice = mallory_client.request_permission_advice(PermissionAdviceAction::Read {
         table: "todos".to_owned(),
@@ -1892,7 +1895,7 @@ fn distinct_advice_actions_with_one_compiled_scope_hydrate_once() {
         NodeUuid::from_bytes([0x5e; 16]),
         1,
     );
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let subscriber = server.accept_subscriber(server_transport, alice);
 
     let first = client.request_permission_advice(PermissionAdviceAction::Read {
@@ -1953,7 +1956,7 @@ fn scope_receipt_claim_transition_ignores_late_a_support_and_requires_fresh_b_re
         NodeUuid::from_bytes([0x5e; 16]),
         1,
     );
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let subscriber = server.accept_subscriber(server_transport, author);
 
     let cancelled = client.request_permission_advice(PermissionAdviceAction::Read {
@@ -2057,7 +2060,7 @@ fn authority_claim_revision_invalidates_cached_scope_and_rehydrates() {
         NodeUuid::from_bytes([0x5e; 16]),
         1,
     );
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let subscriber = server.accept_subscriber(server_transport, alice);
 
     let first = client.request_permission_advice(PermissionAdviceAction::Read {
@@ -2169,11 +2172,11 @@ fn direct_subscription_claim_refresh_replaces_membership_without_touching_same_s
     a_client.set_test_provider_claims(session_subject, a_claims.clone());
     b_client.set_test_provider_claims(session_subject, b_claims.clone());
     let (a_transport, a_server_transport) = duplex();
-    let a_upstream = crate::db::block_on(a_client.connect_upstream(a_transport));
+    let a_upstream = crate::local_executor::block_on(a_client.connect_upstream(a_transport));
     let a_subscriber =
         server.accept_subscriber_with_claims(a_server_transport, session_subject, a_claims);
     let (b_transport, b_server_transport) = duplex();
-    let b_upstream = crate::db::block_on(b_client.connect_upstream(b_transport));
+    let b_upstream = crate::local_executor::block_on(b_client.connect_upstream(b_transport));
     let _b_subscriber =
         server.accept_subscriber_with_claims(b_server_transport, session_subject, b_claims);
 
@@ -2254,7 +2257,7 @@ fn direct_whole_table_claim_refresh_reopens_under_new_binding() {
     let denied_claims = BTreeMap::from([("sub".to_owned(), Value::Uuid(denied_owner.test_uuid()))]);
     client.set_test_provider_claims(session_subject, allowed_claims.clone());
     let (client_transport, server_transport, _client_sent, server_sent) = duplex_with_taps();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let subscriber =
         server.accept_subscriber_with_claims(server_transport, session_subject, allowed_claims);
 
@@ -2351,7 +2354,7 @@ fn claim_refresh_counts_one_full_diff_fallback_and_incremental_deltas_count_none
     let denied_claims = test_provider_claims(denied_owner);
     client.set_test_provider_claims(session_subject, allowed_claims.clone());
     let (client_transport, server_transport) = duplex();
-    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let subscriber =
         server.accept_subscriber_with_claims(server_transport, session_subject, allowed_claims);
     let query = Query::from("todos");
@@ -2459,7 +2462,7 @@ fn claim_refresh_retries_only_the_unsent_group_member_after_backpressure() {
     )]);
     client.set_test_provider_claims(session_subject, allowed_claims.clone());
     let (client_transport, server_transport, _client_sent, _server_sent) = duplex_with_taps();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let subscriber =
         server.accept_subscriber_with_claims(server_transport, session_subject, allowed_claims);
 
@@ -2667,7 +2670,7 @@ fn subscriber_disconnect_retires_direct_and_delegated_coverage_receivers() {
         .active_subscriptions;
     let (direct_client_transport, direct_server_transport) = duplex();
     let _direct_upstream =
-        crate::db::block_on(direct_client.connect_upstream(direct_client_transport));
+        crate::local_executor::block_on(direct_client.connect_upstream(direct_client_transport));
     let direct_subscriber =
         direct_server.accept_subscriber(direct_server_transport, direct_identity);
     let direct_query = Query::from("todos");
@@ -2841,7 +2844,7 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
     client.set_test_provider_claims(session_subject, allowed_claims.clone());
 
     let (relay_transport, core_transport) = duplex();
-    let relay_upstream = crate::db::block_on(relay.connect_upstream(relay_transport));
+    let relay_upstream = crate::local_executor::block_on(relay.connect_upstream(relay_transport));
     // The Core does not infer a user session from a trusted/backend transport.
     // This test models the production scope-relay handshake that admits the
     // exact foreground binding forwarded by the relay.
@@ -2852,7 +2855,8 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
         1,
     );
     let (client_transport, relay_client_transport, _client_sent, relay_sent) = duplex_with_taps();
-    let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _client_upstream =
+        crate::local_executor::block_on(client.connect_upstream(client_transport));
     let relay_client = relay.accept_subscriber_with_claims(
         relay_client_transport,
         session_subject,
@@ -2936,7 +2940,7 @@ fn direct_claim_refresh_replaces_relay_upstream_usage_and_remote_membership() {
 
     let (replacement_relay_transport, replacement_core_transport) = duplex();
     let _replacement_relay_upstream =
-        crate::db::block_on(relay.connect_upstream(replacement_relay_transport));
+        crate::local_executor::block_on(relay.connect_upstream(replacement_relay_transport));
     let replacement_core_relay = core.accept_scope_isolated_relay_subscriber(
         replacement_core_transport,
         session_subject,
@@ -3043,7 +3047,8 @@ fn terminal_core_write_fates_prove_exact_insert_update_and_delete_actions() {
         NodeUuid::from_bytes([0xc0; 16]),
         9,
     );
-    let _core_upstream = crate::db::block_on(server.server.connect_upstream(core_upstream));
+    let _core_upstream =
+        crate::local_executor::block_on(server.server.connect_upstream(core_upstream));
     let client = open_db(0xa1, alice, &schema);
     let (client_transport, server_transport) = duplex_with_admitted_session_context(
         alice,
@@ -3052,7 +3057,7 @@ fn terminal_core_write_fates_prove_exact_insert_update_and_delete_actions() {
         NodeUuid::from_bytes([0x5e; 16]),
         1,
     );
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let subscriber = server.accept_subscriber(server_transport, alice);
 
     let inserted = client
@@ -3505,7 +3510,7 @@ fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
         let ConnectionLink::Subscriber(a_state) = &mut a_connection.link else {
             unreachable!("A is an admitted subscriber link");
         };
-        crate::db::block_on(a_state.peer.prove_terminal_commit_authorization(
+        crate::local_executor::block_on(a_state.peer.prove_terminal_commit_authorization(
             &mut server.node().borrow_mut(),
             alice,
             a_state.session_claims.clone(),
@@ -3552,7 +3557,7 @@ fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
         let ConnectionLink::Subscriber(a_state) = &mut a_connection.link else {
             unreachable!("A remains an admitted subscriber link");
         };
-        crate::db::block_on(a_state.peer.prove_terminal_commit_authorization(
+        crate::local_executor::block_on(a_state.peer.prove_terminal_commit_authorization(
             &mut server.node().borrow_mut(),
             alice,
             a_state.session_claims.clone(),
@@ -3574,7 +3579,7 @@ fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
         let ConnectionLink::Subscriber(a_state) = &mut a_connection.link else {
             unreachable!("A remains an admitted subscriber link");
         };
-        crate::db::block_on(a_state.peer.prove_terminal_commit_authorization(
+        crate::local_executor::block_on(a_state.peer.prove_terminal_commit_authorization(
             &mut server.node().borrow_mut(),
             alice,
             a_state.session_claims.clone(),
@@ -3603,7 +3608,7 @@ fn concurrent_upstreams_keep_selected_owner_until_detach_handoff() {
         NodeUuid::from_bytes([0xa2; 16]),
         20,
     );
-    let a = crate::db::block_on(relay.node.connect_upstream(a_transport));
+    let a = crate::local_executor::block_on(relay.node.connect_upstream(a_transport));
     let first = *relay.node.admitted_upstream_authority.borrow();
     let (b_transport, _b_peer) = duplex_with_admitted_session_context(
         identity,
@@ -3612,7 +3617,7 @@ fn concurrent_upstreams_keep_selected_owner_until_detach_handoff() {
         NodeUuid::from_bytes([0xb2; 16]),
         21,
     );
-    let _b = crate::db::block_on(relay.node.connect_upstream(b_transport));
+    let _b = crate::local_executor::block_on(relay.node.connect_upstream(b_transport));
     assert_eq!(
         *relay.node.admitted_upstream_authority.borrow(),
         first,
@@ -3652,7 +3657,7 @@ fn missing_read_policy_advice_denies_with_an_explicit_zero_clause_receipt() {
         NodeUuid::from_bytes([0x5e; 16]),
         1,
     );
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, identity);
     let advice = client.request_permission_advice(PermissionAdviceAction::Read {
         table: "todos".to_owned(),
@@ -3680,7 +3685,7 @@ fn permission_advice_is_unknown_until_authority_permissions_are_ready() {
         NodeUuid::from_bytes([0x5e; 16]),
         1,
     );
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, author);
     let advice = client.request_permission_advice(PermissionAdviceAction::Insert {
         table: "todos".to_owned(),
@@ -3708,7 +3713,7 @@ fn partial_replica_cannot_act_as_permission_advice_authority() {
         NodeUuid::from_bytes([0x5e; 16]),
         1,
     );
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = partial.accept_subscriber(partial_transport, author);
     let advice = client.request_permission_advice(PermissionAdviceAction::Insert {
         table: "todos".to_owned(),
@@ -3748,7 +3753,7 @@ fn permission_advice_update_evaluates_post_patch_update_check() {
         NodeUuid::from_bytes([0x5e; 16]),
         1,
     );
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, author);
     let advice = client.request_permission_advice(PermissionAdviceAction::Update {
         table: "todos".to_owned(),
@@ -3808,7 +3813,7 @@ fn permission_advice_update_allows_a_valid_patch_to_an_existing_row() {
         NodeUuid::from_bytes([0x61; 16]),
         1,
     );
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, author);
     let mut ask = |row, patch| {
         let advice = client.request_permission_advice(PermissionAdviceAction::Update {
@@ -3873,7 +3878,7 @@ fn permission_advice_update_denies_missing_and_deleted_rows_under_allow_all_poli
         NodeUuid::from_bytes([0x62; 16]),
         1,
     );
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, author);
     let ask = |row| {
         let advice = client.request_permission_advice(PermissionAdviceAction::Update {
@@ -3937,7 +3942,7 @@ fn probe_3386_update_advice_latency() {
         NodeUuid::from_bytes([0x60; 16]),
         1,
     );
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, author);
     let mut inserted = 0usize;
     for size in [100usize, 1_000, 5_000] {
@@ -4008,7 +4013,7 @@ fn cancelled_permission_advice_ignores_late_or_replayed_response_ids() {
         NodeUuid::from_bytes([0x5e; 16]),
         1,
     );
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
 
     let cancelled = client.request_permission_advice(PermissionAdviceAction::Read {
         table: "todos".to_owned(),
@@ -4059,7 +4064,7 @@ fn identical_permission_advice_requests_share_one_authority_intent() {
         NodeUuid::from_bytes([0x5e; 16]),
         1,
     );
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let action = PermissionAdviceAction::Read {
         table: "todos".to_owned(),
         row: row(1),
@@ -4097,7 +4102,7 @@ fn dropped_permission_advice_is_not_sent_and_reopened_nodes_use_fresh_ids() {
         NodeUuid::from_bytes([0x5e; 16]),
         1,
     );
-    let _first_upstream = crate::db::block_on(first.connect_upstream(first_transport));
+    let _first_upstream = crate::local_executor::block_on(first.connect_upstream(first_transport));
     let cancelled = first.request_permission_advice(PermissionAdviceAction::Insert {
         table: "todos".to_owned(),
         cells: cells("sensitive", false, author),
@@ -4125,7 +4130,8 @@ fn dropped_permission_advice_is_not_sent_and_reopened_nodes_use_fresh_ids() {
         NodeUuid::from_bytes([0x5e; 16]),
         2,
     );
-    let _reopened_upstream = crate::db::block_on(reopened.connect_upstream(reopened_transport));
+    let _reopened_upstream =
+        crate::local_executor::block_on(reopened.connect_upstream(reopened_transport));
     let reopened_live = reopened.request_permission_advice(PermissionAdviceAction::Read {
         table: "todos".to_owned(),
         row: row(1),

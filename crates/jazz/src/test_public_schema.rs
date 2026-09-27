@@ -1,4 +1,4 @@
-use crate::tools::public_schema::{
+use crate::model::public_schema::{
     PolicyExpr, RelColumnRef, RelExpr, RelJoinCondition, RelJoinKind, RelKeyRef, RelPredicateCmpOp,
     RelPredicateExpr, RelProjectColumn, RelProjectExpr, RelRecursionBound, RelValueRef, RowIdRef,
     Value,

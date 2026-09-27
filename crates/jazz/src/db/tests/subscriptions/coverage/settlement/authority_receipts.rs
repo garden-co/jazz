@@ -29,7 +29,7 @@ fn subscription_emits_when_remote_coverage_settles_without_row_changes() {
     let client = open_db(0xc1, client_author, &schema);
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, client_author);
 
     let query = Query::from("todos");
@@ -60,7 +60,8 @@ fn global_settlement_requires_a_fresh_current_connection_view_receipt() {
     seed(&server, "todos", cells("cached", false, owner));
 
     let (first_client_transport, first_server_transport) = duplex();
-    let first_upstream = crate::db::block_on(client.connect_upstream(first_client_transport));
+    let first_upstream =
+        crate::local_executor::block_on(client.connect_upstream(first_client_transport));
     let _first_subscriber = server.accept_subscriber(first_server_transport, client_author);
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
@@ -90,7 +91,7 @@ fn global_settlement_requires_a_fresh_current_connection_view_receipt() {
 
     let (reconnected_client_transport, reconnected_server_transport) = duplex();
     let _reconnected_upstream =
-        crate::db::block_on(client.connect_upstream(reconnected_client_transport));
+        crate::local_executor::block_on(client.connect_upstream(reconnected_client_transport));
     let _reconnected_subscriber =
         server.accept_subscriber(reconnected_server_transport, client_author);
     client.tick().unwrap();
@@ -116,7 +117,8 @@ fn nonselected_upstream_update_demotes_selected_receipt_before_publication() {
     seed(&server, "todos", cells("initial", false, owner));
 
     let (old_client_transport, old_server_transport) = duplex();
-    let old_upstream = crate::db::block_on(client.connect_upstream(old_client_transport));
+    let old_upstream =
+        crate::local_executor::block_on(client.connect_upstream(old_client_transport));
     let _old_subscriber = server.accept_subscriber(old_server_transport, client_author);
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
@@ -131,7 +133,8 @@ fn nonselected_upstream_update_demotes_selected_receipt_before_publication() {
     ));
 
     let (new_client_transport, new_server_transport) = duplex();
-    let new_upstream = crate::db::block_on(client.connect_upstream(new_client_transport));
+    let new_upstream =
+        crate::local_executor::block_on(client.connect_upstream(new_client_transport));
     let _new_subscriber = server.accept_subscriber(new_server_transport, client_author);
     assert!(!subscription._state.borrow().settled);
     assert!(subscription.try_next_event().is_none());
@@ -178,7 +181,8 @@ fn nonselected_view_update_demotes_receipts_for_other_recomputed_views() {
     let view_update = settled_todos_source_closure;
 
     let (old_client_transport, mut old_authority) = duplex();
-    let _old_upstream = crate::db::block_on(client.connect_upstream(old_client_transport));
+    let _old_upstream =
+        crate::local_executor::block_on(client.connect_upstream(old_client_transport));
     let mut all_subscription =
         prepared_subscribe(&client, &all_query, global_subscribe_opts()).unwrap();
     let mut filtered_subscription =
@@ -203,7 +207,8 @@ fn nonselected_view_update_demotes_receipts_for_other_recomputed_views() {
     let filtered_terminal_before = filtered_subscription._state.borrow().snapshot.clone();
 
     let (new_client_transport, mut new_authority) = duplex();
-    let _new_upstream = crate::db::block_on(client.connect_upstream(new_client_transport));
+    let _new_upstream =
+        crate::local_executor::block_on(client.connect_upstream(new_client_transport));
     assert!(!all_subscription._state.borrow().settled);
     assert!(!filtered_subscription._state.borrow().settled);
     client.tick().unwrap();
@@ -273,7 +278,8 @@ fn stale_old_upstream_epoch_cannot_settle_after_upstream_switch_or_fallback() {
     );
 
     let (old_client_transport, old_server_transport) = duplex();
-    let old_upstream = crate::db::block_on(client.connect_upstream(old_client_transport));
+    let old_upstream =
+        crate::local_executor::block_on(client.connect_upstream(old_client_transport));
     let _old_subscriber = server.accept_subscriber(old_server_transport, client_author);
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
@@ -291,7 +297,8 @@ fn stale_old_upstream_epoch_cannot_settle_after_upstream_switch_or_fallback() {
     // Switching links immediately retires the old receipt, even while the old
     // transport remains alive long enough to race one more response.
     let (new_client_transport, new_server_transport) = duplex();
-    let new_upstream = crate::db::block_on(client.connect_upstream(new_client_transport));
+    let new_upstream =
+        crate::local_executor::block_on(client.connect_upstream(new_client_transport));
     let _new_subscriber = server.accept_subscriber(new_server_transport, client_author);
     assert!(
         !subscription._state.borrow().settled,
@@ -361,7 +368,8 @@ fn fallback_staged_cut_blocks_older_selected_confirmation() {
     let update = settled_todos_source_closure;
 
     let (old_client_transport, mut old_authority) = duplex();
-    let _old_upstream = crate::db::block_on(client.connect_upstream(old_client_transport));
+    let _old_upstream =
+        crate::local_executor::block_on(client.connect_upstream(old_client_transport));
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
     assert!(subscription.try_next_event().is_none());
     client.tick().unwrap();
@@ -375,7 +383,8 @@ fn fallback_staged_cut_blocks_older_selected_confirmation() {
     assert!(subscription._state.borrow().settled);
 
     let (new_client_transport, mut new_authority) = duplex();
-    let new_upstream = crate::db::block_on(client.connect_upstream(new_client_transport));
+    let new_upstream =
+        crate::local_executor::block_on(client.connect_upstream(new_client_transport));
     client.tick().unwrap();
     let new_key = loop {
         if let SyncMessage::Subscribe(subscribe) = new_authority.try_recv().unwrap() {
@@ -410,7 +419,8 @@ fn fallback_replay_of_preselection_row_repair_cannot_settle() {
     let query = Query::from("todos");
 
     let (old_client_transport, mut old_authority_transport) = duplex();
-    let old_upstream = crate::db::block_on(client.connect_upstream(old_client_transport));
+    let old_upstream =
+        crate::local_executor::block_on(client.connect_upstream(old_client_transport));
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
     assert!(subscription.try_next_event().is_none());
     client.tick().unwrap();
@@ -428,7 +438,8 @@ fn fallback_replay_of_preselection_row_repair_cannot_settle() {
     assert!(subscription._state.borrow().settled);
 
     let (new_client_transport, mut new_authority_transport) = duplex();
-    let new_upstream = crate::db::block_on(client.connect_upstream(new_client_transport));
+    let new_upstream =
+        crate::local_executor::block_on(client.connect_upstream(new_client_transport));
     client.tick().unwrap();
     let new_subscription = loop {
         match new_authority_transport.try_recv().unwrap() {
@@ -514,7 +525,8 @@ fn restarted_client_reuses_durable_cursor_but_waits_for_current_authority_receip
     }))
     .unwrap();
     let (first_client_transport, first_server_transport) = duplex();
-    let first_upstream = crate::db::block_on(client.connect_upstream(first_client_transport));
+    let first_upstream =
+        crate::local_executor::block_on(client.connect_upstream(first_client_transport));
     let first_subscriber = server.accept_subscriber(first_server_transport, client_author);
     let query = Query::from("todos");
     let mut first_subscription =
@@ -556,7 +568,7 @@ fn restarted_client_reuses_durable_cursor_but_waits_for_current_authority_receip
     assert!(subscription.try_next_event().is_none());
     let (reopened_client_transport, reopened_server_transport) = duplex();
     let _reopened_upstream =
-        crate::db::block_on(reopened.connect_upstream(reopened_client_transport));
+        crate::local_executor::block_on(reopened.connect_upstream(reopened_client_transport));
     let _reopened_subscriber = server.accept_subscriber(reopened_server_transport, client_author);
     reopened.tick().unwrap();
     server.tick().unwrap();

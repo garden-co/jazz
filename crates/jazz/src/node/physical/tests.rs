@@ -4,7 +4,7 @@ mod variant_case_tests {
     use crate::legacy_test_future::SettledNodeTestExt as _;
     use crate::protocol::TableLens;
     use crate::query::Query as JazzQuery;
-    use crate::tools::public_schema::{
+    use crate::model::public_schema::{
         ColumnDescriptor as PublicColumnDescriptor, ColumnType as PublicColumnType,
         EnumCaseDescriptor as PublicEnumCaseDescriptor, SchemaBuilder as PublicSchemaBuilder,
         TableSchemaBuilder as PublicTableSchemaBuilder,
@@ -1311,7 +1311,7 @@ mod variant_case_tests {
             .map(String::as_str)
             .collect::<Vec<_>>();
         let storage = RocksDbStorage::open(path, &refs).expect("open receipt storage");
-        crate::db::block_on(NodeState::new(node_uuid, genesis.clone(), storage))
+        crate::local_executor::block_on(NodeState::new(node_uuid, genesis.clone(), storage))
             .expect("open receipt node")
     }
 
@@ -1329,9 +1329,9 @@ mod variant_case_tests {
             mapping,
         )
         .expect("encode corrupted mapping fixture");
-        let applied = crate::db::block_on(node.database.apply_batch(batch))
+        let applied = crate::local_executor::block_on(node.database.apply_batch(batch))
             .expect("write corrupted mapping fixture");
-        let persisted = crate::db::block_on(applied.persist());
+        let persisted = crate::local_executor::block_on(applied.persist());
         node.database
             .finish_persistence(persisted)
             .expect("finish corrupted mapping fixture");
@@ -1376,7 +1376,7 @@ mod variant_case_tests {
         binding: &crate::query::Binding,
         expected_row: RowUuid,
     ) {
-        let current = crate::db::block_on(node.current_rows_for_schema(
+        let current = crate::local_executor::block_on(node.current_rows_for_schema(
             "events",
             schema.version_id(),
             DurabilityTier::Local,
@@ -1391,7 +1391,7 @@ mod variant_case_tests {
         );
 
         let queried =
-            crate::db::block_on(node.query_rows(shape, binding, DurabilityTier::Local))
+            crate::local_executor::block_on(node.query_rows(shape, binding, DurabilityTier::Local))
                 .expect("read projected query rows");
         assert_eq!(queried.len(), 1);
         assert_eq!(queried[0].row_uuid(), expected_row);
@@ -1479,7 +1479,7 @@ mod variant_case_tests {
         let binding = shape.bind(BTreeMap::new()).expect("bind wide payload query");
         assert_wide_payload_receipt(&mut node, &evolved_schema, &shape, &binding, row_uuid);
 
-        crate::db::block_on(node.close()).expect("close durable receipt storage");
+        crate::local_executor::block_on(node.close()).expect("close durable receipt storage");
         drop(node);
         let mut reopened = open_receipt_node(dir.path(), node_uuid, &base);
         let reopened_physical =
@@ -1501,7 +1501,7 @@ mod variant_case_tests {
             &binding,
             row_uuid,
         );
-        crate::db::block_on(reopened.close()).expect("close reopened receipt storage");
+        crate::local_executor::block_on(reopened.close()).expect("close reopened receipt storage");
     }
 
     #[test]
@@ -1527,13 +1527,13 @@ mod variant_case_tests {
         cases[0].introducing_ordinal = 0;
         cases[1].introducing_ordinal = 1;
         overwrite_schema_mapping(&mut node, schema_id, &corrupt);
-        crate::db::block_on(node.close()).expect("close corrupted receipt storage");
+        crate::local_executor::block_on(node.close()).expect("close corrupted receipt storage");
         drop(node);
 
         let cfs = schema.column_families();
         let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
         let storage = RocksDbStorage::open(dir.path(), &refs).expect("reopen corrupted storage");
-        let error = match crate::db::block_on(NodeState::new(node_uuid, schema, storage)) {
+        let error = match crate::local_executor::block_on(NodeState::new(node_uuid, schema, storage)) {
             Ok(_) => panic!("forged payload provenance must fail before descriptor rebuild"),
             Err(error) => error,
         };
@@ -1563,13 +1563,13 @@ mod variant_case_tests {
         cases[0].introducing_ordinal = 0;
         cases[1].introducing_ordinal = 1;
         overwrite_schema_mapping(&mut node, schema_id, &corrupt);
-        crate::db::block_on(node.close()).expect("close corrupted scalar receipt storage");
+        crate::local_executor::block_on(node.close()).expect("close corrupted scalar receipt storage");
         drop(node);
 
         let cfs = schema.column_families();
         let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
         let storage = RocksDbStorage::open(dir.path(), &refs).expect("reopen corrupted storage");
-        let error = match crate::db::block_on(NodeState::new(node_uuid, schema, storage)) {
+        let error = match crate::local_executor::block_on(NodeState::new(node_uuid, schema, storage)) {
             Ok(_) => panic!("forged scalar provenance must fail before descriptor rebuild"),
             Err(error) => error,
         };
@@ -1615,7 +1615,7 @@ mod variant_case_tests {
             255
         );
 
-        crate::db::block_on(node.close()).expect("close scalar lineage receipt storage");
+        crate::local_executor::block_on(node.close()).expect("close scalar lineage receipt storage");
         drop(node);
         let mut reopened = open_receipt_node(dir.path(), node_uuid, &base);
         let physical = &reopened.catalogue.physical_mappings[&evolved.id].tables["events"];
@@ -1626,7 +1626,7 @@ mod variant_case_tests {
             physical.scalar_enum_cases[&status][255].introducing_ordinal,
             255
         );
-        crate::db::block_on(reopened.close()).expect("close reopened scalar lineage receipt storage");
+        crate::local_executor::block_on(reopened.close()).expect("close reopened scalar lineage receipt storage");
     }
 
     #[test]
@@ -1672,7 +1672,7 @@ mod variant_case_tests {
         assert_eq!(node.catalogue.next_physical_table_id, next_table);
         assert_eq!(node.catalogue.next_physical_column_id, next_column);
 
-        crate::db::block_on(node.close()).expect("close scalar receipt storage");
+        crate::local_executor::block_on(node.close()).expect("close scalar receipt storage");
         drop(node);
         let mut reopened = open_receipt_node(dir.path(), node_uuid, &base);
         assert_eq!(reopened.active_catalogue_seq(), 1);
@@ -1682,7 +1682,7 @@ mod variant_case_tests {
         assert!(reopened.catalogue.staged_lineages.is_empty());
         assert_eq!(reopened.catalogue.next_physical_table_id, next_table);
         assert_eq!(reopened.catalogue.next_physical_column_id, next_column);
-        crate::db::block_on(reopened.close()).expect("close reopened scalar receipt storage");
+        crate::local_executor::block_on(reopened.close()).expect("close reopened scalar receipt storage");
     }
 
     #[test]
@@ -1716,7 +1716,7 @@ mod variant_case_tests {
         assert_eq!(node.catalogue.next_physical_table_id, initial_next_table);
         assert_eq!(node.catalogue.next_physical_column_id, initial_next_column);
 
-        crate::db::block_on(node.close()).expect("close parked scalar receipt storage");
+        crate::local_executor::block_on(node.close()).expect("close parked scalar receipt storage");
         drop(node);
         let mut node = open_receipt_node(dir.path(), node_uuid, &base);
         assert!(node.catalogue.pending_lineages.contains_key(&2));
@@ -1745,7 +1745,7 @@ mod variant_case_tests {
         assert_eq!(next_table, initial_next_table);
         assert_eq!(next_column, initial_next_column);
 
-        crate::db::block_on(node.close()).expect("close cleaned scalar receipt storage");
+        crate::local_executor::block_on(node.close()).expect("close cleaned scalar receipt storage");
         drop(node);
         let mut reopened = open_receipt_node(dir.path(), node_uuid, &base);
         assert_eq!(reopened.active_catalogue_seq(), 1);
@@ -1755,7 +1755,7 @@ mod variant_case_tests {
         assert!(reopened.catalogue.staged_lineages.is_empty());
         assert_eq!(reopened.catalogue.next_physical_table_id, next_table);
         assert_eq!(reopened.catalogue.next_physical_column_id, next_column);
-        crate::db::block_on(reopened.close())
+        crate::local_executor::block_on(reopened.close())
             .expect("close reopened cleaned scalar receipt storage");
     }
 }

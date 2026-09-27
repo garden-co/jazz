@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use crate::node::CurrentRow;
-use crate::tools::OutputOccurrenceId;
+use crate::object::OutputOccurrenceId;
 
 /// Ordered recursive result of a query with relation arrays.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

@@ -1,21 +1,21 @@
 //! Stable public schema and session vocabulary.
 
-pub use crate::tools::public_api::policy::{CmpOp, Operation, PolicyExpr, PolicyValue};
-pub use crate::tools::public_api::relation_ir::{
+pub use crate::model::public_api::policy::{CmpOp, Operation, PolicyExpr, PolicyValue};
+pub use crate::model::public_api::relation_ir::{
     ColumnRef as RelColumnRef, JoinCondition as RelJoinCondition, JoinKind as RelJoinKind,
     KeyRef as RelKeyRef, PredicateCmpOp as RelPredicateCmpOp, PredicateExpr as RelPredicateExpr,
     ProjectColumn as RelProjectColumn, ProjectExpr as RelProjectExpr,
     RecursionBound as RelRecursionBound, RelExpr, RowIdRef, UnionArm as RelUnionArm,
     ValueRef as RelValueRef,
 };
-pub use crate::tools::public_api::session::{AuthMode, Session, WriteContext};
-pub use crate::tools::public_api::types::{
+pub use crate::model::public_api::session::{AuthMode, Session, WriteContext};
+pub use crate::model::public_api::types::{
     ColumnDescriptor, ColumnMergeStrategy, ColumnName, ColumnType, EnumCaseDescriptor,
     OperationPolicy, OrderedRowDelta, QueryResult, QueryResultField, Row, RowDelta, RowDescriptor,
     Schema, SchemaBuilder, SchemaHash, TableName, TablePolicies, TableSchema, TableSchemaBuilder,
     Value, permissions, policy_expr,
 };
-pub use crate::tools::transaction::{OpenTransactionId, TransactionId};
+pub use crate::model::transaction::{OpenTransactionId, TransactionId};
 
 /// Validate JSON-bearing public values without changing their source text.
 ///

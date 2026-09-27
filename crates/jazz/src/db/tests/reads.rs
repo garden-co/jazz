@@ -274,7 +274,7 @@ fn maintained_global_index_snapshot_waits_for_settled_source() {
     );
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, client_author);
     let query = Query::from("documents").filter(eq(col("team"), lit(Value::Uuid(team.0))));
     server.node().borrow_mut().reset_query_engine_read_metrics();

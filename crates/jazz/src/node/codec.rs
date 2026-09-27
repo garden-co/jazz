@@ -7,7 +7,7 @@
 
 use super::query_engine::user_column_field;
 use super::*;
-use crate::protocol::{ResultRowLayer, SnapshotRef};
+use crate::protocol::SnapshotRef;
 use crate::schema::{ColumnSchema, contribution_merge_storage_type};
 use crate::tx::{
     BranchViewCopyBase, BranchViewCopyEvidence, BranchWriteIntent, BranchWriteOperation,
@@ -114,95 +114,6 @@ groove::define_record! {
     }
 }
 
-groove::impl_record_field_u64!(TxTime);
-groove::impl_record_field_u64!(GlobalTime);
-groove::impl_record_field_u64!(NodeAlias);
-groove::impl_record_field_u64!(SchemaVersionAlias);
-groove::impl_record_field_uuid!(NodeUuid);
-groove::impl_record_field_uuid!(SchemaFamilyId);
-groove::impl_record_field_uuid!(RowUuid);
-groove::impl_record_field_uuid!(SchemaVersionId);
-groove::impl_record_field_enum!(TxKind {
-    TxKind::Mergeable = 0,
-    TxKind::Exclusive = 1,
-});
-// Storage tags are independent of the public enum: 2 is a decode-only legacy
-// alias for Local, while Global remains 3.
-impl DurabilityTier {
-    #[doc(hidden)]
-    pub fn from_discriminant(tag: u8) -> Result<Self, groove::records::Error> {
-        match tag {
-            0 => Ok(Self::None),
-            1 | 2 => Ok(Self::Local),
-            3 => Ok(Self::Global),
-            tag => Err(groove::records::Error::InvalidEnumDiscriminant {
-                enum_name: "DurabilityTier".to_owned(),
-                discriminant: tag,
-            }),
-        }
-    }
-
-    #[doc(hidden)]
-    pub fn discriminant(self) -> u8 {
-        match self {
-            Self::None => 0,
-            Self::Local => 1,
-            Self::Global => 3,
-        }
-    }
-}
-
-impl groove::records::RecordField for DurabilityTier {
-    fn read(
-        record: &groove::records::BorrowedRecord<'_>,
-        idx: usize,
-    ) -> Result<Self, groove::records::Error> {
-        Self::from_discriminant(record.get_enum(idx)?)
-    }
-    fn to_value(&self) -> Value {
-        Value::EnumTag(self.discriminant())
-    }
-    const COLUMN_KIND: groove::records::FieldKind = groove::records::FieldKind::Enum;
-    fn read_raw(
-        bytes: &[u8],
-        value_type: &groove::records::ValueType,
-    ) -> Result<Self, groove::records::Error> {
-        match value_type {
-            groove::records::ValueType::EnumTag(schema) => {
-                let tag = <u8 as groove::records::RecordField>::read_raw(
-                    bytes,
-                    &groove::records::ValueType::U8,
-                )?;
-                schema.variant(tag)?;
-                Self::from_discriminant(tag)
-            }
-            _ => Err(groove::records::Error::TypeMismatch {
-                expected: groove::records::ValueType::U8,
-            }),
-        }
-    }
-    fn read_tuple_raw(
-        bytes: &[u8],
-        value_type: &groove::records::ValueType,
-    ) -> Result<Self, groove::records::Error> {
-        Self::read_raw(bytes, value_type)
-    }
-}
-
-groove::impl_record_field_enum!(DeletionEvent {
-    DeletionEvent::Deleted = 0,
-    DeletionEvent::Restored = 1,
-});
-groove::impl_record_field_enum!(MergeAspect {
-    MergeAspect::Content = 0,
-    MergeAspect::Deletion = 1,
-});
-groove::impl_record_field_enum!(ResultRowLayer {
-    ResultRowLayer::Content = 0,
-    ResultRowLayer::Deletion = 1,
-    ResultRowLayer::ContentOrDeletion = 2,
-});
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum FateTag {
     Pending,
@@ -234,48 +145,6 @@ groove::impl_record_field_enum!(RejectionReasonTag {
     RejectionReasonTag::Cascade = 4,
     RejectionReasonTag::MalformedCommit = 5,
 });
-
-impl records::RecordField for AuthorSubject {
-    fn read_raw(bytes: &[u8], value_type: &records::ValueType) -> Result<Self, records::Error> {
-        AuthorSubject::from_value(<Value as records::RecordField>::read_raw(
-            bytes, value_type,
-        )?)
-        .map_err(|_| records::Error::NonCanonicalRecord)
-    }
-    fn read(record: &records::BorrowedRecord<'_>, idx: usize) -> Result<Self, records::Error> {
-        AuthorSubject::from_value(record.get_idx(idx)?)
-            .map_err(|_| records::Error::NonCanonicalRecord)
-    }
-
-    fn to_value(&self) -> Value {
-        (*self).to_value()
-    }
-
-    const COLUMN_KIND: records::FieldKind = records::FieldKind::Record;
-}
-
-impl records::RecordField for RowAuthor {
-    fn read_raw(bytes: &[u8], value_type: &records::ValueType) -> Result<Self, records::Error> {
-        let records::ValueType::Record(descriptor) = value_type else {
-            return Err(records::Error::TypeMismatch {
-                expected: value_type.clone(),
-            });
-        };
-        RowAuthor::from_record(descriptor.bind(bytes))
-            .map_err(|_| records::Error::NonCanonicalRecord)
-    }
-
-    fn read(record: &records::BorrowedRecord<'_>, idx: usize) -> Result<Self, records::Error> {
-        RowAuthor::from_record(record.get_record(idx)?)
-            .map_err(|_| records::Error::NonCanonicalRecord)
-    }
-
-    fn to_value(&self) -> Value {
-        (*self).to_value()
-    }
-
-    const COLUMN_KIND: records::FieldKind = records::FieldKind::Record;
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct ParentRefs(Vec<TxId>);
@@ -1065,7 +934,7 @@ pub(super) fn decode_catalogue_schema(payload: &[u8]) -> Result<SchemaVersion, E
     let id = SchemaVersionId(cursor.uuid()?);
     let public_schema = cursor.sized_bytes()?;
     cursor.finish()?;
-    let schema = crate::tools::public_schema_convert::decode_public_schema_json(public_schema)
+    let schema = crate::model::public_schema_convert::decode_public_schema_json(public_schema)
         .map_err(|_| Error::InvalidStoredValue("invalid catalogue schema public schema"))?;
     let canonical_public_schema = serde_json::to_vec(schema.public_schema())
         .map_err(|_| Error::InvalidStoredValue("encode catalogue public schema"))?;
@@ -1853,7 +1722,7 @@ mod catalogue_payload_tests {
     }
 
     fn composite_index_schema(declared: &[[&str; 2]]) -> SchemaVersion {
-        use crate::tools::public_schema::{ColumnType, SchemaBuilder, TableSchema};
+        use crate::model::public_schema::{ColumnType, SchemaBuilder, TableSchema};
         let mut table = TableSchema::builder("docs")
             .column("owner", ColumnType::Text)
             .column("updated", ColumnType::Text);
@@ -1998,8 +1867,25 @@ groove::define_record! {
     }
 }
 
-impl VersionRecord {
-    pub(super) fn from_commit(
+// Node-side constructors: an inherent impl would have to live in the protocol
+// layer, which cannot see node rows or commits.
+pub(super) trait VersionRecordFromNode: Sized {
+    fn from_commit(
+        commit: &MergeableCommit,
+        table: &TableSchema,
+        schema_version: SchemaVersionId,
+    ) -> Result<Self, Error>;
+
+    fn from_stored(
+        stored: &VersionRow,
+        table: &TableSchema,
+        schema_version: SchemaVersionId,
+        authored_columns: Option<BTreeSet<String>>,
+    ) -> Result<Self, Error>;
+}
+
+impl VersionRecordFromNode for VersionRecord {
+    fn from_commit(
         commit: &MergeableCommit,
         table: &TableSchema,
         schema_version: SchemaVersionId,
@@ -2026,7 +1912,7 @@ impl VersionRecord {
         .map_err(Error::from)
     }
 
-    pub(super) fn from_stored(
+    fn from_stored(
         stored: &VersionRow,
         table: &TableSchema,
         schema_version: SchemaVersionId,

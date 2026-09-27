@@ -7856,7 +7856,7 @@ fn handle_write_state_update<S>(
     let Some(record) = browser_relay_recovered_tx_ids
         .borrow()
         .contains(&tx_id)
-        .then(|| crate::db::block_on(node.borrow_mut().transaction_record(tx_id)))
+        .then(|| crate::local_executor::block_on(node.borrow_mut().transaction_record(tx_id)))
         .flatten()
     else {
         return;
