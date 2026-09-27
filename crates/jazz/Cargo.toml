@@ -214,3 +214,8 @@ path = "tests/integration/main.rs"
 [[test]]
 name = "incremental_delivery_canary"
 path = "tests/incremental_delivery_canary.rs"
+
+[[bench]]
+name = "local_blob_reads"
+harness = false
+required-features = ["testing"]
