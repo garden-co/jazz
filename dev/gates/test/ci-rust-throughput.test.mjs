@@ -106,7 +106,13 @@ const benchmarkSmokeMode = (mode) => {
   return benchmarkSmokeGate.slice(startIndex + start.length, endIndex);
 };
 const assertUsesBlacksmithRunner = (jobName, jobSource) => {
-  const cpu = ["lint", "test-rust-workspace", "test-ts", "test-react-native"].includes(jobName)
+  const cpu = [
+    "lint",
+    "test-rust-workspace",
+    "test-storage-compat",
+    "test-ts",
+    "test-react-native",
+  ].includes(jobName)
     ? 16
     : 4;
   assert.match(jobSource, new RegExp(`runs-on: blacksmith-${cpu}vcpu-ubuntu-2404`));
@@ -130,23 +136,21 @@ const assertRnNativeArtifactPushPaths = (paths) =>
     rnNativeArtifactPushPaths,
     "RN artifact main pushes must cover exactly the relay production dependency closure",
   );
-const integrationCheckStep = (typescriptJob) => {
-  const start = typescriptJob.indexOf("name: Run CI-equivalent TypeScript and workspace partition");
+const integrationCheckStep = (lintJob) => {
+  const start = lintJob.indexOf(
+    "name: Run CI-equivalent lint, metadata and workspace check partition",
+  );
   assert.notEqual(start, -1, "missing integration workspace check");
-  const end = typescriptJob.indexOf("\n      - ", start + 1);
-  return typescriptJob.slice(start, end === -1 ? typescriptJob.length : end);
+  const end = lintJob.indexOf("\n      - ", start + 1);
+  return lintJob.slice(start, end === -1 ? lintJob.length : end);
 };
-const assertIntegrationCheckIsGating = (typescriptJob) => {
+const assertIntegrationCheckIsGating = (lintJob) => {
   // Job-level continue-on-error makes every failed step non-gating. Reject the
   // property rather than only the literal `true`, because expressions are
   // equally able to accidentally suppress an integration failure.
+  assert.doesNotMatch(lintJob, /^    continue-on-error:/m, "lint must not suppress job failures");
   assert.doesNotMatch(
-    typescriptJob,
-    /^    continue-on-error:/m,
-    "test-ts must not suppress job failures",
-  );
-  assert.doesNotMatch(
-    integrationCheckStep(typescriptJob),
+    integrationCheckStep(lintJob),
     /^\s+continue-on-error:/m,
     "integration workspace check must not suppress its failure",
   );
@@ -185,7 +189,13 @@ const assertSuiteS3ConfigurationBoundary = (source) => {
       `untrusted suite callers must not inherit ${name}`,
     );
 
-  for (const name of ["lint", "test-rust-workspace", "test-rust-differential", "test-ts"]) {
+  for (const name of [
+    "lint",
+    "test-rust-workspace",
+    "test-rust-differential",
+    "test-storage-compat",
+    "test-ts",
+  ]) {
     const parsedJob = document.jobs[name];
     assert.equal(parsedJob.env, undefined, `${name} must not configure S3 at job scope`);
     const exportIndex = parsedJob.steps.findIndex(
@@ -254,7 +264,10 @@ const assertEntryCacheTrustBoundary = (source) => {
     packages: "read",
   });
   assert.equal(untrusted.uses, "./.github/workflows/ci-suite.yml");
-  assert.deepEqual(untrusted.with, { "sccache-write": false, "trusted-cache": false });
+  assert.deepEqual(untrusted.with, {
+    "sccache-write": false,
+    "trusted-cache": false,
+  });
 
   assert.deepEqual(
     Object.keys(trusted).sort(),
@@ -652,7 +665,10 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
   const document = parse(rustShadowWorkflow);
   const shard = document.jobs.shard;
   const aggregate = document.jobs.aggregate;
-  assert.deepEqual(document.permissions, { contents: "read", packages: "read" });
+  assert.deepEqual(document.permissions, {
+    contents: "read",
+    packages: "read",
+  });
   assert.deepEqual(
     document.on.pull_request,
     { types: ["opened", "reopened", "synchronize", "labeled", "unlabeled"] },
@@ -1076,11 +1092,17 @@ test("the exact pre-checkout shadow receipt logs and rejects tracked and untrack
         ["config", "user.email", "test@example.invalid"],
         ["config", "user.name", "Test"],
       ]) {
-        const initialized = spawnSync("git", args, { cwd: workspace, encoding: "utf8" });
+        const initialized = spawnSync("git", args, {
+          cwd: workspace,
+          encoding: "utf8",
+        });
         assert.equal(initialized.status, 0, initialized.stderr);
       }
       fs.writeFileSync(path.join(workspace, "tracked.txt"), "clean\n");
-      let result = spawnSync("git", ["add", "tracked.txt"], { cwd: workspace, encoding: "utf8" });
+      let result = spawnSync("git", ["add", "tracked.txt"], {
+        cwd: workspace,
+        encoding: "utf8",
+      });
       assert.equal(result.status, 0, result.stderr);
       result = spawnSync("git", ["commit", "--quiet", "-m", "fixture"], {
         cwd: workspace,
@@ -1144,8 +1166,9 @@ test("Rust CI uses a contention-tolerant but finite Nextest watchdog", () => {
   );
 });
 
-test("the TypeScript CI job checks the integration workspace before TypeScript artifacts", () => {
+test("the lint job checks the integration workspace and TypeScript runs its own partition", () => {
   const typescript = job("test-ts");
+  const lint = job("lint");
 
   assert.match(
     setupBlacksmithAction,
@@ -1156,13 +1179,13 @@ test("the TypeScript CI job checks the integration workspace before TypeScript a
   assert.doesNotMatch(workflowSuite, /^  build-integration:/m);
   assert.match(
     typescript,
-    /name: Run CI-equivalent TypeScript and workspace partition\s+run: node dev\/gates\/local-ci-equivalent\.mjs --ci-partition typescript/,
+    /name: Run CI-equivalent TypeScript partition\s+run: node dev\/gates\/local-ci-equivalent\.mjs --ci-partition typescript/,
   );
-  assertIntegrationCheckIsGating(typescript);
-  assert.ok(
-    typescript.indexOf("name: Run CI-equivalent TypeScript and workspace partition") !== -1,
-    "workspace check and artifacts must use the shared CI-equivalent partition",
+  assert.match(
+    lint,
+    /name: Run CI-equivalent lint, metadata and workspace check partition\s+run: node dev\/gates\/local-ci-equivalent\.mjs --ci-partition lint/,
   );
+  assertIntegrationCheckIsGating(lint);
   assertUsesBlacksmithRunner("test-ts", typescript);
 });
 
@@ -1193,7 +1216,13 @@ test("Turbo cache uses its pinned OIDC policy only inside the trusted suite invo
 });
 
 test("shared Rust cache writes are main-only while trusted PRs receive read access", () => {
-  for (const name of ["lint", "test-rust-workspace", "test-rust-differential", "test-ts"]) {
+  for (const name of [
+    "lint",
+    "test-rust-workspace",
+    "test-rust-differential",
+    "test-storage-compat",
+    "test-ts",
+  ]) {
     const source = job(name);
     assert.match(source, /role-to-assume: \$\{\{ vars\.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN \}\}/);
     assert.match(source, /role-to-assume: \$\{\{ vars\.SCCACHE_PR_READER_AWS_ROLE_ARN \}\}/);
@@ -1214,17 +1243,32 @@ test("entry workflow grants credentialed cross-ref caches only to main and trust
     [
       "main push",
       { eventName: "push", ref: "refs/heads/main" },
-      { invocation: "trusted", idToken: "write", sccache: "writer", turbo: true },
+      {
+        invocation: "trusted",
+        idToken: "write",
+        sccache: "writer",
+        turbo: true,
+      },
     ],
     [
       "release push",
       { eventName: "push", ref: "refs/heads/release" },
-      { invocation: "trusted", idToken: "write", sccache: "none", turbo: false },
+      {
+        invocation: "trusted",
+        idToken: "write",
+        sccache: "none",
+        turbo: false,
+      },
     ],
     [
       "feature push",
       { eventName: "push", ref: "refs/heads/feature/cache-auth" },
-      { invocation: "untrusted", idToken: "none", sccache: "none", turbo: false },
+      {
+        invocation: "untrusted",
+        idToken: "none",
+        sccache: "none",
+        turbo: false,
+      },
     ],
     [
       "trusted same-repository PR",
@@ -1234,7 +1278,12 @@ test("entry workflow grants credentialed cross-ref caches only to main and trust
         sameRepository: true,
         authorAssociation: "MEMBER",
       },
-      { invocation: "trusted", idToken: "write", sccache: "reader", turbo: true },
+      {
+        invocation: "trusted",
+        idToken: "write",
+        sccache: "reader",
+        turbo: true,
+      },
     ],
     [
       "trusted upper stack layer",
@@ -1244,7 +1293,12 @@ test("entry workflow grants credentialed cross-ref caches only to main and trust
         sameRepository: true,
         authorAssociation: "COLLABORATOR",
       },
-      { invocation: "trusted", idToken: "write", sccache: "reader", turbo: true },
+      {
+        invocation: "trusted",
+        idToken: "write",
+        sccache: "reader",
+        turbo: true,
+      },
     ],
     [
       "outside contributor on same repository",
@@ -1254,7 +1308,12 @@ test("entry workflow grants credentialed cross-ref caches only to main and trust
         sameRepository: true,
         authorAssociation: "CONTRIBUTOR",
       },
-      { invocation: "untrusted", idToken: "none", sccache: "none", turbo: false },
+      {
+        invocation: "untrusted",
+        idToken: "none",
+        sccache: "none",
+        turbo: false,
+      },
     ],
     [
       "fork PR",
@@ -1264,7 +1323,12 @@ test("entry workflow grants credentialed cross-ref caches only to main and trust
         sameRepository: false,
         authorAssociation: "MEMBER",
       },
-      { invocation: "untrusted", idToken: "none", sccache: "none", turbo: false },
+      {
+        invocation: "untrusted",
+        idToken: "none",
+        sccache: "none",
+        turbo: false,
+      },
     ],
     [
       "Dependabot PR",
@@ -1274,17 +1338,32 @@ test("entry workflow grants credentialed cross-ref caches only to main and trust
         sameRepository: true,
         authorAssociation: "CONTRIBUTOR",
       },
-      { invocation: "untrusted", idToken: "none", sccache: "none", turbo: false },
+      {
+        invocation: "untrusted",
+        idToken: "none",
+        sccache: "none",
+        turbo: false,
+      },
     ],
     [
       "manual main",
       { eventName: "workflow_dispatch", ref: "refs/heads/main" },
-      { invocation: "untrusted", idToken: "none", sccache: "none", turbo: false },
+      {
+        invocation: "untrusted",
+        idToken: "none",
+        sccache: "none",
+        turbo: false,
+      },
     ],
     [
       "manual feature",
       { eventName: "workflow_dispatch", ref: "refs/heads/feature/cache-auth" },
-      { invocation: "untrusted", idToken: "none", sccache: "none", turbo: false },
+      {
+        invocation: "untrusted",
+        idToken: "none",
+        sccache: "none",
+        turbo: false,
+      },
     ],
   ];
 
@@ -1390,26 +1469,26 @@ test("on-demand WebKit IndexedDB receipt scopes build caches to its repository",
 });
 
 test("integration workspace check contract rejects planted failure suppression", () => {
-  const typescript = job("test-ts");
+  const lint = job("lint");
   const check =
-    "name: Run CI-equivalent TypeScript and workspace partition\n        run: node dev/gates/local-ci-equivalent.mjs --ci-partition typescript";
+    "name: Run CI-equivalent lint, metadata and workspace check partition\n        run: node dev/gates/local-ci-equivalent.mjs --ci-partition lint";
 
   assert.throws(
     () =>
       assertIntegrationCheckIsGating(
-        typescript.replace(check, `${check}\n        continue-on-error: true`),
+        lint.replace(check, `${check}\n        continue-on-error: true`),
       ),
     /integration workspace check must not suppress its failure/,
   );
   assert.throws(
     () =>
       assertIntegrationCheckIsGating(
-        typescript.replace(
-          "    timeout-minutes: 20",
-          "    continue-on-error: true\n    timeout-minutes: 20",
+        lint.replace(
+          "    timeout-minutes: 15",
+          "    continue-on-error: true\n    timeout-minutes: 15",
         ),
       ),
-    /test-ts must not suppress job failures/,
+    /lint must not suppress job failures/,
   );
 });
 
@@ -2060,7 +2139,10 @@ test("the Jazz Tools preflight derives public exports and keeps test-only entryp
       JSON.stringify({
         exports: {
           ".": { types: "./dist/index.d.ts", default: "./dist/index.js" },
-          "./react": { types: "./dist/react/index.d.ts", default: "./dist/react/index.js" },
+          "./react": {
+            types: "./dist/react/index.d.ts",
+            default: "./dist/react/index.js",
+          },
           "./testing": { default: "./dist/testing/index.js" },
         },
       }),
@@ -2120,7 +2202,10 @@ test("missing public exports or inspector assets prevent both TypeScript suites 
       JSON.stringify({
         exports: {
           ".": { types: "./dist/index.d.ts", default: "./dist/index.js" },
-          "./react": { types: "./dist/react/index.d.ts", default: "./dist/react/index.js" },
+          "./react": {
+            types: "./dist/react/index.d.ts",
+            default: "./dist/react/index.js",
+          },
           "./testing": { default: "./dist/testing/index.js" },
         },
       }),

@@ -96,7 +96,16 @@ export const ciPartitions = Object.freeze({
     command("Turbo cache-input contracts", "pnpm", ["test:turbo-cache-inputs"]),
     command("invariant registry", "bash", ["dev/gates/invariant-registry.sh"]),
     command("SPEC issue links", "node", ["dev/gates/spec-open-questions.mjs"]),
-    command("ignored-test inventory", "node", ["dev/gates/ignored-tests.mjs"]),
+    // The exhaustive target-class compile lives here rather than in front of
+    // the TypeScript artifact build: it gates the same push, but no longer
+    // delays the longest job's native artifacts by a serial workspace check.
+    command("all Rust workspace target classes", "cargo", [
+      "check",
+      "--workspace",
+      ...RUST_WORKSPACE_TARGETS,
+      "--features",
+      RUST_CI_FEATURES,
+    ]),
   ]),
   "rust-workspace": Object.freeze([
     command("workspace Rust tests", "node", [
@@ -148,6 +157,9 @@ export const ciPartitions = Object.freeze({
       "--features",
       RUST_CI_FEATURES,
     ]),
+    // Runs after the workspace tests with the same feature selection, so its
+    // `cargo nextest list` reuses the test binaries that were just built.
+    command("ignored-test inventory", "node", ["dev/gates/ignored-tests.mjs"]),
     command("Nextest partition coverage", "node", [
       "--test",
       "dev/gates/test/nextest-partitions.test.mjs",
@@ -155,13 +167,6 @@ export const ciPartitions = Object.freeze({
   ]),
   "rust-differential": Object.freeze([m3DifferentialCommand]),
   typescript: Object.freeze([
-    command("all Rust workspace target classes", "cargo", [
-      "check",
-      "--workspace",
-      ...RUST_WORKSPACE_TARGETS,
-      "--features",
-      RUST_CI_FEATURES,
-    ]),
     command("native correctness-artifact producer", "node", [
       "dev/gates/ensure-correctness-artifacts.mjs",
     ]),

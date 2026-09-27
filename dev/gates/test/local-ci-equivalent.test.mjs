@@ -48,7 +48,9 @@ const sccacheExportStep = Object.freeze({
 const turboExportStep = Object.freeze({
   name: "Export trusted Turbo cache signing key",
   if: trustedTurboCondition,
-  env: { CACHE_SIGNATURE_KEY: "${{ secrets.TURBO_REMOTE_CACHE_SIGNATURE_KEY }}" },
+  env: {
+    CACHE_SIGNATURE_KEY: "${{ secrets.TURBO_REMOTE_CACHE_SIGNATURE_KEY }}",
+  },
   run: 'echo "TURBO_REMOTE_CACHE_SIGNATURE_KEY=${CACHE_SIGNATURE_KEY}" >> "${GITHUB_ENV}"',
 });
 const sccacheStatsStep = Object.freeze({
@@ -114,7 +116,10 @@ test("CI invokes only shared partitions and rejects a direct correctness bypass"
   assert.doesNotThrow(() => assertCiSuiteUsesOnlySharedCorrectnessPartitions(workflowModel));
 
   const planted = structuredClone(workflowModel);
-  planted.jobs.lint.steps.push({ name: "quiet bypass", run: "cargo test -p jazz" });
+  planted.jobs.lint.steps.push({
+    name: "quiet bypass",
+    run: "cargo test -p jazz",
+  });
   assert.throws(
     () => assertCiSuiteUsesOnlySharedCorrectnessPartitions(planted),
     /unshared direct run step: quiet bypass/,
@@ -321,10 +326,7 @@ test("the generated-artifact boundary fails before Node/browser tests can use st
       }),
     /generated artifact failure/,
   );
-  assert.deepEqual(seen, [
-    "all Rust workspace target classes",
-    "native correctness-artifact producer",
-  ]);
+  assert.deepEqual(seen, ["native correctness-artifact producer"]);
 });
 
 test("React Native is a distinct bridge-enabled CI partition with an admitted build", async () => {
@@ -353,7 +355,10 @@ test("React Native is a distinct bridge-enabled CI partition with an admitted bu
 
   const noConfig = reactNative.map((item) =>
     item.label === "React Native bridge tests"
-      ? { ...item, args: item.args.filter((arg) => arg !== "vitest.react-native.config.ts") }
+      ? {
+          ...item,
+          args: item.args.filter((arg) => arg !== "vitest.react-native.config.ts"),
+        }
       : item,
   );
   assert.throws(
@@ -399,7 +404,6 @@ test("a successful native producer remains visible when a TypeScript consumer fa
     /planted TS consumer failure/,
   );
   assert.deepEqual(seen, [
-    "all Rust workspace target classes",
     "native correctness-artifact producer",
     "preinstalled Chromium",
     "TypeScript consumers",
@@ -479,7 +483,10 @@ test("CI lint enforces SPEC issue links and propagates an unlinked question fail
   const spec = path.join(directory, "crates/jazz/SPEC/fixture.md");
   const executeValidator = async (item) => {
     if (item.label !== "SPEC issue links") return;
-    const result = spawnSync(item.executable, item.args, { cwd: directory, encoding: "utf8" });
+    const result = spawnSync(item.executable, item.args, {
+      cwd: directory,
+      encoding: "utf8",
+    });
     if (result.status !== 0) throw new Error(result.stderr);
   };
   fs.writeFileSync(spec, "🔶 [#1](https://github.com/garden-co/jazz/issues/1) — linked.\n");

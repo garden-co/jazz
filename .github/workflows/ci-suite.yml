@@ -24,7 +24,7 @@ jobs:
   lint:
     # Full workspace compilation and checks exceed the four-core job budget.
     runs-on: blacksmith-16vcpu-ubuntu-2404
-    timeout-minutes: 10
+    timeout-minutes: 15
     container:
       image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:dcb4ec5e4f5507b258805617d58ee6976f7dcee2e9afe1b05ae3d41cc185ef35
       credentials:
@@ -61,7 +61,10 @@ jobs:
       # This named partition is also the local source of truth. Do not copy
       # individual commands here: local `--ci-equivalent` must execute the
       # same complete partition rather than a drifting approximation.
-      - name: Run CI-equivalent lint and metadata partition
+      # PR-level checks cannot catch two independently green PRs whose merged
+      # tree no longer compiles, so this partition also runs the exhaustive
+      # workspace target-class check on every push to the integration branch.
+      - name: Run CI-equivalent lint, metadata and workspace check partition
         run: node dev/gates/local-ci-equivalent.mjs --ci-partition lint
       - name: Report sccache statistics
         if: always()
@@ -171,8 +174,11 @@ jobs:
   # than an incidental member of the broad nextest shard. A green Rust suite
   # must mean current code opened the pinned native and real-browser corpora.
   test-storage-compat:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    # Native corpus plus cold sealed NAPI/WASM production and real Chromium.
+    # Native corpus plus sealed NAPI/WASM production and real Chromium. The
+    # corpus tests take seconds; the job is compile-bound, so it gets the same
+    # 16-vCPU runner and trusted shared compile cache as the other compile
+    # jobs. On four cores without the S3 tier it was the CI long pole.
+    runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 30
     container:
       image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:dcb4ec5e4f5507b258805617d58ee6976f7dcee2e9afe1b05ae3d41cc185ef35
@@ -181,9 +187,31 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Authenticate trusted sccache writer
+        if: inputs.trusted-cache && inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
+        with:
+          role-to-assume: ${{ vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.SCCACHE_REGION }}
+      - name: Authenticate trusted sccache reader
+        if: inputs.trusted-cache && !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
+        with:
+          role-to-assume: ${{ vars.SCCACHE_PR_READER_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.SCCACHE_REGION }}
+      - name: Export trusted sccache configuration
+        if: inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '')
+        env:
+          CACHE_BUCKET: ${{ vars.SCCACHE_BUCKET }}
+          CACHE_REGION: ${{ vars.SCCACHE_REGION }}
+        run: |
+          echo "SCCACHE_BUCKET=${CACHE_BUCKET}" >> "${GITHUB_ENV}"
+          echo "SCCACHE_REGION=${CACHE_REGION}" >> "${GITHUB_ENV}"
+          echo "SCCACHE_S3_USE_SSL=true" >> "${GITHUB_ENV}"
+          echo "SCCACHE_S3_KEY_PREFIX=jazz-ci/v1/production/blacksmith-v1" >> "${GITHUB_ENV}"
       - uses: ./.github/actions/setup-blacksmith
         with:
-          sccache-s3: false
+          sccache-s3: ${{ inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') }}
       - name: Run CI-equivalent native and browser storage compatibility partition
         run: node dev/gates/local-ci-equivalent.mjs --ci-partition storage-compat
       - name: Report sccache statistics
@@ -262,17 +290,11 @@ jobs:
         with:
           sccache-s3: ${{ inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') }}
 
-      # Keep the integration-branch compile gate, but run it as the first
-      # phase of this trusted-runner job. Keeping it here avoids a separate
-      # checkout/setup phase on the PR critical path.
-      #
-      # PR-level checks cannot catch two independently green PRs whose merged
-      # tree no longer compiles. This runs on every push to the integration
-      # branch before building the TypeScript correctness artifacts.
-      # This starts with the exhaustive workspace target-class check, then
-      # builds provenance-checked test artifacts and retains parallel Node /
+      # Builds provenance-checked test artifacts, then runs the parallel Node /
       # browser suites. The local CI-equivalent gate calls this exact partition.
-      - name: Run CI-equivalent TypeScript and workspace partition
+      # The integration-branch workspace target-class check that used to run
+      # first here now runs in the lint partition, off this job's critical path.
+      - name: Run CI-equivalent TypeScript partition
         run: node dev/gates/local-ci-equivalent.mjs --ci-partition typescript
       - name: Upload BandChat failure screenshots
         if: failure()
