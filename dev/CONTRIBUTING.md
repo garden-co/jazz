@@ -69,10 +69,12 @@ features it will run. A filter must resolve to exactly one inventory entry; the
 wrapper then invokes that canonical name with Cargo's `--exact`. It refuses an
 empty or ambiguous selection before a test runs, prints the selected binary,
 feature and cache context, and separately reports inventory/compile and test-run
-elapsed time. This is useful for files under `src/node/tests/`: their test names
-are wrapped as `node::tests::harness::…` (rather than retaining their source
-file in the module path), but a distinctive test-name suffix is enough for
-`dev/t` to discover and run the canonical name.
+elapsed time. This is useful for files under the `jazz-node` crate's
+`src/node/tests/`: their test names are wrapped as `node::tests::harness::…`
+(rather than retaining their source file in the module path), but a distinctive
+test-name suffix is enough for `dev/t -p jazz-node` to discover and run the
+canonical name. A filter that already starts with `node::` or `peer::` selects
+`jazz-node` without `-p`.
 
 ```sh
 # Default: Jazz library tests, substring matching.
@@ -82,7 +84,7 @@ dev/t subscription::tests::reopens
 dev/t --exact db::tests::round_trips
 
 # A node test: resolve its canonical harness path from the unique suffix.
-dev/t query_rows_at_lowers_filters_against_historical_current_rows
+dev/t -p jazz-node query_rows_at_lowers_filters_against_historical_current_rows
 
 # An integration target is explicit, so Cargo cannot search an unintended bin.
 dev/t --test incremental_delivery_canary maintained_relation -- --nocapture

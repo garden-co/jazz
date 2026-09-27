@@ -12,11 +12,11 @@ autotests = false
 # Jazz is the common semantic library. Process and target shells select
 # storage, transport, compression, and runtime capabilities explicitly.
 default = []
-runtime = ["dep:jsonwebtoken", "dep:tokio", "jazz-model/runtime"]
+runtime = ["dep:jsonwebtoken", "dep:tokio", "jazz-model/runtime", "jazz-node/runtime"]
 sync-autopsy = []
 # Disabled-by-default counters for the cold-settle attribution bench. They do
 # not alter protocol behavior or production measurement paths.
-cold-settle-attribution = ["groove/cold-settle-attribution"]
+cold-settle-attribution = ["groove/cold-settle-attribution", "jazz-node/cold-settle-attribution"]
 r3-open-attribution = ["testing"]
 testing = [
   "runtime",
@@ -24,12 +24,14 @@ testing = [
   "jazz-model/testing",
   "jazz-protocol/testing",
   "jazz-engine/testing",
+  "jazz-node/testing",
 ]
-transport-compression-lz4 = ["jazz-compression/lz4", "jazz-protocol/transport-compression-lz4"]
-transport-compression-zstd = ["jazz-compression/zstd", "jazz-protocol/transport-compression-zstd"]
+transport-compression-lz4 = ["jazz-compression/lz4", "jazz-protocol/transport-compression-lz4", "jazz-node/transport-compression-lz4"]
+transport-compression-zstd = ["jazz-compression/zstd", "jazz-protocol/transport-compression-zstd", "jazz-node/transport-compression-zstd"]
 transport-compression-ruzstd = [
   "jazz-compression/ruzstd",
   "jazz-protocol/transport-compression-ruzstd",
+  "jazz-node/transport-compression-ruzstd",
 ]
 
 [dependencies]
@@ -43,6 +45,7 @@ jazz-types.workspace = true
 jazz-model.workspace = true
 jazz-protocol.workspace = true
 jazz-engine.workspace = true
+jazz-node.workspace = true
 bytes = "1"
 jazz-compression.workspace = true
 postcard = { version = "1.1.3", features = ["alloc"] }

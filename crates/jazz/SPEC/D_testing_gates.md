@@ -79,7 +79,7 @@ replacing the former fixed `-j 2` guidance.
   the `--lib` test binary before separately bounding its semantic execution,
   then executes the bounded, real seed-11 smoke
   `JAZZ_SEED=11 JAZZ_DIFFERENTIAL_CHURN_DEPTHS=10,1000 JAZZ_DIFFERENTIAL_STEP_COUNT=3
-cargo test -p jazz --lib node::tests::harness::m3_maintained_one_shot_differential_oracle -- --exact --ignored`.
+cargo test -p jazz-node --lib node::tests::harness::m3_maintained_one_shot_differential_oracle -- --exact --ignored`.
   That smoke preserves the oracle assertions but is not a substitute for the
   quarantined multi-seed gate.
 - **Incremental delivery canary** —
@@ -141,7 +141,7 @@ lower-level tests that best pin an invariant.
 
 **Current coverage limit (verified 2026-08-04).**
 `m3_maintained_one_shot_differential_oracle` compares only
-`BTreeSet<(table, RowUuid)>` (`crates/jazz/src/node/tests/m3_differential.rs:896-936`).
+`BTreeSet<(table, RowUuid)>` (`crates/jazz/layers/node/src/node/tests/m3_differential.rs:896-936`).
 It discards cells, content versions, relation edges, position/order, and
 duplicates. It therefore proves root-membership convergence only; it does not
 prove output content, ordering, nested association, or delivery shape. The

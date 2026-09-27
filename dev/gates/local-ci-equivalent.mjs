@@ -59,14 +59,14 @@ const m3DifferentialCommand = command(
   [
     "-lc",
     String.raw`set -euo pipefail
-test_binary="$(cargo test -p jazz --lib --no-default-features --features testing,transport-compression-zstd --no-run --message-format=json | node -e '
+test_binary="$(cargo test -p jazz-node --lib --no-default-features --features testing,transport-compression-zstd --no-run --message-format=json | node -e '
   const readline = require("node:readline");
   let executable;
   const lines = readline.createInterface({ input: process.stdin });
   lines.on("line", (line) => {
     try {
       const message = JSON.parse(line);
-      if (message.reason === "compiler-artifact" && message.target.name === "jazz" && message.executable)
+      if (message.reason === "compiler-artifact" && message.target.name === "jazz_node" && message.executable)
         executable = message.executable;
     } catch {}
   });

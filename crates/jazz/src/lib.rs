@@ -130,29 +130,25 @@ pub mod foreground_node_lease;
 /// Poll ready-immediate database futures without an async runtime.
 pub use db::block_on;
 pub use jazz_model::model;
+pub use jazz_model::query;
 pub use jazz_model::row_input;
+pub use jazz_node::node;
+pub use jazz_node::peer;
+pub use jazz_protocol::protocol;
+pub use jazz_protocol::protocol_limits;
 pub use jazz_types::identity;
 pub use jazz_types::ids;
 pub use jazz_types::local_executor;
-/// Storage-backed node implementation and local API.
-pub mod node;
 pub use jazz_types::object;
+pub use jazz_types::postcard_exact;
 #[cfg(any(test, feature = "testing"))]
 pub use node::oracle;
-/// Per-peer sync state and metrics.
-pub mod peer;
-pub use jazz_model::query;
-pub use jazz_protocol::protocol;
-pub use jazz_protocol::protocol_limits;
-pub use jazz_types::postcard_exact;
 /// Canonical recursive structured query-result boundary types.
 pub mod result_tree;
 pub use jazz_model::schema;
 /// Platform-neutral client and server runtime APIs used by target shells.
 #[cfg(feature = "runtime")]
 pub mod serving;
-#[cfg(test)]
-use jazz_model::test_public_schema;
 pub use jazz_protocol::storage_codec_profile;
 pub use jazz_types::time;
 /// Public runtime and data-model support APIs formerly provided by jazz-tools.
