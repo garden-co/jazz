@@ -1,0 +1,324 @@
+{
+  "measurement_kind": "wall_clock",
+  "run_order": [
+    "control",
+    "candidate",
+    "candidate",
+    "control"
+  ],
+  "environment": {
+    "JAZZ_BLOB_COVERAGE": "1",
+    "JAZZ_BLOB_REFERENCE": "1",
+    "JAZZ_BLOB_ACCOUNT": "1",
+    "JAZZ_BLOB_SCHEMA_TABLES": "32",
+    "JAZZ_BLOB_BACKGROUND": "36",
+    "JAZZ_BLOB_BYTES": "32768,262144,4194304,16777216",
+    "JAZZ_BLOB_REPEATS": "16"
+  },
+  "machine": "macOS-27.0-arm64-arm-64bit-Mach-O",
+  "warmup_policy": "Exclude repetition 0 of each size/process; retain raw records.",
+  "aggregation": "Median of process medians; two processes and 30 warm observations per arm/size.",
+  "scope": "Resident independent MemoryStorage DBs; in-process SyncMessage queues. No IDB, browser transport, encode/decode, UI or app benchmark.",
+  "started_at": "2026-09-27T10:06:12+0200",
+  "binaries": {
+    "candidate": {
+      "sha256": "a24f19d9682b1d493133bba1a3c41e1c59dc76dda5bf3b0fdac57dfc8b6381bd"
+    },
+    "control": {
+      "sha256": "9e75ae5374560f551ae8950682aa7e7219a9e4837b7b5da9ca38866f36eafa28"
+    }
+  },
+  "runs": [
+    {
+      "arm": "control",
+      "file": "protocol-ordering-abba-1-control.jsonl",
+      "sha256": "cb707485febca154032a9213276fcdcfa3ec6b41e2d3f19794fda55d959df223",
+      "medians": {
+        "32768": {
+          "elapsed_ms": 3.538875,
+          "owner_tick_ms": 2.7663339999999996,
+          "foreground_tick_ms": 0.15229199999999998,
+          "read_poll_ms": 0.5984160000000001,
+          "full_materializations": 0,
+          "turns": 3,
+          "owner_messages": 1,
+          "foreground_messages": 2
+        },
+        "262144": {
+          "elapsed_ms": 5.41325,
+          "owner_tick_ms": 4.012917,
+          "foreground_tick_ms": 0.13975,
+          "read_poll_ms": 1.2457079999999998,
+          "full_materializations": 3,
+          "turns": 3,
+          "owner_messages": 1,
+          "foreground_messages": 2
+        },
+        "4194304": {
+          "elapsed_ms": 26.865582999999997,
+          "owner_tick_ms": 18.030124999999998,
+          "foreground_tick_ms": 0.159126,
+          "read_poll_ms": 8.697415999999999,
+          "full_materializations": 3,
+          "turns": 3,
+          "owner_messages": 1,
+          "foreground_messages": 2
+        },
+        "16777216": {
+          "elapsed_ms": 139.719125,
+          "owner_tick_ms": 85.194583,
+          "foreground_tick_ms": 0.18016700000000002,
+          "read_poll_ms": 54.278334,
+          "full_materializations": 3,
+          "turns": 3,
+          "owner_messages": 1,
+          "foreground_messages": 2
+        }
+      }
+    },
+    {
+      "arm": "candidate",
+      "file": "protocol-ordering-abba-2-candidate.jsonl",
+      "sha256": "1c7e92725879ca432894ef1fedc9348518763831c57ef8eccde0172233233d9f",
+      "medians": {
+        "32768": {
+          "elapsed_ms": 3.473541,
+          "owner_tick_ms": 2.696832,
+          "foreground_tick_ms": 0.147124,
+          "read_poll_ms": 0.5700419999999999,
+          "full_materializations": 0,
+          "turns": 3,
+          "owner_messages": 1,
+          "foreground_messages": 2
+        },
+        "262144": {
+          "elapsed_ms": 4.6264579999999995,
+          "owner_tick_ms": 3.340251,
+          "foreground_tick_ms": 0.12762500000000002,
+          "read_poll_ms": 1.1644590000000001,
+          "full_materializations": 2,
+          "turns": 3,
+          "owner_messages": 1,
+          "foreground_messages": 2
+        },
+        "4194304": {
+          "elapsed_ms": 19.873333,
+          "owner_tick_ms": 11.022041,
+          "foreground_tick_ms": 0.15283300000000002,
+          "read_poll_ms": 8.704417,
+          "full_materializations": 2,
+          "turns": 3,
+          "owner_messages": 1,
+          "foreground_messages": 2
+        },
+        "16777216": {
+          "elapsed_ms": 111.31774999999999,
+          "owner_tick_ms": 56.790375000000004,
+          "foreground_tick_ms": 0.17654099999999998,
+          "read_poll_ms": 54.269207,
+          "full_materializations": 2,
+          "turns": 3,
+          "owner_messages": 1,
+          "foreground_messages": 2
+        }
+      }
+    },
+    {
+      "arm": "candidate",
+      "file": "protocol-ordering-abba-3-candidate.jsonl",
+      "sha256": "fd41aaa93aacb80f79277b8e2940baa10d1709dece26a0d2e64efbe46e69bd93",
+      "medians": {
+        "32768": {
+          "elapsed_ms": 3.445917,
+          "owner_tick_ms": 2.669708,
+          "foreground_tick_ms": 0.14987599999999998,
+          "read_poll_ms": 0.587458,
+          "full_materializations": 0,
+          "turns": 3,
+          "owner_messages": 1,
+          "foreground_messages": 2
+        },
+        "262144": {
+          "elapsed_ms": 4.643458,
+          "owner_tick_ms": 3.3401250000000005,
+          "foreground_tick_ms": 0.13262500000000002,
+          "read_poll_ms": 1.173292,
+          "full_materializations": 2,
+          "turns": 3,
+          "owner_messages": 1,
+          "foreground_messages": 2
+        },
+        "4194304": {
+          "elapsed_ms": 20.113708000000003,
+          "owner_tick_ms": 11.111500000000001,
+          "foreground_tick_ms": 0.164083,
+          "read_poll_ms": 8.721041999999999,
+          "full_materializations": 2,
+          "turns": 3,
+          "owner_messages": 1,
+          "foreground_messages": 2
+        },
+        "16777216": {
+          "elapsed_ms": 111.383417,
+          "owner_tick_ms": 56.758792,
+          "foreground_tick_ms": 0.181543,
+          "read_poll_ms": 54.36024999999999,
+          "full_materializations": 2,
+          "turns": 3,
+          "owner_messages": 1,
+          "foreground_messages": 2
+        }
+      }
+    },
+    {
+      "arm": "control",
+      "file": "protocol-ordering-abba-4-control.jsonl",
+      "sha256": "f4c3eeee966fba8cb202db7d204343d0925d571d79909cf96b4de123f1c8cdfc",
+      "medians": {
+        "32768": {
+          "elapsed_ms": 3.5517909999999997,
+          "owner_tick_ms": 2.7626669999999995,
+          "foreground_tick_ms": 0.15570900000000001,
+          "read_poll_ms": 0.595584,
+          "full_materializations": 0,
+          "turns": 3,
+          "owner_messages": 1,
+          "foreground_messages": 2
+        },
+        "262144": {
+          "elapsed_ms": 5.073708,
+          "owner_tick_ms": 3.777624,
+          "foreground_tick_ms": 0.130166,
+          "read_poll_ms": 1.180167,
+          "full_materializations": 3,
+          "turns": 3,
+          "owner_messages": 1,
+          "foreground_messages": 2
+        },
+        "4194304": {
+          "elapsed_ms": 27.044583,
+          "owner_tick_ms": 18.178667,
+          "foreground_tick_ms": 0.162209,
+          "read_poll_ms": 8.711208999999998,
+          "full_materializations": 3,
+          "turns": 3,
+          "owner_messages": 1,
+          "foreground_messages": 2
+        },
+        "16777216": {
+          "elapsed_ms": 139.565875,
+          "owner_tick_ms": 85.088416,
+          "foreground_tick_ms": 0.18091800000000002,
+          "read_poll_ms": 54.315792,
+          "full_materializations": 3,
+          "turns": 3,
+          "owner_messages": 1,
+          "foreground_messages": 2
+        }
+      }
+    }
+  ],
+  "comparison": {
+    "32768": {
+      "candidate": {
+        "elapsed_ms": 3.4597290000000003,
+        "owner_tick_ms": 2.6832700000000003,
+        "foreground_tick_ms": 0.1485,
+        "read_poll_ms": 0.57875,
+        "full_materializations": 0.0,
+        "turns": 3.0,
+        "owner_messages": 1.0,
+        "foreground_messages": 2.0
+      },
+      "control": {
+        "elapsed_ms": 3.545333,
+        "owner_tick_ms": 2.7645004999999996,
+        "foreground_tick_ms": 0.15400049999999998,
+        "read_poll_ms": 0.597,
+        "full_materializations": 0.0,
+        "turns": 3.0,
+        "owner_messages": 1.0,
+        "foreground_messages": 2.0
+      },
+      "speedup": 1.0247429784240325,
+      "latency_reduction_pct": 2.4145545707554006
+    },
+    "262144": {
+      "candidate": {
+        "elapsed_ms": 4.634957999999999,
+        "owner_tick_ms": 3.3401880000000004,
+        "foreground_tick_ms": 0.13012500000000002,
+        "read_poll_ms": 1.1688755,
+        "full_materializations": 2.0,
+        "turns": 3.0,
+        "owner_messages": 1.0,
+        "foreground_messages": 2.0
+      },
+      "control": {
+        "elapsed_ms": 5.243479,
+        "owner_tick_ms": 3.8952704999999996,
+        "foreground_tick_ms": 0.13495800000000002,
+        "read_poll_ms": 1.2129374999999998,
+        "full_materializations": 3.0,
+        "turns": 3.0,
+        "owner_messages": 1.0,
+        "foreground_messages": 2.0
+      },
+      "speedup": 1.131289431317393,
+      "latency_reduction_pct": 11.605291067247537
+    },
+    "4194304": {
+      "candidate": {
+        "elapsed_ms": 19.993520500000002,
+        "owner_tick_ms": 11.0667705,
+        "foreground_tick_ms": 0.15845800000000002,
+        "read_poll_ms": 8.712729499999998,
+        "full_materializations": 2.0,
+        "turns": 3.0,
+        "owner_messages": 1.0,
+        "foreground_messages": 2.0
+      },
+      "control": {
+        "elapsed_ms": 26.955083,
+        "owner_tick_ms": 18.104396,
+        "foreground_tick_ms": 0.1606675,
+        "read_poll_ms": 8.704312499999999,
+        "full_materializations": 3.0,
+        "turns": 3.0,
+        "owner_messages": 1.0,
+        "foreground_messages": 2.0
+      },
+      "speedup": 1.3481909301565973,
+      "latency_reduction_pct": 25.8265296382133
+    },
+    "16777216": {
+      "candidate": {
+        "elapsed_ms": 111.3505835,
+        "owner_tick_ms": 56.774583500000006,
+        "foreground_tick_ms": 0.17904199999999998,
+        "read_poll_ms": 54.3147285,
+        "full_materializations": 2.0,
+        "turns": 3.0,
+        "owner_messages": 1.0,
+        "foreground_messages": 2.0
+      },
+      "control": {
+        "elapsed_ms": 139.64249999999998,
+        "owner_tick_ms": 85.1414995,
+        "foreground_tick_ms": 0.18054250000000002,
+        "read_poll_ms": 54.297063,
+        "full_materializations": 3.0,
+        "turns": 3.0,
+        "owner_messages": 1.0,
+        "foreground_messages": 2.0
+      },
+      "speedup": 1.2540796429683727,
+      "latency_reduction_pct": 20.260247775569752
+    }
+  },
+  "source": {
+    "integration_parent": "6b14a7ed5",
+    "runtime_file_sha256_at_measurement": "5a48ce460ca1f52a9bb5dd05791514df5cbf8889ce600cb3f30f434c7d2510b6",
+    "post_measurement_source_change": "Only a clippy::too_many_arguments lint allowance; no executable behavior changed."
+  }
+}

@@ -69,6 +69,9 @@ struct EvaluationSession<'a> {
     work_queue: EvaluationWorkQueue,
     /// How root outputs present indirect values to the caller.
     root_indirect_values: RootIndirectValues,
+    /// Auxiliary ordering snapshots are consumed only through field zero by
+    /// `order_terminal_snapshot`. Their remaining cells are not public output.
+    ordering_only_roots: HashSet<NodeId>,
     /// Nodes that stay owned by the live runtime rather than this session.
     /// A binding attached to an already-maintained prepared shape brings the
     /// shared nodes up to date through an ordinary binding tick, then hydrates
@@ -1769,6 +1772,7 @@ impl<'a> EvaluationSession<'a> {
             evaluation_inputs: EvaluationInputs::default(),
             work_queue,
             root_indirect_values: RootIndirectValues::Materialize,
+            ordering_only_roots: HashSet::default(),
             borrowed: HashSet::default(),
         })
     }
@@ -1945,13 +1949,34 @@ impl<'a> EvaluationSession<'a> {
                             let materialized_fields = self
                                 .root_indirect_values
                                 .materialized_field_indices(&records.descriptor);
+                            // Ordering operators have already evaluated their sort
+                            // fields. This auxiliary snapshot only supplies the
+                            // first-field identity-to-position map, so rebuilding
+                            // an unrelated large cell here is wasted work. A node
+                            // that is also a public output keeps its normal policy.
+                            let materialized_fields = if self.ordering_only_roots.contains(&node) {
+                                // Honor an explicitly physical first-result key,
+                                // just as the corresponding public output does.
+                                Some(
+                                    if materialized_fields
+                                        .as_ref()
+                                        .is_none_or(|fields| fields.contains(&0))
+                                    {
+                                        &[0][..]
+                                    } else {
+                                        &[][..]
+                                    },
+                                )
+                            } else {
+                                materialized_fields.as_deref()
+                            };
                             let mut materialized = Vec::with_capacity(records.deltas.len());
                             let mut blocked = false;
                             for delta in &records.deltas {
                                 match crate::large_values::materialize_record_borrowed_attempt(
                                     &records.descriptor,
                                     delta.raw(),
-                                    materialized_fields.as_deref(),
+                                    materialized_fields,
                                     &mut self.evaluation_inputs,
                                 ) {
                                     Ok(record) => materialized.push(RecordDelta {
@@ -2173,6 +2198,7 @@ impl IvmRuntime {
                 Ok::<_, IvmRuntimeError>(found || self.output_depends_on_aggregate(root)?)
             })?;
         let mut session = EvaluationSession::hydration(self, roots, storage)?;
+        session.ordering_only_roots = ordering_only_hydration_roots(&outputs);
         session.root_indirect_values = root_indirect_values;
         if !borrowed.is_empty() {
             // The attach tick advanced every shared node. The subscription's
@@ -3466,12 +3492,14 @@ impl IvmRuntime {
             None,
             None,
             root_indirect_values,
+            HashSet::default(),
         )
         .await?
         .remove(&output_node)
         .ok_or(IvmRuntimeError::GraphNodeNotFound(output_node))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn hydration_roots_owned<'a>(
         &mut self,
         roots: impl IntoIterator<Item = NodeId>,
@@ -3480,6 +3508,7 @@ impl IvmRuntime {
         binding_snapshots: Option<Arc<BindingSnapshots>>,
         binding_frontier_advance: Option<&str>,
         root_indirect_values: RootIndirectValues,
+        ordering_only_roots: HashSet<NodeId>,
     ) -> Result<HashMap<NodeId, RecordDeltas>, IvmRuntimeError> {
         let roots = roots.into_iter().collect::<VecDeque<_>>();
         let binding_snapshots = binding_snapshots.unwrap_or_else(|| self.binding_snapshot_deltas());
@@ -3492,6 +3521,7 @@ impl IvmRuntime {
                 Ok::<_, IvmRuntimeError>(found || self.output_depends_on_aggregate(root)?)
             })?;
         let mut session = EvaluationSession::hydration(self, roots, owned_storage)?;
+        session.ordering_only_roots = ordering_only_roots;
         session.root_indirect_values = root_indirect_values;
         if let Some(shape) = binding_frontier_advance {
             session.advance_binding_input(&self.graph, shape);
@@ -3552,6 +3582,7 @@ impl IvmRuntime {
                 binding_snapshots,
                 binding_frontier_advance,
                 RootIndirectValues::Materialize,
+                ordering_only_hydration_roots(outputs),
             )
             .await?;
         subscription_snapshot_from_hydrated(&self.graph, outputs, &hydrated, &HashMap::default())
@@ -3646,6 +3677,18 @@ impl IvmRuntime {
 
         Ok(())
     }
+}
+
+fn ordering_only_hydration_roots(outputs: &BTreeMap<String, CompiledNode>) -> HashSet<NodeId> {
+    let published = outputs
+        .values()
+        .map(|output| output.node)
+        .collect::<HashSet<_>>();
+    outputs
+        .values()
+        .filter_map(|output| output.root_ordering_node)
+        .filter(|node| !published.contains(node))
+        .collect()
 }
 
 fn subscription_snapshot_from_hydrated(

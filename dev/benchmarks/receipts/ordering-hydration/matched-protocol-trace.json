@@ -1,0 +1,466 @@
+{
+  "trace_equal": true,
+  "records": [
+    {
+      "benchmark": "local_blob_protocol",
+      "bytes": 32768,
+      "measurement_kind": "attribution_only",
+      "messages": [
+        {
+          "canonical_payload_bytes": 87,
+          "detail": {},
+          "direction": "foreground_to_owner",
+          "kind": "RegisterShape"
+        },
+        {
+          "canonical_payload_bytes": 72,
+          "detail": {
+            "known_state": "none"
+          },
+          "direction": "foreground_to_owner",
+          "kind": "Subscribe"
+        },
+        {
+          "canonical_payload_bytes": 36627,
+          "detail": {
+            "bundles": 2,
+            "complete_payload_refs": 0,
+            "snapshot": true,
+            "support_adds": 2,
+            "support_removes": 0,
+            "versions": 2
+          },
+          "direction": "owner_to_foreground",
+          "kind": "ViewUpdate"
+        }
+      ],
+      "phase": "read",
+      "repetition": 0
+    },
+    {
+      "benchmark": "local_blob_protocol",
+      "bytes": 32768,
+      "measurement_kind": "attribution_only",
+      "messages": [
+        {
+          "canonical_payload_bytes": 52,
+          "detail": {},
+          "direction": "foreground_to_owner",
+          "kind": "Unsubscribe"
+        }
+      ],
+      "phase": "cleanup",
+      "repetition": 0
+    },
+    {
+      "benchmark": "local_blob_protocol",
+      "bytes": 32768,
+      "measurement_kind": "attribution_only",
+      "messages": [
+        {
+          "canonical_payload_bytes": 87,
+          "detail": {},
+          "direction": "foreground_to_owner",
+          "kind": "RegisterShape"
+        },
+        {
+          "canonical_payload_bytes": 72,
+          "detail": {
+            "known_state": "none"
+          },
+          "direction": "foreground_to_owner",
+          "kind": "Subscribe"
+        },
+        {
+          "canonical_payload_bytes": 36627,
+          "detail": {
+            "bundles": 2,
+            "complete_payload_refs": 0,
+            "snapshot": true,
+            "support_adds": 2,
+            "support_removes": 0,
+            "versions": 2
+          },
+          "direction": "owner_to_foreground",
+          "kind": "ViewUpdate"
+        }
+      ],
+      "phase": "read",
+      "repetition": 1
+    },
+    {
+      "benchmark": "local_blob_protocol",
+      "bytes": 32768,
+      "measurement_kind": "attribution_only",
+      "messages": [
+        {
+          "canonical_payload_bytes": 52,
+          "detail": {},
+          "direction": "foreground_to_owner",
+          "kind": "Unsubscribe"
+        }
+      ],
+      "phase": "cleanup",
+      "repetition": 1
+    },
+    {
+      "benchmark": "local_blob_protocol",
+      "bytes": 32768,
+      "measurement_kind": "attribution_only",
+      "messages": [
+        {
+          "canonical_payload_bytes": 87,
+          "detail": {},
+          "direction": "foreground_to_owner",
+          "kind": "RegisterShape"
+        },
+        {
+          "canonical_payload_bytes": 72,
+          "detail": {
+            "known_state": "none"
+          },
+          "direction": "foreground_to_owner",
+          "kind": "Subscribe"
+        },
+        {
+          "canonical_payload_bytes": 36627,
+          "detail": {
+            "bundles": 2,
+            "complete_payload_refs": 0,
+            "snapshot": true,
+            "support_adds": 2,
+            "support_removes": 0,
+            "versions": 2
+          },
+          "direction": "owner_to_foreground",
+          "kind": "ViewUpdate"
+        }
+      ],
+      "phase": "read",
+      "repetition": 2
+    },
+    {
+      "benchmark": "local_blob_protocol",
+      "bytes": 32768,
+      "measurement_kind": "attribution_only",
+      "messages": [
+        {
+          "canonical_payload_bytes": 52,
+          "detail": {},
+          "direction": "foreground_to_owner",
+          "kind": "Unsubscribe"
+        }
+      ],
+      "phase": "cleanup",
+      "repetition": 2
+    },
+    {
+      "benchmark": "local_blob_protocol",
+      "bytes": 262144,
+      "measurement_kind": "attribution_only",
+      "messages": [
+        {
+          "canonical_payload_bytes": 87,
+          "detail": {},
+          "direction": "foreground_to_owner",
+          "kind": "RegisterShape"
+        },
+        {
+          "canonical_payload_bytes": 72,
+          "detail": {
+            "known_state": "none"
+          },
+          "direction": "foreground_to_owner",
+          "kind": "Subscribe"
+        },
+        {
+          "canonical_payload_bytes": 3988,
+          "detail": {
+            "bundles": 2,
+            "complete_payload_refs": 0,
+            "snapshot": true,
+            "support_adds": 2,
+            "support_removes": 0,
+            "versions": 2
+          },
+          "direction": "owner_to_foreground",
+          "kind": "ViewUpdate"
+        }
+      ],
+      "phase": "read",
+      "repetition": 0
+    },
+    {
+      "benchmark": "local_blob_protocol",
+      "bytes": 262144,
+      "measurement_kind": "attribution_only",
+      "messages": [
+        {
+          "canonical_payload_bytes": 52,
+          "detail": {},
+          "direction": "foreground_to_owner",
+          "kind": "Unsubscribe"
+        }
+      ],
+      "phase": "cleanup",
+      "repetition": 0
+    },
+    {
+      "benchmark": "local_blob_protocol",
+      "bytes": 262144,
+      "measurement_kind": "attribution_only",
+      "messages": [
+        {
+          "canonical_payload_bytes": 87,
+          "detail": {},
+          "direction": "foreground_to_owner",
+          "kind": "RegisterShape"
+        },
+        {
+          "canonical_payload_bytes": 72,
+          "detail": {
+            "known_state": "none"
+          },
+          "direction": "foreground_to_owner",
+          "kind": "Subscribe"
+        },
+        {
+          "canonical_payload_bytes": 3988,
+          "detail": {
+            "bundles": 2,
+            "complete_payload_refs": 0,
+            "snapshot": true,
+            "support_adds": 2,
+            "support_removes": 0,
+            "versions": 2
+          },
+          "direction": "owner_to_foreground",
+          "kind": "ViewUpdate"
+        }
+      ],
+      "phase": "read",
+      "repetition": 1
+    },
+    {
+      "benchmark": "local_blob_protocol",
+      "bytes": 262144,
+      "measurement_kind": "attribution_only",
+      "messages": [
+        {
+          "canonical_payload_bytes": 52,
+          "detail": {},
+          "direction": "foreground_to_owner",
+          "kind": "Unsubscribe"
+        }
+      ],
+      "phase": "cleanup",
+      "repetition": 1
+    },
+    {
+      "benchmark": "local_blob_protocol",
+      "bytes": 262144,
+      "measurement_kind": "attribution_only",
+      "messages": [
+        {
+          "canonical_payload_bytes": 87,
+          "detail": {},
+          "direction": "foreground_to_owner",
+          "kind": "RegisterShape"
+        },
+        {
+          "canonical_payload_bytes": 72,
+          "detail": {
+            "known_state": "none"
+          },
+          "direction": "foreground_to_owner",
+          "kind": "Subscribe"
+        },
+        {
+          "canonical_payload_bytes": 3988,
+          "detail": {
+            "bundles": 2,
+            "complete_payload_refs": 0,
+            "snapshot": true,
+            "support_adds": 2,
+            "support_removes": 0,
+            "versions": 2
+          },
+          "direction": "owner_to_foreground",
+          "kind": "ViewUpdate"
+        }
+      ],
+      "phase": "read",
+      "repetition": 2
+    },
+    {
+      "benchmark": "local_blob_protocol",
+      "bytes": 262144,
+      "measurement_kind": "attribution_only",
+      "messages": [
+        {
+          "canonical_payload_bytes": 52,
+          "detail": {},
+          "direction": "foreground_to_owner",
+          "kind": "Unsubscribe"
+        }
+      ],
+      "phase": "cleanup",
+      "repetition": 2
+    },
+    {
+      "benchmark": "local_blob_protocol",
+      "bytes": 4194304,
+      "measurement_kind": "attribution_only",
+      "messages": [
+        {
+          "canonical_payload_bytes": 87,
+          "detail": {},
+          "direction": "foreground_to_owner",
+          "kind": "RegisterShape"
+        },
+        {
+          "canonical_payload_bytes": 72,
+          "detail": {
+            "known_state": "none"
+          },
+          "direction": "foreground_to_owner",
+          "kind": "Subscribe"
+        },
+        {
+          "canonical_payload_bytes": 3988,
+          "detail": {
+            "bundles": 2,
+            "complete_payload_refs": 0,
+            "snapshot": true,
+            "support_adds": 2,
+            "support_removes": 0,
+            "versions": 2
+          },
+          "direction": "owner_to_foreground",
+          "kind": "ViewUpdate"
+        }
+      ],
+      "phase": "read",
+      "repetition": 0
+    },
+    {
+      "benchmark": "local_blob_protocol",
+      "bytes": 4194304,
+      "measurement_kind": "attribution_only",
+      "messages": [
+        {
+          "canonical_payload_bytes": 52,
+          "detail": {},
+          "direction": "foreground_to_owner",
+          "kind": "Unsubscribe"
+        }
+      ],
+      "phase": "cleanup",
+      "repetition": 0
+    },
+    {
+      "benchmark": "local_blob_protocol",
+      "bytes": 4194304,
+      "measurement_kind": "attribution_only",
+      "messages": [
+        {
+          "canonical_payload_bytes": 87,
+          "detail": {},
+          "direction": "foreground_to_owner",
+          "kind": "RegisterShape"
+        },
+        {
+          "canonical_payload_bytes": 72,
+          "detail": {
+            "known_state": "none"
+          },
+          "direction": "foreground_to_owner",
+          "kind": "Subscribe"
+        },
+        {
+          "canonical_payload_bytes": 3988,
+          "detail": {
+            "bundles": 2,
+            "complete_payload_refs": 0,
+            "snapshot": true,
+            "support_adds": 2,
+            "support_removes": 0,
+            "versions": 2
+          },
+          "direction": "owner_to_foreground",
+          "kind": "ViewUpdate"
+        }
+      ],
+      "phase": "read",
+      "repetition": 1
+    },
+    {
+      "benchmark": "local_blob_protocol",
+      "bytes": 4194304,
+      "measurement_kind": "attribution_only",
+      "messages": [
+        {
+          "canonical_payload_bytes": 52,
+          "detail": {},
+          "direction": "foreground_to_owner",
+          "kind": "Unsubscribe"
+        }
+      ],
+      "phase": "cleanup",
+      "repetition": 1
+    },
+    {
+      "benchmark": "local_blob_protocol",
+      "bytes": 4194304,
+      "measurement_kind": "attribution_only",
+      "messages": [
+        {
+          "canonical_payload_bytes": 87,
+          "detail": {},
+          "direction": "foreground_to_owner",
+          "kind": "RegisterShape"
+        },
+        {
+          "canonical_payload_bytes": 72,
+          "detail": {
+            "known_state": "none"
+          },
+          "direction": "foreground_to_owner",
+          "kind": "Subscribe"
+        },
+        {
+          "canonical_payload_bytes": 3988,
+          "detail": {
+            "bundles": 2,
+            "complete_payload_refs": 0,
+            "snapshot": true,
+            "support_adds": 2,
+            "support_removes": 0,
+            "versions": 2
+          },
+          "direction": "owner_to_foreground",
+          "kind": "ViewUpdate"
+        }
+      ],
+      "phase": "read",
+      "repetition": 2
+    },
+    {
+      "benchmark": "local_blob_protocol",
+      "bytes": 4194304,
+      "measurement_kind": "attribution_only",
+      "messages": [
+        {
+          "canonical_payload_bytes": 52,
+          "detail": {},
+          "direction": "foreground_to_owner",
+          "kind": "Unsubscribe"
+        }
+      ],
+      "phase": "cleanup",
+      "repetition": 2
+    }
+  ],
+  "measurement_kind": "attribution_only",
+  "canonical_payload_encoding": "postcard semantic payload, excludes transport framing and compression"
+}

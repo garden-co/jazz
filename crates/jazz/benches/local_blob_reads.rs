@@ -200,7 +200,84 @@ fn run(length: usize, repetitions: usize) {
 
 // These independent preloaded stores isolate coverage overhead for bytes already
 // present at both ends. This is not a cold-transfer or browser/IDB benchmark.
+// Opt-in attribution; byte counting and JSON construction happen during send,
+// so records from this mode must never be treated as timing measurements.
+#[derive(Default)]
+struct ProtocolTrace {
+    messages: Vec<serde_json::Value>,
+}
+impl ProtocolTrace {
+    fn record(&mut self, direction: &str, message: &SyncMessage) {
+        use jazz::protocol::KnownStateDeclaration;
+        let mut detail = json!({});
+        let kind = match message {
+            SyncMessage::RegisterShape { .. } => "RegisterShape",
+            SyncMessage::Subscribe(subscribe) => {
+                detail["known_state"] = match &subscribe.known_state {
+                    None => json!("none"),
+                    Some(KnownStateDeclaration::Fast { .. }) => json!("fast"),
+                    Some(KnownStateDeclaration::FastWithAuthorizationProgress { .. }) => {
+                        json!("fast_with_authorization")
+                    }
+                    Some(KnownStateDeclaration::ExactVersionSet { versions }) => {
+                        detail["known_versions"] = json!(versions.len());
+                        json!("exact_versions")
+                    }
+                };
+                "Subscribe"
+            }
+            SyncMessage::Unsubscribe { .. } => "Unsubscribe",
+            SyncMessage::ViewUpdate(view) => {
+                let bundles = view
+                    .version_carriers
+                    .iter()
+                    .flat_map(|carrier| carrier.bundle_refs().expect("valid carrier"))
+                    .collect::<Vec<_>>();
+                detail["bundles"] = json!(bundles.len());
+                detail["versions"] = json!(
+                    bundles
+                        .iter()
+                        .map(|bundle| bundle.versions.len())
+                        .sum::<usize>()
+                );
+                detail["support_adds"] = json!(view.supporting_rows.added_rows().len());
+                detail["support_removes"] = json!(view.supporting_rows.removed_rows().len());
+                detail["snapshot"] = json!(view.supporting_rows.is_snapshot());
+                detail["complete_payload_refs"] =
+                    json!(view.peer_payload_inventory.complete_tx_payloads.len());
+                "ViewUpdate"
+            }
+            SyncMessage::CatalogueSnapshot { .. } => "CatalogueSnapshot",
+            SyncMessage::CatalogueAck { .. } => "CatalogueAck",
+            SyncMessage::SessionClaims { .. } => "SessionClaims",
+            SyncMessage::ChunkRequestBatch { .. } => "ChunkRequestBatch",
+            SyncMessage::ChunkResponseBatch { .. } => "ChunkResponseBatch",
+            SyncMessage::FetchRowVersions { .. } => "FetchRowVersions",
+            SyncMessage::RowVersionPayloads { .. } => "RowVersionPayloads",
+            SyncMessage::CommitUnit { .. } => "CommitUnit",
+            SyncMessage::FateUpdate { .. } => "FateUpdate",
+            _ => "other",
+        };
+        let bytes =
+            postcard::serialize_with_flavor(message, postcard::ser_flavors::Size::default())
+                .expect("canonical payload size");
+        self.messages
+            .push(json!({"direction":direction, "kind":kind,
+            "canonical_payload_bytes":bytes, "detail":detail}));
+    }
+    fn flush(&mut self, phase: &str, bytes: usize, repetition: Option<usize>) {
+        println!(
+            "{}",
+            json!({"benchmark":"local_blob_protocol", "measurement_kind":"attribution_only",
+            "phase":phase, "bytes":bytes, "repetition":repetition, "messages":self.messages})
+        );
+        self.messages.clear();
+    }
+}
+
 struct CachedPeer {
+    trace: Option<Rc<RefCell<ProtocolTrace>>>,
+    direction: &'static str,
     incoming: Rc<RefCell<VecDeque<SyncMessage>>>,
     outgoing: Rc<RefCell<VecDeque<SyncMessage>>>,
     sent: Rc<RefCell<usize>>,
@@ -208,6 +285,9 @@ struct CachedPeer {
 impl Transport for CachedPeer {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
         *self.sent.borrow_mut() += 1;
+        if let Some(trace) = &self.trace {
+            trace.borrow_mut().record(self.direction, &message);
+        }
         self.outgoing.borrow_mut().push_back(message);
         Ok(())
     }
@@ -251,6 +331,8 @@ fn run_coverage(
     foreground.set_non_durable_client();
     let a = Rc::new(RefCell::new(VecDeque::new()));
     let b = Rc::new(RefCell::new(VecDeque::new()));
+    let trace = std::env::var_os("JAZZ_BLOB_PROTOCOL_TRACE")
+        .map(|_| Rc::new(RefCell::new(ProtocolTrace::default())));
     let owner_sent = Rc::new(RefCell::new(0));
     let foreground_sent = Rc::new(RefCell::new(0));
     let claims = if account_identity || std::env::var_os("JAZZ_BLOB_CLAIMS").is_some() {
@@ -261,12 +343,16 @@ fn run_coverage(
     let claim_count = claims.len();
     foreground.set_identity_claims(author, claims.clone());
     let _upstream = block_on(foreground.connect_upstream(Box::new(CachedPeer {
+        trace: trace.clone(),
+        direction: "foreground_to_owner",
         incoming: a.clone(),
         outgoing: b.clone(),
         sent: foreground_sent.clone(),
     })));
     let _subscriber = owner.accept_subscriber_with_claims(
         Box::new(CachedPeer {
+            trace: trace.clone(),
+            direction: "owner_to_foreground",
             incoming: b,
             outgoing: a,
             sent: owner_sent.clone(),
@@ -299,6 +385,9 @@ fn run_coverage(
     for _ in 0..4 {
         block_on(foreground.tick()).unwrap();
         block_on(owner.tick()).unwrap();
+    }
+    if let Some(trace) = &trace {
+        trace.borrow_mut().flush("setup", expected.len(), None);
     }
     let query = postcard::to_allocvec(
         &Query::from("assets")
@@ -375,18 +464,33 @@ fn run_coverage(
         );
         println!(
             "{}",
-            json!({"benchmark":"local_blob_reads", "phase":"cached_peer_coverage", "with_reference":std::env::var_os("JAZZ_BLOB_REFERENCE").is_some(),
+            json!({"benchmark":"local_blob_reads", "phase":"cached_peer_coverage", "measurement_kind":if trace.is_some() { "attribution_only" } else { "wall_clock" }, "with_reference":std::env::var_os("JAZZ_BLOB_REFERENCE").is_some(),
             "account_identity":account_identity, "schema_tables":schema.tables().len(),
             "claim_count":claim_count, "background_queries":background_count, "bytes":expected.len(), "repetition":repetition, "elapsed_ms":elapsed_ms,
             "read_poll_ms":read_ms, "owner_tick_ms":owner_ms, "foreground_tick_ms":foreground_ms,
             "turns":turns, "owner_messages":*owner_sent.borrow(), "foreground_messages":*foreground_sent.borrow(),
             "full_materializations":materializations})
         );
+        if let Some(trace) = &trace {
+            trace
+                .borrow_mut()
+                .flush("read", expected.len(), Some(repetition));
+        }
         // Finish releasing this one-shot before the next independently fresh read.
         for _ in 0..4 {
             block_on(foreground.tick()).unwrap();
             block_on(owner.tick()).unwrap();
         }
+        if let Some(trace) = &trace {
+            trace
+                .borrow_mut()
+                .flush("cleanup", expected.len(), Some(repetition));
+        }
+    }
+    if let Some(trace) = &trace {
+        trace
+            .borrow_mut()
+            .flush("final_cleanup", expected.len(), None);
     }
     for handle in background {
         foreground.detach_query(handle);
