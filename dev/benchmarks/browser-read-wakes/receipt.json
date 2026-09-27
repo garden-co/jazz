@@ -1,4 +1,6 @@
 {
+  "schemaVersion": 2,
+  "authoritativeComparison": "verifiedIsolatedComparison",
   "workload": {
     "rows": 1500,
     "sharedParents": 15,
@@ -8,590 +10,6 @@
     "measuredReadsPerProcess": 10,
     "scheduling": "production adapter, no diagnostic override"
   },
-  "arms": {
-    "baseline": {
-      "wall": {
-        "memory": [
-          {
-            "sourceRevision": "5f42b14f4d458bf3083694c17b629dcfd112d95b",
-            "wasmSha256": "30d71bd3c2db53930cbd594ed13859bbb2a318d6103b474cde15df7eca76eb9b",
-            "adapterSha256": "f91eadbe1036406b1ebf07370c1bd16ebd749fe05bedd13d395ab8d6d6a56be7",
-            "scriptSha256": "16617a60acd8a2070cd4498c7be7da0646dd364bcd60be321f8833586b0b0517",
-            "fixtureSha256": "365a348a1a683c6ad0329cc90c433dd294ba371358a7c0dc65dfd36af53e7962",
-            "lanes": {
-              "include": {
-                "samplesMs": [
-                  346.86500000953674, 375.8799999952316, 376.83999997377396, 376.4150000214577,
-                  373.19000002741814, 376.9850000143051, 372.64999997615814, 370.3700000047684,
-                  373.7199999988079, 367.7350000143051
-                ],
-                "medianMs": 373.455000013113
-              },
-              "flat": {
-                "samplesMs": [
-                  33.50999999046326, 36.0450000166893, 32.42500001192093, 39.53000000119209,
-                  32.70500001311302, 36.49500000476837, 32.59499999880791, 36.38500002026558,
-                  34.37000000476837, 33.189999997615814
-                ],
-                "medianMs": 33.939999997615814
-              }
-            }
-          },
-          {
-            "sourceRevision": "5f42b14f4d458bf3083694c17b629dcfd112d95b",
-            "wasmSha256": "30d71bd3c2db53930cbd594ed13859bbb2a318d6103b474cde15df7eca76eb9b",
-            "adapterSha256": "f91eadbe1036406b1ebf07370c1bd16ebd749fe05bedd13d395ab8d6d6a56be7",
-            "scriptSha256": "16617a60acd8a2070cd4498c7be7da0646dd364bcd60be321f8833586b0b0517",
-            "fixtureSha256": "365a348a1a683c6ad0329cc90c433dd294ba371358a7c0dc65dfd36af53e7962",
-            "lanes": {
-              "include": {
-                "samplesMs": [
-                  347.63499999046326, 375.43000000715256, 375.125, 373.9699999988079,
-                  372.39500001072884, 379.1599999964237, 371.03999999165535, 368.6850000023842,
-                  370.84999999403954, 371.41499999165535
-                ],
-                "medianMs": 371.9050000011921
-              },
-              "flat": {
-                "samplesMs": [
-                  33.900000005960464, 32.810000002384186, 34.25, 32.94499999284744,
-                  34.46000000834465, 32.55500000715256, 32.25, 34.25999999046326, 32.21000000834465,
-                  34.839999973773956
-                ],
-                "medianMs": 33.42249999940395
-              }
-            }
-          }
-        ],
-        "persistent": [
-          {
-            "sourceRevision": "5f42b14f4d458bf3083694c17b629dcfd112d95b",
-            "wasmSha256": "30d71bd3c2db53930cbd594ed13859bbb2a318d6103b474cde15df7eca76eb9b",
-            "adapterSha256": "f91eadbe1036406b1ebf07370c1bd16ebd749fe05bedd13d395ab8d6d6a56be7",
-            "scriptSha256": "16617a60acd8a2070cd4498c7be7da0646dd364bcd60be321f8833586b0b0517",
-            "fixtureSha256": "365a348a1a683c6ad0329cc90c433dd294ba371358a7c0dc65dfd36af53e7962",
-            "lanes": {
-              "include": {
-                "samplesMs": [
-                  660.005000025034, 655.625, 691.7049999833107, 693.0349999964237,
-                  661.4600000083447, 637.0999999940395, 608.4699999988079, 624.4399999976158,
-                  563.1599999964237, 528.0749999880791
-                ],
-                "medianMs": 646.3624999970198
-              },
-              "flat": {
-                "samplesMs": [
-                  158.63999998569489, 148.79499998688698, 159.25999999046326, 155.22499999403954,
-                  144.4849999845028, 147.51000002026558, 148.13499999046326, 145.16500002145767,
-                  151.54499998688698, 141.0499999821186
-                ],
-                "medianMs": 148.46499998867512
-              }
-            }
-          },
-          {
-            "sourceRevision": "5f42b14f4d458bf3083694c17b629dcfd112d95b",
-            "wasmSha256": "30d71bd3c2db53930cbd594ed13859bbb2a318d6103b474cde15df7eca76eb9b",
-            "adapterSha256": "f91eadbe1036406b1ebf07370c1bd16ebd749fe05bedd13d395ab8d6d6a56be7",
-            "scriptSha256": "16617a60acd8a2070cd4498c7be7da0646dd364bcd60be321f8833586b0b0517",
-            "fixtureSha256": "365a348a1a683c6ad0329cc90c433dd294ba371358a7c0dc65dfd36af53e7962",
-            "lanes": {
-              "include": {
-                "samplesMs": [
-                  569.5949999988079, 559.4800000190735, 566.2299999892712, 580.6150000095367,
-                  569.7000000178814, 560.8700000047684, 564.2450000047684, 555.0850000083447,
-                  571.9600000083447, 547.6200000047684
-                ],
-                "medianMs": 565.2374999970198
-              },
-              "flat": {
-                "samplesMs": [
-                  181.55000001192093, 150.23500001430511, 167.91000002622604, 163.83000001311302,
-                  152.50499999523163, 171.78999999165535, 155.36500000953674, 157.7950000166893,
-                  152.50999999046326, 155.7699999809265
-                ],
-                "medianMs": 156.7824999988079
-              }
-            }
-          }
-        ]
-      },
-      "cpu": {
-        "memory": {
-          "include": [
-            {
-              "target": "page",
-              "activeMsPerRead": 100.24549999999981,
-              "idleMsPerRead": 267.6536999999993
-            }
-          ],
-          "flat": [
-            {
-              "target": "page",
-              "activeMsPerRead": 45.2023,
-              "idleMsPerRead": 55.08829999999998
-            }
-          ]
-        },
-        "persistent": {
-          "include": [
-            {
-              "target": "page",
-              "activeMsPerRead": 129.36609999999976,
-              "idleMsPerRead": 464.87149999999815
-            },
-            {
-              "target": "shared_worker",
-              "idleMsPerRead": 416.0215000000044,
-              "activeMsPerRead": 181.1819999999997
-            }
-          ],
-          "flat": [
-            {
-              "target": "page",
-              "activeMsPerRead": 69.04819999999988,
-              "idleMsPerRead": 112.194
-            },
-            {
-              "target": "shared_worker",
-              "idleMsPerRead": 64.43030000000002,
-              "activeMsPerRead": 116.52759999999974
-            }
-          ]
-        }
-      }
-    },
-    "candidate": {
-      "wall": {
-        "memory": [
-          {
-            "sourceRevision": "047ba66d7aafe79fed346790c93c984f55c5cecb",
-            "wasmSha256": "d27f7f04ec05f51fd2821ba4803327fad4c9c6a2adbedd7c0cf2cfb5a11d4e83",
-            "adapterSha256": "3834956c214d5e8326e34bd8eaa81c8b7d748c81890789ef300aa5e61f0d5852",
-            "scriptSha256": "16617a60acd8a2070cd4498c7be7da0646dd364bcd60be321f8833586b0b0517",
-            "fixtureSha256": "365a348a1a683c6ad0329cc90c433dd294ba371358a7c0dc65dfd36af53e7962",
-            "lanes": {
-              "include": {
-                "samplesMs": [
-                  95.27500000596046, 93.6749999821186, 95.2199999988079, 94.09000000357628,
-                  98.56000000238419, 87.96000000834465, 86.01999998092651, 91.7199999988079,
-                  90.9699999988079, 84.49500000476837
-                ],
-                "medianMs": 92.69749999046326
-              },
-              "flat": {
-                "samplesMs": [
-                  33.479999989271164, 34.185000002384186, 40.66999998688698, 34.76500001549721,
-                  40.520000010728836, 32.104999989271164, 39.74500000476837, 32.53499999642372,
-                  32.35000002384186, 37.49000000953674
-                ],
-                "medianMs": 34.4750000089407
-              }
-            }
-          },
-          {
-            "sourceRevision": "047ba66d7aafe79fed346790c93c984f55c5cecb",
-            "wasmSha256": "d27f7f04ec05f51fd2821ba4803327fad4c9c6a2adbedd7c0cf2cfb5a11d4e83",
-            "adapterSha256": "3834956c214d5e8326e34bd8eaa81c8b7d748c81890789ef300aa5e61f0d5852",
-            "scriptSha256": "16617a60acd8a2070cd4498c7be7da0646dd364bcd60be321f8833586b0b0517",
-            "fixtureSha256": "365a348a1a683c6ad0329cc90c433dd294ba371358a7c0dc65dfd36af53e7962",
-            "lanes": {
-              "include": {
-                "samplesMs": [
-                  89.53499999642372, 92.30500000715256, 87.02499997615814, 89.15999999642372,
-                  88.99000000953674, 84.53499999642372, 86.26500001549721, 82.46000000834465,
-                  87.625, 88.5750000178814
-                ],
-                "medianMs": 88.1000000089407
-              },
-              "flat": {
-                "samplesMs": [
-                  33.31999999284744, 35.48499998450279, 31.80000001192093, 32.37000000476837,
-                  36.42499998211861, 32.91499999165535, 39.70000001788139, 32.08500000834465,
-                  31.570000022649765, 36.139999985694885
-                ],
-                "medianMs": 33.117499992251396
-              }
-            }
-          }
-        ],
-        "persistent": [
-          {
-            "sourceRevision": "047ba66d7aafe79fed346790c93c984f55c5cecb",
-            "wasmSha256": "d27f7f04ec05f51fd2821ba4803327fad4c9c6a2adbedd7c0cf2cfb5a11d4e83",
-            "adapterSha256": "3834956c214d5e8326e34bd8eaa81c8b7d748c81890789ef300aa5e61f0d5852",
-            "scriptSha256": "16617a60acd8a2070cd4498c7be7da0646dd364bcd60be321f8833586b0b0517",
-            "fixtureSha256": "365a348a1a683c6ad0329cc90c433dd294ba371358a7c0dc65dfd36af53e7962",
-            "lanes": {
-              "include": {
-                "samplesMs": [
-                  309.7950000166893, 349.9050000011921, 323.875, 308.705000013113,
-                  335.3449999988079, 276.6399999856949, 293.27499997615814, 298.31999999284744,
-                  286.83999997377396, 280.9350000023842
-                ],
-                "medianMs": 303.51250000298023
-              },
-              "flat": {
-                "samplesMs": [
-                  189.38000002503395, 170.45500001311302, 159.15999999642372, 182.4050000011921,
-                  156.97499999403954, 185.4050000011921, 163.52500000596046, 165.19500002264977,
-                  194.75499999523163, 194.09999999403954
-                ],
-                "medianMs": 176.43000000715256
-              }
-            }
-          },
-          {
-            "sourceRevision": "047ba66d7aafe79fed346790c93c984f55c5cecb",
-            "wasmSha256": "d27f7f04ec05f51fd2821ba4803327fad4c9c6a2adbedd7c0cf2cfb5a11d4e83",
-            "adapterSha256": "3834956c214d5e8326e34bd8eaa81c8b7d748c81890789ef300aa5e61f0d5852",
-            "scriptSha256": "16617a60acd8a2070cd4498c7be7da0646dd364bcd60be321f8833586b0b0517",
-            "fixtureSha256": "365a348a1a683c6ad0329cc90c433dd294ba371358a7c0dc65dfd36af53e7962",
-            "lanes": {
-              "include": {
-                "samplesMs": [
-                  266.125, 279.59999999403954, 278.8349999785423, 260.3400000035763,
-                  284.38499999046326, 273.72000002861023, 275.169999986887, 270.0450000166893,
-                  285.13499999046326, 255.9350000023842
-                ],
-                "medianMs": 274.4450000077486
-              },
-              "flat": {
-                "samplesMs": [
-                  158.29499998688698, 150.3900000154972, 148.2800000011921, 160.41999998688698,
-                  158.2999999821186, 170.49500000476837, 163.2800000011921, 163.88500002026558,
-                  161.00499999523163, 169.38500002026558
-                ],
-                "medianMs": 160.7124999910593
-              }
-            }
-          }
-        ]
-      },
-      "cpu": {
-        "memory": {
-          "include": [
-            {
-              "target": "page",
-              "activeMsPerRead": 98.5563999999996,
-              "idleMsPerRead": 0.4081
-            }
-          ],
-          "flat": [
-            {
-              "target": "page",
-              "activeMsPerRead": 38.729099999999946,
-              "idleMsPerRead": 0.3007
-            }
-          ]
-        },
-        "persistent": {
-          "include": [
-            {
-              "target": "page",
-              "activeMsPerRead": 125.38639999999997,
-              "idleMsPerRead": 164.19500000000002
-            },
-            {
-              "target": "shared_worker",
-              "idleMsPerRead": 120.23869999999991,
-              "activeMsPerRead": 167.7215000000003
-            }
-          ],
-          "flat": [
-            {
-              "target": "page",
-              "activeMsPerRead": 69.34669999999979,
-              "idleMsPerRead": 136.46500000000023
-            },
-            {
-              "target": "shared_worker",
-              "idleMsPerRead": 60.881200000000064,
-              "activeMsPerRead": 144.24360000000007
-            }
-          ]
-        }
-      }
-    }
-  },
-  "comparisons": [
-    {
-      "storage": "memory",
-      "query": "include",
-      "baselineMedianMs": 372.68000000715256,
-      "candidateMedianMs": 90.39874999970198,
-      "speedup": 4.122623377075249
-    },
-    {
-      "storage": "memory",
-      "query": "flat",
-      "baselineMedianMs": 33.681249998509884,
-      "candidateMedianMs": 33.79625000059605,
-      "speedup": 0.9965972555510113
-    },
-    {
-      "storage": "persistent",
-      "query": "include",
-      "baselineMedianMs": 605.7999999970198,
-      "candidateMedianMs": 288.9787500053644,
-      "speedup": 2.0963479148061026
-    },
-    {
-      "storage": "persistent",
-      "query": "flat",
-      "baselineMedianMs": 152.6237499937415,
-      "candidateMedianMs": 168.57124999910593,
-      "speedup": 0.905396086192343
-    }
-  ],
-  "schemaVersion": 1,
-  "cpuInterpretation": "250 microsecond sampled active/idle time, ten reads per profile; page and worker run concurrently and must not be summed as elapsed latency.",
-  "sameWasmSchedulerControl": {
-    "order": ["timer-polling", "control", "control", "timer-polling"],
-    "runs": [
-      {
-        "revision": "047ba66d7aafe79fed346790c93c984f55c5cecb",
-        "wasmSha256": "d27f7f04ec05f51fd2821ba4803327fad4c9c6a2adbedd7c0cf2cfb5a11d4e83",
-        "adapterSha256": "3834956c214d5e8326e34bd8eaa81c8b7d748c81890789ef300aa5e61f0d5852",
-        "scriptSha256": "8884bfd4703553706433b18b61c0da4c6626f14f266efe984b217d70709a2778",
-        "fixtureSha256": "01cf3a10608897e13ae18d8de8e28a924345eb33c54c62a79c5820f22ee3ba52",
-        "scheduling": "timer-polling",
-        "lanes": {
-          "include": {
-            "samplesMs": [
-              608.3250000178814, 592.580000013113, 591.0300000011921, 596.1949999928474,
-              580.8400000035763, 572.9050000011921, 586.380000025034, 575.7899999916553,
-              580.6050000190735, 607.0250000059605
-            ],
-            "medianMs": 588.705000013113
-          },
-          "flat": {
-            "samplesMs": [
-              190.22999998927116, 180.5949999988079, 180.49500000476837, 180.58500000834465,
-              171.46000000834465, 174.62000000476837, 173.63000002503395, 175.74500000476837,
-              169.95500001311302, 164.0300000011921
-            ],
-            "medianMs": 175.18250000476837
-          }
-        }
-      },
-      {
-        "revision": "047ba66d7aafe79fed346790c93c984f55c5cecb",
-        "wasmSha256": "d27f7f04ec05f51fd2821ba4803327fad4c9c6a2adbedd7c0cf2cfb5a11d4e83",
-        "adapterSha256": "3834956c214d5e8326e34bd8eaa81c8b7d748c81890789ef300aa5e61f0d5852",
-        "scriptSha256": "8884bfd4703553706433b18b61c0da4c6626f14f266efe984b217d70709a2778",
-        "fixtureSha256": "01cf3a10608897e13ae18d8de8e28a924345eb33c54c62a79c5820f22ee3ba52",
-        "scheduling": "control",
-        "lanes": {
-          "include": {
-            "samplesMs": [
-              292.8149999976158, 287.3899999856949, 313.50500002503395, 297.3649999797344,
-              304.8449999988079, 272.4950000047684, 281.2300000190735, 280.22499999403954,
-              280.66499999165535, 296.02500000596046
-            ],
-            "medianMs": 290.10249999165535
-          },
-          "flat": {
-            "samplesMs": [
-              176.37999999523163, 181.2300000190735, 164.0300000011921, 189.27500000596046,
-              161.4249999821186, 168.90999999642372, 181.81999999284744, 170.05500000715256,
-              174.19999998807907, 168.83999997377396
-            ],
-            "medianMs": 172.1274999976158
-          }
-        }
-      },
-      {
-        "revision": "047ba66d7aafe79fed346790c93c984f55c5cecb",
-        "wasmSha256": "d27f7f04ec05f51fd2821ba4803327fad4c9c6a2adbedd7c0cf2cfb5a11d4e83",
-        "adapterSha256": "3834956c214d5e8326e34bd8eaa81c8b7d748c81890789ef300aa5e61f0d5852",
-        "scriptSha256": "8884bfd4703553706433b18b61c0da4c6626f14f266efe984b217d70709a2778",
-        "fixtureSha256": "01cf3a10608897e13ae18d8de8e28a924345eb33c54c62a79c5820f22ee3ba52",
-        "scheduling": "control",
-        "lanes": {
-          "include": {
-            "samplesMs": [
-              289.36500000953674, 284.25999999046326, 283.0049999952316, 302.4650000035763,
-              306.27500000596046, 279.7350000143051, 278.294999986887, 265.52000001072884,
-              308.67500001192093, 283.58500000834465
-            ],
-            "medianMs": 283.92249999940395
-          },
-          "flat": {
-            "samplesMs": [
-              179.94499999284744, 170.11500000953674, 160.64999997615814, 178.25499999523163,
-              174.07000002264977, 168.16499999165535, 168.8149999976158, 171.625,
-              173.64500001072884, 180.34000000357628
-            ],
-            "medianMs": 172.63500000536442
-          }
-        }
-      },
-      {
-        "revision": "047ba66d7aafe79fed346790c93c984f55c5cecb",
-        "wasmSha256": "d27f7f04ec05f51fd2821ba4803327fad4c9c6a2adbedd7c0cf2cfb5a11d4e83",
-        "adapterSha256": "3834956c214d5e8326e34bd8eaa81c8b7d748c81890789ef300aa5e61f0d5852",
-        "scriptSha256": "8884bfd4703553706433b18b61c0da4c6626f14f266efe984b217d70709a2778",
-        "fixtureSha256": "01cf3a10608897e13ae18d8de8e28a924345eb33c54c62a79c5820f22ee3ba52",
-        "scheduling": "timer-polling",
-        "lanes": {
-          "include": {
-            "samplesMs": [
-              580.5450000166893, 576.0700000226498, 582.794999986887, 572.6649999916553,
-              580.2800000011921, 574.0649999976158, 594.3149999976158, 584.3900000154972,
-              551.5900000035763, 584.7299999892712
-            ],
-            "medianMs": 580.4125000089407
-          },
-          "flat": {
-            "samplesMs": [
-              187.13999998569489, 167.09999999403954, 155.33500000834465, 174.70500001311302,
-              176.7650000154972, 169.20500001311302, 170.2199999988079, 165.6400000154972,
-              169.15999999642372, 162.13500002026558
-            ],
-            "medianMs": 169.18250000476837
-          }
-        }
-      }
-    ],
-    "interpretation": "Isolates only foreground adapter scheduling on candidate WASM. Does not rule out a candidate-vs-main flat-read regression.",
-    "comparisons": [
-      {
-        "lane": "include",
-        "timerPollingMedianMs": 584.5587500110269,
-        "wakeDrivenMedianMs": 287.01249999552965,
-        "speedup": 2.036701363251188
-      },
-      {
-        "lane": "flat",
-        "timerPollingMedianMs": 172.18250000476837,
-        "wakeDrivenMedianMs": 172.38125000149012,
-        "speedup": 0.9988470323963886
-      }
-    ]
-  },
-  "profiles": [
-    {
-      "arm": "baseline",
-      "storage": "memory",
-      "lane": "include",
-      "target": "page",
-      "sourceRevision": "5f42b14f4d458bf3083694c17b629dcfd112d95b",
-      "wasmSha256": "30d71bd3c2db53930cbd594ed13859bbb2a318d6103b474cde15df7eca76eb9b",
-      "file": "memory-1500-include-page-0.cpuprofile",
-      "sha256": "2367423127af10ad03291e6ae3c10ef744b050ebaac0bdba37c2de81c62946d3"
-    },
-    {
-      "arm": "baseline",
-      "storage": "memory",
-      "lane": "flat",
-      "target": "page",
-      "sourceRevision": "5f42b14f4d458bf3083694c17b629dcfd112d95b",
-      "wasmSha256": "30d71bd3c2db53930cbd594ed13859bbb2a318d6103b474cde15df7eca76eb9b",
-      "file": "memory-1500-flat-page-0.cpuprofile",
-      "sha256": "373b5be89bc79ae2912a8f050e91b5b9f78564e74a1c2730fd2288f34dba570b"
-    },
-    {
-      "arm": "baseline",
-      "storage": "persistent",
-      "lane": "include",
-      "target": "page",
-      "sourceRevision": "5f42b14f4d458bf3083694c17b629dcfd112d95b",
-      "wasmSha256": "30d71bd3c2db53930cbd594ed13859bbb2a318d6103b474cde15df7eca76eb9b",
-      "file": "persistent-1500-include-page-0.cpuprofile",
-      "sha256": "841946128c7df08a2b99da152183e966bf2deb735a453248c14be4f87a975c41"
-    },
-    {
-      "arm": "baseline",
-      "storage": "persistent",
-      "lane": "include",
-      "target": "shared_worker",
-      "sourceRevision": "5f42b14f4d458bf3083694c17b629dcfd112d95b",
-      "wasmSha256": "30d71bd3c2db53930cbd594ed13859bbb2a318d6103b474cde15df7eca76eb9b",
-      "file": "persistent-1500-include-shared_worker-1.cpuprofile",
-      "sha256": "1d26c20aecaf2e117b6d95d5303294d8e54d7cd570049d50fadbaae2941a6290"
-    },
-    {
-      "arm": "baseline",
-      "storage": "persistent",
-      "lane": "flat",
-      "target": "page",
-      "sourceRevision": "5f42b14f4d458bf3083694c17b629dcfd112d95b",
-      "wasmSha256": "30d71bd3c2db53930cbd594ed13859bbb2a318d6103b474cde15df7eca76eb9b",
-      "file": "persistent-1500-flat-page-0.cpuprofile",
-      "sha256": "3fd03cfc49b9efdc2469f3b878ba195690763275631b31c2d7321a159d7c61d9"
-    },
-    {
-      "arm": "baseline",
-      "storage": "persistent",
-      "lane": "flat",
-      "target": "shared_worker",
-      "sourceRevision": "5f42b14f4d458bf3083694c17b629dcfd112d95b",
-      "wasmSha256": "30d71bd3c2db53930cbd594ed13859bbb2a318d6103b474cde15df7eca76eb9b",
-      "file": "persistent-1500-flat-shared_worker-1.cpuprofile",
-      "sha256": "08d0f93e91c7bbdc792f8f2f62fed02be35bef63e3a05f996ce67520efaf2e11"
-    },
-    {
-      "arm": "candidate",
-      "storage": "memory",
-      "lane": "include",
-      "target": "page",
-      "sourceRevision": "047ba66d7aafe79fed346790c93c984f55c5cecb",
-      "wasmSha256": "d27f7f04ec05f51fd2821ba4803327fad4c9c6a2adbedd7c0cf2cfb5a11d4e83",
-      "file": "memory-1500-include-page-0.cpuprofile",
-      "sha256": "70b79ec8642032c44288c8c3a7037525a4f48b157b21ecf9616fbf08f1fbaff6"
-    },
-    {
-      "arm": "candidate",
-      "storage": "memory",
-      "lane": "flat",
-      "target": "page",
-      "sourceRevision": "047ba66d7aafe79fed346790c93c984f55c5cecb",
-      "wasmSha256": "d27f7f04ec05f51fd2821ba4803327fad4c9c6a2adbedd7c0cf2cfb5a11d4e83",
-      "file": "memory-1500-flat-page-0.cpuprofile",
-      "sha256": "8e7fb3e6e8f201eb82d7dcfa9222415a0bec057821184ad4591a5b6e8a6b427a"
-    },
-    {
-      "arm": "candidate",
-      "storage": "persistent",
-      "lane": "include",
-      "target": "page",
-      "sourceRevision": "047ba66d7aafe79fed346790c93c984f55c5cecb",
-      "wasmSha256": "d27f7f04ec05f51fd2821ba4803327fad4c9c6a2adbedd7c0cf2cfb5a11d4e83",
-      "file": "persistent-1500-include-page-0.cpuprofile",
-      "sha256": "5ee241e299d82a792ca89efa783066df9a7401955af660ef5b8ab52af5eef284"
-    },
-    {
-      "arm": "candidate",
-      "storage": "persistent",
-      "lane": "include",
-      "target": "shared_worker",
-      "sourceRevision": "047ba66d7aafe79fed346790c93c984f55c5cecb",
-      "wasmSha256": "d27f7f04ec05f51fd2821ba4803327fad4c9c6a2adbedd7c0cf2cfb5a11d4e83",
-      "file": "persistent-1500-include-shared_worker-1.cpuprofile",
-      "sha256": "af5aab0a10c3e4c6260ba01823886c91bd72065a30d28e68ef5e260dffb60470"
-    },
-    {
-      "arm": "candidate",
-      "storage": "persistent",
-      "lane": "flat",
-      "target": "page",
-      "sourceRevision": "047ba66d7aafe79fed346790c93c984f55c5cecb",
-      "wasmSha256": "d27f7f04ec05f51fd2821ba4803327fad4c9c6a2adbedd7c0cf2cfb5a11d4e83",
-      "file": "persistent-1500-flat-page-0.cpuprofile",
-      "sha256": "2cefa5b14072f7e706a5ccc2e08cea35ed4d2beb95335e5e338ef87fc265b2d6"
-    },
-    {
-      "arm": "candidate",
-      "storage": "persistent",
-      "lane": "flat",
-      "target": "shared_worker",
-      "sourceRevision": "047ba66d7aafe79fed346790c93c984f55c5cecb",
-      "wasmSha256": "d27f7f04ec05f51fd2821ba4803327fad4c9c6a2adbedd7c0cf2cfb5a11d4e83",
-      "file": "persistent-1500-flat-shared_worker-1.cpuprofile",
-      "sha256": "c2d2651e926668136b3273f7c2a82493ce364ea75e1596036107fb4f43461513"
-    }
-  ],
   "artifactManifests": {
     "baseline": {
       "schema": 1,
@@ -677,5 +95,1726 @@
       ],
       "nativeArtifactFingerprint": "7343e79778be49e852018d5d1dfca5ce01509ed17870fed0bddba05cadc0ce2e"
     }
+  },
+  "verifiedIsolatedComparison": {
+    "method": "Source and exact verified WASM switched together; a unique child-owned browser endpoint and owned Vite startup per run; browser shutdown verified. No builds during measurements.",
+    "wallRuns": [
+      {
+        "revision": "5f42b14f4d458bf3083694c17b629dcfd112d95b",
+        "wasmSha256": "30d71bd3c2db53930cbd594ed13859bbb2a318d6103b474cde15df7eca76eb9b",
+        "adapterSha256": "f91eadbe1036406b1ebf07370c1bd16ebd749fe05bedd13d395ab8d6d6a56be7",
+        "scriptSha256": "b6548c9d8cee9193d3417822850e4436a3233e3ad75beb089d09142ae27b864c",
+        "fixtureSha256": "b99c6178af3bc1a1ce0b2566507d93c19a0078dd293e662c7f7e86f7c41d9c6c",
+        "browser": {
+          "protocolVersion": "1.3",
+          "product": "HeadlessChrome/145.0.7632.6",
+          "revision": "@47e20adcc15fc15f01825aa17e570c8f5492ac0f",
+          "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/145.0.7632.6 Safari/537.36",
+          "jsVersion": "14.5.201.2"
+        },
+        "browserIsolation": {
+          "endpointFromLaunchedProcess": true,
+          "serverFromLaunchedProcess": true,
+          "browserId": "73e8bded-deeb-4acc-ab6c-0d7bb2e9daed",
+          "browserPid": 54562,
+          "initialWorkerCount": 0,
+          "shutdownVerified": true
+        },
+        "host": {
+          "platform": "darwin",
+          "architecture": "arm64",
+          "node": "v24.13.1"
+        },
+        "storage": "memory",
+        "count": 1500,
+        "repetitions": 10,
+        "setup": {
+          "open_ms": 348.42500001192093,
+          "empty_query_ms": 127.22500002384186,
+          "seed_ms": 188.34999999403954,
+          "local_settlement_ms": 1.2949999868869781
+        },
+        "arm": "main",
+        "lanes": {
+          "include": {
+            "samplesMs": [
+              374.2649999856949, 401.97999998927116, 407.2450000047684, 397.65000000596046,
+              403.34999999403954, 397.83500000834465, 397.0900000035763, 402.1550000011921,
+              391.580000013113, 393.44999998807907
+            ],
+            "medianMs": 397.74250000715256
+          },
+          "flat": {
+            "samplesMs": [
+              32.49499997496605, 32.78999999165535, 40.3299999833107, 32.24500000476837,
+              32.39999997615814, 35.04999998211861, 33.349999994039536, 35.42499998211861,
+              33.019999980926514, 32.125
+            ],
+            "medianMs": 32.90499998629093
+          }
+        }
+      },
+      {
+        "revision": "047ba66d7aafe79fed346790c93c984f55c5cecb",
+        "wasmSha256": "d27f7f04ec05f51fd2821ba4803327fad4c9c6a2adbedd7c0cf2cfb5a11d4e83",
+        "adapterSha256": "3834956c214d5e8326e34bd8eaa81c8b7d748c81890789ef300aa5e61f0d5852",
+        "scriptSha256": "b6548c9d8cee9193d3417822850e4436a3233e3ad75beb089d09142ae27b864c",
+        "fixtureSha256": "b99c6178af3bc1a1ce0b2566507d93c19a0078dd293e662c7f7e86f7c41d9c6c",
+        "browser": {
+          "protocolVersion": "1.3",
+          "product": "HeadlessChrome/145.0.7632.6",
+          "revision": "@47e20adcc15fc15f01825aa17e570c8f5492ac0f",
+          "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/145.0.7632.6 Safari/537.36",
+          "jsVersion": "14.5.201.2"
+        },
+        "browserIsolation": {
+          "endpointFromLaunchedProcess": true,
+          "serverFromLaunchedProcess": true,
+          "browserId": "14f787e7-9fd1-4d69-a2d5-c50aafa2b8b6",
+          "browserPid": 56079,
+          "initialWorkerCount": 0,
+          "shutdownVerified": true
+        },
+        "host": {
+          "platform": "darwin",
+          "architecture": "arm64",
+          "node": "v24.13.1"
+        },
+        "storage": "memory",
+        "count": 1500,
+        "repetitions": 10,
+        "setup": {
+          "open_ms": 872.7700000107288,
+          "empty_query_ms": 123.93500000238419,
+          "seed_ms": 199.0600000023842,
+          "local_settlement_ms": 1.2750000059604645
+        },
+        "arm": "candidate",
+        "lanes": {
+          "include": {
+            "samplesMs": [
+              92.23500001430511, 89.61500000953674, 92.0799999833107, 86.53999999165535,
+              100.18999999761581, 84.63500002026558, 91.69499999284744, 85.58000001311302,
+              87.06000000238419, 88.125
+            ],
+            "medianMs": 88.87000000476837
+          },
+          "flat": {
+            "samplesMs": [
+              33.42499998211861, 37.9549999833107, 33.019999980926514, 37.88499999046326,
+              32.08500000834465, 32.4200000166893, 36.50499999523163, 32.88000002503395,
+              36.99500000476837, 34.59000000357628
+            ],
+            "medianMs": 34.00749999284744
+          }
+        }
+      },
+      {
+        "revision": "047ba66d7aafe79fed346790c93c984f55c5cecb",
+        "wasmSha256": "d27f7f04ec05f51fd2821ba4803327fad4c9c6a2adbedd7c0cf2cfb5a11d4e83",
+        "adapterSha256": "3834956c214d5e8326e34bd8eaa81c8b7d748c81890789ef300aa5e61f0d5852",
+        "scriptSha256": "b6548c9d8cee9193d3417822850e4436a3233e3ad75beb089d09142ae27b864c",
+        "fixtureSha256": "b99c6178af3bc1a1ce0b2566507d93c19a0078dd293e662c7f7e86f7c41d9c6c",
+        "browser": {
+          "protocolVersion": "1.3",
+          "product": "HeadlessChrome/145.0.7632.6",
+          "revision": "@47e20adcc15fc15f01825aa17e570c8f5492ac0f",
+          "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/145.0.7632.6 Safari/537.36",
+          "jsVersion": "14.5.201.2"
+        },
+        "browserIsolation": {
+          "endpointFromLaunchedProcess": true,
+          "serverFromLaunchedProcess": true,
+          "browserId": "99150bda-7e6b-4516-8ec2-c0cddf7c3431",
+          "browserPid": 57460,
+          "initialWorkerCount": 0,
+          "shutdownVerified": true
+        },
+        "host": {
+          "platform": "darwin",
+          "architecture": "arm64",
+          "node": "v24.13.1"
+        },
+        "storage": "memory",
+        "count": 1500,
+        "repetitions": 10,
+        "setup": {
+          "open_ms": 316.0799999833107,
+          "empty_query_ms": 124.12999999523163,
+          "seed_ms": 189.2950000166893,
+          "local_settlement_ms": 1.4650000035762787
+        },
+        "arm": "candidate",
+        "lanes": {
+          "include": {
+            "samplesMs": [
+              94.34999999403954, 101.26999998092651, 95.4050000011921, 98.93000000715256,
+              86.25999999046326, 94.55500000715256, 89.31000000238419, 87.31499999761581,
+              91.69499999284744, 86.51999998092651
+            ],
+            "medianMs": 93.02249999344349
+          },
+          "flat": {
+            "samplesMs": [
+              38.264999985694885, 40.88500002026558, 33.03999999165535, 33.50999999046326,
+              42.25499999523163, 34.150000005960464, 39.84000000357628, 33.35000002384186,
+              32.09499999880791, 39.59000000357628
+            ],
+            "medianMs": 36.207499995827675
+          }
+        }
+      },
+      {
+        "revision": "5f42b14f4d458bf3083694c17b629dcfd112d95b",
+        "wasmSha256": "30d71bd3c2db53930cbd594ed13859bbb2a318d6103b474cde15df7eca76eb9b",
+        "adapterSha256": "f91eadbe1036406b1ebf07370c1bd16ebd749fe05bedd13d395ab8d6d6a56be7",
+        "scriptSha256": "b6548c9d8cee9193d3417822850e4436a3233e3ad75beb089d09142ae27b864c",
+        "fixtureSha256": "b99c6178af3bc1a1ce0b2566507d93c19a0078dd293e662c7f7e86f7c41d9c6c",
+        "browser": {
+          "protocolVersion": "1.3",
+          "product": "HeadlessChrome/145.0.7632.6",
+          "revision": "@47e20adcc15fc15f01825aa17e570c8f5492ac0f",
+          "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/145.0.7632.6 Safari/537.36",
+          "jsVersion": "14.5.201.2"
+        },
+        "browserIsolation": {
+          "endpointFromLaunchedProcess": true,
+          "serverFromLaunchedProcess": true,
+          "browserId": "57191107-aeb0-47ee-ae9b-2877fafff22b",
+          "browserPid": 58792,
+          "initialWorkerCount": 0,
+          "shutdownVerified": true
+        },
+        "host": {
+          "platform": "darwin",
+          "architecture": "arm64",
+          "node": "v24.13.1"
+        },
+        "storage": "memory",
+        "count": 1500,
+        "repetitions": 10,
+        "setup": {
+          "open_ms": 497.5450000166893,
+          "empty_query_ms": 123.27500000596046,
+          "seed_ms": 182,
+          "local_settlement_ms": 1.9749999940395355
+        },
+        "arm": "main",
+        "lanes": {
+          "include": {
+            "samplesMs": [
+              370.2549999952316, 399.31999999284744, 399.3899999856949, 401.75, 397.8899999856949,
+              401.02499997615814, 395.25, 401.09999999403954, 397.8100000023842, 396.1700000166893
+            ],
+            "medianMs": 398.60499998927116
+          },
+          "flat": {
+            "samplesMs": [
+              33.1700000166893, 37.599999994039536, 32.36499997973442, 33.28499999642372,
+              38.21000000834465, 34.61499997973442, 39.08499997854233, 32.429999977350235,
+              33.86499997973442, 37.604999989271164
+            ],
+            "medianMs": 34.23999997973442
+          }
+        }
+      },
+      {
+        "revision": "5f42b14f4d458bf3083694c17b629dcfd112d95b",
+        "wasmSha256": "30d71bd3c2db53930cbd594ed13859bbb2a318d6103b474cde15df7eca76eb9b",
+        "adapterSha256": "f91eadbe1036406b1ebf07370c1bd16ebd749fe05bedd13d395ab8d6d6a56be7",
+        "scriptSha256": "b6548c9d8cee9193d3417822850e4436a3233e3ad75beb089d09142ae27b864c",
+        "fixtureSha256": "b99c6178af3bc1a1ce0b2566507d93c19a0078dd293e662c7f7e86f7c41d9c6c",
+        "browser": {
+          "protocolVersion": "1.3",
+          "product": "HeadlessChrome/145.0.7632.6",
+          "revision": "@47e20adcc15fc15f01825aa17e570c8f5492ac0f",
+          "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/145.0.7632.6 Safari/537.36",
+          "jsVersion": "14.5.201.2"
+        },
+        "browserIsolation": {
+          "endpointFromLaunchedProcess": true,
+          "serverFromLaunchedProcess": true,
+          "browserId": "9de0df1d-d8e5-492e-9aec-099d9c6a409f",
+          "browserPid": 60174,
+          "initialWorkerCount": 0,
+          "shutdownVerified": true
+        },
+        "host": {
+          "platform": "darwin",
+          "architecture": "arm64",
+          "node": "v24.13.1"
+        },
+        "storage": "persistent",
+        "count": 1500,
+        "repetitions": 10,
+        "setup": {
+          "open_ms": 801.6500000059605,
+          "empty_query_ms": 605.8250000178814,
+          "seed_ms": 210.86000001430511,
+          "local_settlement_ms": 289.88499999046326
+        },
+        "arm": "main",
+        "lanes": {
+          "include": {
+            "samplesMs": [
+              607.2599999904633, 625.7299999892712, 605.7249999940395, 745.1200000047684,
+              608.7549999952316, 603.6800000071526, 612.8549999892712, 592, 577.1850000023842,
+              596.2849999964237
+            ],
+            "medianMs": 606.4924999922514
+          },
+          "flat": {
+            "samplesMs": [
+              177.54000002145767, 163.00499999523163, 191.80499997735023, 176.47499999403954,
+              180.41499999165535, 173.9800000190735, 190.11000001430511, 181.25, 166.31999999284744,
+              182.55500000715256
+            ],
+            "medianMs": 178.9775000065565
+          }
+        }
+      },
+      {
+        "revision": "047ba66d7aafe79fed346790c93c984f55c5cecb",
+        "wasmSha256": "d27f7f04ec05f51fd2821ba4803327fad4c9c6a2adbedd7c0cf2cfb5a11d4e83",
+        "adapterSha256": "3834956c214d5e8326e34bd8eaa81c8b7d748c81890789ef300aa5e61f0d5852",
+        "scriptSha256": "b6548c9d8cee9193d3417822850e4436a3233e3ad75beb089d09142ae27b864c",
+        "fixtureSha256": "b99c6178af3bc1a1ce0b2566507d93c19a0078dd293e662c7f7e86f7c41d9c6c",
+        "browser": {
+          "protocolVersion": "1.3",
+          "product": "HeadlessChrome/145.0.7632.6",
+          "revision": "@47e20adcc15fc15f01825aa17e570c8f5492ac0f",
+          "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/145.0.7632.6 Safari/537.36",
+          "jsVersion": "14.5.201.2"
+        },
+        "browserIsolation": {
+          "endpointFromLaunchedProcess": true,
+          "serverFromLaunchedProcess": true,
+          "browserId": "27237fde-403f-41a2-bf37-0fb4ad2af392",
+          "browserPid": 61720,
+          "initialWorkerCount": 0,
+          "shutdownVerified": true
+        },
+        "host": {
+          "platform": "darwin",
+          "architecture": "arm64",
+          "node": "v24.13.1"
+        },
+        "storage": "persistent",
+        "count": 1500,
+        "repetitions": 10,
+        "setup": {
+          "open_ms": 478.74499997496605,
+          "empty_query_ms": 536.7899999916553,
+          "seed_ms": 229.9350000023842,
+          "local_settlement_ms": 312.06999999284744
+        },
+        "arm": "candidate",
+        "lanes": {
+          "include": {
+            "samplesMs": [
+              279.3599999845028, 303.14500001072884, 296.1599999964237, 273.7950000166893, 275,
+              274.8100000023842, 272.59999999403954, 262.6099999845028, 277.1899999976158, 263.375
+            ],
+            "medianMs": 274.9050000011921
+          },
+          "flat": {
+            "samplesMs": [
+              177.0450000166893, 158.50999999046326, 168.4699999988079, 157.0600000023842,
+              155.94999998807907, 165.40999999642372, 169.875, 162.75, 169.05500000715256,
+              159.00500002503395
+            ],
+            "medianMs": 164.07999999821186
+          }
+        }
+      },
+      {
+        "revision": "047ba66d7aafe79fed346790c93c984f55c5cecb",
+        "wasmSha256": "d27f7f04ec05f51fd2821ba4803327fad4c9c6a2adbedd7c0cf2cfb5a11d4e83",
+        "adapterSha256": "3834956c214d5e8326e34bd8eaa81c8b7d748c81890789ef300aa5e61f0d5852",
+        "scriptSha256": "b6548c9d8cee9193d3417822850e4436a3233e3ad75beb089d09142ae27b864c",
+        "fixtureSha256": "b99c6178af3bc1a1ce0b2566507d93c19a0078dd293e662c7f7e86f7c41d9c6c",
+        "browser": {
+          "protocolVersion": "1.3",
+          "product": "HeadlessChrome/145.0.7632.6",
+          "revision": "@47e20adcc15fc15f01825aa17e570c8f5492ac0f",
+          "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/145.0.7632.6 Safari/537.36",
+          "jsVersion": "14.5.201.2"
+        },
+        "browserIsolation": {
+          "endpointFromLaunchedProcess": true,
+          "serverFromLaunchedProcess": true,
+          "browserId": "342c2fb9-e428-42a2-a43c-b0fbc4261768",
+          "browserPid": 63098,
+          "initialWorkerCount": 0,
+          "shutdownVerified": true
+        },
+        "host": {
+          "platform": "darwin",
+          "architecture": "arm64",
+          "node": "v24.13.1"
+        },
+        "storage": "persistent",
+        "count": 1500,
+        "repetitions": 10,
+        "setup": {
+          "open_ms": 527.0100000202656,
+          "empty_query_ms": 580.6550000011921,
+          "seed_ms": 210.1850000023842,
+          "local_settlement_ms": 317
+        },
+        "arm": "candidate",
+        "lanes": {
+          "include": {
+            "samplesMs": [
+              275.3550000190735, 275.8700000047684, 308.97500002384186, 289.18000000715256,
+              272.9150000214577, 275.294999986887, 274.0949999988079, 266.13499999046326,
+              253.4249999821186, 263.67999997735023
+            ],
+            "medianMs": 274.69499999284744
+          },
+          "flat": {
+            "samplesMs": [
+              178.6899999976158, 159.21000000834465, 165.58500000834465, 167.6550000011921,
+              183.9399999976158, 170.63499999046326, 151.3599999845028, 158.30499997735023,
+              156.46500000357628, 167.25
+            ],
+            "medianMs": 166.41750000417233
+          }
+        }
+      },
+      {
+        "revision": "5f42b14f4d458bf3083694c17b629dcfd112d95b",
+        "wasmSha256": "30d71bd3c2db53930cbd594ed13859bbb2a318d6103b474cde15df7eca76eb9b",
+        "adapterSha256": "f91eadbe1036406b1ebf07370c1bd16ebd749fe05bedd13d395ab8d6d6a56be7",
+        "scriptSha256": "b6548c9d8cee9193d3417822850e4436a3233e3ad75beb089d09142ae27b864c",
+        "fixtureSha256": "b99c6178af3bc1a1ce0b2566507d93c19a0078dd293e662c7f7e86f7c41d9c6c",
+        "browser": {
+          "protocolVersion": "1.3",
+          "product": "HeadlessChrome/145.0.7632.6",
+          "revision": "@47e20adcc15fc15f01825aa17e570c8f5492ac0f",
+          "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/145.0.7632.6 Safari/537.36",
+          "jsVersion": "14.5.201.2"
+        },
+        "browserIsolation": {
+          "endpointFromLaunchedProcess": true,
+          "serverFromLaunchedProcess": true,
+          "browserId": "f04f0781-3a49-447f-9cb6-36a5cd51894b",
+          "browserPid": 64461,
+          "initialWorkerCount": 0,
+          "shutdownVerified": true
+        },
+        "host": {
+          "platform": "darwin",
+          "architecture": "arm64",
+          "node": "v24.13.1"
+        },
+        "storage": "persistent",
+        "count": 1500,
+        "repetitions": 10,
+        "setup": {
+          "open_ms": 891.7349999845028,
+          "empty_query_ms": 625.7549999952316,
+          "seed_ms": 223.0799999833107,
+          "local_settlement_ms": 299.16000002622604
+        },
+        "arm": "main",
+        "lanes": {
+          "include": {
+            "samplesMs": [
+              601.4150000214577, 735.2800000011921, 608.2199999988079, 623.9000000059605,
+              612.3299999833107, 612.375, 608.2849999964237, 594.7049999833107, 599.5500000119209,
+              622.1550000011921
+            ],
+            "medianMs": 610.3074999898672
+          },
+          "flat": {
+            "samplesMs": [
+              188.40999999642372, 163.63500002026558, 172.00499999523163, 184.7300000190735,
+              183.15999999642372, 170.21500000357628, 170.72499999403954, 167.72499999403954,
+              159.7300000190735, 178.9350000023842
+            ],
+            "medianMs": 171.36499999463558
+          }
+        }
+      },
+      {
+        "revision": "047ba66d7aafe79fed346790c93c984f55c5cecb",
+        "wasmSha256": "d27f7f04ec05f51fd2821ba4803327fad4c9c6a2adbedd7c0cf2cfb5a11d4e83",
+        "adapterSha256": "3834956c214d5e8326e34bd8eaa81c8b7d748c81890789ef300aa5e61f0d5852",
+        "scriptSha256": "b6548c9d8cee9193d3417822850e4436a3233e3ad75beb089d09142ae27b864c",
+        "fixtureSha256": "b99c6178af3bc1a1ce0b2566507d93c19a0078dd293e662c7f7e86f7c41d9c6c",
+        "browser": {
+          "protocolVersion": "1.3",
+          "product": "HeadlessChrome/145.0.7632.6",
+          "revision": "@47e20adcc15fc15f01825aa17e570c8f5492ac0f",
+          "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/145.0.7632.6 Safari/537.36",
+          "jsVersion": "14.5.201.2"
+        },
+        "browserIsolation": {
+          "endpointFromLaunchedProcess": true,
+          "serverFromLaunchedProcess": true,
+          "browserId": "b24d4b6c-2686-4be9-aa0f-e4f34b2d79f4",
+          "browserPid": 65981,
+          "initialWorkerCount": 0,
+          "shutdownVerified": true
+        },
+        "host": {
+          "platform": "darwin",
+          "architecture": "arm64",
+          "node": "v24.13.1"
+        },
+        "storage": "persistent",
+        "count": 1500,
+        "repetitions": 10,
+        "setup": {
+          "open_ms": 510.35499998927116,
+          "empty_query_ms": 576.0799999833107,
+          "seed_ms": 220.7800000011921,
+          "local_settlement_ms": 286.0300000011921
+        },
+        "arm": "candidate",
+        "lanes": {
+          "include": {
+            "samplesMs": [
+              282.1650000214577, 287.13499999046326, 303.1650000214577, 271.375, 276.15000000596046,
+              276.22999998927116, 312.0949999988079, 278.544999986887, 262.9699999988079,
+              267.97499999403954
+            ],
+            "medianMs": 277.38749998807907
+          },
+          "flat": {
+            "samplesMs": [
+              188.5, 169.2349999845028, 161.7800000011921, 181.66499999165535, 166.07499998807907,
+              157.1099999845028, 168.26499998569489, 193.66499999165535, 152.0300000011921,
+              163.31999999284744
+            ],
+            "medianMs": 167.16999998688698
+          }
+        }
+      },
+      {
+        "revision": "5f42b14f4d458bf3083694c17b629dcfd112d95b",
+        "wasmSha256": "30d71bd3c2db53930cbd594ed13859bbb2a318d6103b474cde15df7eca76eb9b",
+        "adapterSha256": "f91eadbe1036406b1ebf07370c1bd16ebd749fe05bedd13d395ab8d6d6a56be7",
+        "scriptSha256": "b6548c9d8cee9193d3417822850e4436a3233e3ad75beb089d09142ae27b864c",
+        "fixtureSha256": "b99c6178af3bc1a1ce0b2566507d93c19a0078dd293e662c7f7e86f7c41d9c6c",
+        "browser": {
+          "protocolVersion": "1.3",
+          "product": "HeadlessChrome/145.0.7632.6",
+          "revision": "@47e20adcc15fc15f01825aa17e570c8f5492ac0f",
+          "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/145.0.7632.6 Safari/537.36",
+          "jsVersion": "14.5.201.2"
+        },
+        "browserIsolation": {
+          "endpointFromLaunchedProcess": true,
+          "serverFromLaunchedProcess": true,
+          "browserId": "8ee30287-b46d-48c9-b826-5594294c48d0",
+          "browserPid": 67374,
+          "initialWorkerCount": 0,
+          "shutdownVerified": true
+        },
+        "host": {
+          "platform": "darwin",
+          "architecture": "arm64",
+          "node": "v24.13.1"
+        },
+        "storage": "persistent",
+        "count": 1500,
+        "repetitions": 10,
+        "setup": {
+          "open_ms": 539.5950000286102,
+          "empty_query_ms": 573.7100000083447,
+          "seed_ms": 226.02500000596046,
+          "local_settlement_ms": 356.6299999952316
+        },
+        "arm": "main",
+        "lanes": {
+          "include": {
+            "samplesMs": [
+              591.1550000011921, 587.8050000071526, 604.369999974966, 606.6099999845028,
+              595.5949999988079, 579.3250000178814, 581.0900000035763, 586.6750000119209,
+              580.955000013113, 579.7400000095367
+            ],
+            "medianMs": 587.2400000095367
+          },
+          "flat": {
+            "samplesMs": [
+              177.38000002503395, 175.87000000476837, 170.12000000476837, 162.50499999523163,
+              158.9849999845028, 168.92500001192093, 177.34000000357628, 167.15000000596046,
+              161.125, 164.79499998688698
+            ],
+            "medianMs": 168.0375000089407
+          }
+        }
+      },
+      {
+        "revision": "5f42b14f4d458bf3083694c17b629dcfd112d95b",
+        "wasmSha256": "30d71bd3c2db53930cbd594ed13859bbb2a318d6103b474cde15df7eca76eb9b",
+        "adapterSha256": "f91eadbe1036406b1ebf07370c1bd16ebd749fe05bedd13d395ab8d6d6a56be7",
+        "scriptSha256": "b6548c9d8cee9193d3417822850e4436a3233e3ad75beb089d09142ae27b864c",
+        "fixtureSha256": "b99c6178af3bc1a1ce0b2566507d93c19a0078dd293e662c7f7e86f7c41d9c6c",
+        "browser": {
+          "protocolVersion": "1.3",
+          "product": "HeadlessChrome/145.0.7632.6",
+          "revision": "@47e20adcc15fc15f01825aa17e570c8f5492ac0f",
+          "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/145.0.7632.6 Safari/537.36",
+          "jsVersion": "14.5.201.2"
+        },
+        "browserIsolation": {
+          "endpointFromLaunchedProcess": true,
+          "serverFromLaunchedProcess": true,
+          "browserId": "791989ca-ff2a-43fd-a925-1b3e2a9a682c",
+          "browserPid": 68904,
+          "initialWorkerCount": 0,
+          "shutdownVerified": true
+        },
+        "host": {
+          "platform": "darwin",
+          "architecture": "arm64",
+          "node": "v24.13.1"
+        },
+        "storage": "persistent",
+        "count": 1500,
+        "repetitions": 10,
+        "setup": {
+          "open_ms": 1095.3700000047684,
+          "empty_query_ms": 605.8150000274181,
+          "seed_ms": 215.50999999046326,
+          "local_settlement_ms": 298.6550000011921
+        },
+        "arm": "main",
+        "lanes": {
+          "include": {
+            "samplesMs": [
+              588.8600000143051, 595.0250000059605, 605.5300000011921, 593.5599999725819,
+              598.2750000059605, 577.0550000071526, 593.1899999976158, 593.794999986887,
+              589.8700000047684, 579.2900000214577
+            ],
+            "medianMs": 593.3749999850988
+          },
+          "flat": {
+            "samplesMs": [
+              180.42500001192093, 161.91499999165535, 170.23999997973442, 168.0300000011921,
+              175.0799999833107, 161.16000002622604, 176.63999998569489, 153.53999999165535,
+              157.00499999523163, 151.1850000023842
+            ],
+            "medianMs": 164.97249999642372
+          }
+        }
+      },
+      {
+        "revision": "047ba66d7aafe79fed346790c93c984f55c5cecb",
+        "wasmSha256": "d27f7f04ec05f51fd2821ba4803327fad4c9c6a2adbedd7c0cf2cfb5a11d4e83",
+        "adapterSha256": "3834956c214d5e8326e34bd8eaa81c8b7d748c81890789ef300aa5e61f0d5852",
+        "scriptSha256": "b6548c9d8cee9193d3417822850e4436a3233e3ad75beb089d09142ae27b864c",
+        "fixtureSha256": "b99c6178af3bc1a1ce0b2566507d93c19a0078dd293e662c7f7e86f7c41d9c6c",
+        "browser": {
+          "protocolVersion": "1.3",
+          "product": "HeadlessChrome/145.0.7632.6",
+          "revision": "@47e20adcc15fc15f01825aa17e570c8f5492ac0f",
+          "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/145.0.7632.6 Safari/537.36",
+          "jsVersion": "14.5.201.2"
+        },
+        "browserIsolation": {
+          "endpointFromLaunchedProcess": true,
+          "serverFromLaunchedProcess": true,
+          "browserId": "7c27dc3f-64e6-4f3c-9da8-070f30af462c",
+          "browserPid": 70273,
+          "initialWorkerCount": 0,
+          "shutdownVerified": true
+        },
+        "host": {
+          "platform": "darwin",
+          "architecture": "arm64",
+          "node": "v24.13.1"
+        },
+        "storage": "persistent",
+        "count": 1500,
+        "repetitions": 10,
+        "setup": {
+          "open_ms": 572.4399999976158,
+          "empty_query_ms": 607.1299999952316,
+          "seed_ms": 210.9399999976158,
+          "local_settlement_ms": 330.42999997735023
+        },
+        "arm": "candidate",
+        "lanes": {
+          "include": {
+            "samplesMs": [
+              272.2450000047684, 290.22499999403954, 309.9950000047684, 291.4500000178814,
+              276.7300000190735, 254.2199999988079, 291.75, 267.32000002264977, 253.4699999988079,
+              269.52000001072884
+            ],
+            "medianMs": 274.48750001192093
+          },
+          "flat": {
+            "samplesMs": [
+              169.66999998688698, 157.80499997735023, 164.61500000953674, 179.63499999046326,
+              167.3949999809265, 160.45999997854233, 156.13499999046326, 159.73500001430511,
+              162.97500002384186, 163.84000000357628
+            ],
+            "medianMs": 163.40750001370907
+          }
+        }
+      }
+    ],
+    "cpuRuns": [
+      {
+        "revision": "5f42b14f4d458bf3083694c17b629dcfd112d95b",
+        "wasmSha256": "30d71bd3c2db53930cbd594ed13859bbb2a318d6103b474cde15df7eca76eb9b",
+        "adapterSha256": "f91eadbe1036406b1ebf07370c1bd16ebd749fe05bedd13d395ab8d6d6a56be7",
+        "scriptSha256": "b6548c9d8cee9193d3417822850e4436a3233e3ad75beb089d09142ae27b864c",
+        "fixtureSha256": "b99c6178af3bc1a1ce0b2566507d93c19a0078dd293e662c7f7e86f7c41d9c6c",
+        "browser": {
+          "protocolVersion": "1.3",
+          "product": "HeadlessChrome/145.0.7632.6",
+          "revision": "@47e20adcc15fc15f01825aa17e570c8f5492ac0f",
+          "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/145.0.7632.6 Safari/537.36",
+          "jsVersion": "14.5.201.2"
+        },
+        "browserIsolation": {
+          "endpointFromLaunchedProcess": true,
+          "serverFromLaunchedProcess": true,
+          "browserId": "95302a62-a4c6-45fb-8172-c50433113cc0",
+          "browserPid": 71653,
+          "initialWorkerCount": 0,
+          "shutdownVerified": true
+        },
+        "host": {
+          "platform": "darwin",
+          "architecture": "arm64",
+          "node": "v24.13.1"
+        },
+        "storage": "memory",
+        "count": 1500,
+        "repetitions": 10,
+        "setup": {
+          "open_ms": 542.2599999904633,
+          "empty_query_ms": 123.24000000953674,
+          "seed_ms": 189.00499999523163,
+          "local_settlement_ms": 1.4000000059604645
+        },
+        "arm": "main",
+        "lanes": {
+          "include": {
+            "samplesMs": [
+              340.32000002264977, 369.4200000166893, 364.2800000011921, 367.18000000715256,
+              368.44999998807907, 373.99499997496605, 364.5750000178814, 367.8799999952316,
+              369.0600000023842, 375.0150000154972
+            ],
+            "medianMs": 368.16499999165535
+          },
+          "flat": {
+            "samplesMs": [
+              35.16500002145767, 34.17500001192093, 37.41999998688698, 34.9549999833107,
+              34.85999998450279, 35.85000002384186, 36.145000010728836, 36.314999997615814,
+              35.20500001311302, 34.514999985694885
+            ],
+            "medianMs": 35.18500001728535
+          }
+        },
+        "profiles": [
+          {
+            "lane": "include",
+            "target": "page",
+            "file": "memory-1500-include-page-0.cpuprofile",
+            "sha256": "da6210d919a878c1d2a251607853447ac01589950d4b0affedd0c9cf527112e6",
+            "activeMsPerRead": 97.60300000000004,
+            "idleMsPerRead": 272.7975000000004
+          },
+          {
+            "lane": "flat",
+            "target": "page",
+            "file": "memory-1500-flat-page-0.cpuprofile",
+            "sha256": "2ebeb0b0214228275a3a545d51e65ab466a0c3f6d0487c23a98008f09d28b323",
+            "activeMsPerRead": 37.3572,
+            "idleMsPerRead": 0.6695000000000001
+          }
+        ]
+      },
+      {
+        "revision": "047ba66d7aafe79fed346790c93c984f55c5cecb",
+        "wasmSha256": "d27f7f04ec05f51fd2821ba4803327fad4c9c6a2adbedd7c0cf2cfb5a11d4e83",
+        "adapterSha256": "3834956c214d5e8326e34bd8eaa81c8b7d748c81890789ef300aa5e61f0d5852",
+        "scriptSha256": "b6548c9d8cee9193d3417822850e4436a3233e3ad75beb089d09142ae27b864c",
+        "fixtureSha256": "b99c6178af3bc1a1ce0b2566507d93c19a0078dd293e662c7f7e86f7c41d9c6c",
+        "browser": {
+          "protocolVersion": "1.3",
+          "product": "HeadlessChrome/145.0.7632.6",
+          "revision": "@47e20adcc15fc15f01825aa17e570c8f5492ac0f",
+          "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/145.0.7632.6 Safari/537.36",
+          "jsVersion": "14.5.201.2"
+        },
+        "browserIsolation": {
+          "endpointFromLaunchedProcess": true,
+          "serverFromLaunchedProcess": true,
+          "browserId": "cf4f43f7-88b5-4fa8-bb35-efa331544e30",
+          "browserPid": 73215,
+          "initialWorkerCount": 0,
+          "shutdownVerified": true
+        },
+        "host": {
+          "platform": "darwin",
+          "architecture": "arm64",
+          "node": "v24.13.1"
+        },
+        "storage": "memory",
+        "count": 1500,
+        "repetitions": 10,
+        "setup": {
+          "open_ms": 320.77500000596046,
+          "empty_query_ms": 127.65999999642372,
+          "seed_ms": 189.47499999403954,
+          "local_settlement_ms": 1.4150000214576721
+        },
+        "arm": "candidate",
+        "lanes": {
+          "include": {
+            "samplesMs": [
+              99.23500001430511, 101.22999998927116, 94.56500002741814, 102.9249999821186,
+              95.7199999988079, 98.68499997258186, 100.00499999523163, 92.02499997615814,
+              98.30500000715256, 98.56999999284744
+            ],
+            "medianMs": 98.62749998271465
+          },
+          "flat": {
+            "samplesMs": [
+              40.54499998688698, 48, 37.41999998688698, 41.02999997138977, 35.849999994039536,
+              36.5450000166893, 41.724999994039536, 35.264999985694885, 38.764999985694885,
+              35.11999997496605
+            ],
+            "medianMs": 38.09249998629093
+          }
+        },
+        "profiles": [
+          {
+            "lane": "include",
+            "target": "page",
+            "file": "memory-1500-include-page-0.cpuprofile",
+            "sha256": "1e35f5d4160a600c13a801cc84fd71f759d3c44461cab5c698ab73c6e44ec90f",
+            "activeMsPerRead": 103.99430000000012,
+            "idleMsPerRead": 0.16699999999999998
+          },
+          {
+            "lane": "flat",
+            "target": "page",
+            "file": "memory-1500-flat-page-0.cpuprofile",
+            "sha256": "b80fb3499a7558dab7ee694c85d8426672214021c368471420fc8a854181adf7",
+            "activeMsPerRead": 45.036900000000045,
+            "idleMsPerRead": 0.4292000000000001
+          }
+        ]
+      },
+      {
+        "revision": "5f42b14f4d458bf3083694c17b629dcfd112d95b",
+        "wasmSha256": "30d71bd3c2db53930cbd594ed13859bbb2a318d6103b474cde15df7eca76eb9b",
+        "adapterSha256": "f91eadbe1036406b1ebf07370c1bd16ebd749fe05bedd13d395ab8d6d6a56be7",
+        "scriptSha256": "b6548c9d8cee9193d3417822850e4436a3233e3ad75beb089d09142ae27b864c",
+        "fixtureSha256": "b99c6178af3bc1a1ce0b2566507d93c19a0078dd293e662c7f7e86f7c41d9c6c",
+        "browser": {
+          "protocolVersion": "1.3",
+          "product": "HeadlessChrome/145.0.7632.6",
+          "revision": "@47e20adcc15fc15f01825aa17e570c8f5492ac0f",
+          "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/145.0.7632.6 Safari/537.36",
+          "jsVersion": "14.5.201.2"
+        },
+        "browserIsolation": {
+          "endpointFromLaunchedProcess": true,
+          "serverFromLaunchedProcess": true,
+          "browserId": "d41c4d4b-c4fe-4d8e-8367-40ae08c3c379",
+          "browserPid": 74540,
+          "initialWorkerCount": 0,
+          "shutdownVerified": true
+        },
+        "host": {
+          "platform": "darwin",
+          "architecture": "arm64",
+          "node": "v24.13.1"
+        },
+        "storage": "persistent",
+        "count": 1500,
+        "repetitions": 10,
+        "setup": {
+          "open_ms": 578.0099999904633,
+          "empty_query_ms": 596.1399999856949,
+          "seed_ms": 217.68499997258186,
+          "local_settlement_ms": 311.330000013113
+        },
+        "arm": "main",
+        "lanes": {
+          "include": {
+            "samplesMs": [
+              599.5649999976158, 615.2549999952316, 608.4449999928474, 608.4650000035763,
+              587.7000000178814, 587.3050000071526, 578.7899999916553, 580.5900000035763, 579.125,
+              567.580000013113
+            ],
+            "medianMs": 587.502500012517
+          },
+          "flat": {
+            "samplesMs": [
+              209.29499998688698, 197.01000002026558, 185.96000000834465, 168.71500000357628,
+              193.8550000190735, 179.7349999845028, 179.90999999642372, 193.2199999988079,
+              175.4849999845028, 177.66999998688698
+            ],
+            "medianMs": 182.9350000023842
+          }
+        },
+        "profiles": [
+          {
+            "lane": "include",
+            "target": "page",
+            "file": "persistent-1500-include-page-0.cpuprofile",
+            "sha256": "20994645a539c9e4cba17a58df8d3c6258a9ee12a0f6eea2b0acec94c5e01552",
+            "activeMsPerRead": 126.47119999999997,
+            "idleMsPerRead": 472.2926
+          },
+          {
+            "lane": "include",
+            "target": "shared_worker",
+            "file": "persistent-1500-include-shared_worker-1.cpuprofile",
+            "sha256": "011c2ee8534c8e53516926b5e42be5ed7aeafa1e42a46031ecc4e2c42ba35dfc",
+            "idleMsPerRead": 399.0718999999992,
+            "activeMsPerRead": 198.3509000000001
+          },
+          {
+            "lane": "flat",
+            "target": "page",
+            "file": "persistent-1500-flat-page-0.cpuprofile",
+            "sha256": "1fc70a13fc8df22176bcf4504f2a35c8546d9da8474d996184e00353f91369f8",
+            "activeMsPerRead": 68.30189999999993,
+            "idleMsPerRead": 121.18590000000005
+          },
+          {
+            "lane": "flat",
+            "target": "shared_worker",
+            "file": "persistent-1500-flat-shared_worker-1.cpuprofile",
+            "sha256": "3e8da21a5296303db59ba05c06c2ca815ea4e6c22581c2070c72c02cb8049fc0",
+            "idleMsPerRead": 58.463000000000015,
+            "activeMsPerRead": 131.1924000000001
+          }
+        ]
+      },
+      {
+        "revision": "047ba66d7aafe79fed346790c93c984f55c5cecb",
+        "wasmSha256": "d27f7f04ec05f51fd2821ba4803327fad4c9c6a2adbedd7c0cf2cfb5a11d4e83",
+        "adapterSha256": "3834956c214d5e8326e34bd8eaa81c8b7d748c81890789ef300aa5e61f0d5852",
+        "scriptSha256": "b6548c9d8cee9193d3417822850e4436a3233e3ad75beb089d09142ae27b864c",
+        "fixtureSha256": "b99c6178af3bc1a1ce0b2566507d93c19a0078dd293e662c7f7e86f7c41d9c6c",
+        "browser": {
+          "protocolVersion": "1.3",
+          "product": "HeadlessChrome/145.0.7632.6",
+          "revision": "@47e20adcc15fc15f01825aa17e570c8f5492ac0f",
+          "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/145.0.7632.6 Safari/537.36",
+          "jsVersion": "14.5.201.2"
+        },
+        "browserIsolation": {
+          "endpointFromLaunchedProcess": true,
+          "serverFromLaunchedProcess": true,
+          "browserId": "9924a656-f330-45e8-9e21-176fc93e8258",
+          "browserPid": 75914,
+          "initialWorkerCount": 0,
+          "shutdownVerified": true
+        },
+        "host": {
+          "platform": "darwin",
+          "architecture": "arm64",
+          "node": "v24.13.1"
+        },
+        "storage": "persistent",
+        "count": 1500,
+        "repetitions": 10,
+        "setup": {
+          "open_ms": 729.8049999773502,
+          "empty_query_ms": 625.0250000059605,
+          "seed_ms": 217.07499998807907,
+          "local_settlement_ms": 341.90000000596046
+        },
+        "arm": "candidate",
+        "lanes": {
+          "include": {
+            "samplesMs": [
+              309.794999986887, 327.82499998807907, 324.19999998807907, 321.2000000178814,
+              300.28500002622604, 320.5, 342.4699999988079, 302.080000013113, 322.2800000011921,
+              296.6299999952316
+            ],
+            "medianMs": 320.8500000089407
+          },
+          "flat": {
+            "samplesMs": [
+              189.87000000476837, 181.33999997377396, 193.375, 192.86000001430511,
+              198.36500000953674, 175.7800000011921, 194.73500001430511, 199.9500000178814,
+              179.86000001430511, 166.97999998927116
+            ],
+            "medianMs": 191.36500000953674
+          }
+        },
+        "profiles": [
+          {
+            "lane": "include",
+            "target": "page",
+            "file": "persistent-1500-include-page-0.cpuprofile",
+            "sha256": "59cbcfb37e90a54812dcb08cefe2f5a8888642f4fc6a46236dbd3f66ce84ad43",
+            "activeMsPerRead": 130.3866000000001,
+            "idleMsPerRead": 195.01400000000027
+          },
+          {
+            "lane": "include",
+            "target": "shared_worker",
+            "file": "persistent-1500-include-shared_worker-1.cpuprofile",
+            "sha256": "20b0c04dfbcffc8cbd6bf7349a7564dc0650b88c99b3f5e579d54886710101d0",
+            "idleMsPerRead": 121.17450000000015,
+            "activeMsPerRead": 202.80770000000015
+          },
+          {
+            "lane": "flat",
+            "target": "page",
+            "file": "persistent-1500-flat-page-0.cpuprofile",
+            "sha256": "b6775dd36a2a20e76babf823e097907e4156b860ddb89e8a87abe2bb901d1d46",
+            "activeMsPerRead": 68.7752,
+            "idleMsPerRead": 121.77619999999996
+          },
+          {
+            "lane": "flat",
+            "target": "shared_worker",
+            "file": "persistent-1500-flat-shared_worker-1.cpuprofile",
+            "sha256": "763bb97426a457a6e002b10d53bd223f3d02a6124254186fcb8dd58c34ca51bd",
+            "idleMsPerRead": 57.43809999999996,
+            "activeMsPerRead": 132.55599999999993
+          }
+        ]
+      }
+    ],
+    "comparisons": [
+      {
+        "storage": "memory",
+        "lane": "include",
+        "mainProcessMediansMs": [397.74250000715256, 398.60499998927116],
+        "candidateProcessMediansMs": [88.87000000476837, 93.02249999344349],
+        "mainMedianMs": 398.17374999821186,
+        "candidateMedianMs": 90.94624999910593,
+        "speedup": 4.3781216927814635
+      },
+      {
+        "storage": "memory",
+        "lane": "flat",
+        "mainProcessMediansMs": [32.90499998629093, 34.23999997973442],
+        "candidateProcessMediansMs": [34.00749999284744, 36.207499995827675],
+        "mainMedianMs": 33.572499983012676,
+        "candidateMedianMs": 35.10749999433756,
+        "speedup": 0.9562771484277587
+      },
+      {
+        "storage": "persistent",
+        "lane": "include",
+        "mainProcessMediansMs": [
+          606.4924999922514, 610.3074999898672, 587.2400000095367, 593.3749999850988
+        ],
+        "candidateProcessMediansMs": [
+          274.9050000011921, 274.69499999284744, 277.38749998807907, 274.48750001192093
+        ],
+        "mainMedianMs": 599.9337499886751,
+        "candidateMedianMs": 274.79999999701977,
+        "speedup": 2.1831650290945466
+      },
+      {
+        "storage": "persistent",
+        "lane": "flat",
+        "mainProcessMediansMs": [
+          178.9775000065565, 171.36499999463558, 168.0375000089407, 164.97249999642372
+        ],
+        "candidateProcessMediansMs": [
+          164.07999999821186, 166.41750000417233, 167.16999998688698, 163.40750001370907
+        ],
+        "mainMedianMs": 169.70125000178814,
+        "candidateMedianMs": 165.2487500011921,
+        "speedup": 1.0269442280232917
+      }
+    ]
+  },
+  "earlierPrototypeComparison": {
+    "workload": {
+      "rows": 1500,
+      "sharedParents": 15,
+      "parentDescriptionBytes": 2048,
+      "rootBodyBytes": 128,
+      "warmupReads": 3,
+      "measuredReadsPerProcess": 10,
+      "scheduling": "production adapter, no diagnostic override"
+    },
+    "arms": {
+      "baseline": {
+        "wall": {
+          "memory": [
+            {
+              "sourceRevision": "5f42b14f4d458bf3083694c17b629dcfd112d95b",
+              "wasmSha256": "30d71bd3c2db53930cbd594ed13859bbb2a318d6103b474cde15df7eca76eb9b",
+              "adapterSha256": "f91eadbe1036406b1ebf07370c1bd16ebd749fe05bedd13d395ab8d6d6a56be7",
+              "scriptSha256": "16617a60acd8a2070cd4498c7be7da0646dd364bcd60be321f8833586b0b0517",
+              "fixtureSha256": "365a348a1a683c6ad0329cc90c433dd294ba371358a7c0dc65dfd36af53e7962",
+              "lanes": {
+                "include": {
+                  "samplesMs": [
+                    346.86500000953674, 375.8799999952316, 376.83999997377396, 376.4150000214577,
+                    373.19000002741814, 376.9850000143051, 372.64999997615814, 370.3700000047684,
+                    373.7199999988079, 367.7350000143051
+                  ],
+                  "medianMs": 373.455000013113
+                },
+                "flat": {
+                  "samplesMs": [
+                    33.50999999046326, 36.0450000166893, 32.42500001192093, 39.53000000119209,
+                    32.70500001311302, 36.49500000476837, 32.59499999880791, 36.38500002026558,
+                    34.37000000476837, 33.189999997615814
+                  ],
+                  "medianMs": 33.939999997615814
+                }
+              }
+            },
+            {
+              "sourceRevision": "5f42b14f4d458bf3083694c17b629dcfd112d95b",
+              "wasmSha256": "30d71bd3c2db53930cbd594ed13859bbb2a318d6103b474cde15df7eca76eb9b",
+              "adapterSha256": "f91eadbe1036406b1ebf07370c1bd16ebd749fe05bedd13d395ab8d6d6a56be7",
+              "scriptSha256": "16617a60acd8a2070cd4498c7be7da0646dd364bcd60be321f8833586b0b0517",
+              "fixtureSha256": "365a348a1a683c6ad0329cc90c433dd294ba371358a7c0dc65dfd36af53e7962",
+              "lanes": {
+                "include": {
+                  "samplesMs": [
+                    347.63499999046326, 375.43000000715256, 375.125, 373.9699999988079,
+                    372.39500001072884, 379.1599999964237, 371.03999999165535, 368.6850000023842,
+                    370.84999999403954, 371.41499999165535
+                  ],
+                  "medianMs": 371.9050000011921
+                },
+                "flat": {
+                  "samplesMs": [
+                    33.900000005960464, 32.810000002384186, 34.25, 32.94499999284744,
+                    34.46000000834465, 32.55500000715256, 32.25, 34.25999999046326,
+                    32.21000000834465, 34.839999973773956
+                  ],
+                  "medianMs": 33.42249999940395
+                }
+              }
+            }
+          ],
+          "persistent": [
+            {
+              "sourceRevision": "5f42b14f4d458bf3083694c17b629dcfd112d95b",
+              "wasmSha256": "30d71bd3c2db53930cbd594ed13859bbb2a318d6103b474cde15df7eca76eb9b",
+              "adapterSha256": "f91eadbe1036406b1ebf07370c1bd16ebd749fe05bedd13d395ab8d6d6a56be7",
+              "scriptSha256": "16617a60acd8a2070cd4498c7be7da0646dd364bcd60be321f8833586b0b0517",
+              "fixtureSha256": "365a348a1a683c6ad0329cc90c433dd294ba371358a7c0dc65dfd36af53e7962",
+              "lanes": {
+                "include": {
+                  "samplesMs": [
+                    660.005000025034, 655.625, 691.7049999833107, 693.0349999964237,
+                    661.4600000083447, 637.0999999940395, 608.4699999988079, 624.4399999976158,
+                    563.1599999964237, 528.0749999880791
+                  ],
+                  "medianMs": 646.3624999970198
+                },
+                "flat": {
+                  "samplesMs": [
+                    158.63999998569489, 148.79499998688698, 159.25999999046326, 155.22499999403954,
+                    144.4849999845028, 147.51000002026558, 148.13499999046326, 145.16500002145767,
+                    151.54499998688698, 141.0499999821186
+                  ],
+                  "medianMs": 148.46499998867512
+                }
+              }
+            },
+            {
+              "sourceRevision": "5f42b14f4d458bf3083694c17b629dcfd112d95b",
+              "wasmSha256": "30d71bd3c2db53930cbd594ed13859bbb2a318d6103b474cde15df7eca76eb9b",
+              "adapterSha256": "f91eadbe1036406b1ebf07370c1bd16ebd749fe05bedd13d395ab8d6d6a56be7",
+              "scriptSha256": "16617a60acd8a2070cd4498c7be7da0646dd364bcd60be321f8833586b0b0517",
+              "fixtureSha256": "365a348a1a683c6ad0329cc90c433dd294ba371358a7c0dc65dfd36af53e7962",
+              "lanes": {
+                "include": {
+                  "samplesMs": [
+                    569.5949999988079, 559.4800000190735, 566.2299999892712, 580.6150000095367,
+                    569.7000000178814, 560.8700000047684, 564.2450000047684, 555.0850000083447,
+                    571.9600000083447, 547.6200000047684
+                  ],
+                  "medianMs": 565.2374999970198
+                },
+                "flat": {
+                  "samplesMs": [
+                    181.55000001192093, 150.23500001430511, 167.91000002622604, 163.83000001311302,
+                    152.50499999523163, 171.78999999165535, 155.36500000953674, 157.7950000166893,
+                    152.50999999046326, 155.7699999809265
+                  ],
+                  "medianMs": 156.7824999988079
+                }
+              }
+            }
+          ]
+        },
+        "cpu": {
+          "memory": {
+            "include": [
+              {
+                "target": "page",
+                "activeMsPerRead": 100.24549999999981,
+                "idleMsPerRead": 267.6536999999993
+              }
+            ],
+            "flat": [
+              {
+                "target": "page",
+                "activeMsPerRead": 45.2023,
+                "idleMsPerRead": 55.08829999999998
+              }
+            ]
+          },
+          "persistent": {
+            "include": [
+              {
+                "target": "page",
+                "activeMsPerRead": 129.36609999999976,
+                "idleMsPerRead": 464.87149999999815
+              },
+              {
+                "target": "shared_worker",
+                "idleMsPerRead": 416.0215000000044,
+                "activeMsPerRead": 181.1819999999997
+              }
+            ],
+            "flat": [
+              {
+                "target": "page",
+                "activeMsPerRead": 69.04819999999988,
+                "idleMsPerRead": 112.194
+              },
+              {
+                "target": "shared_worker",
+                "idleMsPerRead": 64.43030000000002,
+                "activeMsPerRead": 116.52759999999974
+              }
+            ]
+          }
+        }
+      },
+      "candidate": {
+        "wall": {
+          "memory": [
+            {
+              "sourceRevision": "047ba66d7aafe79fed346790c93c984f55c5cecb",
+              "wasmSha256": "d27f7f04ec05f51fd2821ba4803327fad4c9c6a2adbedd7c0cf2cfb5a11d4e83",
+              "adapterSha256": "3834956c214d5e8326e34bd8eaa81c8b7d748c81890789ef300aa5e61f0d5852",
+              "scriptSha256": "16617a60acd8a2070cd4498c7be7da0646dd364bcd60be321f8833586b0b0517",
+              "fixtureSha256": "365a348a1a683c6ad0329cc90c433dd294ba371358a7c0dc65dfd36af53e7962",
+              "lanes": {
+                "include": {
+                  "samplesMs": [
+                    95.27500000596046, 93.6749999821186, 95.2199999988079, 94.09000000357628,
+                    98.56000000238419, 87.96000000834465, 86.01999998092651, 91.7199999988079,
+                    90.9699999988079, 84.49500000476837
+                  ],
+                  "medianMs": 92.69749999046326
+                },
+                "flat": {
+                  "samplesMs": [
+                    33.479999989271164, 34.185000002384186, 40.66999998688698, 34.76500001549721,
+                    40.520000010728836, 32.104999989271164, 39.74500000476837, 32.53499999642372,
+                    32.35000002384186, 37.49000000953674
+                  ],
+                  "medianMs": 34.4750000089407
+                }
+              }
+            },
+            {
+              "sourceRevision": "047ba66d7aafe79fed346790c93c984f55c5cecb",
+              "wasmSha256": "d27f7f04ec05f51fd2821ba4803327fad4c9c6a2adbedd7c0cf2cfb5a11d4e83",
+              "adapterSha256": "3834956c214d5e8326e34bd8eaa81c8b7d748c81890789ef300aa5e61f0d5852",
+              "scriptSha256": "16617a60acd8a2070cd4498c7be7da0646dd364bcd60be321f8833586b0b0517",
+              "fixtureSha256": "365a348a1a683c6ad0329cc90c433dd294ba371358a7c0dc65dfd36af53e7962",
+              "lanes": {
+                "include": {
+                  "samplesMs": [
+                    89.53499999642372, 92.30500000715256, 87.02499997615814, 89.15999999642372,
+                    88.99000000953674, 84.53499999642372, 86.26500001549721, 82.46000000834465,
+                    87.625, 88.5750000178814
+                  ],
+                  "medianMs": 88.1000000089407
+                },
+                "flat": {
+                  "samplesMs": [
+                    33.31999999284744, 35.48499998450279, 31.80000001192093, 32.37000000476837,
+                    36.42499998211861, 32.91499999165535, 39.70000001788139, 32.08500000834465,
+                    31.570000022649765, 36.139999985694885
+                  ],
+                  "medianMs": 33.117499992251396
+                }
+              }
+            }
+          ],
+          "persistent": [
+            {
+              "sourceRevision": "047ba66d7aafe79fed346790c93c984f55c5cecb",
+              "wasmSha256": "d27f7f04ec05f51fd2821ba4803327fad4c9c6a2adbedd7c0cf2cfb5a11d4e83",
+              "adapterSha256": "3834956c214d5e8326e34bd8eaa81c8b7d748c81890789ef300aa5e61f0d5852",
+              "scriptSha256": "16617a60acd8a2070cd4498c7be7da0646dd364bcd60be321f8833586b0b0517",
+              "fixtureSha256": "365a348a1a683c6ad0329cc90c433dd294ba371358a7c0dc65dfd36af53e7962",
+              "lanes": {
+                "include": {
+                  "samplesMs": [
+                    309.7950000166893, 349.9050000011921, 323.875, 308.705000013113,
+                    335.3449999988079, 276.6399999856949, 293.27499997615814, 298.31999999284744,
+                    286.83999997377396, 280.9350000023842
+                  ],
+                  "medianMs": 303.51250000298023
+                },
+                "flat": {
+                  "samplesMs": [
+                    189.38000002503395, 170.45500001311302, 159.15999999642372, 182.4050000011921,
+                    156.97499999403954, 185.4050000011921, 163.52500000596046, 165.19500002264977,
+                    194.75499999523163, 194.09999999403954
+                  ],
+                  "medianMs": 176.43000000715256
+                }
+              }
+            },
+            {
+              "sourceRevision": "047ba66d7aafe79fed346790c93c984f55c5cecb",
+              "wasmSha256": "d27f7f04ec05f51fd2821ba4803327fad4c9c6a2adbedd7c0cf2cfb5a11d4e83",
+              "adapterSha256": "3834956c214d5e8326e34bd8eaa81c8b7d748c81890789ef300aa5e61f0d5852",
+              "scriptSha256": "16617a60acd8a2070cd4498c7be7da0646dd364bcd60be321f8833586b0b0517",
+              "fixtureSha256": "365a348a1a683c6ad0329cc90c433dd294ba371358a7c0dc65dfd36af53e7962",
+              "lanes": {
+                "include": {
+                  "samplesMs": [
+                    266.125, 279.59999999403954, 278.8349999785423, 260.3400000035763,
+                    284.38499999046326, 273.72000002861023, 275.169999986887, 270.0450000166893,
+                    285.13499999046326, 255.9350000023842
+                  ],
+                  "medianMs": 274.4450000077486
+                },
+                "flat": {
+                  "samplesMs": [
+                    158.29499998688698, 150.3900000154972, 148.2800000011921, 160.41999998688698,
+                    158.2999999821186, 170.49500000476837, 163.2800000011921, 163.88500002026558,
+                    161.00499999523163, 169.38500002026558
+                  ],
+                  "medianMs": 160.7124999910593
+                }
+              }
+            }
+          ]
+        },
+        "cpu": {
+          "memory": {
+            "include": [
+              {
+                "target": "page",
+                "activeMsPerRead": 98.5563999999996,
+                "idleMsPerRead": 0.4081
+              }
+            ],
+            "flat": [
+              {
+                "target": "page",
+                "activeMsPerRead": 38.729099999999946,
+                "idleMsPerRead": 0.3007
+              }
+            ]
+          },
+          "persistent": {
+            "include": [
+              {
+                "target": "page",
+                "activeMsPerRead": 125.38639999999997,
+                "idleMsPerRead": 164.19500000000002
+              },
+              {
+                "target": "shared_worker",
+                "idleMsPerRead": 120.23869999999991,
+                "activeMsPerRead": 167.7215000000003
+              }
+            ],
+            "flat": [
+              {
+                "target": "page",
+                "activeMsPerRead": 69.34669999999979,
+                "idleMsPerRead": 136.46500000000023
+              },
+              {
+                "target": "shared_worker",
+                "idleMsPerRead": 60.881200000000064,
+                "activeMsPerRead": 144.24360000000007
+              }
+            ]
+          }
+        }
+      }
+    },
+    "comparisons": [
+      {
+        "storage": "memory",
+        "query": "include",
+        "baselineMedianMs": 372.68000000715256,
+        "candidateMedianMs": 90.39874999970198,
+        "speedup": 4.122623377075249
+      },
+      {
+        "storage": "memory",
+        "query": "flat",
+        "baselineMedianMs": 33.681249998509884,
+        "candidateMedianMs": 33.79625000059605,
+        "speedup": 0.9965972555510113
+      },
+      {
+        "storage": "persistent",
+        "query": "include",
+        "baselineMedianMs": 605.7999999970198,
+        "candidateMedianMs": 288.9787500053644,
+        "speedup": 2.0963479148061026
+      },
+      {
+        "storage": "persistent",
+        "query": "flat",
+        "baselineMedianMs": 152.6237499937415,
+        "candidateMedianMs": 168.57124999910593,
+        "speedup": 0.905396086192343
+      }
+    ],
+    "schemaVersion": 1,
+    "cpuInterpretation": "250 microsecond sampled active/idle time, ten reads per profile; page and worker run concurrently and must not be summed as elapsed latency.",
+    "sameWasmSchedulerControl": {
+      "order": ["timer-polling", "control", "control", "timer-polling"],
+      "runs": [
+        {
+          "revision": "047ba66d7aafe79fed346790c93c984f55c5cecb",
+          "wasmSha256": "d27f7f04ec05f51fd2821ba4803327fad4c9c6a2adbedd7c0cf2cfb5a11d4e83",
+          "adapterSha256": "3834956c214d5e8326e34bd8eaa81c8b7d748c81890789ef300aa5e61f0d5852",
+          "scriptSha256": "8884bfd4703553706433b18b61c0da4c6626f14f266efe984b217d70709a2778",
+          "fixtureSha256": "01cf3a10608897e13ae18d8de8e28a924345eb33c54c62a79c5820f22ee3ba52",
+          "scheduling": "timer-polling",
+          "lanes": {
+            "include": {
+              "samplesMs": [
+                608.3250000178814, 592.580000013113, 591.0300000011921, 596.1949999928474,
+                580.8400000035763, 572.9050000011921, 586.380000025034, 575.7899999916553,
+                580.6050000190735, 607.0250000059605
+              ],
+              "medianMs": 588.705000013113
+            },
+            "flat": {
+              "samplesMs": [
+                190.22999998927116, 180.5949999988079, 180.49500000476837, 180.58500000834465,
+                171.46000000834465, 174.62000000476837, 173.63000002503395, 175.74500000476837,
+                169.95500001311302, 164.0300000011921
+              ],
+              "medianMs": 175.18250000476837
+            }
+          }
+        },
+        {
+          "revision": "047ba66d7aafe79fed346790c93c984f55c5cecb",
+          "wasmSha256": "d27f7f04ec05f51fd2821ba4803327fad4c9c6a2adbedd7c0cf2cfb5a11d4e83",
+          "adapterSha256": "3834956c214d5e8326e34bd8eaa81c8b7d748c81890789ef300aa5e61f0d5852",
+          "scriptSha256": "8884bfd4703553706433b18b61c0da4c6626f14f266efe984b217d70709a2778",
+          "fixtureSha256": "01cf3a10608897e13ae18d8de8e28a924345eb33c54c62a79c5820f22ee3ba52",
+          "scheduling": "control",
+          "lanes": {
+            "include": {
+              "samplesMs": [
+                292.8149999976158, 287.3899999856949, 313.50500002503395, 297.3649999797344,
+                304.8449999988079, 272.4950000047684, 281.2300000190735, 280.22499999403954,
+                280.66499999165535, 296.02500000596046
+              ],
+              "medianMs": 290.10249999165535
+            },
+            "flat": {
+              "samplesMs": [
+                176.37999999523163, 181.2300000190735, 164.0300000011921, 189.27500000596046,
+                161.4249999821186, 168.90999999642372, 181.81999999284744, 170.05500000715256,
+                174.19999998807907, 168.83999997377396
+              ],
+              "medianMs": 172.1274999976158
+            }
+          }
+        },
+        {
+          "revision": "047ba66d7aafe79fed346790c93c984f55c5cecb",
+          "wasmSha256": "d27f7f04ec05f51fd2821ba4803327fad4c9c6a2adbedd7c0cf2cfb5a11d4e83",
+          "adapterSha256": "3834956c214d5e8326e34bd8eaa81c8b7d748c81890789ef300aa5e61f0d5852",
+          "scriptSha256": "8884bfd4703553706433b18b61c0da4c6626f14f266efe984b217d70709a2778",
+          "fixtureSha256": "01cf3a10608897e13ae18d8de8e28a924345eb33c54c62a79c5820f22ee3ba52",
+          "scheduling": "control",
+          "lanes": {
+            "include": {
+              "samplesMs": [
+                289.36500000953674, 284.25999999046326, 283.0049999952316, 302.4650000035763,
+                306.27500000596046, 279.7350000143051, 278.294999986887, 265.52000001072884,
+                308.67500001192093, 283.58500000834465
+              ],
+              "medianMs": 283.92249999940395
+            },
+            "flat": {
+              "samplesMs": [
+                179.94499999284744, 170.11500000953674, 160.64999997615814, 178.25499999523163,
+                174.07000002264977, 168.16499999165535, 168.8149999976158, 171.625,
+                173.64500001072884, 180.34000000357628
+              ],
+              "medianMs": 172.63500000536442
+            }
+          }
+        },
+        {
+          "revision": "047ba66d7aafe79fed346790c93c984f55c5cecb",
+          "wasmSha256": "d27f7f04ec05f51fd2821ba4803327fad4c9c6a2adbedd7c0cf2cfb5a11d4e83",
+          "adapterSha256": "3834956c214d5e8326e34bd8eaa81c8b7d748c81890789ef300aa5e61f0d5852",
+          "scriptSha256": "8884bfd4703553706433b18b61c0da4c6626f14f266efe984b217d70709a2778",
+          "fixtureSha256": "01cf3a10608897e13ae18d8de8e28a924345eb33c54c62a79c5820f22ee3ba52",
+          "scheduling": "timer-polling",
+          "lanes": {
+            "include": {
+              "samplesMs": [
+                580.5450000166893, 576.0700000226498, 582.794999986887, 572.6649999916553,
+                580.2800000011921, 574.0649999976158, 594.3149999976158, 584.3900000154972,
+                551.5900000035763, 584.7299999892712
+              ],
+              "medianMs": 580.4125000089407
+            },
+            "flat": {
+              "samplesMs": [
+                187.13999998569489, 167.09999999403954, 155.33500000834465, 174.70500001311302,
+                176.7650000154972, 169.20500001311302, 170.2199999988079, 165.6400000154972,
+                169.15999999642372, 162.13500002026558
+              ],
+              "medianMs": 169.18250000476837
+            }
+          }
+        }
+      ],
+      "interpretation": "Isolates only foreground adapter scheduling on candidate WASM. Does not rule out a candidate-vs-main flat-read regression.",
+      "comparisons": [
+        {
+          "lane": "include",
+          "timerPollingMedianMs": 584.5587500110269,
+          "wakeDrivenMedianMs": 287.01249999552965,
+          "speedup": 2.036701363251188
+        },
+        {
+          "lane": "flat",
+          "timerPollingMedianMs": 172.18250000476837,
+          "wakeDrivenMedianMs": 172.38125000149012,
+          "speedup": 0.9988470323963886
+        }
+      ]
+    },
+    "profiles": [
+      {
+        "arm": "baseline",
+        "storage": "memory",
+        "lane": "include",
+        "target": "page",
+        "sourceRevision": "5f42b14f4d458bf3083694c17b629dcfd112d95b",
+        "wasmSha256": "30d71bd3c2db53930cbd594ed13859bbb2a318d6103b474cde15df7eca76eb9b",
+        "file": "memory-1500-include-page-0.cpuprofile",
+        "sha256": "2367423127af10ad03291e6ae3c10ef744b050ebaac0bdba37c2de81c62946d3"
+      },
+      {
+        "arm": "baseline",
+        "storage": "memory",
+        "lane": "flat",
+        "target": "page",
+        "sourceRevision": "5f42b14f4d458bf3083694c17b629dcfd112d95b",
+        "wasmSha256": "30d71bd3c2db53930cbd594ed13859bbb2a318d6103b474cde15df7eca76eb9b",
+        "file": "memory-1500-flat-page-0.cpuprofile",
+        "sha256": "373b5be89bc79ae2912a8f050e91b5b9f78564e74a1c2730fd2288f34dba570b"
+      },
+      {
+        "arm": "baseline",
+        "storage": "persistent",
+        "lane": "include",
+        "target": "page",
+        "sourceRevision": "5f42b14f4d458bf3083694c17b629dcfd112d95b",
+        "wasmSha256": "30d71bd3c2db53930cbd594ed13859bbb2a318d6103b474cde15df7eca76eb9b",
+        "file": "persistent-1500-include-page-0.cpuprofile",
+        "sha256": "841946128c7df08a2b99da152183e966bf2deb735a453248c14be4f87a975c41"
+      },
+      {
+        "arm": "baseline",
+        "storage": "persistent",
+        "lane": "include",
+        "target": "shared_worker",
+        "sourceRevision": "5f42b14f4d458bf3083694c17b629dcfd112d95b",
+        "wasmSha256": "30d71bd3c2db53930cbd594ed13859bbb2a318d6103b474cde15df7eca76eb9b",
+        "file": "persistent-1500-include-shared_worker-1.cpuprofile",
+        "sha256": "1d26c20aecaf2e117b6d95d5303294d8e54d7cd570049d50fadbaae2941a6290"
+      },
+      {
+        "arm": "baseline",
+        "storage": "persistent",
+        "lane": "flat",
+        "target": "page",
+        "sourceRevision": "5f42b14f4d458bf3083694c17b629dcfd112d95b",
+        "wasmSha256": "30d71bd3c2db53930cbd594ed13859bbb2a318d6103b474cde15df7eca76eb9b",
+        "file": "persistent-1500-flat-page-0.cpuprofile",
+        "sha256": "3fd03cfc49b9efdc2469f3b878ba195690763275631b31c2d7321a159d7c61d9"
+      },
+      {
+        "arm": "baseline",
+        "storage": "persistent",
+        "lane": "flat",
+        "target": "shared_worker",
+        "sourceRevision": "5f42b14f4d458bf3083694c17b629dcfd112d95b",
+        "wasmSha256": "30d71bd3c2db53930cbd594ed13859bbb2a318d6103b474cde15df7eca76eb9b",
+        "file": "persistent-1500-flat-shared_worker-1.cpuprofile",
+        "sha256": "08d0f93e91c7bbdc792f8f2f62fed02be35bef63e3a05f996ce67520efaf2e11"
+      },
+      {
+        "arm": "candidate",
+        "storage": "memory",
+        "lane": "include",
+        "target": "page",
+        "sourceRevision": "047ba66d7aafe79fed346790c93c984f55c5cecb",
+        "wasmSha256": "d27f7f04ec05f51fd2821ba4803327fad4c9c6a2adbedd7c0cf2cfb5a11d4e83",
+        "file": "memory-1500-include-page-0.cpuprofile",
+        "sha256": "70b79ec8642032c44288c8c3a7037525a4f48b157b21ecf9616fbf08f1fbaff6"
+      },
+      {
+        "arm": "candidate",
+        "storage": "memory",
+        "lane": "flat",
+        "target": "page",
+        "sourceRevision": "047ba66d7aafe79fed346790c93c984f55c5cecb",
+        "wasmSha256": "d27f7f04ec05f51fd2821ba4803327fad4c9c6a2adbedd7c0cf2cfb5a11d4e83",
+        "file": "memory-1500-flat-page-0.cpuprofile",
+        "sha256": "8e7fb3e6e8f201eb82d7dcfa9222415a0bec057821184ad4591a5b6e8a6b427a"
+      },
+      {
+        "arm": "candidate",
+        "storage": "persistent",
+        "lane": "include",
+        "target": "page",
+        "sourceRevision": "047ba66d7aafe79fed346790c93c984f55c5cecb",
+        "wasmSha256": "d27f7f04ec05f51fd2821ba4803327fad4c9c6a2adbedd7c0cf2cfb5a11d4e83",
+        "file": "persistent-1500-include-page-0.cpuprofile",
+        "sha256": "5ee241e299d82a792ca89efa783066df9a7401955af660ef5b8ab52af5eef284"
+      },
+      {
+        "arm": "candidate",
+        "storage": "persistent",
+        "lane": "include",
+        "target": "shared_worker",
+        "sourceRevision": "047ba66d7aafe79fed346790c93c984f55c5cecb",
+        "wasmSha256": "d27f7f04ec05f51fd2821ba4803327fad4c9c6a2adbedd7c0cf2cfb5a11d4e83",
+        "file": "persistent-1500-include-shared_worker-1.cpuprofile",
+        "sha256": "af5aab0a10c3e4c6260ba01823886c91bd72065a30d28e68ef5e260dffb60470"
+      },
+      {
+        "arm": "candidate",
+        "storage": "persistent",
+        "lane": "flat",
+        "target": "page",
+        "sourceRevision": "047ba66d7aafe79fed346790c93c984f55c5cecb",
+        "wasmSha256": "d27f7f04ec05f51fd2821ba4803327fad4c9c6a2adbedd7c0cf2cfb5a11d4e83",
+        "file": "persistent-1500-flat-page-0.cpuprofile",
+        "sha256": "2cefa5b14072f7e706a5ccc2e08cea35ed4d2beb95335e5e338ef87fc265b2d6"
+      },
+      {
+        "arm": "candidate",
+        "storage": "persistent",
+        "lane": "flat",
+        "target": "shared_worker",
+        "sourceRevision": "047ba66d7aafe79fed346790c93c984f55c5cecb",
+        "wasmSha256": "d27f7f04ec05f51fd2821ba4803327fad4c9c6a2adbedd7c0cf2cfb5a11d4e83",
+        "file": "persistent-1500-flat-shared_worker-1.cpuprofile",
+        "sha256": "c2d2651e926668136b3273f7c2a82493ce364ea75e1596036107fb4f43461513"
+      }
+    ],
+    "artifactManifests": {
+      "baseline": {
+        "schema": 1,
+        "kind": "wasm",
+        "profile": "release",
+        "git": {
+          "head": "5f42b14f4d458bf3083694c17b629dcfd112d95b",
+          "tree": "4c6d636dd3da16f613044780bb71b7d4f877fa81",
+          "dirtyDiff": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+        },
+        "cargoLock": "3de3b72da5fe6d9ba05225e19240a7326b5ca3ad156b426dba61ebc08bd6fab2",
+        "rustToolchain": "94829243c47c76917df64fb0a88044d05004e390b67b02544cb702823445eec9",
+        "tools": {
+          "rustc": "rustc 1.93.1 (01f6ddf75 2026-02-11)\nbinary: rustc\ncommit-hash: 01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf\ncommit-date: 2026-02-11\nhost: aarch64-apple-darwin\nrelease: 1.93.1\nLLVM version: 21.1.8",
+          "wasmPack": "wasm-pack 0.14.0",
+          "wasmBindgen": "wasm-bindgen 0.2.117",
+          "wasmOpt": "wasm-opt version 117 (version_117)",
+          "napi": "not-applicable"
+        },
+        "toolchainInputs": "58f10b6cd0fd90936ca8b6d30515d50d71ec67fde5998d2f1b8dec71e10bffe4",
+        "target": "wasm32-unknown-unknown",
+        "features": "default",
+        "packageInputs": "926f277278a131eafe41a6e0d2a5fb08a2cdb9176ee02c17eaa1865ef38da9ea",
+        "artifacts": [
+          {
+            "file": "jazz_wasm.d.ts",
+            "sha256": "6f5d7199d064c22b97439270148d597552846c9f2f0098bad5994e26d726ffd6"
+          },
+          {
+            "file": "jazz_wasm.js",
+            "sha256": "f7190c658415a0e7f8781326c1736b444a6b939088b2ac0d3974ad1bc55f34fd"
+          },
+          {
+            "file": "jazz_wasm_bg.wasm",
+            "sha256": "30d71bd3c2db53930cbd594ed13859bbb2a318d6103b474cde15df7eca76eb9b"
+          },
+          {
+            "file": "jazz_wasm_bg.wasm.d.ts",
+            "sha256": "f7e833cf7a05c524c007608cf3840bcaf2050a37f0bc21ffd8834ee483681a38"
+          }
+        ],
+        "nativeArtifactFingerprint": "76ec69813297e82c6a606ac6546e1c791db87bdf84b8fdc299c5fbb2d9c1f6bb"
+      },
+      "candidate": {
+        "schema": 1,
+        "kind": "wasm",
+        "profile": "release",
+        "git": {
+          "head": "047ba66d7aafe79fed346790c93c984f55c5cecb",
+          "tree": "88452b77981cb6abdb92508e7e328fbdf30f33c9",
+          "dirtyDiff": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+        },
+        "cargoLock": "3de3b72da5fe6d9ba05225e19240a7326b5ca3ad156b426dba61ebc08bd6fab2",
+        "rustToolchain": "94829243c47c76917df64fb0a88044d05004e390b67b02544cb702823445eec9",
+        "tools": {
+          "rustc": "rustc 1.93.1 (01f6ddf75 2026-02-11)\nbinary: rustc\ncommit-hash: 01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf\ncommit-date: 2026-02-11\nhost: aarch64-apple-darwin\nrelease: 1.93.1\nLLVM version: 21.1.8",
+          "wasmPack": "wasm-pack 0.14.0",
+          "wasmBindgen": "wasm-bindgen 0.2.117",
+          "wasmOpt": "wasm-opt version 117 (version_117)",
+          "napi": "not-applicable"
+        },
+        "toolchainInputs": "58f10b6cd0fd90936ca8b6d30515d50d71ec67fde5998d2f1b8dec71e10bffe4",
+        "target": "wasm32-unknown-unknown",
+        "features": "default",
+        "packageInputs": "8a227666d96aa1265661cdcad3e128dafb7c8bf9e2450fdd6e02749c3988dd77",
+        "artifacts": [
+          {
+            "file": "jazz_wasm.d.ts",
+            "sha256": "eee1dfb76ac9ea0543dfb368eeb0323ca8dc8a6d6e8a8f521d6e663cd9122063"
+          },
+          {
+            "file": "jazz_wasm.js",
+            "sha256": "28b4cc764cb80a7985c1f1468dfae3bed44c61c300089c5613548d516b375782"
+          },
+          {
+            "file": "jazz_wasm_bg.wasm",
+            "sha256": "d27f7f04ec05f51fd2821ba4803327fad4c9c6a2adbedd7c0cf2cfb5a11d4e83"
+          },
+          {
+            "file": "jazz_wasm_bg.wasm.d.ts",
+            "sha256": "ccf49d5575f77f03e24ffbf2bcf5372a2a15c7a8bafe72c7bf4d580a6007e427"
+          }
+        ],
+        "nativeArtifactFingerprint": "7343e79778be49e852018d5d1dfca5ce01509ed17870fed0bddba05cadc0ce2e"
+      }
+    }
+  },
+  "excludedRepeat": {
+    "runPrefix": "wake-source-interleaved",
+    "reason": "A stale fixed-port debugging listener survived a failed browser launch. The runner connected to it before the newly launched browser bound its port. Later CPU captures contained 18 and 20 shared-worker targets from earlier runs. This repeat is excluded, including its latency figures.",
+    "supersededBy": "verifiedIsolatedComparison"
   }
 }

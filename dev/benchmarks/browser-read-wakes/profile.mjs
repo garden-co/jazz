@@ -18,7 +18,7 @@ const { values } = parseArgs({
     cpu: { type: "boolean", default: false },
     trace: { type: "boolean", default: false },
     "vite-port": { type: "string", default: "4279" },
-    "cdp-port": { type: "string", default: "9439" },
+    "cdp-port": { type: "string", default: "0" },
     help: { type: "boolean", default: false },
   },
 });
@@ -33,7 +33,7 @@ if (values.help) {
   --cpu                Sample foreground and shared-worker CPU
   --trace              Capture Chrome timer/task events
   --vite-port N        Local Vite port (default 4279)
-  --cdp-port N         Owned Chromium CDP port (default 9439)
+  --cdp-port N         Owned Chromium CDP port (default 0: choose unused port)
 
 Use release WASM built in this checkout with verified fingerprints.
 The scheduling overrides are serial diagnostic experiments, not runtime fixes.
@@ -57,8 +57,98 @@ const outDir = path.resolve(
 if (!["memory", "persistent"].includes(storage)) throw new Error("Invalid storage");
 if (!["control", "timer-polling", "message-channel", "host-yield"].includes(scheduling))
   throw new Error("Invalid scheduling experiment");
-for (const [name, value] of Object.entries({ count, repetitions, vitePort, cdpPort }))
+for (const [name, value] of Object.entries({ count, repetitions, vitePort }))
   if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`Invalid ${name}`);
+
+if (!Number.isSafeInteger(cdpPort) || cdpPort < 0 || cdpPort > 65535)
+  throw new Error("Invalid CDP port");
+
+// Read the endpoint from the child we spawned. Polling a fixed port can attach
+// to an earlier browser before this launch binds, contaminating every receipt.
+async function ownedDebuggingEndpoint(child) {
+  return new Promise((resolve, reject) => {
+    let output = "";
+    let settled = false;
+    const finish = (error, endpoint) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (error) reject(error);
+      else resolve(endpoint);
+    };
+    const timeout = setTimeout(
+      () => finish(new Error(`Owned Chromium startup timed out: ${output.slice(-1500)}`)),
+      60_000,
+    );
+    child.stderr.on("data", (chunk) => {
+      output += chunk.toString();
+      const match = output.match(
+        /DevTools listening on (ws:\/\/127\.0\.0\.1:\d+\/devtools\/browser\/[^\s]+)/,
+      );
+      if (match) finish(null, match[1]);
+    });
+    child.once("error", (error) => finish(error));
+    child.once("exit", (code, signal) => {
+      if (!settled)
+        finish(
+          new Error(`Owned Chromium exited before CDP (${code}/${signal}): ${output.slice(-1500)}`),
+        );
+    });
+  });
+}
+
+function processAlive(pid) {
+  if (!pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error.code === "ESRCH") return false;
+    throw error;
+  }
+}
+
+async function closeOwnedBrowser(cdp, child, browserPid) {
+  if (cdp?.ws?.readyState === WebSocket.OPEN) {
+    let timeout;
+    try {
+      await Promise.race([
+        cdp.send("Browser.close").catch(() => {}),
+        new Promise((resolve) => {
+          timeout = setTimeout(resolve, 3000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+  cdp?.ws?.close();
+  // SystemInfo gives the actual browser PID, including launchers that fork.
+  if (!browserPid && child?.pid && process.platform !== "win32") {
+    try {
+      process.kill(-child.pid, "SIGTERM");
+    } catch (error) {
+      if (error.code !== "ESRCH") throw error;
+    }
+  }
+  const pids = [...new Set([child?.pid, browserPid].filter(Boolean))];
+  for (const signal of [undefined, "SIGTERM", "SIGKILL"]) {
+    if (signal) {
+      for (const pid of pids) {
+        try {
+          process.kill(pid, signal);
+        } catch (error) {
+          if (error.code !== "ESRCH") throw error;
+        }
+      }
+    }
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      if (!pids.some(processAlive)) return;
+      await sleep(100);
+    }
+  }
+  throw new Error("Owned browser did not exit; this receipt is invalid");
+}
 
 async function resolveChromiumExecutable() {
   if (process.env.JAZZ_CHROMIUM_EXECUTABLE) {
@@ -67,6 +157,24 @@ async function resolveChromiumExecutable() {
   }
   const cacheDir = path.join(homedir(), "Library", "Caches", "ms-playwright");
   const entries = await readdir(cacheDir, { withFileTypes: true });
+  const headlessDirs = entries
+    .filter((entry) => entry.isDirectory() && /^chromium_headless_shell-\d+$/.test(entry.name))
+    .map((entry) => entry.name)
+    .sort(
+      (a, b) => Number.parseInt(b.split("-").at(-1), 10) - Number.parseInt(a.split("-").at(-1), 10),
+    );
+  for (const dir of headlessDirs) {
+    const candidate = path.join(
+      cacheDir,
+      dir,
+      "chrome-headless-shell-mac-arm64",
+      "chrome-headless-shell",
+    );
+    try {
+      await access(candidate);
+      return candidate;
+    } catch {}
+  }
   const chromiumDirs = entries
     .filter((entry) => entry.isDirectory() && /^chromium-\d+$/.test(entry.name))
     .map((entry) => entry.name)
@@ -231,20 +339,27 @@ function printSummary(title, entries) {
   }
 }
 
-async function waitForJson(url, timeoutMs = 10_000) {
-  const deadline = Date.now() + timeoutMs;
-  let lastError = null;
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(url);
-      if (res.ok) return await res.json();
-      lastError = new Error(`HTTP ${res.status}`);
-    } catch (error) {
-      lastError = error;
-    }
-    await sleep(100);
-  }
-  throw lastError ?? new Error(`Timed out waiting for ${url}`);
+async function ownedViteReady(child, port) {
+  return new Promise((resolve, reject) => {
+    let output = "";
+    let settled = false;
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (error) reject(error);
+      else resolve();
+    };
+    const timeout = setTimeout(() => finish(new Error("Owned Vite startup timed out")), 30_000);
+    child.stdout.on("data", (chunk) => {
+      output += chunk.toString().replace(/\u001b\[[0-9;]*m/g, "");
+      if (output.includes(`http://127.0.0.1:${port}/`)) finish();
+    });
+    child.once("error", (error) => finish(error));
+    child.once("exit", (code, signal) =>
+      finish(new Error(`Owned Vite exited (${code}/${signal})`)),
+    );
+  });
 }
 
 async function waitForHttp(url, timeoutMs = 10_000) {
@@ -302,9 +417,10 @@ const vite = spawn(
 const logs = [];
 vite.stdout.on("data", (x) => logs.push(x.toString()));
 vite.stderr.on("data", (x) => logs.push(x.toString()));
-let chrome, userDataDir, cdp;
+let chrome, userDataDir, cdp, browserPid, browserIsolation;
 try {
   const pageUrl = `http://127.0.0.1:${vitePort}/tests/browser/remote-db-harness.html`;
+  await ownedViteReady(vite, vitePort);
   await waitForHttp(pageUrl, 30000);
   userDataDir = await mkdtemp(path.join(tmpdir(), "jazz-include-profile-"));
   chrome = spawn(
@@ -321,10 +437,26 @@ try {
       "--no-default-browser-check",
       "about:blank",
     ],
-    { stdio: "ignore" },
+    { stdio: ["ignore", "ignore", "pipe"], detached: process.platform !== "win32" },
   );
-  const { webSocketDebuggerUrl } = await waitForJson(`http://127.0.0.1:${cdpPort}/json/version`);
+  const webSocketDebuggerUrl = await ownedDebuggingEndpoint(chrome);
   cdp = await new CDPClient(webSocketDebuggerUrl).connect();
+  const processes = await cdp.send("SystemInfo.getProcessInfo");
+  browserPid = processes.processInfo.find((entry) => entry.type === "browser")?.id;
+  if (!Number.isSafeInteger(browserPid)) throw new Error("Missing owned browser process identity");
+  const initialTargets = (await cdp.send("Target.getTargets")).targetInfos;
+  const initialWorkers = initialTargets.filter((target) =>
+    ["worker", "shared_worker", "service_worker"].includes(target.type),
+  );
+  if (initialWorkers.length !== 0) throw new Error("Fresh browser already contains workers");
+  browserIsolation = {
+    endpointFromLaunchedProcess: true,
+    serverFromLaunchedProcess: true,
+    browserId: new URL(webSocketDebuggerUrl).pathname.split("/").at(-1),
+    browserPid,
+    initialWorkerCount: initialWorkers.length,
+    shutdownVerified: false,
+  };
   const sessions = new Map();
   cdp.on((msg) => {
     if (msg.method === "Target.attachedToTarget")
@@ -433,6 +565,7 @@ try {
       {
         revision,
         browser: await cdp.send("Browser.getVersion"),
+        browserIsolation,
         host: { platform: process.platform, architecture: process.arch, node: process.version },
         wasmSha256,
         manifest,
@@ -473,9 +606,23 @@ try {
   );
   throw error;
 } finally {
-  cdp?.ws?.close();
-  chrome?.kill("SIGTERM");
-  vite.kill("SIGTERM");
+  try {
+    await closeOwnedBrowser(cdp, chrome, browserPid);
+    if (browserIsolation) {
+      browserIsolation.shutdownVerified = true;
+      const file = path.join(outDir, "receipt.json");
+      try {
+        const receipt = JSON.parse(await readFile(file, "utf8"));
+        receipt.browserIsolation = browserIsolation;
+        await writeFile(file, JSON.stringify(receipt, null, 2));
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+    }
+  } finally {
+    vite.kill("SIGTERM");
+    await closeOwnedBrowser(undefined, vite, vite.pid);
+  }
   await writeFile(path.join(outDir, "vite.log"), logs.join(""));
   if (userDataDir) {
     await sleep(500);

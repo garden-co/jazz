@@ -22,83 +22,101 @@ and settlement conditions; a notification alone does not establish coverage.
 Both browser databases, IVM, history, deletion and permission behavior remain.
 Older bindings without `setWake` use the existing compatibility polling path.
 
-## Matched release-WASM comparison
+## Verified isolated release-WASM comparison
 
 Main: `5f42b14f4d458bf3083694c17b629dcfd112d95b`.
 Candidate: `047ba66d7aafe79fed346790c93c984f55c5cecb`.
-Each release artifact was built in the profiled checkout. Exact source, adapter,
-harness, fixture and WASM hashes, manifests, raw timing samples and CPU-profile
-hashes are in [receipt.json](./receipt.json).
+Exact source/binary hashes, manifests, raw samples, per-process identities,
+setup phases and profile hashes are in [receipt.json](./receipt.json), under
+`verifiedIsolatedComparison`. Both WASM hashes match the earlier built artifacts.
 
 Synthetic public-API workload: 1,500 tasks sharing 15 folders; 128 repeated body
 bytes per task and 2,048 repeated description bytes per folder, plus short labels.
 One locally durable transaction, no remote Core server. Persistent mode retains
-the foreground database and durable SharedWorker/IndexedDB database. Every lane
-checks row identity/count and full returned fields, including folder content.
-This is a repeated read workload, not login latency or a cold-start benchmark.
+both the foreground database and durable SharedWorker/IndexedDB database. Checks
+cover row identity/count and complete returned fields, including folder content.
+This is a repeated read workload, not login latency or cold-start timing.
 
-Three warmups and ten measured reads per lane; two fresh browser processes per
-source/storage arm, CPU profiling disabled. The summary is the median of the
-two process medians. Main was measured before the candidate build; these source
-arms were not interleaved.
+Each arm uses its exact source and its own release artifact. Artifacts were
+preserved only inside their producing checkout; their original manifests were
+verified at the exact producing revision on every switch. No build ran during
+measurements. Three warmups and ten measured reads per lane, profiling disabled:
 
-| Lane               |      Main | Candidate |        Ratio |
-| ------------------ | --------: | --------: | -----------: |
-| Memory include     | 372.68 ms |  90.40 ms | 4.12× faster |
-| Persistent include | 605.80 ms | 288.98 ms | 2.10× faster |
-| Memory flat        |  33.68 ms |  33.80 ms |    unchanged |
-| Persistent flat    | 152.62 ms | 168.57 ms | 10.4% slower |
+- Memory: main / candidate / candidate / main, four fresh processes total.
+- Persistent: main / candidate / candidate / main / candidate / main / main /
+  candidate, eight fresh processes total.
+- Every run records a unique browser identity from the launched process's own
+  endpoint, zero initial workers, owned Vite startup and verified browser shutdown.
+- Separate CPU runs have one page profile in memory and one page plus one
+  SharedWorker profile in persistent mode; no workers from earlier runs appear.
 
-The flat-read result is a negative control, not a general speedup claim.
+Median of process medians:
 
-### Scheduler control on the same candidate WASM
+| Lane               |      Main | Candidate |                Result |
+| ------------------ | --------: | --------: | --------------------: |
+| Memory include     | 398.17 ms |  90.95 ms |      **4.38× faster** |
+| Persistent include | 599.93 ms | 274.80 ms |      **2.18× faster** |
+| Memory flat        |  33.57 ms |  35.11 ms | 4.6% slower, +1.54 ms |
+| Persistent flat    | 169.70 ms | 165.25 ms | 2.6% faster, −4.45 ms |
 
-Four fresh persistent browser processes, old timer loop / production wake loop /
-production wake loop / old timer loop. Each uses the same candidate WASM, schema,
-rows and ten-read measurement protocol. Only the diagnostic foreground adapter
-loop changes; it never calls `setWake` in the timer arm.
+The include improvement is repeatable and large. Flat reads do not show the
+same class of improvement; the small differences and raw samples are retained.
+The initial 10.4% persistent flat slowdown did **not** reproduce in this matched,
+interleaved repeat. This is not evidence of a universal flat-read speedup.
 
-| Lane               | Timer polling | Wake driven |             Ratio |
-| ------------------ | ------------: | ----------: | ----------------: |
-| Persistent include |     584.56 ms |   287.01 ms |      2.04× faster |
-| Persistent flat    |     172.18 ms |   172.38 ms | unchanged (0.12%) |
+## Separate CPU attribution and tradeoffs
 
-This isolates the large include win to scheduling and does not reproduce the
-flat slowdown from changing the scheduler alone. It does **not** distinguish
-environment/time variation from other candidate-versus-main binary effects.
-The initial 10.4% flat result remains unresolved in #3612.
-
-## Separate CPU attribution
-
-One ten-read CPU capture per source/storage arm, 250 μs sampling. Numbers below
+One ten-read CPU capture per source/storage arm, 250 μs sampling. Values below
 are sampled active milliseconds per read, excluding `(idle)` leaf samples.
-Profiler start/stop edges are included, so these are approximate attribution
-windows, separate from the unprofiled latency comparison.
+Profiler start/stop edges remain in the windows, so these are approximate
+attribution measurements, separate from the unprofiled latency comparison.
 
 | Lane / thread               | Main active | Candidate active |
 | --------------------------- | ----------: | ---------------: |
-| Memory include / page       |   100.25 ms |         98.56 ms |
-| Persistent include / page   |   129.37 ms |        125.39 ms |
-| Persistent include / worker |   181.18 ms |        167.72 ms |
-| Persistent flat / page      |    69.05 ms |         69.35 ms |
-| Persistent flat / worker    |   116.53 ms |        144.24 ms |
+| Memory include / page       |    97.60 ms |        103.99 ms |
+| Persistent include / page   |   126.47 ms |        130.39 ms |
+| Persistent include / worker |   198.35 ms |        202.81 ms |
+| Memory flat / page          |    37.36 ms |         45.04 ms |
+| Persistent flat / page      |    68.30 ms |         68.78 ms |
+| Persistent flat / worker    |   131.19 ms |        132.56 ms |
 
-For memory includes, page idle samples fall from 267.65 to 0.41 ms/read.
-Persistent include page idle falls from 464.87 to 164.20 ms/read. Page and worker
-work overlap: their samples must not be added as elapsed latency. The include
-improvement is primarily less waiting; the remaining worker query/IVM cost is
-still present. There is no measured include CPU increase in this capture.
-The flat worker increase is also retained as a negative result.
+The latest include captures show **2–7% more sampled active CPU**, while wall
+latency improves by 2.18–4.38×. This removes waiting; it does not reduce the
+query engine's CPU work. Page and worker overlap and must not be summed as
+elapsed latency. The memory flat profile is another negative control: its CPU
+sample increases about 21%, while its unprofiled latency increases 1.54 ms.
+There is only one CPU process per source/storage arm; these samples do not
+establish a precise CPU regression magnitude across workloads.
 
-The earlier unconditional MessageChannel polling experiment in #3613 doubled
-foreground CPU while waiting externally. This implementation waits for actual
-notifications and avoids that measured failure mode.
+Costs introduced by the implementation include a retained native waker, coverage
+waiter bookkeeping, a cancellable deadline timer for suspended reads, and a lazy
+MessageChannel for notified continuations. Sleeping reads do not repeatedly
+poll. The earlier unconditional MessageChannel experiment's roughly doubled
+foreground CPU is not observed in these captures. No functionality was removed.
+
+## Earlier measurements and a discarded repeat
+
+The first prototype comparison gave 4.12× memory includes and 2.10× persistent
+includes, with a 10.4% persistent flat slowdown. Its earlier CPU captures showed
+no include CPU increase. Those raw observations remain in
+`earlierPrototypeComparison`; the verified isolated comparison above is the
+current result, including its less favorable CPU measurements.
+
+A follow-up fixed-port repeat was **discarded**. A browser left by a failed
+launch still listened on port 9439; HTTP readiness accepted it before the new
+browser bound its port. The later CPU captures included 18 and 20 SharedWorker
+targets, exposing the contamination. Its faster flat numbers are not used.
+The runner now obtains the debugging endpoint from its own child's stderr,
+uses a dynamically assigned debugging port, verifies an initially empty worker
+set, closes the browser through CDP and verifies process exit. It also waits
+for its own Vite process to announce readiness and verifies its shutdown.
 
 ## Reproduce
 
-Use a release workspace built in the checkout being measured. Keep runtime
-fingerprint checks enabled and do not copy generated bindings between checkouts.
-No builds should run alongside timing measurements.
+This delay is specific to the browser scheduler; a native timing harness cannot
+measure Chrome's timer clamping. Use a release workspace built in the checkout
+being measured, retain runtime fingerprint checks, and avoid concurrent builds.
+Do not copy generated bindings or manifests between checkouts.
 
 ```sh
 pnpm build:core
@@ -106,30 +124,29 @@ node dev/benchmarks/browser-read-wakes/profile.mjs \
   --storage persistent --rows 1500 --iterations 10 \
   --out-dir target/browser-read-wakes/production-1
 node dev/benchmarks/browser-read-wakes/profile.mjs \
-  --storage persistent --rows 1500 --iterations 10 --scheduling timer-polling \
-  --out-dir target/browser-read-wakes/timer-1
-node dev/benchmarks/browser-read-wakes/profile.mjs \
   --storage persistent --rows 1500 --iterations 10 --cpu \
   --out-dir target/browser-read-wakes/production-cpu
+node dev/benchmarks/browser-read-wakes/profile.mjs \
+  --storage persistent --rows 1500 --iterations 10 --scheduling timer-polling \
+  --out-dir target/browser-read-wakes/timer-control
 ```
 
 Use `--storage memory` for the single-runtime control. `--root PATH` selects
-another checkout and its own locally built artifacts, so the same runner can
-profile main without adding benchmark source to that checkout. Use unique
-output directories and interleave source arms where possible. `--trace` records
-Chrome timer/task traces; keep it and `--cpu` off for latency comparisons.
+another checkout and its own artifacts. Use unique output directories and
+interleave source arms as above. `--trace` captures Chrome timer/task traces;
+keep it and `--cpu` off for latency comparisons. Setup phases, warmups and
+all measured samples are recorded separately.
 
-The runner defaults to Chromium from the macOS Playwright cache;
-`JAZZ_CHROMIUM_EXECUTABLE` selects a Chromium binary elsewhere. It owns a fresh
-browser/profile and local Vite server, with configurable Vite/CDP ports. Receipts
-include setup phases, every warmup/measured sample and optional raw CPU profiles.
-The preserved runner adds CLI/setup reporting and a per-read count check to the
-prototype used for the recorded comparison. Prototype hashes remain in the
-receipt; they are not presented as hashes of this later wrapper.
+The default executable discovery prefers Playwright's macOS headless shell;
+`JAZZ_CHROMIUM_EXECUTABLE` selects an explicit binary on other platforms.
+The debugging port defaults to zero (allocate a free port); the Vite port is
+configurable. A failed launch or conflicting Vite listener fails the run instead
+of attaching to an existing server. `browserIsolation.shutdownVerified` must be
+true, and every process must have a distinct browser id before combining runs.
 
-Diagnostic overrides are confined to the owned serial fixture. They are not
-application code and are not a replacement for concurrency/cancellation tests.
-`message-channel` and `host-yield` preserve the earlier rejected controls; the
+Diagnostic scheduling overrides are limited to this serial fixture. They are
+not application code or replacements for concurrency/cancellation tests.
+`message-channel` and `host-yield` preserve earlier rejected experiments; the
 latter can time out on persistent coverage.
 
 ## Verification and limits
@@ -154,8 +171,7 @@ latter can time out on persistent coverage.
   a passing default-stack gate.
 - Full canonical/CI-equivalent gates have not passed. The private sensitive-data
   guard was unavailable, not passed. This remains a draft; #3612 records the
-  remaining validation and flat-read comparison work.
+  remaining validation and fixture compatibility work.
 
-Tooling-friction: retaining independently built main/candidate WASM artifacts
-within their producing checkouts and fixing one compiler/SDK environment would
-avoid the long rebuilds that dominated this investigation.
+Tooling-friction: verified baseline snapshots within the producing checkout and
+owned browser endpoints would have avoided the long rebuild and discarded repeat.
