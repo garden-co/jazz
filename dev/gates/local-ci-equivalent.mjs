@@ -49,13 +49,17 @@ export const ciPartitionJobs = Object.freeze({
 const command = (label, executable, args, options = {}) =>
   Object.freeze({ label, executable, args: Object.freeze(args), ...options });
 
+// Build with dev/t's exact selection (`--no-default-features`). Jazz's empty
+// `default` feature still sets `--cfg feature="default"`, so omitting the flag
+// compiles a second, otherwise identical lib-test unit after storage-compat's
+// dev/t corpus build in the same job.
 const m3DifferentialCommand = command(
   "bounded maintained-vs-one-shot differential oracle",
   "bash",
   [
     "-lc",
     String.raw`set -euo pipefail
-test_binary="$(cargo test -p jazz --lib --features testing,transport-compression-zstd --no-run --message-format=json | node -e '
+test_binary="$(cargo test -p jazz --lib --no-default-features --features testing,transport-compression-zstd --no-run --message-format=json | node -e '
   const readline = require("node:readline");
   let executable;
   const lines = readline.createInterface({ input: process.stdin });

@@ -633,7 +633,7 @@ test("Rust CI keeps the bounded real differential oracle in its shared command p
   );
   assert.match(
     localCi,
-    /cargo test -p jazz --lib --features testing,transport-compression-zstd --no-run --message-format=json/,
+    /cargo test -p jazz --lib --no-default-features --features testing,transport-compression-zstd --no-run --message-format=json/,
   );
   assert.match(localCi, /message\.target\.name === "jazz"/);
   assert.match(
