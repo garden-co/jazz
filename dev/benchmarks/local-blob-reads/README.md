@@ -71,7 +71,8 @@ compiler's demand analysis.
 An earlier broader omission broke older enum projection. The final guard retains
 the original path for older schemas, with a new live catalogue-evolution test.
 An additional canonical policy-key carry trial gave no useful incremental native
-endpoint gain and is excluded.
+endpoint gain in this SYSTEM-only fixture and was excluded. A later account-bound
+fixture motivated the separate [immutable claims experiment](CLAIMS.md).
 
 ## Correctness and remaining qualification
 
@@ -85,8 +86,9 @@ endpoint gain and is excluded.
 
 The raw default-stack library invocation hits the separately tracked stack issue
 #3331. The above is an iteration receipt, not full canonical or CI-equivalent
-qualification. Browser/application measurements are pending; these numbers do
-not establish an application image or PDF loading improvement.
+qualification. A matched browser/application comparison found no repeatable improvement for
+small image/PDF reads. The native large-blob numbers do not establish an
+application image or PDF loading improvement.
 
 Tooling friction: preserving native executables and phase-level receipts made
 the compiler-reuse regression visible before paying for another WASM build.
