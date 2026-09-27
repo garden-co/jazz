@@ -113,6 +113,20 @@ declare module "jazz-wasm" {
       claimedAuthor: string,
       storageOwner: string,
     ): Promise<WasmDb>;
+    /** Ordinary worker-owned client; the host first admits its physical root. */
+    static openBrowserClient(
+      pageStore: unknown,
+      schema: Uint8Array,
+      config: Uint8Array,
+    ): Promise<WasmDb>;
+    static openBrowserClientWithSelfSignedProof(
+      pageStore: unknown,
+      schema: Uint8Array,
+      config: Uint8Array,
+      token: string,
+      appId: string,
+      claimedAuthor: string,
+    ): Promise<WasmDb>;
     setLargeValueStagingPolicy(
       incomingBytesPerWindow: number,
       windowMs: number,
