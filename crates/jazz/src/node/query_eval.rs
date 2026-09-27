@@ -4189,26 +4189,14 @@ where
             prepared_claim_binding_mode,
             lone_client_local_source.is_some(),
         )?;
-        // A current-schema plain blob peer publishes membership and immutable
+        // A current-schema plain peer publishes membership and immutable
         // version facts. Its receiver builds the application terminal; another
-        // app collector here needlessly reconstructs selected blobs. Preserve
+        // app collector here needlessly reconstructs selected payloads. Preserve
         // ordinary semantic lowering and remove only the unused execution sink.
         // Older readers retain their compatibility projection, including the
         // exclusion of newly added enum cases.
         let omit_peer_app_rows = matches!(consumer, MaintainedViewConsumer::Peer)
             && shape.schema_version() == self.catalogue.active_schema.wire_pointer().schema
-            && self
-                .table_in_schema(&shape.query().table, shape.schema_version())?
-                .columns
-                .iter()
-                .any(|column| {
-                    column.large_value_kind == crate::schema::LargeValueSemanticKind::Bytes
-                        && shape
-                            .query()
-                            .select
-                            .as_ref()
-                            .is_none_or(|selected| selected.contains(&column.name))
-                })
             && read_view.is_default()
             && shape.query().aggregate.is_none()
             && shape.query().relation.is_none()
