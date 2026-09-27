@@ -115,15 +115,15 @@ impl NativeConnectFailure {
 
 fn native_connect_error(error: NativeConnectFailure) -> NativeTransportError {
     match error {
-        NativeConnectFailure::Resolution(error) => native_transport_error(
-            WebSocketClientError::Connect(tokio_tungstenite::tungstenite::Error::Io(error)),
-        ),
+        NativeConnectFailure::Resolution(error) => {
+            NativeTransportError::Retryable(format!("failed to resolve websocket host: {error}"))
+        }
         NativeConnectFailure::WebSocket(error) => native_transport_error(error),
     }
 }
 
-/// Match typed transport/wire causes, never diagnostic strings. Only the same
-/// NotReady/Later admission response accepted by the browser is retryable.
+/// Match typed transport/wire causes, never diagnostic strings. Retry only
+/// failures that may resolve without changing the request or credentials.
 fn native_transport_error(error: WebSocketClientError) -> NativeTransportError {
     let retryable = match &error {
         // A proxy may accept TCP while its upstream is restarting and close
@@ -159,6 +159,10 @@ fn native_transport_error(error: WebSocketClientError) -> NativeTransportError {
                     | std::io::ErrorKind::NetworkUnreachable
                     | std::io::ErrorKind::HostUnreachable
                     | std::io::ErrorKind::AddrNotAvailable
+                    // rustls reports a peer that closes TLS without
+                    // close_notify as UnexpectedEof. A cleanly reconnectable
+                    // idle peer must not turn a foreground tick terminal.
+                    | std::io::ErrorKind::UnexpectedEof
             )
         }
         WebSocketClientError::HandshakeTimeout => true,
