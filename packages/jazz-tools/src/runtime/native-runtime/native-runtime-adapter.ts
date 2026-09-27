@@ -201,6 +201,17 @@ type PendingNativePermissionAdvice = {
   cancel(): void;
 };
 
+const QUERY_COVERAGE_TIMEOUT = "Timed out waiting for query coverage";
+
+/** Native bindings report core errors as `<code>: <message>` (`NotObserved: ...`). */
+function isQueryCoverageTimeout(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (error.message === QUERY_COVERAGE_TIMEOUT ||
+      error.message === `NotObserved: ${QUERY_COVERAGE_TIMEOUT}`)
+  );
+}
+
 function isPendingNativeRead(value: unknown): value is PendingNativeRead {
   return typeof (value as PendingNativeRead | null)?.poll === "function";
 }
@@ -3060,9 +3071,9 @@ export class NativeRuntimeAdapter implements Runtime {
 
     void refresh().catch((error: unknown) => {
       if (this.closed || this.ownerRuntime.closed) return;
-      if (error instanceof Error && error.message === "Timed out waiting for query coverage") {
-        return;
-      }
+      // The foreground read has already answered. A background refresh that
+      // outlives its coverage deadline is not a transport failure.
+      if (isQueryCoverageTimeout(error)) return;
       this.handleServerTransportError(error);
     });
   }
