@@ -611,7 +611,7 @@ stable, and a descriptor does not depend on runtime data.
 
 The existing public `JoinSpec { table, alias, on }` advertises aliases and an
 arbitrary equality from the accumulated left result to the newly joined table
-(`crates/jazz/src/tools/public_api/query.rs:196-213`). The core `JoinVia` AST is
+(`crates/jazz/src/model/public_api/query.rs:196-213`). The core `JoinVia` AST is
 not that form: it has no alias or accumulated-left scope, and only represents a
 root- or immediately-nested reference/junction traversal with a target column,
 optional source column/lookup, correlations, filters, and nested joins
