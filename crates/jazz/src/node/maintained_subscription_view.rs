@@ -1,3 +1,5 @@
+#[cfg(test)]
+use super::codec::version_tx_id_from_aliases;
 use std::collections::{BTreeMap, BTreeSet};
 use std::mem;
 use std::rc::Rc;
@@ -15,8 +17,8 @@ use super::codec::{
     VersionLayer, VersionRow, VersionRowParts, authored_column_ids_from_value,
     deletion_event_from_value, history_values_from_parts, nullable_value,
     register_values_from_parts, runtime_result_identity_bytes, tx_ids_from_value,
-    version_tx_id_from_aliases,
 };
+use super::maintained_version::{MaintainedVersion, NativeVersionRef};
 use super::query_engine::{
     AggregateResultSchema, AppRowCarrier, AppRowSchema, OutputTerminalSchema, ProgramFactKey,
     ProgramFactSchema, ProgramFactTerminal, QueryProgram, RelationEdgeSchema,
@@ -150,7 +152,7 @@ pub(crate) struct MaintainedSubscriptionView {
     pub(super) targeted_refresh_uncertain: bool,
     /// Native deletion bodies retained for the frontier's selected-deletion
     /// contributions; this map is payload ownership, not another published set.
-    selected_deletion_witnesses: BTreeMap<SupportingRow, VersionRow>,
+    selected_deletion_witnesses: BTreeMap<SupportingRow, MaintainedVersion>,
     versions: WeightedVersionIndex,
     replacements: ReplacementIndex,
 }
@@ -359,7 +361,7 @@ struct WeightedVersion {
 /// transient OwnedRecords. A paired terminal prepares this once for both indexes.
 #[derive(Clone, Debug)]
 struct VersionPayload {
-    row: VersionRow,
+    row: MaintainedVersion,
     tx_id: TxId,
     sort_key: VersionSortKey,
 }
@@ -374,13 +376,15 @@ impl std::ops::Deref for WeightedVersion {
 
 impl VersionPayload {
     fn prepare(
-        row: VersionRow,
+        row: MaintainedVersion,
         identity: &VersionIdentity,
         node_aliases: &NodeAliases,
     ) -> Result<Arc<Self>, super::Error> {
-        let tx_id = version_tx_id_from_aliases(&row, node_aliases).ok_or(
-            super::Error::InvalidStoredValue("history tx node alias must exist"),
-        )?;
+        let tx_id = row
+            .tx_id(node_aliases)
+            .ok_or(super::Error::InvalidStoredValue(
+                "history tx node alias must exist",
+            ))?;
         let sort_key = VersionSortKey::for_row(&row, identity);
         Ok(Arc::new(Self {
             row,
@@ -403,7 +407,30 @@ struct ReplacementIndex {
 struct VersionIdentity {
     table: groove::Intern<String>,
     layer: VersionLayer,
-    raw_record: Arc<[u8]>,
+    raw_record: WitnessIdentity,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum WitnessIdentity {
+    // The empty materialized identity is the prefix lower bound for either kind.
+    Materialized(Arc<[u8]>),
+    Native(Arc<NativeVersionRef>),
+}
+
+impl WitnessIdentity {
+    #[cfg(test)]
+    fn materialized_bytes(&self) -> &Arc<[u8]> {
+        match self {
+            Self::Materialized(bytes) => bytes,
+            Self::Native(_) => panic!("expected materialized witness in sharing fixture"),
+        }
+    }
+    fn retained_bytes(&self) -> usize {
+        match self {
+            Self::Native(v) => v.retained_bytes(),
+            Self::Materialized(bytes) => bytes.len(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -411,7 +438,7 @@ struct VersionSortKey {
     table: groove::Intern<String>,
     row_uuid: RowUuid,
     layer: VersionLayer,
-    raw_record: Arc<[u8]>,
+    raw_record: WitnessIdentity,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -467,24 +494,24 @@ pub(crate) enum DecodedMaintainedEvent {
     },
     VersionContent {
         source: ProgramSourceId,
-        row: VersionRow,
+        row: MaintainedVersion,
     },
     VersionDeletion {
         source: ProgramSourceId,
-        row: VersionRow,
+        row: MaintainedVersion,
     },
     ReplacementContent {
         source: ProgramSourceId,
-        row: VersionRow,
+        row: MaintainedVersion,
     },
     ReplacementDeletion {
         source: ProgramSourceId,
-        row: VersionRow,
+        row: MaintainedVersion,
     },
     /// Identical payload graph with two independent role consumers.
     SharedVersion {
         source: ProgramSourceId,
-        row: VersionRow,
+        row: MaintainedVersion,
     },
     ProgramSourceCoverage(crate::protocol::ProgramSourceCoverageEntry),
     RelationEdge(RelationEdgeEntry),
@@ -551,9 +578,14 @@ struct AggregateNetEvent {
 enum NetEvent {
     Result(Box<(Rc<ResultMemberEntry>, ResultMemberPayloadEntry)>),
     AggregateResult(Box<AggregateNetEvent>),
-    Version(ProgramSourceId, VersionIdentity, VersionRow),
-    Replacement(ProgramSourceId, ReplacementKey, VersionIdentity, VersionRow),
-    SharedVersion(ProgramSourceId, VersionIdentity, VersionRow),
+    Version(ProgramSourceId, VersionIdentity, MaintainedVersion),
+    Replacement(
+        ProgramSourceId,
+        ReplacementKey,
+        VersionIdentity,
+        MaintainedVersion,
+    ),
+    SharedVersion(ProgramSourceId, VersionIdentity, MaintainedVersion),
     ProgramFact(Rc<ProgramFactEntry>),
     StructuredAppRow(RowUuid, OwnedRecord),
 }
@@ -588,7 +620,7 @@ impl MaintainedSubscriptionView {
     fn supporting_row_for_version(
         &self,
         source: ProgramSourceId,
-        row: &VersionRow,
+        row: &MaintainedVersion,
         node_aliases: &NodeAliases,
     ) -> Result<SupportingRow, super::Error> {
         let physical_table =
@@ -598,9 +630,11 @@ impl MaintainedSubscriptionView {
                 .ok_or(super::Error::InvalidStoredValue(
                     "support terminal has no physical table identity",
                 ))?;
-        let tx = version_tx_id_from_aliases(row, node_aliases).ok_or(
-            super::Error::InvalidStoredValue("support input tx node alias must exist"),
-        )?;
+        let tx = row
+            .tx_id(node_aliases)
+            .ok_or(super::Error::InvalidStoredValue(
+                "support input tx node alias must exist",
+            ))?;
         let branch = row.branch_key().canonical_bytes();
         let version_table = self
             .witness_table_names
@@ -1059,7 +1093,7 @@ impl MaintainedSubscriptionView {
         Ok(transitions)
     }
 
-    pub(crate) fn versions_by_tx(&self, tx_id: TxId) -> Vec<VersionRow> {
+    pub(crate) fn versions_by_tx(&self, tx_id: TxId) -> Vec<MaintainedVersion> {
         let mut versions = self.versions.versions_by_tx(tx_id);
         for (fact, version) in &self.selected_deletion_witnesses {
             if (fact.version.tx == tx_id) && !versions.contains(version) {
@@ -1094,7 +1128,7 @@ impl MaintainedSubscriptionView {
     /// frontier. Their native bodies are retained for relaying, not membership.
     pub(crate) fn replace_selected_deletion_witnesses(
         &mut self,
-        witnesses: BTreeMap<SupportingRow, VersionRow>,
+        witnesses: BTreeMap<SupportingRow, MaintainedVersion>,
     ) -> bool {
         let mut changed = false;
         for row in self
@@ -1132,7 +1166,7 @@ impl MaintainedSubscriptionView {
         &self,
         table: &str,
         row_uuid: RowUuid,
-    ) -> (Option<VersionRow>, Option<VersionRow>) {
+    ) -> (Option<MaintainedVersion>, Option<MaintainedVersion>) {
         self.replacements.replacement_for(table, row_uuid)
     }
 
@@ -1663,9 +1697,7 @@ impl MaintainedSubscriptionView {
             || self
                 .replacement_for(table.as_str(), row_uuid)
                 .0
-                .is_some_and(|version| {
-                    version_tx_id_from_aliases(&version, node_aliases) == Some(tx_id)
-                })
+                .is_some_and(|version| version.tx_id(node_aliases) == Some(tx_id))
     }
 
     fn result_member_has_inline_content_source(&self, member: &ResultMemberEntry) -> bool {
@@ -3020,7 +3052,7 @@ fn decode_typed_version_witness(
     schema: &VersionWitnessSchema,
     tables: &TableSchemas,
     decode_plan_cache: &mut VersionDecodePlanCache,
-) -> Result<VersionRow, super::Error> {
+) -> Result<MaintainedVersion, super::Error> {
     let table_name = match record.get_idx(field_idx(record, &schema.identity.table_field)?)? {
         Value::String(value) => value,
         _ => {
@@ -3035,6 +3067,54 @@ fn decode_typed_version_witness(
             "maintained witness table_name must exist",
         ))?;
     let deletion = tagged_deletion(record.get_idx(field_idx(record, &schema.deletion_field)?)?)?;
+    if let Some(physical_table) = schema.native_table {
+        let branch = match schema.identity.branch_or_prefix_field.as_ref() {
+            Some(field) => match record.get_idx(field_idx(record, field)?)? {
+                Value::Bytes(bytes) => RuntimeSchema::decode_persisted_branch_key(table, &bytes)
+                    .map_err(|_| {
+                        super::Error::InvalidStoredValue("native witness branch is invalid")
+                    })?,
+                Value::Nullable(Some(value)) => match *value {
+                    Value::Bytes(bytes) => {
+                        RuntimeSchema::decode_persisted_branch_key(table, &bytes).map_err(|_| {
+                            super::Error::InvalidStoredValue("native witness branch is invalid")
+                        })?
+                    }
+                    _ => {
+                        return Err(super::Error::InvalidStoredValue(
+                            "native witness branch must be bytes",
+                        ));
+                    }
+                },
+                Value::Nullable(None) => BranchKey::default(),
+                _ => {
+                    return Err(super::Error::InvalidStoredValue(
+                        "native witness branch must be bytes",
+                    ));
+                }
+            },
+            None => BranchKey::default(),
+        };
+        return Ok(MaintainedVersion::Native(Arc::new(NativeVersionRef {
+            physical_table,
+            table: groove::Intern::new(table_name),
+            branch,
+            row: RowUuid(record.get_uuid(field_idx(record, &schema.identity.row_field)?)?),
+            time: TxTime(record_u64_idx(
+                record,
+                field_idx(record, &schema.identity.tx_time_field)?,
+            )?),
+            node: NodeAlias(record_u64_idx(
+                record,
+                field_idx(record, &schema.identity.tx_node_field)?,
+            )?),
+            schema: SchemaVersionAlias(record_u64_idx(
+                record,
+                field_idx(record, &schema.identity.schema_field)?,
+            )?),
+            deletion,
+        })));
+    }
     let layer = if deletion.is_some() {
         VersionLayer::Deletion
     } else {
@@ -3170,7 +3250,7 @@ fn decode_typed_version_witness(
         record: OwnedRecord::new(raw, plan.descriptor),
     };
     version.validate_canonical()?;
-    Ok(version)
+    Ok(version.into())
 }
 
 fn build_version_decode_plan(
@@ -3312,7 +3392,7 @@ impl WeightedVersionIndex {
             table,
             row_uuid,
             layer: VersionLayer::Content,
-            raw_record: Arc::default(),
+            raw_record: WitnessIdentity::Materialized(Arc::default()),
         };
         rows.range(lower..).next().is_some_and(|(key, _)| {
             key.table == table && key.row_uuid == row_uuid && key.layer == VersionLayer::Content
@@ -3363,7 +3443,7 @@ impl WeightedVersionIndex {
         }
     }
 
-    fn rows_by_tx(&self, tx_id: TxId) -> impl Iterator<Item = &VersionRow> {
+    fn rows_by_tx(&self, tx_id: TxId) -> impl Iterator<Item = &MaintainedVersion> {
         self.by_tx
             .get(&tx_id)
             .into_iter()
@@ -3371,7 +3451,7 @@ impl WeightedVersionIndex {
             .map(|version| &version.row)
     }
 
-    fn versions_by_tx(&self, tx_id: TxId) -> Vec<VersionRow> {
+    fn versions_by_tx(&self, tx_id: TxId) -> Vec<MaintainedVersion> {
         self.rows_by_tx(tx_id).cloned().collect()
     }
 }
@@ -3438,7 +3518,7 @@ impl ReplacementIndex {
         &self,
         table: &str,
         row_uuid: RowUuid,
-    ) -> (Option<VersionRow>, Option<VersionRow>) {
+    ) -> (Option<MaintainedVersion>, Option<MaintainedVersion>) {
         let table = groove::Intern::new(table.to_owned());
         let content = self.content_by_key.get(&ReplacementKey {
             table,
@@ -3553,11 +3633,15 @@ fn result_member_payload_entry_bytes(payload: &ResultMemberPayloadEntry) -> usiz
 }
 
 fn version_identity_bytes(identity: &VersionIdentity) -> usize {
-    mem::size_of_val(identity) + intern_string_bytes(&identity.table) + identity.raw_record.len()
+    mem::size_of_val(identity)
+        + intern_string_bytes(&identity.table)
+        + identity.raw_record.retained_bytes()
 }
 
 fn version_sort_key_bytes(sort_key: &VersionSortKey) -> usize {
-    mem::size_of_val(sort_key) + intern_string_bytes(&sort_key.table) + sort_key.raw_record.len()
+    mem::size_of_val(sort_key)
+        + intern_string_bytes(&sort_key.table)
+        + sort_key.raw_record.retained_bytes()
 }
 
 fn replacement_key_bytes(key: &ReplacementKey) -> usize {
@@ -3571,35 +3655,40 @@ fn weighted_version_bytes(version: &WeightedVersion) -> usize {
         + version_sort_key_bytes(&version.sort_key)
 }
 
-fn version_row_bytes(row: &VersionRow) -> usize {
-    mem::size_of_val(row) + intern_string_bytes(&row.table) + row.record.raw().len()
+fn version_row_bytes(row: &MaintainedVersion) -> usize {
+    row.retained_bytes()
 }
 
 impl VersionIdentity {
-    fn for_row(row: &VersionRow) -> Self {
+    fn for_row(row: &MaintainedVersion) -> Self {
         Self {
-            table: row.table,
+            table: row.table_intern(),
             layer: row.layer(),
-            raw_record: Arc::from(row.record.raw()),
+            raw_record: match row {
+                MaintainedVersion::Native(v) => WitnessIdentity::Native(v.clone()),
+                MaintainedVersion::Materialized(v) => {
+                    WitnessIdentity::Materialized(Arc::from(v.record.raw()))
+                }
+            },
         }
     }
 }
 
 impl VersionSortKey {
-    fn for_row(row: &VersionRow, identity: &VersionIdentity) -> Self {
+    fn for_row(row: &MaintainedVersion, identity: &VersionIdentity) -> Self {
         Self {
-            table: row.table,
+            table: row.table_intern(),
             row_uuid: row.row_uuid(),
             layer: row.layer(),
-            raw_record: Arc::clone(&identity.raw_record),
+            raw_record: identity.raw_record.clone(),
         }
     }
 }
 
 impl ReplacementKey {
-    fn for_row(row: &VersionRow, layer: VersionLayer) -> Self {
+    fn for_row(row: &MaintainedVersion, layer: VersionLayer) -> Self {
         Self {
-            table: row.table,
+            table: row.table_intern(),
             row_uuid: row.row_uuid(),
             layer,
         }
@@ -3630,7 +3719,7 @@ impl NetEvent {
 
 fn replacement_winner(
     versions: Option<&BTreeMap<VersionIdentity, WeightedVersion>>,
-) -> Option<VersionRow> {
+) -> Option<MaintainedVersion> {
     let versions = versions?;
     versions
         .values()
@@ -4528,6 +4617,7 @@ mod tests {
 
     fn witness_schema() -> VersionWitnessSchema {
         VersionWitnessSchema {
+            native_table: None,
             source: ProgramSourceId {
                 table: "todos".to_owned().into(),
                 path: vec![crate::protocol::ProgramSourceRole::Root],
@@ -4639,14 +4729,14 @@ mod tests {
     fn version_content(row: VersionRow) -> DecodedMaintainedEvent {
         DecodedMaintainedEvent::VersionContent {
             source: test_source(),
-            row,
+            row: row.into(),
         }
     }
 
     fn version_deletion(row: VersionRow) -> DecodedMaintainedEvent {
         DecodedMaintainedEvent::VersionDeletion {
             source: test_source(),
-            row,
+            row: row.into(),
         }
     }
 
@@ -4715,7 +4805,7 @@ mod tests {
         maintained.acknowledge_peer_source_closure();
         // Selected witnesses can change without any companion terminal event.
         maintained
-            .replace_selected_deletion_witnesses(BTreeMap::from([(fact.clone(), version.clone())]));
+            .replace_selected_deletion_witnesses(BTreeMap::from([(fact.clone(), version.clone().into())]));
         assert_eq!(
             maintained.unpublished_supporting_delta(),
             Some((vec![fact.clone()], vec![]))
@@ -4746,7 +4836,7 @@ mod tests {
             maintained.unpublished_supporting_delta(),
             Some((vec![], vec![]))
         );
-        maintained.replace_selected_deletion_witnesses(BTreeMap::from([(fact.clone(), version)]));
+        maintained.replace_selected_deletion_witnesses(BTreeMap::from([(fact.clone(), version.into())]));
         maintained.supporting.apply(1, fact.clone(), -1);
         assert_eq!(
             maintained.unpublished_supporting_delta(),
@@ -4943,7 +5033,7 @@ mod tests {
         assert!(
             maintained.replace_selected_deletion_witnesses(BTreeMap::from([(
                 fact.clone(),
-                version.clone()
+                version.clone().into()
             )]))
         );
         assert_eq!(
@@ -4951,7 +5041,7 @@ mod tests {
             Some((vec![fact.clone()], vec![]))
         );
         maintained.acknowledge_peer_source_closure();
-        assert_eq!(maintained.versions_by_tx(tx), vec![version]);
+        assert_eq!(maintained.versions_by_tx(tx), vec![version.into()]);
         assert!(
             maintained
                 .supporting_rows()
@@ -4985,7 +5075,7 @@ mod tests {
                 table: "todos".to_owned().into(),
                 path: vec![crate::protocol::ProgramSourceRole::Alias("peer".to_owned())],
             },
-            row: record.clone(),
+            row: record.clone().into(),
         };
         let input =
             physical_input(covered_input_for_version(test_source(), &record, &aliases()).unwrap());
@@ -5042,7 +5132,7 @@ mod tests {
     fn replacement_content(row: VersionRow) -> DecodedMaintainedEvent {
         DecodedMaintainedEvent::ReplacementContent {
             source: test_source(),
-            row,
+            row: row.into(),
         }
     }
 
@@ -5057,13 +5147,13 @@ mod tests {
             } else {
                 version(row(1), 100, "shared")
             };
-            let identity = VersionIdentity::for_row(&record);
-            let key = ReplacementKey::for_row(&record, identity.layer);
-            let sort_key = VersionSortKey::for_row(&record, &identity);
+            let identity = VersionIdentity::for_row(&record.clone().into());
+            let key = ReplacementKey::for_row(&record.clone().into(), identity.layer);
+            let sort_key = VersionSortKey::for_row(&record.clone().into(), &identity);
             let tx_id = version_tx_id_from_aliases(&record, &aliases()).unwrap();
             let shared = DecodedMaintainedEvent::SharedVersion {
                 source: test_source(),
-                row: record.clone(),
+                row: record.clone().into(),
             };
             let first = maintained
                 .apply_decoded_deltas([(shared.clone(), 1)], &aliases())
@@ -5079,12 +5169,12 @@ mod tests {
             let replacement_payload = &replacements[&key][&identity].payload;
             assert!(Arc::ptr_eq(version_payload, replacement_payload));
             assert!(Arc::ptr_eq(
-                &maintained.versions.by_tx[&tx_id]
+                maintained.versions.by_tx[&tx_id]
                     .keys()
                     .next()
                     .unwrap()
-                    .raw_record,
-                &replacements[&key].keys().next().unwrap().raw_record
+                    .raw_record.materialized_bytes(),
+                replacements[&key].keys().next().unwrap().raw_record.materialized_bytes()
             ));
             let version_event = if is_deletion {
                 version_deletion(record.clone())
@@ -5142,7 +5232,7 @@ mod tests {
     fn replacement_deletion(row: VersionRow) -> DecodedMaintainedEvent {
         DecodedMaintainedEvent::ReplacementDeletion {
             source: test_source(),
-            row,
+            row: row.into(),
         }
     }
 
@@ -5807,8 +5897,8 @@ mod tests {
                     deletion(row(i % 4 + 1), u64::from(10 + i / 4))
                 };
                 VersionPayload::prepare(
-                    record.clone(),
-                    &VersionIdentity::for_row(&record),
+                    record.clone().into(),
+                    &VersionIdentity::for_row(&record.clone().into()),
                     &aliases,
                 )
                 .unwrap()
@@ -5897,7 +5987,7 @@ mod tests {
         let payloads = records
             .iter()
             .map(|record| {
-                VersionPayload::prepare(record.clone(), &VersionIdentity::for_row(record), &aliases)
+                VersionPayload::prepare(record.clone().into(), &VersionIdentity::for_row(&record.clone().into()), &aliases)
                     .unwrap()
             })
             .collect::<Vec<_>>();
@@ -5998,9 +6088,9 @@ mod tests {
             for i in 0..size {
                 let mut row = version(RowUuid::from_bytes((i as u128).to_be_bytes()), 10, "seed");
                 row.table = tables[i % 2];
-                let identity = VersionIdentity::for_row(&row);
+                let identity = VersionIdentity::for_row(&row.clone().into());
                 index.apply_delta(
-                    VersionPayload::prepare(row, &identity, &aliases).unwrap(),
+                    VersionPayload::prepare(row.into(), &identity, &aliases).unwrap(),
                     1,
                 );
             }
@@ -6013,8 +6103,8 @@ mod tests {
                         deletion(target, time),
                     ] {
                         row.table = table;
-                        let identity = VersionIdentity::for_row(&row);
-                        variants.push(VersionPayload::prepare(row, &identity, &aliases).unwrap());
+                        let identity = VersionIdentity::for_row(&row.clone().into());
+                        variants.push(VersionPayload::prepare(row.into(), &identity, &aliases).unwrap());
                     }
                 }
             }
@@ -6084,7 +6174,7 @@ mod tests {
             .unwrap();
 
         let versions = maintained.versions_by_tx(tx_id);
-        assert_eq!(versions, vec![version_a.clone(), version_b]);
+        assert_eq!(versions, vec![version_a.clone().into(), version_b.into()]);
         let ordering = versions
             .iter()
             .map(|version| {
@@ -6108,7 +6198,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             maintained.versions_by_tx(tx_id),
-            vec![version(row_b, 10, "b")]
+            vec![version(row_b, 10, "b").into()]
         );
     }
 
@@ -6126,7 +6216,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             maintained.replacement_for("todos", row_uuid).0,
-            Some(old.clone())
+            Some(old.clone().into())
         );
 
         maintained
@@ -6140,7 +6230,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             maintained.replacement_for("todos", row_uuid),
-            (Some(new), None)
+            (Some(new.into()), None)
         );
 
         maintained
@@ -6148,7 +6238,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             maintained.replacement_for("todos", row_uuid),
-            (Some(version(row_uuid, 11, "new")), Some(deletion))
+            (Some(version(row_uuid, 11, "new").into()), Some(deletion.into()))
         );
     }
 
@@ -6162,7 +6252,7 @@ mod tests {
         maintained
             .apply_decoded_deltas([(version_deletion(version.clone()), 1)], &aliases)
             .unwrap();
-        assert_eq!(maintained.versions_by_tx(tx_id), vec![version.clone()]);
+        assert_eq!(maintained.versions_by_tx(tx_id), vec![version.clone().into()]);
 
         maintained
             .apply_decoded_deltas([(version_deletion(version), -1)], &aliases)
@@ -6257,4 +6347,44 @@ mod terminal_role_hash_tests {
 std::thread_local! {
     pub(crate) static SOURCE_CLOSURE_POINT_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(crate) static SOURCE_CLOSURE_TRAVERSALS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+mod native_witness_seek_tests {
+    use super::*;
+
+    // Internal: this bounds check distinguishes the reference and byte-backed
+    // identity variants in the retained index. Public rows cannot reveal which
+    // enum variant the lower bound skipped before deciding publishability.
+    #[test]
+    fn prefix_seek_includes_native_references_and_releases_retracted_rows() {
+        let node = crate::ids::NodeUuid::from_bytes([0xd1; 16]);
+        let alias = NodeAlias(1);
+        let aliases = [(node, alias)].into_iter().collect::<NodeAliases>();
+        let table = groove::Intern::new("documents".to_owned());
+        let row = RowUuid::from_bytes([0xd2; 16]);
+        let version = MaintainedVersion::Native(Arc::new(NativeVersionRef {
+            physical_table: crate::ids::PhysicalTableId(1),
+            table,
+            branch: BranchKey::default(),
+            row,
+            time: TxTime(7),
+            node: alias,
+            schema: SchemaVersionAlias(1),
+            deletion: None,
+        }));
+        let identity = VersionIdentity::for_row(&version);
+        let payload = VersionPayload::prepare(version, &identity, &aliases).unwrap();
+        let tx = TxId::new(TxTime(7), node);
+        let mut index = WeightedVersionIndex::default();
+        index.apply_delta(Arc::clone(&payload), 2);
+        assert!(index.has_content_witness(tx, table, row));
+        assert!(!index.has_content_witness(tx, groove::Intern::new("absent".to_owned()), row));
+        assert!(!index.has_content_witness(TxId::new(TxTime(8), node), table, row));
+        index.apply_delta(Arc::clone(&payload), -1);
+        assert!(index.has_content_witness(tx, table, row));
+        index.apply_delta(payload, -1);
+        assert!(!index.has_content_witness(tx, table, row));
+        assert!(index.by_tx.is_empty());
+    }
 }

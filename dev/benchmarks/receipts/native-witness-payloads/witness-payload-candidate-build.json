@@ -1,0 +1,21 @@
+{
+  "source_base": "c1e4a5607de748b2313631a68f243ba4249a8008",
+  "executable_sha256": "94247b6ce64727c8b0f5cb63cb278aa6ac2d78308627059713ea0ed3c2aa9a52",
+  "production_patch_sha256": "7129d5511233025f39f59a13e249cb0f9a8cd9d95455490a584a4afdc85a92fb",
+  "source_files_sha256": {
+    "crates/jazz/src/node/maintained_subscription_view.rs": "9a47bfc8bc2498041bc4e03aa847c1fd3a3a173552acd078e4491444f6856035",
+    "crates/jazz/src/node/maintained_version.rs": "91c2e921bf8d72c45efa05821eec1606f8d348b9abb48239c943fd0a808fa7a3",
+    "crates/jazz/src/node/mod.rs": "f6845e221b2354cbc346d5b66e3d8fa06e403b0d8f9a76f60ac3f9cbaa5328f1",
+    "crates/jazz/src/node/query_engine/lowering/terminals.rs": "bd6e0e826260e19d866296575deb34fca51db77f46bb592c8af42c9505933a5f",
+    "crates/jazz/src/node/query_engine/resolver.rs": "56c01e156b7206c1dcf806660400df55bdb4777a4e2f7be0a26d448036c0052c",
+    "crates/jazz/src/node/query_engine/schemas.rs": "524cfaa1bff12a57844b33d247cc377d45ce6435fcd6311da9fd33d0b00a32e9",
+    "crates/jazz/src/node/query_eval.rs": "3f9c333f17d991d98e176f9cba16a6e7392e5a7b04b08d4c6cba049d2e06c969",
+    "crates/jazz/src/node/query_eval/lowering.rs": "8837220bfa41a739437f4395c51fe79b05a0467df4fb00c39c27e45b5ab7f666",
+    "crates/jazz/src/node/query_eval/materialization.rs": "110a4a33583e648d57ae2f88cfbe8b62579147fef0c3f52928f935bb57fdd813",
+    "crates/jazz/src/node/query_eval/read_sources.rs": "c7926aad59664490799bf3d387e71aa7506603ecefca35388d0ec772117e766d",
+    "crates/jazz/src/node/views.rs": "0ac869ecc249b71d6ff921e3bf72e912dbe6741d13ae41ef5adf42ad3b2ccd5d",
+    "crates/jazz/src/peer/publication.rs": "083ced9790ab4d65519bbdadb68256a8926ad84d5de30ef05bcad57d083c81ba",
+    "crates/jazz/src/node/query_engine/lowering/templates.rs": "608b66f5889d3e172aa7d70e48c845ed2863b11866ab64889ea5a43c9268fcc9"
+  },
+  "prototype_parent": "garden-co/jazz#2961 through c977c5d6a; no direct-coordinate projection refinement"
+}

@@ -285,6 +285,7 @@ where
                 .clone()
                 .expect("checked alongside compiler-owned covered input source");
             return Ok(ResolvedSource {
+                native_witness_table: self.native_witness_table_for_request(request)?,
                 stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
                 table_schema: table,
                 graph: input_source.clone(),
@@ -421,6 +422,7 @@ where
             )
             .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
             return Ok(ResolvedSource {
+                native_witness_table: None,
                 stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
                 table_schema: table,
                 graph,
@@ -557,6 +559,7 @@ where
                 )
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
                 return Ok(ResolvedSource {
+                    native_witness_table: None,
                     stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
                     table_schema: table.clone(),
                     graph,
@@ -711,6 +714,7 @@ where
                 )
                 .map_err(|error| source_resolution_error_from_policy_proof(request, error))?;
                 return Ok(ResolvedSource {
+                    native_witness_table: None,
                     stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
                     table_schema: table.clone(),
                     graph,
@@ -929,6 +933,7 @@ where
                     }
                 };
                 return Ok(ResolvedSource {
+                    native_witness_table: None,
                     stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
                     table_schema: table.clone(),
                     graph,
@@ -1724,6 +1729,7 @@ where
             graph
         };
         Ok(ResolvedSource {
+            native_witness_table: None,
             stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
             table_schema: table,
             graph,
@@ -1824,6 +1830,7 @@ where
             .content_version_source_for_request(request, &table, Some(tier), None, None)
             .await?;
         Ok(ResolvedSource {
+            native_witness_table: self.native_witness_table_for_request(request)?,
             stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
             table_schema: table,
             graph,
@@ -1987,6 +1994,7 @@ where
             .content_version_source_for_request(request, &table, Some(tier), None, None)
             .await?;
         Ok(ResolvedSource {
+            native_witness_table: self.native_witness_table_for_request(request)?,
             stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
             table_schema: table,
             graph,
@@ -2067,6 +2075,7 @@ where
         )
         .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
         Ok(ResolvedSource {
+            native_witness_table: None,
             stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
             table_schema: table,
             graph,
@@ -2130,6 +2139,32 @@ where
 }
 
 impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
+    /// Keep the existing fail-closed behavior for a reused logical table name.
+    /// Such sources retain materialized witnesses and their canonical-history
+    /// ambiguity check. A separate behavior change can qualify exact native
+    /// identities for that case without weakening the existing contract here.
+    fn native_witness_table_for_request(
+        &self,
+        request: &SourceRequest,
+    ) -> Result<Option<crate::ids::PhysicalTableId>, SourceResolutionError> {
+        let physical = self
+            .node
+            .physical_table_id_for_schema(self.read_view.read_schema, &request.source.table)
+            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+        let unambiguous = self
+            .node
+            .catalogue
+            .physical_mappings
+            .values()
+            .all(|mapping| {
+                mapping
+                    .tables
+                    .get(&request.source.table)
+                    .is_none_or(|table| table.table_id == physical)
+            });
+        Ok(unambiguous.then_some(physical))
+    }
+
     fn prepare_source_graph_without_local_exclusions<'a>(
         &'a mut self,
         request: &'a SourceRequest,
