@@ -2,28 +2,28 @@ use super::*;
 
 /// Row-set output request.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RowSetOutputRequest {
+pub struct RowSetOutputRequest {
     /// App-facing rows requested from the shared row-set program, if any.
-    pub(crate) app_rows: Option<AppRowOutputRequest>,
+    pub app_rows: Option<AppRowOutputRequest>,
     /// Internal facts requested by sync, transaction validation, policy
     /// dependency tracking, or binding-route maintenance.
-    pub(crate) facts: BTreeSet<ProgramFactKey>,
+    pub facts: BTreeSet<ProgramFactKey>,
 }
 
 /// App-facing row payload request.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct AppRowOutputRequest {
+pub struct AppRowOutputRequest {
     /// Whether this is an app boundary terminal. Internal policy predicates
     /// consume only filtered row identity and binding routes, without
     /// materializing unrelated candidate payloads.
-    pub(crate) public_terminal: bool,
+    pub public_terminal: bool,
     /// Public payload projection requested at the app boundary.
-    pub(crate) projection: PayloadProjection,
+    pub projection: PayloadProjection,
 }
 
 /// Public app-row payload projection.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum PayloadProjection {
+pub enum PayloadProjection {
     /// Use the projection implied by the normalized shape root.
     ShapeDefault,
     /// Explicit output aliases from a relation projection.
@@ -34,16 +34,16 @@ pub(crate) enum PayloadProjection {
 
 /// Explicit nested app-row projection tree.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct AppProjectionTree {
+pub struct AppProjectionTree {
     /// Root public field projection.
-    pub(crate) fields: FieldProjection,
+    pub fields: FieldProjection,
     /// Nested path/relation projections.
-    pub(crate) paths: Vec<AppPathProjection>,
+    pub paths: Vec<AppPathProjection>,
 }
 
 /// Field projection for app rows.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum FieldProjection {
+pub enum FieldProjection {
     /// Materialize all public fields available at the read schema.
     All,
     /// Materialize this explicit field set.
@@ -52,25 +52,25 @@ pub(crate) enum FieldProjection {
 
 /// Nested path/relation projection.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct AppPathProjection {
+pub struct AppPathProjection {
     /// Internal path identity.
-    pub(crate) path: ProgramPathId,
+    pub path: ProgramPathId,
     /// Public field name used in app rows.
-    pub(crate) field: String,
+    pub field: String,
     /// Path cardinality.
-    pub(crate) cardinality: PathCardinality,
+    pub cardinality: PathCardinality,
     /// Child public field projection.
-    pub(crate) fields: FieldProjection,
+    pub fields: FieldProjection,
     /// Nested child path projections.
-    pub(crate) children: Vec<AppPathProjection>,
+    pub children: Vec<AppPathProjection>,
     /// What app projection does when hidden relation facts show incomplete/null
     /// child coverage.
-    pub(crate) hole_policy: PathHolePolicy,
+    pub hole_policy: PathHolePolicy,
 }
 
 /// App path cardinality.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum PathCardinality {
+pub enum PathCardinality {
     /// At most one child.
     One,
     /// Many children.
@@ -79,7 +79,7 @@ pub(crate) enum PathCardinality {
 
 /// App-row handling for missing/incomplete path rows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum PathHolePolicy {
+pub enum PathHolePolicy {
     /// Keep the parent and materialize null/empty placeholders.
     KeepParentWithHoles,
     /// Drop parent rows whose required path is incomplete.
@@ -88,38 +88,38 @@ pub(crate) enum PathHolePolicy {
 
 /// Stable key for safe sharing of compiled semantic work.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct ProgramSharingKey {
+pub struct ProgramSharingKey {
     /// Binding-independent normalized row-set shape id.
-    pub(crate) shape_id: ShapeId,
+    pub shape_id: ShapeId,
     /// Resolved read/source identity.
-    pub(crate) reads: ResolvedReadSet,
+    pub reads: ResolvedReadSet,
     /// Policy identity and claims.
-    pub(crate) policy: PolicySharingKey,
+    pub policy: PolicySharingKey,
 }
 
 /// Stable key for one semantic program instance before usage-site subscription
 /// handle assignment.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct ProgramInstanceKey {
+pub struct ProgramInstanceKey {
     /// Shared compiled semantic work.
-    pub(crate) program: ProgramSharingKey,
+    pub program: ProgramSharingKey,
     /// Binding values identity for this instance.
-    pub(crate) binding_id: BindingId,
+    pub binding_id: BindingId,
 }
 
 /// Stable output identity. This can vary independently from
 /// [`ProgramSharingKey`] when two consumers share one semantic graph but need
 /// different sinks/facts.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct ProgramOutputKey {
+pub struct ProgramOutputKey {
     /// Canonical identity derived from [`RowSetOutputRequest`]. The request is
     /// the semantic source of truth; this key is only for cache/output sharing.
-    pub(crate) fingerprint: Vec<u8>,
+    pub fingerprint: Vec<u8>,
 }
 
 /// Stable fact-output identity.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum ProgramFactKey {
+pub enum ProgramFactKey {
     /// Row ids authorized by a policy proof subplan.
     AuthorizedRows,
     /// Root result-set membership rows.
@@ -169,21 +169,22 @@ pub(crate) enum ProgramFactKey {
         role: PredicateOutputSetRole,
     },
     /// Point row-read facts.
+    #[doc(hidden)]
     PointReads { present: bool },
 }
 
 /// Stable identity for one policy-decision terminal fact.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct PolicyDecisionFactKey {
+pub struct PolicyDecisionFactKey {
     /// Decision role inside the normalized row-set program.
-    pub(crate) role: PolicyDecisionRole,
+    pub role: PolicyDecisionRole,
     /// Canonical decision/candidate fingerprint.
-    pub(crate) fingerprint: Vec<u8>,
+    pub fingerprint: Vec<u8>,
 }
 
 /// Coarse policy-decision role.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum PolicyDecisionRole {
+pub enum PolicyDecisionRole {
     /// Existing-row visibility check.
     Read,
     /// Proposed insert/update/delete/restore.

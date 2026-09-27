@@ -1332,7 +1332,8 @@ fn analyze_union(
 }
 
 #[cfg(test)]
-pub(crate) fn analyzed_union_labels(
+#[doc(hidden)]
+pub fn analyzed_union_labels(
     inputs: &[UnionInput],
     nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
 ) -> Result<Vec<String>, UnsupportedReason> {

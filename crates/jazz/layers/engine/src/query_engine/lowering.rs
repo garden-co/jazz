@@ -12,7 +12,7 @@ use groove::ivm::{
     TopByLimit, TopByOrder,
 };
 use groove::records::{ValueType, collect_by_ordered_scalar};
-pub(crate) use templates::QueryProgramTemplateCache;
+pub use templates::QueryProgramTemplateCache;
 
 mod closure;
 use closure::{
@@ -34,29 +34,29 @@ fn public_root_field_name(field: &CollectFlatField) -> String {
 
 /// Parameter domains attached to one lowered graph.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct ParameterDomain {
+pub struct ParameterDomain {
     /// User-supplied binding parameters.
-    pub(crate) user_params: BTreeMap<String, ColumnType>,
+    pub user_params: BTreeMap<String, ColumnType>,
     /// Trusted claim parameters supplied by the runtime policy context.
-    pub(crate) claim_params: BTreeMap<String, ClaimParameter>,
+    pub claim_params: BTreeMap<String, ClaimParameter>,
     /// Parameters retained in terminal rows for usage-site routing.
-    pub(crate) routing_params: BTreeSet<String>,
+    pub routing_params: BTreeSet<String>,
 }
 
 /// One trusted claim value carried through a prepared binding source.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ClaimParameter {
+pub struct ClaimParameter {
     /// Claim path resolved from the active policy context.
-    pub(crate) path: ClaimPath,
+    pub path: ClaimPath,
     /// Column type expected by the value-source column.
-    pub(crate) ty: ColumnType,
+    pub ty: ColumnType,
 }
 
 /// Result of lowering one query program.
-pub(crate) type QueryCompileResult = CapabilityResult<QueryProgram>;
+pub type QueryCompileResult = CapabilityResult<QueryProgram>;
 
 /// Owned declarative Groove inputs prepared before pure Jazz lowering.
-pub(crate) type ResolvedQuerySources = BTreeMap<SourceId, ResolvedSource>;
+pub type ResolvedQuerySources = BTreeMap<SourceId, ResolvedSource>;
 
 /// One compilation's analyzed structure and exact source requirements.
 ///
@@ -66,14 +66,15 @@ pub(crate) type ResolvedQuerySources = BTreeMap<SourceId, ResolvedSource>;
 /// handles. It is not yet a cross-binding cache: some terminal lowering still
 /// consumes concrete values from the request.
 #[derive(Clone)]
-pub(crate) struct QueryProgramCompilation {
+pub struct QueryProgramCompilation {
     request: QueryProgramRequest,
     plan: Box<AnalyzedQueryPlan>,
     sources: Vec<SourceRequest>,
 }
 
 impl QueryProgramCompilation {
-    pub(crate) fn analyze(request: QueryProgramRequest) -> CapabilityResult<Self> {
+    #[doc(hidden)]
+    pub fn analyze(request: QueryProgramRequest) -> CapabilityResult<Self> {
         let plan = analyze_query_plan(&request).map_err(|gaps| {
             let mut explain = ExplainPlan::default();
             explain
@@ -92,11 +93,13 @@ impl QueryProgramCompilation {
         })
     }
 
-    pub(crate) fn request(&self) -> &QueryProgramRequest {
+    #[doc(hidden)]
+    pub fn request(&self) -> &QueryProgramRequest {
         &self.request
     }
 
-    pub(crate) fn sources(&self) -> &[SourceRequest] {
+    #[doc(hidden)]
+    pub fn sources(&self) -> &[SourceRequest] {
         &self.sources
     }
 }
@@ -104,7 +107,7 @@ impl QueryProgramCompilation {
 /// Analyze the logical source requests for one program without preparing or
 /// lowering any source. Compilation orchestration uses this to discover
 /// dependent policy programs before source preparation begins.
-pub(crate) fn query_program_source_requests(
+pub fn query_program_source_requests(
     request: &QueryProgramRequest,
 ) -> CapabilityResult<Vec<SourceRequest>> {
     let plan = analyze_query_plan(request).map_err(|gaps| {
@@ -141,7 +144,7 @@ fn source_requests_for_plan(
 /// source that actually requested an exact deletion-register witness. This
 /// retains the normal source occurrence and authorization plan, while keeping
 /// ordinary non-deletion programs on their existing one-source path.
-pub(crate) fn authorized_deletion_preimage_source_request(
+pub fn authorized_deletion_preimage_source_request(
     request: &SourceRequest,
 ) -> Option<SourceRequest> {
     if request.visibility != RowVisibility::Visible
@@ -167,7 +170,7 @@ pub(crate) fn authorized_deletion_preimage_source_request(
 /// This is an explicit compatibility boundary while snapshot capture and
 /// physical-layout preparation remain async. Runtime production code calls
 /// this function; the lowering phase itself is [`lower_resolved_query_program`].
-pub(crate) async fn prepare_and_lower_query_program(
+pub async fn prepare_and_lower_query_program(
     compilation: QueryProgramCompilation,
     source_preparer: &mut impl SourceGraphPreparer,
 ) -> QueryCompileResult {
@@ -175,7 +178,8 @@ pub(crate) async fn prepare_and_lower_query_program(
     lower_resolved_query_program(compilation, sources, explain)
 }
 
-pub(crate) async fn prepare_query_program_sources(
+#[doc(hidden)]
+pub async fn prepare_query_program_sources(
     compilation: &QueryProgramCompilation,
     source_preparer: &mut impl SourceGraphPreparer,
 ) -> CapabilityResult<(ResolvedQuerySources, ExplainPlan)> {
@@ -249,7 +253,7 @@ pub(crate) async fn prepare_query_program_sources(
 ///
 /// This function performs no storage access, hydration, registration, or
 /// evaluation and therefore must remain synchronous.
-pub(crate) fn lower_resolved_query_program(
+pub fn lower_resolved_query_program(
     compilation: QueryProgramCompilation,
     resolved_sources: ResolvedQuerySources,
     explain: ExplainPlan,
@@ -428,7 +432,8 @@ fn covered_input_source_descriptors(
 }
 
 #[cfg(test)]
-pub(crate) async fn lower_query_program(
+#[doc(hidden)]
+pub async fn lower_query_program(
     request: QueryProgramRequest,
     source_preparer: &mut impl SourceGraphPreparer,
 ) -> QueryCompileResult {
@@ -485,7 +490,8 @@ fn terminal_schema_routing_fields(
     }
 }
 
-pub(crate) fn graph_declared_output_fields(graph: &GraphBuilder) -> Option<BTreeSet<String>> {
+#[doc(hidden)]
+pub fn graph_declared_output_fields(graph: &GraphBuilder) -> Option<BTreeSet<String>> {
     // Policy lowering can build deeply nested finite graphs on the server
     // shell's ordinary thread stack. Keep this structural analysis iterative:
     // it is used while installing those policies, before Groove compiles its
@@ -740,9 +746,8 @@ fn parameter_domain(shape: &NormalizedRowSetShape) -> ParameterDomain {
 }
 
 #[cfg(test)]
-pub(crate) fn parameter_domain_for_shape_for_test(
-    shape: &NormalizedRowSetShape,
-) -> ParameterDomain {
+#[doc(hidden)]
+pub fn parameter_domain_for_shape_for_test(shape: &NormalizedRowSetShape) -> ParameterDomain {
     parameter_domain(shape)
 }
 
@@ -1041,88 +1046,89 @@ mod terminals;
 use terminals::*;
 
 #[cfg(test)]
-pub(crate) use graph_lowering::binding_value_source_projection_fields_for_test;
+pub use graph_lowering::binding_value_source_projection_fields_for_test;
 #[cfg(test)]
-pub(crate) use planning::analyzed_union_labels;
+pub use planning::analyzed_union_labels;
 #[cfg(test)]
-pub(crate) use requirements::source_requirements_for_test;
+pub use requirements::source_requirements_for_test;
 
 /// Runnable lowered query program.
 #[derive(Clone, Debug)]
-pub(crate) struct QueryProgram {
+pub struct QueryProgram {
     /// Original request.
-    pub(crate) request: QueryProgramRequest,
+    pub request: QueryProgramRequest,
     /// Groove graph and its boundary contracts.
-    pub(crate) lowered: LoweredGraph,
+    pub lowered: LoweredGraph,
     /// Canonical record descriptor for every normalized source occurrence.
     /// Receiver-owned authority closures use this solely to allocate and
     /// validate local mutable Groove inputs; it is never a wire identity.
-    pub(crate) source_descriptors: BTreeMap<ProgramSourceId, RecordDescriptor>,
+    pub source_descriptors: BTreeMap<ProgramSourceId, RecordDescriptor>,
     /// Exact post-policy source occurrences that may cross into a
     /// receiver-local maintained graph as CoveredInput.
-    pub(crate) covered_input_source_descriptors: BTreeMap<ProgramSourceId, RecordDescriptor>,
+    pub covered_input_source_descriptors: BTreeMap<ProgramSourceId, RecordDescriptor>,
     /// Human-readable debugging and test artifact.
-    pub(crate) explain: ExplainPlan,
+    pub explain: ExplainPlan,
 }
 
 /// Groove graph plus the semantic contracts needed to consume it.
 #[derive(Clone, Debug)]
-pub(crate) struct LoweredGraph {
+pub struct LoweredGraph {
     /// Logical named terminals, including independently meaningful witness roles.
-    pub(crate) terminals: Vec<LoweredTerminal>,
+    pub terminals: Vec<LoweredTerminal>,
     /// Replacement sink -> version sink for compiler-proven identical payloads.
     /// Only the version sink executes; its consumer applies both role weights.
     /// This is ephemeral execution metadata, never a wire/storage identity.
-    pub(crate) shared_witness_sinks: BTreeMap<String, String>,
+    pub shared_witness_sinks: BTreeMap<String, String>,
     /// Filtered current-row graph used only by synchronous one-shot
     /// materializers. Public terminals have their own exact output shape and
     /// must not be decoded as storage-backed current rows.
-    pub(crate) internal_app_rows_graph: Option<GraphBuilder>,
+    pub internal_app_rows_graph: Option<GraphBuilder>,
     /// Parameter domains expected by the graph.
-    pub(crate) parameters: ParameterDomain,
+    pub parameters: ParameterDomain,
     /// App row and fact schemas emitted by the graph.
-    pub(crate) output: ProgramOutputSchemas,
+    pub output: ProgramOutputSchemas,
     /// Table schemas needed to decode maintained fact terminals emitted by this
     /// lowered program. This is derived from resolved query-engine sources, not
     /// recollected from the public query shape.
-    pub(crate) maintained_terminal_tables: BTreeMap<String, TableSchema>,
+    pub maintained_terminal_tables: BTreeMap<String, TableSchema>,
     /// Logical tables read by embedded policy programs and the main query.
     /// Unlike `maintained_terminal_tables`, this is an invalidation footprint,
     /// not a decoding schema map.
-    pub(crate) targeted_refresh_tables: BTreeSet<String>,
+    pub targeted_refresh_tables: BTreeSet<String>,
     /// If policy dependency compilation could not expose a complete footprint,
     /// local writes conservatively refresh this subscription for every table.
-    pub(crate) targeted_refresh_uncertain: bool,
+    pub targeted_refresh_uncertain: bool,
 }
 
 impl LoweredGraph {
-    pub(crate) fn execution_terminals(&self) -> impl Iterator<Item = &LoweredTerminal> {
+    #[doc(hidden)]
+    pub fn execution_terminals(&self) -> impl Iterator<Item = &LoweredTerminal> {
         self.terminals
             .iter()
             .filter(|terminal| !self.shared_witness_sinks.contains_key(&terminal.sink))
     }
 }
 
-#[cfg(test)]
-pub(crate) fn shared_witness_sinks_for_test(
-    terminals: &[LoweredTerminal],
-) -> BTreeMap<String, String> {
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+pub fn shared_witness_sinks_for_test(terminals: &[LoweredTerminal]) -> BTreeMap<String, String> {
     shared_witness_sinks(terminals)
 }
 
 /// One executable output terminal produced by query lowering.
 #[derive(Clone, Debug)]
-pub(crate) struct LoweredTerminal {
+pub struct LoweredTerminal {
     /// Stable sink name for the terminal.
-    pub(crate) sink: String,
+    pub sink: String,
     /// Executable groove graph for this terminal.
-    pub(crate) graph: GraphBuilder,
+    pub graph: GraphBuilder,
     /// Typed terminal output contract.
-    pub(crate) output: OutputTerminalSchema,
+    pub output: OutputTerminalSchema,
 }
 
 #[cfg(test)]
-pub(crate) fn retained_projection_graph_for_test(
+#[doc(hidden)]
+pub fn retained_projection_graph_for_test(
     request: &QueryProgramRequest,
     sources: &ResolvedQuerySources,
 ) -> (GraphBuilder, BTreeMap<String, usize>) {

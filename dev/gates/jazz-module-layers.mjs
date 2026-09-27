@@ -75,11 +75,9 @@ export const LAYERS = {
 // File-path prefixes (relative to crates/jazz/src) and their layer. The
 // longest matching prefix wins; anything unmatched is facade.
 export const LAYER_OF_PATH = [
-  // types, model and protocol: extracted to
-  // crates/jazz/layers/{types,model,protocol}.
+  // types, model, protocol and engine: extracted to
+  // crates/jazz/layers/{types,model,protocol,engine}.
 
-  ["node/query_engine.rs", "engine"],
-  ["node/query_engine/", "engine"],
   ["node/", "node"],
 
   ["peer.rs", "peer"],

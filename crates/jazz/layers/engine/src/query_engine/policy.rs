@@ -2,7 +2,7 @@ use super::*;
 
 /// Identity, claims, and policy mode used by policy augmentation.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum PolicyContext {
+pub enum PolicyContext {
     /// Internal/system reads bypass row-level policy.
     System,
     /// Authenticated identity plus trusted server/session claims.
@@ -41,7 +41,7 @@ pub(crate) enum PolicyContext {
 
 /// Missing-policy behavior.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum PolicyEnforcementMode {
+pub enum PolicyEnforcementMode {
     /// Local/offline runtimes without a compiled policy bundle remain usable.
     PermissiveLocal,
     /// Enforcing runtimes fail closed for missing explicit policy.
@@ -50,7 +50,7 @@ pub(crate) enum PolicyEnforcementMode {
 
 /// Stable policy identity used to decide whether compiled programs can share work.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum PolicySharingKey {
+pub enum PolicySharingKey {
     /// Internal/system policy bypass.
     System,
     /// Authenticated policy context. Claim values are runtime parameters; this

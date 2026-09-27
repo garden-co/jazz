@@ -25,7 +25,7 @@ fn resolved_source_public_name(source: &ResolvedSource, field: &str) -> Option<S
         .fields()
         .iter()
         .find(|candidate| candidate.name.as_deref() == Some(field))
-        .and_then(crate::node::query_engine::descriptor_public_name)
+        .and_then(crate::query_engine::descriptor_public_name)
         .map(str::to_owned)
 }
 
@@ -76,7 +76,7 @@ pub(super) fn collect_layout(
                     field.value_type.clone()
                 },
                 source_field: Some(name.clone()),
-                source_public_name: crate::node::query_engine::descriptor_public_name(field)
+                source_public_name: crate::query_engine::descriptor_public_name(field)
                     .map(str::to_owned),
                 origin: CollectFieldOrigin::SourceRow,
                 is_row_id: name == &root_source.row_shape.row_uuid_field,

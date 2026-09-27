@@ -332,7 +332,7 @@ pub(crate) mod maintained_subscription_view;
 mod open_tx;
 pub(crate) mod physical;
 mod policy;
-pub(crate) mod query_engine;
+pub(crate) use jazz_engine::query_engine;
 mod query_eval;
 mod recovery;
 pub mod relay_scope;

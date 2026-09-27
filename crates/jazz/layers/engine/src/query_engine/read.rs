@@ -1,24 +1,24 @@
 use super::*;
 
 /// Requested read set selected before source resolution.
-pub(crate) type RequestedReadSet = QueryReadSet<RequestedSourceStage>;
+pub type RequestedReadSet = QueryReadSet<RequestedSourceStage>;
 
 /// Resolved read identity used by shared maintained work.
-pub(crate) type ResolvedReadSet = QueryReadSet<ResolvedSourceStage>;
+pub type ResolvedReadSet = QueryReadSet<ResolvedSourceStage>;
 
 /// All read views a lowered program may use.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct QueryReadSet<R: SourceResolution> {
+pub struct QueryReadSet<R: SourceResolution> {
     /// Primary read view used by ordinary row-set semantics.
-    pub(crate) primary: ReadView<R>,
+    pub primary: ReadView<R>,
     /// Fact-specific comparison/read views, such as exclusive validation base
     /// and now predicate output sets.
-    pub(crate) fact_reads: BTreeMap<FactReadRole, ReadView<R>>,
+    pub fact_reads: BTreeMap<FactReadRole, ReadView<R>>,
 }
 
 impl<R: SourceResolution> QueryReadSet<R> {
     /// Build a read set with only a primary read view.
-    pub(crate) fn primary(primary: ReadView<R>) -> Self {
+    pub fn primary(primary: ReadView<R>) -> Self {
         Self {
             primary,
             fact_reads: BTreeMap::new(),
@@ -28,7 +28,7 @@ impl<R: SourceResolution> QueryReadSet<R> {
 
 /// Role for a non-primary read view inside one program request.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum FactReadRole {
+pub enum FactReadRole {
     /// Predicate output set at the exclusive transaction base snapshot.
     PredicateOutputBase,
     /// Predicate output set at validation/comparison time.
@@ -36,36 +36,36 @@ pub(crate) enum FactReadRole {
 }
 
 /// Requested read view selected before source resolution.
-pub(crate) type RequestedReadView = ReadView<RequestedSourceStage>;
+pub type RequestedReadView = ReadView<RequestedSourceStage>;
 
 /// Resolved read identity used by shared maintained work.
-pub(crate) type ResolvedReadKey = ReadView<ResolvedSourceStage>;
+pub type ResolvedReadKey = ReadView<ResolvedSourceStage>;
 
 /// Concrete read view at a particular source-resolution stage.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct ReadView<R: SourceResolution> {
+pub struct ReadView<R: SourceResolution> {
     /// Schema version exposed to the query and application rows.
-    pub(crate) read_schema: SchemaVersionId,
+    pub read_schema: SchemaVersionId,
     /// Effective authorization schema/policy head used to evaluate read/write
     /// policies. This identity must include permission definitions, not just
     /// application column layout.
-    pub(crate) policy_schema: SchemaVersionId,
+    pub policy_schema: SchemaVersionId,
     /// Canonical source expression for every source the normalized/augmented
     /// program may read. Policy augmentation introduces ordinary `SourceId`s
     /// with policy roles here; it does not get a separate source universe.
-    pub(crate) sources: SourceGraph<R>,
+    pub sources: SourceGraph<R>,
 }
 
 impl<R: SourceResolution> ReadView<R> {
     /// Return the schema version visible to application/query semantics.
-    pub(crate) fn read_schema(&self) -> SchemaVersionId {
+    pub fn read_schema(&self) -> SchemaVersionId {
         self.read_schema
     }
 }
 
 impl RequestedReadView {
     /// Return the current durability tier for one source expression.
-    pub(crate) fn source_current_tier(&self, source: &SourceId) -> Option<DurabilityTier> {
+    pub fn source_current_tier(&self, source: &SourceId) -> Option<DurabilityTier> {
         self.sources.get(source)?.current_tier()
     }
 }
@@ -76,7 +76,7 @@ impl RequestedReadView {
 /// fail here as `CapabilityReport::Source` instead of being rejected by ad-hoc
 /// facade gates. Runtime propagation and callback lifecycles stay outside this
 /// resolver; they consume the facts emitted by the lowered program.
-pub(crate) trait ReadViewResolver {
+pub trait ReadViewResolver {
     /// Translate unresolved API options into a requested read view.
     fn requested_read_view(
         &self,
@@ -89,18 +89,18 @@ pub(crate) trait ReadViewResolver {
 }
 
 /// Requested read expression for one logical source.
-pub(crate) type RequestedSourceExpr = SourceExpr<RequestedSourceStage>;
+pub type RequestedSourceExpr = SourceExpr<RequestedSourceStage>;
 
 /// Resolved read expression for one logical source.
-pub(crate) type ResolvedSourceExpr = SourceExpr<ResolvedSourceStage>;
+pub type ResolvedSourceExpr = SourceExpr<ResolvedSourceStage>;
 
 /// Canonical source-expression set at a particular resolution stage.
-pub(crate) type SourceGraph<R> = BTreeMap<SourceId, SourceExpr<R>>;
+pub type SourceGraph<R> = BTreeMap<SourceId, SourceExpr<R>>;
 
 /// Source expression algebra. Branches, snapshots, overlays, transactions, and
 /// schema projections compose here instead of selecting a separate query path.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum SourceExpr<R: SourceResolution> {
+pub enum SourceExpr<R: SourceResolution> {
     /// Visible current rows at one durability tier.
     VisibleCurrent {
         /// Schema/storage/lens projection used by this source.
@@ -184,7 +184,7 @@ pub(crate) enum SourceExpr<R: SourceResolution> {
 impl<R: SourceResolution> SourceExpr<R> {
     /// Return the current durability tier if this expression is a simple
     /// current-source expression after transparent projection/overlay nodes.
-    pub(crate) fn current_tier(&self) -> Option<DurabilityTier> {
+    pub fn current_tier(&self) -> Option<DurabilityTier> {
         match self {
             SourceExpr::VisibleCurrent { tier, .. } | SourceExpr::BranchView { tier, .. } => {
                 Some(*tier)
@@ -209,7 +209,7 @@ impl<R: SourceResolution> SourceExpr<R> {
 
 /// Resolved base of one table source in a branch view.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum BranchViewSourceBase {
+pub enum BranchViewSourceBase {
     /// Base remains connected to current storage.
     Current(BranchKey),
     /// Base is frozen at one application-resolved snapshot.
@@ -218,7 +218,7 @@ pub(crate) enum BranchViewSourceBase {
 
 /// Data branch/prefix selected for a source expression.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum DataSource<B> {
+pub enum DataSource<B> {
     /// Current/default data branch.
     Current,
     /// Explicit data branch/prefix.
@@ -227,18 +227,18 @@ pub(crate) enum DataSource<B> {
 
 /// Schema/storage/lens projection attached to a source-expression boundary.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct SchemaProjection<R: SourceResolution> {
+pub struct SchemaProjection<R: SourceResolution> {
     /// Schema family branch for this logical source.
-    pub(crate) schema_family: R::SchemaFamily,
+    pub schema_family: R::SchemaFamily,
     /// Stored schema partitions considered by source resolution.
-    pub(crate) storage: R::Storage,
+    pub storage: R::Storage,
     /// Lens/projection path from stored partitions into `read_schema`.
-    pub(crate) lens: R::Lens,
+    pub lens: R::Lens,
 }
 
 /// How multiple source expressions combine.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum SourceMergeMode {
+pub enum SourceMergeMode {
     /// LWW merge by row identity and transaction/version order.
     LastWriteWins,
     /// Preserve alternatives as a union. Downstream distinct/project nodes own
@@ -248,7 +248,7 @@ pub(crate) enum SourceMergeMode {
 
 /// Branch/schema-family selector for schema resolution.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum SchemaFamilySelection {
+pub enum SchemaFamilySelection {
     /// Current/default branch for the runtime.
     Current,
     /// Explicit schema-family branch.
@@ -257,7 +257,7 @@ pub(crate) enum SchemaFamilySelection {
 
 /// Stored schema partitions to read before projecting into `read_schema`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum StorageSchemaSelection {
+pub enum StorageSchemaSelection {
     /// Resolver chooses every compatible partition for the selected branch
     /// family and lens path.
     CompatiblePartitions,
@@ -269,7 +269,7 @@ pub(crate) enum StorageSchemaSelection {
 
 /// Lens/projection selector for schema-compatible reads.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum LensSelection {
+pub enum LensSelection {
     /// Resolver chooses the current canonical lens path into `read_schema`.
     Canonical,
     /// Require this already-resolved lens path fingerprint.
@@ -277,7 +277,7 @@ pub(crate) enum LensSelection {
 }
 
 /// Marker for metadata attached to requested vs resolved source selectors.
-pub(crate) trait SourceResolution {
+pub trait SourceResolution {
     /// Schema-family identity at this resolution stage.
     type SchemaFamily: Clone + std::fmt::Debug + PartialEq + Eq + std::hash::Hash;
     /// Storage partition identity at this resolution stage.
@@ -294,7 +294,7 @@ pub(crate) trait SourceResolution {
 
 /// Requested, unresolved source selector metadata.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct RequestedSourceStage;
+pub struct RequestedSourceStage;
 
 impl SourceResolution for RequestedSourceStage {
     type SchemaFamily = SchemaFamilySelection;
@@ -307,7 +307,7 @@ impl SourceResolution for RequestedSourceStage {
 
 /// Resolved source selector metadata.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct ResolvedSourceStage;
+pub struct ResolvedSourceStage;
 
 impl SourceResolution for ResolvedSourceStage {
     type SchemaFamily = SchemaFamilyId;
@@ -320,11 +320,11 @@ impl SourceResolution for ResolvedSourceStage {
 
 /// Ordered own-pending overlays included in current reads.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct OverlayStack<O> {
+pub struct OverlayStack<O> {
     /// Local overlays not yet visible at the selected durability tier, in
     /// application order. Open transactions are entries in the same sequence,
     /// not a second local-read path.
-    pub(crate) entries: Vec<O>,
+    pub entries: Vec<O>,
 }
 
 impl<O> Default for OverlayStack<O> {
@@ -337,7 +337,7 @@ impl<O> Default for OverlayStack<O> {
 
 /// Requested own-pending overlay included in current reads.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum OverlayRef {
+pub enum OverlayRef {
     /// Live pending local changes over exact authority inputs. Existing rows
     /// must already be in that source's scope; pending inserts may enter it.
     /// This is host-selected runtime configuration, not a wire capability.
@@ -353,16 +353,16 @@ pub(crate) enum OverlayRef {
 
 /// Resolved own-pending overlay identity used by shared maintained work.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct ResolvedOverlay {
+pub struct ResolvedOverlay {
     /// Requested overlay identity.
-    pub(crate) overlay: OverlayRef,
+    pub overlay: OverlayRef,
     /// Canonical manifest/completeness fingerprint.
-    pub(crate) manifest_fingerprint: Vec<u8>,
+    pub manifest_fingerprint: Vec<u8>,
 }
 
 /// Canonical batch identity.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct BatchId(pub(crate) Vec<u8>);
+pub struct BatchId(pub Vec<u8>);
 
 impl std::fmt::Debug for BatchId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -379,16 +379,16 @@ impl std::fmt::Debug for BatchId {
 /// Settled-frontier fact identity. Propagation, waiting, and retry behavior are
 /// runtime policy outside the compiler; the lowered program only emits the fact.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct CoverageFrontier {
+pub struct CoverageFrontier {
     /// Source/path scope.
-    pub(crate) scope: CoverageScope,
+    pub scope: CoverageScope,
     /// Frontier that must be settled.
-    pub(crate) frontier: FrontierRequirement,
+    pub frontier: FrontierRequirement,
 }
 
 /// Identity of one coverage scope.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum CoverageScope {
+pub enum CoverageScope {
     /// Whole row-set program.
     Program,
     /// Logical source.
@@ -399,7 +399,7 @@ pub(crate) enum CoverageScope {
 
 /// Concrete settled-frontier requirement.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum FrontierRequirement {
+pub enum FrontierRequirement {
     /// No async frontier gate beyond synchronous local settle.
     None,
     /// Wait until this resolved frontier has been applied.
@@ -408,19 +408,19 @@ pub(crate) enum FrontierRequirement {
 
 /// Resolved ordered frontier.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct ResolvedFrontier {
+pub struct ResolvedFrontier {
     /// Durability tier that must settle.
-    pub(crate) tier: DurabilityTier,
+    pub tier: DurabilityTier,
     /// Ordered stream whose through-position must be applied before the settled
     /// signal is consumable.
-    pub(crate) stream: Option<String>,
+    pub stream: Option<String>,
     /// Concrete stream/frontier position.
-    pub(crate) through: FrontierPosition,
+    pub through: FrontierPosition,
 }
 
 /// Stream/frontier position required by a settled signal.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum FrontierPosition {
+pub enum FrontierPosition {
     /// A concrete global timestamp cut.
     GlobalTime(GlobalTime),
     /// A concrete snapshot frontier fingerprint.
@@ -433,11 +433,11 @@ pub(crate) enum FrontierPosition {
 }
 /// One resolved stored-schema partition plus its lens path into read schema.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct ResolvedPartitionLens {
+pub struct ResolvedPartitionLens {
     /// Concrete stored schema partition.
-    pub(crate) storage_schema: SchemaVersionId,
+    pub storage_schema: SchemaVersionId,
     /// Canonical fingerprint of applied lens/projection path.
-    pub(crate) lens_path_fingerprint: Vec<u8>,
+    pub lens_path_fingerprint: Vec<u8>,
 }
 
 #[cfg(test)]
