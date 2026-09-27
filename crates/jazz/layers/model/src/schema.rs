@@ -2,8 +2,8 @@
 //! owns table/column declarations, merge-strategy declarations, policy metadata,
 //! storage-table naming, and migration-lens schema surfaces from
 //! `jazz/SPEC/10_lenses_migrations.md`;
-//! policy evaluation lives in [`crate::node::policy`], query shapes in
-//! [`crate::query`], and runtime catalogue ingestion in [`crate::node::ingest`].
+//! policy evaluation lives in `jazz::node::policy`, query shapes in
+//! [`crate::query`], and runtime catalogue ingestion in `jazz::node::ingest`.
 //! In the layer map it is the schema bridge from Jazz concepts to groove tables.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -85,7 +85,7 @@ impl JazzSchema {
     }
 
     /// Structural catalogue payload, independent of the active permissions.
-    pub(crate) fn without_permissions(&self) -> Self {
+    pub fn without_permissions(&self) -> Self {
         let mut schema = self.clone();
         for table in schema.public_schema.values_mut() {
             table.policies = Default::default();
@@ -98,7 +98,7 @@ impl JazzSchema {
     }
 
     /// Refresh non-identity metadata while retaining the selected grants.
-    pub(crate) fn with_permissions_from(&self, selected: &Self) -> Self {
+    pub fn with_permissions_from(&self, selected: &Self) -> Self {
         assert_eq!(self.version_id(), selected.version_id());
         let mut schema = self.clone();
         for (name, table) in &mut schema.public_schema {
@@ -132,31 +132,35 @@ impl JazzSchema {
         &self.runtime.tables
     }
 
-    pub(crate) fn from_runtime(public_schema: PublicSchema, runtime: RuntimeSchema) -> Self {
+    #[doc(hidden)]
+    pub fn from_runtime(public_schema: PublicSchema, runtime: RuntimeSchema) -> Self {
         Self {
             public_schema,
             runtime,
         }
     }
 
-    pub(crate) fn runtime(&self) -> &RuntimeSchema {
+    #[doc(hidden)]
+    pub fn runtime(&self) -> &RuntimeSchema {
         &self.runtime
     }
 
     #[cfg(any(test, feature = "testing"))]
-    pub(crate) fn runtime_mut_for_testing(&mut self) -> &mut RuntimeSchema {
+    #[doc(hidden)]
+    pub fn runtime_mut_for_testing(&mut self) -> &mut RuntimeSchema {
         &mut self.runtime
     }
 
     #[cfg(test)]
-    pub(crate) fn into_runtime(self) -> RuntimeSchema {
+    #[doc(hidden)]
+    pub fn into_runtime(self) -> RuntimeSchema {
         self.runtime
     }
 
     /// Construct a compiled schema for internal engine tests whose tables
     /// already declare their branch columns.
-    #[cfg(test)]
-    pub(crate) fn new_with_branch_columns(tables: impl IntoIterator<Item = TableSchema>) -> Self {
+    #[cfg(any(test, feature = "testing"))]
+    pub fn new_with_branch_columns(tables: impl IntoIterator<Item = TableSchema>) -> Self {
         Self::from_runtime(PublicSchema::new(), RuntimeSchema::new(tables))
     }
 }
@@ -185,8 +189,8 @@ impl PartialEq for RuntimeSchema {
 
 impl RuntimeSchema {
     /// Construct a compiled schema from already-lowered application tables.
-    #[cfg(test)]
-    pub(crate) fn new(tables: impl IntoIterator<Item = TableSchema>) -> Self {
+    #[cfg(any(test, feature = "testing"))]
+    pub fn new(tables: impl IntoIterator<Item = TableSchema>) -> Self {
         Self {
             tables: tables.into_iter().collect(),
         }
@@ -264,7 +268,7 @@ impl RuntimeSchema {
 
     /// Compare a stored key with a selector in this schema, interpreting
     /// branch columns absent from older monotone schemas at their defaults.
-    pub(crate) fn branch_key_matches(
+    pub fn branch_key_matches(
         &self,
         table: &TableSchema,
         stored: &BranchKey,
@@ -302,7 +306,7 @@ impl RuntimeSchema {
 
     /// Expand an older table-local key with immutable defaults from the
     /// current monotone branch-column declaration.
-    pub(crate) fn normalize_branch_key(
+    pub fn normalize_branch_key(
         &self,
         table: &TableSchema,
         stored: &BranchKey,
@@ -353,7 +357,7 @@ impl RuntimeSchema {
     /// defaults. Wire versions must carry the exact key declared by their own
     /// schema: accepting a short or non-canonical spelling here would let a
     /// peer change the physical branch coordinate independently of row cells.
-    pub(crate) fn validate_authored_branch_key(
+    pub fn validate_authored_branch_key(
         &self,
         table: &TableSchema,
         key: &BranchKey,
@@ -368,7 +372,7 @@ impl RuntimeSchema {
     /// names, scalar types, and stable-enum domains, so recovery must perform
     /// this second validation before a physical coordinate can influence a
     /// query or cache.
-    pub(crate) fn decode_persisted_branch_key(
+    pub fn decode_persisted_branch_key(
         table: &TableSchema,
         bytes: &[u8],
     ) -> Result<BranchKey, String> {
@@ -381,7 +385,7 @@ impl RuntimeSchema {
     /// Validate an exact branch coordinate against its owning table
     /// declaration. Shared by admission and persisted-state recovery so their
     /// type/domain rules cannot drift.
-    pub(crate) fn validate_branch_key_for_table(
+    pub fn validate_branch_key_for_table(
         table: &TableSchema,
         key: &BranchKey,
     ) -> Result<BTreeMap<String, Value>, String> {
@@ -428,7 +432,7 @@ impl RuntimeSchema {
     }
 
     /// Reconstruct the table-local named selector for an exact stored key.
-    pub(crate) fn branch_selector_for_key(
+    pub fn branch_selector_for_key(
         &self,
         table: &TableSchema,
         key: &BranchKey,
@@ -459,7 +463,7 @@ impl RuntimeSchema {
         Ok(BranchSelector { values })
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     fn validated(self) -> Self {
         let mut branch_column_types = BTreeMap::new();
         for table in &self.tables {
@@ -747,7 +751,7 @@ pub enum MergeStrategy {
     GSet,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 fn is_counter_column_type(column_type: &GrooveColumnType) -> bool {
     matches!(
         column_type,
@@ -760,22 +764,22 @@ fn is_counter_column_type(column_type: &GrooveColumnType) -> bool {
     )
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 fn is_gset_column_type(column_type: &GrooveColumnType) -> bool {
     matches!(column_type, GrooveColumnType::Array(_))
 }
 
 /// Semantics declared for a built-in column transform.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ColumnTransformSemantics {
+pub struct ColumnTransformSemantics {
     /// The transform has a total inverse over its declared value domain.
-    pub(crate) bijective: bool,
+    pub bijective: bool,
     /// Equal canonical source values remain equal after transform and inverse.
-    pub(crate) canonical_equality_preserving: bool,
+    pub canonical_equality_preserving: bool,
 }
 
 /// Return the semantics for a registered built-in column transform.
-pub(crate) fn registered_column_transform(key: &str) -> Option<ColumnTransformSemantics> {
+pub fn registered_column_transform(key: &str) -> Option<ColumnTransformSemantics> {
     match key {
         "identity" | "jazz.identity" => Some(ColumnTransformSemantics {
             bijective: true,
@@ -802,16 +806,16 @@ pub enum LargeValueSemanticKind {
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct ColumnSchema {
     /// Logical column name.
-    pub(crate) name: String,
+    pub name: String,
     /// Groove storage type used for this column's cell value.
-    pub(crate) column_type: GrooveColumnType,
+    pub column_type: GrooveColumnType,
     /// Immutable, schema-derived semantic kind used only by the hidden
     /// physical large-scalar envelope. JSON remains logically string-shaped in
     /// Groove, but cannot be decoded or staged as text at this boundary.
-    pub(crate) large_value_kind: LargeValueSemanticKind,
+    pub large_value_kind: LargeValueSemanticKind,
     /// Literal value used when an insert omits this column.
     #[serde(default)]
-    pub(crate) default: Option<Value>,
+    pub default: Option<Value>,
 }
 
 #[derive(serde::Deserialize)]
@@ -921,7 +925,7 @@ fn large_value_kind_for_type(column_type: &GrooveColumnType) -> LargeValueSemant
 /// Storage descriptors are schema-derived. JSON remains string-shaped to
 /// callers and operators, but its internal cell codec is distinct so a large
 /// JSON descriptor cannot be mistaken for text.
-pub(crate) fn storage_column_type(column: &ColumnSchema) -> GrooveColumnType {
+pub fn storage_column_type(column: &ColumnSchema) -> GrooveColumnType {
     match column.large_value_kind {
         LargeValueSemanticKind::Json => groove::large_values::physical_storage_value_type(
             groove::large_values::LargeValueKind::Json,
@@ -1030,7 +1034,7 @@ pub struct TableSchema {
 
 impl TableSchema {
     /// Construct a public/read-anyone table.
-    pub(crate) fn new(
+    pub fn new(
         name: impl Into<String>,
         columns: impl IntoIterator<Item = impl Into<ColumnSchema>>,
     ) -> Self {
@@ -1061,7 +1065,7 @@ impl TableSchema {
 
     /// Mark a user column as referencing another Jazz table.
     #[cfg(test)]
-    pub(crate) fn with_reference(
+    pub fn with_reference(
         mut self,
         column: impl Into<String>,
         target_table: impl Into<String>,
@@ -1071,8 +1075,8 @@ impl TableSchema {
     }
 
     /// Set a user column's merge strategy.
-    #[cfg(test)]
-    pub(crate) fn with_column_merge_strategy(
+    #[cfg(any(test, feature = "testing"))]
+    pub fn with_column_merge_strategy(
         mut self,
         column: impl Into<String>,
         strategy: MergeStrategy,
@@ -1090,22 +1094,22 @@ impl TableSchema {
     }
 
     /// Set the table read policy.
-    #[cfg(test)]
-    pub(crate) fn with_read_policy(mut self, read_policy: impl Into<Option<Query>>) -> Self {
+    #[cfg(any(test, feature = "testing"))]
+    pub fn with_read_policy(mut self, read_policy: impl Into<Option<Query>>) -> Self {
         self.read_policy = read_policy.into();
         self
     }
 
     /// Set the table write policy.
     #[cfg(test)]
-    pub(crate) fn with_write_policy(mut self, write_policy: impl Into<Option<Query>>) -> Self {
+    pub fn with_write_policy(mut self, write_policy: impl Into<Option<Query>>) -> Self {
         self.write_policies = WritePolicies::legacy(write_policy.into());
         self
     }
 
     /// Set operation-specific write policies.
-    #[cfg(test)]
-    pub(crate) fn with_write_policies(mut self, write_policies: WritePolicies) -> Self {
+    #[cfg(any(test, feature = "testing"))]
+    pub fn with_write_policies(mut self, write_policies: WritePolicies) -> Self {
         self.write_policies = write_policies;
         self
     }
@@ -1142,7 +1146,7 @@ impl TableSchema {
 
     /// Alias kept at the codec boundary to make the physical interpretation
     /// explicit at call sites.
-    pub(crate) fn authored_history_storage_table(&self) -> GrooveTableSchema {
+    pub fn authored_history_storage_table(&self) -> GrooveTableSchema {
         self.history_storage_table()
     }
 
@@ -1524,7 +1528,7 @@ fn global_changes_table() -> GrooveTableSchema {
 /// This is intentionally a fixed system table rather than a schema-variant
 /// table: deletion payload has no user cells. Branch-key routing is added by
 /// the physical branch-local row layer rather than transaction metadata.
-pub(crate) fn shared_deletion_history_table() -> GrooveTableSchema {
+pub fn shared_deletion_history_table() -> GrooveTableSchema {
     GrooveTableSchema::new(
         "jazz_deletion_history",
         [
@@ -1606,12 +1610,12 @@ fn pending_edges_table() -> GrooveTableSchema {
 
 /// Policy-shape constructors.
 #[cfg(test)]
-pub(crate) struct Policy;
+pub struct Policy;
 
 #[cfg(test)]
 impl Policy {
     /// Owner-only policy equivalent to `column == claim("user")`.
-    pub(crate) fn owner_only(table: impl Into<String>, column: impl Into<String>) -> Option<Query> {
+    pub fn owner_only(table: impl Into<String>, column: impl Into<String>) -> Option<Query> {
         Some(Query::from(table).filter(eq(col(column), claim("user"))))
     }
 }
@@ -1666,13 +1670,15 @@ fn column(name: impl Into<String>, column_type: GrooveColumnType) -> groove::sch
 
 /// Frozen carrier namespace used by schema-owned stored/current/wire fields.
 /// Application names are encoded by this constructor, never parsed as identity.
-pub(crate) const APP_COLUMN_PREFIX: &str = "_app_";
+pub const APP_COLUMN_PREFIX: &str = "_app_";
 
-pub(crate) fn app_storage_column_name(column: &str) -> String {
+#[doc(hidden)]
+pub fn app_storage_column_name(column: &str) -> String {
     format!("{APP_COLUMN_PREFIX}{column}")
 }
 
-pub(crate) fn global_current_index_name(column: &str) -> String {
+#[doc(hidden)]
+pub fn global_current_index_name(column: &str) -> String {
     format!("by_app_{column}")
 }
 
@@ -1683,7 +1689,7 @@ pub(crate) fn global_current_index_name(column: &str) -> String {
 /// `composite_5_owner_4_rank` would otherwise collide with the `(owner, rank)`
 /// index. `by_composite_` is a prefix no single-column name can produce, and
 /// the `<len>_<name>` segments keep distinct column lists distinct.
-pub(crate) fn global_current_composite_index_name(columns: &[String]) -> String {
+pub fn global_current_composite_index_name(columns: &[String]) -> String {
     format!(
         "by_composite_{}",
         columns
@@ -1911,7 +1917,7 @@ fn contribution_merge_column() -> GrooveColumnType {
 /// Bound physical type used by the transaction codec. Constructing the
 /// single-column table applies the same durable registry paths as the real
 /// `jazz_transactions.contribution_merge` column.
-pub(crate) fn contribution_merge_storage_type() -> GrooveColumnType {
+pub fn contribution_merge_storage_type() -> GrooveColumnType {
     GrooveTableSchema::new(
         "jazz_transactions",
         [column("contribution_merge", contribution_merge_column())],
@@ -2110,7 +2116,7 @@ fn rejected_transactions_table() -> GrooveTableSchema {
 /// Whether a stored column's physical encoding stays readable under another
 /// table schema's column: same merge strategy and a value type that only
 /// appends enum variants or cases.
-pub(crate) fn physical_column_epoch_is_compatible(
+pub fn physical_column_epoch_is_compatible(
     source_table: &TableSchema,
     source_column_name: &str,
     target_table: &TableSchema,
@@ -2136,7 +2142,8 @@ pub(crate) fn physical_column_epoch_is_compatible(
             == target_table.merge_strategy(target_column_name)
 }
 
-pub(crate) fn physical_value_epoch_is_compatible(
+#[doc(hidden)]
+pub fn physical_value_epoch_is_compatible(
     source: &groove::records::ValueType,
     target: &groove::records::ValueType,
 ) -> bool {
@@ -2180,7 +2187,7 @@ fn physical_record_epoch_is_compatible(
 }
 
 /// Record layout of a row's local-availability receipt column.
-pub(crate) fn local_availability_record_descriptor() -> groove::records::RecordDescriptor {
+pub fn local_availability_record_descriptor() -> groove::records::RecordDescriptor {
     groove::records::RecordDescriptor::new([
         ("format_v1", groove::records::ValueType::U8),
         ("unavailable", groove::records::ValueType::Bool),

@@ -1,6 +1,7 @@
 /// Construct a column operand.
 ///
 /// ```rust
+/// # extern crate jazz_model as jazz;
 /// # use jazz::query::{col, doctest_support, eq, lit, Query};
 /// let query = Query::from("issues").filter(eq(col("state"), lit("open")));
 ///
@@ -14,6 +15,7 @@ pub fn col(name: impl Into<String>) -> Operand {
 /// Construct a parameter operand.
 ///
 /// ```rust
+/// # extern crate jazz_model as jazz;
 /// # use jazz::query::{col, doctest_support, eq, param, Query};
 /// let query = Query::from("issues").filter(eq(col("assignee"), param("user")));
 ///
@@ -32,6 +34,7 @@ pub fn claim(name: impl Into<String>) -> Operand {
 /// Construct a literal operand.
 ///
 /// ```rust
+/// # extern crate jazz_model as jazz;
 /// # use jazz::query::{col, doctest_support, eq, lit, Query};
 /// let query = Query::from("issues").filter(eq(col("state"), lit("open")));
 ///
@@ -45,6 +48,7 @@ pub fn lit(value: impl Into<Value>) -> Operand {
 /// Construct an equality predicate.
 ///
 /// ```rust
+/// # extern crate jazz_model as jazz;
 /// # use jazz::query::{col, doctest_support, eq, lit, Query};
 /// let query = Query::from("issues").filter(eq(col("state"), lit("open")));
 ///
@@ -63,6 +67,7 @@ pub fn ne(left: Operand, right: Operand) -> Predicate {
 /// Construct an all-of predicate.
 ///
 /// ```rust
+/// # extern crate jazz_model as jazz;
 /// # use jazz::query::{all_of, col, doctest_support, eq, gt, lit, Query};
 /// let query = Query::from("issues").filter(all_of([
 ///     eq(col("state"), lit("open")),
@@ -79,6 +84,7 @@ pub fn all_of(predicates: impl IntoIterator<Item = Predicate>) -> Predicate {
 /// Construct an any-of predicate.
 ///
 /// ```rust
+/// # extern crate jazz_model as jazz;
 /// # use jazz::query::{any_of, col, doctest_support, eq, lit, Query};
 /// let query = Query::from("issues").filter(any_of([
 ///     eq(col("state"), lit("open")),
@@ -95,6 +101,7 @@ pub fn any_of(predicates: impl IntoIterator<Item = Predicate>) -> Predicate {
 /// Construct a negated predicate.
 ///
 /// ```rust
+/// # extern crate jazz_model as jazz;
 /// # use jazz::query::{col, doctest_support, eq, lit, not, Query};
 /// let query = Query::from("issues").filter(not(eq(col("state"), lit("closed"))));
 ///
@@ -108,6 +115,7 @@ pub fn not(predicate: Predicate) -> Predicate {
 /// Construct an `IN` predicate.
 ///
 /// ```rust
+/// # extern crate jazz_model as jazz;
 /// # use jazz::query::{col, doctest_support, in_list, lit, Query};
 /// let query = Query::from("issues")
 ///     .filter(in_list(col("state"), [lit("open"), lit("triage")]));
@@ -122,6 +130,7 @@ pub fn in_list(left: Operand, values: impl IntoIterator<Item = Operand>) -> Pred
 /// Construct a greater-than predicate.
 ///
 /// ```rust
+/// # extern crate jazz_model as jazz;
 /// # use jazz::query::{col, doctest_support, gt, lit, Query};
 /// let query = Query::from("issues").filter(gt(col("priority"), lit(3_u64)));
 ///
@@ -140,6 +149,7 @@ pub fn gte(left: Operand, right: Operand) -> Predicate {
 /// Construct a less-than predicate.
 ///
 /// ```rust
+/// # extern crate jazz_model as jazz;
 /// # use jazz::query::{col, doctest_support, lit, lt, Query};
 /// let query = Query::from("issues").filter(lt(col("priority"), lit(10_u64)));
 ///

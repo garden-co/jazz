@@ -18,7 +18,7 @@ use groove::records::{
 /// tuples), and rejects engine-owned values such as rows or large-value refs.
 /// Those values are not valid policy claims because their physical identity is
 /// local storage state rather than a portable session assertion.
-pub(crate) fn policy_binding_directory_claims_value(
+pub fn policy_binding_directory_claims_value(
     claims: &BTreeMap<String, Value>,
 ) -> Result<Value, String> {
     let mut nodes = Vec::new();
@@ -29,7 +29,7 @@ pub(crate) fn policy_binding_directory_claims_value(
 }
 
 /// Decode and validate the normal Groove representation of policy claims.
-pub(crate) fn policy_binding_directory_claims_from_value(
+pub fn policy_binding_directory_claims_from_value(
     value: Value,
 ) -> Result<BTreeMap<String, Value>, String> {
     let Value::Array(nodes) = value else {
@@ -52,7 +52,7 @@ pub(crate) fn policy_binding_directory_claims_from_value(
     Ok(claims)
 }
 
-pub(crate) fn policy_directory_descriptor() -> RecordDescriptor {
+pub fn policy_directory_descriptor() -> RecordDescriptor {
     RecordDescriptor::new([
         ("derived_v1", ValueType::U8),
         (
@@ -64,7 +64,7 @@ pub(crate) fn policy_directory_descriptor() -> RecordDescriptor {
     ])
 }
 
-pub(crate) fn policy_directory_payload(presence: u8, claims: Value) -> Result<Value, String> {
+pub fn policy_directory_payload(presence: u8, claims: Value) -> Result<Value, String> {
     let descriptor = policy_directory_descriptor();
     Ok(Value::Record(OwnedRecord::new(
         descriptor
@@ -75,7 +75,7 @@ pub(crate) fn policy_directory_payload(presence: u8, claims: Value) -> Result<Va
 }
 
 /// Direct-store value type for the collision-checked policy-binding directory.
-pub(crate) fn policy_binding_directory_claims_value_type() -> ValueType {
+pub fn policy_binding_directory_claims_value_type() -> ValueType {
     ValueType::Record(Box::new(policy_directory_descriptor()))
 }
 

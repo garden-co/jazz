@@ -8,7 +8,9 @@ use serde::de::{self, DeserializeSeed, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 
 const MAX_RELATION_BYTES: usize = 1 << 20;
-const MAX_RELATION_DEPTH: usize = 128;
+/// Deepest relation tree the typed Postcard decoder accepts.
+#[doc(hidden)]
+pub const MAX_RELATION_DEPTH: usize = 128;
 const MAX_RELATION_ITEMS: usize = 4096;
 const MAX_RELATION_STRING_BYTES: usize = 1 << 16;
 
@@ -215,7 +217,8 @@ fn deserialize_bounded_string_vec<'de, D: de::Deserializer<'de>>(
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
-pub(crate) struct WireRelationQuery {
+#[doc(hidden)]
+pub struct WireRelationQuery {
     rel: WireRelationExpr,
 }
 
@@ -1136,13 +1139,15 @@ fn relation_expr(value: WireRelationExpr) -> WireResult<RelationExpr> {
     })
 }
 
-pub(crate) fn relation_query_to_wire(value: &RelationQuery) -> WireResult<WireRelationQuery> {
+#[doc(hidden)]
+pub fn relation_query_to_wire(value: &RelationQuery) -> WireResult<WireRelationQuery> {
     let wire = WireRelationQuery::try_from(value)?;
     ensure_wire_size(&wire)?;
     validate_wire(&wire)?;
     Ok(wire)
 }
-pub(crate) fn relation_query_from_wire(value: WireRelationQuery) -> WireResult<RelationQuery> {
+#[doc(hidden)]
+pub fn relation_query_from_wire(value: WireRelationQuery) -> WireResult<RelationQuery> {
     ensure_wire_size(&value)?;
     validate_wire(&value)?;
     RelationQuery::try_from(value)
@@ -1438,7 +1443,7 @@ mod relation_postcard_tests {
 
     #[test]
     fn typed_postcard_corpus_is_current() {
-        let source = include_str!("../../fixtures/relation_query_postcard.json");
+        let source = include_str!("../../../../fixtures/relation_query_postcard.json");
         let corpus: Corpus = serde_json::from_str(source).unwrap();
         if std::env::var_os("JAZZ_UPDATE_RELATION_POSTCARD_CORPUS").is_some() {
             let mut updated = source.to_owned();
@@ -1454,7 +1459,7 @@ mod relation_postcard_tests {
             std::fs::write(
                 concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/fixtures/relation_query_postcard.json"
+                    "/../../fixtures/relation_query_postcard.json"
                 ),
                 updated,
             )
@@ -1553,32 +1558,6 @@ mod relation_postcard_tests {
             query
         );
 
-        let shape = crate::protocol::ShapeAst::new_relation(
-            RelationQuery {
-                rel: RelationExpr::TableScan {
-                    table: "t".into(),
-                    alias: None,
-                },
-            },
-            crate::ids::SchemaVersionId(uuid::Uuid::nil()),
-        );
-        let mut shape_bytes = postcard::to_allocvec(&shape).unwrap();
-        assert!(shape_bytes.ends_with(&table_scan));
-        shape_bytes.truncate(shape_bytes.len() - table_scan.len());
-        shape_bytes.extend(&relation);
-        assert!(
-            std::panic::catch_unwind(|| postcard::from_bytes::<crate::protocol::ShapeAst>(
-                &shape_bytes
-            ))
-            .is_ok()
-        );
-        assert!(postcard::from_bytes::<crate::protocol::ShapeAst>(&shape_bytes).is_err());
-        let valid_shape_bytes = postcard::to_allocvec(&shape).unwrap();
-        assert_eq!(
-            crate::postcard_exact::decode_postcard_exact::<crate::protocol::ShapeAst>(&valid_shape_bytes)
-                .unwrap(),
-            shape
-        );
 
         let mut union = Vec::new();
         for _ in 0..=MAX_RELATION_DEPTH {
@@ -1674,7 +1653,7 @@ mod relation_postcard_tests {
     }
 
     #[test]
-    fn query_and_shape_carry_relation_postcard_recursively() {
+    fn query_carries_relation_postcard_recursively() {
         let relation = RelationQuery {
             rel: RelationExpr::Filter {
                 input: Box::new(RelationExpr::TableScan {
@@ -1695,15 +1674,5 @@ mod relation_postcard_tests {
         query.relation = Some(relation.clone());
         let query_bytes = postcard::to_allocvec(&query).unwrap();
         assert_eq!(postcard::from_bytes::<Query>(&query_bytes).unwrap(), query);
-
-        let shape = crate::protocol::ShapeAst::new_relation(
-            relation,
-            crate::ids::SchemaVersionId(uuid::Uuid::nil()),
-        );
-        let shape_bytes = postcard::to_allocvec(&shape).unwrap();
-        assert_eq!(
-            postcard::from_bytes::<crate::protocol::ShapeAst>(&shape_bytes).unwrap(),
-            shape
-        );
     }
 }

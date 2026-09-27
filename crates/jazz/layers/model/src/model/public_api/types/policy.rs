@@ -126,7 +126,8 @@ impl TablePolicies {
 /// Build table permissions with a TypeScript-DSL-like API.
 ///
 /// ```
-/// # use jazz::tools::{permissions, policy_expr as expr};
+/// # extern crate jazz_model as jazz;
+/// # use jazz::model::public_schema::{permissions, policy_expr as expr};
 /// let policies = permissions(|p| {
 ///     p.allow_read()
 ///         .where_(expr::eq("owner_id", expr::session("user_id")));

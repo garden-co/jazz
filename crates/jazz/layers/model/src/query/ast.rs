@@ -55,12 +55,13 @@ pub struct Query {
 
 /// Human-readable query JSON retains the relation tree. Non-human serializers
 /// carry the typed Postcard relation tree.
-pub(crate) mod relation_query_wire {
+pub mod relation_query_wire {
     use super::{
         relation_query_from_wire, relation_query_to_wire, RelationQuery, WireRelationQuery,
     };
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+    #[doc(hidden)]
     pub fn serialize<S>(value: &Option<RelationQuery>, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -76,6 +77,7 @@ pub(crate) mod relation_query_wire {
             .serialize(serializer)
     }
 
+    #[doc(hidden)]
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<RelationQuery>, D::Error>
     where
         D: Deserializer<'de>,
@@ -88,6 +90,7 @@ pub(crate) mod relation_query_wire {
             .transpose()
     }
 
+    #[doc(hidden)]
     pub fn serialize_required<S>(value: &RelationQuery, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -100,6 +103,7 @@ pub(crate) mod relation_query_wire {
                 .serialize(serializer)
         }
     }
+    #[doc(hidden)]
     pub fn deserialize_required<'de, D>(deserializer: D) -> Result<RelationQuery, D::Error>
     where
         D: Deserializer<'de>,

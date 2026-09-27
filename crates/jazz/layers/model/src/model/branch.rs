@@ -122,10 +122,7 @@ impl From<Value> for BranchColumnValue {
 
 impl BranchColumnValue {
     /// Encode one value using its schema-declared Groove column type.
-    pub(crate) fn encode_typed(
-        value: &Value,
-        value_type: &ValueType,
-    ) -> Result<Self, BranchCodecError> {
+    pub fn encode_typed(value: &Value, value_type: &ValueType) -> Result<Self, BranchCodecError> {
         let tag = branch_column_tag(value_type).ok_or(BranchCodecError::UnsupportedType)?;
         let descriptor = RecordDescriptor::new([("value", value_type.clone())]);
         let payload = descriptor.create(std::slice::from_ref(value))?;
@@ -149,7 +146,7 @@ impl BranchColumnValue {
     }
 
     /// Decode and canonically validate an exact key value against its schema.
-    pub(crate) fn decode_as(&self, value_type: &ValueType) -> Result<Value, BranchCodecError> {
+    pub fn decode_as(&self, value_type: &ValueType) -> Result<Value, BranchCodecError> {
         let (tag, payload) = self.envelope()?;
         if branch_column_tag(value_type) != Some(tag) {
             return Err(BranchCodecError::TypeMismatch);

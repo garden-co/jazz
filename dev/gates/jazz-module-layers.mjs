@@ -75,13 +75,7 @@ export const LAYERS = {
 // File-path prefixes (relative to crates/jazz/src) and their layer. The
 // longest matching prefix wins; anything unmatched is facade.
 export const LAYER_OF_PATH = [
-  // types: extracted to crates/jazz-types.
-
-  ["schema.rs", "model"],
-  ["query.rs", "model"],
-  ["query/", "model"],
-  ["tx.rs", "model"],
-  ["model/", "model"],
+  // types and model: extracted to crates/jazz/layers/{types,model}.
 
   ["protocol.rs", "protocol"],
   ["protocol/", "protocol"],
@@ -106,6 +100,10 @@ export const LAYER_OF_PATH = [
 ];
 
 export function layerOf(rel) {
+  return defaultLayerOf(rel);
+}
+
+function defaultLayerOf(rel) {
   let best = null;
   for (const [prefix, layer] of LAYER_OF_PATH) {
     if (rel === prefix || (prefix.endsWith("/") && rel.startsWith(prefix))) {
@@ -344,7 +342,7 @@ function identifiers(text) {
   return new Set(text.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []);
 }
 
-export function analyze({ includeTests = false, src = SRC } = {}) {
+export function analyze({ includeTests = false, src = SRC, layerOf = defaultLayerOf } = {}) {
   const EXTERNAL_REEXPORTS = externalReexports(src);
   const files = walk(src).map((full) => path.relative(src, full).split(path.sep).join("/"));
   const moduleFile = new Map(); // "a::b" -> rel

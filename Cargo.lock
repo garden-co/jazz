@@ -2041,6 +2041,7 @@ dependencies = [
  "internment",
  "jazz-benchmark-guard",
  "jazz-compression",
+ "jazz-model",
  "jazz-storage-rocksdb",
  "jazz-storage-sqlite",
  "jazz-types",
@@ -2276,6 +2277,25 @@ dependencies = [
  "codspeed-divan-compat",
  "jazz",
  "jazz-benchmark-guard",
+]
+
+[[package]]
+name = "jazz-model"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "blake3",
+ "groove",
+ "hex",
+ "internment",
+ "jazz-types",
+ "jsonschema",
+ "postcard",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "thiserror",
+ "uuid",
 ]
 
 [[package]]
