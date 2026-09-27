@@ -21,9 +21,9 @@ pub(super) enum PhysicalWriteTarget {
 pub(super) struct PreparedPhysicalWritePlan {
     pub(super) storage_table: String,
     pub(super) source_table: Arc<TableSchema>,
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     pub(super) source_mapping: Arc<TablePhysicalMapping>,
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     pub(super) physical_table: Arc<GrooveTableSchema>,
     pub(super) logical_descriptor: records::RecordDescriptor,
     pub(super) physical_descriptor: records::RecordDescriptor,

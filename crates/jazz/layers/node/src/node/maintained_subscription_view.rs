@@ -29,7 +29,7 @@ use crate::node::terminal_root::{
 };
 use crate::node::{CurrentRowPublicationField, CurrentRowResultVisibility};
 use crate::object::{ObjectId, OutputOccurrenceId};
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 use crate::protocol::CoveredInputEntry;
 use crate::protocol::{
     BranchKey, ProgramFactEntry, ProgramSourceId, RealRowMemberEntry, RelationEdgeEntry,
@@ -100,7 +100,7 @@ pub struct MaintainedSubscriptionView {
     /// can affect publishability. Keep candidates across partial/failed drains;
     /// `None` requires a full reconcile (also used by witness-gated views).
     unreconciled_result_members: Option<RetainedResultMembers>,
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     result_member_reconcile_visits: usize,
     result_payloads: RetainedResultMap<ResultMemberPayloadEntry>,
     /// Payloads paired with memberships already exposed to a consumer. Keep
@@ -127,7 +127,7 @@ pub struct MaintainedSubscriptionView {
     /// Counts key comparisons made while scanning `structured_root_key_order`
     /// for membership. Any such scan on an insert path must bump it, so tests
     /// can pin that opening N fresh rows stays linear.
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     root_order_insert_comparisons: usize,
     structured_app_row_descriptor: Option<RecordDescriptor>,
     /// Whether this maintained subscription retains the recursive app-row
@@ -170,7 +170,7 @@ impl Default for MaintainedSubscriptionView {
             result_weights: RetainedResultMap::default(),
             published_result_members: RetainedResultMembers::default(),
             unreconciled_result_members: None,
-            #[cfg(any(test, feature = "testing"))]
+            #[cfg(test)]
             result_member_reconcile_visits: 0,
             result_payloads: RetainedResultMap::default(),
             published_result_payloads: RetainedResultMap::default(),
@@ -178,7 +178,7 @@ impl Default for MaintainedSubscriptionView {
             structured_terminal_records: BTreeMap::new(),
             structured_root_keys: BTreeMap::new(),
             structured_root_key_order: Vec::new(),
-            #[cfg(any(test, feature = "testing"))]
+            #[cfg(test)]
             root_order_insert_comparisons: 0,
             structured_app_row_descriptor: None,
             retains_structured_app_rows: true,
@@ -940,7 +940,7 @@ impl MaintainedSubscriptionView {
         transitions.result_payload_removes.extend(payload_removes);
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     fn apply_decoded_deltas(
         &mut self,
         rows: impl IntoIterator<Item = (DecodedMaintainedEvent, i64)>,
@@ -1218,7 +1218,7 @@ impl MaintainedSubscriptionView {
             + self.published_result_members.entry_bytes;
         let result_payloads_bytes = self.result_payloads.footprint_bytes()
             + self.published_result_payloads.footprint_bytes();
-        #[cfg(any(test, feature = "testing"))]
+        #[cfg(test)]
         self.assert_incremental_footprint_matches_full_scan();
         let supporting_frontier_bytes = self.supporting.retained_bytes();
         let versions_bytes = self.versions.footprint_bytes()
@@ -1289,7 +1289,7 @@ impl MaintainedSubscriptionView {
 
     // Accounting is not observable from row/query APIs. Keep the old full-scan
     // model as a test-only oracle at every exercised footprint refresh.
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     fn assert_incremental_footprint_matches_full_scan(&self) {
         fn check_map<V: RetainedResultValue>(map: &RetainedResultMap<V>) {
             assert_eq!(
@@ -1365,7 +1365,7 @@ impl MaintainedSubscriptionView {
     /// Returns the collector row for a public root only when it has one
     /// occurrence. Callers that materialize a flat relation must use the
     /// opaque-key accessor below: a root UUID cannot select among siblings.
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     pub fn structured_app_row(&self, root: RowUuid) -> Option<OwnedRecord> {
         let mut rows = self
             .structured_root_key_order
@@ -1379,7 +1379,7 @@ impl MaintainedSubscriptionView {
         rows.next().is_none().then_some(row)
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     #[doc(hidden)]
     pub fn structured_app_rows(&self) -> Vec<(RowUuid, OwnedRecord)> {
         self.structured_root_key_order
@@ -1568,7 +1568,7 @@ impl MaintainedSubscriptionView {
                 // each one would make an initial result quadratic.
                 if root_was_present {
                     self.structured_root_key_order.retain(|key| {
-                        #[cfg(any(test, feature = "testing"))]
+                        #[cfg(test)]
                         {
                             self.root_order_insert_comparisons += 1;
                         }
@@ -1630,7 +1630,7 @@ impl MaintainedSubscriptionView {
     ) {
         let (adds, removes) = if let Some(candidates) = self.unreconciled_result_members.take() {
             debug_assert!(self.storage_backed_result_materialization);
-            #[cfg(any(test, feature = "testing"))]
+            #[cfg(test)]
             {
                 self.result_member_reconcile_visits += candidates.len();
             }
@@ -1655,7 +1655,7 @@ impl MaintainedSubscriptionView {
             }
             (adds, removes)
         } else {
-            #[cfg(any(test, feature = "testing"))]
+            #[cfg(test)]
             {
                 self.result_member_reconcile_visits += self.result_weights.len();
             }
@@ -1870,7 +1870,7 @@ impl MaintainedSubscriptionView {
 /// advance. This intentionally names input rows rather than collector output:
 /// a retained result member can change because a nested child, a sort key, or
 /// a deletion-register witness advanced while the output membership did not.
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 fn covered_input_for_version(
     source: ProgramSourceId,
     row: &VersionRow,
@@ -3219,9 +3219,9 @@ fn decode_typed_version_witness(
             Ok(())
         },
     )?;
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     let mut parts = parts;
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     {
         // Internal byte-equivalence oracle: public query equality would not
         // detect a change to the immutable history record's exact encoding.
@@ -3535,7 +3535,7 @@ impl ReplacementIndex {
         self.entry_count
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     fn assert_footprint_matches_full_scan(&self) {
         assert_eq!(
             self.footprint_bytes(),
@@ -3553,7 +3553,7 @@ impl ReplacementIndex {
     }
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 fn replacement_map_bytes(
     by_key: &BTreeMap<ReplacementKey, BTreeMap<VersionIdentity, WeightedVersion>>,
 ) -> usize {
@@ -6331,7 +6331,7 @@ mod terminal_role_hash_tests {
     }
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 std::thread_local! {
     #[doc(hidden)]
     pub static SOURCE_CLOSURE_POINT_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };

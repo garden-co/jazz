@@ -76,7 +76,7 @@ where
         let mut global_current_updates = Vec::new();
         let cleanup_rejected_versions = matches!(stored.fate, Fate::Rejected(_));
         let tx_versions = self.query_versions_for_tx(tx_id).await?;
-        #[cfg(any(test, feature = "testing"))]
+        #[cfg(test)]
         let content_versions = tx_versions
             .iter()
             .filter(|version| version.layer() == VersionLayer::Content)
@@ -137,7 +137,7 @@ where
                 self.write_global_current_update(&mut batch, version, global_time)?;
             }
         }
-        #[cfg(any(test, feature = "testing"))]
+        #[cfg(test)]
         let global_current_update_versions = stored
             .global_time
             .map(|global_time| {
@@ -172,7 +172,7 @@ where
             self.persist_storage_consistency_marker_through(tx_id.time)
                 .await?;
         }
-        #[cfg(any(test, feature = "testing"))]
+        #[cfg(test)]
         {
             let rows = content_versions
                 .iter()
@@ -1019,7 +1019,7 @@ where
         Ok(updates)
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     #[doc(hidden)]
     pub async fn transaction_ids(&self) -> Result<Vec<TxId>, Error> {
         let mut tx_ids = Vec::new();

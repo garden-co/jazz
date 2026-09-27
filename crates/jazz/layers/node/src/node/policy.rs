@@ -78,7 +78,7 @@ where
     /// version record.  This is the sole bridge from committed wire data to
     /// authorization support hydration: callers must not substitute a
     /// table-wide or placeholder update action.
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     pub async fn authorization_actions_for_versions(
         &mut self,
         versions: &[VersionRecord],
@@ -428,7 +428,7 @@ where
             .await
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     #[doc(hidden)]
     pub async fn advisory_mergeable_write_allows(
         &mut self,
@@ -550,7 +550,7 @@ where
         Ok(rows.into_iter().any(|row| row.row_uuid() == row_uuid))
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     #[doc(hidden)]
     pub async fn dry_run_write_current_allows(
         &mut self,

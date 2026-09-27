@@ -8,7 +8,7 @@
 use super::*;
 use crate::schema::RuntimeSchema;
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 thread_local! {
     pub(super) static HISTORY_PAYLOAD_DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(super) static TRANSACTION_PAYLOAD_DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -423,7 +423,7 @@ where
         Ok(winner)
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     pub(super) async fn query_all_versions(&mut self) -> Result<Vec<VersionRow>, Error> {
         let mut versions = Vec::new();
         for table in self.catalogue.schema.tables.clone() {
@@ -519,7 +519,7 @@ where
         &mut self,
         tx_id: TxId,
     ) -> Result<Vec<VersionRow>, Error> {
-        #[cfg(any(test, feature = "testing"))]
+        #[cfg(test)]
         record_query_versions_for_tx_call();
 
         let Some(tx) = self.query_transaction(tx_id).await? else {
@@ -677,7 +677,7 @@ where
             if version.row_uuid() == row_uuid
                 && self.physical_table_id_for_version(&version)? == physical_table_id
             {
-                #[cfg(any(test, feature = "testing"))]
+                #[cfg(test)]
                 record_parent_version_lookup_materialized_rows(1);
                 matching.push(version);
             }
@@ -833,7 +833,7 @@ where
         storage_table: &str,
         record: OwnedRecord,
     ) -> Result<VersionRow, Error> {
-        #[cfg(any(test, feature = "testing"))]
+        #[cfg(test)]
         HISTORY_PAYLOAD_DECODES.with(|count| count.set(count.get() + 1));
         if storage_table == SHARED_DELETION_HISTORY_TABLE {
             let shared = record.to_values()?;
@@ -1181,7 +1181,7 @@ where
         expected_alias: NodeAlias,
         record: BorrowedRecord<'_>,
     ) -> Result<StoredTransaction, Error> {
-        #[cfg(any(test, feature = "testing"))]
+        #[cfg(test)]
         TRANSACTION_PAYLOAD_DECODES.with(|count| count.set(count.get() + 1));
         let tx = Transaction {
             tx_id,

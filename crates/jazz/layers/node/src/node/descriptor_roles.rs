@@ -402,7 +402,7 @@ impl CurrentPayloadEncodePlan {
     }
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 pub(super) fn encode_current_payload_record(
     record: BorrowedRecord<'_>,
     schema: &super::query_engine::ResultMembershipSchema,

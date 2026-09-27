@@ -47,29 +47,29 @@ impl Drop for HydrationSubscription<'_> {
     }
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 pub(super) struct ScopedPolicyGraphReplacementPause;
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 thread_local! {
     static SCOPED_POLICY_GRAPH_REPLACEMENT_PAUSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 impl Drop for ScopedPolicyGraphReplacementPause {
     fn drop(&mut self) {
         SCOPED_POLICY_GRAPH_REPLACEMENT_PAUSED.with(|paused| paused.set(false));
     }
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 pub(super) fn pause_scoped_policy_graph_replacement_for_test() -> ScopedPolicyGraphReplacementPause
 {
     SCOPED_POLICY_GRAPH_REPLACEMENT_PAUSED.with(|paused| paused.set(true));
     ScopedPolicyGraphReplacementPause
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 async fn wait_for_scoped_policy_graph_replacement_for_test() {
     if SCOPED_POLICY_GRAPH_REPLACEMENT_PAUSED.with(|paused| paused.get()) {
         std::future::pending::<()>().await;
@@ -1088,7 +1088,7 @@ where
                         self.query
                             .policy_authorization_graph_cache
                             .insert(cache_key.clone(), graph);
-                        #[cfg(any(test, feature = "testing"))]
+                        #[cfg(test)]
                         wait_for_scoped_policy_graph_replacement_for_test().await;
                     }
                     Err(Error::QueryCapability(error)) if error.contains("PolicyProofCycle") => {

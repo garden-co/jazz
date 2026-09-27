@@ -359,7 +359,7 @@ where
             .retain(|(subscription, _), _| !reclaimed.contains(subscription.shape_id));
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     #[doc(hidden)]
     pub fn outbound_shape_owner_count_for_test(&self, shape_id: ShapeId) -> usize {
         self.query
@@ -488,7 +488,7 @@ where
     /// authority scope. Binding-only client helpers must fail closed in a
     /// multiplexed relay rather than selecting whichever session arrived
     /// last. Relay serving paths carry `AuthorityResultKey` explicitly.
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     pub fn authority_result_state_for_binding_view(
         &self,
         binding_view: BindingViewKey,

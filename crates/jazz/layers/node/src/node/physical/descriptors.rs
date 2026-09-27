@@ -69,7 +69,7 @@ pub(super) fn physical_write_descriptor(
     ))
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 fn remap_authored_scalar_enum_value(
     value: Value,
     authored_cases: &[GlobalScalarEnumCaseId],
@@ -103,7 +103,7 @@ fn remap_authored_scalar_enum_value(
     }
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 fn remap_authored_payload_enum_value(
     value: Value,
     authored_schema: &records::EnumSchema,

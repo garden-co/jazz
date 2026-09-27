@@ -109,7 +109,7 @@ pub fn terminal_root_binding_fields(layout: &TerminalRootLayout) -> Vec<CurrentR
 /// public output is simply `{column}`.  Native hosts must receive the latter
 /// without guessing from a prefix, while truly logical `user_*` fields remain
 /// untouched.
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 pub fn terminal_root_binding_field_names(layout: &TerminalRootLayout) -> Vec<Option<String>> {
     let mut names = vec![None; layout.root_descriptor.fields().len()];
     for field in &layout.public_fields {

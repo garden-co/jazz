@@ -986,7 +986,7 @@ pub(super) fn decode_catalogue_bootstrap_ready(
     })
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 pub(super) fn encode_catalogue_write_pointer(pointer: CurrentWriteSchema) -> Vec<u8> {
     let mut payload = Vec::with_capacity(1 + 8 + 16);
     payload.push(CATALOGUE_WRITE_POINTER_VERSION);
@@ -1956,7 +1956,7 @@ impl VersionRecordFromNode for VersionRecord {
                 Ok(())
             },
         )?;
-        #[cfg(any(test, feature = "testing"))]
+        #[cfg(test)]
         {
             // Application equality cannot detect changed durable bytes. Keep
             // the former value-based encoder as an independent byte oracle.
@@ -2157,7 +2157,7 @@ struct HistoryDescriptorCacheEntry {
     wire_descriptor: records::RecordDescriptor,
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 thread_local! {
     static HISTORY_DESCRIPTOR_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
@@ -2195,7 +2195,7 @@ fn version_record_descriptors(
         }) {
             return (entry.descriptor, entry.wire_descriptor);
         }
-        #[cfg(any(test, feature = "testing"))]
+        #[cfg(test)]
         HISTORY_DESCRIPTOR_BUILDS.with(|count| count.set(count.get() + 1));
         let descriptor = table.authored_history_storage_table().record_schema();
         let wire_descriptor = table.wire_record_descriptor();
@@ -2362,7 +2362,7 @@ impl VersionRow {
                 Ok(())
             },
         )?;
-        #[cfg(any(test, feature = "testing"))]
+        #[cfg(test)]
         {
             // Compare the optimized representation boundary with the previous
             // Value-based encoder across every ingress fixture in the unit suite.
@@ -3954,7 +3954,7 @@ pub(super) fn history_values_from_parts(
     Ok(values)
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 fn history_values_from_wire(
     table: &TableSchema,
     version: &VersionRecord,
@@ -4026,7 +4026,7 @@ pub(super) fn register_values_from_parts(version: &VersionRowParts) -> Result<Ve
     ])
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 fn register_values_from_wire(
     version: &VersionRecord,
     tx_node_alias: NodeAlias,
@@ -4114,7 +4114,7 @@ fn stored_version_prefix_values(version: &VersionRow) -> Result<Vec<Value>, Erro
     ])
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 pub(super) fn global_current_values(
     table: &TableSchema,
     version: &VersionRow,
@@ -4340,7 +4340,7 @@ pub(super) fn sort_current_rows(rows: &mut [CurrentRow]) {
 /// Build a current row from cells that are already app-facing values.
 ///
 /// Build a row from ordinary app-facing cells.
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 pub(super) fn current_row_from_cells(
     table: &TableSchema,
     row_uuid: RowUuid,

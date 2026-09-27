@@ -52,7 +52,7 @@ use super::query_engine::{
     right_field, route_param_field, user_column_field,
 };
 use crate::object::{ObjectId, OutputOccurrenceId};
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 use crate::protocol::ReadViewKey;
 use crate::protocol::{
     AuthorizationOperationKey, AuthorizationScopeOperation, AuthorizationSupportScopeKey,
@@ -91,7 +91,7 @@ use query_result_rows::{
     aggregate_result_table, compare_optional_values, sort_aggregate_rows,
 };
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 pub fn exact_known_state_declaration_for_test(
     shape_id: ShapeId,
     subscription: SubscriptionKey,
@@ -115,7 +115,7 @@ thread_local! {
     static COVERED_INPUT_SOURCE_DISCOVERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 pub fn take_covered_input_source_discoveries_for_test() -> usize {
     COVERED_INPUT_SOURCE_DISCOVERIES.with(|calls| calls.replace(0))
 }
@@ -263,7 +263,7 @@ pub use local_authority_reconciliation::LocalAuthorityReconciliation;
 
 #[cfg(feature = "testing")]
 pub use maintained_views::LocalMaintainedViewSubscriptionFootprint;
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 use maintained_views::SubscriptionPreparedPlan;
 pub use maintained_views::{
     CoveredInputReceiver, LocalMaintainedViewSubscription, LocalMaintainedViewSubscriptionUpdate,
@@ -319,7 +319,7 @@ where
         &self,
         subscription: SubscriptionKey,
     ) -> Result<CompiledScopeTables, Error> {
-        #[cfg(any(test, feature = "testing"))]
+        #[cfg(test)]
         COVERED_INPUT_SOURCE_DISCOVERIES.with(|calls| calls.set(calls.get() + 1));
         let registered = self
             .unique_registered_binding_for_subscription(subscription)
@@ -415,7 +415,7 @@ where
         .await
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     async fn compile_current_query_program_for_read_view(
         &mut self,
         shape: &ValidatedQuery,
@@ -2121,7 +2121,7 @@ where
         Ok((rows, profile))
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     fn settled_binding_view_key_for_query(
         &self,
         shape: &ValidatedQuery,
@@ -2282,7 +2282,7 @@ where
             .any(|include| include.require || include.join_mode == crate::query::JoinMode::Inner)
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     fn query_uses_heterogeneous_physical_lineage(&self, shape: &ValidatedQuery) -> bool {
         let Some(tables) = self.query_storage_read_tables(shape) else {
             return true;
@@ -2306,7 +2306,7 @@ where
         })
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     fn query_storage_read_tables(&self, shape: &ValidatedQuery) -> Option<BTreeSet<String>> {
         let query = shape.query();
         let read_schema_version = shape.schema_version();
@@ -2330,7 +2330,7 @@ where
         Some(tables)
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     fn collect_include_read_tables(
         &self,
         root_table: &str,
@@ -2866,7 +2866,7 @@ where
         Ok((shape, binding, plan))
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     #[doc(hidden)]
     pub async fn prepare_query_binding_for_link_in_authorization_mode(
         &mut self,
@@ -2888,7 +2888,7 @@ where
         }
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     async fn prepare_client_subscription_binding(
         &mut self,
         shape: &ValidatedQuery,
@@ -2911,7 +2911,7 @@ where
         ))
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     async fn prepare_trusted_subscription_binding(
         &mut self,
         shape: &ValidatedQuery,
@@ -2932,7 +2932,7 @@ where
         ))
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     #[doc(hidden)]
     pub async fn prepare_query_binding_for_link_with_shared_claim_fragments(
         &mut self,
@@ -3210,7 +3210,7 @@ where
         self.materialize_include_deleted_query_rows(table, deltas)
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     #[doc(hidden)]
     pub async fn query_rows_for_link_forced_full_scan_for_test(
         &mut self,
@@ -3256,7 +3256,7 @@ where
 
     /// Evaluate a query plus its array-subquery relation payload against local
     /// visible-current knowledge for one identity.
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     pub async fn query_relation_snapshot_for_serving(
         &mut self,
         shape: &ValidatedQuery,
@@ -4886,7 +4886,7 @@ fn collect_operand_param(operand: &Operand, params: &mut BTreeSet<String>) {
     }
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 fn collect_join_read_tables(join: &crate::query::JoinVia, tables: &mut BTreeSet<String>) {
     tables.insert(join.table.clone());
     if let Some(source_lookup) = &join.source_lookup {
@@ -4897,7 +4897,7 @@ fn collect_join_read_tables(join: &crate::query::JoinVia, tables: &mut BTreeSet<
     }
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 fn compare_values(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
     match (left, right) {
         (Value::Nullable(None), _) | (_, Value::Nullable(None)) => None,

@@ -9,28 +9,28 @@ use super::*;
 use crate::query::{col, eq, lit};
 
 /// Test-only rendezvous at the cancellation-sensitive proof-stack boundary.
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 struct PolicyProofCompilationPause;
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 thread_local! {
     static POLICY_PROOF_COMPILATION_PAUSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 impl Drop for PolicyProofCompilationPause {
     fn drop(&mut self) {
         POLICY_PROOF_COMPILATION_PAUSED.with(|paused| paused.set(false));
     }
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 fn pause_policy_proof_compilation_for_test() -> PolicyProofCompilationPause {
     POLICY_PROOF_COMPILATION_PAUSED.with(|paused| paused.set(true));
     PolicyProofCompilationPause
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 async fn wait_for_policy_proof_compilation_for_test() {
     if POLICY_PROOF_COMPILATION_PAUSED.with(|paused| paused.get()) {
         std::future::pending::<()>().await;
@@ -345,7 +345,7 @@ where
                         .expect("proof table owns a cancellation lease"),
                 ),
             });
-            #[cfg(any(test, feature = "testing"))]
+            #[cfg(test)]
             wait_for_policy_proof_compilation_for_test().await;
         }
 

@@ -1049,7 +1049,7 @@ where
             &empty_history_tables,
         ).await?;
 
-        #[cfg(any(test, feature = "testing"))]
+        #[cfg(test)]
         let current_update_versions = current_updates
             .values()
             .map(|(stored, global_time)| (stored.clone(), *global_time))
@@ -1076,7 +1076,7 @@ where
         if let Some(tx_time) = loaded_tx_ids.iter().map(|tx_id| tx_id.time).max() {
             self.persist_storage_consistency_marker_through(tx_time).await?;
         }
-        #[cfg(any(test, feature = "testing"))]
+        #[cfg(test)]
         {
             if std::env::var_os("JAZZ_SKIP_BULK_INGEST_ASSERTS").is_none() {
                 for (_, table, branch_key, row_uuid) in &content_rows {

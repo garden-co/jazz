@@ -63,7 +63,7 @@ impl NodeAliases {
         self.max_alias
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     #[doc(hidden)]
     pub fn remove(&mut self, node: &NodeUuid) -> Option<NodeAlias> {
         let alias = self.by_node.remove(node)?;
@@ -76,7 +76,7 @@ impl NodeAliases {
         self.by_node.iter()
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     #[doc(hidden)]
     #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {

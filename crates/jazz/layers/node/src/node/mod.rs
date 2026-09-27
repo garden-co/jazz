@@ -23,7 +23,7 @@ use groove::db::{
 };
 use groove::ivm::PreparedShapeId;
 use groove::ivm::ProjectField;
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 use groove::queries::{Query, Select, SelectItem, TableRef};
 use groove::records::{self, BorrowedRecord, OwnedRecord, Value, ValueType};
 use groove::storage::{self, BoxedStorage, OrderedKvStorage, ReopenableStorage, StorageLayout};
@@ -42,7 +42,7 @@ use crate::ids::{
     SchemaVersionId,
 };
 use crate::model::transaction::OpenTransactionId;
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 use crate::protocol::ProgramFactEntry;
 use crate::protocol::{
     AuthorityResultKey, BindingViewKey, BranchKey, BranchSelector, CurrentWriteSchema, LensOp,
@@ -441,32 +441,32 @@ std::thread_local! {
     static SUBSCRIPTION_SNAPSHOT_FOR_LINK_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 pub(super) fn reset_query_versions_for_tx_call_count() {
     QUERY_VERSIONS_FOR_TX_CALLS.with(|calls| calls.set(0));
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 pub(super) fn query_versions_for_tx_call_count() -> usize {
     QUERY_VERSIONS_FOR_TX_CALLS.with(std::cell::Cell::get)
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 pub(super) fn reset_parent_version_lookup_materialized_row_count() {
     PARENT_VERSION_LOOKUP_MATERIALIZED_ROWS.with(|rows| rows.set(0));
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 pub(super) fn parent_version_lookup_materialized_row_count() -> usize {
     PARENT_VERSION_LOOKUP_MATERIALIZED_ROWS.with(std::cell::Cell::get)
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 fn record_query_versions_for_tx_call() {
     QUERY_VERSIONS_FOR_TX_CALLS.with(|calls| calls.set(calls.get() + 1));
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 fn record_parent_version_lookup_materialized_rows(rows: usize) {
     PARENT_VERSION_LOOKUP_MATERIALIZED_ROWS.with(|count| count.set(count.get() + rows));
 }
@@ -959,7 +959,7 @@ impl<S: OrderedKvStorage> NodeState<S> {
     }
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
@@ -1058,7 +1058,7 @@ impl CachedTransactionVersions {
         let Some(indexes) = self.by_schema_table_row.get(&key) else {
             return Vec::new();
         };
-        #[cfg(any(test, feature = "testing"))]
+        #[cfg(test)]
         record_parent_version_lookup_materialized_rows(indexes.len());
         indexes
             .iter()
@@ -2510,7 +2510,7 @@ impl CurrentRow {
     }
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 impl PartialEq<(RowUuid, BTreeMap<String, Value>)> for CurrentRow {
     fn eq(&self, other: &(RowUuid, BTreeMap<String, Value>)) -> bool {
         self.row_uuid() == other.0 && self.test_cells_by_descriptor() == other.1
@@ -3178,7 +3178,7 @@ fn validate_mergeable_write_shape(cells_empty: bool, deletion_present: bool) -> 
     }
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 fn select_all(table: &str) -> Query {
     Query::Select(Box::new(
         Select::new([SelectItem::Wildcard]).from([TableRef::named(table)]),
@@ -3379,7 +3379,7 @@ impl From<QueryError> for Error {
     }
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 #[test]
 fn query_errors_keep_display_source_and_matching_after_node_conversion() {
     let error = Error::from(QueryError::UnknownTable("missing".to_owned()));

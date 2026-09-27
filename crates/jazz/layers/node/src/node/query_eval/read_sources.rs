@@ -5112,7 +5112,7 @@ fn inline_current_graph_with_source_metadata(
     )
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 pub(super) fn inline_current_graph_with_source_metadata_for_test(
     table: &TableSchema,
     rows: Vec<CurrentRow>,
@@ -5413,7 +5413,7 @@ fn inline_snapshot_include_deleted_current_graph_with_source_metadata(
     ))
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 pub(super) fn historical_current_graph_full_scan(
     table: &TableSchema,
     table_id: PhysicalTableId,

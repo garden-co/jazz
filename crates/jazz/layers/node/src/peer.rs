@@ -25,9 +25,9 @@ use crate::node::maintained_subscription_view::{
     ResultTransitions,
 };
 use crate::node::{Error, NodeState};
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 use crate::protocol::KnownStateCompleteness;
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 use crate::protocol::ResultRowEntry;
 use crate::protocol::{
     AuthorityResultKey, DelegatedSessionBinding, KnownStateDeclaration, ProgramFactEntry,
@@ -44,7 +44,7 @@ use crate::tx::{DurabilityTier, TxId};
 mod subscription_state;
 
 pub use subscription_state::PeerRole;
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 use subscription_state::fast_cursor_membership_mismatch;
 use subscription_state::{
     CachedPeerQueryPlan, MaintainedRehydrateRequest, MaintainedSubscriptionViewSubscription,

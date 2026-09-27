@@ -13,7 +13,7 @@ use crate::object::OutputOccurrenceId;
 /// Produce the one unambiguous unordered transition between two exact sets.
 /// Runtime terminals may have crossed intermediate states while a publisher
 /// drained; those intermediate operations are not peer-wire operations.
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 pub(super) fn canonical_set_delta<T: Ord + Clone>(
     predecessor: &BTreeSet<T>,
     successor: &BTreeSet<T>,

@@ -7,7 +7,7 @@
 use crate::protocol::SupportingRow;
 use std::collections::BTreeMap;
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 std::thread_local! {
     pub(super) static SOURCE_CLOSURE_POINT_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     #[doc(hidden)]
@@ -42,7 +42,7 @@ impl SupportingFrontier {
     }
 
     pub(super) fn rows(&self) -> impl Iterator<Item = &SupportingRow> {
-        #[cfg(any(test, feature = "testing"))]
+        #[cfg(test)]
         SOURCE_CLOSURE_TRAVERSALS.with(|count| count.set(count.get() + 1));
         self.weights
             .iter()
@@ -71,7 +71,7 @@ impl SupportingFrontier {
         let mut adds = Vec::new();
         let mut removes = Vec::new();
         for (row, before) in self.unpublished.as_ref()? {
-            #[cfg(any(test, feature = "testing"))]
+            #[cfg(test)]
             SOURCE_CLOSURE_POINT_LOOKUPS.with(|count| count.set(count.get() + 1));
             match (*before, self.contains(row)) {
                 (false, true) => adds.push(row.clone()),
@@ -90,7 +90,7 @@ impl SupportingFrontier {
         self.unpublished = None;
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     pub(super) fn is_empty(&self) -> bool {
         self.weights.is_empty()
     }

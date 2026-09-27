@@ -1519,7 +1519,7 @@ where
 
     /// Test helper exercising the same internally allocated admission path as
     /// production writes.
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     pub async fn attach_large_cell_for_test(
         &self,
         mut commit: MergeableCommit,

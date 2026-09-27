@@ -387,9 +387,9 @@ where
         let plan = Arc::new(PreparedPhysicalWritePlan {
             storage_table,
             source_table,
-            #[cfg(any(test, feature = "testing"))]
+            #[cfg(test)]
             source_mapping,
-            #[cfg(any(test, feature = "testing"))]
+            #[cfg(test)]
             physical_table,
             logical_descriptor,
             physical_descriptor,
@@ -578,7 +578,7 @@ where
 
     // Retain the previous per-row remapper as the independent byte oracle.
     // Storage/query equality alone cannot pin the physical enum representation.
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     pub(super) fn remap_authored_enum_cells_for_physical(
         &self,
         values: &mut [Value],
@@ -827,7 +827,7 @@ where
                 Ok(())
             },
         )?;
-        #[cfg(any(test, feature = "testing"))]
+        #[cfg(test)]
         {
             // Internal byte oracle: public query equality cannot detect a
             // different durable authored/physical enum or timestamp encoding.

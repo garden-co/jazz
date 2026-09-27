@@ -462,7 +462,7 @@ where
     }
 
     /// Build a current-row view update for a system-identity peer.
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     pub async fn view_update_for_current_rows(
         &mut self,
         table: &str,
@@ -488,7 +488,7 @@ where
     }
 
     /// Build a current-row view update using the peer's payload inventory.
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     pub async fn view_update_for_current_rows_with_peer_payload_inventory(
         &mut self,
         table: &str,
@@ -512,7 +512,7 @@ where
     }
 
     /// Build a query-binding view update using the peer's payload inventory.
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub async fn view_update_for_query_binding_with_peer_payload_inventory(
         &mut self,
@@ -538,7 +538,7 @@ where
 
     /// Build a cold maintained query-binding view update using the peer's
     /// payload inventory.
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub async fn seeded_maintained_view_update_for_query_binding_with_peer_payload_inventory(
         &mut self,
@@ -563,7 +563,7 @@ where
         .await
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     #[doc(hidden)]
     pub async fn seeded_maintained_view_update_for_query_binding_with_peer_payload_inventory_at_tier(
         &mut self,

@@ -52,7 +52,7 @@ where
         Ok(outcome)
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     pub(super) async fn create_merge_version_if_needed(
         &mut self,
         table: &str,
@@ -982,7 +982,7 @@ where
         self.require_merge_heads(table_id, branch_key, row_uuid).await
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     fn physical_table_id_for_authored_test_table(
         &self,
         table: &str,
@@ -1002,7 +1002,7 @@ where
         }
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     async fn recomputed_merge_heads_from_history_for_test(
         &mut self,
         table: &str,
@@ -1038,7 +1038,7 @@ where
         Ok(heads)
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     pub(super) async fn rebuild_merge_heads_from_history_for_test(
         &mut self,
         table: &str,
@@ -1063,7 +1063,7 @@ where
         Ok(())
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     pub(super) async fn assert_merge_heads_match_history_for_test(
         &mut self,
         table: &str,
@@ -1077,7 +1077,7 @@ where
         .await
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     async fn assert_merge_heads_match_history_in_branch_for_test(
         &mut self,
         table: &str,
@@ -1116,7 +1116,7 @@ where
         Ok(())
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     async fn assert_merge_head_rows_match_history_for_test(
         &mut self,
         rows: &BTreeSet<(String, BranchKey, RowUuid)>,
@@ -1132,7 +1132,7 @@ where
         Ok(())
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     async fn recomputed_global_layer_winner_from_history_for_test(
         &mut self,
         table: &str,
@@ -1165,7 +1165,7 @@ where
         Ok(winner.map(|(version, _, _)| version))
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     async fn assert_global_current_updates_match_history_for_test(
         &mut self,
         updates: &[(VersionRow, GlobalTime)],
@@ -1206,7 +1206,7 @@ where
         Ok(())
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     async fn assert_global_current_row_matches_version_for_test(
         &mut self,
         version: &VersionRow,
@@ -1268,7 +1268,7 @@ where
         Ok(())
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     async fn assert_global_change_row_matches_version_for_test(
         &mut self,
         version: &VersionRow,
@@ -1453,7 +1453,7 @@ where
     }
 
     /// Build the physical current-source carrier consumed by Groove terminals.
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     fn public_current_values(
         &mut self,
         table: &TableSchema,
