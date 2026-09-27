@@ -420,7 +420,7 @@ fn maintained_view_join_policy_retained_claim_param_matches_query_engine_result(
 #[test]
 fn maintained_subscription_view_shared_todo_member_include_emits_relation_deltas_without_full_recompute()
  {
-    use crate::tools::test_support::AllowAll;
+    use crate::model::test_support::AllowAll;
     let schema = build_public_test_schema(
         PublicSchemaBuilder::new()
             .table(
@@ -818,7 +818,7 @@ fn maintained_subscription_view_rehydrates_reference_bearing_root_table() {
 
 #[test]
 fn maintained_subscription_view_explicit_include_keeps_other_implicit_references() {
-    use crate::tools::test_support::AllowAll;
+    use crate::model::test_support::AllowAll;
     let schema = build_public_test_schema(
         PublicSchemaBuilder::new()
             .table(

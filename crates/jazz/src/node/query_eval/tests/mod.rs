@@ -1,7 +1,7 @@
 //! Query-evaluation tests that exercise several pipeline stages together.
 
 use super::*;
-use crate::legacy_test_future::{ResultFutureExt as _, SettledNodeTestExt as _};
+use crate::node::legacy_test_future::{ResultFutureExt as _, SettledNodeTestExt as _};
 
 mod authorization;
 mod bindings;
@@ -29,6 +29,11 @@ use crate::model::public_schema::{
     RelRecursionBound as PublicRelRecursionBound, RelValueRef as PublicRelValueRef,
     RowIdRef as PublicRelRowIdRef,
 };
+use crate::model::public_schema::{
+    ColumnType as PublicColumnType, PolicyExpr as PublicPolicyExpr,
+    SchemaBuilder as PublicSchemaBuilder, TablePolicies as PublicTablePolicies,
+    TableSchemaBuilder as PublicTableSchemaBuilder,
+};
 use crate::node::query_engine::{CoverageScope, FieldRequirement};
 use crate::node::{MergeableCommit, NodeState};
 use crate::peer::PeerState;
@@ -41,11 +46,6 @@ use crate::query::{
     lit, lte, param, table,
 };
 use crate::schema::{JazzSchema, TableSchema};
-use crate::tools::{
-    ColumnType as PublicColumnType, PolicyExpr as PublicPolicyExpr,
-    SchemaBuilder as PublicSchemaBuilder, TablePolicies as PublicTablePolicies,
-    TableSchemaBuilder as PublicTableSchemaBuilder,
-};
 
 /// A coalesced authority re-entry for Alice's document must replace only
 /// that exact member; Bob's ordinary content update in the same batch must

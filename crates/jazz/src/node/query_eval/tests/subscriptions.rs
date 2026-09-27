@@ -1,7 +1,7 @@
 //! subscriptions query-evaluation tests.
 
 use super::*;
-use crate::legacy_test_future::FutureResolveExt as _;
+use crate::node::legacy_test_future::FutureResolveExt as _;
 use crate::peer::PeerState;
 use crate::protocol::{DelegatedSessionBinding, PolicyBindingKey, ReadViewSourceSpec, SnapshotRef};
 

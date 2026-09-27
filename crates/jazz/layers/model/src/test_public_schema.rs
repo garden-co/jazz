@@ -20,7 +20,7 @@ fn equals(scope: &str, column_name: &str, right: RelValueRef) -> RelPredicateExp
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn seeded_recursive_access_policy(
+pub fn seeded_recursive_access_policy(
     access_table: &str,
     access_row_column: &str,
     access_team_column: &str,

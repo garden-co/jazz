@@ -158,7 +158,7 @@ fn literal_empty_in_remains_a_valid_false_query() {
 /// authority-local.
 #[test]
 fn policy_branch_query_keeps_explicit_inherited_parent_contribution() {
-    use crate::tools::test_support::AllowAll;
+    use crate::model::test_support::AllowAll;
     let schema = public_query_eval_schema(
         PublicSchemaBuilder::new()
             .table(PublicTableSchemaBuilder::new("parents").column("state", PublicColumnType::Text))

@@ -1,4 +1,4 @@
-use crate::tools::test_support::AllowAll;
+use crate::model::test_support::AllowAll;
 fn node(byte: u8) -> NodeUuid {
     NodeUuid::from_bytes([byte; 16])
 }

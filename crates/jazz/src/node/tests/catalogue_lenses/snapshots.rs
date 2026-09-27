@@ -36,13 +36,13 @@ fn schema_version_id_round_trips_through_wire_ingest_and_recovery() {
 
 #[test]
 fn trusted_snapshot_carries_policy_source_and_receiver_recompiles_it_after_reopen() {
-    let public = crate::tools::SchemaBuilder::new()
+    let public = crate::model::public_schema::SchemaBuilder::new()
         .table(
-            crate::tools::TableSchema::builder("todos")
-                .column("title", crate::tools::ColumnType::Text)
+            crate::model::public_schema::TableSchema::builder("todos")
+                .column("title", crate::model::public_schema::ColumnType::Text)
                 .policies(
-                    crate::tools::TablePolicies::new()
-                        .with_select(crate::tools::PolicyExpr::True),
+                    crate::model::public_schema::TablePolicies::new()
+                        .with_select(crate::model::public_schema::PolicyExpr::True),
                 ),
         )
         .build();
@@ -2258,12 +2258,12 @@ fn reordered_lineage_declarations_survive_client_and_authority_reopen() {
     // Internal trusted-transport boundary coverage: public clients cannot inject
     // a historical noncanonical declaration order into an authority snapshot.
     let base = schema();
-    let mut builder = crate::tools::SchemaBuilder::new()
-        .table(crate::tools::TableSchema::builder("todos")
-            .column("title", crate::tools::ColumnType::Text));
+    let mut builder = crate::model::public_schema::SchemaBuilder::new()
+        .table(crate::model::public_schema::TableSchema::builder("todos")
+            .column("title", crate::model::public_schema::ColumnType::Text));
     for name in ["zebra", "alpha", "middle"] {
-        builder = builder.table(crate::tools::TableSchema::builder(name)
-            .column("title", crate::tools::ColumnType::Text));
+        builder = builder.table(crate::model::public_schema::TableSchema::builder(name)
+            .column("title", crate::model::public_schema::ColumnType::Text));
     }
     let evolved = SchemaVersion::new(crate::schema::JazzSchema::new(&builder.build()).unwrap());
     let (bob_dir, mut bob) = open_node_with_schema(node(0xd1), base.clone());
@@ -2395,14 +2395,14 @@ fn legacy_receiver_upgrades_active_schema_during_open() {
 fn permission_bearing_lineage_snapshot_replay_reopens_without_restoring_old_grants() {
     let mut snapshot = catalogue_snapshot_fixture();
     let granted = crate::schema::JazzSchema::new(
-        &crate::tools::SchemaBuilder::new()
+        &crate::model::public_schema::SchemaBuilder::new()
             .table(
-                crate::tools::TableSchema::builder("todos")
-                    .column("title", crate::tools::ColumnType::Text)
-                    .column("body", crate::tools::ColumnType::Text)
+                crate::model::public_schema::TableSchema::builder("todos")
+                    .column("title", crate::model::public_schema::ColumnType::Text)
+                    .column("body", crate::model::public_schema::ColumnType::Text)
                     .policies(
-                        crate::tools::TablePolicies::new()
-                            .with_select(crate::tools::PolicyExpr::True),
+                        crate::model::public_schema::TablePolicies::new()
+                            .with_select(crate::model::public_schema::PolicyExpr::True),
                     ),
             )
             .build(),

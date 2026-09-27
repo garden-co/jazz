@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod variant_case_tests {
     use super::*;
-    use crate::legacy_test_future::SettledNodeTestExt as _;
+    use crate::node::legacy_test_future::SettledNodeTestExt as _;
     use crate::protocol::TableLens;
     use crate::query::Query as JazzQuery;
     use crate::model::public_schema::{

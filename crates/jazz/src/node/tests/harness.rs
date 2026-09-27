@@ -1,7 +1,7 @@
 //! Test harness and seeded regressions for node semantics. This module owns
 //! fixtures that drive the `NodeState` through sync, merge, query, policy, branch,
 //! and lens scenarios; production logic stays in the node submodules, while
-//! model comparisons use [`crate::oracle`].
+//! model comparisons use [`crate::node::oracle`].
 
 use super::*;
 use crate::model::public_schema::{
@@ -14,7 +14,7 @@ use crate::model::public_schema::{
     TablePolicies as PublicTablePolicies, TableSchema as PublicTableSchema,
     TableSchemaBuilder as PublicTableSchemaBuilder, Value as PublicValue,
 };
-use crate::oracle::{ModelRowVersion, Oracle, OracleTxState, ParallelMaterializationOracle};
+use crate::node::oracle::{ModelRowVersion, Oracle, OracleTxState, ParallelMaterializationOracle};
 use crate::peer::{PeerMetrics, PeerState};
 use crate::protocol::{
     CurrentWriteSchema, LensOp, MigrationLens, RegisterShapeOptions, SchemaLineagePublication,

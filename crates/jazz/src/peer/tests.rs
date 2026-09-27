@@ -1,5 +1,5 @@
 use super::*;
-use crate::legacy_test_future::{
+use crate::node::legacy_test_future::{
     FutureResolveExt as _, ResultFutureExt as _, SettledNodeTestExt as _,
 };
 
@@ -17,7 +17,7 @@ use crate::query::{
 use crate::schema::{JazzSchema, TableSchema};
 use crate::time::{GlobalTime, TxTime};
 use crate::model::transaction::OpenTransactionId;
-use crate::tools::{
+use crate::model::public_schema::{
     ColumnType as PublicColumnType, PolicyExpr as PublicPolicyExpr,
     SchemaBuilder as PublicSchemaBuilder, TablePolicies as PublicTablePolicies,
     TableSchemaBuilder as PublicTableSchemaBuilder,
@@ -604,7 +604,7 @@ fn client_fast_cursor_requires_retained_matching_authorization_progress() {
 
 #[test]
 fn client_fast_cursor_authorization_proof_controls_rehydrate_reset() {
-    use crate::tools::test_support::AllowAll;
+    use crate::model::test_support::AllowAll;
     let (_dir, mut core) = open_node_with_schema(node(0x91), schema().allow_all());
     let live = row(0x31);
     let live_tx = core
@@ -689,7 +689,7 @@ fn client_fast_cursor_authorization_proof_controls_rehydrate_reset() {
 
 #[test]
 fn duplicate_structured_query_authorization_mismatch_forces_reset() {
-    use crate::tools::test_support::AllowAll;
+    use crate::model::test_support::AllowAll;
     let (_dir, mut core) = open_node_with_schema(node(0x92), schema().allow_all());
     for (index, title) in ["one", "two"].into_iter().enumerate() {
         let tx = core

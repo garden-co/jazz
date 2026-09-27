@@ -328,8 +328,14 @@ mod global_state;
 mod ingest;
 mod node_aliases;
 pub(crate) use node_aliases::NodeAliases;
+#[doc(hidden)]
+#[cfg(any(test, feature = "testing"))]
+pub mod legacy_test_future;
 pub(crate) mod maintained_subscription_view;
 mod open_tx;
+/// Independent semantic oracle used by tests and harnesses.
+#[cfg(any(test, feature = "testing"))]
+pub mod oracle;
 pub(crate) mod physical;
 mod policy;
 pub(crate) use jazz_engine::query_engine;

@@ -211,7 +211,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
                             vec![
                                 PublicPolicyExpr::eq_literal(
                                     "isPublic",
-                                    crate::tools::Value::Boolean(true),
+                                    crate::model::public_schema::Value::Boolean(true),
                                 ),
                                 public_claim_eq("joinCode", "join_code"),
                                 chat_member("id"),

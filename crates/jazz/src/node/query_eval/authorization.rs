@@ -1539,16 +1539,16 @@ pub(super) fn permission_scope_claim_values(
 mod authorization_scope_compiler_tests {
     use super::*;
     use crate::ids::NodeUuid;
-    use crate::legacy_test_future::{ResultFutureExt as _, SettledNodeTestExt as _};
     use crate::model::public_schema::OperationPolicy as PublicOperationPolicy;
-    use crate::node::NodeState;
-    use crate::protocol::TableLens;
-    use crate::schema::WritePolicies;
-    use crate::tools::{
+    use crate::model::public_schema::{
         ColumnType as PublicColumnType, PolicyExpr as PublicPolicyExpr,
         SchemaBuilder as PublicSchemaBuilder, TablePolicies as PublicTablePolicies,
         TableSchemaBuilder as PublicTableSchemaBuilder, Value as PublicValue,
     };
+    use crate::node::NodeState;
+    use crate::node::legacy_test_future::{ResultFutureExt as _, SettledNodeTestExt as _};
+    use crate::protocol::TableLens;
+    use crate::schema::WritePolicies;
     use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 
     fn public_schema(builder: PublicSchemaBuilder) -> JazzSchema {

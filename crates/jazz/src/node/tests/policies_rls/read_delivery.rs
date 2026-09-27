@@ -960,7 +960,7 @@ fn client_public_or_owner_claim_policy_rehydrates_empty_result_set() {
 
 #[test]
 fn composed_read_policy_grants_and_revokes_incrementally() {
-    use crate::tools::test_support::AllowAll;
+    use crate::model::test_support::AllowAll;
     let invited = user(0xa1);
     let spy = user(0xb2);
     let canvas_row = row(8);

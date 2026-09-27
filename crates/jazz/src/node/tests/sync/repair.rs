@@ -572,7 +572,7 @@ fn scope_relay_repair_ledger_survives_reopen_only_for_exact_scope() {
     install_test_uuid_sub_claim(&mut relay_node, alice);
     install_test_uuid_sub_claim(&mut relay_node, bob);
     let alice_scope = unsafe {
-        crate::db::ClientRelayScope::from_admitted_storage_owner(
+        crate::node::relay_scope::ClientRelayScope::from_admitted_storage_owner(
             "relay-storage-owner".to_owned(),
             alice,
         )
@@ -620,7 +620,7 @@ fn scope_relay_repair_ledger_survives_reopen_only_for_exact_scope() {
     let mut wrong_scope = reopen_node_at(&relay_dir, node(9), schema);
     wrong_scope
         .configure_scope_isolated_client_relay(unsafe {
-            crate::db::ClientRelayScope::from_admitted_storage_owner(
+            crate::node::relay_scope::ClientRelayScope::from_admitted_storage_owner(
                 "relay-storage-owner".to_owned(),
                 bob,
             )
@@ -648,7 +648,7 @@ fn scope_relay_authored_pending_repairs_require_exact_author_scope() {
     install_test_uuid_sub_claim(&mut relay_node, bob);
     relay_node
         .configure_scope_isolated_client_relay(unsafe {
-            crate::db::ClientRelayScope::from_admitted_storage_owner(
+            crate::node::relay_scope::ClientRelayScope::from_admitted_storage_owner(
                 "relay-storage-owner".to_owned(),
                 alice,
             )

@@ -4885,7 +4885,7 @@ mod authority_storage_codec_tests {
     // frequency or accidental reuse of a different physical enum registry.
     #[test]
     fn version_descriptor_preparation_tracks_exact_schema_shape() {
-        use crate::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+        use crate::model::public_schema::{ColumnType, SchemaBuilder, TableSchemaBuilder};
         let table = |name: &str, ty: ColumnType| {
             JazzSchema::new(
                 &SchemaBuilder::new()

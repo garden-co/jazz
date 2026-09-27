@@ -817,10 +817,10 @@ fn batched_view_update_rejection_is_atomic_across_valid_and_unavailable_schemas(
 #[test]
 fn legacy_inline_json_wire_descriptor_is_rejected_before_storage() {
     let schema = JazzSchema::new(
-        &crate::tools::SchemaBuilder::new()
+        &crate::model::public_schema::SchemaBuilder::new()
             .table(
-                crate::tools::TableSchemaBuilder::new("documents")
-                    .column("payload", crate::tools::ColumnType::Json { schema: None }),
+                crate::model::public_schema::TableSchemaBuilder::new("documents")
+                    .column("payload", crate::model::public_schema::ColumnType::Json { schema: None }),
             )
             .build(),
     )
