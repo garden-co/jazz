@@ -5,11 +5,15 @@
 // binary; Nextest still runs each test in its own process. A module whose file
 // used to need `required-features` is gated by the same feature with `cfg`, so
 // a build without that feature skips it exactly as Cargo skipped the binary.
+// account_author (runtime) and the four files calling `*_for_test` helpers
+// (testing) are gated too: they never compiled without those features, and
+// ungated they would break the whole binary for a plain `cargo test -p jazz`.
 //
 // Two files stay separate binaries (see Cargo.toml): incremental_delivery_canary
 // installs a #[global_allocator], and legacy_benchmark_smoke is selected by
 // name in the CI and benchmark gates.
 
+#[cfg(feature = "runtime")]
 #[path = "../account_author.rs"]
 mod account_author;
 #[cfg(feature = "testing")]
@@ -28,6 +32,7 @@ mod branch_views;
 mod browser_relay_durability;
 #[path = "../column_defaults.rs"]
 mod column_defaults;
+#[cfg(feature = "testing")]
 #[path = "../composite_indexes.rs"]
 mod composite_indexes;
 #[cfg(feature = "testing")]
@@ -53,6 +58,7 @@ mod large_json_wire;
 mod large_value_read_scaling;
 #[path = "../large_value_streaming_create.rs"]
 mod large_value_streaming_create;
+#[cfg(feature = "testing")]
 #[path = "../local_first_unless_empty.rs"]
 mod local_first_unless_empty;
 #[path = "../order_by_unselected_column.rs"]
@@ -62,6 +68,7 @@ mod order_by_unselected_column;
 mod parameterized_subscription_routing;
 #[path = "../persistent_codec_family_registry.rs"]
 mod persistent_codec_family_registry;
+#[cfg(feature = "testing")]
 #[path = "../prepared_claim_routing.rs"]
 mod prepared_claim_routing;
 #[path = "../public_transaction_id_api.rs"]
@@ -72,6 +79,7 @@ mod route_subscription_benchmark_contract;
 mod row_provenance;
 #[path = "../shared_coverage_differential.rs"]
 mod shared_coverage_differential;
+#[cfg(feature = "testing")]
 #[path = "../shared_query_hydration.rs"]
 mod shared_query_hydration;
 #[path = "../structured_result_tree.rs"]
