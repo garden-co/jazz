@@ -1,3 +1,6 @@
+// Shared with jazz-testkit by path so Jazz needs no testkit dev-dependency.
+#[path = "../../jazz-testkit/src/duplex_transport.rs"]
+mod duplex_transport;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Debug;
@@ -6,6 +9,7 @@ use std::rc::Rc;
 
 mod common;
 
+use duplex_transport::duplex;
 use jazz::db::{
     ClientRelayScope, Db, DbConfig, DbIdentity, ExclusiveTxOps, Propagation, ReadOpts,
     SubscriptionEvent, TickScheduler, TickUrgency, Transport, block_on,
@@ -27,7 +31,6 @@ use jazz::tools::{
 };
 use jazz::tx::{DurabilityTier, Fate, Transaction, TxId, TxKind};
 use jazz_storage_rocksdb::RocksDbStorage;
-use jazz_testkit::duplex_transport::duplex;
 
 /// Mirror the production browser-worker upstream: the client side has already
 /// been admitted to forward one scope binding, and the authority side installs

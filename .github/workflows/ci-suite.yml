@@ -24,7 +24,7 @@ jobs:
   lint:
     # Full workspace compilation and checks exceed the four-core job budget.
     runs-on: blacksmith-16vcpu-ubuntu-2404
-    timeout-minutes: 10
+    timeout-minutes: 15
     container:
       image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:dcb4ec5e4f5507b258805617d58ee6976f7dcee2e9afe1b05ae3d41cc185ef35
       credentials:
@@ -61,7 +61,10 @@ jobs:
       # This named partition is also the local source of truth. Do not copy
       # individual commands here: local `--ci-equivalent` must execute the
       # same complete partition rather than a drifting approximation.
-      - name: Run CI-equivalent lint and metadata partition
+      # PR-level checks cannot catch two independently green PRs whose merged
+      # tree no longer compiles, so this partition also runs the exhaustive
+      # workspace target-class check on every push to the integration branch.
+      - name: Run CI-equivalent lint, metadata and workspace check partition
         run: node dev/gates/local-ci-equivalent.mjs --ci-partition lint
       - name: Report sccache statistics
         if: always()
@@ -116,16 +119,17 @@ jobs:
         if: always()
         run: sccache --show-stats
 
-  # This runs a bounded real M3 oracle smoke separately from the workspace
-  # suite. The Rust test remains #[ignore] because its full randomized matrix
-  # is a long-running manual soak; CI deliberately invokes the bounded,
-  # deterministic canonical seed 11. Do not persist this randomized test
-  # job's target directory in the Rust artifact cache.
-  test-rust-differential:
-    # The full randomized matrix remains a long-running manual soak; this job
-    # intentionally exercises one bounded deterministic seed.
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 15
+  # This is deliberately an exact, named historical-storage partition rather
+  # than an incidental member of the broad nextest shard. A green Rust suite
+  # must mean current code opened the pinned native corpus. The pinned
+  # real-browser corpus is the same kind of exact receipt in test-ts, which
+  # already seals the NAPI/WASM pair it needs.
+  test-storage-compat:
+    # The corpus tests take seconds; the job is compile-bound, so it gets the same
+    # 16-vCPU runner and trusted shared compile cache as the other compile
+    # jobs. On four cores without the S3 tier it was the CI long pole.
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 30
     container:
       image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:dcb4ec5e4f5507b258805617d58ee6976f7dcee2e9afe1b05ae3d41cc185ef35
       credentials:
@@ -158,43 +162,27 @@ jobs:
       - uses: ./.github/actions/setup-blacksmith
         with:
           sccache-s3: ${{ inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') }}
-          rust-cache: "false"
-      # The shared partition compiles the exact libtest first; its semantic
-      # watchdog still measures execution only, never a cold compile.
+      - name: Run CI-equivalent native storage compatibility partition
+        run: node dev/gates/local-ci-equivalent.mjs --ci-partition storage-compat
+      # The bounded real M3 oracle smoke (canonical seed 11) shares this job
+      # because its libtest is the exact `jazz` lib-test unit the native corpus
+      # just built, so it costs one run instead of a second cold compile on its
+      # own runner. The Rust test remains #[ignore]: its full randomized matrix
+      # is the nightly/manual soak. It still runs when the corpus step fails so
+      # both results are always reported.
       - name: Run CI-equivalent M3 differential partition
+        if: ${{ !cancelled() }}
         run: node dev/gates/local-ci-equivalent.mjs --ci-partition rust-differential
       - name: Report sccache statistics
         if: always()
         run: sccache --show-stats
 
-  # This is deliberately an exact, named historical-storage partition rather
-  # than an incidental member of the broad nextest shard. A green Rust suite
-  # must mean current code opened the pinned native and real-browser corpora.
-  test-storage-compat:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    # Native corpus plus cold sealed NAPI/WASM production and real Chromium.
-    timeout-minutes: 30
-    container:
-      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:dcb4ec5e4f5507b258805617d58ee6976f7dcee2e9afe1b05ae3d41cc185ef35
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: ./.github/actions/setup-blacksmith
-        with:
-          sccache-s3: false
-      - name: Run CI-equivalent native and browser storage compatibility partition
-        run: node dev/gates/local-ci-equivalent.mjs --ci-partition storage-compat
-      - name: Report sccache statistics
-        if: always()
-        run: sccache --show-stats
-
-  # Branch protection requires this stable check name. It aggregates both Rust
-  # correctness jobs and stays red whenever either dependency fails or is cancelled.
+  # Branch protection requires this stable check name. It aggregates the Rust
+  # correctness jobs and stays red whenever any dependency fails or is cancelled.
+  # test-storage-compat also runs the bounded M3 differential partition.
   test-rust:
     if: always()
-    needs: [test-rust-workspace, test-rust-differential, test-storage-compat]
+    needs: [test-rust-workspace, test-storage-compat]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 2
     permissions:
@@ -203,11 +191,9 @@ jobs:
       - name: Require all Rust partitions
         env:
           WORKSPACE_RESULT: ${{ needs.test-rust-workspace.result }}
-          DIFFERENTIAL_RESULT: ${{ needs.test-rust-differential.result }}
           STORAGE_COMPAT_RESULT: ${{ needs.test-storage-compat.result }}
         run: |
           test "${WORKSPACE_RESULT}" = success
-          test "${DIFFERENTIAL_RESULT}" = success
           test "${STORAGE_COMPAT_RESULT}" = success
 
   test-ts:
@@ -262,17 +248,11 @@ jobs:
         with:
           sccache-s3: ${{ inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') }}
 
-      # Keep the integration-branch compile gate, but run it as the first
-      # phase of this trusted-runner job. Keeping it here avoids a separate
-      # checkout/setup phase on the PR critical path.
-      #
-      # PR-level checks cannot catch two independently green PRs whose merged
-      # tree no longer compiles. This runs on every push to the integration
-      # branch before building the TypeScript correctness artifacts.
-      # This starts with the exhaustive workspace target-class check, then
-      # builds provenance-checked test artifacts and retains parallel Node /
+      # Builds provenance-checked test artifacts, then runs the parallel Node /
       # browser suites. The local CI-equivalent gate calls this exact partition.
-      - name: Run CI-equivalent TypeScript and workspace partition
+      # The integration-branch workspace target-class check that used to run
+      # first here now runs in the lint partition, off this job's critical path.
+      - name: Run CI-equivalent TypeScript partition
         run: node dev/gates/local-ci-equivalent.mjs --ci-partition typescript
       - name: Upload BandChat failure screenshots
         if: failure()

@@ -76,6 +76,19 @@ filter is an error before any test run. For a library test, use
 `dev/t --test target_name unique::module::test_name`. The wrapper preserves the
 core gate's `-p jazz --no-default-features --features testing,transport-compression-zstd` selection.
 
+**Merged integration-test binaries.** `jazz`, `groove` and `jazz-testkit` set
+`autotests = false`: their flat `tests/*.rs` files compile as modules of one
+binary per crate (`tests/integration/main.rs`, or `tests/all/main.rs` in the
+testkit), so an edit relinks one test executable instead of dozens. A flat
+file's tests are therefore addressed as `dev/t --test integration
+<file>::<test>`. Add a new flat test file to that `main.rs` with
+`#[path = "../<file>.rs"] mod <file>;`; `dev/gates/test/rust-test-targets.test.mjs`
+fails if a flat file is built by no target or by two. Only files that install a
+`#[global_allocator]` or are selected by name in a gate stay separate `[[test]]`
+targets. Jazz's own tests share `jazz-testkit/src/duplex_transport.rs` by
+`#[path]`, not through a testkit dev-dependency, so a Jazz edit no longer
+rebuilds Jazz a second time for the testkit.
+
 **Canonical gates:** do not let born-red or rotted targets accumulate silently.
 For ordinary Rust/core work, the full gate set is:
 

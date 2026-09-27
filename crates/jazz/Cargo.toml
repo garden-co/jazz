@@ -4,7 +4,9 @@ version = "0.1.0"
 edition = "2024"
 autobins = false
 autobenches = false
-autotests = true
+# Integration tests are listed explicitly so the flat files build as one
+# binary; see tests/integration/main.rs.
+autotests = false
 
 [features]
 # Jazz is the common semantic library. Process and target shells select
@@ -58,7 +60,6 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 divan.workspace = true
 groove = { workspace = true, default-features = false, features = ["test"] }
 jazz-benchmark-guard = { path = "../benchmark-guard" }
-jazz-testkit = { path = "../jazz-testkit", default-features = false }
 hdrhistogram = "7.5.4"
 tempfile = "3.27.0"
 tar = "0.4"
@@ -161,41 +162,13 @@ harness = false
 required-features = ["testing"]
 
 [[test]]
-name = "parameterized_subscription_routing"
-required-features = ["testing"]
-
-[[test]]
-name = "authorization_scope_reentry"
-required-features = ["testing"]
-
-[[test]]
-name = "async_open"
-required-features = ["testing"]
-
-[[test]]
 name = "legacy_benchmark_smoke"
 required-features = ["testing"]
 
 [[test]]
-name = "core_client_topology"
-required-features = ["testing"]
+name = "integration"
+path = "tests/integration/main.rs"
 
 [[test]]
-name = "browser_relay_durability"
-required-features = ["testing"]
-
-[[test]]
-name = "threaded_client_relay"
-required-features = ["testing"]
-
-[[test]]
-name = "core_fate_authority"
-required-features = ["runtime"]
-
-[[test]]
-name = "auth_admission"
-required-features = ["runtime"]
-
-[[test]]
-name = "fate_replay"
-required-features = ["testing"]
+name = "incremental_delivery_canary"
+path = "tests/incremental_delivery_canary.rs"
