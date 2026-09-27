@@ -4748,7 +4748,7 @@ mod dynamic_schema_view_tests {
                     None,
                     None,
                     false,
-                    f64::INFINITY,
+                    Rc::new(std::cell::Cell::new(false)),
                 ),
                 owner.tick(),
             )
