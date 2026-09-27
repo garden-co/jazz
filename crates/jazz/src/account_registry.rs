@@ -22,7 +22,7 @@ pub struct Principal {
 
 impl Principal {
     fn validate(&self, allow_local_first: bool) -> Result<(), AccountError> {
-        if allow_local_first && self.issuer == crate::tools::identity::LOCAL_FIRST_ISSUER {
+        if allow_local_first && self.issuer == crate::identity::LOCAL_FIRST_ISSUER {
             if uuid::Uuid::parse_str(&self.subject).is_ok() {
                 return Ok(());
             }
@@ -186,7 +186,7 @@ impl AccountRegistry {
         match command {
             AccountCommand::FoundLocalFirst { principal, app } => {
                 principal.validate(true)?;
-                if principal.issuer != crate::tools::identity::LOCAL_FIRST_ISSUER {
+                if principal.issuer != crate::identity::LOCAL_FIRST_ISSUER {
                     return Err(AccountError::InvalidPrincipal);
                 }
                 let account = local_first_account_id(*app, &principal.subject);
@@ -505,9 +505,9 @@ mod founding_tests {
     use super::*;
     #[test]
     fn founding_identity_matches_portable_handle_fixture_and_cannot_reregister() {
-        let app = crate::tools::AppId::from_name("account-fixture");
+        let app = crate::app_id::AppId::from_name("account-fixture");
         let principal = Principal {
-            issuer: crate::tools::identity::LOCAL_FIRST_ISSUER.into(),
+            issuer: crate::identity::LOCAL_FIRST_ISSUER.into(),
             subject: "00000000-0000-4000-8000-000000000001".into(),
         };
         assert_eq!(

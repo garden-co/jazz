@@ -539,7 +539,7 @@ fn local_propagating_subscription_emits_created_by_scoped_insert_after_empty_see
     let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xa1, alice, &schema);
     let (client_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, alice);
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&client, &query, ReadOpts::default()).unwrap();
@@ -593,7 +593,7 @@ fn local_propagating_subscription_matches_subject_claim_for_created_by() {
     )]);
     client.set_test_provider_claims(alice, claims.clone());
     let (client_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber_with_claims(server_transport, alice, claims);
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&client, &query, ReadOpts::default()).unwrap();
@@ -1239,7 +1239,7 @@ fn seeded_membership_grant_and_revoke_propagate_incrementally() {
 
     let client = open_db(0x61, member, &schema);
     let (client_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, member);
     let mut subscription =
         prepared_subscribe(&client, &Query::from("res_i"), ReadOpts::default()).unwrap();
@@ -1422,7 +1422,7 @@ fn same_table_seeded_membership_identity_key_update_propagates_incrementally() {
 
     let client = open_db(0x68, member, &schema);
     let (client_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, member);
     let mut subscription =
         prepared_subscribe(&client, &Query::from("resources"), ReadOpts::default()).unwrap();
@@ -1599,7 +1599,7 @@ fn inherited_child_policy_parent_revocation_propagates_incrementally() {
 
     let client = open_db(0x64, member, &schema);
     let (client_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, member);
     let mut subscription =
         prepared_subscribe(&client, &Query::from("res_i_child"), ReadOpts::default()).unwrap();
@@ -1706,7 +1706,8 @@ fn inherited_child_insert_uses_parent_update_where_old_only() {
         .unwrap();
 
     let (member_transport, server_member_transport) = duplex();
-    let _member_upstream = crate::db::block_on(member_db.connect_upstream(member_transport));
+    let _member_upstream =
+        crate::local_executor::block_on(member_db.connect_upstream(member_transport));
     let _member_subscriber = server.accept_subscriber(server_member_transport, member);
     let allowed = member_db
         .insert(
@@ -1732,7 +1733,8 @@ fn inherited_child_insert_uses_parent_update_where_old_only() {
 
     let other_db = open_db(0x67, other, &schema);
     let (other_transport, server_other_transport) = duplex();
-    let _other_upstream = crate::db::block_on(other_db.connect_upstream(other_transport));
+    let _other_upstream =
+        crate::local_executor::block_on(other_db.connect_upstream(other_transport));
     let _other_subscriber = server.accept_subscriber(server_other_transport, other);
     let denied = other_db
         .insert(
@@ -2239,7 +2241,7 @@ fn served_subscription_rows_for_author_with_claims(
         .borrow_mut()
         .set_test_provider_claims(author, claims.clone());
     let (client_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     // This direct test models an authenticated reader, not a trusted backend
     // connection.  The provider cache above supports local test setup but is
     // not wire/session admission evidence; bind the exact claims that the
@@ -2304,7 +2306,7 @@ fn served_many_subscription_rows_for_author(
         .borrow_mut()
         .set_test_provider_claims(author, test_provider_claims(author));
     let (client_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, author);
     let mut subscriptions = Vec::new();
     for table in tables {
@@ -2390,7 +2392,7 @@ fn served_table_rows_via_relay(
         Value::String("delegated".to_owned()),
     );
     let (relay_transport, core_transport) = duplex();
-    let _relay_upstream = crate::db::block_on(relay.connect_upstream(Box::new(
+    let _relay_upstream = crate::local_executor::block_on(relay.connect_upstream(Box::new(
         TrustedBackendRelayTransport {
             inner: relay_transport,
         },
@@ -2406,7 +2408,8 @@ fn served_table_rows_via_relay(
         1,
     );
     let (client_transport, relay_sub_transport) = duplex();
-    let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _client_upstream =
+        crate::local_executor::block_on(client.connect_upstream(client_transport));
     // The relay is the downstream client's authentication boundary.  Its
     // receiving connection therefore gets the actual session claims instead
     // of the empty claims used by the generic test transport helper.
@@ -2479,11 +2482,13 @@ fn served_table_rows_via_ordinary_browser_worker(
     let client = open_db(0x74, author, schema);
     let claims = test_provider_claims(author);
     let (worker_transport, core_transport) = duplex();
-    let _worker_upstream = crate::db::block_on(worker.connect_upstream(worker_transport));
+    let _worker_upstream =
+        crate::local_executor::block_on(worker.connect_upstream(worker_transport));
     let core_subscriber =
         server.accept_subscriber_with_claims(core_transport, author, claims.clone());
     let (client_transport, worker_sub_transport) = duplex();
-    let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _client_upstream =
+        crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _worker_subscriber =
         worker.accept_subscriber_with_claims(worker_sub_transport, author, claims.clone());
 

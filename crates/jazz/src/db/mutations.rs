@@ -2603,7 +2603,7 @@ where
         author: AuthorSubject,
     ) -> Result<PermissionAdvice, Error> {
         self.table_schema(table)?;
-        crate::db::block_on(
+        crate::local_executor::block_on(
             self.node
                 .node
                 .borrow_mut()

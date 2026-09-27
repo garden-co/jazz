@@ -16,7 +16,7 @@ use crate::query::{
 };
 use crate::schema::{JazzSchema, TableSchema};
 use crate::time::{GlobalTime, TxTime};
-use crate::tools::OpenTransactionId;
+use crate::model::transaction::OpenTransactionId;
 use crate::tools::{
     ColumnType as PublicColumnType, PolicyExpr as PublicPolicyExpr,
     SchemaBuilder as PublicSchemaBuilder, TablePolicies as PublicTablePolicies,
@@ -57,7 +57,7 @@ fn cancelled_cold_authorization_support_restores_peer_identity() {
     let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     let (storage, control) = TestStorage::controlled(&refs);
     let eviction = storage.clone();
-    let mut state = crate::db::block_on(NodeState::new_with_shared_test_catalogue(
+    let mut state = crate::local_executor::block_on(NodeState::new_with_shared_test_catalogue(
         node(0xe3),
         schema.clone(),
         storage,
@@ -114,7 +114,7 @@ fn cancelled_cold_authorization_support_restores_peer_identity() {
         .is_pending()
     );
     control.resume();
-    let update = crate::db::block_on(retry).unwrap();
+    let update = crate::local_executor::block_on(retry).unwrap();
     assert!(matches!(update, SyncMessage::ViewUpdate(_)));
     assert_eq!(
         peer.served_subscription_policy_binding(subscription)
@@ -951,9 +951,9 @@ fn output_member(root: RowUuid, joined: RowUuid, time: u64) -> ResultMemberEntry
         root,
         TxId::new(crate::time::TxTime(time), node(0xee)),
     ))
-    .with_occurrence_id(crate::tools::OutputOccurrenceId::new(
-        crate::tools::ObjectId::from_uuid(root.0),
-        [crate::tools::ObjectId::from_uuid(joined.0)],
+    .with_occurrence_id(crate::object::OutputOccurrenceId::new(
+        crate::object::ObjectId::from_uuid(root.0),
+        [crate::object::ObjectId::from_uuid(joined.0)],
     ))
     .into()
 }
@@ -1006,7 +1006,7 @@ fn incremental_delivery_finds_replacements_by_physical_member_key() {
 fn incremental_delivery_keeps_terminal_children_with_their_root() {
     let root = row(0x41);
     let occurrence =
-        crate::tools::OutputOccurrenceId::new(crate::tools::ObjectId::from_uuid(root.0), []);
+        crate::object::OutputOccurrenceId::new(crate::object::ObjectId::from_uuid(root.0), []);
     let root_member: ResultMemberEntry = RealRowMemberEntry::current_content((
         "users".to_owned().into(),
         root,
@@ -1323,7 +1323,7 @@ fn system_terminal_write_bypasses_claim_and_join_authorization_support() {
     .expect("SYSTEM must not bind session claims for a bypassed write");
     assert_eq!(peer.terminal_authority_scope_proof_count(), 0);
 
-    let denied = crate::db::block_on(
+    let denied = crate::local_executor::block_on(
         node_state.dry_run_mergeable_write_allows_in_schema(
             schema.version_id(),
             MergeableCommit::new("resources", row(0xa2), 2)
@@ -6363,7 +6363,7 @@ fn maintained_publication_retries_source_changes_after_abandoned_drain() {
         )
         .unwrap();
     accept_global(&mut core, second, 2);
-    let abandoned = crate::db::block_on(peer.drain_maintained_subscription_view_changes(
+    let abandoned = crate::local_executor::block_on(peer.drain_maintained_subscription_view_changes(
         &mut core,
         &shape,
         subscription,
@@ -6467,7 +6467,7 @@ fn maintained_publication_bundle_failure_retains_source_journal() {
     let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     let (storage, control) = TestStorage::controlled(&refs);
     let eviction = storage.clone();
-    let mut core = crate::db::block_on(NodeState::new_with_shared_test_catalogue(
+    let mut core = crate::local_executor::block_on(NodeState::new_with_shared_test_catalogue(
         node(0x95),
         schema.clone(),
         storage,
@@ -6510,7 +6510,7 @@ fn maintained_publication_bundle_failure_retains_source_journal() {
         Some(DurabilityTier::Global),
     )
     .unwrap();
-    crate::db::block_on(peer.drain_maintained_subscription_view_changes(
+    crate::local_executor::block_on(peer.drain_maintained_subscription_view_changes(
         &mut core,
         &shape,
         subscription,
@@ -6520,7 +6520,7 @@ fn maintained_publication_bundle_failure_retains_source_journal() {
     .unwrap();
     eviction.evict_all();
     control.fail_next(TestStorageOperation::Get);
-    let failure = crate::db::block_on(peer.query_update(&mut core, &shape, &binding));
+    let failure = crate::local_executor::block_on(peer.query_update(&mut core, &shape, &binding));
     assert!(
         failure.is_err(),
         "cold bundle lookup must fail: {failure:?}"

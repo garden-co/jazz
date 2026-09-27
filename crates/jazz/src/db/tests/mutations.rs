@@ -167,11 +167,12 @@ fn admitted_server_authorizes_branch_write_through_referenced_application_row() 
     let owner_client = open_db(0x76, owner, &schema);
     let outsider_client = open_db(0x77, outsider, &schema);
     let (owner_transport, owner_server_transport) = duplex();
-    let _owner_upstream = crate::db::block_on(owner_client.connect_upstream(owner_transport));
+    let _owner_upstream =
+        crate::local_executor::block_on(owner_client.connect_upstream(owner_transport));
     let _owner_subscriber = server.accept_subscriber(owner_server_transport, owner);
     let (outsider_transport, outsider_server_transport) = duplex();
     let _outsider_upstream =
-        crate::db::block_on(outsider_client.connect_upstream(outsider_transport));
+        crate::local_executor::block_on(outsider_client.connect_upstream(outsider_transport));
     let _outsider_subscriber = server.accept_subscriber(outsider_server_transport, outsider);
 
     let accepted = owner_client
@@ -1774,7 +1775,7 @@ fn db_sync_surface_uploads_client_writes_for_authority_fate() {
     let client = open_db(0xc1, author, &schema);
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, author);
 
     // A local client write is Local and queued for upload.
@@ -1812,7 +1813,7 @@ fn byte_wire_uploads_client_writes_for_authority_fate() {
     let client = open_db(0xc1, author, &schema);
 
     let (client_transport, server_transport) = byte_duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, author);
 
     let write = client
@@ -1845,7 +1846,7 @@ fn db_sync_surface_uploads_client_exclusive_commit_for_global_fate() {
     let client = open_db(0xc1, author, &schema);
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, author);
 
     let row = row(0xe1);
@@ -1913,7 +1914,7 @@ fn db_sync_surface_returns_exclusive_conflict_fate_to_client() {
     let client = open_db(0xc1, author, &schema);
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, author);
 
     let row = row(0xe2);
@@ -1974,7 +1975,7 @@ fn unhandled_rejection_is_delivered_as_mutation_error() {
     let author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, author, &schema);
     let (client_transport, mut authority_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let events = Rc::new(RefCell::new(Vec::new()));
     let callback_events = Rc::clone(&events);
     client.on_mutation_error(Rc::new(move |event| {
@@ -2026,7 +2027,7 @@ fn completed_local_wait_preserves_later_mutation_error() {
     let author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, author, &schema);
     let (client_transport, mut authority_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let events = Rc::new(RefCell::new(Vec::new()));
     let callback_events = Rc::clone(&events);
     client.on_mutation_error(Rc::new(move |event| {
@@ -2348,7 +2349,7 @@ fn queued_empty_update_aliases_current_transaction_without_publishing() {
     let author = AuthorSubject::for_test_bytes([0xc0; 16]);
     let db = open_db(0xc0, author, &schema);
     let row = row(0xc1);
-    crate::db::block_on(db.insert(
+    crate::local_executor::block_on(db.insert(
         "todos",
         cells("existing", false, author),
         InsertOptions {
@@ -2383,7 +2384,7 @@ fn queued_empty_update_aliases_current_transaction_without_publishing() {
         "reservation is a fresh request identity"
     );
     assert_eq!(
-        crate::db::block_on(queued.write_state())
+        crate::local_executor::block_on(queued.write_state())
             .expect("pending queued write state")
             .fate,
         Fate::Pending
@@ -2400,7 +2401,7 @@ fn queued_empty_update_aliases_current_transaction_without_publishing() {
 
     db.drive_queued_mutation_once();
     assert_eq!(
-        crate::db::block_on(queued.write_state())
+        crate::local_executor::block_on(queued.write_state())
             .expect("no-op remains pending behind its FIFO predecessor")
             .fate,
         Fate::Pending,
@@ -2423,13 +2424,13 @@ fn queued_empty_update_aliases_current_transaction_without_publishing() {
     );
 
     assert_eq!(
-        crate::db::block_on(queued.wait(DurabilityTier::Local))
+        crate::local_executor::block_on(queued.wait(DurabilityTier::Local))
             .expect("the reservation resolves through the current transaction"),
         reserved_tx_id,
         "queued callers retain the request identity they were synchronously given"
     );
     assert_eq!(
-        crate::db::block_on(queued.write_state())
+        crate::local_executor::block_on(queued.write_state())
             .expect("write handle follows the completed no-op alias"),
         db.write_state(preceding.mergeable_tx_id())
             .expect("current row transaction remains observable")
@@ -2443,8 +2444,10 @@ fn queued_empty_update_aliases_current_transaction_without_publishing() {
         .next()
         .expect("one seeded row");
     assert_eq!(
-        crate::db::block_on(db.node.node().borrow_mut().current_row_tx_id(&current_row))
-            .expect("current-row transaction lookup"),
+        crate::local_executor::block_on(
+            db.node.node().borrow_mut().current_row_tx_id(&current_row)
+        )
+        .expect("current-row transaction lookup"),
         preceding.mergeable_tx_id(),
         "the empty update must not publish a new row version"
     );
@@ -2465,7 +2468,7 @@ fn queued_empty_update_rejection_does_not_consume_its_target_error() {
     let author = AuthorSubject::for_test_bytes([0xc2; 16]);
     let client = open_db(0xc2, author, &schema);
     let (client_transport, mut authority_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let current = client
         .insert(
             "todos",
@@ -2551,7 +2554,7 @@ fn waited_rejection_is_not_delivered_as_mutation_error() {
     let author = AuthorSubject::for_test_bytes([0xc2; 16]);
     let client = open_db(0xc2, author, &schema);
     let (client_transport, mut authority_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let events = Rc::new(RefCell::new(Vec::new()));
     let callback_events = Rc::clone(&events);
     client.on_mutation_error(Rc::new(move |event| {
@@ -2607,7 +2610,7 @@ fn wait_after_rejection_suppresses_queued_mutation_error() {
     let author = AuthorSubject::for_test_bytes([0xc4; 16]);
     let client = open_db(0xc4, author, &schema);
     let (client_transport, mut authority_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let events = Rc::new(RefCell::new(Vec::new()));
     let callback_events = Rc::clone(&events);
     client.on_mutation_error(Rc::new(move |event| {
@@ -2677,7 +2680,7 @@ fn undelivered_mutation_error_is_recovered_after_reopen() {
     }))
     .unwrap();
     let (client_transport, mut authority_transport) = duplex();
-    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let write = client
         .insert(
             "todos",
@@ -2834,7 +2837,7 @@ fn write_fate_and_durability_are_queryable_through_facade() {
     let client = open_db(0xc1, author, &schema);
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, author);
 
     let write = client
@@ -2883,7 +2886,7 @@ fn session_upload_rejects_forged_made_by_without_ingesting_rows() {
     let client = open_db(0xc1, session_author, &schema);
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, session_author);
 
     let tx_id = client
@@ -2934,7 +2937,7 @@ fn session_upload_strips_forged_system_permission_before_storage_and_replay() {
         core_node,
         2,
     );
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = core.server.accept_subscriber_with_claims_and_trust(
         core_transport,
         session_author,
@@ -2981,7 +2984,7 @@ fn session_upload_strips_forged_system_permission_before_storage_and_replay() {
     );
 
     assert!(matches!(
-        crate::db::block_on(core.node().borrow_mut().transaction_state(tx_id)),
+        crate::local_executor::block_on(core.node().borrow_mut().transaction_state(tx_id)),
         Some((Fate::Accepted, Some(_), DurabilityTier::Global))
     ));
 }
@@ -2994,7 +2997,7 @@ fn session_upload_uses_connection_identity_for_write_policy() {
     let client = open_db(0xc1, session_author, &schema);
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, session_author);
 
     let write = client
@@ -3032,7 +3035,7 @@ fn session_upload_validates_each_version_receipt_once() {
         let server = open_core(0x5f, AuthorSubject::SYSTEM, &schema);
         let client = open_db(0xc2, session_author, &schema);
         let (client_transport, server_transport) = if wire { byte_duplex() } else { duplex() };
-        let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+        let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
         let _subscriber = server.accept_subscriber(server_transport, session_author);
 
         let tx = client.mergeable_tx().unwrap();
@@ -3076,7 +3079,7 @@ fn session_upload_evaluates_write_policy_once_per_version() {
     let server = open_core(0x60, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc3, session_author, &schema);
     let (client_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, session_author);
 
     let tx = client.mergeable_tx().unwrap();
@@ -3118,7 +3121,7 @@ fn session_upload_denied_by_write_policy_evaluates_it_once() {
     let server = open_core(0x61, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc5, session_author, &schema);
     let (client_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, session_author);
 
     let tx_id = client
@@ -3183,11 +3186,12 @@ fn admitted_server_prepared_write_policy_binds_text_user_id_claim() {
     bob_client.set_test_provider_claims(bob, bob_claims.clone());
 
     let (alice_transport, alice_server_transport) = duplex();
-    let _alice_upstream = crate::db::block_on(alice_client.connect_upstream(alice_transport));
+    let _alice_upstream =
+        crate::local_executor::block_on(alice_client.connect_upstream(alice_transport));
     let _alice_subscriber =
         server.accept_subscriber_with_claims(alice_server_transport, alice, alice_claims);
     let (bob_transport, bob_server_transport) = duplex();
-    let _bob_upstream = crate::db::block_on(bob_client.connect_upstream(bob_transport));
+    let _bob_upstream = crate::local_executor::block_on(bob_client.connect_upstream(bob_transport));
     let _bob_subscriber =
         server.accept_subscriber_with_claims(bob_server_transport, bob, bob_claims);
 
@@ -3262,11 +3266,12 @@ fn admitted_server_prepared_write_policy_coerces_string_user_id_to_uuid_column()
     bob_client.set_test_provider_claims(bob, bob_claims.clone());
 
     let (alice_transport, alice_server_transport) = duplex();
-    let _alice_upstream = crate::db::block_on(alice_client.connect_upstream(alice_transport));
+    let _alice_upstream =
+        crate::local_executor::block_on(alice_client.connect_upstream(alice_transport));
     let _alice_subscriber =
         server.accept_subscriber_with_claims(alice_server_transport, alice, alice_claims);
     let (bob_transport, bob_server_transport) = duplex();
-    let _bob_upstream = crate::db::block_on(bob_client.connect_upstream(bob_transport));
+    let _bob_upstream = crate::local_executor::block_on(bob_client.connect_upstream(bob_transport));
     let _bob_subscriber =
         server.accept_subscriber_with_claims(bob_server_transport, bob, bob_claims);
 
@@ -3325,7 +3330,7 @@ fn admitted_server_prepared_write_policy_fails_closed_for_wrong_user_id_type() {
     client.set_test_provider_claims(author, claims.clone());
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber_with_claims(server_transport, author, claims);
     let write = client
         .insert(
@@ -3363,7 +3368,7 @@ fn session_delete_uses_current_row_for_owner_write_policy() {
     let client = open_db(0xc1, session_author, &schema);
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, session_author);
 
     let write = client
@@ -3430,7 +3435,7 @@ fn trusted_backend_upload_uses_backend_policy_and_stores_user_made_by() {
     let backend = open_db(0xb0, backend_author, &schema);
 
     let (backend_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(backend.connect_upstream(backend_transport));
+    let _upstream = crate::local_executor::block_on(backend.connect_upstream(backend_transport));
     let _subscriber = server.accept_subscriber_with_trust(
         server_transport,
         backend_author,
@@ -3480,10 +3485,11 @@ fn trusted_backend_upload_applies_session_claim_assertions_for_write_policy() {
     let backend = open_db(0xb0, backend_author, &schema);
 
     let (backend_transport, server_transport) = duplex();
-    let _upstream =
-        crate::db::block_on(backend.connect_upstream(Box::new(TrustedBackendTransport {
+    let _upstream = crate::local_executor::block_on(backend.connect_upstream(Box::new(
+        TrustedBackendTransport {
             inner: backend_transport,
-        })));
+        },
+    )));
     let _subscriber = server.accept_subscriber_with_trust(
         server_transport,
         backend_author,
@@ -3527,7 +3533,7 @@ fn session_claim_assertions_require_trusted_backend_upload() {
     let client = open_db(0xe1, session_author, &schema);
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, session_author);
 
     client.set_test_provider_claims(
@@ -3564,10 +3570,11 @@ fn trusted_backend_delete_uses_permission_subject_parent_for_write_policy() {
     let backend = open_db(0xb0, backend_author, &schema);
 
     let (backend_transport, server_transport) = duplex();
-    let _upstream =
-        crate::db::block_on(backend.connect_upstream(Box::new(TrustedBackendTransport {
+    let _upstream = crate::local_executor::block_on(backend.connect_upstream(Box::new(
+        TrustedBackendTransport {
             inner: backend_transport,
-        })));
+        },
+    )));
     let _subscriber = server.accept_subscriber_with_trust(
         server_transport,
         backend_author,

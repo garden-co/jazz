@@ -396,7 +396,7 @@ impl MaintainedSubscriptionViewSubscription {
         subscription_key: SubscriptionKey,
         identity: AuthorSubject,
     ) -> SyncMessage {
-        crate::db::block_on(core.drive_query_runtime()).unwrap();
+        crate::local_executor::block_on(core.drive_query_runtime()).unwrap();
         let output_tables = self.tables.clone();
         let mut states = BTreeMap::<ResultRowEntry, (bool, bool)>::new();
         let mut program_fact_adds = Vec::new();

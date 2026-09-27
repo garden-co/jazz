@@ -100,6 +100,7 @@ export const ciPartitions = Object.freeze({
     command("Turbo cache-input contracts", "pnpm", ["test:turbo-cache-inputs"]),
     command("invariant registry", "bash", ["dev/gates/invariant-registry.sh"]),
     command("SPEC issue links", "node", ["dev/gates/spec-open-questions.mjs"]),
+    command("jazz module layers", "node", ["dev/gates/jazz-module-layers.mjs"]),
     // The exhaustive target-class compile lives here rather than in front of
     // the TypeScript artifact build: it gates the same push, but no longer
     // delays the longest job's native artifacts by a serial workspace check.
@@ -252,6 +253,7 @@ export const ciPartitions = Object.freeze({
 export const focusedCommands = Object.freeze([
   command("format check", "pnpm", ["format:check"]),
   command("invariant registry", "bash", ["dev/gates/invariant-registry.sh"]),
+  command("jazz module layers", "node", ["dev/gates/jazz-module-layers.mjs"]),
   command("ignored-test validator self-test", "node", [
     "dev/gates/ignored-tests.mjs",
     "--self-test",

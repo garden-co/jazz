@@ -1065,7 +1065,7 @@ pub(super) fn decode_catalogue_schema(payload: &[u8]) -> Result<SchemaVersion, E
     let id = SchemaVersionId(cursor.uuid()?);
     let public_schema = cursor.sized_bytes()?;
     cursor.finish()?;
-    let schema = crate::tools::public_schema_convert::decode_public_schema_json(public_schema)
+    let schema = crate::model::public_schema_convert::decode_public_schema_json(public_schema)
         .map_err(|_| Error::InvalidStoredValue("invalid catalogue schema public schema"))?;
     let canonical_public_schema = serde_json::to_vec(schema.public_schema())
         .map_err(|_| Error::InvalidStoredValue("encode catalogue public schema"))?;
@@ -1853,7 +1853,7 @@ mod catalogue_payload_tests {
     }
 
     fn composite_index_schema(declared: &[[&str; 2]]) -> SchemaVersion {
-        use crate::tools::public_schema::{ColumnType, SchemaBuilder, TableSchema};
+        use crate::model::public_schema::{ColumnType, SchemaBuilder, TableSchema};
         let mut table = TableSchema::builder("docs")
             .column("owner", ColumnType::Text)
             .column("updated", ColumnType::Text);

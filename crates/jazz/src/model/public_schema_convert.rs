@@ -14,13 +14,13 @@ use crate::schema::{
     TableSchema as CoreTableSchema, WritePolicies,
 };
 
-use crate::tools::public_api::policy::{CmpOp, PolicyValue};
-use crate::tools::public_api::relation_ir::{
+use crate::model::public_api::policy::{CmpOp, PolicyValue};
+use crate::model::public_api::relation_ir::{
     ColumnRef, JoinKind as RelJoinKind, PredicateCmpOp as RelPredicateCmpOp,
     PredicateExpr as RelPredicateExpr, ProjectExpr as RelProjectExpr,
     RecursionBound as RelRecursionBound, RelExpr, RowIdRef, ValueRef as RelValueRef,
 };
-use crate::tools::public_schema::{
+use crate::model::public_schema::{
     ColumnDescriptor, ColumnMergeStrategy, ColumnType, Operation, PolicyExpr, Schema, TableName,
     TableSchema, Value,
 };
@@ -702,7 +702,7 @@ fn convert_column(
     column: &ColumnDescriptor,
 ) -> Result<CoreColumnSchema, SchemaConversionError> {
     let path = format!("$.{}.{}", table.as_str(), column.name.as_str());
-    crate::tools::public_schema::validate_json_schemas(&column.column_type, column.name.as_str())
+    crate::model::public_schema::validate_json_schemas(&column.column_type, column.name.as_str())
         .map_err(|message| err(path, message))?;
     let mut column_type = convert_column_type(table, column.name.as_str(), &column.column_type)?;
     if column.nullable {
@@ -726,7 +726,7 @@ fn convert_column_default(
     column: &ColumnDescriptor,
     value: &Value,
 ) -> Result<GrooveValue, SchemaConversionError> {
-    crate::tools::public_schema::validate_json_value(
+    crate::model::public_schema::validate_json_value(
         value,
         &column.column_type,
         column.name.as_str(),
@@ -2568,7 +2568,7 @@ fn unwrap_joined_seed_projection<'a>(
     path: &str,
     left: &'a RelExpr,
     right: &RelExpr,
-    on: &[crate::tools::public_api::relation_ir::JoinCondition],
+    on: &[crate::model::public_api::relation_ir::JoinCondition],
     projected: &ColumnRef,
 ) -> Result<(&'a RelExpr, Option<String>), SchemaConversionError> {
     let RelExpr::TableScan {
@@ -3417,16 +3417,16 @@ fn err(path: impl Into<String>, message: impl Into<String>) -> SchemaConversionE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query::provider_claim_operand_key;
-    use crate::query::{InheritsOperation, JoinTarget, Operand, Predicate};
-    use crate::tools::object::ObjectId;
-    use crate::tools::public_api::policy::{CmpOp, PolicyValue};
-    use crate::tools::public_api::relation_ir::{
+    use crate::model::public_api::policy::{CmpOp, PolicyValue};
+    use crate::model::public_api::relation_ir::{
         ColumnRef as RelColumnRef, JoinCondition as RelJoinCondition, JoinKind as RelJoinKind,
         KeyRef as RelKeyRef, PredicateCmpOp as RelPredicateCmpOp,
         PredicateExpr as RelPredicateExpr, RecursionBound as RelRecursionBound,
         RelExpr as PublicRelExpr, RowIdRef as RelRowIdRef, ValueRef as RelValueRef,
     };
+    use crate::object::ObjectId;
+    use crate::query::provider_claim_operand_key;
+    use crate::query::{InheritsOperation, JoinTarget, Operand, Predicate};
     #[test]
     fn rejects_user_columns_in_the_compiler_aggregate_namespace() {
         let schema = SchemaBuilder::new()
@@ -3444,9 +3444,9 @@ mod tests {
         );
     }
 
-    use crate::tools::public_api::types::EnumCaseDescriptor;
-    use crate::tools::public_api::types::TableSchemaBuilder;
-    use crate::tools::public_schema::{
+    use crate::model::public_api::types::EnumCaseDescriptor;
+    use crate::model::public_api::types::TableSchemaBuilder;
+    use crate::model::public_schema::{
         ColumnDescriptor, ColumnType, PolicyExpr, RowDescriptor, Schema, SchemaBuilder,
         TablePolicies, TableSchema,
     };
@@ -5598,7 +5598,7 @@ mod tests {
                 }],
                 join_kind: RelJoinKind::Inner,
             }),
-            columns: vec![crate::tools::public_api::relation_ir::ProjectColumn {
+            columns: vec![crate::model::public_api::relation_ir::ProjectColumn {
                 alias: "id".to_owned(),
                 expr: RelProjectExpr::Column(RelColumnRef {
                     scope: Some("target".to_owned()),
@@ -5764,7 +5764,7 @@ mod tests {
                     right: RelValueRef::SessionRef(vec!["claims".to_owned(), "sub".to_owned()]),
                 },
             }),
-            columns: vec![crate::tools::public_api::relation_ir::ProjectColumn {
+            columns: vec![crate::model::public_api::relation_ir::ProjectColumn {
                 alias: "id".to_owned(),
                 expr: RelProjectExpr::Column(RelColumnRef {
                     scope: None,
@@ -5804,7 +5804,7 @@ mod tests {
                 }],
                 join_kind: RelJoinKind::Inner,
             }),
-            columns: vec![crate::tools::public_api::relation_ir::ProjectColumn {
+            columns: vec![crate::model::public_api::relation_ir::ProjectColumn {
                 alias: "id".to_owned(),
                 expr: RelProjectExpr::Column(RelColumnRef {
                     scope: None,
@@ -6169,7 +6169,7 @@ mod tests {
                                             },
                                         }),
                                         columns: vec![
-                                            crate::tools::public_api::relation_ir::ProjectColumn {
+                                            crate::model::public_api::relation_ir::ProjectColumn {
                                                 alias: "id".to_owned(),
                                                 expr: RelProjectExpr::Column(RelColumnRef {
                                                     scope: Some("user_team_edges".to_owned()),
@@ -6208,7 +6208,7 @@ mod tests {
                                             ]),
                                         }),
                                         columns: vec![
-                                            crate::tools::public_api::relation_ir::ProjectColumn {
+                                            crate::model::public_api::relation_ir::ProjectColumn {
                                                 alias: "id".to_owned(),
                                                 expr: RelProjectExpr::Column(RelColumnRef {
                                                     scope: Some("team_team_edges".to_owned()),

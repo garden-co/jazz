@@ -51,6 +51,7 @@ use super::query_engine::{
     claim_param_field, claim_path_from_param_field, left_field, query_program_source_requests,
     right_field, route_param_field, user_column_field,
 };
+use crate::object::{ObjectId, OutputOccurrenceId};
 #[cfg(test)]
 use crate::protocol::ReadViewKey;
 use crate::protocol::{
@@ -67,7 +68,6 @@ use crate::query::{
     QueryError, ShapeId, ValidatedQuery, binding_id_for_values, relation_query_to_query,
 };
 use crate::schema::{ColumnSchema, RuntimeSchema};
-use crate::tools::{ObjectId, OutputOccurrenceId};
 
 mod local_availability_receipts;
 mod materialization;

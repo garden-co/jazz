@@ -1372,7 +1372,7 @@ where
                 .into_iter()
                 .map(|(terminal_key, record)| {
                     Ok((
-                        crate::db::terminal_root_occurrence_id_with_root_union(
+                        crate::node::terminal_root::terminal_root_occurrence_id_with_root_union(
                             &terminal_key,
                             local
                                 .terminal_root_layout()
@@ -1386,7 +1386,7 @@ where
                         CurrentRow::new_with_publication_fields(
                             local.result_table.clone(),
                             record,
-                            crate::db::terminal_root_publication_fields(
+                            crate::node::terminal_root::terminal_root_publication_fields(
                                 local
                                     .terminal_root_layout()
                                     .ok_or(Error::InvalidStoredValue(

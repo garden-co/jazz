@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 use crate::ids::AuthorSubject;
-use crate::tools::metadata::SYSTEM_PRINCIPAL_ID;
-use crate::tools::transaction::OpenTransactionId;
+use crate::model::metadata::SYSTEM_PRINCIPAL_ID;
+use crate::model::transaction::OpenTransactionId;
 
 /// Auth mode derived from the JWT's `iss` claim.
 ///

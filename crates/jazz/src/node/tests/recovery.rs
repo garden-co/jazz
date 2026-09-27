@@ -63,17 +63,17 @@ fn reopening_rejects_a_colliding_durable_node_alias_before_decoding_history() {
             "jazz_nodes",
             vec![Value::U64(999), Value::Uuid(node(1).0)],
         );
-        let applied = crate::db::block_on(reopened_node.database.apply_batch(batch)).unwrap();
-        let persisted = crate::db::block_on(applied.persist());
+        let applied = crate::local_executor::block_on(reopened_node.database.apply_batch(batch)).unwrap();
+        let persisted = crate::local_executor::block_on(applied.persist());
         reopened_node.database.finish_persistence(persisted).unwrap();
-        crate::db::block_on(reopened_node.database.close()).unwrap();
+        crate::local_executor::block_on(reopened_node.database.close()).unwrap();
     }
 
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
     assert!(matches!(
-        crate::db::block_on(NodeState::new(node(1), schema, storage)),
+        crate::local_executor::block_on(NodeState::new(node(1), schema, storage)),
         Err(Error::InvalidStoredValue("node UUID has conflicting durable aliases"))
     ));
 }
@@ -112,8 +112,8 @@ fn failed_node_alias_persistence_leaves_no_resident_alias_or_dependent_history_f
         "a failed alias prerequisite must not become a resident alias"
     );
 
-    let mut reopened = crate::db::block_on(NodeState::new(node(0xd2), node_schema, storage)).unwrap();
-    let aliases = crate::db::block_on(reopened.database.primary_key_scan_raw("jazz_nodes", &[]))
+    let mut reopened = crate::local_executor::block_on(NodeState::new(node(0xd2), node_schema, storage)).unwrap();
+    let aliases = crate::local_executor::block_on(reopened.database.primary_key_scan_raw("jazz_nodes", &[]))
         .unwrap();
     assert_eq!(aliases.len(), 1, "only the core's own durable alias may remain");
     assert_eq!(
@@ -159,17 +159,17 @@ fn reopening_rejects_a_schema_version_with_two_durable_aliases() {
                 Value::Bytes(codec::encode_physical_mapping(&mapping).unwrap()),
             ],
         );
-        let applied = crate::db::block_on(opened.database.apply_batch(batch)).unwrap();
-        let persisted = crate::db::block_on(applied.persist());
+        let applied = crate::local_executor::block_on(opened.database.apply_batch(batch)).unwrap();
+        let persisted = crate::local_executor::block_on(applied.persist());
         opened.database.finish_persistence(persisted).unwrap();
-        crate::db::block_on(opened.database.close()).unwrap();
+        crate::local_executor::block_on(opened.database.close()).unwrap();
     }
 
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
     assert!(matches!(
-        crate::db::block_on(NodeState::new(node(1), schema, storage)),
+        crate::local_executor::block_on(NodeState::new(node(1), schema, storage)),
         Err(Error::InvalidStoredValue(
             "schema version has conflicting durable aliases"
         ))
@@ -198,17 +198,17 @@ fn reopening_rejects_schema_alias_that_cannot_lower_to_a_groove_variant_tag() {
                 Value::Bytes(codec::encode_physical_mapping(&mapping).unwrap()),
             ],
         );
-        let applied = crate::db::block_on(opened.database.apply_batch(batch)).unwrap();
-        let persisted = crate::db::block_on(applied.persist());
+        let applied = crate::local_executor::block_on(opened.database.apply_batch(batch)).unwrap();
+        let persisted = crate::local_executor::block_on(applied.persist());
         opened.database.finish_persistence(persisted).unwrap();
-        crate::db::block_on(opened.database.close()).unwrap();
+        crate::local_executor::block_on(opened.database.close()).unwrap();
     }
 
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
     assert!(matches!(
-        crate::db::block_on(NodeState::new(node(1), schema, storage)),
+        crate::local_executor::block_on(NodeState::new(node(1), schema, storage)),
         Err(Error::InvalidStoredValue("physical table variant tag exhausted"))
     ));
 }
@@ -1105,8 +1105,8 @@ fn reopen_with_noncanonical_contribution_provenance(
             )
             .unwrap(),
         );
-        let applied = crate::db::block_on(core.database.apply_batch(batch)).unwrap();
-        let persisted = crate::db::block_on(applied.persist());
+        let applied = crate::local_executor::block_on(core.database.apply_batch(batch)).unwrap();
+        let persisted = crate::local_executor::block_on(applied.persist());
         core.database.finish_persistence(persisted).unwrap();
     }
 
@@ -1164,8 +1164,8 @@ fn reopen_with_corrupt_contribution_coordinate(
             )
             .unwrap(),
         );
-        let applied = crate::db::block_on(core.database.apply_batch(batch)).unwrap();
-        let persisted = crate::db::block_on(applied.persist());
+        let applied = crate::local_executor::block_on(core.database.apply_batch(batch)).unwrap();
+        let persisted = crate::local_executor::block_on(applied.persist());
         core.database.finish_persistence(persisted).unwrap();
     }
 
@@ -1311,7 +1311,7 @@ fn open_receipt_counts_physical_recovery_scans_exactly() {
             )
             .unwrap();
         }
-        crate::db::block_on(node.database.close()).unwrap();
+        crate::local_executor::block_on(node.database.close()).unwrap();
     }
 
     let cfs = schema.column_families();
@@ -1396,7 +1396,7 @@ fn opening_defers_malformed_current_row_to_read() {
             .unwrap();
         let variant_tag = raw.variant_tag();
         let (key, raw) = raw.into_parts();
-        crate::db::block_on(node.database.close()).unwrap();
+        crate::local_executor::block_on(node.database.close()).unwrap();
         drop(node);
 
         let cfs = schema.column_families();
@@ -1466,8 +1466,8 @@ fn recovery_sweeps_ahead_rows_for_globally_fated_transactions() {
         );
         node.write_global_current_update(&mut batch, &version, GlobalTime(1))
             .unwrap();
-        let applied = crate::db::block_on(node.database.apply_batch(batch)).unwrap();
-let persisted = crate::db::block_on(applied.persist());
+        let applied = crate::local_executor::block_on(node.database.apply_batch(batch)).unwrap();
+let persisted = crate::local_executor::block_on(applied.persist());
 node.database.finish_persistence(persisted).unwrap();
         assert_eq!(ahead_current_row_count(&mut node, "todos"), 1);
     }
@@ -1696,8 +1696,8 @@ where
     );
     node.write_global_current_update(&mut batch, &version, global_time)
         .unwrap();
-    let applied = crate::db::block_on(node.database.apply_batch(batch)).unwrap();
-let persisted = crate::db::block_on(applied.persist());
+    let applied = crate::local_executor::block_on(node.database.apply_batch(batch)).unwrap();
+let persisted = crate::local_executor::block_on(applied.persist());
 node.database.finish_persistence(persisted).unwrap();
 }
 
@@ -1854,8 +1854,8 @@ fn reopen_refuses_preexisting_sequenced_non_global_transaction() {
             )
             .unwrap(),
         );
-        let applied = crate::db::block_on(node.database.apply_batch(batch)).unwrap();
-let persisted = crate::db::block_on(applied.persist());
+        let applied = crate::local_executor::block_on(node.database.apply_batch(batch)).unwrap();
+let persisted = crate::local_executor::block_on(applied.persist());
 node.database.finish_persistence(persisted).unwrap();
     }
 
@@ -2815,7 +2815,7 @@ fn cancelled_alias_discovery_invalidates_absence_before_suspension() {
     drop(future);
     assert_eq!(core.absent_node_alias, None);
     control.resume();
-    let alias = crate::db::block_on(core.ensure_node_alias(absent.node)).unwrap();
+    let alias = crate::local_executor::block_on(core.ensure_node_alias(absent.node)).unwrap();
     assert_eq!(core.node_aliases.get(&absent.node), Some(&alias));
     assert!(core.query_transaction(absent).unwrap().is_none());
 }
@@ -2832,7 +2832,7 @@ fn cached_absent_alias_does_not_hide_a_poisoned_database() {
         MergeableCommit::new("todos", row(7), 10).cells(title_cells("fails")),
     ).is_err());
     assert_eq!(core.absent_node_alias, Some(absent.node));
-    assert!(matches!(crate::db::block_on(core.query_transaction(absent)),
+    assert!(matches!(crate::local_executor::block_on(core.query_transaction(absent)),
         Err(Error::Groove(groove::db::Error::DatabasePoisoned))));
 }
 
@@ -2894,8 +2894,8 @@ fn transaction_status_projects_state_without_decoding_payloads() {
                 values[TransactionRowRecord::FIELD_DURABILITY_IDX] = Value::EnumTag(tag);
                 let mut batch = core.database.open_batch();
                 batch.update("jazz_transactions", values);
-                let applied = crate::db::block_on(core.database.apply_batch(batch)).unwrap();
-                let persisted = crate::db::block_on(applied.persist());
+                let applied = crate::local_executor::block_on(core.database.apply_batch(batch)).unwrap();
+                let persisted = crate::local_executor::block_on(applied.persist());
                 core.database.finish_persistence(persisted).unwrap();
                 assert_eq!(
                     core.transaction_state_settled(tx_id),
@@ -2936,8 +2936,8 @@ fn transaction_status_projects_state_without_decoding_payloads() {
         .unwrap();
         let mut batch = core.database.open_batch();
         batch.update("jazz_transactions", values.clone());
-        let applied = crate::db::block_on(core.database.apply_batch(batch)).unwrap();
-        let persisted = crate::db::block_on(applied.persist());
+        let applied = crate::local_executor::block_on(core.database.apply_batch(batch)).unwrap();
+        let persisted = crate::local_executor::block_on(applied.persist());
         core.database.finish_persistence(persisted).unwrap();
 
         super::super::currency::TRANSACTION_PAYLOAD_DECODES.with(|count| count.set(0));
@@ -2967,8 +2967,8 @@ fn transaction_status_projects_state_without_decoding_payloads() {
                 Value::Nullable(reason.map(|reason| Box::new(Value::String(reason.to_owned()))));
             let mut batch = core.database.open_batch();
             batch.update("jazz_transactions", invalid_state);
-            let applied = crate::db::block_on(core.database.apply_batch(batch)).unwrap();
-            let persisted = crate::db::block_on(applied.persist());
+            let applied = crate::local_executor::block_on(core.database.apply_batch(batch)).unwrap();
+            let persisted = crate::local_executor::block_on(applied.persist());
             core.database.finish_persistence(persisted).unwrap();
             for pending in [false, true] {
                 if pending {
@@ -3094,8 +3094,8 @@ fn legacy_edge_acceptance_reopens_as_replayable_local_write() {
         values[TransactionRowRecord::FIELD_DURABILITY_IDX] = Value::EnumTag(2);
         let mut batch = writer.database.open_batch();
         batch.update("jazz_transactions", values);
-        let applied = crate::db::block_on(writer.database.apply_batch(batch)).unwrap();
-        let persisted = crate::db::block_on(applied.persist());
+        let applied = crate::local_executor::block_on(writer.database.apply_batch(batch)).unwrap();
+        let persisted = crate::local_executor::block_on(applied.persist());
         writer.database.finish_persistence(persisted).unwrap();
     }
     let mut reopened = open_node_at(&temp_dir, schema);

@@ -387,7 +387,7 @@ where
     /// offline writers can settle in an order that disagrees with transaction
     /// HLC time, so this convenience address is best-effort under clock skew.
     pub fn at_time(&mut self, time: TxTime) -> Result<HistoricalRead<'_, S>, Error> {
-        let position = crate::db::block_on(self.resolve_time_travel_position(time))?;
+        let position = crate::local_executor::block_on(self.resolve_time_travel_position(time))?;
         Ok(self.at(position))
     }
 

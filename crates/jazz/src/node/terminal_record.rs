@@ -1,7 +1,7 @@
 //! Receiver-local terminal records. Child edits mutate decoded state; encoding
 //! the complete root is reserved for an explicitly requested snapshot.
 
-use super::{Error, ErrorCode};
+use super::api_error::{Error, ErrorCode};
 use groove::ivm::{TerminalEdit, TerminalOperation, TerminalPathSegment};
 use groove::records::{OwnedRecord, RecordDescriptor, Value, ValueType};
 use std::collections::BTreeMap;
@@ -106,7 +106,7 @@ impl TerminalRecordState {
                         "terminal descendant collection contains a non-record child",
                     ));
                 };
-                let row_key = super::terminal_child_key(child)?;
+                let row_key = terminal_child_key(child)?;
                 let occurrence = occurrences.entry(row_key.clone()).or_default();
                 let key = groove::ivm::terminal_occurrence_key(row_key, *occurrence);
                 *occurrence += 1;
@@ -199,7 +199,7 @@ impl TerminalCollectionState {
         match edit {
             TerminalEdit::Insert { value, .. } | TerminalEdit::Update { value, .. } => {
                 let record = OwnedRecord::new(value.clone(), self.descriptor);
-                let row_key = super::terminal_child_key(&Value::Record(record.clone()))?;
+                let row_key = terminal_child_key(&Value::Record(record.clone()))?;
                 let valid_key = *key == row_key
                     || (key.len() == row_key.len() + 9
                         && key.starts_with(&row_key)
@@ -249,4 +249,29 @@ impl TerminalCollectionState {
         }
         Ok(())
     }
+}
+
+pub(crate) fn terminal_child_key(value: &Value) -> Result<Vec<u8>, Error> {
+    let Value::Record(record) = value else {
+        return Err(Error::new(
+            ErrorCode::Protocol,
+            "terminal descendant collection contains a non-record child",
+        ));
+    };
+    let Value::Uuid(row_uuid) = record.get_idx(0).map_err(|error| {
+        Error::new(
+            ErrorCode::Protocol,
+            format!("cannot decode terminal child key: {error}"),
+        )
+    })?
+    else {
+        return Err(Error::new(
+            ErrorCode::Protocol,
+            "terminal descendant child key must be its physical row UUID",
+        ));
+    };
+    let mut key = Vec::with_capacity(17);
+    key.push(10);
+    key.extend_from_slice(row_uuid.as_bytes());
+    Ok(key)
 }

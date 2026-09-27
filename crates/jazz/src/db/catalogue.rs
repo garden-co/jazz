@@ -101,8 +101,8 @@ where
         revision: u64,
         schema: JazzSchema,
         permissions: std::collections::HashMap<
-            crate::tools::public_schema::TableName,
-            crate::tools::public_schema::TablePolicies,
+            crate::model::public_schema::TableName,
+            crate::model::public_schema::TablePolicies,
         >,
     ) -> Result<(), Error> {
         self.check_catalogue_admin()?;

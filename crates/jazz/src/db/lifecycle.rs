@@ -402,13 +402,13 @@ where
         &self,
         snapshot: crate::protocol::CatalogueSnapshot,
     ) -> Result<(), Error> {
-        let outcome = crate::db::block_on(
+        let outcome = crate::local_executor::block_on(
             self.node
                 .node
                 .borrow_mut()
                 .apply_trusted_catalogue_snapshot(snapshot),
         )?;
-        crate::db::block_on(self.finish_publication_outcome(outcome))
+        crate::local_executor::block_on(self.finish_publication_outcome(outcome))
     }
 
     #[cfg(feature = "testing")]
@@ -809,7 +809,7 @@ where
         &self,
         cadence: InitialSyncFlushCadence,
     ) -> Result<(), Error> {
-        Ok(crate::db::block_on(
+        Ok(crate::local_executor::block_on(
             self.node
                 .node
                 .borrow_mut()
@@ -846,7 +846,7 @@ where
                 );
             }
         }
-        let published = crate::db::block_on(
+        let published = crate::local_executor::block_on(
             self.node.node.borrow_mut().commit_mergeable_in_schema(
                 write_schema_version,
                 MergeableCommit::new(table, row, self.next_now_ms())
@@ -855,16 +855,16 @@ where
             ),
         )?;
         let tx_id = published.tx_id;
-        crate::db::block_on(
+        crate::local_executor::block_on(
             self.finish_publication_outcome(PublicationOutcome::published((), published)),
         )?;
-        let outcome = crate::db::block_on(
+        let outcome = crate::local_executor::block_on(
             self.node
                 .node
                 .borrow_mut()
                 .finalize_local_mergeable_commit(tx_id),
         )?;
-        crate::db::block_on(self.finish_publication_outcome(outcome))?;
+        crate::local_executor::block_on(self.finish_publication_outcome(outcome))?;
         self.node.mark_subscriber_connections_dirty();
         Ok(tx_id)
     }
@@ -876,13 +876,13 @@ where
     /// before performing the same self-acceptance step as
     /// [`Db::seed_settled_mergeable_for_bootstrap`].
     pub fn finalize_local_mergeable_commit_for_test(&self, tx_id: TxId) -> Result<(), Error> {
-        let outcome = crate::db::block_on(
+        let outcome = crate::local_executor::block_on(
             self.node
                 .node
                 .borrow_mut()
                 .finalize_local_mergeable_commit(tx_id),
         )?;
-        crate::db::block_on(self.finish_publication_outcome(outcome))?;
+        crate::local_executor::block_on(self.finish_publication_outcome(outcome))?;
         self.node.mark_subscriber_connections_dirty();
         Ok(())
     }
@@ -893,7 +893,7 @@ where
             return state;
         }
         let Some((fate, global_time, durability)) =
-            crate::db::block_on(self.node.node.borrow_mut().transaction_state(tx_id))
+            crate::local_executor::block_on(self.node.node.borrow_mut().transaction_state(tx_id))
         else {
             return Err(Error::new(
                 ErrorCode::NotObserved,

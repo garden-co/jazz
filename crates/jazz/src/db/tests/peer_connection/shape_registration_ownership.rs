@@ -448,7 +448,7 @@ fn same_cycle_reattach_reannounces_shape_after_unsubscribe() {
     let query = Query::from("todos").filter(eq(col("title"), lit("reattach")));
     let prepared = prepared(&client, &query);
     let (client_transport, _server_transport, client_sent, _) = duplex_with_taps();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
 
     let first = client
         .attach_query_with_opts(&prepared, global_subscribe_opts())

@@ -11,7 +11,7 @@ use serde::Serialize;
 use crate::db::{RemovedRow, SubscriptionOutputRow};
 use crate::ids::{PhysicalColumnId, RowUuid};
 use crate::node::{CurrentRow, CurrentRowPublicationField, RelationSnapshot};
-use crate::tools::ResultKey;
+use crate::object::ResultKey;
 use groove::ivm::TerminalOperation;
 
 /// Encode only the descriptor portion of the named-cell input role. This is

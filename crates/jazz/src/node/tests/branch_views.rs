@@ -430,7 +430,7 @@ fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() 
         crate::tx::BranchViewCopyBase::Current(base_key.clone()),
     );
     let allowed_outcome =
-        crate::db::block_on(authority.ingest_commit_unit(allowed_tx.clone(), allowed_versions, 20))
+        crate::local_executor::block_on(authority.ingest_commit_unit(allowed_tx.clone(), allowed_versions, 20))
             .unwrap();
     settle_outcome(&mut authority, allowed_outcome).unwrap();
     assert!(matches!(
@@ -503,7 +503,7 @@ fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() 
                 &right.head,
             ))
         });
-    let batch_outcome = crate::db::block_on(authority.ingest_commit_unit(
+    let batch_outcome = crate::local_executor::block_on(authority.ingest_commit_unit(
         batch_tx.clone(),
         batch_versions.clone(),
         21,
@@ -515,7 +515,7 @@ fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() 
         Some((Fate::Accepted, Some(_), DurabilityTier::Global))
     ));
     let batch_versions_for_reopen = batch_versions.clone();
-    let replay_outcome = crate::db::block_on(authority.ingest_commit_unit(
+    let replay_outcome = crate::local_executor::block_on(authority.ingest_commit_unit(
         batch_tx.clone(),
         batch_versions,
         21,
@@ -577,7 +577,7 @@ fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() 
     provenance.branch_write_intents[0].head = rejected_head_key.clone();
     // The raw payload has two branch versions but only the view-copy proof.
     // This is deliberately malformed canonical metadata, not a policy denial.
-    let rejected_outcome = crate::db::block_on(authority.ingest_commit_unit(
+    let rejected_outcome = crate::local_executor::block_on(authority.ingest_commit_unit(
         rejected_tx.clone(),
         rejected_versions,
         24,
@@ -619,7 +619,7 @@ fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() 
             },
         },
     );
-    let snapshot_outcome = crate::db::block_on(authority.ingest_commit_unit(
+    let snapshot_outcome = crate::local_executor::block_on(authority.ingest_commit_unit(
         snapshot_tx.clone(),
         snapshot_versions,
         22,
@@ -643,7 +643,7 @@ fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() 
         head_value,
         crate::tx::BranchViewCopyBase::Current(base_key.clone()),
     );
-    let race_outcome = crate::db::block_on(authority.ingest_commit_unit(
+    let race_outcome = crate::local_executor::block_on(authority.ingest_commit_unit(
         race_tx.clone(),
         race_versions,
         23,
@@ -673,7 +673,7 @@ fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() 
         crate::tx::BranchViewCopyBase::Current(base_key.clone()),
     );
     omitted_tx.contribution_merge = None;
-    let omitted_outcome = crate::db::block_on(authority.ingest_commit_unit(
+    let omitted_outcome = crate::local_executor::block_on(authority.ingest_commit_unit(
         omitted_tx.clone(),
         omitted_versions,
         25,
@@ -699,7 +699,7 @@ fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() 
         crate::tx::BranchViewCopyBase::Current(base_key.clone()),
     );
     let denied_outcome =
-        crate::db::block_on(authority.ingest_commit_unit(denied_tx.clone(), denied_versions, 30))
+        crate::local_executor::block_on(authority.ingest_commit_unit(denied_tx.clone(), denied_versions, 30))
             .unwrap();
     settle_outcome(&mut authority, denied_outcome).unwrap();
     let denied_state = authority.transaction_state_settled(denied_tx.tx_id);
@@ -741,7 +741,7 @@ fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() 
                 .clone()
         },
     );
-    let tampered_outcome = crate::db::block_on(authority.ingest_commit_unit(
+    let tampered_outcome = crate::local_executor::block_on(authority.ingest_commit_unit(
         tampered_tx.clone(),
         tampered_versions,
         40,
@@ -827,7 +827,7 @@ fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() 
                 .0,
         ),
     ];
-    let malformed_outcome = crate::db::block_on(authority.ingest_commit_unit(
+    let malformed_outcome = crate::local_executor::block_on(authority.ingest_commit_unit(
         malformed_tx.clone(),
         malformed_versions,
         42,
@@ -864,7 +864,7 @@ fn branch_view_copy_evidence_authorizes_exact_inherited_source_without_parent() 
         reopened.transaction_record(batch_tx.tx_id).unwrap().contribution_merge,
         batch_tx.contribution_merge
     );
-    let reopened_outcome = crate::db::block_on(reopened.ingest_commit_unit(
+    let reopened_outcome = crate::local_executor::block_on(reopened.ingest_commit_unit(
         batch_tx.clone(),
         batch_versions_for_reopen,
         41,
@@ -2523,7 +2523,7 @@ fn added_branch_column_defaults_old_history_and_survives_column_rename() {
                 .column_with_default(
                     "workspace_id",
                     PublicColumnType::Uuid,
-                    PublicValue::Uuid(crate::tools::ObjectId::from_uuid(default_workspace)),
+                    PublicValue::Uuid(crate::object::ObjectId::from_uuid(default_workspace)),
                 )
                 .branch_by("workspace_id"),
         ),
@@ -2607,7 +2607,7 @@ fn added_branch_column_defaults_old_history_and_survives_column_rename() {
                 .column_with_default(
                     "space_id",
                     PublicColumnType::Uuid,
-                    PublicValue::Uuid(crate::tools::ObjectId::from_uuid(default_workspace)),
+                    PublicValue::Uuid(crate::object::ObjectId::from_uuid(default_workspace)),
                 )
                 .branch_by("space_id"),
         ),

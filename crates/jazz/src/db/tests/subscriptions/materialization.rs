@@ -243,7 +243,7 @@ fn server_reset_subscription_materializes_without_local_snapshot_eval() {
     seed(&server, "todos", cells("second", true, owner));
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, client_author);
 
     let query = Query::from("todos");
@@ -313,7 +313,7 @@ fn authoritative_reset_retries_after_refresh_error() {
     let first = seed(&server, "todos", cells("retry after error", false, owner));
 
     let (client_transport, server_transport) = duplex();
-    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, client_author);
     let query = Query::from("todos")
         .select(["title", "$createdBy"])
@@ -427,7 +427,7 @@ fn authoritative_reset_retries_after_refresh_cancellation() {
     );
 
     let (client_transport, server_transport) = duplex();
-    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, client_author);
     let query = Query::from("todos")
         .select(["title", "$createdBy"])
@@ -744,7 +744,7 @@ fn client_tier_routing_scans_local_overlay_but_uses_global_settled_members() {
     );
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(db.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(db.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, client_author);
     let attachment = db
         .attach_query_with_opts(&prepared, global_subscribe_opts())
@@ -878,7 +878,7 @@ fn client_settled_file_member_reads_bytes_for_bound_id_read() {
     let query = Query::from("files").filter(eq(col("id"), lit(file.0)));
     let prepared = prepared(&db, &query);
     let (client_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(db.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(db.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, client_author);
     let attachment = db
         .attach_query_with_opts(&prepared, global_subscribe_opts())

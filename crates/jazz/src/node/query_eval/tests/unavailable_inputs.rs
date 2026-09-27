@@ -1328,8 +1328,8 @@ fn local_unavailable_confirmed_row_keeps_pending_successor() {
     );
     node.write_global_current_update(&mut batch, &version, global_time)
         .unwrap();
-    let applied = crate::db::block_on(node.database.apply_batch(batch)).unwrap();
-    let persisted = crate::db::block_on(applied.persist());
+    let applied = crate::local_executor::block_on(node.database.apply_batch(batch)).unwrap();
+    let persisted = crate::local_executor::block_on(applied.persist());
     node.database.finish_persistence(persisted).unwrap();
     let scope = node.local_read_policy_binding(alice).unwrap();
     let table = node

@@ -27,7 +27,7 @@ fn peer_view_updates_reject_authority_output_before_receiver_state_changes() {
     let mut member_update = base();
     member_update.result_member_adds.push(member.clone());
     assert!(matches!(
-        crate::db::block_on(reader.apply_view_update(member_update)),
+        crate::local_executor::block_on(reader.apply_view_update(member_update)),
         Err(Error::InvalidAuthoritySourceClosure { transition, .. })
             if transition == "authority view update carries retired result members"
     ));

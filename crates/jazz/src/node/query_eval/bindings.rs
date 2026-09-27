@@ -120,7 +120,7 @@ pub(super) fn rewrite_claim_predicate_for_binding(
         Predicate::IsNull(Operand::Claim(name)) => {
             let path = crate::query::operand_claim_path(&name);
             match claims
-                .and_then(|claims| crate::tools::policy_claims::policy_claim_at_path(claims, &path))
+                .and_then(|claims| crate::model::policy_claims::policy_claim_at_path(claims, &path))
             {
                 Some(Value::Nullable(None)) => Predicate::All(Vec::new()),
                 // Missing claims must not match IS NULL; the Not guard above
@@ -141,7 +141,7 @@ pub(super) fn default_permission_scope_claim_values(
 pub(super) fn default_policy_claim_values(writer: AuthorSubject) -> BTreeMap<String, Value> {
     // Alpha-compat built-ins live at the node admission/query boundary, not in
     // the compiler: lowering receives ordinary claim values plus spec `sub`.
-    let mut claims = crate::tools::policy_claims::author_policy_claims(writer);
+    let mut claims = crate::model::policy_claims::author_policy_claims(writer);
     claims.insert("isAdmin".into(), Value::Bool(false));
     claims
 }
@@ -272,7 +272,7 @@ fn bind_scope_claim_operand(
         return;
     };
     let path = crate::query::operand_claim_path(name);
-    let Some(value) = crate::tools::policy_claims::policy_claim_at_path(claim_values, &path) else {
+    let Some(value) = crate::model::policy_claims::policy_claim_at_path(claim_values, &path) else {
         return;
     };
     let param = claim_param_field(&ClaimPath(crate::query::operand_claim_path(name)));
@@ -477,7 +477,7 @@ fn operand_contains_unbound_claim(
 ) -> bool {
     matches!(operand, Operand::Claim(name) if !is_builtin_policy_claim(name) && !claims.is_some_and(|claims| {
         let path = crate::query::operand_claim_path(name);
-        crate::tools::policy_claims::policy_claim_at_path(claims, &path).is_some()
+        crate::model::policy_claims::policy_claim_at_path(claims, &path).is_some()
     }))
 }
 

@@ -6,7 +6,7 @@
 //! are grounded in `jazz/README.md`.
 
 use crate::ids::{AuthorSubject, NodeUuid, PhysicalTableId, RowAuthor, RowUuid, SchemaVersionId};
-use crate::protocol::{BranchKey, SnapshotRef};
+use crate::model::branch::{BranchKey, SnapshotRef};
 use crate::query::{BindingId, Query, ShapeId};
 use crate::schema::TableSchema;
 use crate::time::{GlobalTime, TxTime};

@@ -89,6 +89,17 @@ targets. Jazz's own tests share `jazz-testkit/src/duplex_transport.rs` by
 `#[path]`, not through a testkit dev-dependency, so a Jazz edit no longer
 rebuilds Jazz a second time for the testkit.
 
+**Jazz module layers.** `crates/jazz/src` is being split into crates bottom-up.
+`dev/gates/jazz-module-layers.mjs` assigns each file to a layer (types → model
+→ protocol → engine → node → peer → db → facade) and fails CI lint on any
+production `crate::`/`super::` reference to a higher layer. Basic types
+(`object`, `app_id`, `identity`) sit at the crate root and the public data model
+lives in `model/`; `tools` only re-exports them. Put new code in the lowest layer
+that its dependencies allow. Test-only upward references are ratcheted in
+`dev/gates/jazz-module-layers.allow`: remove a pair when you fix it, never add
+one by hand (`--write-allow` refreshes the list and refuses while production
+is unclean; `--report [--tests]` lists references).
+
 **Canonical gates:** do not let born-red or rotted targets accumulate silently.
 For ordinary Rust/core work, the full gate set is:
 

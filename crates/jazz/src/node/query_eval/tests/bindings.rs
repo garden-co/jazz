@@ -34,7 +34,7 @@ fn capability_admission_reuses_only_exact_claim_context_and_clears_with_plans() 
         );
     };
     let admit = |node: &mut NodeState<RocksDbStorage>| {
-        crate::db::block_on(node.ensure_peer_maintained_subscription_view_supported(
+        crate::local_executor::block_on(node.ensure_peer_maintained_subscription_view_supported(
             &shape,
             &binding,
             DurabilityTier::Global,
@@ -88,7 +88,7 @@ fn capability_admission_reuses_only_exact_claim_context_and_clears_with_plans() 
             .validate_runtime(&schema)
             .unwrap();
         let other_binding = other_shape.bind(BTreeMap::new()).unwrap();
-        crate::db::block_on(node.ensure_peer_maintained_subscription_view_supported(
+        crate::local_executor::block_on(node.ensure_peer_maintained_subscription_view_supported(
             &other_shape,
             &other_binding,
             DurabilityTier::Global,

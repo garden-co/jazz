@@ -1168,7 +1168,7 @@ pub fn decode_relation_query_postcard(bytes: &[u8]) -> WireResult<RelationQuery>
     if bytes.len() > MAX_RELATION_BYTES {
         return Err(RelationWireError::TooLarge);
     }
-    let wire = crate::wire::decode_postcard_exact::<WireRelationQuery>(bytes)?;
+    let wire = crate::postcard_exact::decode_postcard_exact::<WireRelationQuery>(bytes)?;
     relation_query_from_wire(wire)
 }
 fn validate_wire(value: &WireRelationQuery) -> WireResult<()> {
@@ -1549,7 +1549,7 @@ mod relation_postcard_tests {
         assert!(postcard::from_bytes::<Query>(&query_bytes).is_err());
         let valid_query_bytes = postcard::to_allocvec(&query).unwrap();
         assert_eq!(
-            crate::wire::decode_postcard_exact::<Query>(&valid_query_bytes).unwrap(),
+            crate::postcard_exact::decode_postcard_exact::<Query>(&valid_query_bytes).unwrap(),
             query
         );
 
@@ -1575,7 +1575,7 @@ mod relation_postcard_tests {
         assert!(postcard::from_bytes::<crate::protocol::ShapeAst>(&shape_bytes).is_err());
         let valid_shape_bytes = postcard::to_allocvec(&shape).unwrap();
         assert_eq!(
-            crate::wire::decode_postcard_exact::<crate::protocol::ShapeAst>(&valid_shape_bytes)
+            crate::postcard_exact::decode_postcard_exact::<crate::protocol::ShapeAst>(&valid_shape_bytes)
                 .unwrap(),
             shape
         );
