@@ -6459,6 +6459,28 @@ where
             }
         }
     }
+    // Publish readiness only after the batch and its selected-authority
+    // receipts commit. The reader rechecks generation, scope and settlement;
+    // this notification is not itself proof of coverage.
+    let read_waiters = {
+        let mut registrations = query_coverage_registrations.borrow_mut();
+        confirmed_subscriptions
+            .iter()
+            .flat_map(|(subscription, _)| {
+                registrations
+                    .get_mut(subscription)
+                    .map(|registration| std::mem::take(&mut registration.read_waiters))
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>()
+    };
+    for waiter in read_waiters {
+        if let Some(waiter) = waiter.upgrade()
+            && let Some(sender) = waiter.borrow_mut().take()
+        {
+            let _ = sender.send(());
+        }
+    }
     Ok(())
 }
 

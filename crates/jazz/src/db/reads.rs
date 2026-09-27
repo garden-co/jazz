@@ -402,6 +402,7 @@ where
             };
             let outcome = async {
                 let mut next = Box::pin(stream.next_event());
+                let mut coverage_wait = None;
                 let event = std::future::poll_fn(|cx| {
                     if coverage_expired() {
                         return Poll::Ready(Err(Error::new(
@@ -409,15 +410,22 @@ where
                             "Timed out waiting for query coverage",
                         )));
                     }
-                    if local_coverage.as_ref().is_some_and(|coverage| {
-                        !self.query_attachment_is_covered(
-                            coverage
-                                .attachment
-                                .as_ref()
-                                .expect("live local read coverage"),
-                        )
-                    }) {
-                        return Poll::Pending;
+                    if let Some(coverage) = local_coverage.as_ref() {
+                        let attachment = coverage
+                            .attachment
+                            .as_ref()
+                            .expect("live local read coverage");
+                        // A reconnect/rebuild can invalidate coverage while
+                        // next_event is pending. Recheck on every continuation.
+                        if !self.query_attachment_is_covered(attachment) {
+                            let wait = coverage_wait.get_or_insert_with(|| {
+                                Box::pin(self.await_query_attachment_coverage(attachment))
+                            });
+                            if wait.as_mut().poll(cx).is_pending() {
+                                return Poll::Pending;
+                            }
+                        }
+                        coverage_wait = None;
                     }
                     std::future::Future::poll(next.as_mut(), cx).map(Ok)
                 })
@@ -473,13 +481,15 @@ where
             None
         };
         if let Some(coverage) = coverage.as_ref() {
-            std::future::poll_fn(|_| {
-                if self.query_attachment_is_covered(
-                    coverage
-                        .attachment
-                        .as_ref()
-                        .expect("live serialized read coverage"),
-                ) {
+            let covered = self.await_query_attachment_coverage(
+                coverage
+                    .attachment
+                    .as_ref()
+                    .expect("live serialized read coverage"),
+            );
+            let mut covered = std::pin::pin!(covered);
+            std::future::poll_fn(|cx| {
+                if covered.as_mut().poll(cx).is_ready() {
                     Poll::Ready(Ok(()))
                 } else if coverage_expired() {
                     Poll::Ready(Err(Error::new(
