@@ -275,6 +275,8 @@ function browserRelayErrorProtocolViolation(): Error {
 }
 
 export interface BrowserWorkerInitOptions {
+  /** Ephemeral host topology; omission keeps the existing relay/follower path. */
+  clientBinding?: "ordinary-client-v1";
   runtimeSources?: RuntimeSourcesConfig;
   schema: WasmSchema;
   dbName: string;
@@ -435,6 +437,7 @@ export type BrowserFollowerPortRequest =
       id: number;
       sessionClaims: Record<string, unknown>;
       inspectorBinding?: InspectorAttachmentBinding;
+      clientPort?: MessagePort;
     }
   | {
       type: "inspect-binding";
@@ -567,6 +570,7 @@ export type BrowserFollowerPortEvent =
       /** Present only on an init reply for a worker-authenticated Inspector peer. */
       inspectorAttachmentPhysicalDbName?: string;
       peerAuthority?: { node: Uint8Array; epoch: bigint; features: number };
+      clientBinding?: "ordinary-client-v1";
     }
   | { type: "auth-failure"; reason: string }
   | { type: "auth-restored" }

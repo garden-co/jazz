@@ -5,7 +5,7 @@ import type { BrowserRelayError } from "./browser-worker-protocol.js";
 /** Versioned, ephemeral host binding. These messages are never peer sync or durable storage. */
 export const CLIENT_BINDING_VERSION = 1;
 
-type Methods = Pick<
+type Methods = { flushLocal: () => Promise<void> } & Pick<
   TransactionalRuntime,
   | "query"
   | "insert"
@@ -18,14 +18,14 @@ type Methods = Pick<
   | "rollbackTransaction"
   | "waitForTransaction"
 > & {
-  [M in
-    | "streamingMutation"
-    | "updateLargeValues"
-    | "requestInsertPermissionAdvice"
-    | "requestReadPermissionAdvice"
-    | "requestUpdatePermissionAdvice"
-    | "requestDeletePermissionAdvice"]-?: NonNullable<TransactionalRuntime[M]>;
-};
+    [M in
+      | "streamingMutation"
+      | "updateLargeValues"
+      | "requestInsertPermissionAdvice"
+      | "requestReadPermissionAdvice"
+      | "requestUpdatePermissionAdvice"
+      | "requestDeletePermissionAdvice"]-?: NonNullable<TransactionalRuntime[M]>;
+  };
 export type ClientBindingMethod = keyof Methods;
 export type ClientBindingArgs<M extends ClientBindingMethod> = Parameters<Methods[M]>;
 export type ClientBindingResult<M extends ClientBindingMethod> = Awaited<ReturnType<Methods[M]>>;

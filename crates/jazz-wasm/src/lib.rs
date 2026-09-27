@@ -1637,24 +1637,7 @@ impl WasmDb {
         console_error_panic_hook::set_once();
         let (schema, config) = decode_open_args(&schema, &config)?;
         validate_untrusted_open_author(&config)?;
-        let refs = schema.column_families();
-        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage = BrowserStorage::open(IndexedDbPageStore::from_js(page_store), &refs)
-            .await
-            .map_err(to_js_error)?;
-        let db = open_scope_isolated_relay_db(schema, storage, config, storage_owner)
-            .await
-            .map_err(to_js_error)?;
-        db.restore_browser_relay_pending_uploads()
-            .await
-            .map_err(to_js_error)?;
-        db.set_deferred_local_persistence(true);
-        Ok(Self {
-            inner: Rc::new(RefCell::new(Some(WasmDbInner::Browser(Rc::new(db))))),
-            owns_runtime: true,
-            non_durable_client: Rc::new(Cell::new(false)),
-            trusted_backend: false,
-        })
+        open_browser_runtime(page_store, schema, config, Some(storage_owner)).await
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -1673,24 +1656,44 @@ impl WasmDb {
         let (schema, mut config) = decode_open_args(&schema, &config)?;
         config.identity.author =
             verify_self_signed_runtime_author(&token, &app_id, &claimed_author)?;
-        let refs = schema.column_families();
-        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage = BrowserStorage::open(IndexedDbPageStore::from_js(page_store), &refs)
-            .await
-            .map_err(to_js_error)?;
-        let db = open_scope_isolated_relay_db(schema, storage, config, storage_owner)
-            .await
-            .map_err(to_js_error)?;
-        db.restore_browser_relay_pending_uploads()
-            .await
-            .map_err(to_js_error)?;
-        db.set_deferred_local_persistence(true);
-        Ok(Self {
-            inner: Rc::new(RefCell::new(Some(WasmDbInner::Browser(Rc::new(db))))),
-            owns_runtime: true,
-            non_durable_client: Rc::new(Cell::new(false)),
-            trusted_backend: false,
-        })
+        open_browser_runtime(page_store, schema, config, Some(storage_owner)).await
+    }
+
+    /// Open the ordinary persistent client owned by a browser host. The host
+    /// must admit the physical storage owner before entering this ABI. Unlike
+    /// `openBrowser`, this does not grant scope-relay authority-result serving.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = openBrowserClient)]
+    pub async fn open_browser_client(
+        page_store: JsValue,
+        schema: Vec<u8>,
+        config: Vec<u8>,
+    ) -> Result<WasmDb, JsValue> {
+        initialize_wasm_tracing();
+        console_error_panic_hook::set_once();
+        let (schema, config) = decode_open_args(&schema, &config)?;
+        validate_untrusted_open_author(&config)?;
+        open_browser_runtime(page_store, schema, config, None).await
+    }
+
+    /// Ordinary persistent client with the same verified reserved-identity
+    /// boundary as the memory and scope-relay constructors.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = openBrowserClientWithSelfSignedProof)]
+    pub async fn open_browser_client_with_self_signed_proof(
+        page_store: JsValue,
+        schema: Vec<u8>,
+        config: Vec<u8>,
+        token: String,
+        app_id: String,
+        claimed_author: String,
+    ) -> Result<WasmDb, JsValue> {
+        initialize_wasm_tracing();
+        console_error_panic_hook::set_once();
+        let (schema, mut config) = decode_open_args(&schema, &config)?;
+        config.identity.author =
+            verify_self_signed_runtime_author(&token, &app_id, &claimed_author)?;
+        open_browser_runtime(page_store, schema, config, None).await
     }
 
     /// Register a typed schema view backed by this same runtime owner.
@@ -2935,6 +2938,45 @@ where
         configure_initial_sync_flush_cadence(&db, initial_sync_flush_every)?;
         Ok(db)
     }
+}
+
+/// Shared storage engine for both browser host roles. Role selection changes
+/// the open-time capability, not storage formats or generic instantiations.
+#[cfg(target_arch = "wasm32")]
+async fn open_browser_runtime(
+    page_store: JsValue,
+    schema: JazzSchema,
+    config: WasmOpenDbConfig,
+    relay_owner: Option<String>,
+) -> Result<WasmDb, JsValue> {
+    if relay_owner.is_none() && config.history_complete {
+        return Err(to_js_error(
+            "browser clients cannot open history-complete authority storage",
+        ));
+    }
+    let refs = schema.column_families();
+    let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = BrowserStorage::open(IndexedDbPageStore::from_js(page_store), &refs)
+        .await
+        .map_err(to_js_error)?;
+    let db = match relay_owner {
+        Some(owner) => open_scope_isolated_relay_db(schema, storage, config, owner).await,
+        None => open_db(schema, storage, config).await,
+    }
+    .map_err(to_js_error)?;
+    // Existing browser roots contain pending writes minted by former tabs.
+    // Recover by the admitted author even when this worker now owns mutations
+    // directly; node-local recovery alone would silently leave those uploads.
+    db.restore_browser_relay_pending_uploads()
+        .await
+        .map_err(to_js_error)?;
+    db.set_deferred_local_persistence(true);
+    Ok(WasmDb {
+        inner: Rc::new(RefCell::new(Some(WasmDbInner::Browser(Rc::new(db))))),
+        owns_runtime: true,
+        non_durable_client: Rc::new(Cell::new(false)),
+        trusted_backend: false,
+    })
 }
 
 /// Browser page stores are opened only after the worker has admitted their

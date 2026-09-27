@@ -1,3 +1,5 @@
+import { BrowserClientBindingHost } from "../runtime/native-runtime/browser-client-binding-host.js";
+import { admitBrowserClientRequest } from "../runtime/native-runtime/browser-client-session.js";
 import { createOpenTransactionId, type TxId } from "../runtime/client.js";
 import type { WasmDb } from "jazz-wasm";
 import { loadWasmModule, type WasmModule } from "../runtime/wasm-loader.js";
@@ -55,6 +57,8 @@ type TabPeer = {
   port: MessagePort;
   pump: BrowserWorkerTransportPump | null;
   subscriber: Transport | null;
+  clientBinding: BrowserClientBindingHost | null;
+  clientPort: MessagePort | null;
   pendingFrames: Uint8Array[];
   flushedLocal: boolean;
   flushRequestId: number | null;
@@ -96,6 +100,7 @@ type RuntimeContext = {
   peers: Map<string, TabPeer>;
   admissionClaims: Set<symbol>;
   pendingAdmissionTasks: number;
+  clientRetirements: Set<Promise<void>>;
   runtime: NativeRuntimeAdapter | null;
   initialize: Promise<void>;
   closing: Promise<void> | null;
@@ -159,6 +164,9 @@ async function publishWorkerSessionClaims(
       attachedPeer.subscriber?.updateAuthenticatedClaims?.(sessionClaims),
     ),
   );
+  if (context.options.clientBinding) {
+    await requireRuntime(context).admitBrowserOwnerClaims(sessionClaims);
+  }
   context.options.sessionClaims = sessionClaims;
 }
 
@@ -975,7 +983,11 @@ async function connectTab(
     if (context && !workerTelemetryCompatible(context.options, message.options)) {
       throw new Error("incompatible persistent browser telemetry configuration");
     }
-    if (context && context.fingerprint !== message.fingerprint) {
+    if (
+      context &&
+      (context.fingerprint !== message.fingerprint ||
+        context.options.clientBinding !== message.options.clientBinding)
+    ) {
       throw new Error("incompatible persistent browser configuration");
     }
     if (!context) {
@@ -1040,6 +1052,7 @@ function createContext(
     peers: new Map(),
     admissionClaims: new Set(),
     pendingAdmissionTasks: 0,
+    clientRetirements: new Set(),
     runtime: null,
     pageStore: null,
     disposePageStoreInvalidation: null,
@@ -1098,22 +1111,44 @@ async function initialize(context: RuntimeContext): Promise<void> {
         "WASM runtime does not support self-signed client opens; rebuild the matching Jazz WASM artifact",
       );
     }
-    unownedDb = proof
-      ? await wasmModule.WasmDb.openBrowserWithSelfSignedProof(
-          context.pageStore,
-          schema,
-          config,
-          proof.token,
-          proof.appId,
-          proof.claimedAuthor,
-          physicalOwner.storageOwner,
-        )
-      : await wasmModule.WasmDb.openBrowser(
-          context.pageStore,
-          schema,
-          config,
-          physicalOwner.storageOwner,
+    if (options.clientBinding && options.clientBinding !== "ordinary-client-v1") {
+      throw new Error("Unsupported browser client binding version");
+    }
+    if (options.clientBinding) {
+      if (
+        typeof wasmModule.WasmDb.openBrowserClient !== "function" ||
+        typeof wasmModule.WasmDb.openBrowserClientWithSelfSignedProof !== "function"
+      )
+        throw new Error(
+          "WASM runtime lacks the ordinary browser client ABI; rebuild matching artifacts",
         );
+      unownedDb = proof
+        ? await wasmModule.WasmDb.openBrowserClientWithSelfSignedProof(
+            context.pageStore,
+            schema,
+            config,
+            proof.token,
+            proof.appId,
+            proof.claimedAuthor,
+          )
+        : await wasmModule.WasmDb.openBrowserClient(context.pageStore, schema, config);
+    } else
+      unownedDb = proof
+        ? await wasmModule.WasmDb.openBrowserWithSelfSignedProof(
+            context.pageStore,
+            schema,
+            config,
+            proof.token,
+            proof.appId,
+            proof.claimedAuthor,
+            physicalOwner.storageOwner,
+          )
+        : await wasmModule.WasmDb.openBrowser(
+            context.pageStore,
+            schema,
+            config,
+            physicalOwner.storageOwner,
+          );
     const runtime = NativeRuntimeAdapter.fromDb(
       unownedDb as never,
       options.schema,
@@ -1121,10 +1156,11 @@ async function initialize(context: RuntimeContext): Promise<void> {
       options.author,
       1,
       false,
-      { selfSignedClientProof: proof, scopeIsolatedRelay: true },
+      { selfSignedClientProof: proof, scopeIsolatedRelay: !options.clientBinding },
     );
     context.runtime = runtime;
     unownedDb = null;
+    if (options.clientBinding) await runtime.admitBrowserOwnerClaims(options.sessionClaims);
     context.runtime.onAuthFailure((reason) => {
       context.authFailureEpoch += 1;
       broadcast(context, { type: "auth-failure", reason });
@@ -1147,7 +1183,7 @@ async function initialize(context: RuntimeContext): Promise<void> {
       // durable notifications. Only peers that have completed admission own a
       // tab runtime capable of rejecting an active remote wait.
       for (const peer of context.peers.values()) {
-        if (!peer.subscriber || !peer.pump) continue;
+        if (!peer.clientBinding && (!peer.subscriber || !peer.pump)) continue;
         post(peer.port, { type: "transport-error", error: serializeBrowserRelayError(error) });
       }
     });
@@ -1355,6 +1391,8 @@ function attachTab(
     port,
     pump: null,
     subscriber: null,
+    clientBinding: null,
+    clientPort: null,
     pendingFrames: [],
     flushedLocal: false,
     flushRequestId: null,
@@ -1390,6 +1428,10 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
     return;
   }
   if (message.type === "frames") {
+    if (peer.clientBinding || (peer.context.options.clientBinding && !peer.inspectorAttachment)) {
+      failPeer(peer, new Error("Application client bindings do not accept peer frames"));
+      return;
+    }
     if (peer.context.options.logLevel === "trace") {
       recordWorkerLifecycle(
         "peer-frames",
@@ -1602,13 +1644,43 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
           peer.context.runtime === activeRuntime &&
           !peer.context.storageInvalidated &&
           !peer.context.closing;
-        if (!canPublishAdmission()) return;
+        if (!canPublishAdmission()) {
+          message.clientPort?.close();
+          return;
+        }
         if (peer.inspectorAttachment || message.inspectorBinding)
           assertInspectorBinding(peer, message.inspectorBinding);
-        if (peer.pump || peer.subscriber) throw new Error("Browser tab is already initialized");
+        if (peer.pump || peer.subscriber || peer.clientBinding)
+          throw new Error("Browser tab is already initialized");
         // Admission and installation share the auth transition queue: a rebind
         // must include this subscriber, rather than overtake its storage wait.
         assertWorkerSessionClaims(peer.context, message.sessionClaims);
+        if (message.clientPort) {
+          const bindingPort = message.clientPort;
+          if (!peer.context.options.clientBinding || peer.inspectorAttachment) {
+            bindingPort.close();
+            throw new Error("This worker context does not admit application client bindings");
+          }
+          const author = new TextDecoder("utf-8", { fatal: true }).decode(
+            peer.context.options.author,
+          );
+          peer.clientPort = bindingPort;
+          peer.clientBinding = new BrowserClientBindingHost(activeRuntime, bindingPort, {
+            admit: (request) => {
+              if (!canPublishAdmission()) throw new Error("Browser client admission was revoked");
+              return admitBrowserClientRequest(request, author);
+            },
+            flushLocal: () => activeRuntime.flushLocalSettlements(),
+          });
+          if (peer.context.explicitlyDisconnected)
+            post(peer.port, { type: "transport-state", explicitlyDisconnected: true });
+          else ensureServerConnection(peer.context);
+          post(peer.port, { type: "remote-link", state: activeRuntime.remoteLinkState() });
+          result(peer, message.id, undefined, { clientBinding: "ordinary-client-v1" });
+          return;
+        }
+        if (peer.context.options.clientBinding && !peer.inspectorAttachment)
+          throw new Error("Ordinary browser workers require an application binding port");
         let unownedSubscriber: Transport | null = null;
         try {
           const peerAuthority = activeRuntime.createPeerAuthority();
@@ -1651,7 +1723,8 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
       return;
     }
     if (message.type === "update-auth") {
-      if (!peer.subscriber) throw new Error("Browser tab is not initialized");
+      if (!peer.subscriber && !peer.clientBinding)
+        throw new Error("Browser tab is not initialized");
       let authenticationRejected = false;
       await enqueueTransportTransition(peer.context, async () => {
         const authFailureEpoch = peer.context.authFailureEpoch;
@@ -1744,6 +1817,8 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
     if (peer.transportWaitAbort.signal.aborted) return;
     result(peer, message.id);
   } catch (error) {
+    if (message.type === "init" && message.clientPort !== peer.clientPort)
+      message.clientPort?.close();
     if (
       message.type === "init" &&
       (!peer.context.runtime || peer.context.storageInvalidated || peer.context.closing)
@@ -1888,6 +1963,7 @@ function result(
   receipt?: {
     inspectorAttachmentPhysicalDbName?: string;
     peerAuthority?: { node: Uint8Array; epoch: bigint; features: number };
+    clientBinding?: "ordinary-client-v1";
   },
 ): void {
   if (peer.context.peers.get(peer.tabId) !== peer) return;
@@ -1909,6 +1985,7 @@ function closeTab(context: RuntimeContext, tabId: string, closePort = true): voi
   if (!peer) return;
   context.peers.delete(tabId);
   peer.transportWaitAbort.abort();
+  retireClientBinding(peer, new Error("Browser application port closed"));
   for (const dispose of peer.pendingInspectorBootstraps) dispose();
   peer.pendingInspectorBootstraps.clear();
   for (const handle of peer.inspectorSubscriptions.values()) context.runtime?.unsubscribe(handle);
@@ -1919,6 +1996,22 @@ function closeTab(context: RuntimeContext, tabId: string, closePort = true): voi
   peer.port.removeEventListener("messageerror", peer.onMessageError);
   detachPeerRuntime(peer);
   if (closePort) peer.port.close();
+}
+
+function retireClientBinding(peer: TabPeer, error: Error): void {
+  const binding = peer.clientBinding;
+  const port = peer.clientPort;
+  peer.clientBinding = null;
+  peer.clientPort = null;
+  if (!binding) return;
+  const retired = binding
+    .revoke(error)
+    .catch(() => undefined)
+    .finally(() => {
+      port?.close();
+      peer.context.clientRetirements.delete(retired);
+    });
+  peer.context.clientRetirements.add(retired);
 }
 
 function detachPeerRuntime(peer: TabPeer): void {
@@ -1944,6 +2037,7 @@ function requireRuntime(context: RuntimeContext): NativeRuntimeAdapter {
 async function finalizeContextStorageReset(context: RuntimeContext): Promise<void> {
   context.intentionalStorageReset = false;
   for (const peer of context.peers.values()) {
+    retireClientBinding(peer, new Error("Browser storage was reset"));
     // The persistence epoch is already gone. Do not call into transport or
     // subscriber wrappers whose WASM receiver may still be unwinding the IDB
     // versionchange; abandon them with the discarded runtime instead.
@@ -1983,6 +2077,7 @@ async function releaseIdleContext(context: RuntimeContext): Promise<void> {
   if (context.peers.size !== 0 || context.pendingAdmissionTasks !== 0) return;
   if (!context.closing) {
     context.closing = (async () => {
+      await Promise.all(context.clientRetirements);
       for (const peer of context.peers.values()) {
         peer.pump?.close();
         peer.pump = null;
@@ -2100,6 +2195,8 @@ function closeContextPeers(context: RuntimeContext): void {
 }
 
 function handleStorageInvalidation(context: RuntimeContext): void {
+  for (const peer of context.peers.values())
+    retireClientBinding(peer, new Error("Browser storage was invalidated"));
   if (context.intentionalStorageReset) {
     context.runtime?.discard();
     context.runtime = null;

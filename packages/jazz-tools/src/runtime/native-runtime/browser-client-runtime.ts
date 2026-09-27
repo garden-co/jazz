@@ -51,6 +51,19 @@ import {
  */
 export class BrowserClientRuntime implements TransactionalRuntime {
   private nextId = 1;
+  private readonly activityListeners = new Set<() => void>();
+
+  /** The control connection uses this to probe a worker with pending app work. */
+  hasActiveOperations(): boolean {
+    return this.pending.size > 0 || this.subscriptions.size > 0;
+  }
+  onActivity(listener: () => void): () => void {
+    this.activityListeners.add(listener);
+    return () => this.activityListeners.delete(listener);
+  }
+  flushLocalSettlements(): Promise<void> {
+    return this.call("flushLocal", []);
+  }
   private closed: Error | null = null;
   private closing: Promise<void> | null = null;
   private readonly pending = new Map<
@@ -389,6 +402,7 @@ export class BrowserClientRuntime implements TransactionalRuntime {
     this.pending.clear();
     for (const subscription of this.subscriptions.values()) subscription.callback?.(error);
     this.subscriptions.clear();
+    this.transactions.clear();
     this.activeSubscriptions.clear();
     this.subscriptionRequests.clear();
   }
@@ -453,6 +467,7 @@ export class BrowserClientRuntime implements TransactionalRuntime {
   private send(message: RequestWithoutVersion, transfer: Transferable[] = []): void {
     try {
       this.port.postMessage({ ...message, version: CLIENT_BINDING_VERSION }, transfer);
+      for (const listener of this.activityListeners) listener();
     } catch (error) {
       this.fail(asError(error));
     }

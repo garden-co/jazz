@@ -374,7 +374,7 @@ export class BrowserConnectionManager extends ConnectionManager {
         const successor = await this.host.runtimeSource.acquireBrowserForegroundNodeLease(
           this.host.config,
         );
-        if (this.shutdownStarted || this.connectionScope !== scope) await successor.retire();
+        if (this.shutdownStarted || this.connectionScope !== scope) await successor?.retire();
         else this.foregroundNodeLease = successor;
       },
     ]).finally(() => {

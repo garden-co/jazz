@@ -15,6 +15,12 @@ import {
  * Owns only this port's handles. It neither creates a replica nor grants server
  * authority. The admitting host remains responsible for auth, storage and life.
  */
+export interface BrowserClientBindingOptions {
+  /** Host admission, applied before any handle or runtime operation is touched. */
+  admit?: (request: ClientBindingRequest) => ClientBindingRequest;
+  flushLocal?: () => Promise<void>;
+}
+
 export class BrowserClientBindingHost {
   private lastRequest = 0;
   private closed = false;
@@ -22,10 +28,12 @@ export class BrowserClientBindingHost {
   private readonly transactions = new Map<OpenTransactionId, { error?: Error }>();
   private readonly writes = new Set<TxId>();
   private closing: Promise<void> | null = null;
+  private readonly pendingMutations = new Set<Promise<unknown>>();
 
   constructor(
     private readonly runtime: TransactionalRuntime,
     private readonly port: MessagePort,
+    private readonly options: BrowserClientBindingOptions = {},
   ) {
     port.addEventListener("message", this.onMessage);
     port.addEventListener("messageerror", this.onMessageError);
@@ -34,7 +42,7 @@ export class BrowserClientBindingHost {
 
   private readonly onMessage = (event: MessageEvent<ClientBindingRequest>): void => {
     if (this.closed) return;
-    const message = event.data;
+    let message = event.data;
     if (
       !message ||
       message.version !== CLIENT_BINDING_VERSION ||
@@ -53,6 +61,7 @@ export class BrowserClientBindingHost {
     // before admitting the next. A remote query or durability wait must not
     // block an unrelated resident Local query (or the write that will settle it).
     try {
+      message = this.options.admit?.(message) ?? message;
       if (message.type === "client-close") {
         void this.close().then(
           () => this.reply(message.id),
@@ -77,6 +86,11 @@ export class BrowserClientBindingHost {
         });
       } else if (message.type === "client-call") {
         const result = this.call(message.call);
+        if (isMutation(message.call.method)) {
+          const pending = Promise.resolve(result).catch(() => undefined);
+          this.pendingMutations.add(pending);
+          void pending.finally(() => this.pendingMutations.delete(pending));
+        }
         void Promise.resolve(result).then(
           (value) => {
             if (!this.closed) this.reply(message.id, value);
@@ -101,6 +115,13 @@ export class BrowserClientBindingHost {
 
   private call(call: ClientBindingCall): unknown {
     switch (call.method) {
+      case "flushLocal":
+        // The barrier travels on the mutation port. A control-port message
+        // cannot prove that earlier application writes have arrived here.
+        return Promise.all(this.pendingMutations).then(() => {
+          if (!this.options.flushLocal) throw new Error("Host has no local durability barrier");
+          return this.options.flushLocal();
+        });
       case "query": {
         this.assertTransactionContext(call.args[3]);
         return this.runtime.query(...call.args).then(queryRowsForPort);
@@ -268,4 +289,17 @@ export class BrowserClientBindingHost {
       );
     }
   }
+}
+
+function isMutation(method: ClientBindingCall["method"]): boolean {
+  return [
+    "insert",
+    "restore",
+    "update",
+    "upsert",
+    "delete",
+    "updateLargeValues",
+    "streamingMutation",
+    "commitTransaction",
+  ].includes(method);
 }

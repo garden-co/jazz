@@ -2947,6 +2947,11 @@ export class NativeRuntimeAdapter implements Runtime {
     this.clientSessionClaimsKey = key;
   }
 
+  /** Host-only admission for a persistent ordinary client, before app ports open. */
+  async admitBrowserOwnerClaims(claims: Record<string, unknown>): Promise<void> {
+    await this.runWhenCoreIdle(() => this.installClientSessionClaims(claims));
+  }
+
   private ensureClientSessionClaims(session: RuntimeSession | null): void | Promise<void> {
     if (this.closed || this.ownerRuntime.closed) throw new Error("Native runtime is closed");
     if (!session || session.backendAuthority || this.readAuthorizationHost === "trusted-serving")

@@ -175,7 +175,9 @@ export abstract class RuntimeSource<RuntimeConfig extends DbConfig = DbConfig> {
     return undefined;
   }
 
-  acquireBrowserForegroundNodeLease(_config: RuntimeConfig): Promise<BrowserForegroundNodeLease> {
+  acquireBrowserForegroundNodeLease(
+    _config: RuntimeConfig,
+  ): Promise<BrowserForegroundNodeLease | undefined> {
     return Promise.reject(
       new Error("Db runtime source does not support browser foreground leases"),
     );

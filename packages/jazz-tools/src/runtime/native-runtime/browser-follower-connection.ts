@@ -11,6 +11,7 @@ import {
   type BrowserFollowerPortRequest,
   type InspectorAttachmentBinding,
 } from "./browser-worker-protocol.js";
+import type { BrowserClientRuntime } from "./browser-client-runtime.js";
 import type { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
 import { IndexedDbPageStore } from "../indexeddb-page-store.js";
 import {
@@ -18,6 +19,14 @@ import {
   inspectorControlAbortError,
   waitForInspectorOpening,
 } from "./inspector-control-lifecycle.js";
+
+/** Explicit application binding, distinct from a foreground replica transport. */
+export type BrowserRuntimeEndpoint =
+  | NativeRuntimeAdapter
+  | {
+      client: BrowserClientRuntime;
+      port: MessagePort;
+    };
 
 type PendingRequest = {
   type: BrowserFollowerPortRpcRequest["type"] | "open-inspector-control";
@@ -30,6 +39,7 @@ type BrowserFollowerPortRpcRequest =
       type: "init";
       sessionClaims: Record<string, unknown>;
       inspectorBinding?: InspectorAttachmentBinding;
+      clientPort?: MessagePort;
     }
   | { type: "wait-server" }
   | { type: "disconnect" }
@@ -78,9 +88,10 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
   private probeNonce: number | null = null;
   private watchdogTimer: number | NodeJS.Timeout | null = null;
   private watchdogEpoch = 0;
+  private disposeClientActivity: (() => void) | null = null;
 
   constructor(
-    private readonly runtime: NativeRuntimeAdapter,
+    private readonly runtime: BrowserRuntimeEndpoint,
     private readonly port: MessagePort,
     sessionClaims: Record<string, unknown>,
     private readonly dbName: string | null,
@@ -102,15 +113,20 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     port.start();
     globalThis.addEventListener?.("pageshow", this.onResume);
     globalThis.document?.addEventListener("visibilitychange", this.onVisibilityChange);
-    this.disposeQueryCoverageTrace = traceRelay
-      ? runtime.onQueryCoverageTrace((entry) => {
-          if (this.closed) return;
-          this.port.postMessage({
-            type: "diagnostic-query-coverage",
-            ...entry,
-          } satisfies BrowserFollowerPortRequest);
-        })
-      : null;
+    this.disposeQueryCoverageTrace =
+      traceRelay && !("client" in runtime)
+        ? runtime.onQueryCoverageTrace((entry) => {
+            if (this.closed) return;
+            this.port.postMessage({
+              type: "diagnostic-query-coverage",
+              ...entry,
+            } satisfies BrowserFollowerPortRequest);
+          })
+        : null;
+
+    if ("client" in runtime) {
+      this.disposeClientActivity = runtime.client.onActivity(() => this.armWatchdog());
+    }
 
     // Establish the accepted peer with this tab's claims before any runtime
     // frames can be delivered. MessagePort ordering keeps the handshake ahead
@@ -119,9 +135,11 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       type: "init",
       sessionClaims,
       ...(inspectorBinding ? { inspectorBinding } : {}),
+      ...("client" in runtime ? { clientPort: runtime.port } : {}),
     });
     const connected = (async () => {
       await initialized;
+      if ("client" in runtime) return;
       const transport = await runtime.connectUpstreamPeer(this.peerAuthority);
       if (this.closed || this.failed) {
         await runtime.retirePeerTransport(transport);
@@ -254,7 +272,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     // it does not establish that attempt. Keep the original remote failure
     // latched until the worker confirms an actual negotiated server connection.
     await this.request({ type: "wait-server" });
-    this.runtime.clearRemoteServerTransportError();
+    if (!("client" in this.runtime)) this.runtime.clearRemoteServerTransportError();
   }
 
   updateAuth(authJson: string, sessionClaims: Record<string, unknown>): void {
@@ -283,6 +301,10 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
 
   async flushLocal(): Promise<void> {
     await this.ready();
+    if ("client" in this.runtime) {
+      await this.runtime.client.flushLocalSettlements();
+      return;
+    }
     await this.pump!.flush();
     const workerBarrier = this.request({ type: "flush-local" });
     await this.runtime.flushLocalSettlements();
@@ -304,11 +326,21 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     });
     this.armWatchdog();
     try {
-      this.port.postMessage(message satisfies BrowserFollowerPortRequest);
+      this.port.postMessage(
+        message satisfies BrowserFollowerPortRequest,
+        request.type === "init" && request.clientPort ? [request.clientPort] : [],
+      );
     } catch (error) {
       this.fail(asError(error));
     }
     return promise;
+  }
+
+  private hasPendingWork(): boolean {
+    return (
+      this.pending.size > 0 ||
+      ("client" in this.runtime && this.runtime.client.hasActiveOperations())
+    );
   }
 
   private clearWatchdog(): void {
@@ -319,8 +351,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
   }
 
   private armWatchdog(): void {
-    if (this.closed || this.failed || this.pending.size === 0 || this.watchdogTimer !== null)
-      return;
+    if (this.closed || this.failed || !this.hasPendingWork() || this.watchdogTimer !== null) return;
     this.scheduleWatchdog(probeTiming.intervalMs, false);
   }
 
@@ -330,7 +361,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     this.watchdogTimer = setTimeout(() => {
       if (epoch !== this.watchdogEpoch || this.closed || this.failed) return;
       this.watchdogTimer = null;
-      if (this.pending.size === 0) {
+      if (!this.hasPendingWork()) {
         this.clearWatchdog();
         return;
       }
@@ -343,14 +374,14 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       const error = new BrowserWorkerUnresponsiveError(
         "Browser worker connection is unresponsive. Pending operation outcomes are unknown; operations were not retried.",
       );
-      this.runtime.reportRemoteServerTransportError(error);
+      if (!("client" in this.runtime)) this.runtime.reportRemoteServerTransportError(error);
       this.fail(error);
     }, delay);
   }
 
   private sendProbe(): void {
     this.clearWatchdog();
-    if (this.closed || this.failed || this.pending.size === 0) return;
+    if (this.closed || this.failed || !this.hasPendingWork()) return;
     const nonce = this.nextProbeNonce++;
     this.probeNonce = nonce;
     // Arm first so a synchronous adapter reply cannot leave an expiry behind.
@@ -403,19 +434,22 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     if (message.type === "remote-link") {
       // The worker keeps reconnecting after a published outage. Once it is
       // live again, release the relayed error so Global reads work again.
-      if (message.state === "connected") this.runtime.clearRemoteServerTransportError();
+      if (message.state === "connected" && !("client" in this.runtime))
+        this.runtime.clearRemoteServerTransportError();
       this.callbacks.onRemoteLinkChange?.(message.state);
       return;
     }
     if (message.type === "mutation-error") {
-      this.runtime.reportRemoteMutationError(message.event);
+      if ("client" in this.runtime) this.runtime.client.reportRemoteMutationError(message.event);
+      else this.runtime.reportRemoteMutationError(message.event);
       return;
     }
     if (message.type === "transport-error") {
       // Keep this distinct from a fate rejection. The runtime records the
       // error before any later port teardown so active Global waits and
       // remote subscriptions wake, while Local durability stays valid.
-      this.runtime.reportRemoteServerTransportError(deserializeBrowserRelayError(message.error));
+      if (!("client" in this.runtime))
+        this.runtime.reportRemoteServerTransportError(deserializeBrowserRelayError(message.error));
       return;
     }
     if (message.type === "storage-reset") {
@@ -424,7 +458,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
         this.pending.delete(id);
         pending.resolve();
       }
-      if (this.pending.size === 0) this.clearWatchdog();
+      if (!this.hasPendingWork()) this.clearWatchdog();
       this.port.postMessage({
         type: "storage-reset-observed",
         resetId: message.resetId,
@@ -449,9 +483,15 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     const pending = this.pending.get(message.id);
     if (!pending) return;
     this.pending.delete(message.id);
-    if (this.pending.size === 0) this.clearWatchdog();
+    if (!this.hasPendingWork()) this.clearWatchdog();
     if (message.error) {
       pending.reject(deserializeBrowserRelayError(message.error));
+    } else if (
+      pending.type === "init" &&
+      "client" in this.runtime &&
+      message.clientBinding !== "ordinary-client-v1"
+    ) {
+      pending.reject(new Error("Worker did not admit the application client binding version"));
     } else {
       this.inspectorAttachmentPhysicalDbName ??= message.inspectorAttachmentPhysicalDbName ?? null;
       if (pending.type === "init") this.peerAuthority = message.peerAuthority;
@@ -489,6 +529,8 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     this.port.removeEventListener("message", this.onMessage);
     this.port.removeEventListener("messageerror", this.onMessageError);
     this.disposeQueryCoverageTrace?.();
+    this.disposeClientActivity?.();
+    if ("client" in this.runtime) this.runtime.client.fail(error);
     this.pump?.close();
     this.pendingFrames.length = 0;
     this.port.close();

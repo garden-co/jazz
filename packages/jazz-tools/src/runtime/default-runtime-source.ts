@@ -13,6 +13,7 @@ import {
   type RuntimeTelemetryContext,
   type RuntimeTokenOptions,
 } from "./runtime-source.js";
+import { BrowserClientRuntime } from "./native-runtime/browser-client-runtime.js";
 import { NativeRuntimeAdapter } from "./native-runtime/native-runtime-adapter.js";
 import type { NativeSelfSignedClientProof } from "./native-runtime/native-codec.js";
 import {
@@ -169,6 +170,9 @@ function browserWorkerRuntimeSources(config: DbConfig): DbConfig["runtimeSources
 
 export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
   override readonly supportsBrowserWorker = true;
+  /** Internal qualification source opts in until browser lifecycle gates pass. */
+  protected readonly browserClientBinding: boolean = false;
+  private readonly clientBindingPorts = new WeakMap<BrowserClientRuntime, MessagePort>();
   private module: WasmModule | null = null;
   private ownerRuntime: NativeRuntimeAdapter | null = null;
 
@@ -211,23 +215,33 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     const author = authorBytesForSession(runtimeAuthorFromConfig(config));
     const flushEvery = initialSyncFlushEvery(config);
     const browserMode = isPersistentBrowserConfig(config);
-    const mainThreadPeerRuntime = this.nativeSchemaView(
-      schema,
-      node,
-      author,
-      flushEvery,
-      !browserMode,
-      selfSignedClientProof,
-      backendMode,
-    );
-    if (foregroundNodeLease) {
-      mainThreadPeerRuntime.seedForegroundTxTimeHighWater(foregroundNodeLease.confirmedTxTime);
-    }
-    if (browserMode) {
-      mainThreadPeerRuntime.setNonDurableClient();
-      if (!foregroundNodeLease) {
-        throw new Error("Persistent browser runtime requires a foreground node lease");
+    let runtime: Runtime;
+    if (browserMode && this.browserClientBinding && !config.runtimeSources?.browserWorkerPort) {
+      if (backendMode) throw new Error("Browser worker clients require an admitted client account");
+      const channel = new MessageChannel();
+      const bound = new BrowserClientRuntime(schema, channel.port1);
+      this.clientBindingPorts.set(bound, channel.port2);
+      runtime = bound;
+    } else {
+      const mainThreadPeerRuntime = this.nativeSchemaView(
+        schema,
+        node,
+        author,
+        flushEvery,
+        !browserMode,
+        selfSignedClientProof,
+        backendMode,
+      );
+      if (foregroundNodeLease) {
+        mainThreadPeerRuntime.seedForegroundTxTimeHighWater(foregroundNodeLease.confirmedTxTime);
       }
+      if (browserMode) {
+        mainThreadPeerRuntime.setNonDurableClient();
+        if (!foregroundNodeLease) {
+          throw new Error("Persistent browser runtime requires a foreground node lease");
+        }
+      }
+      runtime = this.wrapClientRuntime(mainThreadPeerRuntime, config, schema);
     }
 
     const context: AppContext = {
@@ -243,11 +257,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       tier: "local",
     };
     setTrustedReservedSession(context, getTrustedReservedSession(config));
-    return JazzClient.connectWithRuntime(
-      this.wrapClientRuntime(mainThreadPeerRuntime, config, schema),
-      context,
-      runtimeOptions,
-    );
+    return JazzClient.connectWithRuntime(runtime, context, runtimeOptions);
   }
 
   /** Private runtime sources may bind an admitted runtime through a host port. */
@@ -263,6 +273,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     if (!isPersistentBrowserConfig(config)) {
       throw new Error("Browser foreground node leases require persistent browser storage");
     }
+    if (this.browserClientBinding && !config.runtimeSources?.browserWorkerPort) return undefined;
     const dbName = resolveDefaultPersistentDbName(config);
     return await SharedBrowserForegroundNodeLease.acquire({
       runtimeSources: browserWorkerRuntimeSources(config),
@@ -300,8 +311,8 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     onStorageInvalidated,
   }: BrowserWorkerConnectionContext<DbConfig>): BrowserWorkerConnection {
     const runtime = client.getRuntime();
-    if (!(runtime instanceof NativeRuntimeAdapter)) {
-      throw new Error("Browser worker connections require the native runtime adapter");
+    if (!(runtime instanceof NativeRuntimeAdapter) && !(runtime instanceof BrowserClientRuntime)) {
+      throw new Error("Browser worker connections require a native or worker-client runtime");
     }
     const session = sessionFromConfig(config);
     const selfSignedClientProof = selfSignedClientProofFromConfig(config, session);
@@ -314,6 +325,8 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     const dbName = resolveDefaultPersistentDbName(config);
     const author = authorBytesForSession(runtimeAuthorFromConfig(config));
     if (config.runtimeSources?.browserWorkerPort) {
+      if (!(runtime instanceof NativeRuntimeAdapter))
+        throw new Error("Inspector attachments require a native view");
       return new AttachedBrowserWorkerConnection(
         runtime,
         config.runtimeSources.browserWorkerPort,
@@ -331,9 +344,15 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         config.runtimeSources.inspectorBinding,
       );
     }
+    const bindingPort =
+      runtime instanceof BrowserClientRuntime ? this.clientBindingPorts.get(runtime) : undefined;
+    if (runtime instanceof BrowserClientRuntime && !bindingPort)
+      throw new Error("The experimental worker client must be reopened after connection failure");
+    if (runtime instanceof BrowserClientRuntime) this.clientBindingPorts.delete(runtime);
     return new SharedBrowserWorkerConnection(
-      runtime,
+      runtime instanceof BrowserClientRuntime ? { client: runtime, port: bindingPort! } : runtime,
       {
+        ...(bindingPort ? { clientBinding: "ordinary-client-v1" as const } : {}),
         runtimeSources: browserWorkerRuntimeSources(config),
         schema,
         dbName,
@@ -349,13 +368,20 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         logLevel: config.logLevel,
         telemetryCollectorUrl: config.telemetryCollectorUrl,
       },
-      createBrowserWorkerFingerprint(config, dbName, getRuntimeSchemaCacheKey(schema)),
+      createBrowserWorkerFingerprint(config, dbName, getRuntimeSchemaCacheKey(schema)) +
+        (bindingPort ? ":ordinary-client-v1" : ""),
       {
         onAuthFailure,
         onAuthRestored,
         onExplicitOfflineChange,
         onRemoteLinkChange,
-        onFailure,
+        onFailure: (error) => {
+          if (runtime instanceof BrowserClientRuntime) {
+            runtime.fail(error instanceof Error ? error : new Error(String(error)));
+            bindingPort?.close();
+          }
+          onFailure(error);
+        },
         onStorageReset,
         onStorageInvalidated,
       },

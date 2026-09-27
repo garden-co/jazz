@@ -22,8 +22,10 @@ import type {
   BrowserWorkerConnection,
   BrowserWorkerConnectionContext,
 } from "../runtime-source.js";
-import { MessagePortBrowserFollowerConnection } from "./browser-follower-connection.js";
-import type { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
+import {
+  MessagePortBrowserFollowerConnection,
+  type BrowserRuntimeEndpoint,
+} from "./browser-follower-connection.js";
 import { waitForInspectorOpening } from "./inspector-control-lifecycle.js";
 
 export type BrowserForegroundNodeLeaseOptions = Pick<
@@ -431,7 +433,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
   private cancelBootstrap: (() => void) | null = null;
 
   constructor(
-    runtime: NativeRuntimeAdapter,
+    runtime: BrowserRuntimeEndpoint,
     options: BrowserWorkerInitOptions,
     fingerprint: string,
     private readonly callbacks: Pick<
@@ -486,7 +488,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
   }
 
   private async connect(
-    runtime: NativeRuntimeAdapter,
+    runtime: BrowserRuntimeEndpoint,
     options: BrowserWorkerInitOptions,
     fingerprint: string,
     workerName: string,
@@ -515,7 +517,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
   }
 
   private connectOnce(
-    runtime: NativeRuntimeAdapter,
+    runtime: BrowserRuntimeEndpoint,
     options: BrowserWorkerInitOptions,
     fingerprint: string,
     workerName: string,
