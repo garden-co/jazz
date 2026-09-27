@@ -16,8 +16,8 @@ use jazz::wire::{
 };
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::sync::{Semaphore, mpsc, oneshot};
-use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 use jazz::tools::AppId;
@@ -86,6 +86,41 @@ impl fmt::Display for WebSocketClientError {
 }
 
 impl std::error::Error for WebSocketClientError {}
+
+/// Connect failures retain whether an I/O error came from name resolution.
+/// Rust's platform resolver may report DNS failures as `Uncategorized`, which
+/// stable Rust intentionally does not expose for matching.
+#[derive(Debug)]
+enum NativeConnectFailure {
+    Resolution(std::io::Error),
+    WebSocket(WebSocketClientError),
+}
+
+impl From<WebSocketClientError> for NativeConnectFailure {
+    fn from(error: WebSocketClientError) -> Self {
+        Self::WebSocket(error)
+    }
+}
+
+impl NativeConnectFailure {
+    fn into_client_error(self) -> WebSocketClientError {
+        match self {
+            Self::Resolution(error) => {
+                WebSocketClientError::Connect(tokio_tungstenite::tungstenite::Error::Io(error))
+            }
+            Self::WebSocket(error) => error,
+        }
+    }
+}
+
+fn native_connect_error(error: NativeConnectFailure) -> NativeTransportError {
+    match error {
+        NativeConnectFailure::Resolution(error) => native_transport_error(
+            WebSocketClientError::Connect(tokio_tungstenite::tungstenite::Error::Io(error)),
+        ),
+        NativeConnectFailure::WebSocket(error) => native_transport_error(error),
+    }
+}
 
 /// Match typed transport/wire causes, never diagnostic strings. Only the same
 /// NotReady/Later admission response accepted by the browser is retryable.
@@ -178,7 +213,7 @@ impl NativeTransportConnector for NativeWebSocketConnector {
                 request.requested_link,
             )
             .await
-            .map_err(native_transport_error)?;
+            .map_err(native_connect_error)?;
             let (protocol_version, features, session_context) =
                 transport.negotiated_transport_metadata();
             let terminal = transport.take_terminal_future();
@@ -362,6 +397,7 @@ impl WebSocketTransport {
             NativeTransportLink::OrdinarySession,
         )
         .await
+        .map_err(NativeConnectFailure::into_client_error)
     }
 
     async fn connect_with_link(
@@ -370,18 +406,73 @@ impl WebSocketTransport {
         peer_identity: AuthorSubject,
         auth: AuthConfig,
         wake: Arc<dyn Fn() + Send + Sync>,
-
         requested_link: NativeTransportLink,
-    ) -> Result<Self, WebSocketClientError> {
+    ) -> Result<Self, NativeConnectFailure> {
         let deadline = tokio::time::Instant::now() + WS_CLIENT_HANDSHAKE_TIMEOUT;
         let url = ws_url(base_url.as_ref(), app_id);
-        let (mut ws, _) = tokio::time::timeout_at(
-            deadline,
-            connect_async_with_config(url, Some(client_websocket_config()), false),
-        )
+        let (mut ws, _) = tokio::time::timeout_at(deadline, async {
+            let request = url
+                .into_client_request()
+                .map_err(WebSocketClientError::Connect)?;
+            let host = request.uri().host().ok_or_else(|| {
+                WebSocketClientError::Connect(tokio_tungstenite::tungstenite::Error::Url(
+                    tokio_tungstenite::tungstenite::error::UrlError::NoHostName,
+                ))
+            })?;
+            let port = request
+                .uri()
+                .port_u16()
+                .or_else(|| match request.uri().scheme_str() {
+                    Some("wss") => Some(443),
+                    Some("ws") => Some(80),
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    WebSocketClientError::Connect(tokio_tungstenite::tungstenite::Error::Url(
+                        tokio_tungstenite::tungstenite::error::UrlError::UnsupportedUrlScheme,
+                    ))
+                })?;
+            let addresses = tokio::net::lookup_host(format!("{host}:{port}"))
+                .await
+                .map_err(NativeConnectFailure::Resolution)?;
+            let mut stream = None;
+            let mut last_error = None;
+            for address in addresses {
+                match tokio::net::TcpStream::connect(address).await {
+                    Ok(connected) => {
+                        stream = Some(connected);
+                        break;
+                    }
+                    Err(error) => last_error = Some(error),
+                }
+            }
+            let stream = match (stream, last_error) {
+                (Some(stream), _) => stream,
+                (None, Some(error)) => {
+                    return Err(WebSocketClientError::Connect(
+                        tokio_tungstenite::tungstenite::Error::Io(error),
+                    )
+                    .into());
+                }
+                (None, None) => {
+                    return Err(NativeConnectFailure::Resolution(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "could not resolve to any address",
+                    )));
+                }
+            };
+            let connection = tokio_tungstenite::client_async_tls_with_config(
+                request,
+                stream,
+                Some(client_websocket_config()),
+                None,
+            )
+            .await
+            .map_err(WebSocketClientError::Connect)?;
+            Ok(connection)
+        })
         .await
-        .map_err(|_| WebSocketClientError::HandshakeTimeout)?
-        .map_err(WebSocketClientError::Connect)?;
+        .map_err(|_| NativeConnectFailure::WebSocket(WebSocketClientError::HandshakeTimeout))??;
 
         let prelude = encode_prelude(peer_identity, auth, requested_link)?;
         tokio::time::timeout_at(deadline, ws.send(Message::Binary(prelude.into())))
@@ -418,7 +509,8 @@ impl WebSocketTransport {
         {
             return Err(WebSocketClientError::ServerRejected(
                 "upstream does not support requested scope_isolated_client_relay link".to_owned(),
-            ));
+            )
+            .into());
         }
         // Receipt semantics require an admitted authority endpoint, not merely
         // a feature bit from a legacy hello.
@@ -429,7 +521,8 @@ impl WebSocketTransport {
         if negotiated.features & WS_CLIENT_REQUIRED_FEATURES != WS_CLIENT_REQUIRED_FEATURES {
             return Err(WebSocketClientError::ServerRejected(
                 "server did not negotiate sync message payload frames".to_owned(),
-            ));
+            )
+            .into());
         }
         let session_context = if negotiated.features
             & (jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
@@ -930,6 +1023,44 @@ mod tests {
         assert!(
             !native_transport_error(WebSocketClientError::UnexpectedHandshakeMessage)
                 .is_retryable()
+        );
+    }
+
+    // The resolver outcome, not its platform-specific I/O kind, identifies
+    // name lookup failure. This boundary cannot be injected through Db APIs.
+    #[test]
+    fn native_dns_resolution_failures_are_retryable() {
+        let lookup = NativeConnectFailure::Resolution(std::io::Error::other("name lookup failed"));
+        assert!(
+            native_connect_error(lookup).is_retryable(),
+            "a failed hostname lookup must reconnect"
+        );
+
+        let unrelated = NativeConnectFailure::WebSocket(WebSocketClientError::Connect(
+            tokio_tungstenite::tungstenite::Error::Io(std::io::ErrorKind::Other.into()),
+        ));
+        assert!(
+            !native_connect_error(unrelated).is_retryable(),
+            "an unclassified connect I/O failure must remain terminal"
+        );
+    }
+
+    // rustls uses UnexpectedEof when a peer closes TLS without close_notify.
+    #[test]
+    fn rustls_tls_eof_is_retryable() {
+        use tokio_tungstenite::tungstenite::Error;
+
+        let eof =
+            WebSocketClientError::Receive(Error::Io(std::io::ErrorKind::UnexpectedEof.into()));
+        assert!(
+            native_transport_error(eof).is_retryable(),
+            "TLS EOF after connection establishment must reconnect"
+        );
+
+        let unrelated = WebSocketClientError::Connect(Error::Io(std::io::ErrorKind::Other.into()));
+        assert!(
+            !native_transport_error(unrelated).is_retryable(),
+            "other unclassified connection errors must remain terminal"
         );
     }
 
