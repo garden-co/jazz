@@ -74,6 +74,77 @@ counts and canonical payload sizes, including setup and cleanup. A 4 MiB read
 sends a 3,988-byte ViewUpdate and no chunk request. Canonical payload size is not
 framed or compressed transport size.
 
+## Exact review-base comparison
+
+This comparison isolates the draft on its actual review base: production control
+1d16705c174071f00ab253c816ffd14e4593438d (#3610), candidate
+5f2970b6ac351d0a28cba1e721ce8a71aebe5720. The ordinary-row harness is identical
+in both executables (harness checkpoint 2ac55d72e), including the repaired
+membership counter. Source and executable hashes accompany every run.
+
+### Ordinary text rows
+
+The existing maintained_rehydrate_scaling fixture uses independent RocksDB
+WalNoSync databases and current rows, with no deletions or binary blobs. Half
+the rows initially match; one previously nonmatching row enters the result.
+The table reports a fresh subscription returning 501 or 5,001 rows. Two text
+columns are the original fixture; the wide case adds 18 ordinary text columns
+of 128 characters plus a short row/column prefix each.
+
+Four fresh processes per width run control/candidate/candidate/control with
+all local builds and tests stopped. Each process runs the 1,000 and 10,000
+source-row rungs once. Report the median of two process observations per arm;
+these sample counts establish a local comparison, not a confidence interval.
+
+| Source rows | Text columns | Subscription open, before → after | Speedup | Estimated retained state, before → after |
+| ----------: | -----------: | --------------------------------: | ------: | ---------------------------------------: |
+|       1,000 |            2 |                  15.41 → 13.72 ms |   1.12× |                           1.59 → 1.32 MB |
+|      10,000 |            2 |                164.14 → 148.75 ms |   1.10× |                         15.92 → 13.21 MB |
+|       1,000 |           20 |                  27.82 → 24.38 ms |   1.14× |                           7.23 → 2.68 MB |
+|      10,000 |           20 |                317.57 → 289.86 ms |   1.10× |                         72.57 → 26.83 MB |
+
+MB above is decimal and the retained-state counter is an estimate, not measured
+RSS or an allocation-count profile. The narrow estimate falls about 17%; the
+wide estimate falls about 63%. Fresh-subscription latency falls about
+9–12% in this fixture (1.10–1.14× faster). Both independent process observations improve at each
+rung. Single-row maintained delivery is already below 0.25 ms in both arms;
+that small delta is not the main justification for this change.
+
+All result digests, supporting-row additions/removals, bundle counts and encoded
+message sizes match across arms. Storage reads/ranges also match: the single-row
+update reads three entries/ranges, and fresh subscription reads 3N+3 entries
+and N+5 ranges. This removes duplicate witness work and retained payload
+state; the storage-read count stays the same.
+
+Reproduction: build maintained_rehydrate_scaling at each source with cargo bench,
+package jazz, no default features, features testing,transport-compression-zstd,
+profile perf and --no-run. Freeze the executables, then run them serially with
+JAZZ_PERF5_ROWS=1000,10000, JAZZ_PERF5_EXTRA_TEXT_COLUMNS=0 or 18,
+and JAZZ_PERF5_EXTRA_TEXT_BYTES=128.
+
+### Resident large values on the same review base
+
+The same four-process resident-read recipe from the integration comparison
+above produces:
+
+| Resident value |     Before |     After | Speedup |
+| -------------- | ---------: | --------: | ------: |
+| 32 KiB, inline |   3.894 ms |  3.727 ms |   1.04× |
+| 256 KiB        |   5.014 ms |  4.169 ms |   1.20× |
+| 4 MiB          |  21.540 ms | 12.090 ms |   1.78× |
+| 16 MiB         | 113.808 ms | 58.422 ms |   1.95× |
+
+The 32 KiB difference remains within the control process spread; it is not a
+demonstrated inline-row win. Large-value full reconstructions remain two → one.
+These review-base results confirm the earlier integration result without
+pooling differently based observations or multiplying stacked PR speedups.
+
+The accompanying witness-review-abba-receipt.json records per-process
+observations, phase breakdowns, hashes, environment and aggregation. Published
+row records omit the harness's runtime hostname/git fields: those identify its
+execution checkout, not the frozen executable's compiled source. Original raw
+output hashes remain in the receipt; source/binary provenance is explicit.
+
 ## Correctness and qualification
 
 New public-facade tests independently drive a serving Core and a scope-isolated
@@ -88,10 +159,26 @@ approved them. Data, ordering, sharing and reused-name rejection expectations
 are preserved. A new internal prefix-seek test covers the reference identity's
 ordering and signed retraction boundary, which row equality cannot observe.
 
-This remains a draft experiment. The earlier #2961 merged-tree relay-write
-failure must be qualified on the current implementation, alongside the full
-canonical gates. Native timings do not establish browser or Core-service
-end-to-end latency gains. Ordinary text-row measurements are reported separately.
+Both unchanged native-relay restart regressions now pass on integration
+commit 159c12c55: offline-relay restart and worker-plus-relay restart. This covers
+the current counterpart of the failure reported on the older #2961 prototype.
 
-Tooling-friction: preserving frozen native executables makes matched reruns cheap;
-the existing subscription harness is being extended with optional text-width controls.
+On exact review head 5f2970b6a, both new public peer tests, the native seek test,
+both existing rename/collision tests, all three incremental-delivery canaries
+and both targeted benchmark compile gates pass locally. CI run
+[36309137828](https://github.com/garden-co/jazz/actions/runs/36309137828) passes
+the Rust workspace, bounded differential, TypeScript, React Native and storage
+compatibility partitions. Lint stopped on formatting of approved fixture edits;
+this receipt follow-up fixes formatting without changing assertions.
+
+The integration library diagnostic passes 2,256 tests (four ignored) with
+32 MiB test-thread stacks. Its default-stack catalogue-test abort is still
+unattributed; the larger-stack diagnostic is not a canonical default-gate pass.
+The bounded local differential oracle also passes. Full landing qualification,
+the missing local private sensitive-data guard and browser/application timing
+remain tracked in #3609. Native measurements do not establish browser or
+Core-service end-to-end latency gains.
+
+Tooling-friction: frozen native executables made matched reruns cheap; a repaired
+membership counter and text-width controls avoided a new benchmark, while a
+feature-specific debug RocksDB rebuild delayed the targeted compile gate.

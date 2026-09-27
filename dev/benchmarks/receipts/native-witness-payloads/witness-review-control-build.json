@@ -1,0 +1,9 @@
+{
+  "source_base": "1d16705c174071f00ab253c816ffd14e4593438d",
+  "benchmark_source_sha256": "64292f5e1d391abf85e0557898649149b166728c73ce6a736024d5e37f2f1048",
+  "binaries": {
+    "blob": "1b8dfe1d276e1b7874676cc170ad279ebc9b8aac29bd17bb3d73e4d1cce1ea11",
+    "rows": "2a74cb78b8847f0aeeed90a9615491b7a83b4414d9ca588be1395af18b1113d6"
+  },
+  "harness_repair": "The original update_counts returned constant zero adds/removes; now read supporting_rows deltas without changing its assertions."
+}

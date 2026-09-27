@@ -4804,8 +4804,10 @@ mod tests {
         let mut maintained = test_maintained();
         maintained.acknowledge_peer_source_closure();
         // Selected witnesses can change without any companion terminal event.
-        maintained
-            .replace_selected_deletion_witnesses(BTreeMap::from([(fact.clone(), version.clone().into())]));
+        maintained.replace_selected_deletion_witnesses(BTreeMap::from([(
+            fact.clone(),
+            version.clone().into(),
+        )]));
         assert_eq!(
             maintained.unpublished_supporting_delta(),
             Some((vec![fact.clone()], vec![]))
@@ -4836,7 +4838,8 @@ mod tests {
             maintained.unpublished_supporting_delta(),
             Some((vec![], vec![]))
         );
-        maintained.replace_selected_deletion_witnesses(BTreeMap::from([(fact.clone(), version.into())]));
+        maintained
+            .replace_selected_deletion_witnesses(BTreeMap::from([(fact.clone(), version.into())]));
         maintained.supporting.apply(1, fact.clone(), -1);
         assert_eq!(
             maintained.unpublished_supporting_delta(),
@@ -5173,8 +5176,14 @@ mod tests {
                     .keys()
                     .next()
                     .unwrap()
-                    .raw_record.materialized_bytes(),
-                replacements[&key].keys().next().unwrap().raw_record.materialized_bytes()
+                    .raw_record
+                    .materialized_bytes(),
+                replacements[&key]
+                    .keys()
+                    .next()
+                    .unwrap()
+                    .raw_record
+                    .materialized_bytes()
             ));
             let version_event = if is_deletion {
                 version_deletion(record.clone())
@@ -5987,8 +5996,12 @@ mod tests {
         let payloads = records
             .iter()
             .map(|record| {
-                VersionPayload::prepare(record.clone().into(), &VersionIdentity::for_row(&record.clone().into()), &aliases)
-                    .unwrap()
+                VersionPayload::prepare(
+                    record.clone().into(),
+                    &VersionIdentity::for_row(&record.clone().into()),
+                    &aliases,
+                )
+                .unwrap()
             })
             .collect::<Vec<_>>();
         let mut index = WeightedVersionIndex::default();
@@ -6104,7 +6117,9 @@ mod tests {
                     ] {
                         row.table = table;
                         let identity = VersionIdentity::for_row(&row.clone().into());
-                        variants.push(VersionPayload::prepare(row.into(), &identity, &aliases).unwrap());
+                        variants.push(
+                            VersionPayload::prepare(row.into(), &identity, &aliases).unwrap(),
+                        );
                     }
                 }
             }
@@ -6238,7 +6253,10 @@ mod tests {
             .unwrap();
         assert_eq!(
             maintained.replacement_for("todos", row_uuid),
-            (Some(version(row_uuid, 11, "new").into()), Some(deletion.into()))
+            (
+                Some(version(row_uuid, 11, "new").into()),
+                Some(deletion.into())
+            )
         );
     }
 
@@ -6252,7 +6270,10 @@ mod tests {
         maintained
             .apply_decoded_deltas([(version_deletion(version.clone()), 1)], &aliases)
             .unwrap();
-        assert_eq!(maintained.versions_by_tx(tx_id), vec![version.clone().into()]);
+        assert_eq!(
+            maintained.versions_by_tx(tx_id),
+            vec![version.clone().into()]
+        );
 
         maintained
             .apply_decoded_deltas([(version_deletion(version), -1)], &aliases)
