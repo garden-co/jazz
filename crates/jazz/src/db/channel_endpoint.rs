@@ -397,6 +397,68 @@ pub(crate) mod tests {
         }
         encoded
     }
+
+    #[cfg(feature = "transport-compression-zstd")]
+    #[test]
+    fn synthetic_small_delta_streaming_compression_receipt() {
+        jazz_benchmark_guard::refuse_contaminated_measurement();
+        let shape_id = crate::query::ShapeId(uuid::Uuid::from_bytes([0x22; 16]));
+        let binding_id = crate::query::BindingId(uuid::Uuid::from_bytes([0x33; 16]));
+        let subscription = crate::protocol::SubscriptionKey {
+            shape_id,
+            binding_id,
+            read_view: Default::default(),
+        };
+        let messages = (1..301_u64)
+            .map(|i| {
+                SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+                    subscription,
+                    settled_through: crate::time::GlobalTime(10_000 + i),
+                    version_carriers: Vec::new(),
+                    peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+                    // Use current wire-v3 empty supporting-set successors as
+                    // independently delivered control-plane messages. This is
+                    // a compression roundtrip receipt, not a historical size baseline.
+                    supporting_rows: crate::protocol::SupportingRowsUpdate::Delta {
+                        predecessor: u128::from(i).to_le_bytes(),
+                        revision: u128::from(i + 1).to_le_bytes(),
+                        adds: Vec::new(),
+                        removes: Vec::new(),
+                    },
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut raw = 0_u64;
+        let mut per_message_zstd = 0_u64;
+        let streaming_zstd = compression_receipt(
+            &messages,
+            (crate::wire::current_wire_features() & !crate::wire::FEATURE_PAYLOAD_LZ4)
+                | crate::wire::FEATURE_PAYLOAD_ZSTD,
+        );
+        #[cfg(feature = "transport-compression-lz4")]
+        let streaming_lz4 = compression_receipt(
+            &messages,
+            crate::wire::current_wire_features() | crate::wire::FEATURE_PAYLOAD_LZ4,
+        );
+        #[cfg(not(feature = "transport-compression-lz4"))]
+        let streaming_lz4 = 0_u64;
+        for message in &messages {
+            let payload = crate::wire::encode_sync_message(message).unwrap();
+            raw += payload.len() as u64;
+            let (compressed, active) = crate::wire::compress_sync_payload(
+                payload.clone(),
+                crate::wire::FEATURE_PAYLOAD_ZSTD,
+            )
+            .unwrap();
+            let decompressed = crate::wire::decompress_sync_payload(&compressed, active).unwrap();
+            assert_eq!(decompressed, payload);
+            per_message_zstd += compressed.len() as u64;
+        }
+        eprintln!(
+            "SYNTHETIC_SMALL_DELTA_COMPRESSION raw={raw} per_message_zstd={per_message_zstd} streaming_zstd={streaming_zstd} streaming_lz4={streaming_lz4}"
+        );
+        assert!(streaming_zstd < per_message_zstd);
+    }
 }
 
 #[cfg(test)]

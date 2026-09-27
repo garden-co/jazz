@@ -42,15 +42,20 @@ struct InboundChannel {
     lease: Option<BufferLease>,
 }
 
-pub(crate) struct ReceivedBytes {
+#[doc(hidden)]
+pub struct ReceivedBytes {
+    #[doc(hidden)]
     pub channel: u16,
+    #[doc(hidden)]
     pub class: ChannelClass,
+    #[doc(hidden)]
     pub payload: Vec<u8>,
+    #[doc(hidden)]
     pub lease: BufferLease,
 }
 
 /// Persistent state for a connection direction's bounded channel set.
-pub(crate) struct OrderedChannelBackend {
+pub struct OrderedChannelBackend {
     context: WireInboundContext,
     credits: SharedChannelCredits,
     scheduler: ChannelScheduler,
@@ -67,7 +72,8 @@ pub(crate) struct OrderedChannelBackend {
 }
 
 impl OrderedChannelBackend {
-    pub(crate) fn new(context: WireInboundContext) -> Result<Self, String> {
+    #[doc(hidden)]
+    pub fn new(context: WireInboundContext) -> Result<Self, String> {
         let features = context.negotiated_features();
         // A decode-only browser explicitly emits uncompressed channel bytes;
         // it never substitutes independent per-message frames for a stream.
@@ -95,12 +101,14 @@ impl OrderedChannelBackend {
     }
 
     #[cfg(any(test, feature = "testing"))]
-    pub(crate) fn set_incomplete_receive_timeout_for_test(&mut self, timeout_ms: u64) {
+    #[doc(hidden)]
+    pub fn set_incomplete_receive_timeout_for_test(&mut self, timeout_ms: u64) {
         self.idle_timeout_ms = timeout_ms;
         self.age_timeout_ms = timeout_ms;
     }
 
-    pub(crate) fn incomplete_receive_timeout_ms(&self) -> Option<u64> {
+    #[doc(hidden)]
+    pub fn incomplete_receive_timeout_ms(&self) -> Option<u64> {
         self.inbound
             .values()
             .flat_map(|state| {
@@ -119,7 +127,8 @@ impl OrderedChannelBackend {
             .min()
     }
 
-    pub(crate) fn expire(&mut self) -> Result<(), String> {
+    #[doc(hidden)]
+    pub fn expire(&mut self) -> Result<(), String> {
         let expired = self.inbound.values().any(|state| {
             state
                 .started
@@ -138,8 +147,9 @@ impl OrderedChannelBackend {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_elapsed_for_test(&mut self, elapsed_ms: u64) {
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn set_elapsed_for_test(&mut self, elapsed_ms: u64) {
         let at = Instant::now() - std::time::Duration::from_millis(elapsed_ms);
         for state in self
             .inbound
@@ -151,7 +161,8 @@ impl OrderedChannelBackend {
         }
     }
 
-    pub(crate) fn enqueue(
+    #[doc(hidden)]
+    pub fn enqueue(
         &mut self,
         channel: u16,
         generation: u64,
@@ -191,25 +202,31 @@ impl OrderedChannelBackend {
         Ok(())
     }
 
-    pub(crate) fn set_channel_credits(&mut self, credits: SharedChannelCredits) {
+    #[doc(hidden)]
+    pub fn set_channel_credits(&mut self, credits: SharedChannelCredits) {
         self.credits = credits;
     }
 
-    pub(crate) fn channel_credits(&self) -> SharedChannelCredits {
+    #[doc(hidden)]
+    pub fn channel_credits(&self) -> SharedChannelCredits {
         Arc::clone(&self.credits)
     }
 
-    pub(crate) fn is_idle(&self, channel: u16) -> bool {
+    #[doc(hidden)]
+    pub fn is_idle(&self, channel: u16) -> bool {
         self.scheduler.is_idle(channel)
     }
-    pub(crate) fn next_idle_generation(&self, channel: u16) -> Result<u64, String> {
+    #[doc(hidden)]
+    pub fn next_idle_generation(&self, channel: u16) -> Result<u64, String> {
         self.scheduler.next_idle_generation(channel)
     }
-    pub(crate) fn has_pending(&self) -> bool {
+    #[doc(hidden)]
+    pub fn has_pending(&self) -> bool {
         self.scheduler.queued_messages() != 0
     }
 
-    pub(crate) fn peek_outbound(&mut self) -> Result<Option<Vec<u8>>, String> {
+    #[doc(hidden)]
+    pub fn peek_outbound(&mut self) -> Result<Option<Vec<u8>>, String> {
         self.expire()?;
         if let Some(error) = &self.failed {
             return Err(error.clone());
@@ -296,7 +313,8 @@ impl OrderedChannelBackend {
         Ok(Some(frame))
     }
 
-    pub(crate) fn accept_outbound(&mut self) -> Result<bool, String> {
+    #[doc(hidden)]
+    pub fn accept_outbound(&mut self) -> Result<bool, String> {
         if self.pending.is_none() {
             return Err("no encoded channel frame to accept".into());
         }
@@ -309,7 +327,8 @@ impl OrderedChannelBackend {
         Ok(self.pending_last)
     }
 
-    pub(crate) fn receive(
+    #[doc(hidden)]
+    pub fn receive(
         &mut self,
         frame: WireChannelEnvelope,
         encoded_len: usize,

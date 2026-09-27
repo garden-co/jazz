@@ -6,12 +6,14 @@ use super::{SubscriptionKey, SupportingRow, SupportingRowsUpdate, SyncMessage};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Default)]
-pub(crate) struct SupportingSetTestOracle {
+#[doc(hidden)]
+pub struct SupportingSetTestOracle {
     sets: BTreeMap<SubscriptionKey, ([u8; 16], BTreeSet<SupportingRow>)>,
 }
 
 impl SupportingSetTestOracle {
-    pub(crate) fn observe(&mut self, message: &SyncMessage) -> SyncMessage {
+    #[doc(hidden)]
+    pub fn observe(&mut self, message: &SyncMessage) -> SyncMessage {
         let SyncMessage::ViewUpdate(view) = message else {
             panic!("expected view update")
         };
