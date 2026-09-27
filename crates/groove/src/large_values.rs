@@ -3639,6 +3639,33 @@ fn decode_canonical_node_v1(encoded: &[u8]) -> Result<ChunkNode, Error> {
     if encoded.len() > MAX_ENCODED_NODE_BYTES {
         return Err(Error::MalformedNode);
     }
+    let (tag, payload) =
+        crate::records::split_variant_record(encoded).map_err(|_| Error::MalformedNode)?;
+    if tag == 0 {
+        let [format, kind, bytes @ ..] = payload else {
+            return Err(Error::MalformedNode);
+        };
+        let kind = large_value_kind_from_tag(*kind).map_err(|_| Error::MalformedNode)?;
+        if bytes.len() > LEAF_MAX_BYTES {
+            return Err(Error::MalformedNode);
+        }
+        // V1's ordinary Leaf record is exactly two fixed u8 fields followed
+        // by its sole raw-bytes field. Its canonical re-encoding is therefore
+        // this header followed by the unchanged payload, with no offset or
+        // length table. Compare those segments directly instead of allocating
+        // an owned EnumValue, decoded Values and another full encoded node.
+        let canonical_header = [0, *format, large_value_kind_tag(kind)];
+        if encoded.strip_prefix(&canonical_header) != Some(bytes) {
+            return Err(Error::MalformedNode);
+        }
+        let node = ChunkNode::Leaf {
+            format: *format,
+            kind,
+            bytes: bytes.to_vec(),
+        };
+        validate_untyped_node_structure(&node)?;
+        return Ok(node);
+    }
     let schema = chunk_node_schema();
     preflight_node_bounds(encoded, &schema)?;
     let value =
