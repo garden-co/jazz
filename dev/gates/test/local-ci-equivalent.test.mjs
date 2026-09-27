@@ -413,11 +413,17 @@ test("a successful native producer remains visible when a TypeScript consumer fa
   ]);
 });
 
-test("storage compatibility executes the historical browser file and propagates its failure", async () => {
-  const partition = planFor({ partition: "storage-compat" });
+test("storage compatibility executes the historical native and browser corpora and propagates failure", async () => {
+  // The native corpus stays its own partition; the browser corpus runs in the
+  // TypeScript partition, which already produced the sealed artifacts it opens.
+  assert.deepEqual(
+    planFor({ partition: "storage-compat" }).map(({ label }) => label),
+    ["native storage compatibility corpus"],
+  );
+  const partition = planFor({ partition: "typescript" });
   const assertBrowser = (commands) => {
     const browser = commands.find((item) => item.label === "browser storage compatibility corpus");
-    assert.ok(browser, "storage partition must execute browser corpus");
+    assert.ok(browser, "TypeScript partition must execute browser corpus");
     assert.equal(browser.executable, "pnpm");
     assert.deepEqual(browser.args, [
       "--dir",
@@ -445,9 +451,9 @@ test("storage compatibility executes the historical browser file and propagates 
     /planted browser corpus failure/,
   );
   assert.deepEqual(seen, [
-    "native storage compatibility corpus",
     "native correctness-artifact producer",
     "preinstalled Chromium",
+    "TypeScript consumers",
     "browser storage compatibility corpus",
   ]);
   assert.equal(workflowModel.jobs["test-storage-compat"]["timeout-minutes"], 30);

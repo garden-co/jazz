@@ -182,6 +182,16 @@ export const ciPartitions = Object.freeze({
       // own harness tests. A CI-equivalent invocation must not inherit one.
       env: { JAZZ_REQUIRE_CI_TEST_COMMANDS: "1" },
     }),
+    // An exact, named historical-storage receipt rather than an incidental
+    // member of the broad browser suite: a green TypeScript partition must mean
+    // current code opened the pinned real-browser corpus.
+    command("browser storage compatibility corpus", "pnpm", [
+      "--dir",
+      "packages/jazz-tools",
+      "test:browser:focused",
+      "--",
+      "tests/browser/indexeddb-jazz-compat.test.ts",
+    ]),
   ]),
   "react-native": Object.freeze([
     // React Native's bridge is deliberately opt-in. This producer must be
@@ -227,25 +237,11 @@ export const ciPartitions = Object.freeze({
       { env: { JAZZ_RN_TEST_BRIDGE: "1" } },
     ),
   ]),
+  // The exact browser corpus receipt runs in the TypeScript partition, which
+  // already produces and seals the NAPI/WASM pair it needs; building that pair
+  // again here only to open one IndexedDB fixture cost ~3 minutes per run.
   "storage-compat": Object.freeze([
     command("native storage compatibility corpus", "bash", ["dev/gates/storage-compat.sh"]),
-    command("native correctness-artifact producer", "node", [
-      "dev/gates/ensure-correctness-artifacts.mjs",
-    ]),
-    command("preinstalled Chromium", "pnpm", [
-      "exec",
-      "playwright",
-      "install",
-      "--dry-run",
-      "chromium",
-    ]),
-    command("browser storage compatibility corpus", "pnpm", [
-      "--dir",
-      "packages/jazz-tools",
-      "test:browser:focused",
-      "--",
-      "tests/browser/indexeddb-jazz-compat.test.ts",
-    ]),
   ]),
 });
 

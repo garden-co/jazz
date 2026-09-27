@@ -121,10 +121,11 @@ jobs:
 
   # This is deliberately an exact, named historical-storage partition rather
   # than an incidental member of the broad nextest shard. A green Rust suite
-  # must mean current code opened the pinned native and real-browser corpora.
+  # must mean current code opened the pinned native corpus. The pinned
+  # real-browser corpus is the same kind of exact receipt in test-ts, which
+  # already seals the NAPI/WASM pair it needs.
   test-storage-compat:
-    # Native corpus plus sealed NAPI/WASM production and real Chromium. The
-    # corpus tests take seconds; the job is compile-bound, so it gets the same
+    # The corpus tests take seconds; the job is compile-bound, so it gets the same
     # 16-vCPU runner and trusted shared compile cache as the other compile
     # jobs. On four cores without the S3 tier it was the CI long pole.
     runs-on: blacksmith-16vcpu-ubuntu-2404
@@ -161,7 +162,7 @@ jobs:
       - uses: ./.github/actions/setup-blacksmith
         with:
           sccache-s3: ${{ inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') }}
-      - name: Run CI-equivalent native and browser storage compatibility partition
+      - name: Run CI-equivalent native storage compatibility partition
         run: node dev/gates/local-ci-equivalent.mjs --ci-partition storage-compat
       # The bounded real M3 oracle smoke (canonical seed 11) shares this job
       # because its libtest is the exact `jazz` lib-test unit the native corpus
