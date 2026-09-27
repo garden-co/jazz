@@ -145,6 +145,7 @@ mod mutations;
 mod node_runtime;
 mod peer_blob_reads;
 mod peer_connection;
+mod peer_plain_reads;
 mod reads;
 mod reference_metadata_migration;
 mod subscriptions;

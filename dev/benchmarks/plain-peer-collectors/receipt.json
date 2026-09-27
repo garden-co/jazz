@@ -1,0 +1,95 @@
+{
+  "format": 1,
+  "description": "Anonymous resident two-database staged Local query startup. Seed/open is reported separately from the timed query endpoint. Full-result signatures and every selected field are checked in every run.",
+  "metadata": {
+    "control": {
+      "base": "cc5a303f1a2bfd0b56c8d36f1544464f6e23eba7",
+      "sourceFiles": {
+        "crates/jazz/Cargo.toml": "b13bf18ba0c8b206fcc0f685027315bc1e837af34778dfbbfd18a7aaf088709d",
+        "crates/jazz/benches/publication_fairness.rs": "aad41f6a8bc4eeb97b8a6d610471f13b8c4ceb0ba7fc15ab34bc1f7c15625e53",
+        "crates/jazz/benches/support/local_query_startup.rs": "9c92de7c1669bc2936a5291cbdcf090d73b7b17b336bd3e6555c6b77f5d35acf",
+        "crates/groove/src/records/values.rs": "a407af82f3f00afebc9930faad0b0e4ab3a95b897f9112f4295f24a0be9425ea",
+        "Cargo.lock": "7061055cd799e8731faf264e2925b28baa383ba32129058ce321becf12a78066"
+      },
+      "binarySha256": "7bcb6168b434ce3606015ac776af673c08c9a2bee1a4dc0db441723576a68c1f",
+      "profile": "perf",
+      "features": "testing,transport-compression-zstd"
+    },
+    "patchSha256": "f5f6f994e9e299110040541eed2e765f70ad774109548f9fe1f542f3b4b90a09",
+    "candidateSha256": "16eac2ce3ecd3dd2203714232d855aabc1883324272afc5645c8bbd0a01ea5a4",
+    "candidateSourceSha256": "a22ff956f45935c19d16d4865b35f7fe60a0b74caa4f1d4f31b74ed35aea7c45"
+  },
+  "sourceNotes": [
+    "Control is retained integration cc5a303 plus the restored publication_fairness benchmark scaffold. It includes prior unmerged performance work and excludes #3611.",
+    "Candidate adds only the plain-peer guard removal. Committed leaf-decoding optimization was temporarily reversed for this comparison, then restored for combined correctness.",
+    "Four fresh endpoints per process; ABBA then BAAB; no omitted warmups or observations. Tests were added after freezing binaries."
+  ],
+  "summary": {
+    "600": {
+      "control": {
+        "samples": 16,
+        "medians": {
+          "elapsed_ms": 388.11814549999997,
+          "full_list_ms": 299.965708,
+          "detail_ms": 388.104333,
+          "setup_ms": 296.61429150000004,
+          "prepare_ms": 1.524897,
+          "subscribe_ms": 80.723837,
+          "owner_ms": 155.588708,
+          "foreground_ms": 143.394688,
+          "extract_ms": 6.7023335
+        }
+      },
+      "candidate": {
+        "samples": 16,
+        "medians": {
+          "elapsed_ms": 367.762604,
+          "full_list_ms": 283.64179149999995,
+          "detail_ms": 367.7491455,
+          "setup_ms": 296.781979,
+          "prepare_ms": 1.598125,
+          "subscribe_ms": 81.89225250000001,
+          "owner_ms": 130.86656349999998,
+          "foreground_ms": 147.003875,
+          "extract_ms": 6.7230004999999995
+        }
+      },
+      "elapsed_reduction_percent": 5.244676585212627,
+      "elapsed_speedup": 1.055349677423972
+    },
+    "6000": {
+      "control": {
+        "samples": 16,
+        "medians": {
+          "elapsed_ms": 1877.3717499999998,
+          "full_list_ms": 1793.8180415000002,
+          "detail_ms": 1877.355521,
+          "setup_ms": 1406.413042,
+          "prepare_ms": 1.4120834999999998,
+          "subscribe_ms": 76.4117945,
+          "owner_ms": 919.0354785,
+          "foreground_ms": 853.3199999999999,
+          "extract_ms": 32.6597495
+        }
+      },
+      "candidate": {
+        "samples": 16,
+        "medians": {
+          "elapsed_ms": 1786.7688335,
+          "full_list_ms": 1706.3152089999999,
+          "detail_ms": 1786.755042,
+          "setup_ms": 1443.241521,
+          "prepare_ms": 1.5299785,
+          "subscribe_ms": 78.15335350000001,
+          "owner_ms": 786.104561,
+          "foreground_ms": 889.1422514999999,
+          "extract_ms": 32.204187499999996
+        }
+      },
+      "elapsed_reduction_percent": 4.826050913997171,
+      "elapsed_speedup": 1.0507076879791566
+    }
+  },
+  "observationsFile": "observations.jsonl",
+  "sampleCount": 64
+}

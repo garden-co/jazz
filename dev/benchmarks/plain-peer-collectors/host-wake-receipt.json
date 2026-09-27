@@ -1,0 +1,185 @@
+{
+  "format": 1,
+  "description": "Anonymous preseeded owner and empty foreground, 37 staged Local subscriptions. Host-owned wakeups are explicitly activated and asserted. Seeding/opening is outside the query endpoint.",
+  "metadata": {
+    "control": {
+      "base": "2f9f288ef71eaa17c21a92cd472116e1f512a363",
+      "sourceFiles": {
+        "crates/jazz/Cargo.toml": "b13bf18ba0c8b206fcc0f685027315bc1e837af34778dfbbfd18a7aaf088709d",
+        "crates/jazz/benches/publication_fairness.rs": "aad41f6a8bc4eeb97b8a6d610471f13b8c4ceb0ba7fc15ab34bc1f7c15625e53",
+        "crates/jazz/benches/support/local_query_startup.rs": "887a0da05fc4f793360b4ff12bd9d47defb66e3738ca8e4a460f46d109c9f232",
+        "crates/groove/src/large_values.rs": "31eb2894f4d3fde7a48bcbe79f31e9c9bcef3b38d4d504d4a5ef2e7aacf4f12e",
+        "crates/jazz/src/node/query_eval.rs": "f64c9c0d75d87ee34c01edcda9cd97d7cd8e238496641ee62ec57bfc89cf2aa8",
+        "Cargo.lock": "7061055cd799e8731faf264e2925b28baa383ba32129058ce321becf12a78066"
+      },
+      "profile": "perf",
+      "features": "testing,transport-compression-zstd",
+      "hostScheduler": true,
+      "binarySha256": "36d2b851c9b8399ffa1e26ab4c2f2e1081459825421612af6ddc413641892c1a"
+    },
+    "candidate": {
+      "base": "2f9f288ef71eaa17c21a92cd472116e1f512a363",
+      "sourceFiles": {
+        "crates/jazz/Cargo.toml": "b13bf18ba0c8b206fcc0f685027315bc1e837af34778dfbbfd18a7aaf088709d",
+        "crates/jazz/benches/publication_fairness.rs": "aad41f6a8bc4eeb97b8a6d610471f13b8c4ceb0ba7fc15ab34bc1f7c15625e53",
+        "crates/jazz/benches/support/local_query_startup.rs": "887a0da05fc4f793360b4ff12bd9d47defb66e3738ca8e4a460f46d109c9f232",
+        "crates/groove/src/large_values.rs": "31eb2894f4d3fde7a48bcbe79f31e9c9bcef3b38d4d504d4a5ef2e7aacf4f12e",
+        "crates/jazz/src/node/query_eval.rs": "a22ff956f45935c19d16d4865b35f7fe60a0b74caa4f1d4f31b74ed35aea7c45",
+        "Cargo.lock": "7061055cd799e8731faf264e2925b28baa383ba32129058ce321becf12a78066"
+      },
+      "profile": "perf",
+      "features": "testing,transport-compression-zstd",
+      "hostScheduler": true,
+      "binarySha256": "2eb87f232446f21f8018707f9574466949ee94c27d7429976d6e1c78faf3b76e",
+      "runtimePatchSha256": "f5f6f994e9e299110040541eed2e765f70ad774109548f9fe1f542f3b4b90a09"
+    }
+  },
+  "summary": {
+    "600": {
+      "control": {
+        "samples": 16,
+        "medians": {
+          "elapsed_ms": 414.5625,
+          "full_list_ms": 327.209292,
+          "detail_ms": 414.5459795,
+          "setup_ms": 291.25747950000004,
+          "prepare_ms": 1.467394,
+          "subscribe_ms": 76.93321000000002,
+          "owner_ms": 177.14464650000002,
+          "foreground_ms": 152.2478115,
+          "extract_ms": 6.5335625
+        },
+        "runtimeWorkMedians": {
+          "owner": {
+            "arrangement_encoded_bytes": 27569482.0,
+            "arrangement_rows": 5132.0,
+            "eval_memo_bytes": 133518540.0,
+            "graph_nodes": 1770.0,
+            "hydration_memo_computes": 1499.0,
+            "hydration_memo_distinct_computed_nodes": 1453.0,
+            "hydration_memo_hits": 2109.0
+          },
+          "foreground": {
+            "arrangement_encoded_bytes": 27569482.0,
+            "arrangement_rows": 5132.0,
+            "eval_memo_bytes": 831362.0,
+            "graph_nodes": 1770.0,
+            "hydration_memo_computes": 1635.0,
+            "hydration_memo_distinct_computed_nodes": 1579.0,
+            "hydration_memo_hits": 2184.0
+          }
+        }
+      },
+      "candidate": {
+        "samples": 16,
+        "medians": {
+          "elapsed_ms": 400.95852049999996,
+          "full_list_ms": 315.38810450000005,
+          "detail_ms": 400.9433125,
+          "setup_ms": 297.820021,
+          "prepare_ms": 1.542375,
+          "subscribe_ms": 80.21043699999998,
+          "owner_ms": 155.8966035,
+          "foreground_ms": 154.98008099999998,
+          "extract_ms": 6.744562999999999
+        },
+        "runtimeWorkMedians": {
+          "owner": {
+            "arrangement_encoded_bytes": 27569482.0,
+            "arrangement_rows": 5132.0,
+            "eval_memo_bytes": 129073016.0,
+            "graph_nodes": 1629.0,
+            "hydration_memo_computes": 1355.0,
+            "hydration_memo_distinct_computed_nodes": 1312.0,
+            "hydration_memo_hits": 1967.0
+          },
+          "foreground": {
+            "arrangement_encoded_bytes": 27569482.0,
+            "arrangement_rows": 5132.0,
+            "eval_memo_bytes": 831362.0,
+            "graph_nodes": 1770.0,
+            "hydration_memo_computes": 1635.0,
+            "hydration_memo_distinct_computed_nodes": 1579.0,
+            "hydration_memo_hits": 2184.0
+          }
+        }
+      },
+      "elapsedReductionPercent": 3.2815267902909784,
+      "elapsedSpeedup": 1.033928645494391
+    },
+    "6000": {
+      "control": {
+        "samples": 16,
+        "medians": {
+          "elapsed_ms": 1877.3730835,
+          "full_list_ms": 1791.1192084999998,
+          "detail_ms": 1877.3603335,
+          "setup_ms": 1437.430271,
+          "prepare_ms": 1.4243964999999998,
+          "subscribe_ms": 75.500271,
+          "owner_ms": 815.1895625,
+          "foreground_ms": 949.118228,
+          "extract_ms": 31.453109
+        },
+        "runtimeWorkMedians": {
+          "owner": {
+            "arrangement_encoded_bytes": 252223126.0,
+            "arrangement_rows": 33032.0,
+            "eval_memo_bytes": 131564100.0,
+            "graph_nodes": 1770.0,
+            "hydration_memo_computes": 1510.0,
+            "hydration_memo_distinct_computed_nodes": 1453.0,
+            "hydration_memo_hits": 2109.0
+          },
+          "foreground": {
+            "arrangement_encoded_bytes": 252223126.0,
+            "arrangement_rows": 33032.0,
+            "eval_memo_bytes": 832262.0,
+            "graph_nodes": 1770.0,
+            "hydration_memo_computes": 1635.0,
+            "hydration_memo_distinct_computed_nodes": 1579.0,
+            "hydration_memo_hits": 2184.0
+          }
+        }
+      },
+      "candidate": {
+        "samples": 16,
+        "medians": {
+          "elapsed_ms": 1730.0703125,
+          "full_list_ms": 1651.18075,
+          "detail_ms": 1730.055104,
+          "setup_ms": 1426.5359795,
+          "prepare_ms": 1.4554814999999999,
+          "subscribe_ms": 75.092375,
+          "owner_ms": 669.280792,
+          "foreground_ms": 952.3087499999999,
+          "extract_ms": 32.5331045
+        },
+        "runtimeWorkMedians": {
+          "owner": {
+            "arrangement_encoded_bytes": 252223126.0,
+            "arrangement_rows": 33032.0,
+            "eval_memo_bytes": 130324088.0,
+            "graph_nodes": 1629.0,
+            "hydration_memo_computes": 1369.0,
+            "hydration_memo_distinct_computed_nodes": 1312.0,
+            "hydration_memo_hits": 1968.0
+          },
+          "foreground": {
+            "arrangement_encoded_bytes": 252223126.0,
+            "arrangement_rows": 33032.0,
+            "eval_memo_bytes": 832262.0,
+            "graph_nodes": 1770.0,
+            "hydration_memo_computes": 1635.0,
+            "hydration_memo_distinct_computed_nodes": 1579.0,
+            "hydration_memo_hits": 2184.0
+          }
+        }
+      },
+      "elapsedReductionPercent": 7.846217264678279,
+      "elapsedSpeedup": 1.0851426499464887
+    }
+  },
+  "observationsFile": "host-wake-observations.jsonl",
+  "sampleCount": 64
+}
