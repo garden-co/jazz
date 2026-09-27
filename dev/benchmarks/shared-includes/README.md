@@ -1,6 +1,6 @@
 # Shared-parent include profiling
 
-Implementation follow-up: [#3612](https://github.com/garden-co/jazz/issues/3612). Profiling follows #3609 / #3611. Current production source `a086c1be807f85022032e7a210ca796087b34603`; release WASM SHA256 `94d24bd3ecb24e15ce1a6b9ba7d8c8fd55f00aad70a7389aacce745255c04baf`. This is a separate profiling finding, with no runtime change shipped.
+Profiling PR: [#3613](https://github.com/garden-co/jazz/pull/3613). Implementation follow-up: [#3612](https://github.com/garden-co/jazz/issues/3612). Profiling follows #3609 / #3611. Current production source `a086c1be807f85022032e7a210ca796087b34603`; release WASM SHA256 `94d24bd3ecb24e15ce1a6b9ba7d8c8fd55f00aad70a7389aacce745255c04baf`. This is a separate profiling finding, with no runtime change shipped.
 
 ### Evidence
 
@@ -28,14 +28,13 @@ Replace only the pending-read loop's sleep with a MessageChannel task in the iso
 
 It still polls while storage or coverage is unavailable. Matched ten-read CPU profiles show foreground active samples increasing from **122 to 256 ms/read** in persistent mode, despite lower wall time. The worker still needs about 143–147 ms of active work. A separate `scheduler.yield()` variant improves memory includes to ~89 ms but **times out waiting for persistent query coverage**. Its exact starvation mechanism needs an event-order test; a timeout is not evidence that coverage can be bypassed.
 
-### Required implementation work
+### Implementation direction
 
-- Preserve native read wake notifications across the WASM boundary, distinguish ready CPU continuations from external waiting, and yield fairly to host tasks.
-- Audit coverage readiness before replacing timer polling: `all_serialized_query_once` currently has `poll_fn` coverage checks that return Pending without registering the caller's waker. Native wake callbacks alone are insufficient.
-- Preserve the 15-second coverage deadline: time passage currently becomes visible through polling. An event-driven implementation needs a real timeout wake.
-- Keep cancellation, runtime/facade shutdown, transport errors, owner-lock release, and queued transaction writes live; cancellation must release waiters and stored callbacks.
-- Test concurrent reads, real MessagePort traffic, slow/missing remote authority, IndexedDB suspension, CPU-budget continuations, and timer/render responsiveness. Show that sleeping requests do not create a hot polling loop.
-- Re-run both flat and include lanes, memory and dual-runtime persistent mode, with CPU attribution. Treat the flat-lane regression and failed scheduler trial as required controls.
+[#3612](https://github.com/garden-co/jazz/issues/3612) tracks a wake-driven read
+boundary with fair host scheduling, coverage and deadline wakes, and cancellation/
+transport-error handling. It includes the concrete implementation requirements
+and verification cases. A native callback alone cannot replace polling while
+coverage checks still return Pending without registering their caller's waker.
 
 The remaining worker CPU is largely query/IVM execution and publication; this profile does not establish that IndexedDB disk I/O dominates. No history, deletion, permission, dual-database, or query-result semantics were removed.
 
