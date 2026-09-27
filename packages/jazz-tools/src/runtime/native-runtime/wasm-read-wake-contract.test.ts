@@ -5,6 +5,12 @@ import { loadWasmModuleForTest } from "../testing/wasm-runtime-test-utils.js";
 import { openConfig, queryFromTable } from "./native-codec.js";
 import { encodeSchema } from "./schema-codec.js";
 
+type PendingRead = {
+  setWake(callback: () => void): void;
+  poll(): Uint8Array | null;
+  cancel(): void;
+};
+
 const app = s.defineApp({ notes: s.table({ text: s.string() }, {}) });
 // Raw-binding tests are required here: the public runtime otherwise supplies
 // scheduling itself, hiding whether the WASM future actually emits a wake.
@@ -20,18 +26,19 @@ describe("WASM pending read deadlines", () => {
   it("wakes at the coverage deadline without intermediate polling", async () => {
     const db = await open();
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
-    let pending;
+    let pending: PendingRead | undefined;
     try {
-      pending = db.all(queryFromTable("notes"), { tier: "global" });
-      expect(pending.setWake).toBeTypeOf("function");
+      const read: PendingRead = db.all(queryFromTable("notes"), { tier: "global" });
+      pending = read;
+      expect(read.setWake).toBeTypeOf("function");
       const wake = vi.fn();
-      pending.setWake(wake);
-      expect(pending.poll()).toBeNull();
+      read.setWake(wake);
+      expect(read.poll()).toBeNull();
       await vi.advanceTimersByTimeAsync(14_999);
       expect(wake).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(1);
       expect(wake).toHaveBeenCalledTimes(1);
-      expect(() => pending.poll()).toThrow("Timed out waiting for query coverage");
+      expect(() => read.poll()).toThrow("Timed out waiting for query coverage");
     } finally {
       pending?.cancel();
       vi.useRealTimers();
@@ -42,14 +49,15 @@ describe("WASM pending read deadlines", () => {
   it("removes the deadline and stored callback when cancelled asleep", async () => {
     const db = await open();
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
-    let pending;
+    let pending: PendingRead | undefined;
     try {
-      pending = db.all(queryFromTable("notes"), { tier: "global" });
+      const read: PendingRead = db.all(queryFromTable("notes"), { tier: "global" });
+      pending = read;
       const wake = vi.fn();
-      pending.setWake(wake);
-      expect(pending.poll()).toBeNull();
+      read.setWake(wake);
+      expect(read.poll()).toBeNull();
       expect(vi.getTimerCount()).toBe(1);
-      pending.cancel();
+      read.cancel();
       expect(vi.getTimerCount()).toBe(0);
       await vi.advanceTimersByTimeAsync(30_000);
       expect(wake).not.toHaveBeenCalled();
