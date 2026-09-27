@@ -114,28 +114,27 @@ pub(crate) use node::legacy_test_future;
 /// Re-export of the underlying groove crate used for storage setup.
 pub use groove;
 
-pub use jazz_protocol::authorization_scope;
-pub use jazz_types::account_registry;
-pub use jazz_types::app_id;
-/// Shared binary row payload contract for the NAPI and WASM bindings.
-pub mod binding_codec;
-/// Disabled-by-default counters used by the native cold-settle attribution bench.
-#[cfg(feature = "cold-settle-attribution")]
-pub mod cold_settle_attribution;
-/// High-level thread-affine database facade.
-pub mod db;
-use jazz_types::debug_env;
-/// Host-facing exclusive lifecycle for foreground transaction-node identities.
-pub mod foreground_node_lease;
 /// Poll ready-immediate database futures without an async runtime.
 pub use db::block_on;
+pub use jazz_db::binding_codec;
+#[cfg(feature = "cold-settle-attribution")]
+pub use jazz_db::cold_settle_attribution;
+pub use jazz_db::db;
+pub use jazz_db::foreground_node_lease;
+pub use jazz_db::result_tree;
+pub use jazz_db::row;
 pub use jazz_model::model;
 pub use jazz_model::query;
 pub use jazz_model::row_input;
+pub use jazz_model::schema;
 pub use jazz_node::node;
 pub use jazz_node::peer;
+pub use jazz_protocol::authorization_scope;
 pub use jazz_protocol::protocol;
 pub use jazz_protocol::protocol_limits;
+pub use jazz_types::account_registry;
+pub use jazz_types::app_id;
+use jazz_types::debug_env;
 pub use jazz_types::identity;
 pub use jazz_types::ids;
 pub use jazz_types::local_executor;
@@ -143,9 +142,6 @@ pub use jazz_types::object;
 pub use jazz_types::postcard_exact;
 #[cfg(any(test, feature = "testing"))]
 pub use node::oracle;
-/// Canonical recursive structured query-result boundary types.
-pub mod result_tree;
-pub use jazz_model::schema;
 /// Platform-neutral client and server runtime APIs used by target shells.
 #[cfg(feature = "runtime")]
 pub mod serving;

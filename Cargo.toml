@@ -5,6 +5,7 @@ members = [
   "crates/idb-tree",
   "crates/groove",
   "crates/jazz",
+  "crates/jazz/layers/db",
   "crates/jazz/layers/engine",
   "crates/jazz/layers/model",
   "crates/jazz/layers/node",
@@ -51,6 +52,7 @@ exclude = ["examples/todo-server-rs", "examples/docs/todo-server-rs", "vendor/ru
 [workspace.dependencies]
 groove = { path = "crates/groove", default-features = false }
 jazz = { path = "crates/jazz", default-features = false }
+jazz-db = { path = "crates/jazz/layers/db", default-features = false }
 jazz-engine = { path = "crates/jazz/layers/engine", default-features = false }
 jazz-model = { path = "crates/jazz/layers/model", default-features = false }
 jazz-node = { path = "crates/jazz/layers/node", default-features = false }

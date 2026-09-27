@@ -102,13 +102,13 @@ where
 
     /// Core-shell capability: see `Node::declare_upload_root`.
     #[cfg(feature = "runtime")]
-    pub(crate) fn declare_upload_root(&self) {
+    pub fn declare_upload_root(&self) {
         self.node.declare_upload_root();
     }
 
     /// Core-shell capability; partial caches and relays must leave it disabled.
     #[cfg(feature = "runtime")]
-    pub(crate) fn enable_authoritative_scalar_exit_refresh(&self) {
+    pub fn enable_authoritative_scalar_exit_refresh(&self) {
         self.node.enable_authoritative_scalar_exit_refresh();
     }
 
@@ -130,6 +130,13 @@ where
     /// its published lineage; opening never publishes that schema locally.
     ///
     /// ```rust
+    /// # extern crate jazz_db;
+    /// # #[allow(unused_imports)]
+    /// # mod jazz {
+    /// #     pub use jazz_db::{db, row};
+    /// #     pub use jazz_model::{query, tx};
+    /// #     pub use jazz_types::ids;
+    /// # }
     /// # use jazz::db::{Db, DbConfig, DbIdentity, SeededRowIdSource};
     /// # use jazz::db::doctest_support::{block_on, schema, MemoryStorage};
     /// # use jazz::ids::{AuthorSubject, NodeUuid};
@@ -398,7 +405,7 @@ where
     /// bootstrap link.  This is intentionally crate-private: ordinary wire
     /// dispatch must never turn an arbitrary peer's snapshot into authority.
     #[cfg(feature = "runtime")]
-    pub(crate) fn apply_trusted_catalogue_snapshot(
+    pub fn apply_trusted_catalogue_snapshot(
         &self,
         snapshot: crate::protocol::CatalogueSnapshot,
     ) -> Result<(), Error> {
@@ -412,7 +419,8 @@ where
     }
 
     #[cfg(feature = "testing")]
-    pub(crate) fn set_catalogue_activation_failpoint(
+    #[doc(hidden)]
+    pub fn set_catalogue_activation_failpoint(
         &self,
         failpoint: crate::node::CatalogueActivationFailpoint,
     ) {
@@ -425,9 +433,7 @@ where
     /// Produce the authority's complete catalogue for the privileged
     /// snapshot-only transport exchange.
     #[cfg(feature = "runtime")]
-    pub(crate) fn trusted_catalogue_snapshot(
-        &self,
-    ) -> Result<crate::protocol::CatalogueSnapshot, Error> {
+    pub fn trusted_catalogue_snapshot(&self) -> Result<crate::protocol::CatalogueSnapshot, Error> {
         Ok(self.node.node.borrow().catalogue_snapshot()?)
     }
 
@@ -1231,7 +1237,7 @@ where
     // mint a scope-relay capability from caller-controlled claims.
     #[allow(dead_code)]
     #[doc(hidden)]
-    pub(crate) fn accept_scope_isolated_relay_subscriber(
+    pub fn accept_scope_isolated_relay_subscriber(
         &self,
         transport: Box<dyn Transport>,
         identity: AuthorSubject,

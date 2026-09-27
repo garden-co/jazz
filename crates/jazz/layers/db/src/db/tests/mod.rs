@@ -28,9 +28,6 @@ impl TestRocksOpen for RocksDbStorage {
 
 use super::*;
 use crate::ids::{AuthorSubject, NodeUuid};
-use crate::legacy_test_future::{
-    FutureResolveExt as _, OptionFutureExt as _, ResultFutureExt as _, SettledNodeTestExt as _,
-};
 use crate::model::public_schema::{
     CmpOp as PublicCmpOp, ColumnDescriptor as PublicColumnDescriptor,
     ColumnType as PublicColumnType, EnumCaseDescriptor as PublicEnumCaseDescriptor,
@@ -46,6 +43,9 @@ use crate::model::public_schema::{
     RelPredicateExpr as PublicRelPredicateExpr, RelProjectColumn as PublicRelProjectColumn,
     RelProjectExpr as PublicRelProjectExpr, RelRecursionBound as PublicRelRecursionBound,
     RelValueRef as PublicRelValueRef, RowIdRef as PublicRelRowIdRef,
+};
+use crate::node::legacy_test_future::{
+    FutureResolveExt as _, OptionFutureExt as _, ResultFutureExt as _, SettledNodeTestExt as _,
 };
 use crate::object::ObjectId as PublicObjectId;
 use crate::protocol::{

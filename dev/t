@@ -19,8 +19,9 @@ runs that resolved name with --exact. --exact requires FILTER itself to already
 be that full canonical name; without it FILTER is a literal substring.
 -p selects one of Jazz's layer crates (for example jazz-types) instead of
 jazz; it is built with --no-default-features --features testing. Without -p, a
-library filter starting with node:: or peer:: selects jazz-node, where those
-modules and their tests live.
+library filter that starts with a module an extracted layer crate owns selects
+that crate: node:: and peer:: select jazz-node; db::, binding_codec::,
+result_tree:: and foreground_node_lease:: select jazz-db.
 
 Examples:
   dev/t subscription::tests::reopens
@@ -92,12 +93,19 @@ done
 
 if [[ -z "$package" ]]; then
   package="jazz"
-  if [[ "$target_kind" == "lib" && ( "$filter" == node::* || "$filter" == peer::* ) ]]; then
-    package="jazz-node"
+  if [[ "$target_kind" == "lib" ]]; then
+    case "$filter" in
+      node::*|peer::*) package="jazz-node" ;;
+      db::*|binding_codec::*|result_tree::*|foreground_node_lease::*|cold_settle_attribution::*)
+        package="jazz-db" ;;
+    esac
   fi
 fi
 features="testing,transport-compression-zstd"
-[[ "$package" == "jazz" || "$package" == "jazz-node" ]] || features="testing"
+case "$package" in
+  jazz|jazz-node|jazz-db) ;;
+  *) features="testing" ;;
+esac
 cargo_args=(-p "$package" --no-default-features --features "$features")
 if [[ "$target_kind" == "lib" ]]; then
   cargo_args+=(--lib)

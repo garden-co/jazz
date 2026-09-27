@@ -122,7 +122,8 @@ pub struct StreamingValueUpload {
 }
 
 impl StreamingValueUpload {
-    pub(crate) fn cleanup_id(mut self) -> groove::large_values::StagedLargeValueId {
+    #[doc(hidden)]
+    pub fn cleanup_id(mut self) -> groove::large_values::StagedLargeValueId {
         self.preparation.take();
         self.id
     }
@@ -1417,6 +1418,13 @@ where
     /// selected through [`InsertOptions`]; there are no parallel insert paths.
     ///
     /// ```rust
+    /// # extern crate jazz_db;
+    /// # #[allow(unused_imports)]
+    /// # mod jazz {
+    /// #     pub use jazz_db::{db, row};
+    /// #     pub use jazz_model::{query, tx};
+    /// #     pub use jazz_types::ids;
+    /// # }
     /// # use jazz::db::doctest_support::{block_on, open_todos_db};
     /// # use jazz::tx::DurabilityTier;
     /// let db = block_on(open_todos_db())?;
@@ -2160,7 +2168,7 @@ where
 
     /// Evaluate an insert for a test-only serving-path probe without writing.
     #[cfg(test)]
-    pub(crate) async fn authorize_insert_for_identity(
+    pub async fn authorize_insert_for_identity(
         &self,
         table: &str,
         cells: RowCells,
@@ -2596,7 +2604,7 @@ where
     }
 
     /// Evaluate a read for the serving path without disclosing data.
-    pub(crate) fn authorize_read_for_identity(
+    pub fn authorize_read_for_identity(
         &self,
         table: &str,
         row: RowUuid,
@@ -2656,7 +2664,7 @@ where
     }
 
     #[cfg(test)]
-    pub(crate) fn set_test_provider_claims(
+    pub fn set_test_provider_claims(
         &self,
         identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
@@ -2680,7 +2688,7 @@ where
 
     /// Evaluate a delete for a test-only serving-path probe without writing.
     #[cfg(test)]
-    pub(crate) async fn authorize_delete_for_identity(
+    pub async fn authorize_delete_for_identity(
         &self,
         table: &str,
         row: RowUuid,

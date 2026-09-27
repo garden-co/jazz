@@ -919,12 +919,13 @@ where
     /// upstream left to relay it to, so it is not retained in the outbox.
     /// Attaching any upstream (before or after) revokes this for good.
     #[cfg(any(test, feature = "runtime"))]
-    pub(crate) fn declare_upload_root(&self) {
+    pub fn declare_upload_root(&self) {
         self.outbox.borrow_mut().declare_root();
     }
 
     #[cfg(any(test, feature = "runtime"))]
-    pub(crate) fn enable_authoritative_scalar_exit_refresh(&self) {
+    #[doc(hidden)]
+    pub fn enable_authoritative_scalar_exit_refresh(&self) {
         self.node
             .borrow_mut()
             .enable_authoritative_scalar_exit_refresh();
@@ -2461,7 +2462,7 @@ where
     }
 
     #[cfg(test)]
-    pub(crate) fn accept_test_subscriber_with_claims(
+    pub fn accept_test_subscriber_with_claims(
         &self,
         transport: Box<dyn Transport>,
         identity: AuthorSubject,
@@ -2505,7 +2506,7 @@ where
 
     #[cfg(not(feature = "testing"))]
     #[allow(dead_code)]
-    pub(crate) fn accept_relay_subscriber(
+    pub fn accept_relay_subscriber(
         &self,
         transport: Box<dyn Transport>,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
@@ -2546,7 +2547,7 @@ where
     // The public serving shell reaches this from a runtime-selected backend;
     // it is intentionally not a general Node API.
     #[allow(dead_code)]
-    pub(crate) fn accept_scope_isolated_relay_subscriber(
+    pub fn accept_scope_isolated_relay_subscriber(
         &self,
         transport: Box<dyn Transport>,
         identity: AuthorSubject,

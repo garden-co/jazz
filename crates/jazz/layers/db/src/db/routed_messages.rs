@@ -62,13 +62,15 @@ pub(super) fn max_routed_payload_bytes() -> usize {
 pub struct ReceivedSyncMessage {
     /// The decoded canonical message.
     pub message: SyncMessage,
-    pub(crate) lease: Option<BufferLease>,
+    #[doc(hidden)]
+    pub lease: Option<BufferLease>,
     /// The checked (untrusted-encoder) wire decoder produced this message, so
     /// every version receipt it carries has already been validated.
-    pub(crate) receipts_validated: bool,
+    pub receipts_validated: bool,
 }
 impl ReceivedSyncMessage {
-    pub(crate) fn unleased(message: SyncMessage) -> Self {
+    #[doc(hidden)]
+    pub fn unleased(message: SyncMessage) -> Self {
         Self {
             message,
             lease: None,

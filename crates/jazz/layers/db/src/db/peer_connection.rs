@@ -164,7 +164,7 @@ fn relay_authority_coverage_key(coverage: &CoverageKey) -> CoverageKey {
     upstream
 }
 
-pub(crate) fn coverage_group_subscription_key(coverage: &CoverageKey) -> SubscriptionKey {
+pub fn coverage_group_subscription_key(coverage: &CoverageKey) -> SubscriptionKey {
     let binding_id = coverage
         .policy_binding
         .as_ref()
@@ -852,7 +852,7 @@ pub struct ResumeCursor {
 impl ResumeCursor {
     /// Full-diff fallbacks carried by the parked subscriber peer.
     #[cfg(feature = "runtime")]
-    pub(crate) fn full_diff_fallbacks(&self) -> crate::peer::FullDiffFallbackMetrics {
+    pub fn full_diff_fallbacks(&self) -> crate::peer::FullDiffFallbackMetrics {
         self.peer
             .maintained_subscription_view_metrics()
             .full_diff_fallbacks
@@ -862,7 +862,7 @@ impl ResumeCursor {
     /// the server-authenticated scope binding while replacing its old
     /// per-attachment admission capability.
     #[cfg(feature = "runtime")]
-    pub(crate) fn refresh_scope_relay_admission_epoch(&mut self) -> bool {
+    pub fn refresh_scope_relay_admission_epoch(&mut self) -> bool {
         self.peer.refresh_scope_relay_admission_epoch()
     }
 }
@@ -1515,7 +1515,7 @@ where
 
     /// Host-only capability; does not alter write or publication trust.
     #[cfg(any(test, feature = "runtime"))]
-    pub(crate) fn admit_authority_query_delegate(&mut self) {
+    pub fn admit_authority_query_delegate(&mut self) {
         if let ConnectionLink::Subscriber(state) = &mut self.link {
             state.peer.authority_query_delegate = state.ingest_context.trust
                 == CommitUnitTrust::TrustedAuthority
@@ -1524,18 +1524,18 @@ where
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn scope_relay_admission_epoch_for_test(&self) -> Option<u64> {
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn scope_relay_admission_epoch_for_test(&self) -> Option<u64> {
         let ConnectionLink::Subscriber(SubscriberConnectionState { peer, .. }) = &self.link else {
             return None;
         };
         peer.scope_relay_admission_epoch_for_test()
     }
 
-    #[cfg(test)]
-    pub(crate) fn scope_relay_binding_for_test(
-        &self,
-    ) -> Option<(AuthorSubject, BTreeMap<String, Value>)> {
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn scope_relay_binding_for_test(&self) -> Option<(AuthorSubject, BTreeMap<String, Value>)> {
         let ConnectionLink::Subscriber(SubscriberConnectionState { peer, .. }) = &self.link else {
             return None;
         };
@@ -6551,9 +6551,9 @@ impl<S: OrderedKvStorage> Drop for AuthorizationScopeReceivers<'_, S> {
 }
 
 #[cfg(test)]
-pub(crate) struct AuthorizationScopeTestHook {
-    pub(crate) fail: bool,
-    pub(crate) reached_second_clause: bool,
+pub struct AuthorizationScopeTestHook {
+    pub fail: bool,
+    pub reached_second_clause: bool,
 }
 
 /// Compile and serve an authorization scope entirely at the serving authority.
@@ -6562,7 +6562,7 @@ pub(crate) struct AuthorizationScopeTestHook {
 /// caller-provided subscription.  The authority allocates opaque usage-site
 /// keys, registers canonical shapes in the receiver, and only then sends the
 /// ordinary view updates in authority-scope envelopes.
-pub(crate) async fn serve_authorization_scope_intent<S>(
+pub async fn serve_authorization_scope_intent<S>(
     node: &SharedNodeState<S>,
     peer: &mut PeerState,
     pending_control_responses: &mut VecDeque<PendingSubscriberControlResponse>,

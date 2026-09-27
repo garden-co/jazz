@@ -1,7 +1,7 @@
 //! Shared test transports, fixtures, and assertion helpers.
 
 use super::*;
-use crate::tools::test_support::AllowAll;
+use crate::model::test_support::AllowAll;
 
 /// Receive the next subscriber payload relevant to direct protocol assertions.
 /// A subscriber begins by publishing its trusted catalogue prerequisite; tests
@@ -1695,7 +1695,7 @@ pub(super) fn relation_hop_schema() -> JazzSchema {
 }
 
 pub(super) fn access_edge_include_schema() -> JazzSchema {
-    use crate::tools::test_support::AllowAll;
+    use crate::model::test_support::AllowAll;
     build_public_db_test_schema(
         PublicSchemaBuilder::new()
             .table(PublicTableSchemaBuilder::new("teams").column("name", PublicColumnType::Text))
@@ -1758,7 +1758,7 @@ pub(super) fn cells(title: &str, done: bool, owner: AuthorSubject) -> RowCells {
 }
 
 pub(super) fn issue_schema() -> JazzSchema {
-    use crate::tools::test_support::AllowAll;
+    use crate::model::test_support::AllowAll;
     build_public_db_test_schema(
         PublicSchemaBuilder::new()
             .table(PublicTableSchemaBuilder::new("projects").column("name", PublicColumnType::Text))

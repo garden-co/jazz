@@ -2041,6 +2041,7 @@ dependencies = [
  "internment",
  "jazz-benchmark-guard",
  "jazz-compression",
+ "jazz-db",
  "jazz-engine",
  "jazz-model",
  "jazz-node",
@@ -2119,6 +2120,35 @@ dependencies = [
  "jazz-ruzstd",
  "lz4_flex 0.11.6",
  "zstd",
+]
+
+[[package]]
+name = "jazz-db"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "bytes",
+ "futures",
+ "futures-channel",
+ "futures-core",
+ "groove",
+ "hex",
+ "jazz-benchmark-guard",
+ "jazz-engine",
+ "jazz-model",
+ "jazz-node",
+ "jazz-protocol",
+ "jazz-storage-rocksdb",
+ "jazz-types",
+ "postcard",
+ "serde",
+ "serde_json",
+ "stacker",
+ "tempfile",
+ "thiserror",
+ "tracing",
+ "uuid",
+ "web-time",
 ]
 
 [[package]]

@@ -80,7 +80,7 @@ use crate::time::{GlobalTime, TxTime};
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId, TxKind};
 use crate::wire::{TransportError, WireAuthorityEndpoint, WireFeatures};
 
-pub(crate) mod channel_endpoint;
+pub mod channel_endpoint;
 mod routed_messages;
 pub use channel_endpoint::{AuxiliaryChannelEndpoint, SharedAuxiliaryEndpoint};
 pub use routed_messages::ReceivedSyncMessage;
@@ -96,7 +96,7 @@ pub use wire_transport::{WireFlushStatus, WireSendOutcome, WireTransportAdapter}
 /// intentionally part of the existing `Node` owner rather than a parallel
 /// async facade. A future operation scheduler may replace it with finer-grained
 /// owned sessions once the async lifecycle has settled.
-pub(crate) type SharedNodeState<S> = Rc<LocalMutex<NodeState<S>>>;
+pub type SharedNodeState<S> = Rc<LocalMutex<NodeState<S>>>;
 
 const DEFAULT_CHUNK_FORWARD_HOPS: u8 = 8;
 const MAX_PENDING_CHUNK_DEMANDS: usize = 4096;
@@ -753,18 +753,20 @@ pub struct PeerIoPump {
 
 /// One exact encoded channel frame retained by the endpoint until handoff.
 /// Dropping a reservation leaves both bytes and the logical obligation pending.
-pub(crate) struct ReservedOutboundWireFrame {
+pub struct ReservedOutboundWireFrame {
     pump: PeerIoPump,
     frame: Vec<u8>,
     credit_grant: bool,
 }
 
 impl ReservedOutboundWireFrame {
-    pub(crate) fn take_frame(&mut self) -> Vec<u8> {
+    #[doc(hidden)]
+    pub fn take_frame(&mut self) -> Vec<u8> {
         self.frame.clone()
     }
 
-    pub(crate) fn commit(self) {
+    #[doc(hidden)]
+    pub fn commit(self) {
         if self.credit_grant {
             self.pump
                 .channel_credits()
@@ -826,7 +828,8 @@ impl PeerIoPump {
         }
     }
 
-    pub(crate) fn with_shared_auxiliary_endpoint(
+    #[doc(hidden)]
+    pub fn with_shared_auxiliary_endpoint(
         mut self,
         endpoint: Option<SharedAuxiliaryEndpoint>,
     ) -> Self {
@@ -1030,12 +1033,14 @@ impl PeerIoPump {
     }
 
     #[cfg(feature = "runtime")]
-    pub(crate) fn take_canonical_credit_progress(&self) -> bool {
+    #[doc(hidden)]
+    pub fn take_canonical_credit_progress(&self) -> bool {
         self.canonical_credit_progress.replace(false)
     }
 
     #[cfg(feature = "runtime")]
-    pub(crate) fn wire_frame_is_auxiliary(&self, frame: &[u8]) -> Result<bool, String> {
+    #[doc(hidden)]
+    pub fn wire_frame_is_auxiliary(&self, frame: &[u8]) -> Result<bool, String> {
         if self.is_disconnected() {
             return Err("auxiliary connection is disconnected".to_owned());
         }
@@ -1113,9 +1118,7 @@ impl PeerIoPump {
     /// Reserve one complete auxiliary wire frame for a binding-owned send.
     /// The caller must commit after its transport accepted the frame or restore
     /// it after a rejected send; dropping it also restores the original batch.
-    pub(crate) fn reserve_outbound_wire_frame(
-        &self,
-    ) -> Result<Option<ReservedOutboundWireFrame>, String> {
+    pub fn reserve_outbound_wire_frame(&self) -> Result<Option<ReservedOutboundWireFrame>, String> {
         if self.is_disconnected() || self.wire_reservation_active.get() {
             return Ok(None);
         }
@@ -1257,7 +1260,7 @@ impl PeerIoPump {
     /// Confirm that an auxiliary batch has been handed to its binding. A
     /// failed transport send must call `restore_outbound` instead, retaining
     /// the reservation across that decision boundary.
-    pub(crate) fn acknowledge_outbound(&self, message: &SyncMessage) {
+    pub fn acknowledge_outbound(&self, message: &SyncMessage) {
         if let (PeerIoPumpRole::Subscriber, SyncMessage::ChunkResponseBatch(batch)) =
             (self.role, message)
         {
@@ -1341,7 +1344,8 @@ impl PeerIoPump {
         }
     }
 
-    pub(crate) fn is_disconnected(&self) -> bool {
+    #[doc(hidden)]
+    pub fn is_disconnected(&self) -> bool {
         self.resolver
             .state
             .borrow()
@@ -1432,7 +1436,8 @@ impl groove::chunks::MissingChunkResolver for PeerChunkResolver {
         })
     }
 }
-pub(crate) type WeakNodeState<S> = Weak<LocalMutex<NodeState<S>>>;
+#[doc(hidden)]
+pub type WeakNodeState<S> = Weak<LocalMutex<NodeState<S>>>;
 
 /// One pending owner schema, shared with its authenticated upstream connections.
 /// Shared futures release their waiter registrations when individual reads cancel.
@@ -1760,12 +1765,13 @@ pub use crate::local_executor::block_on;
 /// maintained-view, and transport layers before an async storage operation
 /// yields. Keep that implementation detail from making the public `Db` API
 /// depend on a host executor's task-stack size.
-pub(crate) struct StackSafeFuture<F> {
+pub struct StackSafeFuture<F> {
     inner: Pin<Box<F>>,
 }
 
 impl<F> StackSafeFuture<F> {
-    pub(crate) fn new(inner: F) -> Self {
+    #[doc(hidden)]
+    pub fn new(inner: F) -> Self {
         Self {
             inner: Box::pin(inner),
         }
@@ -1917,7 +1923,9 @@ pub(super) struct UpstreamUploadDestination {
     link_identity: AuthorSubject,
 }
 
-pub(crate) trait UploadRetryClock {
+#[doc(hidden)]
+pub trait UploadRetryClock {
+    #[doc(hidden)]
     fn now_ms(&self) -> u64;
 }
 
@@ -2982,7 +2990,7 @@ fn queue_pending_upload_in(outbox: &Outbox, tx_id: TxId, unit: Option<SyncMessag
 /// Whether a transaction has reached the requested application-visible wait
 /// boundary. Local persistence precedes authority fate assignment, while
 /// remote durability is successful only after an Accepted fate.
-pub(crate) fn transaction_satisfies_wait(
+pub fn transaction_satisfies_wait(
     fate: &Fate,
     global_time: Option<GlobalTime>,
     durability: DurabilityTier,
@@ -3138,10 +3146,10 @@ mod reads;
 #[doc(hidden)]
 pub use reads::BindingHydrationError;
 mod subscriptions;
-pub(crate) use crate::node::terminal_record;
+pub use crate::node::terminal_record;
 #[cfg(test)]
-pub(crate) use crate::node::terminal_root::terminal_root_binding_fields;
-pub(crate) use crate::node::terminal_root::{
+pub use crate::node::terminal_root::terminal_root_binding_fields;
+pub use crate::node::terminal_root::{
     terminal_root_occurrence_id_with_root_union, terminal_root_publication_fields,
 };
 mod transactions;
@@ -3834,6 +3842,13 @@ fn ensure_exclusive_view_target(target: &WriteTarget) -> Result<(), Error> {
 /// write/query validation time.
 ///
 /// ```rust
+/// # extern crate jazz_db;
+/// # #[allow(unused_imports)]
+/// # mod jazz {
+/// #     pub use jazz_db::{db, row};
+/// #     pub use jazz_model::{query, tx};
+/// #     pub use jazz_types::ids;
+/// # }
 /// # use jazz::db::doctest_support::{block_on, open_todos_db};
 /// # use jazz::tx::DurabilityTier;
 /// let db = block_on(open_todos_db())?;
@@ -4537,6 +4552,13 @@ where
     /// Mergeable transaction id backing this write.
     ///
     /// ```rust
+    /// # extern crate jazz_db;
+    /// # #[allow(unused_imports)]
+    /// # mod jazz {
+    /// #     pub use jazz_db::{db, row};
+    /// #     pub use jazz_model::{query, tx};
+    /// #     pub use jazz_types::ids;
+    /// # }
     /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
     /// let db = block_on(open_todos_db())?;
     /// let write = block_on(db.insert(
@@ -4556,6 +4578,13 @@ where
     /// Wait until this write has reached the requested tier.
     ///
     /// ```rust
+    /// # extern crate jazz_db;
+    /// # #[allow(unused_imports)]
+    /// # mod jazz {
+    /// #     pub use jazz_db::{db, row};
+    /// #     pub use jazz_model::{query, tx};
+    /// #     pub use jazz_types::ids;
+    /// # }
     /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
     /// # use jazz::tx::DurabilityTier;
     /// let db = block_on(open_todos_db())?;
@@ -5408,7 +5437,7 @@ impl SubscriptionStream {
     /// is limited to admitting the covered source closure; the receiver's
     /// maintained graph remains the sole producer of application output.
     #[allow(dead_code)] // The native public facade is feature-gated in the core-only build.
-    pub(crate) fn settled_receiver_local_snapshot(&self) -> Result<RelationSnapshot, Error> {
+    pub fn settled_receiver_local_snapshot(&self) -> Result<RelationSnapshot, Error> {
         let state = self._state.borrow();
         if !state.settled {
             return Err(Error::new(
@@ -6769,7 +6798,8 @@ where
                 .is_some_and(|receipts| receipts.binding_views.contains(&binding_view_key)))
 }
 
-pub(crate) fn subscription_row_occurrence_id(row: &CurrentRow) -> OutputOccurrenceId {
+#[doc(hidden)]
+pub fn subscription_row_occurrence_id(row: &CurrentRow) -> OutputOccurrenceId {
     let root = ObjectId::from_uuid(row.row_uuid().0);
     let mut joined = Vec::new();
     for position in 1.. {

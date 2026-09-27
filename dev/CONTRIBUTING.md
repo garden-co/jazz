@@ -74,7 +74,8 @@ elapsed time. This is useful for files under the `jazz-node` crate's
 (rather than retaining their source file in the module path), but a distinctive
 test-name suffix is enough for `dev/t -p jazz-node` to discover and run the
 canonical name. A filter that already starts with `node::` or `peer::` selects
-`jazz-node` without `-p`.
+`jazz-node` without `-p`, and one starting with `db::`, `binding_codec::`,
+`result_tree::` or `foreground_node_lease::` selects `jazz-db`.
 
 ```sh
 # Default: Jazz library tests, substring matching.

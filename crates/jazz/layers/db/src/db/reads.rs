@@ -76,6 +76,13 @@ where
     /// Start a query rooted at `table`.
     ///
     /// ```rust
+    /// # extern crate jazz_db;
+    /// # #[allow(unused_imports)]
+    /// # mod jazz {
+    /// #     pub use jazz_db::{db, row};
+    /// #     pub use jazz_model::{query, tx};
+    /// #     pub use jazz_types::ids;
+    /// # }
     /// # use jazz::db::doctest_support::{block_on, open_todos_db};
     /// # use jazz::query::{col, eq, lit};
     /// let db = block_on(open_todos_db())?;
@@ -95,6 +102,13 @@ where
     /// Prepare a query for repeated reads or subscriptions.
     ///
     /// ```rust
+    /// # extern crate jazz_db;
+    /// # #[allow(unused_imports)]
+    /// # mod jazz {
+    /// #     pub use jazz_db::{db, row};
+    /// #     pub use jazz_model::{query, tx};
+    /// #     pub use jazz_types::ids;
+    /// # }
     /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
     /// let db = block_on(open_todos_db())?;
     /// let write = block_on(db.insert(
@@ -138,7 +152,7 @@ where
     /// operation (for example awaiting large-value chunks), so they must wait
     /// for the owner rather than use the synchronous entry point.
     #[cfg(feature = "runtime")]
-    pub(crate) async fn prepare_query_for_open_schema_async(
+    pub async fn prepare_query_for_open_schema_async(
         &self,
         query: &Query,
     ) -> Result<PreparedQuery, Error> {
@@ -223,7 +237,7 @@ where
     /// Decode and prepare the canonical serialized query accepted by host
     /// bindings. Keeping this here gives every binding the same validation,
     /// normalization, plan ownership, and immutable request scope.
-    pub(crate) async fn prepare_serialized_query_async(
+    pub async fn prepare_serialized_query_async(
         &self,
         query: &[u8],
         request_scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
@@ -631,6 +645,13 @@ where
     /// Synchronously read exactly one local row if present.
     ///
     /// ```rust
+    /// # extern crate jazz_db;
+    /// # #[allow(unused_imports)]
+    /// # mod jazz {
+    /// #     pub use jazz_db::{db, row};
+    /// #     pub use jazz_model::{query, tx};
+    /// #     pub use jazz_types::ids;
+    /// # }
     /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
     /// let db = block_on(open_todos_db())?;
     /// let todo = block_on(db.insert(
@@ -706,6 +727,13 @@ where
     /// Tier-gated one-shot read.
     ///
     /// ```rust
+    /// # extern crate jazz_db;
+    /// # #[allow(unused_imports)]
+    /// # mod jazz {
+    /// #     pub use jazz_db::{db, row};
+    /// #     pub use jazz_model::{query, tx};
+    /// #     pub use jazz_types::ids;
+    /// # }
     /// # use jazz::db::{ReadOpts, LocalUpdates, Propagation};
     /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
     /// # use jazz::tx::DurabilityTier;

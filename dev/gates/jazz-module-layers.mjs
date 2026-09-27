@@ -77,13 +77,8 @@ export const LAYERS = {
 export const LAYER_OF_PATH = [
   // types, model, protocol and engine: extracted to
   // crates/jazz/layers/{types,model,protocol,engine}; node and peer: extracted
-  // together to crates/jazz/layers/node (node tests drive PeerState).
-
-  ["db.rs", "db"],
-  ["db/", "db"],
-  ["foreground_node_lease.rs", "db"],
-  ["cold_settle_attribution.rs", "db"],
-  ["result_tree.rs", "db"],
+  // together to crates/jazz/layers/node (node tests drive PeerState); db:
+  // extracted to crates/jazz/layers/db. Only the facade remains here.
 ];
 
 export function layerOf(rel) {
