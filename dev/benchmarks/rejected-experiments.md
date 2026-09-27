@@ -59,6 +59,23 @@ rejection concerns the additional certificate machinery. Source, binaries and
 receipts are preserved in the [#2913](https://github.com/garden-co/jazz/issues/2913)
 log. Do not infer a win from fewer compiled nodes alone.
 
+## Browser pending-read timer substitutions
+
+The [#3612](https://github.com/garden-co/jazz/issues/3612) shared-parent include
+profile exposed discarded WASM read wakeups and repeated 4 ms clamped timers.
+Diagnostic substitution of MessageChannel tasks improved 1,500-row warm includes
+from 366 to 86 ms in memory and 528 to 244 ms with the durable worker. It was
+**not retained as a runtime change**: the persistent foreground's sampled active
+CPU increased from 122 to 256 ms/read, and the flat lane became 5.4% slower.
+A `scheduler.yield()` substitution timed out on persistent coverage even though
+its memory lane improved. The scheduling experiments and negative results are
+preserved in `dev/benchmarks/shared-includes/`.
+
+The changed premise needed for an implementation is wake-driven readiness with
+fair host-task scheduling, rather than unconditional faster polling. Coverage
+waits currently lack a registered caller waker, and their timeout currently
+advances through polling; both must be handled before removing fallback polling.
+
 ## Before building another trial
 
 1. Identify the actual allocation/copy/work site with a current profile and code walk.
