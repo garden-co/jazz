@@ -21,7 +21,10 @@ r3-open-attribution = ["testing"]
 testing = ["runtime", "jazz-types/testing", "jazz-model/testing", "jazz-protocol/testing"]
 transport-compression-lz4 = ["jazz-compression/lz4", "jazz-protocol/transport-compression-lz4"]
 transport-compression-zstd = ["jazz-compression/zstd", "jazz-protocol/transport-compression-zstd"]
-transport-compression-ruzstd = ["jazz-compression/ruzstd", "jazz-protocol/transport-compression-ruzstd"]
+transport-compression-ruzstd = [
+  "jazz-compression/ruzstd",
+  "jazz-protocol/transport-compression-ruzstd",
+]
 
 [dependencies]
 futures-core = "0.3.31"
