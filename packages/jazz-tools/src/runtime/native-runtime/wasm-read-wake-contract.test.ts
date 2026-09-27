@@ -19,7 +19,7 @@ async function open() {
 describe("WASM pending read deadlines", () => {
   it("wakes at the coverage deadline without intermediate polling", async () => {
     const db = await open();
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     let pending;
     try {
       pending = db.all(queryFromTable("notes"), { tier: "global" });
@@ -41,7 +41,7 @@ describe("WASM pending read deadlines", () => {
 
   it("removes the deadline and stored callback when cancelled asleep", async () => {
     const db = await open();
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     let pending;
     try {
       pending = db.all(queryFromTable("notes"), { tier: "global" });

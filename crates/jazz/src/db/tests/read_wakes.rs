@@ -45,7 +45,7 @@ fn pending_read<'a>(
 #[test]
 fn serialized_coverage_wakes_concurrent_reads_without_polling() {
     let alice = open_db(0xa1, AuthorSubject::SYSTEM, &schema());
-    let bob = open_db(0xa2, AuthorSubject::SYSTEM, &schema());
+    let bob = open_core(0xa2, AuthorSubject::SYSTEM, &schema());
     let (left, right) = duplex();
     let _upstream = block_on(alice.connect_upstream(left));
     let _subscriber = bob.accept_subscriber(right, AuthorSubject::SYSTEM);
@@ -72,7 +72,7 @@ fn serialized_coverage_wakes_concurrent_reads_without_polling() {
     }
     for _ in 0..50 {
         block_on(alice.tick()).unwrap();
-        block_on(bob.tick()).unwrap();
+        bob.tick().unwrap();
         block_on(alice.tick()).unwrap();
         for index in 0..2 {
             if done[index] || wakes[index].0.load(Ordering::SeqCst) == observed[index] {
@@ -144,7 +144,7 @@ fn sleeping_coverage_cancellation_and_deadline_release_waiters() {
 #[test]
 fn covered_read_wakes_when_busy_owner_is_released() {
     let alice = open_db(0xa4, AuthorSubject::SYSTEM, &schema());
-    let bob = open_db(0xa5, AuthorSubject::SYSTEM, &schema());
+    let bob = open_core(0xa5, AuthorSubject::SYSTEM, &schema());
     let (left, right) = duplex();
     let _upstream = block_on(alice.connect_upstream(left));
     let _subscriber = bob.accept_subscriber(right, AuthorSubject::SYSTEM);
@@ -161,7 +161,7 @@ fn covered_read_wakes_when_busy_owner_is_released() {
     .unwrap();
     for _ in 0..20 {
         block_on(alice.tick()).unwrap();
-        block_on(bob.tick()).unwrap();
+        bob.tick().unwrap();
         block_on(alice.tick()).unwrap();
         if alice.query_attachment_is_covered(&attachment) {
             break;
