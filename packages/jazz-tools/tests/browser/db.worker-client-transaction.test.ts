@@ -57,3 +57,36 @@ it("shutdown persists an ordinary worker mutation without a separate application
     await db.shutdown();
   }
 });
+
+it.each(["relay", "ordinary"] as const)(
+  "keeps an older foreground's pending row in a reopened %s transaction snapshot",
+  async (role) => {
+    const { DefaultRuntimeSource } = await import("../../src/runtime/default-runtime-source.js");
+    const account = await localAccountConfig(crypto.randomUUID());
+    const config = {
+      ...account,
+      driver: { type: "persistent" as const, dbName: `worker-old-snapshot-${crypto.randomUUID()}` },
+    };
+    let db = await createAccountDbWithRuntimeSource(config, new DefaultRuntimeSource());
+    const write = db.insert(app.records, { label: "old foreground", payload: new Uint8Array([9]) });
+    try {
+      await write.wait({ tier: "local" });
+      await db.shutdown();
+      db = await createAccountDbWithRuntimeSource(
+        config,
+        role === "relay" ? new DefaultRuntimeSource() : new WorkerClientRuntimeSource(),
+      );
+      expect(await db.all(app.records, { tier: "local" })).toEqual([write.value]);
+      const transaction = db.beginTransaction();
+      try {
+        expect(
+          (await transaction.all(app.records, { tier: "local" })).map((row) => row.label),
+        ).toEqual(["old foreground"]);
+      } finally {
+        await transaction.rollback();
+      }
+    } finally {
+      await db.shutdown();
+    }
+  },
+);
