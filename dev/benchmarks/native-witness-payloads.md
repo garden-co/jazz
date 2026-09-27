@@ -147,38 +147,161 @@ output hashes remain in the receipt; source/binary provenance is explicit.
 
 ## Correctness and qualification
 
-New public-facade tests independently drive a serving Core and a scope-isolated
-relay. They check repeated reads of 128 KiB and 2 MiB values, exact bytes and
-foreign keys, zero serving-side full reconstructions, and one public-result
-reconstruction. The Core scenario also denies a row already resident at the
-client. The Core uses its required Global registration; the local relay uses
-the foreground's Local registration.
+The public-facade Core and scope-relay tests check repeated large reads, exact
+bytes and foreign keys, serving/public reconstruction counts and authorization.
+The approved existing-fixture changes preserve their data, ordering, sharing and
+reused-name collision assertions. The native-prefix test covers ordering and
+signed retraction that cannot be observed solely through public row equality.
 
-Existing fixture changes only adapt the internal witness type; the maintainer
-approved them. Data, ordering, sharing and reused-name rejection expectations
-are preserved. A new internal prefix-seek test covers the reference identity's
-ordering and signed retraction boundary, which row equality cannot observe.
+The qualification checkpoint `9e63d6f55b4ed7d99b21e9fb3106c0467bc76156` passes all
+hosted CI jobs in [run 36312702810](https://github.com/garden-co/jazz/actions/runs/36312702810):
+Rust workspace, bounded differential, storage compatibility, TypeScript, React
+Native and lint. The Rust job explicitly reports PASS for all four new reference
+guards: manual/budgeted eviction fails closed, old bytes survive update/delete/
+restore, schema/missing-coordinate checks, and deletion-event mismatch checks.
+The accompanying CI receipt preserves those individual log lines.
 
-Both unchanged native-relay restart regressions now pass on integration
-commit 159c12c55: offline-relay restart and worker-plus-relay restart. This covers
-the current counterpart of the failure reported on the older #2961 prototype.
+The three repair reproducers linked to #2960 remain explicitly ignored and are
+**not** included in those passing guards. Fresh-response repair was deliberately
+run outside the passing suite and fails on both the candidate manual probe and
+the exact production base's independent manual/budgeted probes, as detailed below.
+No existing correctness assertion or transaction-conflict guard was weakened.
 
-On exact review head 5f2970b6a, both new public peer tests, the native seek test,
-both existing rename/collision tests, all three incremental-delivery canaries
-and both targeted benchmark compile gates pass locally. CI run
-[36309137828](https://github.com/garden-co/jazz/actions/runs/36309137828) passes
-the Rust workspace, bounded differential, TypeScript, React Native and storage
-compatibility partitions. Lint stopped on formatting of approved fixture edits;
-this receipt follow-up fixes formatting without changing assertions.
+Both unchanged native-relay restart regressions pass on integration `159c12c55`.
+The earlier exact review head also passed the public peer tests, native seek,
+rename/collision checks, all three mechanism canaries and both targeted native
+benchmark compile gates. These follow-up commits add only tests, benchmarks and
+receipts; the optimized production implementation is unchanged.
 
-The integration library diagnostic passes 2,256 tests (four ignored) with
-32 MiB test-thread stacks. Its default-stack catalogue-test abort is still
-unattributed; the larger-stack diagnostic is not a canonical default-gate pass.
-The bounded local differential oracle also passes. Full landing qualification,
-the missing local private sensitive-data guard and browser/application timing
-remain tracked in #3609. Native measurements do not establish browser or
-Core-service end-to-end latency gains.
+The private sensitive-data guard is absent locally; no local pass is claimed.
+The draft remains open for review. Browser fixture timing below is now measured;
+Core network latency, application startup and a full browser memory profile are
+not established by these results.
 
-Tooling-friction: frozen native executables made matched reruns cheap; a repaired
-membership counter and text-width controls avoided a new benchmark, while a
-feature-specific debug RocksDB rebuild delayed the targeted compile gate.
+## Measured tradeoffs and failure boundaries
+
+### Actual process memory
+
+The same frozen exact-review-base native executables were run serially as
+control/candidate/candidate/control, separately for 10,000 narrow and wide rows.
+macOS `/usr/bin/time -l` measures the whole process high-water resident set. This
+includes seeding, two RocksDB databases, storage caches and both subscriptions;
+it is not an isolated witness heap measurement. Report the median of two fresh
+processes per arm. Result digests, membership additions, wire bytes and read
+counts match within each width.
+
+| Text columns | Control peak RSS | Candidate peak RSS |               Reduction |
+| -----------: | ---------------: | -----------------: | ----------------------: |
+|            2 |        365.47 MB |          363.50 MB | Effectively flat (0.5%) |
+|           20 |      1,287.31 MB |        1,180.39 MB |                    8.3% |
+
+The 63% retained-state estimate is specific to the maintained view. It must not
+be reported as a 63% process-memory saving. Wide-table process observations were
+1,281.51/1,293.11 MB before and 1,178.86/1,181.91 MB after. The RSS runs preserve
+phase measurements as provenance, but do not replace the earlier timing recipe.
+
+### Release Chromium browser measurement
+
+The opt-in `witness-tradeoffs.abstract-bench.test.ts` uses public account/schema/
+transaction/query/subscription APIs. Each fixture inserts 150 or 1,500 ordinary
+text rows plus 15 shared relation targets in one transaction. Each target carries
+2,048 text characters; includes return the same parent for many roots. Each read
+validates row count, unique result IDs, body text, foreign keys and included
+parent values.
+
+The persistent driver retains the foreground plus durable IndexedDB worker. The
+memory driver uses one runtime, so subtracting their times does not isolate an
+IndexedDB tax. Writes are locally durable and still pending; no Core is running.
+Reopen resets database/runtime page caches while browser, WASM and OS caches
+remain warm. These are database-reopen measurements, not a cold OS or app-login
+benchmark.
+
+Control production is `1d16705c1`; its browser/test harness checkpoint is
+`697377c11`. Candidate production is identical across release builds `6f5e0b3ab`
+and `9e63d6f55`. The production-tree receipt checks that the qualification files
+changed neither implementation. Same checkout, release profile and wasm-opt
+pipeline; source-bound WASM manifests and the identical harness hash accompany
+every run. Four fresh Chromium processes run candidate/control/control/candidate,
+with local builds/tests stopped. Other desktop applications remained running.
+
+Warm phases have five reads per process. Each reopen/first-delivery phase has one
+observation per process. Aggregate the median of the two process medians per arm;
+these sample counts establish a local comparison, not confidence intervals.
+
+| 1,500-row phase                            |   Control | Candidate | Ratio |
+| :----------------------------------------- | --------: | --------: | ----: |
+| Memory: warm flat                          |  32.88 ms |  33.66 ms | 0.98× |
+| Memory: warm include                       | 392.65 ms | 380.91 ms | 1.03× |
+| IndexedDB: warm flat                       | 158.34 ms | 144.45 ms | 1.10× |
+| IndexedDB: warm include                    | 548.95 ms | 533.16 ms | 1.03× |
+| IndexedDB: first flat after reopen         | 350.68 ms | 303.63 ms | 1.15× |
+| IndexedDB: first include after reopen      | 711.40 ms | 656.21 ms | 1.08× |
+| IndexedDB: first subscription after reopen | 391.95 ms | 367.92 ms | 1.07× |
+
+This fixture shows modest browser gains, not a general 2× speedup. The 2.3%
+slower memory flat-read median overlaps the observed process spread and does not
+establish a regression. Native reference resolution does replace retained-row
+cloning with exact history lookups in local materialization; the measured net
+browser times do not establish backend read counts for that path.
+
+The 150-row persistent cases are mixed/noisy. The balanced warm-include aggregate
+is **56.73 → 69.95 ms**, with candidate process medians **85.72/54.19 ms** versus
+control **56.73/56.73 ms** (unrounded values are in the receipt). A later full
+candidate diagnostic gives **49.98 ms** for that phase and does not reproduce
+the slow process. It is preserved separately and excluded from the original
+balanced aggregate. Do not claim a win or a demonstrated regression for this
+small case; keep the inconclusive signal visible in #3609.
+
+All 16 primary browser cases and four additional diagnostic cases pass their
+result assertions. The remaining ~0.53 s warm include path is separately worth
+profiling: the single-runtime memory case already costs ~0.38 s. Repeated
+transaction-witness list copies and per-edge projection work are code-level
+suspects, not phase-attributed causes established by this measurement.
+
+### WASM size cost
+
+Same release build/wasm-opt pipeline, WASM binary only (not the whole JavaScript
+bundle): raw **33,176,704 → 33,311,165 bytes (+134,461; 0.41%)**; deterministic
+gzip level 9 **9,408,894 → 9,472,332 bytes (+63,438; 0.67%)**. The reference path
+therefore has a small measured download-size cost alongside its memory/runtime
+benefits. Build manifests and binary hashes accompany the size receipt.
+
+### Explicit body eviction
+
+A native witness is an immutable coordinate, not a body lease. Holding a
+reference does not pin evictable history. Explicit manual and budgeted eviction
+invalidate coverage before removing bodies; resolving the old reference then
+fails closed. The new reference tests cover this boundary, exact old bytes
+across update/delete/restore, a missing row coordinate, and schema/deletion-event
+mismatches. Logical and storage descriptors can have different field names, so
+the tests compare full encoded bytes plus table/branch identity rather than
+requiring descriptor-name equality.
+
+A repair gap remains in [#2960](https://github.com/garden-co/jazz/issues/2960):
+a fresh nonempty authority reset after accepted-body eviction is rejected as
+`ConflictingCommitUnit`. The candidate manual probe and unchanged production
+base both fail. The base
+`697377c11` preserves production `1d16705c1`; both its manual and budgeted probes
+return `ConflictingCommitUnit` after verifying real body removal. A portable
+reproducer tests those paths separately; a native-reference repair reproducer
+retains the same expected recovery. They remain issue-linked ignored tests. The
+base portable probes were explicitly run as diagnostics; no repair pass is claimed. The receiver keeps a
+complete transaction header while eviction removes its stored version keys;
+`preflight_view_bundle_conflicts` requires those keys to match a complete resend
+or contain every key of a view-scoped resend. Missing bodies consequently look
+like conflicting immutable membership. A repair must preserve conflict
+validation and fresh authority coverage; merely dropping those checks would
+weaken the contract.
+
+### Local stack diagnostic
+
+The exact catalogue test
+`offline_replica_opens_requested_schema_only_after_published_lineage` aborts with
+stack overflow on integration candidate `159c12c55` and unchanged control
+`c1e4a5607`, with the identical test-source SHA-256. The control passes with
+`RUST_MIN_STACK=33554432`. Thus this native-reference change did not introduce
+that local default-stack failure. This is attribution, not a fix or a canonical
+default-stack gate pass; the remaining defect is tracked in #3609.
+
+Tooling-friction: retaining verified release-WASM generations within this checkout
+would have avoided a repeat build; the opt-in browser fixture reruns in ~26 s.

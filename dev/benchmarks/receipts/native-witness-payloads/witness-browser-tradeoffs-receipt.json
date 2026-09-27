@@ -1,0 +1,1462 @@
+{
+  "recipe": "Serial candidate/control/control/candidate, two fresh Chromium processes per arm. Within-process warm measurements: median of five; cold phases: one per process. Across-process aggregate: median of two. Release WASM; no concurrent local builds/tests during timing. Same browser/OS caches remain warm on database reopen. Local pending writes; no Core/network and no accepted-row eviction in this browser fixture.",
+  "runs": [
+    {
+      "arm": "1-candidate",
+      "checkout": "9e63d6f55b4ed7d99b21e9fb3106c0467bc76156",
+      "wasm_manifest": {
+        "schema": 1,
+        "kind": "wasm",
+        "profile": "release",
+        "git": {
+          "head": "6f5e0b3abe5db24961359aeb0f33ddeaee8e141f",
+          "tree": "c05fb9b0a5bb4944c73783192eddfe7defbc8386",
+          "dirtyDiff": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+        },
+        "cargoLock": "21db1d9aa31b82e8863441f8efc3e9649b01efe7252a538db535a520ffa1c98a",
+        "rustToolchain": "94829243c47c76917df64fb0a88044d05004e390b67b02544cb702823445eec9",
+        "tools": {
+          "rustc": "rustc 1.93.1 (01f6ddf75 2026-02-11)\nbinary: rustc\ncommit-hash: 01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf\ncommit-date: 2026-02-11\nhost: aarch64-apple-darwin\nrelease: 1.93.1\nLLVM version: 21.1.8",
+          "wasmPack": "wasm-pack 0.14.0",
+          "wasmBindgen": "wasm-bindgen 0.2.117",
+          "wasmOpt": "wasm-opt version 117 (version_117)",
+          "napi": "not-applicable"
+        },
+        "toolchainInputs": "58f10b6cd0fd90936ca8b6d30515d50d71ec67fde5998d2f1b8dec71e10bffe4",
+        "target": "wasm32-unknown-unknown",
+        "features": "default",
+        "packageInputs": "0f69b81b563a80ec1a39419ca079d35c0e1dd7378e0bcdcd84290bfc72ca9030",
+        "artifacts": [
+          {
+            "file": "jazz_wasm.d.ts",
+            "sha256": "6f5d7199d064c22b97439270148d597552846c9f2f0098bad5994e26d726ffd6"
+          },
+          {
+            "file": "jazz_wasm.js",
+            "sha256": "df86e3f0c290795fd212676e1066094987534719ae5b85d212906cdf681c46a7"
+          },
+          {
+            "file": "jazz_wasm_bg.wasm",
+            "sha256": "21e7dd72c7ded282e74c18b229abf86f0c8c92ace7f7e19c6d58fb6a9d7318cc"
+          },
+          {
+            "file": "jazz_wasm_bg.wasm.d.ts",
+            "sha256": "f7e833cf7a05c524c007608cf3840bcaf2050a37f0bc21ffd8834ee483681a38"
+          }
+        ],
+        "nativeArtifactFingerprint": "674b5ffee95e96dd88a2576a0d9ef6d8b55a785e25e5efe9a128e41404d45176"
+      },
+      "harness_sha256": "6e6ce07400fa3633d0ed85d67174cd5d46058ec968ec58c83270fc8c78b91719",
+      "exit_code": 0,
+      "wall_seconds": 29.846021416975418,
+      "reports": [
+        {
+          "fixture": "native-witness-browser-v1",
+          "topology": "single-runtime",
+          "storage": "memory",
+          "count": 150,
+          "relationTargets": 15,
+          "relationTextBytes": 2048,
+          "settlement": "local-pending",
+          "phases": {
+            "initial_open": [207.69499999284744],
+            "initial_empty_query": [129.8449999988079],
+            "seed_local_durable": [51.185000002384186],
+            "seeded_flat": [18.74500000476837],
+            "seeded_include": [30.310000002384186],
+            "warm_flat": [
+              7.185000002384186, 6.234999984502792, 5.285000026226044, 5.310000002384186,
+              4.925000011920929
+            ],
+            "warm_include": [
+              17.69999998807907, 18.599999994039536, 20.75, 21.394999980926514, 21.719999998807907
+            ],
+            "warm_subscription": [57.875]
+          }
+        },
+        {
+          "fixture": "native-witness-browser-v1",
+          "topology": "single-runtime",
+          "storage": "memory",
+          "count": 1500,
+          "relationTargets": 15,
+          "relationTextBytes": 2048,
+          "settlement": "local-pending",
+          "phases": {
+            "initial_open": [0.9100000262260437],
+            "initial_empty_query": [6.444999992847443],
+            "seed_local_durable": [141.7199999988079],
+            "seeded_flat": [37.67499998211861],
+            "seeded_include": [374.4350000023842],
+            "warm_flat": [
+              33.93000000715256, 35.28999999165535, 33.84499999880791, 32.30500000715256,
+              35.69499999284744
+            ],
+            "warm_include": [
+              383.38000002503395, 386.25, 407.00999999046326, 382.47499999403954, 390.41499999165535
+            ],
+            "warm_subscription": [240.19499999284744]
+          }
+        },
+        {
+          "fixture": "native-witness-browser-v1",
+          "topology": "foreground-and-worker",
+          "storage": "persistent",
+          "count": 150,
+          "relationTargets": 15,
+          "relationTextBytes": 2048,
+          "settlement": "local-pending",
+          "phases": {
+            "initial_open": [118.125],
+            "initial_empty_query": [653.7599999904633],
+            "seed_local_durable": [171.7199999988079],
+            "seeded_flat": [279.4800000190735],
+            "seeded_include": [97.1749999821186],
+            "warm_flat": [
+              79.34999999403954, 94.89000001549721, 29.094999998807907, 25.430000007152557,
+              40.74500000476837
+            ],
+            "warm_include": [
+              187.09000000357628, 85.72499999403954, 110.83000001311302, 67.7800000011921,
+              52.70999997854233
+            ],
+            "warm_subscription": [74.2800000011921],
+            "shutdown": [26.30000001192093, 10.314999997615814, 3.0550000071525574],
+            "flat_reopen_runtime": [21.530000001192093],
+            "cold_flat": [101.18500000238419],
+            "reopened_flat_warm_include": [
+              73.48499998450279, 127.46000000834465, 68.30000001192093, 60.525000005960464,
+              70.72999998927116
+            ],
+            "include_reopen_runtime": [9.965000003576279],
+            "cold_include": [116.31499999761581],
+            "reopened_include_warm_include": [
+              55.814999997615814, 53.564999997615814, 58.474999994039536, 51.37999999523163,
+              48.65500000119209
+            ],
+            "subscription_reopen_runtime": [7.215000003576279],
+            "cold_subscription": [80.27500000596046],
+            "reopened_subscription_warm_include": [
+              68.02500000596046, 54.92500001192093, 58.15999999642372, 61.28000000119209,
+              54.28000000119209
+            ]
+          }
+        },
+        {
+          "fixture": "native-witness-browser-v1",
+          "topology": "foreground-and-worker",
+          "storage": "persistent",
+          "count": 1500,
+          "relationTargets": 15,
+          "relationTextBytes": 2048,
+          "settlement": "local-pending",
+          "phases": {
+            "initial_open": [1012.7800000011921],
+            "initial_empty_query": [860.9149999916553],
+            "seed_local_durable": [504.1400000154972],
+            "seeded_flat": [413.88499999046326],
+            "seeded_include": [570.7150000035763],
+            "warm_flat": [
+              163.2699999809265, 143.22999998927116, 136.22499999403954, 143.53500002622604,
+              138.69500002264977
+            ],
+            "warm_include": [
+              527.169999986887, 544.0250000059605, 542.0049999952316, 531.169999986887,
+              535.8250000178814
+            ],
+            "warm_subscription": [231.25],
+            "shutdown": [15.125, 3.865000009536743, 5.054999977350235],
+            "flat_reopen_runtime": [8.259999990463257],
+            "cold_flat": [286.24000000953674],
+            "reopened_flat_warm_include": [
+              532.4050000011921, 645.919999986887, 546.4849999845028, 581.9849999845028,
+              552.7750000059605
+            ],
+            "include_reopen_runtime": [6.034999996423721],
+            "cold_include": [643.7849999964237],
+            "reopened_include_warm_include": [
+              558.8250000178814, 533.4350000023842, 539.1800000071526, 547.0750000178814,
+              531.6500000059605
+            ],
+            "subscription_reopen_runtime": [6.680000007152557],
+            "cold_subscription": [363.6100000143051],
+            "reopened_subscription_warm_include": [
+              545.4650000035763, 533.7650000154972, 529.0949999988079, 527.3449999988079,
+              627.7749999761581
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "arm": "2-control",
+      "checkout": "697377c11218be6cbdf29ab8cb919ae7d5e6f1cb",
+      "wasm_manifest": {
+        "schema": 1,
+        "kind": "wasm",
+        "profile": "release",
+        "git": {
+          "head": "697377c11218be6cbdf29ab8cb919ae7d5e6f1cb",
+          "tree": "2eeefbe32a846cf10ece46edfd5b25e65be741b0",
+          "dirtyDiff": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+        },
+        "cargoLock": "21db1d9aa31b82e8863441f8efc3e9649b01efe7252a538db535a520ffa1c98a",
+        "rustToolchain": "94829243c47c76917df64fb0a88044d05004e390b67b02544cb702823445eec9",
+        "tools": {
+          "rustc": "rustc 1.93.1 (01f6ddf75 2026-02-11)\nbinary: rustc\ncommit-hash: 01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf\ncommit-date: 2026-02-11\nhost: aarch64-apple-darwin\nrelease: 1.93.1\nLLVM version: 21.1.8",
+          "wasmPack": "wasm-pack 0.14.0",
+          "wasmBindgen": "wasm-bindgen 0.2.117",
+          "wasmOpt": "wasm-opt version 117 (version_117)",
+          "napi": "not-applicable"
+        },
+        "toolchainInputs": "58f10b6cd0fd90936ca8b6d30515d50d71ec67fde5998d2f1b8dec71e10bffe4",
+        "target": "wasm32-unknown-unknown",
+        "features": "default",
+        "packageInputs": "e28c9d703c4fe898b00b353efe3aeb126feda58222b7896055e6b4d15ffc3386",
+        "artifacts": [
+          {
+            "file": "jazz_wasm.d.ts",
+            "sha256": "6f5d7199d064c22b97439270148d597552846c9f2f0098bad5994e26d726ffd6"
+          },
+          {
+            "file": "jazz_wasm.js",
+            "sha256": "5af3e26a0f4e5855bad42259194e4525b6bb45c23d86ebaeb7f96ff239482788"
+          },
+          {
+            "file": "jazz_wasm_bg.wasm",
+            "sha256": "164b11672b5797875fd26d16f784a0c1455cf7aac689684443a6b67d0c53b9d5"
+          },
+          {
+            "file": "jazz_wasm_bg.wasm.d.ts",
+            "sha256": "f7e833cf7a05c524c007608cf3840bcaf2050a37f0bc21ffd8834ee483681a38"
+          }
+        ],
+        "nativeArtifactFingerprint": "b9dce997b3d13c5bb002d1c7d86b0ec3b618a3f9e2e98386a7b13b5b2cd0972c"
+      },
+      "harness_sha256": "6e6ce07400fa3633d0ed85d67174cd5d46058ec968ec58c83270fc8c78b91719",
+      "exit_code": 0,
+      "wall_seconds": 27.68286954201176,
+      "reports": [
+        {
+          "fixture": "native-witness-browser-v1",
+          "topology": "single-runtime",
+          "storage": "memory",
+          "count": 150,
+          "relationTargets": 15,
+          "relationTextBytes": 2048,
+          "settlement": "local-pending",
+          "phases": {
+            "initial_open": [195.36500000953674],
+            "initial_empty_query": [129.7199999988079],
+            "seed_local_durable": [59.625],
+            "seeded_flat": [16.525000005960464],
+            "seeded_include": [30.889999985694885],
+            "warm_flat": [
+              7.004999995231628, 5.409999996423721, 6.199999988079071, 4.9549999833106995,
+              4.824999988079071
+            ],
+            "warm_include": [
+              14.929999977350235, 17.264999985694885, 21.7950000166893, 21.549999982118607,
+              21.689999997615814
+            ],
+            "warm_subscription": [58.71500000357628]
+          }
+        },
+        {
+          "fixture": "native-witness-browser-v1",
+          "topology": "single-runtime",
+          "storage": "memory",
+          "count": 1500,
+          "relationTargets": 15,
+          "relationTextBytes": 2048,
+          "settlement": "local-pending",
+          "phases": {
+            "initial_open": [0.804999977350235],
+            "initial_empty_query": [7.165000021457672],
+            "seed_local_durable": [144.17500001192093],
+            "seeded_flat": [37.064999997615814],
+            "seeded_include": [382.419999986887],
+            "warm_flat": [
+              35.09000000357628, 33.78499999642372, 31.634999990463257, 31.91499999165535,
+              32.18000000715256
+            ],
+            "warm_include": [
+              397.0900000035763, 394.7199999988079, 401.30499997735023, 395.6899999976158,
+              392.1700000166893
+            ],
+            "warm_subscription": [254.19999998807907]
+          }
+        },
+        {
+          "fixture": "native-witness-browser-v1",
+          "topology": "foreground-and-worker",
+          "storage": "persistent",
+          "count": 150,
+          "relationTargets": 15,
+          "relationTextBytes": 2048,
+          "settlement": "local-pending",
+          "phases": {
+            "initial_open": [136.8149999976158],
+            "initial_empty_query": [391.28999999165535],
+            "seed_local_durable": [100.42500001192093],
+            "seeded_flat": [82.02000001072884],
+            "seeded_include": [111.35499998927116],
+            "warm_flat": [
+              47.75, 27.844999998807907, 25.78499999642372, 28.280000001192093, 24.610000014305115
+            ],
+            "warm_include": [
+              56.729999989271164, 57.54499998688698, 52.59000000357628, 55.525000005960464,
+              60.554999977350235
+            ],
+            "warm_subscription": [41.525000005960464],
+            "shutdown": [10.859999984502792, 3.324999988079071, 3.875],
+            "flat_reopen_runtime": [6.990000009536743],
+            "cold_flat": [75.09999999403954],
+            "reopened_flat_warm_include": [
+              66.31000000238419, 63.43499997258186, 56.59000000357628, 61.86500000953674,
+              53.65500000119209
+            ],
+            "include_reopen_runtime": [9.860000014305115],
+            "cold_include": [118.98499998450279],
+            "reopened_include_warm_include": [
+              56.59000000357628, 59.34000000357628, 53.560000002384186, 58.98499998450279,
+              49.520000010728836
+            ],
+            "subscription_reopen_runtime": [5.805000007152557],
+            "cold_subscription": [101.97999998927116],
+            "reopened_subscription_warm_include": [
+              70.60999998450279, 56.14000001549721, 50.854999989271164, 49.39999997615814,
+              54.400000005960464
+            ]
+          }
+        },
+        {
+          "fixture": "native-witness-browser-v1",
+          "topology": "foreground-and-worker",
+          "storage": "persistent",
+          "count": 1500,
+          "relationTargets": 15,
+          "relationTextBytes": 2048,
+          "settlement": "local-pending",
+          "phases": {
+            "initial_open": [95.23999997973442],
+            "initial_empty_query": [466.60000002384186],
+            "seed_local_durable": [368.8700000047684],
+            "seeded_flat": [277.69499999284744],
+            "seeded_include": [595.4250000119209],
+            "warm_flat": [
+              152.72499999403954, 145.42500001192093, 147.4399999976158, 151.74499997496605,
+              139.94500002264977
+            ],
+            "warm_include": [
+              562.8650000095367, 550.4050000011921, 548.9950000047684, 553.7899999916553,
+              564.2699999809265
+            ],
+            "warm_subscription": [254.69499999284744],
+            "shutdown": [14.310000002384186, 4.429999977350235, 5.050000011920929],
+            "flat_reopen_runtime": [6.685000002384186],
+            "cold_flat": [326.0049999952316],
+            "reopened_flat_warm_include": [
+              556.880000025034, 567.1049999892712, 554.1200000047684, 591.5550000071526, 558
+            ],
+            "include_reopen_runtime": [7.0950000286102295],
+            "cold_include": [691.2999999821186],
+            "reopened_include_warm_include": [
+              566.4000000059605, 546.8849999904633, 564.7700000107288, 594.9799999892712,
+              560.5599999725819
+            ],
+            "subscription_reopen_runtime": [6.799999982118607],
+            "cold_subscription": [406.89999997615814],
+            "reopened_subscription_warm_include": [
+              564.8649999797344, 552.9749999940395, 550.1500000059605, 555.3199999928474,
+              553.294999986887
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "arm": "3-control",
+      "checkout": "697377c11218be6cbdf29ab8cb919ae7d5e6f1cb",
+      "wasm_manifest": {
+        "schema": 1,
+        "kind": "wasm",
+        "profile": "release",
+        "git": {
+          "head": "697377c11218be6cbdf29ab8cb919ae7d5e6f1cb",
+          "tree": "2eeefbe32a846cf10ece46edfd5b25e65be741b0",
+          "dirtyDiff": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+        },
+        "cargoLock": "21db1d9aa31b82e8863441f8efc3e9649b01efe7252a538db535a520ffa1c98a",
+        "rustToolchain": "94829243c47c76917df64fb0a88044d05004e390b67b02544cb702823445eec9",
+        "tools": {
+          "rustc": "rustc 1.93.1 (01f6ddf75 2026-02-11)\nbinary: rustc\ncommit-hash: 01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf\ncommit-date: 2026-02-11\nhost: aarch64-apple-darwin\nrelease: 1.93.1\nLLVM version: 21.1.8",
+          "wasmPack": "wasm-pack 0.14.0",
+          "wasmBindgen": "wasm-bindgen 0.2.117",
+          "wasmOpt": "wasm-opt version 117 (version_117)",
+          "napi": "not-applicable"
+        },
+        "toolchainInputs": "58f10b6cd0fd90936ca8b6d30515d50d71ec67fde5998d2f1b8dec71e10bffe4",
+        "target": "wasm32-unknown-unknown",
+        "features": "default",
+        "packageInputs": "e28c9d703c4fe898b00b353efe3aeb126feda58222b7896055e6b4d15ffc3386",
+        "artifacts": [
+          {
+            "file": "jazz_wasm.d.ts",
+            "sha256": "6f5d7199d064c22b97439270148d597552846c9f2f0098bad5994e26d726ffd6"
+          },
+          {
+            "file": "jazz_wasm.js",
+            "sha256": "5af3e26a0f4e5855bad42259194e4525b6bb45c23d86ebaeb7f96ff239482788"
+          },
+          {
+            "file": "jazz_wasm_bg.wasm",
+            "sha256": "164b11672b5797875fd26d16f784a0c1455cf7aac689684443a6b67d0c53b9d5"
+          },
+          {
+            "file": "jazz_wasm_bg.wasm.d.ts",
+            "sha256": "f7e833cf7a05c524c007608cf3840bcaf2050a37f0bc21ffd8834ee483681a38"
+          }
+        ],
+        "nativeArtifactFingerprint": "b9dce997b3d13c5bb002d1c7d86b0ec3b618a3f9e2e98386a7b13b5b2cd0972c"
+      },
+      "harness_sha256": "6e6ce07400fa3633d0ed85d67174cd5d46058ec968ec58c83270fc8c78b91719",
+      "exit_code": 0,
+      "wall_seconds": 27.223908790998394,
+      "reports": [
+        {
+          "fixture": "native-witness-browser-v1",
+          "topology": "single-runtime",
+          "storage": "memory",
+          "count": 150,
+          "relationTargets": 15,
+          "relationTextBytes": 2048,
+          "settlement": "local-pending",
+          "phases": {
+            "initial_open": [209],
+            "initial_empty_query": [120.9699999988079],
+            "seed_local_durable": [47.21500000357628],
+            "seeded_flat": [22.984999984502792],
+            "seeded_include": [29.759999990463257],
+            "warm_flat": [
+              7.175000011920929, 5.344999998807907, 5.644999980926514, 5.534999996423721, 4.75
+            ],
+            "warm_include": [
+              15.055000007152557, 18.134999990463257, 22.1700000166893, 20.94999998807907,
+              20.530000001192093
+            ],
+            "warm_subscription": [56.4200000166893]
+          }
+        },
+        {
+          "fixture": "native-witness-browser-v1",
+          "topology": "single-runtime",
+          "storage": "memory",
+          "count": 1500,
+          "relationTargets": 15,
+          "relationTextBytes": 2048,
+          "settlement": "local-pending",
+          "phases": {
+            "initial_open": [1.2449999749660492],
+            "initial_empty_query": [7.330000013113022],
+            "seed_local_durable": [146.91499999165535],
+            "seeded_flat": [34.88000002503395],
+            "seeded_include": [384.375],
+            "warm_flat": [
+              34.71999999880791, 33.945000022649765, 33.24000000953674, 33.58499997854233,
+              32.04000002145767
+            ],
+            "warm_include": [
+              396.92999997735023, 389.9500000178814, 389.61500000953674, 378.72499999403954,
+              376.8799999952316
+            ],
+            "warm_subscription": [247.95500001311302]
+          }
+        },
+        {
+          "fixture": "native-witness-browser-v1",
+          "topology": "foreground-and-worker",
+          "storage": "persistent",
+          "count": 150,
+          "relationTargets": 15,
+          "relationTextBytes": 2048,
+          "settlement": "local-pending",
+          "phases": {
+            "initial_open": [99.76500001549721],
+            "initial_empty_query": [378.8949999809265],
+            "seed_local_durable": [108.12999999523163],
+            "seeded_flat": [65.8449999988079],
+            "seeded_include": [128.24000000953674],
+            "warm_flat": [
+              62.645000010728836, 31.71500000357628, 32.84000000357628, 30.634999990463257,
+              25.844999998807907
+            ],
+            "warm_include": [
+              60.57499998807907, 62.34499999880791, 56.72500002384186, 53.735000014305115,
+              56.12999999523163
+            ],
+            "warm_subscription": [40.935000002384186],
+            "shutdown": [10.63500002026558, 3.3350000083446503, 2.7650000154972076],
+            "flat_reopen_runtime": [6.294999986886978],
+            "cold_flat": [72.62000000476837],
+            "reopened_flat_warm_include": [
+              61.679999977350235, 60.78000000119209, 57, 59.30500000715256, 53.264999985694885
+            ],
+            "include_reopen_runtime": [5.41499999165535],
+            "cold_include": [103.5],
+            "reopened_include_warm_include": [
+              59.01500001549721, 67.42500001192093, 74.73499998450279, 51.68000000715256,
+              49.32499998807907
+            ],
+            "subscription_reopen_runtime": [4.729999989271164],
+            "cold_subscription": [83.52000001072884],
+            "reopened_subscription_warm_include": [
+              69.19999998807907, 51.21999999880791, 48.20999997854233, 49.67500001192093,
+              51.474999994039536
+            ]
+          }
+        },
+        {
+          "fixture": "native-witness-browser-v1",
+          "topology": "foreground-and-worker",
+          "storage": "persistent",
+          "count": 1500,
+          "relationTargets": 15,
+          "relationTextBytes": 2048,
+          "settlement": "local-pending",
+          "phases": {
+            "initial_open": [115.57499998807907],
+            "initial_empty_query": [455.455000013113],
+            "seed_local_durable": [415.05500000715256],
+            "seeded_flat": [320.2349999845028],
+            "seeded_include": [600.910000026226],
+            "warm_flat": [
+              160.71500000357628, 146.57499998807907, 181.86000001430511, 217.19999998807907, 169.25
+            ],
+            "warm_include": [
+              544.1200000047684, 542.6649999916553, 577.9500000178814, 588.8349999785423,
+              542.3900000154972
+            ],
+            "warm_subscription": [254.62999999523163],
+            "shutdown": [11.689999997615814, 9.200000017881393, 4.064999997615814],
+            "flat_reopen_runtime": [8.235000014305115],
+            "cold_flat": [375.3599999845028],
+            "reopened_flat_warm_include": [
+              539.8599999845028, 571.2899999916553, 560.3900000154972, 541.3549999892712,
+              565.5649999976158
+            ],
+            "include_reopen_runtime": [8.229999989271164],
+            "cold_include": [731.5],
+            "reopened_include_warm_include": [
+              552.3199999928474, 596.1750000119209, 580.1599999964237, 583.0300000011921,
+              726.4350000023842
+            ],
+            "subscription_reopen_runtime": [9.444999992847443],
+            "cold_subscription": [377],
+            "reopened_subscription_warm_include": [
+              542.1150000095367, 535.5049999952316, 538.630000025034, 532.6799999773502,
+              538.8299999833107
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "arm": "4-candidate",
+      "checkout": "9e63d6f55b4ed7d99b21e9fb3106c0467bc76156",
+      "wasm_manifest": {
+        "schema": 1,
+        "kind": "wasm",
+        "profile": "release",
+        "git": {
+          "head": "9e63d6f55b4ed7d99b21e9fb3106c0467bc76156",
+          "tree": "36277612a31d8897e10311e3b26b2658386bfad0",
+          "dirtyDiff": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+        },
+        "cargoLock": "21db1d9aa31b82e8863441f8efc3e9649b01efe7252a538db535a520ffa1c98a",
+        "rustToolchain": "94829243c47c76917df64fb0a88044d05004e390b67b02544cb702823445eec9",
+        "tools": {
+          "rustc": "rustc 1.93.1 (01f6ddf75 2026-02-11)\nbinary: rustc\ncommit-hash: 01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf\ncommit-date: 2026-02-11\nhost: aarch64-apple-darwin\nrelease: 1.93.1\nLLVM version: 21.1.8",
+          "wasmPack": "wasm-pack 0.14.0",
+          "wasmBindgen": "wasm-bindgen 0.2.117",
+          "wasmOpt": "wasm-opt version 117 (version_117)",
+          "napi": "not-applicable"
+        },
+        "toolchainInputs": "58f10b6cd0fd90936ca8b6d30515d50d71ec67fde5998d2f1b8dec71e10bffe4",
+        "target": "wasm32-unknown-unknown",
+        "features": "default",
+        "packageInputs": "d06674210f0bcb12f793bd6d45c3a7c11e768ae1a5086f0fdd0b164bf6de55a4",
+        "artifacts": [
+          {
+            "file": "jazz_wasm.d.ts",
+            "sha256": "6f5d7199d064c22b97439270148d597552846c9f2f0098bad5994e26d726ffd6"
+          },
+          {
+            "file": "jazz_wasm.js",
+            "sha256": "df86e3f0c290795fd212676e1066094987534719ae5b85d212906cdf681c46a7"
+          },
+          {
+            "file": "jazz_wasm_bg.wasm",
+            "sha256": "94d24bd3ecb24e15ce1a6b9ba7d8c8fd55f00aad70a7389aacce745255c04baf"
+          },
+          {
+            "file": "jazz_wasm_bg.wasm.d.ts",
+            "sha256": "f7e833cf7a05c524c007608cf3840bcaf2050a37f0bc21ffd8834ee483681a38"
+          }
+        ],
+        "nativeArtifactFingerprint": "734a014d2aa8f7e1956f7b8445fa40f9ab7a96cb713d85d40de2724cba20b5e6"
+      },
+      "harness_sha256": "6e6ce07400fa3633d0ed85d67174cd5d46058ec968ec58c83270fc8c78b91719",
+      "exit_code": 0,
+      "wall_seconds": 26.383736624993617,
+      "reports": [
+        {
+          "fixture": "native-witness-browser-v1",
+          "topology": "single-runtime",
+          "storage": "memory",
+          "count": 150,
+          "relationTargets": 15,
+          "relationTextBytes": 2048,
+          "settlement": "local-pending",
+          "phases": {
+            "initial_open": [198.72999998927116],
+            "initial_empty_query": [119.0499999821186],
+            "seed_local_durable": [59.19499999284744],
+            "seeded_flat": [22.094999998807907],
+            "seeded_include": [31.334999978542328],
+            "warm_flat": [
+              7.435000002384186, 5.729999989271164, 5.324999988079071, 5.554999977350235,
+              4.990000009536743
+            ],
+            "warm_include": [
+              15.115000009536743, 16.719999998807907, 21.705000013113022, 20.945000022649765,
+              20.8299999833107
+            ],
+            "warm_subscription": [56.644999980926514]
+          }
+        },
+        {
+          "fixture": "native-witness-browser-v1",
+          "topology": "single-runtime",
+          "storage": "memory",
+          "count": 1500,
+          "relationTargets": 15,
+          "relationTextBytes": 2048,
+          "settlement": "local-pending",
+          "phases": {
+            "initial_open": [0.8149999976158142],
+            "initial_empty_query": [6.449999988079071],
+            "seed_local_durable": [145.65000000596046],
+            "seeded_flat": [35.57499998807907],
+            "seeded_include": [369.25],
+            "warm_flat": [
+              35.125, 33.389999985694885, 32.39999997615814, 32.20500001311302, 33.514999985694885
+            ],
+            "warm_include": [
+              375.57000002264977, 372.4849999845028, 376.75, 373.4099999964237, 377.125
+            ],
+            "warm_subscription": [227.8550000190735]
+          }
+        },
+        {
+          "fixture": "native-witness-browser-v1",
+          "topology": "foreground-and-worker",
+          "storage": "persistent",
+          "count": 150,
+          "relationTargets": 15,
+          "relationTextBytes": 2048,
+          "settlement": "local-pending",
+          "phases": {
+            "initial_open": [106.86499997973442],
+            "initial_empty_query": [374.63000002503395],
+            "seed_local_durable": [118.6550000011921],
+            "seeded_flat": [83.71000000834465],
+            "seeded_include": [107.2000000178814],
+            "warm_flat": [
+              52.019999980926514, 24.469999998807907, 24.945000022649765, 27.5, 25.310000002384186
+            ],
+            "warm_include": [
+              70.97999998927116, 50.8299999833107, 54.185000002384186, 60.935000002384186,
+              50.28000000119209
+            ],
+            "warm_subscription": [40.195000022649765],
+            "shutdown": [10.26000002026558, 2.990000009536743, 3.6599999964237213],
+            "flat_reopen_runtime": [6.310000002384186],
+            "cold_flat": [66.55500000715256],
+            "reopened_flat_warm_include": [
+              61.145000010728836, 53.105000019073486, 54.94499999284744, 55.05000001192093,
+              52.96500000357628
+            ],
+            "include_reopen_runtime": [7.180000007152557],
+            "cold_include": [95.1749999821186],
+            "reopened_include_warm_include": [
+              52.36499997973442, 54.21999999880791, 51.00999999046326, 50.66499999165535,
+              48.53999999165535
+            ],
+            "subscription_reopen_runtime": [6.389999985694885],
+            "cold_subscription": [79.77000001072884],
+            "reopened_subscription_warm_include": [
+              57.78000000119209, 52.79999998211861, 46.94999998807907, 48.96500000357628,
+              47.55000001192093
+            ]
+          }
+        },
+        {
+          "fixture": "native-witness-browser-v1",
+          "topology": "foreground-and-worker",
+          "storage": "persistent",
+          "count": 1500,
+          "relationTargets": 15,
+          "relationTextBytes": 2048,
+          "settlement": "local-pending",
+          "phases": {
+            "initial_open": [97.27500000596046],
+            "initial_empty_query": [501.52000001072884],
+            "seed_local_durable": [366.0600000023842],
+            "seeded_flat": [291.705000013113],
+            "seeded_include": [588.1200000047684],
+            "warm_flat": [
+              148.56999999284744, 141.82000002264977, 145.6700000166893, 159.21500000357628,
+              136.66499999165535
+            ],
+            "warm_include": [
+              538.2350000143051, 529.2000000178814, 538.7749999761581, 522.1299999952316, 530.5
+            ],
+            "warm_subscription": [243.30500000715256],
+            "shutdown": [11.569999992847443, 4.33500000834465, 4],
+            "flat_reopen_runtime": [8.120000004768372],
+            "cold_flat": [321.02500000596046],
+            "reopened_flat_warm_include": [
+              531.5200000107288, 543.3700000047684, 537.2299999892712, 531.8449999988079,
+              543.8949999809265
+            ],
+            "include_reopen_runtime": [7.740000009536743],
+            "cold_include": [668.6399999856949],
+            "reopened_include_warm_include": [
+              587.0699999928474, 536.25, 532.7450000047684, 528.8849999904633, 531.5300000011921
+            ],
+            "subscription_reopen_runtime": [6.140000015497208],
+            "cold_subscription": [372.22499999403954],
+            "reopened_subscription_warm_include": [
+              540.25, 534.3949999809265, 531.6999999880791, 533.205000013113, 532.9500000178814
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "summary": [
+    {
+      "storage": "memory",
+      "count": 150,
+      "phase": "initial_open",
+      "control_process_medians_ms": [195.36500000953674, 209],
+      "candidate_process_medians_ms": [207.69499999284744, 198.72999998927116],
+      "control_ms": 202.18250000476837,
+      "candidate_ms": 203.2124999910593,
+      "speedup": 0.9949314142272929
+    },
+    {
+      "storage": "memory",
+      "count": 150,
+      "phase": "initial_empty_query",
+      "control_process_medians_ms": [129.7199999988079, 120.9699999988079],
+      "candidate_process_medians_ms": [129.8449999988079, 119.0499999821186],
+      "control_ms": 125.3449999988079,
+      "candidate_ms": 124.44749999046326,
+      "speedup": 1.0072118765617102
+    },
+    {
+      "storage": "memory",
+      "count": 150,
+      "phase": "seed_local_durable",
+      "control_process_medians_ms": [59.625, 47.21500000357628],
+      "candidate_process_medians_ms": [51.185000002384186, 59.19499999284744],
+      "control_ms": 53.42000000178814,
+      "candidate_ms": 55.189999997615814,
+      "speedup": 0.9679289727141849
+    },
+    {
+      "storage": "memory",
+      "count": 150,
+      "phase": "seeded_flat",
+      "control_process_medians_ms": [16.525000005960464, 22.984999984502792],
+      "candidate_process_medians_ms": [18.74500000476837, 22.094999998807907],
+      "control_ms": 19.75499999523163,
+      "candidate_ms": 20.42000000178814,
+      "speedup": 0.967433888026529
+    },
+    {
+      "storage": "memory",
+      "count": 150,
+      "phase": "seeded_include",
+      "control_process_medians_ms": [30.889999985694885, 29.759999990463257],
+      "candidate_process_medians_ms": [30.310000002384186, 31.334999978542328],
+      "control_ms": 30.32499998807907,
+      "candidate_ms": 30.822499990463257,
+      "speedup": 0.9838591936884381
+    },
+    {
+      "storage": "memory",
+      "count": 150,
+      "phase": "warm_flat",
+      "control_process_medians_ms": [5.409999996423721, 5.534999996423721],
+      "candidate_process_medians_ms": [5.310000002384186, 5.554999977350235],
+      "control_ms": 5.472499996423721,
+      "candidate_ms": 5.43249998986721,
+      "speedup": 1.0073630937194882
+    },
+    {
+      "storage": "memory",
+      "count": 150,
+      "phase": "warm_include",
+      "control_process_medians_ms": [21.549999982118607, 20.530000001192093],
+      "candidate_process_medians_ms": [20.75, 20.8299999833107],
+      "control_ms": 21.03999999165535,
+      "candidate_ms": 20.78999999165535,
+      "speedup": 1.0120250120298386
+    },
+    {
+      "storage": "memory",
+      "count": 150,
+      "phase": "warm_subscription",
+      "control_process_medians_ms": [58.71500000357628, 56.4200000166893],
+      "candidate_process_medians_ms": [57.875, 56.644999980926514],
+      "control_ms": 57.56750001013279,
+      "candidate_ms": 57.25999999046326,
+      "speedup": 1.005370241350345
+    },
+    {
+      "storage": "memory",
+      "count": 1500,
+      "phase": "initial_open",
+      "control_process_medians_ms": [0.804999977350235, 1.2449999749660492],
+      "candidate_process_medians_ms": [0.9100000262260437, 0.8149999976158142],
+      "control_ms": 1.024999976158142,
+      "candidate_ms": 0.862500011920929,
+      "speedup": 1.1884057530333236
+    },
+    {
+      "storage": "memory",
+      "count": 1500,
+      "phase": "initial_empty_query",
+      "control_process_medians_ms": [7.165000021457672, 7.330000013113022],
+      "candidate_process_medians_ms": [6.444999992847443, 6.449999988079071],
+      "control_ms": 7.247500017285347,
+      "candidate_ms": 6.447499990463257,
+      "speedup": 1.124079104770128
+    },
+    {
+      "storage": "memory",
+      "count": 1500,
+      "phase": "seed_local_durable",
+      "control_process_medians_ms": [144.17500001192093, 146.91499999165535],
+      "candidate_process_medians_ms": [141.7199999988079, 145.65000000596046],
+      "control_ms": 145.54500000178814,
+      "candidate_ms": 143.6850000023842,
+      "speedup": 1.0129449838144071
+    },
+    {
+      "storage": "memory",
+      "count": 1500,
+      "phase": "seeded_flat",
+      "control_process_medians_ms": [37.064999997615814, 34.88000002503395],
+      "candidate_process_medians_ms": [37.67499998211861, 35.57499998807907],
+      "control_ms": 35.97250001132488,
+      "candidate_ms": 36.62499998509884,
+      "speedup": 0.9821843010501179
+    },
+    {
+      "storage": "memory",
+      "count": 1500,
+      "phase": "seeded_include",
+      "control_process_medians_ms": [382.419999986887, 384.375],
+      "candidate_process_medians_ms": [374.4350000023842, 369.25],
+      "control_ms": 383.3974999934435,
+      "candidate_ms": 371.8425000011921,
+      "speedup": 1.0310749846836076
+    },
+    {
+      "storage": "memory",
+      "count": 1500,
+      "phase": "warm_flat",
+      "control_process_medians_ms": [32.18000000715256, 33.58499997854233],
+      "candidate_process_medians_ms": [33.93000000715256, 33.389999985694885],
+      "control_ms": 32.88249999284744,
+      "candidate_ms": 33.65999999642372,
+      "speedup": 0.9769013664985476
+    },
+    {
+      "storage": "memory",
+      "count": 1500,
+      "phase": "warm_include",
+      "control_process_medians_ms": [395.6899999976158, 389.61500000953674],
+      "candidate_process_medians_ms": [386.25, 375.57000002264977],
+      "control_ms": 392.6525000035763,
+      "candidate_ms": 380.9100000113249,
+      "speedup": 1.0308274920372327
+    },
+    {
+      "storage": "memory",
+      "count": 1500,
+      "phase": "warm_subscription",
+      "control_process_medians_ms": [254.19999998807907, 247.95500001311302],
+      "candidate_process_medians_ms": [240.19499999284744, 227.8550000190735],
+      "control_ms": 251.07750000059605,
+      "candidate_ms": 234.02500000596046,
+      "speedup": 1.072866146754412
+    },
+    {
+      "storage": "persistent",
+      "count": 150,
+      "phase": "initial_open",
+      "control_process_medians_ms": [136.8149999976158, 99.76500001549721],
+      "candidate_process_medians_ms": [118.125, 106.86499997973442],
+      "control_ms": 118.29000000655651,
+      "candidate_ms": 112.49499998986721,
+      "speedup": 1.051513400748578
+    },
+    {
+      "storage": "persistent",
+      "count": 150,
+      "phase": "initial_empty_query",
+      "control_process_medians_ms": [391.28999999165535, 378.8949999809265],
+      "candidate_process_medians_ms": [653.7599999904633, 374.63000002503395],
+      "control_ms": 385.09249998629093,
+      "candidate_ms": 514.1950000077486,
+      "speedup": 0.7489230738931492
+    },
+    {
+      "storage": "persistent",
+      "count": 150,
+      "phase": "seed_local_durable",
+      "control_process_medians_ms": [100.42500001192093, 108.12999999523163],
+      "candidate_process_medians_ms": [171.7199999988079, 118.6550000011921],
+      "control_ms": 104.27750000357628,
+      "candidate_ms": 145.1875,
+      "speedup": 0.7182264313634182
+    },
+    {
+      "storage": "persistent",
+      "count": 150,
+      "phase": "seeded_flat",
+      "control_process_medians_ms": [82.02000001072884, 65.8449999988079],
+      "candidate_process_medians_ms": [279.4800000190735, 83.71000000834465],
+      "control_ms": 73.93250000476837,
+      "candidate_ms": 181.59500001370907,
+      "speedup": 0.4071285002295604
+    },
+    {
+      "storage": "persistent",
+      "count": 150,
+      "phase": "seeded_include",
+      "control_process_medians_ms": [111.35499998927116, 128.24000000953674],
+      "candidate_process_medians_ms": [97.1749999821186, 107.2000000178814],
+      "control_ms": 119.79749999940395,
+      "candidate_ms": 102.1875,
+      "speedup": 1.172330275223525
+    },
+    {
+      "storage": "persistent",
+      "count": 150,
+      "phase": "warm_flat",
+      "control_process_medians_ms": [27.844999998807907, 31.71500000357628],
+      "candidate_process_medians_ms": [40.74500000476837, 25.310000002384186],
+      "control_ms": 29.780000001192093,
+      "candidate_ms": 33.02750000357628,
+      "speedup": 0.9016728483223816
+    },
+    {
+      "storage": "persistent",
+      "count": 150,
+      "phase": "warm_include",
+      "control_process_medians_ms": [56.729999989271164, 56.72500002384186],
+      "candidate_process_medians_ms": [85.72499999403954, 54.185000002384186],
+      "control_ms": 56.72750000655651,
+      "candidate_ms": 69.95499999821186,
+      "speedup": 0.8109141592167327
+    },
+    {
+      "storage": "persistent",
+      "count": 150,
+      "phase": "warm_subscription",
+      "control_process_medians_ms": [41.525000005960464, 40.935000002384186],
+      "candidate_process_medians_ms": [74.2800000011921, 40.195000022649765],
+      "control_ms": 41.230000004172325,
+      "candidate_ms": 57.23750001192093,
+      "speedup": 0.7203319501303393
+    },
+    {
+      "storage": "persistent",
+      "count": 150,
+      "phase": "shutdown",
+      "control_process_medians_ms": [3.875, 3.3350000083446503],
+      "candidate_process_medians_ms": [10.314999997615814, 3.6599999964237213],
+      "control_ms": 3.605000004172325,
+      "candidate_ms": 6.987499997019768,
+      "speedup": 0.5159212888314691
+    },
+    {
+      "storage": "persistent",
+      "count": 150,
+      "phase": "flat_reopen_runtime",
+      "control_process_medians_ms": [6.990000009536743, 6.294999986886978],
+      "candidate_process_medians_ms": [21.530000001192093, 6.310000002384186],
+      "control_ms": 6.642499998211861,
+      "candidate_ms": 13.92000000178814,
+      "speedup": 0.47719109176426555
+    },
+    {
+      "storage": "persistent",
+      "count": 150,
+      "phase": "cold_flat",
+      "control_process_medians_ms": [75.09999999403954, 72.62000000476837],
+      "candidate_process_medians_ms": [101.18500000238419, 66.55500000715256],
+      "control_ms": 73.85999999940395,
+      "candidate_ms": 83.87000000476837,
+      "speedup": 0.88064862281155
+    },
+    {
+      "storage": "persistent",
+      "count": 150,
+      "phase": "reopened_flat_warm_include",
+      "control_process_medians_ms": [61.86500000953674, 59.30500000715256],
+      "candidate_process_medians_ms": [70.72999998927116, 54.94499999284744],
+      "control_ms": 60.58500000834465,
+      "candidate_ms": 62.8374999910593,
+      "speedup": 0.964153570988102
+    },
+    {
+      "storage": "persistent",
+      "count": 150,
+      "phase": "include_reopen_runtime",
+      "control_process_medians_ms": [9.860000014305115, 5.41499999165535],
+      "candidate_process_medians_ms": [9.965000003576279, 7.180000007152557],
+      "control_ms": 7.637500002980232,
+      "candidate_ms": 8.572500005364418,
+      "speedup": 0.8909303001692517
+    },
+    {
+      "storage": "persistent",
+      "count": 150,
+      "phase": "cold_include",
+      "control_process_medians_ms": [118.98499998450279, 103.5],
+      "candidate_process_medians_ms": [116.31499999761581, 95.1749999821186],
+      "control_ms": 111.2424999922514,
+      "candidate_ms": 105.74499998986721,
+      "speedup": 1.0519882737047705
+    },
+    {
+      "storage": "persistent",
+      "count": 150,
+      "phase": "reopened_include_warm_include",
+      "control_process_medians_ms": [56.59000000357628, 59.01500001549721],
+      "candidate_process_medians_ms": [53.564999997615814, 51.00999999046326],
+      "control_ms": 57.80250000953674,
+      "candidate_ms": 52.287499994039536,
+      "speedup": 1.1054745401123764
+    },
+    {
+      "storage": "persistent",
+      "count": 150,
+      "phase": "subscription_reopen_runtime",
+      "control_process_medians_ms": [5.805000007152557, 4.729999989271164],
+      "candidate_process_medians_ms": [7.215000003576279, 6.389999985694885],
+      "control_ms": 5.267499998211861,
+      "candidate_ms": 6.802499994635582,
+      "speedup": 0.7743476666469364
+    },
+    {
+      "storage": "persistent",
+      "count": 150,
+      "phase": "cold_subscription",
+      "control_process_medians_ms": [101.97999998927116, 83.52000001072884],
+      "candidate_process_medians_ms": [80.27500000596046, 79.77000001072884],
+      "control_ms": 92.75,
+      "candidate_ms": 80.02250000834465,
+      "speedup": 1.1590490173429742
+    },
+    {
+      "storage": "persistent",
+      "count": 150,
+      "phase": "reopened_subscription_warm_include",
+      "control_process_medians_ms": [54.400000005960464, 51.21999999880791],
+      "candidate_process_medians_ms": [58.15999999642372, 48.96500000357628],
+      "control_ms": 52.810000002384186,
+      "candidate_ms": 53.5625,
+      "speedup": 0.9859509918764842
+    },
+    {
+      "storage": "persistent",
+      "count": 1500,
+      "phase": "initial_open",
+      "control_process_medians_ms": [95.23999997973442, 115.57499998807907],
+      "candidate_process_medians_ms": [1012.7800000011921, 97.27500000596046],
+      "control_ms": 105.40749998390675,
+      "candidate_ms": 555.0275000035763,
+      "speedup": 0.18991401323939366
+    },
+    {
+      "storage": "persistent",
+      "count": 1500,
+      "phase": "initial_empty_query",
+      "control_process_medians_ms": [466.60000002384186, 455.455000013113],
+      "candidate_process_medians_ms": [860.9149999916553, 501.52000001072884],
+      "control_ms": 461.02750001847744,
+      "candidate_ms": 681.2175000011921,
+      "speedup": 0.676769900975343
+    },
+    {
+      "storage": "persistent",
+      "count": 1500,
+      "phase": "seed_local_durable",
+      "control_process_medians_ms": [368.8700000047684, 415.05500000715256],
+      "candidate_process_medians_ms": [504.1400000154972, 366.0600000023842],
+      "control_ms": 391.96250000596046,
+      "candidate_ms": 435.1000000089407,
+      "speedup": 0.9008561250239168
+    },
+    {
+      "storage": "persistent",
+      "count": 1500,
+      "phase": "seeded_flat",
+      "control_process_medians_ms": [277.69499999284744, 320.2349999845028],
+      "candidate_process_medians_ms": [413.88499999046326, 291.705000013113],
+      "control_ms": 298.9649999886751,
+      "candidate_ms": 352.79500000178814,
+      "speedup": 0.8474184724476249
+    },
+    {
+      "storage": "persistent",
+      "count": 1500,
+      "phase": "seeded_include",
+      "control_process_medians_ms": [595.4250000119209, 600.910000026226],
+      "candidate_process_medians_ms": [570.7150000035763, 588.1200000047684],
+      "control_ms": 598.1675000190735,
+      "candidate_ms": 579.4175000041723,
+      "speedup": 1.0323600858012851
+    },
+    {
+      "storage": "persistent",
+      "count": 1500,
+      "phase": "warm_flat",
+      "control_process_medians_ms": [147.4399999976158, 169.25],
+      "candidate_process_medians_ms": [143.22999998927116, 145.6700000166893],
+      "control_ms": 158.3449999988079,
+      "candidate_ms": 144.45000000298023,
+      "speedup": 1.0961924541055106
+    },
+    {
+      "storage": "persistent",
+      "count": 1500,
+      "phase": "warm_include",
+      "control_process_medians_ms": [553.7899999916553, 544.1200000047684],
+      "candidate_process_medians_ms": [535.8250000178814, 530.5],
+      "control_ms": 548.9549999982119,
+      "candidate_ms": 533.1625000089407,
+      "speedup": 1.0296204252718568
+    },
+    {
+      "storage": "persistent",
+      "count": 1500,
+      "phase": "warm_subscription",
+      "control_process_medians_ms": [254.69499999284744, 254.62999999523163],
+      "candidate_process_medians_ms": [231.25, 243.30500000715256],
+      "control_ms": 254.66249999403954,
+      "candidate_ms": 237.27750000357628,
+      "speedup": 1.0732686411067263
+    },
+    {
+      "storage": "persistent",
+      "count": 1500,
+      "phase": "shutdown",
+      "control_process_medians_ms": [5.050000011920929, 9.200000017881393],
+      "candidate_process_medians_ms": [5.054999977350235, 4.33500000834465],
+      "control_ms": 7.125000014901161,
+      "candidate_ms": 4.694999992847443,
+      "speedup": 1.5175718904697937
+    },
+    {
+      "storage": "persistent",
+      "count": 1500,
+      "phase": "flat_reopen_runtime",
+      "control_process_medians_ms": [6.685000002384186, 8.235000014305115],
+      "candidate_process_medians_ms": [8.259999990463257, 8.120000004768372],
+      "control_ms": 7.46000000834465,
+      "candidate_ms": 8.189999997615814,
+      "speedup": 0.9108669121509556
+    },
+    {
+      "storage": "persistent",
+      "count": 1500,
+      "phase": "cold_flat",
+      "control_process_medians_ms": [326.0049999952316, 375.3599999845028],
+      "candidate_process_medians_ms": [286.24000000953674, 321.02500000596046],
+      "control_ms": 350.6824999898672,
+      "candidate_ms": 303.6325000077486,
+      "speedup": 1.1549570615165303
+    },
+    {
+      "storage": "persistent",
+      "count": 1500,
+      "phase": "reopened_flat_warm_include",
+      "control_process_medians_ms": [558, 560.3900000154972],
+      "candidate_process_medians_ms": [552.7750000059605, 537.2299999892712],
+      "control_ms": 559.1950000077486,
+      "candidate_ms": 545.0024999976158,
+      "speedup": 1.0260411649674908
+    },
+    {
+      "storage": "persistent",
+      "count": 1500,
+      "phase": "include_reopen_runtime",
+      "control_process_medians_ms": [7.0950000286102295, 8.229999989271164],
+      "candidate_process_medians_ms": [6.034999996423721, 7.740000009536743],
+      "control_ms": 7.662500008940697,
+      "candidate_ms": 6.887500002980232,
+      "speedup": 1.1125226868421227
+    },
+    {
+      "storage": "persistent",
+      "count": 1500,
+      "phase": "cold_include",
+      "control_process_medians_ms": [691.2999999821186, 731.5],
+      "candidate_process_medians_ms": [643.7849999964237, 668.6399999856949],
+      "control_ms": 711.3999999910593,
+      "candidate_ms": 656.2124999910593,
+      "speedup": 1.0841000438131732
+    },
+    {
+      "storage": "persistent",
+      "count": 1500,
+      "phase": "reopened_include_warm_include",
+      "control_process_medians_ms": [564.7700000107288, 583.0300000011921],
+      "candidate_process_medians_ms": [539.1800000071526, 532.7450000047684],
+      "control_ms": 573.9000000059605,
+      "candidate_ms": 535.9625000059605,
+      "speedup": 1.0707838701393813
+    },
+    {
+      "storage": "persistent",
+      "count": 1500,
+      "phase": "subscription_reopen_runtime",
+      "control_process_medians_ms": [6.799999982118607, 9.444999992847443],
+      "candidate_process_medians_ms": [6.680000007152557, 6.140000015497208],
+      "control_ms": 8.122499987483025,
+      "candidate_ms": 6.4100000113248825,
+      "speedup": 1.2671606822359718
+    },
+    {
+      "storage": "persistent",
+      "count": 1500,
+      "phase": "cold_subscription",
+      "control_process_medians_ms": [406.89999997615814, 377],
+      "candidate_process_medians_ms": [363.6100000143051, 372.22499999403954],
+      "control_ms": 391.94999998807907,
+      "candidate_ms": 367.9175000041723,
+      "speedup": 1.0653203503058002
+    },
+    {
+      "storage": "persistent",
+      "count": 1500,
+      "phase": "reopened_subscription_warm_include",
+      "control_process_medians_ms": [553.294999986887, 538.630000025034],
+      "candidate_process_medians_ms": [533.7650000154972, 533.205000013113],
+      "control_ms": 545.9625000059605,
+      "candidate_ms": 533.4850000143051,
+      "speedup": 1.0233886613331598
+    }
+  ],
+  "additional_diagnostic": {
+    "reason": "Investigate one slow 150-row persistent candidate process. This later full-fixture run is preserved but excluded from the original balanced four-process aggregate.",
+    "run": {
+      "arm": "5-candidate-diagnostic",
+      "checkout": "9e63d6f55b4ed7d99b21e9fb3106c0467bc76156",
+      "wasm_manifest": {
+        "schema": 1,
+        "kind": "wasm",
+        "profile": "release",
+        "git": {
+          "head": "9e63d6f55b4ed7d99b21e9fb3106c0467bc76156",
+          "tree": "36277612a31d8897e10311e3b26b2658386bfad0",
+          "dirtyDiff": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+        },
+        "cargoLock": "21db1d9aa31b82e8863441f8efc3e9649b01efe7252a538db535a520ffa1c98a",
+        "rustToolchain": "94829243c47c76917df64fb0a88044d05004e390b67b02544cb702823445eec9",
+        "tools": {
+          "rustc": "rustc 1.93.1 (01f6ddf75 2026-02-11)\nbinary: rustc\ncommit-hash: 01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf\ncommit-date: 2026-02-11\nhost: aarch64-apple-darwin\nrelease: 1.93.1\nLLVM version: 21.1.8",
+          "wasmPack": "wasm-pack 0.14.0",
+          "wasmBindgen": "wasm-bindgen 0.2.117",
+          "wasmOpt": "wasm-opt version 117 (version_117)",
+          "napi": "not-applicable"
+        },
+        "toolchainInputs": "58f10b6cd0fd90936ca8b6d30515d50d71ec67fde5998d2f1b8dec71e10bffe4",
+        "target": "wasm32-unknown-unknown",
+        "features": "default",
+        "packageInputs": "d06674210f0bcb12f793bd6d45c3a7c11e768ae1a5086f0fdd0b164bf6de55a4",
+        "artifacts": [
+          {
+            "file": "jazz_wasm.d.ts",
+            "sha256": "6f5d7199d064c22b97439270148d597552846c9f2f0098bad5994e26d726ffd6"
+          },
+          {
+            "file": "jazz_wasm.js",
+            "sha256": "df86e3f0c290795fd212676e1066094987534719ae5b85d212906cdf681c46a7"
+          },
+          {
+            "file": "jazz_wasm_bg.wasm",
+            "sha256": "94d24bd3ecb24e15ce1a6b9ba7d8c8fd55f00aad70a7389aacce745255c04baf"
+          },
+          {
+            "file": "jazz_wasm_bg.wasm.d.ts",
+            "sha256": "f7e833cf7a05c524c007608cf3840bcaf2050a37f0bc21ffd8834ee483681a38"
+          }
+        ],
+        "nativeArtifactFingerprint": "734a014d2aa8f7e1956f7b8445fa40f9ab7a96cb713d85d40de2724cba20b5e6"
+      },
+      "harness_sha256": "6e6ce07400fa3633d0ed85d67174cd5d46058ec968ec58c83270fc8c78b91719",
+      "exit_code": 0,
+      "wall_seconds": 25.752711000008276,
+      "reports": [
+        {
+          "fixture": "native-witness-browser-v1",
+          "topology": "single-runtime",
+          "storage": "memory",
+          "count": 150,
+          "relationTargets": 15,
+          "relationTextBytes": 2048,
+          "settlement": "local-pending",
+          "phases": {
+            "initial_open": [207.78999999165535],
+            "initial_empty_query": [129.59000000357628],
+            "seed_local_durable": [55.875],
+            "seeded_flat": [19.319999992847443],
+            "seeded_include": [33.13499999046326],
+            "warm_flat": [
+              7.519999980926514, 5.969999998807907, 5.469999998807907, 5.0999999940395355,
+              4.969999998807907
+            ],
+            "warm_include": [
+              17.0450000166893, 18.775000005960464, 21.560000002384186, 20.16499999165535,
+              22.0450000166893
+            ],
+            "warm_subscription": [56.66500002145767]
+          }
+        },
+        {
+          "fixture": "native-witness-browser-v1",
+          "topology": "single-runtime",
+          "storage": "memory",
+          "count": 1500,
+          "relationTargets": 15,
+          "relationTextBytes": 2048,
+          "settlement": "local-pending",
+          "phases": {
+            "initial_open": [0.8100000023841858],
+            "initial_empty_query": [7.719999998807907],
+            "seed_local_durable": [143.90999999642372],
+            "seeded_flat": [35.79000002145767],
+            "seeded_include": [368.9650000035763],
+            "warm_flat": [
+              34.38500002026558, 34.78000000119209, 32.21500000357628, 31.910000026226044,
+              31.71000000834465
+            ],
+            "warm_include": [
+              381.919999986887, 378.28999999165535, 374.9699999988079, 370.8100000023842,
+              373.2699999809265
+            ],
+            "warm_subscription": [240.85000002384186]
+          }
+        },
+        {
+          "fixture": "native-witness-browser-v1",
+          "topology": "foreground-and-worker",
+          "storage": "persistent",
+          "count": 150,
+          "relationTargets": 15,
+          "relationTextBytes": 2048,
+          "settlement": "local-pending",
+          "phases": {
+            "initial_open": [126.55000001192093],
+            "initial_empty_query": [385.9650000035763],
+            "seed_local_durable": [113.30500000715256],
+            "seeded_flat": [80.19499999284744],
+            "seeded_include": [111.84999999403954],
+            "warm_flat": [
+              45.34499999880791, 23.959999978542328, 23.740000009536743, 24.665000021457672,
+              23.6700000166893
+            ],
+            "warm_include": [
+              71.79499998688698, 49.980000019073486, 49.31999999284744, 56.59499999880791,
+              49.05500000715256
+            ],
+            "warm_subscription": [37.78000000119209],
+            "shutdown": [9.11499997973442, 4.284999996423721, 3.044999986886978],
+            "flat_reopen_runtime": [9.935000002384186],
+            "cold_flat": [60.55500000715256],
+            "reopened_flat_warm_include": [
+              53.03499999642372, 55.480000019073486, 50.54499998688698, 56.28000000119209,
+              48.49500000476837
+            ],
+            "include_reopen_runtime": [6.955000013113022],
+            "cold_include": [95.13999998569489],
+            "reopened_include_warm_include": [
+              51.889999985694885, 49.71999999880791, 49.44999998807907, 50.40500000119209,
+              46.85999998450279
+            ],
+            "subscription_reopen_runtime": [6.495000004768372],
+            "cold_subscription": [69.52000001072884],
+            "reopened_subscription_warm_include": [
+              62.32499998807907, 52.185000002384186, 47.90500000119209, 46.564999997615814,
+              48.09499999880791
+            ]
+          }
+        },
+        {
+          "fixture": "native-witness-browser-v1",
+          "topology": "foreground-and-worker",
+          "storage": "persistent",
+          "count": 1500,
+          "relationTargets": 15,
+          "relationTextBytes": 2048,
+          "settlement": "local-pending",
+          "phases": {
+            "initial_open": [101.77500000596046],
+            "initial_empty_query": [413.2649999856949],
+            "seed_local_durable": [333.2650000154972],
+            "seeded_flat": [274.8799999952316],
+            "seeded_include": [574.1400000154972],
+            "warm_flat": [
+              147.97999998927116, 135.19499999284744, 132.1850000023842, 130.6700000166893,
+              131.81999999284744
+            ],
+            "warm_include": [
+              531.8650000095367, 521.0149999856949, 526.0499999821186, 519.7299999892712,
+              522.8650000095367
+            ],
+            "warm_subscription": [238.01000002026558],
+            "shutdown": [15.03999999165535, 5.830000013113022, 4.16499999165535],
+            "flat_reopen_runtime": [8.605000019073486],
+            "cold_flat": [286.2549999952316],
+            "reopened_flat_warm_include": [
+              532.6349999904633, 536.7650000154972, 526.4699999988079, 522.8050000071526,
+              530.1550000011921
+            ],
+            "include_reopen_runtime": [4.875],
+            "cold_include": [651.0999999940395],
+            "reopened_include_warm_include": [
+              530.5550000071526, 528.9950000047684, 523.9900000095367, 524.6299999952316,
+              524.2000000178814
+            ],
+            "subscription_reopen_runtime": [8.974999994039536],
+            "cold_subscription": [355.0750000178814],
+            "reopened_subscription_warm_include": [
+              526.2100000083447, 530.8650000095367, 529.6899999976158, 519.5900000035763,
+              526.2849999964237
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

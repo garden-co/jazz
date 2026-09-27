@@ -1,0 +1,59 @@
+{
+  "head": "9e63d6f55b4ed7d99b21e9fb3106c0467bc76156",
+  "run": "https://github.com/garden-co/jazz/actions/runs/36312702810",
+  "status": "success",
+  "jobs": [
+    {
+      "name": "trusted / test-storage-compat",
+      "conclusion": "success"
+    },
+    {
+      "name": "trusted / test-rust-differential",
+      "conclusion": "success"
+    },
+    {
+      "name": "trusted / lint",
+      "conclusion": "success"
+    },
+    {
+      "name": "trusted / test-react-native",
+      "conclusion": "success"
+    },
+    {
+      "name": "trusted / test-ts",
+      "conclusion": "success"
+    },
+    {
+      "name": "trusted / test-rust-workspace",
+      "conclusion": "success"
+    },
+    {
+      "name": "trusted / test-rust",
+      "conclusion": "success"
+    }
+  ],
+  "guard_tests": [
+    {
+      "test": "node::tests::harness::native_witness_ref_rejects_deletion_event_mismatch",
+      "status": "pass",
+      "ci_log_line": "2026-09-27T10:32:53.1972297Z         PASS [   0.047s] (2490/4676) jazz node::tests::harness::native_witness_ref_rejects_deletion_event_mismatch"
+    },
+    {
+      "test": "node::tests::harness::native_witness_ref_rejects_schema_mismatch_and_missing_coordinate",
+      "status": "pass",
+      "ci_log_line": "2026-09-27T10:32:53.2036366Z         PASS [   0.048s] (2491/4676) jazz node::tests::harness::native_witness_ref_rejects_schema_mismatch_and_missing_coordinate"
+    },
+    {
+      "test": "node::tests::harness::native_witness_ref_stays_exact_across_update_delete_restore",
+      "status": "pass",
+      "ci_log_line": "2026-09-27T10:32:53.2579034Z         PASS [   0.069s] (2494/4676) jazz node::tests::harness::native_witness_ref_stays_exact_across_update_delete_restore"
+    },
+    {
+      "test": "node::tests::harness::native_witness_ref_eviction_fails_closed",
+      "status": "pass",
+      "ci_log_line": "2026-09-27T10:32:53.4062211Z         PASS [   0.259s] (2503/4676) jazz node::tests::harness::native_witness_ref_eviction_fails_closed"
+    }
+  ],
+  "rust_job_log_sha256": "3b7ced09a43183a09df98048f6cf1c35ffd3e3a0e51010203bb63ceeacbd79fc",
+  "repair_reproducers": "Three explicitly ignored tests link #2960 and retain expected successful repair. They are not included in the passing guard list."
+}
