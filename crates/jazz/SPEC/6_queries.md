@@ -158,7 +158,7 @@ universal `_id` contract from support in an individual query form.
 **Implementation status (2026-07-27).** Parameterized `!=` predicates are
 accepted for maintained subscriptions; the behavior is covered by
 `maintained_subscription_view_ne_param_stays_maintained` in
-`crates/jazz/src/peer.rs`.
+`crates/jazz/layers/node/src/peer.rs`.
 
 An `array_subquery` names an output relation (`column_name`), an inner table,
 and a correlation from a parent-scope column to an inner-table column. It may
@@ -493,7 +493,7 @@ create an arrangement-key arity obstacle. They do increase arrangement value and
 terminal-payload bytes, which are ordinary descriptor/payload costs, not a
 reason to introduce a second terminal. The source resolver already supplies the
 policy-filtered projected source boundary before query composition
-(`crates/jazz/src/node/query_eval.rs:537-1066`, `2036-2184`); wide lowering
+(`crates/jazz/layers/node/src/node/query_eval.rs:537-1066`, `2036-2184`); wide lowering
 preserves that ordering.
 
 The one-shot public Rust facade currently returns `Vec<(ObjectId, Vec<Value>)>`
@@ -657,7 +657,7 @@ materialize root `CurrentRow`s`, and expand-mode occurrence-addressed public
 delivery is not complete. Collect-mode structured output already uses the sole
 Groove terminal and typed terminal operations. The ordinary current
 source resolver already applies source authorization and schema projection
-before lowered query composition (`crates/jazz/src/node/query_eval.rs:537-1066`,
+before lowered query composition (`crates/jazz/layers/node/src/node/query_eval.rs:537-1066`,
 `2036-2184`); this target relies on that existing source boundary.
 
 ### 6.4.2 Uncorrelated policy existence

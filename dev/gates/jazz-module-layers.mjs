@@ -76,12 +76,8 @@ export const LAYERS = {
 // longest matching prefix wins; anything unmatched is facade.
 export const LAYER_OF_PATH = [
   // types, model, protocol and engine: extracted to
-  // crates/jazz/layers/{types,model,protocol,engine}.
-
-  ["node/", "node"],
-
-  ["peer.rs", "peer"],
-  ["peer/", "peer"],
+  // crates/jazz/layers/{types,model,protocol,engine}; node and peer: extracted
+  // together to crates/jazz/layers/node (node tests drive PeerState).
 
   ["db.rs", "db"],
   ["db/", "db"],

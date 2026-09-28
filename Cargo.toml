@@ -7,6 +7,7 @@ members = [
   "crates/jazz",
   "crates/jazz/layers/engine",
   "crates/jazz/layers/model",
+  "crates/jazz/layers/node",
   "crates/jazz/layers/protocol",
   "crates/jazz/layers/types",
   "crates/jazz-compression",
@@ -52,6 +53,7 @@ groove = { path = "crates/groove", default-features = false }
 jazz = { path = "crates/jazz", default-features = false }
 jazz-engine = { path = "crates/jazz/layers/engine", default-features = false }
 jazz-model = { path = "crates/jazz/layers/model", default-features = false }
+jazz-node = { path = "crates/jazz/layers/node", default-features = false }
 jazz-protocol = { path = "crates/jazz/layers/protocol", default-features = false }
 jazz-types = { path = "crates/jazz/layers/types", default-features = false }
 jazz-compression = { path = "crates/jazz-compression", default-features = false }

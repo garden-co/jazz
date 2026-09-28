@@ -2044,6 +2044,7 @@ dependencies = [
  "jazz-compression",
  "jazz-engine",
  "jazz-model",
+ "jazz-node",
  "jazz-protocol",
  "jazz-storage-rocksdb",
  "jazz-storage-sqlite",
@@ -2386,6 +2387,39 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "uuid",
+]
+
+[[package]]
+name = "jazz-node"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "blake3",
+ "bytes",
+ "flate2",
+ "futures",
+ "groove",
+ "hex",
+ "jazz-benchmark-guard",
+ "jazz-engine",
+ "jazz-model",
+ "jazz-protocol",
+ "jazz-storage-rocksdb",
+ "jazz-storage-sqlite",
+ "jazz-types",
+ "postcard",
+ "rusqlite",
+ "rust-rocksdb",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tar",
+ "tempfile",
+ "thiserror",
+ "tracing",
+ "uuid",
+ "web-time",
 ]
 
 [[package]]

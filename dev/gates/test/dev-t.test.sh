@@ -42,13 +42,19 @@ grep -F -- '-p jazz --no-default-features --features testing,transport-compressi
 run --exact db::tests::round_trips
 grep -F -- 'db::tests::round_trips -- --exact' "$TEMP/cargo.log" >/dev/null
 
-# Rust files under src/node/tests are wired through node::tests::harness.  A
-# human should be able to supply the distinctive test-name suffix without
-# knowing that internal module wrapper, and dev/t must still invoke Cargo with
-# the canonical name and --exact.
+# Rust files under the jazz-node crate's src/node/tests are wired through
+# node::tests::harness.  A human should be able to supply the distinctive
+# test-name suffix without knowing that internal module wrapper, and dev/t must
+# still invoke Cargo with the canonical name and --exact.
 : >"$TEMP/cargo.log"
-run query_rows_at_lowers_filters_against_historical_current_rows
-grep -F -- 'node::tests::harness::query_rows_at_lowers_filters_against_historical_current_rows -- --exact' "$TEMP/cargo.log" >/dev/null
+run -p jazz-node query_rows_at_lowers_filters_against_historical_current_rows
+grep -F -- '-p jazz-node --no-default-features --features testing,transport-compression-zstd --lib node::tests::harness::query_rows_at_lowers_filters_against_historical_current_rows -- --exact' "$TEMP/cargo.log" >/dev/null
+
+# Without -p, a node:: or peer:: library filter selects jazz-node, so the
+# canonical names gates and workflows pass keep working.
+: >"$TEMP/cargo.log"
+run --exact node::tests::harness::query_rows_at_lowers_filters_against_historical_current_rows
+grep -F -- '-p jazz-node --no-default-features --features testing,transport-compression-zstd --lib -- --list' "$TEMP/cargo.log" >/dev/null
 
 if run --exact db::tests::round; then
   echo 'expected exact non-match to fail' >&2

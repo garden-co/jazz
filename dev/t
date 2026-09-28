@@ -18,7 +18,9 @@ the wrapper resolves a unique canonical module-path test name from FILTER, then
 runs that resolved name with --exact. --exact requires FILTER itself to already
 be that full canonical name; without it FILTER is a literal substring.
 -p selects one of Jazz's layer crates (for example jazz-types) instead of
-jazz; it is built with --no-default-features --features testing.
+jazz; it is built with --no-default-features --features testing. Without -p, a
+library filter starting with node:: or peer:: selects jazz-node, where those
+modules and their tests live.
 
 Examples:
   dev/t subscription::tests::reopens
@@ -30,7 +32,7 @@ EOF
 
 target_kind="lib"
 target_name=""
-package="jazz"
+package=""
 exact=false
 while (($#)); do
   case "$1" in
@@ -88,8 +90,14 @@ for required in cargo mktemp grep sed date; do
   }
 done
 
+if [[ -z "$package" ]]; then
+  package="jazz"
+  if [[ "$target_kind" == "lib" && ( "$filter" == node::* || "$filter" == peer::* ) ]]; then
+    package="jazz-node"
+  fi
+fi
 features="testing,transport-compression-zstd"
-[[ "$package" == "jazz" ]] || features="testing"
+[[ "$package" == "jazz" || "$package" == "jazz-node" ]] || features="testing"
 cargo_args=(-p "$package" --no-default-features --features "$features")
 if [[ "$target_kind" == "lib" ]]; then
   cargo_args+=(--lib)

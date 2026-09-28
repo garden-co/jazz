@@ -34,3 +34,8 @@ pub mod query;
 pub mod schema;
 /// Transaction, fate, and history vocabulary.
 pub mod tx;
+
+/// Public-schema fixtures shared by the tests of the layers above.
+#[doc(hidden)]
+#[cfg(any(test, feature = "testing"))]
+pub mod test_public_schema;
