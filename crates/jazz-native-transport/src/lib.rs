@@ -375,13 +375,10 @@ impl WebSocketTransport {
     ) -> Result<Self, WebSocketClientError> {
         let deadline = tokio::time::Instant::now() + WS_CLIENT_HANDSHAKE_TIMEOUT;
         let url = ws_url(base_url.as_ref(), app_id);
-        let (mut ws, _) = tokio::time::timeout_at(
-            deadline,
-            connect_async_with_config(url, Some(client_websocket_config()), false),
-        )
-        .await
-        .map_err(|_| WebSocketClientError::HandshakeTimeout)?
-        .map_err(WebSocketClientError::Connect)?;
+        let mut ws = tokio::time::timeout_at(deadline, open_client_websocket(url))
+            .await
+            .map_err(|_| WebSocketClientError::HandshakeTimeout)?
+            .map_err(WebSocketClientError::Connect)?;
 
         let prelude = encode_prelude(peer_identity, auth, requested_link)?;
         tokio::time::timeout_at(deadline, ws.send(Message::Binary(prelude.into())))
@@ -570,6 +567,20 @@ fn ws_url(base_url: &str, app_id: AppId) -> String {
         .trim_end_matches('/')
         .to_owned();
     format!("{base}/apps/{app_id}/ws")
+}
+
+/// Open the client socket with Nagle disabled. The client sends small
+/// multiplexed frames in pairs (a header then its payload, a mutation then a
+/// read), which otherwise wait on the server's delayed ACK. Mirrors the
+/// server-side accept policy in `jazz-server`'s `tcp` module (#3268).
+async fn open_client_websocket(
+    url: String,
+) -> Result<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    tokio_tungstenite::tungstenite::Error,
+> {
+    let (ws, _) = connect_async_with_config(url, Some(client_websocket_config()), true).await?;
+    Ok(ws)
 }
 
 fn client_websocket_config() -> WebSocketConfig {
@@ -849,6 +860,32 @@ mod tests {
             "abrupt EOF must reconnect: {classified:?}"
         );
         server.await.unwrap();
+    }
+
+    // Logical sync results cannot detect this socket policy. Check the real
+    // connected client socket directly instead of a timing threshold.
+    #[tokio::test]
+    async fn client_websocket_disables_nagle() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            tokio_tungstenite::accept_async(stream).await.unwrap()
+        });
+        let ws = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            open_client_websocket(format!("ws://{address}")),
+        )
+        .await
+        .expect("bounded client connect")
+        .expect("client websocket connects");
+        match ws.get_ref() {
+            tokio_tungstenite::MaybeTlsStream::Plain(stream) => {
+                assert!(stream.nodelay().unwrap(), "client socket keeps Nagle on");
+            }
+            _ => panic!("ws:// URL must open a plain TCP stream"),
+        }
+        drop(server.await.unwrap());
     }
 
     // Keep the exception typed and narrow: other protocol failures must still
