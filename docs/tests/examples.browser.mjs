@@ -92,7 +92,8 @@ try {
   // The old explorer route lands on the examples page.
   await page.goto(`${origin}/perf-timeline?benchmark=insert`);
   assert.equal(new URL(page.url()).pathname, "/examples");
-  assert.ok((await page.locator('a[href="/examples"]').count()) > 0);
+  // The top nav lays out its links after hydration.
+  await page.locator('a[href="/examples"]').first().waitFor({ state: "attached" });
 
   // Newest released number, per insert, with the /5 estimate: 2 s / 5 / 1350.
   const card = page.locator("#todo .metric-card").first();
