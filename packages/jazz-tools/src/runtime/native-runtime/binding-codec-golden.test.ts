@@ -2,9 +2,10 @@ import { readFileSync } from "node:fs";
 
 import { describe, expect, it } from "vitest";
 
-import type { NativeTerminalEventEnvelope } from "../../drivers/types.js";
+import type { ColumnDescriptor, NativeTerminalEventEnvelope } from "../../drivers/types.js";
 import { openConfig, PostcardReader, PostcardWriter } from "./native-codec.js";
 import {
+  decodeNativeTerminalRowByLayout,
   readNativeRelationSubscriptionSnapshot,
   readNativeSubscriptionDelta,
 } from "./native-row-codec.js";
@@ -165,6 +166,23 @@ describe("binding codec golden contract", () => {
       { type: "UnsupportedShapeCapability", detail: "unsupported descendant terminal shape" },
       { type: "ServerFailure", code: "TableNotFound" },
     ]);
+  });
+  it("decodes Rust terminal payloads against their public logical projection", () => {
+    const envelope = bindingCodecGoldenFixture().terminal.events[0]!.terminalOperations;
+    const insert = envelope.operations[0]!;
+    if (!("Insert" in insert.edit)) throw new Error("golden operation 0 is not an insert");
+    const titleColumn: ColumnDescriptor = {
+      name: "title",
+      column_type: { type: "Text" },
+      nullable: false,
+    };
+    const row = decodeNativeTerminalRowByLayout(
+      "11111111-1111-1111-1111-111111111111",
+      envelope.layouts[insert.payload_layout!]!,
+      [titleColumn],
+      Uint8Array.from(insert.edit.Insert.value),
+    );
+    expect(row.values).toEqual([{ type: "Text", value: "first" }]);
   });
 
   it("rejects trailing bytes after a complete binding payload", () => {
