@@ -1273,7 +1273,6 @@ struct R3OpenBreakdown {
     validate_current_rows: Duration,
     recover_global_times: Duration,
     recover_pending_and_rejected: Duration,
-    recover_unclean_close: Duration,
     recover_known_state: Duration,
     rebuild_ahead_current: Duration,
     finalize_catalogue: Duration,
@@ -1429,7 +1428,6 @@ fn open_rocks_db_with_phases(
                 validate_current_rows: receipt.validate_current_rows,
                 recover_global_times: receipt.recover_global_times,
                 recover_pending_and_rejected: receipt.recover_pending_and_rejected,
-                recover_unclean_close: receipt.recover_unclean_close,
                 recover_known_state: receipt.recover_known_state,
                 rebuild_ahead_current: receipt.rebuild_ahead_current,
                 finalize_catalogue: receipt.finalize_catalogue,
@@ -1597,10 +1595,6 @@ fn emit_r3_phase_receipts(path: &Path, project: RowUuid, selected: R3Profile) {
                     "recover_pending_and_rejected_p50_us": median_open_us(
                         &samples,
                         |receipt| receipt.recover_pending_and_rejected,
-                    ),
-                    "recover_unclean_close_p50_us": median_open_us(
-                        &samples,
-                        |receipt| receipt.recover_unclean_close,
                     ),
                     "recover_known_state_p50_us": median_open_us(
                         &samples,
