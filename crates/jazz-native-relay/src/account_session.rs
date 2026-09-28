@@ -564,7 +564,7 @@ mod tests {
                 &mut out,
             );
 
-            assert_eq!(status as i32, 9, "remote HTTP has a stable policy status");
+            assert_eq!(status, JazzNativeRelayStatus::RemotePlaintextEndpoint);
             assert!(out.data.is_null());
             assert_eq!(out.len, 0);
             let state = match (*lease).inner.lock() {
