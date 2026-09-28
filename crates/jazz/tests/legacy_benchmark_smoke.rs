@@ -138,6 +138,10 @@ fn successful_empty_status_is_available_without_a_git_commit() {
     );
     let status = std::process::Command::new("git")
         .args(["status", "--porcelain"])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_INDEX_FILE")
         .current_dir(&temp_dir)
         .output()
         .unwrap();

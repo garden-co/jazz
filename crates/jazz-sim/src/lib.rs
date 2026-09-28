@@ -1685,6 +1685,10 @@ mod tests {
         std::fs::create_dir(&temp_dir).unwrap();
         let initialized = Command::new("git")
             .args(["init", "--quiet"])
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_INDEX_FILE")
             .current_dir(&temp_dir)
             .status()
             .unwrap();
@@ -1694,6 +1698,10 @@ mod tests {
         );
         let status = Command::new("git")
             .args(["status", "--porcelain"])
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_INDEX_FILE")
             .current_dir(&temp_dir)
             .output()
             .unwrap();
