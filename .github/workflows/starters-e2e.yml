@@ -21,7 +21,7 @@ on:
   workflow_dispatch:
     inputs:
       starter:
-        description: "Single starter to run (omit for all twelve)"
+        description: "Single starter to run (omit for all of them)"
         required: false
         type: string
 
@@ -48,7 +48,7 @@ jobs:
           STARTER_FILTER: ${{ github.event.inputs.starter }}
         run: |
           case "$STARTER_FILTER" in
-            ""|next-betterauth|next-localfirst|next-hybrid|sveltekit-betterauth|sveltekit-localfirst|sveltekit-hybrid|react-betterauth|react-localfirst|react-hybrid|ts-betterauth|ts-localfirst|ts-hybrid)
+            ""|next-betterauth|next-localfirst|next-hybrid|sveltekit-betterauth|sveltekit-localfirst|sveltekit-hybrid|react-betterauth|react-localfirst|react-hybrid|ts-betterauth|ts-localfirst|ts-hybrid|ts-effect-localfirst|ts-effect-betterauth)
               ;;
             *)
               echo "::error::Unknown starter '$STARTER_FILTER'"
@@ -165,6 +165,8 @@ jobs:
           - ts-betterauth
           - ts-localfirst
           - ts-hybrid
+          - ts-effect-localfirst
+          - ts-effect-betterauth
         cancel_reopen_subscription_probe: [false]
         include:
           - starter: ts-betterauth
