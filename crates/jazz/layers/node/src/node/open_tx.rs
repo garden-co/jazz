@@ -144,6 +144,7 @@ where
         for global_time in self.clock.applied_global_times_after_frontier.clone() {
             dots.extend(self.transaction_ids_for_global_time(global_time).await?);
         }
+        dots.extend(self.pending_foreign_transaction_ids().await?);
         let base_snapshot = Snapshot::exclusive_base(
             self.node_uuid,
             self.clock.committed_global_time,
@@ -1653,6 +1654,30 @@ where
                 TxTime(record.get_u64(TransactionRowRecord::FIELD_TIME_IDX)?),
                 node,
             ));
+        }
+        Ok(tx_ids)
+    }
+
+    /// Pending transactions of other nodes that are present locally. Current reads already
+    /// include their versions, so a transaction opened now must read the same visible set.
+    /// A runtime reopened as a new node after an unclean close (every browser foreground
+    /// runtime) receives its previous node's unsynced writes this way. Only transactions
+    /// ingested by this runtime are tracked, so opening a transaction never scans history;
+    /// each is confirmed by a point lookup and dropped once sequenced or gone.
+    async fn pending_foreign_transaction_ids(&mut self) -> Result<Vec<TxId>, Error> {
+        let mut tx_ids = Vec::new();
+        let tracked: Vec<TxId> = self
+            .open_tx
+            .pending_foreign_transactions
+            .iter()
+            .copied()
+            .collect();
+        for tx_id in tracked {
+            if matches!(self.query_transaction_global_time(tx_id).await?, Some(None)) {
+                tx_ids.push(tx_id);
+            } else {
+                self.open_tx.pending_foreign_transactions.remove(&tx_id);
+            }
         }
         Ok(tx_ids)
     }

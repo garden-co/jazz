@@ -1521,6 +1521,10 @@ struct OpenTxState {
     closed_batches: BTreeSet<OpenTransactionId>,
     /// Local-only permission subjects for transactions whose `made_by` keeps provenance.
     local_permission_subjects: BTreeMap<TxId, AuthorSubject>,
+    /// Other nodes' transactions ingested by this runtime that are still pending and
+    /// unsequenced. Current reads include their versions; an opened transaction's snapshot
+    /// must too. Entries are confirmed against storage when a transaction opens.
+    pending_foreign_transactions: BTreeSet<TxId>,
 }
 
 /// Rejection records and derived indexes used for pending-cascade handling.
