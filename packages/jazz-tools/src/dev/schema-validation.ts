@@ -11,6 +11,9 @@ export async function validateSchemaAndPermissions(
   permissions: CompiledPermissionsMap,
 ): Promise<void> {
   const combined = mergePermissionsIntoWasmSchema(schema, permissions);
-  const { validateSchema } = await import("jazz-napi");
+  const { validateSchema } =
+    typeof process !== "undefined" && process.versions?.node
+      ? await import("jazz-napi")
+      : await (await import("../runtime/wasm-loader.js")).loadWasmModule();
   validateSchema(encodeSchema(combined));
 }
