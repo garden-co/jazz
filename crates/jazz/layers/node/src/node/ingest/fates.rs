@@ -288,6 +288,8 @@ where
         ) else {
             return Ok(false);
         };
+        let row_reads = tx.row_read_set.as_deref().unwrap_or(&[]);
+        let absent_reads = tx.absent_read_set.as_deref().unwrap_or(&[]);
         // Point-read records carry names, not schema IDs. A retained alias is
         // usable only when every mapping agrees on its physical identity.
         // ponytail: scans retained schemas per distinct read table; index alias
