@@ -10,3 +10,5 @@ Local durability is not authority acceptance or verified account history. Import
 Authorize relayed exclusive writes as complete transactions so explicitly marked same-commit creation dependencies work without broadening ordinary existence checks or bypassing mergeable read-for-write policy.
 
 Split persistent browser B-tree leaves by encoded byte size, including separator capacity, so uneven encrypted-history records do not overflow a child page despite fitting a valid split. Existing stored data remains compatible.
+
+Keep React Native initialisation payload types behind the existing foreground command API without adding a separate relay export.
