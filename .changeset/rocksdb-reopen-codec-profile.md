@@ -2,4 +2,4 @@
 "jazz-tools": patch
 ---
 
-Keep a caller-selected storage codec profile when a native RocksDB store reopens to add column families, instead of failing the pinned-profile check.
+Node and React Native dev runtimes no longer fail to reopen local storage when a schema adds tables: reopening a RocksDB or SQLite store to add column families now keeps the store's codec profile instead of failing the pinned-profile check.
