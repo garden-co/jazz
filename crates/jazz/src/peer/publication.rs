@@ -1348,8 +1348,8 @@ impl PeerState {
                         complete_exclusive_payloads: self.ship_complete_exclusive_payloads
                             && self.role == PeerRole::Relay,
                         previous_result_set: previous_result_tx_ids,
-                        result_member_adds,
-                        result_member_removes,
+                        result_member_adds: result_member_adds.clone(),
+                        result_member_removes: result_member_removes.clone(),
                         identity: policy_identity,
                         tier,
                         maintained_facts: maintained,
@@ -1393,6 +1393,17 @@ impl PeerState {
         // fallible bundle construction succeeds. Failed/cancelled attempts
         // leave every changed identity available to the next drain.
         self.record_outgoing_view_update_metadata(&update);
+        // The maintained rehydrate records the membership it shipped as this
+        // subscription's baseline. Advance that baseline by the delta shipped
+        // here, so it stays the receiver's exact membership: a later diff or
+        // usage-site rehydrate from this subscription must never see a member
+        // this frame already replaced or removed.
+        self.apply_outgoing_view_delta(
+            subscription,
+            false,
+            &result_member_adds,
+            &result_member_removes,
+        );
         if let SyncMessage::ViewUpdate(view) = &update {
             let state = self
                 .publication_states
