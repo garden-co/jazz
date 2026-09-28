@@ -7,6 +7,7 @@ import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 import type { Db } from "../runtime/db.js";
 import type { AccountStore } from "../accounts/persistence.js";
+import { accountGeneratedHere, exportLocalFirstSecret } from "../accounts/enrollment.js";
 
 const app = s.defineApp({
   plaintext: s.table({ title: s.string(), done: s.boolean() }, {}),
@@ -75,6 +76,7 @@ it.each([
   "provisional-update",
   "rejected-founder",
   "plaintext-transaction",
+  "imported-root-resumes-exact-founder-journal",
 ] as const)(
   "keeps automatic offline initialization fail-closed across %s",
   async (scenario) => {
@@ -83,7 +85,7 @@ it.each([
     const clients: Db[] = [];
     try {
       const warmAccount = await localAccountConfig(server.appId, gate.url);
-      const founderAccount = await localAccountConfig(server.appId, gate.url);
+      let founderAccount = await localAccountConfig(server.appId, gate.url);
       const permissions = definePermissions(app, ({ policy, session }) => {
         policy.projects.allowRead.always();
         policy.plaintext.allowRead.always();
@@ -116,7 +118,11 @@ it.each([
       await warm.shutdown();
       clients.pop();
       gate.block();
-      const founder = await createDb({ ...founderAccount, e2ee: { app, store: privateStore() } });
+      const founderStore = privateStore();
+      let founder = await createDb({
+        ...founderAccount,
+        e2ee: { app, store: founderStore },
+      });
       clients.push(founder);
 
       if (scenario === "plaintext-transaction") {
@@ -182,6 +188,23 @@ it.each([
         tier: "local",
       });
       expect(root?.accountId).toBe(founderAccount.account.id);
+
+      if (scenario === "imported-root-resumes-exact-founder-journal") {
+        const secret = exportLocalFirstSecret(founderAccount.account);
+        await founder.shutdown();
+        clients.pop();
+        founderAccount = await localAccountConfig(server.appId, gate.url, secret);
+        expect(await accountGeneratedHere(founderAccount.account)).toBe(false);
+        founder = await createDb({
+          ...founderAccount,
+          e2ee: { app, store: founderStore },
+        });
+        clients.push(founder);
+        expect(await founder.one(app.notes.where({ id: note.id }), { tier: "local" })).toEqual(
+          note,
+        );
+        return;
+      }
 
       if (scenario === "provisional-update") {
         await founder
