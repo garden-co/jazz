@@ -294,6 +294,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     onAuthFailure,
     onAuthRestored,
     onExplicitOfflineChange,
+    onRemoteLinkChange,
     onFailure,
     onStorageReset,
     onStorageInvalidated,
@@ -322,6 +323,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
           onAuthFailure,
           onAuthRestored,
           onExplicitOfflineChange,
+          onRemoteLinkChange,
           onFailure,
           onStorageReset,
           onStorageInvalidated,
@@ -352,6 +354,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         onAuthFailure,
         onAuthRestored,
         onExplicitOfflineChange,
+        onRemoteLinkChange,
         onFailure,
         onStorageReset,
         onStorageInvalidated,
@@ -366,6 +369,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     onAuthFailure,
     onAuthRestored,
     onExplicitOfflineChange,
+    onRemoteLinkChange,
     onFailure,
   }: BrowserFollowerConnectionContext<DbConfig>): BrowserFollowerConnection {
     const runtime = client.getRuntime();
@@ -382,6 +386,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         onAuthFailure,
         onAuthRestored,
         onExplicitOfflineChange,
+        onRemoteLinkChange,
         onFailure,
       },
     );

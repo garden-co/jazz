@@ -30,6 +30,12 @@ type StructuralHashFixture = {
     nullable: boolean;
     hash: string;
   }>;
+  compositeIndexCases: Array<{
+    name: string;
+    columns: string[];
+    compositeIndexes: string[][];
+    hash: string;
+  }>;
 };
 
 const portableColumnTypeTags = [
@@ -78,6 +84,23 @@ describe("structuralSchemaHash", () => {
     );
 
     expect(new Set(hashes).size).toBe(hashes.length);
+  });
+
+  it("matches Rust for composite indexes, including its UTF-8 index order", () => {
+    expect(structuralHashFixture.compositeIndexCases.length).toBeGreaterThanOrEqual(5);
+    for (const entry of structuralHashFixture.compositeIndexCases) {
+      const schema: WasmSchema = {
+        values: {
+          columns: entry.columns.map((name) => ({
+            name,
+            column_type: { type: "Text" },
+            nullable: false,
+          })),
+          composite_indexes: entry.compositeIndexes,
+        },
+      };
+      expect(structuralSchemaHash(schema), entry.name).toBe(entry.hash);
+    }
   });
 
   it("matches Rust-produced defaults, merge strategies, JSON metadata, and branch bindings", () => {

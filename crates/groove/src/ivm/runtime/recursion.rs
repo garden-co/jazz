@@ -6,6 +6,7 @@
 //! than defining separate operators. Join arrangements live in [`super::join`];
 //! public ticks, subscriptions, and graph retention live in [`super`].
 
+use super::BindingSnapshots;
 use bytes::Bytes;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::rc::Rc;
@@ -144,7 +145,7 @@ pub(super) struct HydrationRecomputeContext<'a> {
     pub(super) inputs: Option<&'a mut EvaluationInputs>,
     pub(super) table_deltas: Option<&'a [TableDelta]>,
     pub(super) storage: &'a dyn OrderedKvStorage,
-    pub(super) binding_snapshots: &'a HashMap<BindingSourceKey, RecordDeltas>,
+    pub(super) binding_snapshots: &'a BindingSnapshots,
     pub(super) scope: ScopeId,
     pub(super) input_generation: u64,
 }
@@ -1577,7 +1578,7 @@ struct HydrationEvaluator<'a> {
     table_deltas: Option<&'a [TableDelta]>,
     evaluation_inputs: Option<&'a mut EvaluationInputs>,
     storage: &'a dyn OrderedKvStorage,
-    binding_snapshots: &'a HashMap<BindingSourceKey, RecordDeltas>,
+    binding_snapshots: &'a BindingSnapshots,
     context: EvalContext,
     memo: HashMap<NodeId, RecordDeltas>,
 }
@@ -1662,12 +1663,13 @@ impl HydrationEvaluator<'_> {
                     Ok(deltas)
                 }
                 OpType::BindingSource(binding_source) => {
-                    let deltas = self
-                        .binding_snapshots
-                        .get(&binding_source.key)
-                        .cloned()
-                        .unwrap_or_else(|| RecordDeltas::empty(output_desc));
-                    project_binding_source_deltas(&deltas, &output_desc)
+                    match self.binding_snapshots.get(&binding_source.key) {
+                        Some(deltas) => project_binding_source_deltas(deltas, &output_desc),
+                        None => project_binding_source_deltas(
+                            &RecordDeltas::empty(output_desc),
+                            &output_desc,
+                        ),
+                    }
                 }
                 OpType::Arrange(_) => self.eval_unary_input(graph_node, node).await,
                 OpType::Filter(filter) => {

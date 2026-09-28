@@ -219,8 +219,8 @@ fn normalized_tick_metrics(metrics: Option<&TickMetrics>) -> Option<TickMetrics>
 }
 
 struct ColdSubscriptionBench {
-    writer: NodeState<RocksDbStorage>,
-    core: Option<NodeState<RocksDbStorage>>,
+    writer: NodeState,
+    core: Option<NodeState>,
     schema: JazzSchema,
     _writer_dir: tempfile::TempDir,
     core_dir: tempfile::TempDir,
@@ -240,11 +240,11 @@ impl ColdSubscriptionBench {
         }
     }
 
-    fn core(&self) -> &NodeState<RocksDbStorage> {
+    fn core(&self) -> &NodeState {
         self.core.as_ref().expect("core must be open")
     }
 
-    fn core_mut(&mut self) -> &mut NodeState<RocksDbStorage> {
+    fn core_mut(&mut self) -> &mut NodeState {
         self.core.as_mut().expect("core must be open")
     }
 
@@ -365,11 +365,7 @@ impl ColdSubscriptionBench {
     }
 }
 
-fn core_ingest(
-    core: &mut NodeState<RocksDbStorage>,
-    message: &SyncMessage,
-    now_ms: u64,
-) -> SyncMessage {
+fn core_ingest(core: &mut NodeState, message: &SyncMessage, now_ms: u64) -> SyncMessage {
     let SyncMessage::CommitUnit { tx, versions } = message else {
         panic!("expected commit unit");
     };
@@ -397,10 +393,7 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_node(
-    node_uuid: NodeUuid,
-    schema: JazzSchema,
-) -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
+fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, NodeState) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();

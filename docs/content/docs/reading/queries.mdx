@@ -10,10 +10,15 @@ import DurabilityTiersTable from "../../partials/durability-tiers-table.mdx";
 
 A one-shot query runs once against the database without subscribing to changes.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-oneshot-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts">
+      ../examples/docs/todo-effect/src/docs-snippets.ts#reading-oneshot-effect
     </include>
   </Tab>
   <Tab value="Rust">
@@ -27,10 +32,15 @@ A one-shot query runs once against the database without subscribing to changes.
 
 Subscribe to a query to receive updates whenever the underlying data changes.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-subscriptions-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts">
+      ../examples/docs/todo-effect/src/docs-snippets.ts#reading-subscriptions-effect
     </include>
   </Tab>
   <Tab value="Rust">
@@ -75,17 +85,22 @@ stale local snapshot would mislead them.
 
 - `"local-first"` uses cached local data and pending local writes immediately, while continuing to sync.
 - `"remote"` waits for Core-authorized query results and excludes pending local edits.
-- `"remote-if-possible"` uses remote scope while connected and falls back to local data only after an explicit app disconnect. A timeout, error, or slow response never triggers fallback.
+- `"local-first-unless-empty"` behaves like `"local-first"`, except that an empty local result waits for the first remote answer while the server is reachable. Use it to avoid a flash of empty UI on a fresh device. Offline, never-connected, and failed connections get the local result right away. Queries with an `offset` read the server's page whenever the server can answer.
 
 See [Read tiers](/docs/reference/durability-tiers#read-tiers) for pending-write
 behavior and how subscriptions change between offline and online operation.
 The aliases `"local"` and `"global"` remain accepted for reads; write waits use
 `"local"` and `"global"`.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-durability-tier-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts">
+      ../examples/docs/todo-effect/src/docs-snippets.ts#reading-durability-tier-effect
     </include>
   </Tab>
   <Tab value="Rust">
@@ -106,7 +121,7 @@ The aliases `"local"` and `"global"` remain accepted for reads; write waits use
 The read tier also determines how a subscription treats your own local writes:
 
 - `"local-first"` shows pending local writes using locally known data.
-- Online `"remote-if-possible"` shows pending edits/deletes to rows already in remote scope, plus matching new inserts. Existing out-of-scope rows and cached related rows are not pulled in merely because of a pending edit. After an explicit disconnect, it uses local knowledge instead.
+- `"local-first-unless-empty"` shows pending local writes exactly like `"local-first"`.
 - `"remote"` has no pending overlay: writes appear when reflected in the server's query scope.
 
 See [Durability Tiers](/docs/reference/durability-tiers) for the full reference, including which APIs accept these options and how they compose.
@@ -126,9 +141,18 @@ You can select and filter on Jazz's magic columns just like other columns. They 
 These are useful for showing authorship, when a row last changed, or building "my created items"
 views without storing duplicate ownership fields.
 
-<include cwd lang="ts">
-  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-edit-metadata-magic-columns-ts
-</include>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-edit-metadata-magic-columns-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts">
+      ../examples/docs/todo-effect/src/docs-snippets.ts#reading-edit-metadata-magic-columns-effect
+    </include>
+  </Tab>
+</Tabs>
 
 See [Permissions](/docs/auth/permissions) for policy examples using `$createdBy` and the other
 magic columns.

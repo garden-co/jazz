@@ -32,7 +32,7 @@ mod relay_topology {
         JazzSchema::new(&source).expect("replica settlement public schema compiles")
     }
 
-    fn open_db(node: u8, author: AuthorSubject) -> Db<MemoryStorage> {
+    fn open_db(node: u8, author: AuthorSubject) -> Db {
         let schema = schema();
         let column_families = schema.column_families();
         let refs = column_families
@@ -50,7 +50,7 @@ mod relay_topology {
         .expect("open database")
     }
 
-    fn open_authority(node: u8) -> Db<MemoryStorage> {
+    fn open_authority(node: u8) -> Db {
         let schema = schema();
         let column_families = schema.column_families();
         let refs = column_families
@@ -76,7 +76,7 @@ mod relay_topology {
         std::iter::from_fn(|| subscription.try_next_event()).collect()
     }
 
-    fn tick(db: &Db<MemoryStorage>, context: &str) {
+    fn tick(db: &Db, context: &str) {
         block_on(db.tick()).expect(context);
     }
 

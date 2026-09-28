@@ -122,7 +122,7 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_db(path: &Path, schema: JazzSchema) -> Db<RocksDbStorage> {
+fn open_db(path: &Path, schema: JazzSchema) -> Db {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -143,7 +143,7 @@ fn open_db(path: &Path, schema: JazzSchema) -> Db<RocksDbStorage> {
     .expect("open owner-filter Jazz db")
 }
 
-fn seed_rows(db: &Db<RocksDbStorage>, table_rows: usize, owned_rows: usize, batch_rows: usize) {
+fn seed_rows(db: &Db, table_rows: usize, owned_rows: usize, batch_rows: usize) {
     for batch_start in (0..table_rows).step_by(batch_rows) {
         let batch_end = table_rows.min(batch_start + batch_rows);
         let tx = block_on(db.mergeable_tx()).expect("open owner-filter seed tx");

@@ -21,7 +21,7 @@ use jazz::query::{OrderDirection, Query};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
-type BenchDb = Db<MemoryStorage>;
+type BenchDb = Db;
 
 const AUTHOR_UUID: uuid::Uuid = uuid::uuid!("00000000-0000-0000-0000-0000000000a1");
 

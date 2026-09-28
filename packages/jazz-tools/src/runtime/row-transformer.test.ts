@@ -3,7 +3,13 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { unwrapValue, transformRows, type WasmValue } from "./row-transformer.js";
+import {
+  createRowTransformer,
+  transformRow,
+  transformRows,
+  unwrapValue,
+  type WasmValue,
+} from "./row-transformer.js";
 import type { WasmSchema, WasmRow } from "../drivers/types.js";
 
 describe("unwrapValue", () => {
@@ -716,5 +722,72 @@ describe("transformRows", () => {
         },
       },
     ]);
+  });
+
+  it("reuses one prepared transformer across rows with the same output as transformRow", () => {
+    const todo = (index: number, owner: WasmValue[]): WasmRow => ({
+      id: `todo-${index}`,
+      values: [
+        { type: "Text", value: `Todo ${index}` },
+        { type: "Uuid", value: `user-${index}` },
+        { type: "Array", value: owner },
+      ],
+    });
+    const user = (index: number, managers: WasmValue[]): WasmValue => ({
+      type: "Row",
+      value: {
+        id: `user-${index}`,
+        values: [
+          { type: "Text", value: `User ${index}` },
+          index % 2 === 0 ? { type: "Null" } : { type: "Uuid", value: `user-${index + 1}` },
+          { type: "Array", value: managers },
+        ],
+      },
+    });
+    const manager = (index: number): WasmValue => ({
+      type: "Row",
+      value: {
+        id: `user-${index}`,
+        values: [{ type: "Text", value: `Boss ${index}` }, { type: "Null" }],
+      },
+    });
+    const rows = [
+      todo(1, [user(1, [manager(2)])]),
+      todo(2, []),
+      todo(3, [user(3, [])]),
+      todo(4, [user(4, [manager(5)])]),
+    ];
+    const includes = { owner: { manager: true } };
+
+    const perRow = createRowTransformer(relationSchema, "todos", includes);
+    const prepared = rows.map((row) => perRow(row));
+    expect(prepared).toEqual(
+      rows.map((row) => transformRow(row, relationSchema, "todos", includes)),
+    );
+    expect(prepared).toEqual(transformRows(rows, relationSchema, "todos", includes));
+    expect(prepared[1]).toEqual({ id: "todo-2", title: "Todo 2", owner_id: "user-2", owner: null });
+    expect(prepared[3]).toEqual({
+      id: "todo-4",
+      title: "Todo 4",
+      owner_id: "user-4",
+      owner: {
+        id: "user-4",
+        name: "User 4",
+        manager_id: null,
+        manager: { id: "user-5", name: "Boss 5", manager_id: null },
+      },
+    });
+
+    const projected = createRowTransformer(relationSchema, "todos", {}, ["title"]);
+    expect(rows.map((row) => projected(row))).toEqual(
+      rows.map((row) => transformRow(row, relationSchema, "todos", {}, ["title"])),
+    );
+  });
+
+  it("reports unknown tables and relations when the first row is transformed", () => {
+    const unknownTable = createRowTransformer(relationSchema, "missing");
+    expect(() => unknownTable({ id: "x", values: [] })).toThrow('Unknown table "missing"');
+    const unknownRelation = createRowTransformer(relationSchema, "todos", { nope: true });
+    expect(() => unknownRelation({ id: "x", values: [] })).toThrow('Unknown relation "nope"');
   });
 });

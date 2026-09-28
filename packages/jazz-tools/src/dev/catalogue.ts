@@ -132,6 +132,50 @@ export class MissingMigrationError extends Error {
   }
 }
 
+/**
+ * The server stored a schema under a different structural hash than the one
+ * computed locally. This happens when the server predates a schema feature the
+ * local schema uses (for example composite indexes on an alpha.56 server) and
+ * silently dropped it while parsing. Deploy stops before publishing a
+ * migration or permissions against the server's hash.
+ */
+export class SchemaHashMismatchError extends Error {
+  readonly name = "SchemaHashMismatchError";
+
+  constructor(
+    readonly localHash: string,
+    readonly serverHash: string,
+  ) {
+    super(
+      `Schema publish returned hash ${shortSchemaHash(serverHash)}, but the local schema hashes to ` +
+        `${shortSchemaHash(localHash)}. The server did not store the schema as sent; it likely predates ` +
+        "a schema feature this schema uses (such as composite indexes) and dropped it. Upgrade the " +
+        "server before deploying. No migration or permissions were published for this schema.",
+    );
+  }
+}
+
+/**
+ * Publishes `wasmSchema` and verifies that the server stored exactly it: the
+ * structural hash the server returns must equal the locally computed one.
+ */
+async function publishStoredSchemaVerified(
+  options: CatalogueServerOptions,
+  wasmSchema: WasmSchema,
+  localHash?: string,
+): Promise<{ objectId: string; hash: string }> {
+  const expectedHash = localHash ?? (await computeSchemaHash(wasmSchema));
+  const result = await publishStoredSchema(options.serverUrl, {
+    appId: options.appId,
+    adminSecret: options.adminSecret,
+    schema: wasmSchema,
+  });
+  if (result.hash !== expectedHash) {
+    throw new SchemaHashMismatchError(expectedHash, result.hash);
+  }
+  return result;
+}
+
 function collectWarning(warnings: string[], message: string): void {
   warnings.push(message);
 }
@@ -418,11 +462,7 @@ async function loadSchema(options: CatalogueServerOptions, hash: string): Promis
  * Prefer using {@link deploy}, which handles all operations.
  */
 export async function pushSchema(options: PushSchemaOptions): Promise<PushSchemaResult> {
-  const result = await publishStoredSchema(options.serverUrl, {
-    appId: options.appId,
-    adminSecret: options.adminSecret,
-    schema: resolveSchemaSource(options.schema),
-  });
+  const result = await publishStoredSchemaVerified(options, resolveSchemaSource(options.schema));
 
   return {
     hash: result.hash,
@@ -575,11 +615,7 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
   const schema: DeploySchemaResult = storedSchemaHash
     ? { hash: storedSchemaHash, status: "already-stored" }
     : {
-        ...(await publishStoredSchema(options.serverUrl, {
-          appId: options.appId,
-          adminSecret: options.adminSecret,
-          schema: wasmSchema,
-        })),
+        ...(await publishStoredSchemaVerified(options, wasmSchema, targetHash)),
         status: "published",
       };
   let migration: DeployResult["migration"];

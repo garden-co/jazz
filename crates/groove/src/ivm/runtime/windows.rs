@@ -369,10 +369,17 @@ pub(super) fn update_unbounded_collect_by_terminal_state(
         let state_key = (sort_key, delta.record.clone());
         let group = state.groups.get_or_default(group_key.clone());
         let before_weight = group.get(&state_key).copied().unwrap_or_default();
-        let before_index = (before_weight > 0).then(|| group.count_before(&state_key));
         let after_weight = before_weight + delta.weight;
         group.set(state_key.clone(), after_weight);
         if !emit || (before_weight > 0) == (after_weight > 0) {
+            continue;
+        }
+        // A group that enters the terminal in this batch is rendered whole as
+        // a root insert below, which drops its child edits. Don't build them.
+        if root_groups_before
+            .as_ref()
+            .is_some_and(|before| !before.contains(&group_key))
+        {
             continue;
         }
         let source_input = BorrowedRecord::new(delta.raw(), &input_desc);
@@ -417,7 +424,7 @@ pub(super) fn update_unbounded_collect_by_terminal_state(
                 path,
                 edit: TerminalEdit::Remove { key: child_key },
             });
-            debug_assert!(before_index.is_some());
+            debug_assert!(before_weight > 0);
         }
     }
     state
@@ -443,7 +450,17 @@ pub(super) fn update_unbounded_collect_by_terminal_state(
                 },
             });
         }
-        for root_key in root_groups_after.difference(&root_groups_before) {
+        let inserted_roots = root_groups_after
+            .difference(&root_groups_before)
+            .collect::<Vec<_>>();
+        // Rank against the complete merged group index: untouched parents
+        // remain in the immutable base and still determine terminal insertion
+        // position. Ascending inserts ranked against the final index apply
+        // correctly in order, and one merged walk ranks them all.
+        let root_ranks = state
+            .groups
+            .count_before_each(inserted_roots.iter().map(|key| key.as_slice()));
+        for (root_key, index) in inserted_roots.into_iter().zip(root_ranks) {
             let group = state
                 .groups
                 .get(root_key)
@@ -459,10 +476,6 @@ pub(super) fn update_unbounded_collect_by_terminal_state(
                             "new collect root did not render a terminal row".to_owned(),
                         )
                     })?;
-            // Rank against the complete merged group index: untouched parents
-            // remain in the immutable base and still determine terminal
-            // insertion position.
-            let index = state.groups.count_before(root_key);
             operations.push(TerminalOperation {
                 root_descriptor: output_desc,
                 root_key: root_key.clone(),
@@ -1347,6 +1360,97 @@ pub(super) fn encoded_record_key_part(
         encode_runtime_primary_key_part(&mut key, &value)?;
     }
     Ok(key)
+}
+
+/// Terminal root identity key of `field_indices` (#3309). Unlike
+/// [`encoded_record_key_part`] this keys every value a record can hold: the
+/// runtime primary-key bytes for every value that encoder supports (so group
+/// prefixes match the TopBy's own group keys), extended with arrays, enum
+/// payloads and indirect large values. It is a process-local opaque key, not a
+/// durable codec: nothing persists it and consumers only compare it.
+pub(super) fn encoded_identity_key_part(
+    descriptor: RecordDescriptor,
+    record: &[u8],
+    field_indices: &[usize],
+) -> Result<Vec<u8>, IvmRuntimeError> {
+    let mut key = Vec::new();
+    for field_idx in field_indices {
+        let value = descriptor.get_idx(record, *field_idx)?;
+        encode_identity_key_part(&mut key, &value)?;
+    }
+    Ok(key)
+}
+
+fn encode_identity_key_part(key: &mut Vec<u8>, value: &Value) -> Result<(), IvmRuntimeError> {
+    match value {
+        Value::Tuple(values) => {
+            key.push(11);
+            for value in values {
+                encode_identity_key_part(key, value)?;
+            }
+        }
+        Value::Nullable(None) => {
+            key.push(12);
+            key.push(0);
+        }
+        Value::Nullable(Some(value)) => {
+            key.push(12);
+            key.push(1);
+            encode_identity_key_part(key, value)?;
+        }
+        Value::Array(values) => {
+            key.push(16);
+            key.extend((values.len() as u64).to_be_bytes());
+            for value in values {
+                encode_identity_key_part(key, value)?;
+            }
+        }
+        Value::Enum(value) => {
+            // The column's schema fixes each case's payload descriptor, so the
+            // tag plus the payload values identify the value.
+            key.push(17);
+            key.extend(value.tag().to_be_bytes());
+            let payload = value.record();
+            let fields = payload.descriptor().fields().len();
+            key.extend((fields as u64).to_be_bytes());
+            for index in 0..fields {
+                encode_identity_key_part(key, &payload.get_idx(index)?)?;
+            }
+        }
+        Value::Large(large) => {
+            // An indirect value is identified by its content, not by where its
+            // chunks live: the structural content hash of its base, its
+            // lengths and its pending edits. The root locator is left out, so
+            // two references to the same content share a key.
+            key.push(18);
+            key.push(match large.kind {
+                crate::large_values::LargeValueKind::String => 0,
+                crate::large_values::LargeValueKind::Bytes => 1,
+                crate::large_values::LargeValueKind::Json => 2,
+            });
+            key.push(large.format_version);
+            key.extend_from_slice(&large.logical_hash.0);
+            key.extend(large.byte_length.to_be_bytes());
+            match large.utf16_length {
+                Some(length) => {
+                    key.push(1);
+                    key.extend(length.to_be_bytes());
+                }
+                None => key.push(0),
+            }
+            key.extend((large.edit_tail.len() as u64).to_be_bytes());
+            for edit in &large.edit_tail {
+                key.extend(edit.offset.to_be_bytes());
+                key.extend(edit.delete_length.to_be_bytes());
+                key.extend(edit.utf16_offset.to_be_bytes());
+                key.extend(edit.delete_utf16_length.to_be_bytes());
+                key.extend(edit.insert_utf16_length.to_be_bytes());
+                encode_runtime_ordered_bytes(key, &edit.insert_bytes);
+            }
+        }
+        value => encode_runtime_primary_key_part(key, value)?,
+    }
+    Ok(())
 }
 
 pub(super) fn encoded_arrangement_key_part(

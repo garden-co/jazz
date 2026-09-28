@@ -361,6 +361,17 @@ describe("typed app prototype", () => {
     expect(app.wasmSchema.users?.indexed_columns).toBeUndefined();
   });
 
+  it("emits ordered composite indexes through the TypeScript schema", () => {
+    const indexed = s.defineApp({
+      documents: s
+        .table({ ownerId: s.uuid(), updatedAt: s.timestamp() }, {})
+        .indexOnly(["ownerId"])
+        .compositeIndex(["ownerId", "updatedAt"]),
+    });
+    expect(indexed.wasmSchema.documents?.indexed_columns).toEqual(["ownerId"]);
+    expect(indexed.wasmSchema.documents?.composite_indexes).toEqual([["ownerId", "updatedAt"]]);
+  });
+
   it("serializes gather seeded from the current relation", () => {
     const directParents = graphApp.team_edges
       .where({ child_team: "team-a" })

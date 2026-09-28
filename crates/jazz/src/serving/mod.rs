@@ -124,6 +124,10 @@ pub struct InMemoryServerShellConfig {
     /// catalogue if the opened store does not already carry a durable write
     /// pointer for it.
     pub bootstrap_runtime_schema: bool,
+    /// Whether a durable store that does not hold the constructor schema
+    /// reopens with its own current schema instead of failing its genesis
+    /// check. Fresh stores still open with the constructor schema.
+    pub reopen_with_durable_schema: bool,
     /// Target-shell factory used when [`StorageConfig`] selects durable storage.
     pub storage_factory: Option<Arc<dyn StorageFactory>>,
 }
@@ -138,6 +142,7 @@ impl InMemoryServerShellConfig {
             large_value_staging_policy: crate::node::LargeValueStagingPolicy::default(),
             role: NodeRole::Core,
             bootstrap_runtime_schema: false,
+            reopen_with_durable_schema: false,
             storage_factory: None,
         }
     }
@@ -177,6 +182,15 @@ impl InMemoryServerShellConfig {
         self.bootstrap_runtime_schema = true;
         self
     }
+
+    /// Reopen an existing durable store with its own current schema when it
+    /// does not hold the constructor schema. A dynamic-schema server uses this
+    /// because its administrative catalogue can name a schema its runtime
+    /// store never admitted; a fixed-schema server keeps the strict check.
+    pub fn with_durable_reopen_schema(mut self) -> Self {
+        self.reopen_with_durable_schema = true;
+        self
+    }
 }
 
 impl fmt::Debug for InMemoryServerShellConfig {
@@ -191,6 +205,10 @@ impl fmt::Debug for InMemoryServerShellConfig {
             )
             .field("role", &self.role)
             .field("bootstrap_runtime_schema", &self.bootstrap_runtime_schema)
+            .field(
+                "reopen_with_durable_schema",
+                &self.reopen_with_durable_schema,
+            )
             .field(
                 "storage_factory",
                 &self.storage_factory.as_ref().map(|_| "configured"),
@@ -276,8 +294,8 @@ pub struct AbiTransportDiagnostics {
 }
 
 enum ShellDb {
-    Memory(Db<BoxedStorage>),
-    Durable(Db<BoxedStorage>),
+    Memory(Db),
+    Durable(Db),
 }
 
 struct ServerSessionState {
@@ -290,8 +308,8 @@ struct ServerSessionState {
 }
 
 enum ShellPeerConnection {
-    Memory(Rc<LocalMutex<PeerConnection<BoxedStorage>>>),
-    Durable(Rc<LocalMutex<PeerConnection<BoxedStorage>>>),
+    Memory(Rc<LocalMutex<PeerConnection>>),
+    Durable(Rc<LocalMutex<PeerConnection>>),
 }
 
 impl fmt::Debug for ShellPeerConnection {
@@ -454,6 +472,13 @@ impl ShellDb {
         }
     }
 
+    fn declare_upload_root(&self) {
+        match self {
+            Self::Memory(db) => db.declare_upload_root(),
+            Self::Durable(db) => db.declare_upload_root(),
+        }
+    }
+
     fn set_large_value_staging_policy(&self, policy: crate::node::LargeValueStagingPolicy) {
         match self {
             Self::Memory(db) => db.set_large_value_staging_policy(policy),
@@ -504,27 +529,35 @@ impl ShellDb {
 
     fn connect_upstream(&self, transport: Box<dyn Transport>) -> ShellPeerConnection {
         match self {
-            Self::Memory(db) => {
-                ShellPeerConnection::Memory(crate::db::block_on(db.connect_upstream(transport)))
-            }
-            Self::Durable(db) => {
-                ShellPeerConnection::Durable(crate::db::block_on(db.connect_upstream(transport)))
-            }
+            Self::Memory(db) => ShellPeerConnection::Memory(crate::local_executor::block_on(
+                db.connect_upstream(transport),
+            )),
+            Self::Durable(db) => ShellPeerConnection::Durable(crate::local_executor::block_on(
+                db.connect_upstream(transport),
+            )),
         }
     }
 
     #[cfg(test)]
     fn publish_schema(&self, schema: SchemaVersion) -> ShellResult<Vec<SyncMessage>> {
         match self {
-            Self::Memory(db) => crate::db::block_on(db.publish_schema(schema)).map_err(Into::into),
-            Self::Durable(db) => crate::db::block_on(db.publish_schema(schema)).map_err(Into::into),
+            Self::Memory(db) => {
+                crate::local_executor::block_on(db.publish_schema(schema)).map_err(Into::into)
+            }
+            Self::Durable(db) => {
+                crate::local_executor::block_on(db.publish_schema(schema)).map_err(Into::into)
+            }
         }
     }
 
     fn publish_lens(&self, lens: MigrationLens) -> ShellResult<Vec<SyncMessage>> {
         match self {
-            Self::Memory(db) => crate::db::block_on(db.publish_lens(lens)).map_err(Into::into),
-            Self::Durable(db) => crate::db::block_on(db.publish_lens(lens)).map_err(Into::into),
+            Self::Memory(db) => {
+                crate::local_executor::block_on(db.publish_lens(lens)).map_err(Into::into)
+            }
+            Self::Durable(db) => {
+                crate::local_executor::block_on(db.publish_lens(lens)).map_err(Into::into)
+            }
         }
     }
 
@@ -534,14 +567,14 @@ impl ShellDb {
         publication: SchemaLineagePublication,
     ) -> ShellResult<Vec<SyncMessage>> {
         match self {
-            Self::Memory(db) => {
-                crate::db::block_on(db.publish_schema_with_lens(catalogue_seq, publication))
-                    .map_err(Into::into)
-            }
-            Self::Durable(db) => {
-                crate::db::block_on(db.publish_schema_with_lens(catalogue_seq, publication))
-                    .map_err(Into::into)
-            }
+            Self::Memory(db) => crate::local_executor::block_on(
+                db.publish_schema_with_lens(catalogue_seq, publication),
+            )
+            .map_err(Into::into),
+            Self::Durable(db) => crate::local_executor::block_on(
+                db.publish_schema_with_lens(catalogue_seq, publication),
+            )
+            .map_err(Into::into),
         }
     }
 
@@ -561,17 +594,17 @@ impl ShellDb {
         revision: u64,
         schema: JazzSchema,
         permissions: std::collections::HashMap<
-            crate::tools::public_schema::TableName,
-            crate::tools::public_schema::TablePolicies,
+            crate::model::public_schema::TableName,
+            crate::model::public_schema::TablePolicies,
         >,
     ) -> ShellResult<()> {
         match self {
             Self::Memory(db) => {
-                crate::db::block_on(db.activate_schema(revision, schema, permissions))
+                crate::local_executor::block_on(db.activate_schema(revision, schema, permissions))
                     .map_err(Into::into)
             }
             Self::Durable(db) => {
-                crate::db::block_on(db.activate_schema(revision, schema, permissions))
+                crate::local_executor::block_on(db.activate_schema(revision, schema, permissions))
                     .map_err(Into::into)
             }
         }
@@ -711,38 +744,48 @@ impl ShellPeerConnection {
     fn admit_authority_query_delegate(&self) {
         match self {
             Self::Memory(connection) | Self::Durable(connection) => {
-                crate::db::block_on(connection.lock()).admit_authority_query_delegate()
+                crate::local_executor::block_on(connection.lock()).admit_authority_query_delegate()
             }
         }
     }
 
     fn io_pump(&self) -> crate::db::PeerIoPump {
         match self {
-            Self::Memory(connection) => crate::db::block_on(connection.lock()).io_pump(),
-            Self::Durable(connection) => crate::db::block_on(connection.lock()).io_pump(),
+            Self::Memory(connection) => {
+                crate::local_executor::block_on(connection.lock()).io_pump()
+            }
+            Self::Durable(connection) => {
+                crate::local_executor::block_on(connection.lock()).io_pump()
+            }
         }
     }
 
     fn take_resume_cursor(&self) -> Option<ResumeCursor> {
         match self {
-            Self::Memory(connection) => crate::db::block_on(connection.lock()).take_resume_cursor(),
+            Self::Memory(connection) => {
+                crate::local_executor::block_on(connection.lock()).take_resume_cursor()
+            }
             Self::Durable(connection) => {
-                crate::db::block_on(connection.lock()).take_resume_cursor()
+                crate::local_executor::block_on(connection.lock()).take_resume_cursor()
             }
         }
     }
 
     fn last_resume_bytes(&self) -> Option<usize> {
         match self {
-            Self::Memory(connection) => crate::db::block_on(connection.lock()).last_resume_bytes(),
-            Self::Durable(connection) => crate::db::block_on(connection.lock()).last_resume_bytes(),
+            Self::Memory(connection) => {
+                crate::local_executor::block_on(connection.lock()).last_resume_bytes()
+            }
+            Self::Durable(connection) => {
+                crate::local_executor::block_on(connection.lock()).last_resume_bytes()
+            }
         }
     }
 
     fn full_diff_fallbacks(&self) -> u64 {
         match self {
             Self::Memory(connection) | Self::Durable(connection) => {
-                crate::db::block_on(connection.lock())
+                crate::local_executor::block_on(connection.lock())
                     .full_diff_fallbacks()
                     .total()
             }
@@ -752,12 +795,10 @@ impl ShellPeerConnection {
     #[cfg(test)]
     fn scope_relay_admission_epoch_for_test(&self) -> Option<u64> {
         match self {
-            Self::Memory(connection) => {
-                crate::db::block_on(connection.lock()).scope_relay_admission_epoch_for_test()
-            }
-            Self::Durable(connection) => {
-                crate::db::block_on(connection.lock()).scope_relay_admission_epoch_for_test()
-            }
+            Self::Memory(connection) => crate::local_executor::block_on(connection.lock())
+                .scope_relay_admission_epoch_for_test(),
+            Self::Durable(connection) => crate::local_executor::block_on(connection.lock())
+                .scope_relay_admission_epoch_for_test(),
         }
     }
 
@@ -765,10 +806,10 @@ impl ShellPeerConnection {
     fn scope_relay_binding_for_test(&self) -> Option<(AuthorSubject, BTreeMap<String, Value>)> {
         match self {
             Self::Memory(connection) => {
-                crate::db::block_on(connection.lock()).scope_relay_binding_for_test()
+                crate::local_executor::block_on(connection.lock()).scope_relay_binding_for_test()
             }
             Self::Durable(connection) => {
-                crate::db::block_on(connection.lock()).scope_relay_binding_for_test()
+                crate::local_executor::block_on(connection.lock()).scope_relay_binding_for_test()
             }
         }
     }
@@ -804,7 +845,9 @@ impl InMemoryServerShell {
                 if let Some(row_id_seed) = config.row_id_seed {
                     db_config = db_config.with_id_source(SeededRowIdSource::new(row_id_seed));
                 }
-                ShellDb::Memory(crate::db::block_on(Db::open_history_complete(db_config))?)
+                ShellDb::Memory(crate::local_executor::block_on(Db::open_history_complete(
+                    db_config,
+                ))?)
             }
             StorageConfig::RocksDb { path } => {
                 let refs = config.schema.column_families();
@@ -813,20 +856,30 @@ impl InMemoryServerShell {
                         "durable server storage requires a target-shell storage factory".into(),
                     )
                 })?;
-                let mut db_config = DbConfig::new(
-                    config.schema,
-                    crate::db::block_on(factory.open(
-                        path.clone(),
-                        refs,
-                        epoch_1_storage_codec_profile().map_err(db_storage_error)?,
-                    ))
-                    .map_err(db_storage_error)?,
-                    config.identity,
-                );
+                let storage = crate::local_executor::block_on(factory.open(
+                    path.clone(),
+                    refs,
+                    epoch_1_storage_codec_profile().map_err(db_storage_error)?,
+                ))
+                .map_err(db_storage_error)?;
+                let (storage, schema) = if config.reopen_with_durable_schema {
+                    crate::local_executor::block_on(
+                        crate::node::NodeState::select_durable_reopen_schema(
+                            storage,
+                            config.schema,
+                        ),
+                    )
+                    .map_err(|error| ShellError::Db(error.to_string()))?
+                } else {
+                    (storage, config.schema)
+                };
+                let mut db_config = DbConfig::new(schema, storage, config.identity);
                 if let Some(row_id_seed) = config.row_id_seed {
                     db_config = db_config.with_id_source(SeededRowIdSource::new(row_id_seed));
                 }
-                ShellDb::Durable(crate::db::block_on(Db::open_history_complete(db_config))?)
+                ShellDb::Durable(crate::local_executor::block_on(Db::open_history_complete(
+                    db_config,
+                ))?)
             }
             StorageConfig::SQLite { .. } => {
                 return Err(ShellError::UnsupportedStorage {
@@ -836,6 +889,8 @@ impl InMemoryServerShell {
         };
         if role == NodeRole::Core {
             db.enable_authoritative_scalar_exit_refresh();
+            // A Core shell is the root until `connect_upstream` says otherwise.
+            db.declare_upload_root();
         }
         db.set_large_value_staging_policy(large_value_staging_policy);
 
@@ -992,8 +1047,8 @@ impl InMemoryServerShell {
         revision: u64,
         schema: JazzSchema,
         permissions: std::collections::HashMap<
-            crate::tools::public_schema::TableName,
-            crate::tools::public_schema::TablePolicies,
+            crate::model::public_schema::TableName,
+            crate::model::public_schema::TablePolicies,
         >,
     ) -> ShellResult<SchemaVersionId> {
         let schema_id = schema.version_id();
@@ -1351,9 +1406,10 @@ impl InMemoryServerShell {
             self.metrics.frames_received += 1;
             self.metrics.bytes_received += frame.len() as u64;
             let state = self.session_state(session)?;
-            let canonical =
-                crate::db::block_on(state.auxiliary_pump.route_incoming_wire_frame(frame))
-                    .map_err(ShellError::Transport)?;
+            let canonical = crate::local_executor::block_on(
+                state.auxiliary_pump.route_incoming_wire_frame(frame),
+            )
+            .map_err(ShellError::Transport)?;
             if let Some(frame) = canonical {
                 state
                     .transport
@@ -1419,7 +1475,7 @@ impl InMemoryServerShell {
 
     /// Service the shell database's accepted subscriber connections once.
     pub fn tick(&mut self) -> ShellResult<()> {
-        crate::db::block_on(self.tick_async())
+        crate::local_executor::block_on(self.tick_async())
     }
 
     pub(super) fn set_tick_scheduler(&self, scheduler: Option<Rc<dyn TickScheduler>>) {

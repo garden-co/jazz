@@ -81,7 +81,7 @@ fn write_only_schema() -> JazzSchema {
     )
 }
 
-fn open_db(node_byte: u8, author: AuthorSubject, schema: &JazzSchema) -> Db<TestStorage> {
+fn open_db(node_byte: u8, author: AuthorSubject, schema: &JazzSchema) -> Db {
     let refs = schema.column_families();
     let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open(DbConfig::new(
@@ -126,7 +126,7 @@ impl WireTransport for QueuedWireTransport {
 
 fn connect_client_to_core(
     core: &mut InMemoryServerShell,
-    client: &Db<TestStorage>,
+    client: &Db,
     client_wire: &QueuedWireTransport,
     identity: AuthorSubject,
 ) -> ServerSession {
@@ -137,7 +137,7 @@ fn connect_client_to_core(
 }
 
 fn pump_client_core(
-    client: &Db<TestStorage>,
+    client: &Db,
     wire: &QueuedWireTransport,
     core: &mut InMemoryServerShell,
     session: ServerSession,
@@ -151,7 +151,7 @@ fn pump_client_core(
     block_on(client.tick()).unwrap();
 }
 
-fn visible_titles(db: &Db<TestStorage>, tier: DurabilityTier) -> Vec<String> {
+fn visible_titles(db: &Db, tier: DurabilityTier) -> Vec<String> {
     let query = Query::from("todos");
     let prepared = db.prepare_query(&query).unwrap();
     block_on(db.all(
@@ -513,4 +513,166 @@ fn explicit_unchanged_partial_write_survives_sync_and_wins_lww() {
         rows[0].cell(&schema.tables[0], "completed"),
         Some(Value::Bool(true))
     );
+}
+
+/// A core that has seen many writer nodes still resolves every stored
+/// version's writer correctly: each writer's own row keeps its author, and a
+/// row all writers edited converges to the same last-writer-wins head on the
+/// core and on a Global reader.
+///
+/// ```text
+/// writer_0..writer_N ──insert own row, update shared──► core ──Global──► bob
+///                                                          │
+///                                  compact alias → node ───┘ (per version)
+/// ```
+///
+/// Every version carries its writer as a compact node alias that the core
+/// maps back to the writer's node. With many writers, a wrong or missing
+/// mapping would surface as a wrong author, a failed Global wait, or a
+/// divergent merged head.
+#[test]
+fn many_writer_nodes_resolve_authors_and_merge_heads_at_the_core() {
+    const WRITERS: u8 = 24;
+    let schema = schema();
+    let mut core = InMemoryServerShell::start(
+        InMemoryServerShellConfig::new(schema.clone(), identity(0xc0, AuthorSubject::SYSTEM))
+            .with_role(NodeRole::Core),
+    )
+    .unwrap();
+    let bob = open_db(0xb1, author(0xb1), &schema);
+    let bob_wire = QueuedWireTransport::default();
+    let bob_session = connect_client_to_core(&mut core, &bob, &bob_wire, author(0xb1));
+    let prepared = bob.prepare_query(&Query::from("todos")).unwrap();
+    let _bob_subscription = block_on(bob.subscribe(
+        &prepared,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            ..ReadOpts::default()
+        },
+    ))
+    .unwrap();
+    pump_client_core(&bob, &bob_wire, &mut core, bob_session);
+
+    let shared_row = RowUuid::from_bytes([0x5e; 16]);
+    let mut writers = Vec::new();
+    for index in 0..WRITERS {
+        let byte = 0x10 + index;
+        let db = open_db(byte, author(byte), &schema);
+        let wire = QueuedWireTransport::default();
+        let session = connect_client_to_core(&mut core, &db, &wire, author(byte));
+        // Writers must read the shared row before they may edit it.
+        let prepared = db.prepare_query(&Query::from("todos")).unwrap();
+        let subscription = block_on(db.subscribe(
+            &prepared,
+            ReadOpts {
+                tier: DurabilityTier::Global,
+                ..ReadOpts::default()
+            },
+        ))
+        .unwrap();
+        writers.push((byte, db, wire, session, subscription));
+    }
+
+    let (_, seeder, seeder_wire, seeder_session, _) = &writers[0];
+    let seed = block_on(seeder.insert(
+        "todos",
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("shared seed".to_owned())),
+            ("completed".to_owned(), Value::Bool(false)),
+        ]),
+        jazz::db::InsertOptions {
+            row_id: Some(shared_row),
+            updated_at_ms: Some(1_000),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    pump_client_core(seeder, seeder_wire, &mut core, *seeder_session);
+    assert!(block_on(seed.wait(DurabilityTier::Global)).is_ok());
+
+    let mut own_rows = Vec::new();
+    for (byte, db, wire, session, _) in &writers {
+        // Every writer sees the shared row's current head before editing it,
+        // so each edit descends from the previous one and the last one wins.
+        pump_client_core(db, wire, &mut core, *session);
+        pump_client_core(db, wire, &mut core, *session);
+        let own = block_on(db.insert(
+            "todos",
+            BTreeMap::from([
+                ("title".to_owned(), Value::String(format!("own {byte:02x}"))),
+                ("completed".to_owned(), Value::Bool(false)),
+            ]),
+            Default::default(),
+        ))
+        .unwrap();
+        block_on(db.update(
+            "todos",
+            shared_row,
+            BTreeMap::from([(
+                "title".to_owned(),
+                Value::String(format!("shared by {byte:02x}")),
+            )]),
+            jazz::db::UpdateOptions {
+                updated_at_ms: Some(2_000 + u64::from(*byte)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        pump_client_core(db, wire, &mut core, *session);
+        assert!(block_on(own.wait(DurabilityTier::Global)).is_ok());
+        own_rows.push((own.row_uuid(), author(*byte), format!("own {byte:02x}")));
+    }
+
+    pump_client_core(&bob, &bob_wire, &mut core, bob_session);
+    pump_client_core(&bob, &bob_wire, &mut core, bob_session);
+    let rows = block_on(bob.all(
+        &prepared,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            local_updates: LocalUpdates::Deferred,
+            propagation: Propagation::Full,
+            ..ReadOpts::default()
+        },
+    ))
+    .unwrap();
+    assert_eq!(rows.len(), usize::from(WRITERS) + 1);
+    for (row_uuid, writer, title) in &own_rows {
+        let row = rows
+            .iter()
+            .find(|row| row.row_uuid() == *row_uuid)
+            .expect("every writer's row reaches Bob");
+        assert!(matches!(
+            row.cell(&schema.tables[0], "title"),
+            Some(Value::String(seen)) if seen == *title
+        ));
+        let provenance = bob.row_provenance(row).unwrap().unwrap();
+        assert_eq!(provenance.created_by, *writer);
+        assert_eq!(provenance.updated_by, *writer);
+    }
+
+    let last = 0x10 + WRITERS - 1;
+    let shared = rows
+        .iter()
+        .find(|row| row.row_uuid() == shared_row)
+        .expect("shared row reaches Bob");
+    assert!(matches!(
+        shared.cell(&schema.tables[0], "title"),
+        Some(Value::String(seen)) if seen == format!("shared by {last:02x}")
+    ));
+    let provenance = bob.row_provenance(shared).unwrap().unwrap();
+    assert_eq!(provenance.created_by, author(0x10));
+    assert_eq!(provenance.updated_by, author(last));
+
+    // The writers converge on the same head through the core.
+    for (_, db, wire, session, _) in &writers {
+        pump_client_core(db, wire, &mut core, *session);
+        pump_client_core(db, wire, &mut core, *session);
+    }
+    for (_, db, _, _, _) in &writers {
+        let titles = visible_titles(db, DurabilityTier::Global);
+        assert!(
+            titles.contains(&format!("shared by {last:02x}")),
+            "{titles:?}"
+        );
+    }
 }
