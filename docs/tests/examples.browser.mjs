@@ -95,14 +95,14 @@ try {
   assert.ok((await page.locator('a[href="/examples"]').count()) > 0);
 
   // Newest released number, per insert, with the /5 estimate: 2 s / 5 / 1350.
-  const card = page.locator("#todo .group").first();
-  await card.locator("div.text-2xl").filter({ hasText: "0.296 ms*" }).waitFor();
+  const card = page.locator("#todo .metric-card").first();
+  await card.locator(".metric-headline").filter({ hasText: "0.296 ms*" }).waitFor();
   assert.match(await card.innerText(), /per insert/);
   assert.match(await card.innerText(), /Released in v2\.0\.0-alpha\.2/);
   assert.match(await card.innerText(), /−50%/);
 
-  // History popover: one row per release plus the unreleased main number.
-  const tooltip = card.getByRole("tooltip");
+  // History card: one row per release plus the unreleased main number.
+  const tooltip = page.getByRole("dialog", { name: "History of Add a todo" });
   assert.equal(await tooltip.isVisible(), false);
   await card.hover();
   await tooltip.waitFor({ state: "visible" });

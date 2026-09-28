@@ -1,5 +1,11 @@
 "use client";
 
+import type { ReactNode } from "react";
+import { HoverCard } from "@astryxdesign/core/HoverCard";
+import { Link } from "@astryxdesign/core/Link";
+import { VStack } from "@astryxdesign/core/Stack";
+import { Table, TableBody, TableCell, TableRow } from "@astryxdesign/core/Table";
+import { Text } from "@astryxdesign/core/Text";
 import { formatTime, plotGeometry } from "@/lib/perf-timeline/model";
 import {
   getBenchmarkMetadata,
@@ -20,12 +26,9 @@ export function Change({ previous, current }: { previous: number; current: numbe
   const ratio = change(previous, current);
   if (!Number.isFinite(ratio) || Math.abs(ratio) < 0.005) return <span>±0%</span>;
   const faster = ratio < 0;
+  // The sign carries the meaning; colour only reinforces it.
   return (
-    <span
-      className={
-        faster ? "text-emerald-600 dark:text-emerald-400" : "text-amber-700 dark:text-amber-400"
-      }
-    >
+    <span className={faster ? "text-(--color-text-green)" : "text-(--color-text-orange)"}>
       {faster ? "−" : "+"}
       {Math.abs(ratio * 100).toFixed(ratio > -0.1 && ratio < 0.1 ? 1 : 0)}%
     </span>
@@ -39,10 +42,10 @@ function Sparkline({ summary }: { summary: MetricSummary }) {
   const y = (v: number) => 6 + geometry.y(v) * 52;
   return (
     <svg viewBox="0 0 240 64" className="h-16 w-full" aria-hidden="true">
-      <line x1="6" x2="234" y1="58" y2="58" className="stroke-fd-border" strokeWidth="1" />
+      <line x1="6" x2="234" y1="58" y2="58" stroke="var(--color-border)" strokeWidth="1" />
       <polyline
         fill="none"
-        className="stroke-fd-primary"
+        stroke="var(--color-icon-accent)"
         strokeWidth="1.5"
         points={points.map((p, i) => `${x(i)},${y(p.median)}`).join(" ")}
       />
@@ -52,93 +55,121 @@ function Sparkline({ summary }: { summary: MetricSummary }) {
           cx={x(i)}
           cy={y(p.median)}
           r={i === points.length - 1 ? 3 : 2}
-          className="fill-fd-primary"
+          fill="var(--color-icon-accent)"
         />
       ))}
     </svg>
   );
 }
 
-/** Hover or focus card with the metric's release (or recent main) history. */
-export function HistoryPopover({
+/** The metric's release (or recent main) history, shown in a hover card. */
+function History({
   benchmarkId,
   name,
   summary,
-  align = "left",
-  divisor = 1,
+  divisor,
 }: {
   benchmarkId: string;
   name: string;
   summary: MetricSummary;
-  align?: "left" | "right";
-  /** Shows per-operation times: run seconds ÷ divisor. */
-  divisor?: number;
+  divisor: number;
 }) {
   const metadata = getBenchmarkMetadata(name);
   const rows = [...summary.history].reverse();
   return (
-    <div
-      role="tooltip"
-      className={`pointer-events-none invisible absolute top-full z-40 mt-2 w-80 max-w-[calc(100vw-2rem)] rounded-lg border border-fd-border bg-fd-popover p-3 text-left text-xs text-fd-popover-foreground opacity-0 shadow-lg transition-opacity group-hover:pointer-events-auto group-hover:visible group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:visible group-focus-within:opacity-100 ${align === "right" ? "right-0" : "left-0"}`}
-    >
-      <div className="mb-1 font-medium">
+    <VStack gap={2} className="w-80 max-w-[calc(100vw-2rem)]">
+      <Text type="label" display="block">
         {summary.basis === "release"
           ? "Median by release"
           : "Recent main runs (no release attributed)"}
-      </div>
+      </Text>
       <Sparkline summary={summary} />
-      <table className="mt-2 w-full tabular-nums">
-        <tbody>
+      <Table density="compact">
+        <TableBody>
           {rows.map((entry, i) => {
             const previous = rows[i + 1];
             return (
-              <tr key={entry.point.resultId} className="border-t border-fd-border/60">
-                <td className="py-1 pr-2 font-mono text-[11px]">{entry.label}</td>
-                <td className="py-1 pr-2 text-right">
-                  {displayedTime(entry.point.median / divisor, true)}
-                </td>
-                <td className="py-1 text-right text-fd-muted-foreground">
-                  {previous ? (
-                    <Change previous={previous.point.median} current={entry.point.median} />
-                  ) : (
-                    ""
+              <TableRow key={entry.point.resultId}>
+                <TableCell>
+                  <Text type="code">{entry.label}</Text>
+                </TableCell>
+                <TableCell>
+                  <Text hasTabularNumbers>{displayedTime(entry.point.median / divisor, true)}</Text>
+                </TableCell>
+                <TableCell>
+                  {previous && (
+                    <Text hasTabularNumbers>
+                      <Change previous={previous.point.median} current={entry.point.median} />
+                    </Text>
                   )}
-                </td>
-              </tr>
+                </TableCell>
+              </TableRow>
             );
           })}
-        </tbody>
-      </table>
+        </TableBody>
+      </Table>
       {summary.unreleased && (
-        <p className="mt-2 text-fd-muted-foreground">
+        <Text type="supporting" display="block">
           Unreleased main ({summary.unreleased.date.slice(0, 10)}):{" "}
           {displayedTime(summary.unreleased.median / divisor, true)}{" "}
           <Change previous={summary.headline.median} current={summary.unreleased.median} />
-        </p>
+        </Text>
       )}
-      <p className="mt-2 text-fd-muted-foreground">
+      <Text type="supporting" display="block">
         Measured on the CodSpeed runner: {formatTime(summary.headline.median / divisor)}
-      </p>
+      </Text>
       {metadata && (
-        <p className="mt-2 text-fd-muted-foreground">
+        <Text type="supporting" display="block">
           What is timed: {metadata.description} {metadata.fixture}
-        </p>
+        </Text>
       )}
       {metadata && (
-        <p className="mt-2 text-fd-muted-foreground">
+        <Text type="supporting" display="block">
           Workload rate: {formatThroughput(summary.headline.median, metadata, true)}
-        </p>
+        </Text>
       )}
-      <p className="mt-2">
-        <a
-          className="underline"
-          href={`${codspeed}/benchmarks/${benchmarkId}`}
-          target="_blank"
-          rel="noreferrer"
-        >
-          Full history on CodSpeed ↗
-        </a>
-      </p>
-    </div>
+      <Link href={`${codspeed}/benchmarks/${benchmarkId}`} isExternalLink>
+        Full history on CodSpeed
+      </Link>
+    </VStack>
+  );
+}
+
+/**
+ * Shows a metric's history when its trigger is hovered, focused or tapped.
+ * The trigger must be focusable (tabIndex) so keyboard users reach it too.
+ */
+export function WithHistory({
+  benchmarkId,
+  name,
+  summary,
+  label,
+  alignment = "start",
+  divisor = 1,
+  children,
+}: {
+  benchmarkId: string;
+  name: string;
+  summary: MetricSummary;
+  label: string;
+  alignment?: "start" | "end";
+  /** Shows per-operation times: run seconds ÷ divisor. */
+  divisor?: number;
+  children: ReactNode;
+}) {
+  return (
+    <HoverCard
+      label={`History of ${label}`}
+      placement="below"
+      alignment={alignment}
+      focusTrigger="always"
+      touchTrigger="tap"
+      hasHoverIndication={false}
+      content={
+        <History benchmarkId={benchmarkId} name={name} summary={summary} divisor={divisor} />
+      }
+    >
+      {children}
+    </HoverCard>
   );
 }

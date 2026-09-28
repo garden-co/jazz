@@ -1,6 +1,23 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { Badge } from "@astryxdesign/core/Badge";
+import { Banner } from "@astryxdesign/core/Banner";
+import { Button } from "@astryxdesign/core/Button";
+import { Card } from "@astryxdesign/core/Card";
+import { Divider } from "@astryxdesign/core/Divider";
+import { Grid } from "@astryxdesign/core/Grid";
+import { Link } from "@astryxdesign/core/Link";
+import { HStack, VStack } from "@astryxdesign/core/Stack";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHeader,
+  TableHeaderCell,
+  TableRow,
+} from "@astryxdesign/core/Table";
+import { Heading, Text } from "@astryxdesign/core/Text";
 import { fetchTimeline } from "@/lib/perf-timeline/client";
 import type { Benchmark, Timeline } from "@/lib/perf-timeline/model";
 import {
@@ -18,7 +35,7 @@ import {
 } from "@/lib/showcase/catalogue";
 import { summarize, type MetricSummary } from "@/lib/showcase/summary";
 
-import { basisText, Change, HistoryPopover } from "./metrics";
+import { basisText, Change, WithHistory } from "./metrics";
 
 const repo = "https://github.com/garden-co/jazz";
 
@@ -57,72 +74,92 @@ function MetricCard({
 }) {
   if (!entry)
     return (
-      <div className="rounded-xl border border-fd-border bg-fd-card p-4">
-        <div className="text-sm text-fd-muted-foreground">{metric.label}</div>
-        <div className="mt-2 text-2xl font-medium text-fd-muted-foreground">
-          {loading ? "…" : "—"}
-        </div>
-        <p className="mt-2 text-xs text-fd-muted-foreground">
-          {loading ? "Reading CodSpeed…" : "No measurement available right now."}
-        </p>
-      </div>
+      <Card>
+        <VStack gap={1}>
+          <Text type="supporting" display="block">
+            {metric.label}
+          </Text>
+          <Text size="2xl" weight="medium" color="secondary" display="block">
+            {loading ? "…" : "—"}
+          </Text>
+          <Text type="supporting" display="block">
+            {loading ? "Reading CodSpeed…" : "No measurement available right now."}
+          </Text>
+        </VStack>
+      </Card>
     );
   const { summary, bench } = entry;
   const previous = summary.history.at(-2);
   const divisor = metric.per?.count ?? 1;
-  const headline = `${displayedTime(summary.headline.median / divisor, true)}${metric.per ? ` per ${metric.per.unit}` : ""}`;
+  const time = displayedTime(summary.headline.median / divisor, true);
+  const headline = `${time}${metric.per ? ` per ${metric.per.unit}` : ""}`;
   return (
-    <div
-      className="group relative rounded-xl border border-fd-border bg-fd-card p-4 outline-none focus-visible:ring-2 focus-visible:ring-fd-primary"
-      tabIndex={0}
-      aria-label={`${metric.label}: ${headline}. Focus for history.`}
+    <WithHistory
+      benchmarkId={bench.id}
+      name={bench.name}
+      summary={summary}
+      label={metric.label}
+      divisor={divisor}
     >
-      <div className="text-sm text-fd-muted-foreground">{metric.label}</div>
-      <div className="mt-1 whitespace-nowrap text-2xl font-medium tabular-nums">
-        {displayedTime(summary.headline.median / divisor, true)}
-        {metric.per && (
-          <span className="ml-1.5 text-base font-normal text-fd-muted-foreground">
-            per {metric.per.unit}
-          </span>
-        )}
-      </div>
-      <div className="mt-0.5 font-mono text-[11px] text-fd-muted-foreground">
-        {basisText(summary)}
-        {previous && (
-          <>
-            {" · "}
-            <Change previous={previous.point.median} current={summary.headline.median} /> vs{" "}
-            {summary.basis === "release" ? previous.label : "previous run"}
-          </>
-        )}
-      </div>
-      <p className="mt-3 text-sm leading-relaxed">
-        {metric.interpret(estimatedSeconds(summary.headline.median), lookup)}
-      </p>
-      <HistoryPopover
-        benchmarkId={bench.id}
-        name={bench.name}
-        summary={summary}
-        divisor={divisor}
-      />
-    </div>
+      <Card
+        className="metric-card h-full"
+        tabIndex={0}
+        aria-label={`${metric.label}: ${headline}. Focus for history.`}
+      >
+        <VStack gap={1}>
+          <Text type="supporting" display="block">
+            {metric.label}
+          </Text>
+          <Text
+            size="2xl"
+            weight="medium"
+            hasTabularNumbers
+            display="block"
+            className="metric-headline whitespace-nowrap"
+          >
+            {time}
+            {metric.per && (
+              <Text color="secondary" weight="normal">
+                {" "}
+                per {metric.per.unit}
+              </Text>
+            )}
+          </Text>
+          <Text type="supporting" hasTabularNumbers display="block">
+            {basisText(summary)}
+            {previous && (
+              <>
+                {" · "}
+                <Change previous={previous.point.median} current={summary.headline.median} /> vs{" "}
+                {summary.basis === "release" ? previous.label : "previous run"}
+              </>
+            )}
+          </Text>
+          <Text as="p" display="block">
+            {metric.interpret(estimatedSeconds(summary.headline.median), lookup)}
+          </Text>
+        </VStack>
+      </Card>
+    </WithHistory>
   );
 }
 
 function Video({ example }: { example: HeroExample }) {
   if (!example.video)
     return (
-      <div className="flex aspect-video flex-col items-center justify-center rounded-xl border border-dashed border-fd-border bg-fd-muted/40 p-6 text-center">
-        <span className="rounded-full border border-fd-border px-2 py-0.5 text-[11px] uppercase tracking-wider text-fd-muted-foreground">
-          Walkthrough coming
-        </span>
-        <p className="mt-3 max-w-sm text-sm text-fd-muted-foreground">{example.plannedVideo}</p>
-      </div>
+      <Card variant="muted" className="aspect-video">
+        <VStack gap={2} hAlign="center" vAlign="center" height="100%">
+          <Badge label="Walkthrough coming" />
+          <Text as="p" color="secondary" justify="center" display="block">
+            {example.plannedVideo}
+          </Text>
+        </VStack>
+      </Card>
     );
   return (
-    <figure>
+    <VStack as="figure" gap={1}>
       <video
-        className="aspect-video w-full rounded-xl border border-fd-border bg-black object-contain"
+        className="aspect-video w-full rounded-(--radius-container) border border-(--color-border) bg-(--color-background-inverted) object-contain"
         src={example.video.src}
         poster={example.video.poster}
         controls
@@ -131,24 +168,26 @@ function Video({ example }: { example: HeroExample }) {
         playsInline
         preload="metadata"
       />
-      <figcaption className="mt-2 text-xs text-fd-muted-foreground">
+      <Text as="p" type="supporting" display="block">
         {example.video.caption}
-      </figcaption>
-    </figure>
+      </Text>
+    </VStack>
   );
 }
 
 function Placeholder({ title, body }: { title: string; body: string }) {
   return (
-    <div className="rounded-xl border border-dashed border-fd-border p-4">
-      <div className="flex items-center gap-2 text-sm font-medium">
-        {title}
-        <span className="rounded-full border border-fd-border px-2 py-0.5 text-[10px] font-normal uppercase tracking-wider text-fd-muted-foreground">
-          Planned
-        </span>
-      </div>
-      <p className="mt-1 text-xs text-fd-muted-foreground">{body}</p>
-    </div>
+    <Card variant="muted">
+      <VStack gap={1}>
+        <HStack gap={2} vAlign="center">
+          <Text weight="medium">{title}</Text>
+          <Badge label="Planned" />
+        </HStack>
+        <Text type="supporting" display="block">
+          {body}
+        </Text>
+      </VStack>
+    </Card>
   );
 }
 
@@ -164,68 +203,70 @@ function Hero({
   loading: boolean;
 }) {
   return (
-    <section id={example.id} className="scroll-mt-24 border-t border-fd-border py-14">
-      <div className="grid gap-8 lg:grid-cols-[minmax(0,5fr)_minmax(0,6fr)]">
-        <div>
-          <h2 className="text-3xl font-medium tracking-tight">{example.title}</h2>
-          <p className="mt-2 text-lg text-fd-muted-foreground">{example.tagline}</p>
-          <p className="mt-4 leading-relaxed">{example.description}</p>
-          <ul className="mt-4 space-y-1.5 text-sm">
+    <VStack as="section" id={example.id} gap={6} className="scroll-mt-24">
+      <Grid columns={{ minWidth: 320, max: 2 }} gap={8}>
+        <VStack gap={3}>
+          <VStack gap={1}>
+            <Heading level={2}>{example.title}</Heading>
+            <Text type="large" color="secondary" display="block">
+              {example.tagline}
+            </Text>
+          </VStack>
+          <Text as="p" display="block">
+            {example.description}
+          </Text>
+          <ul className="list-disc pl-5">
             {example.highlights.map((highlight) => (
-              <li key={highlight} className="flex gap-2">
-                <span className="text-fd-primary" aria-hidden="true">
-                  →
-                </span>
-                {highlight}
+              <li key={highlight}>
+                <Text>{highlight}</Text>
               </li>
             ))}
           </ul>
-          <p className="mt-5 flex flex-wrap gap-x-4 gap-y-1 text-sm">
+          <HStack gap={4} wrap="wrap">
             {example.sources.map((source) => (
-              <a
+              <Link
                 key={source.path}
-                className="underline decoration-fd-border underline-offset-4 hover:decoration-fd-primary"
                 href={`${repo}/tree/main/${source.path}`}
-                target="_blank"
-                rel="noreferrer"
+                isExternalLink
+                hasUnderline
               >
-                {source.label} ↗
-              </a>
+                {source.label}
+              </Link>
             ))}
-          </p>
-        </div>
+          </HStack>
+        </VStack>
         <Video example={example} />
-      </div>
-      <h3 className="mt-10 text-sm font-medium uppercase tracking-wider text-fd-muted-foreground">
-        Key metrics
-      </h3>
-      {example.plannedMetrics && (
-        <div className="mt-3">
+      </Grid>
+      <VStack gap={3}>
+        <Heading level={3}>Key metrics</Heading>
+        {example.plannedMetrics && (
           <Placeholder title="Benchmarks coming" body={example.plannedMetrics} />
-        </div>
-      )}
-      <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        {example.metrics.map((metric) => (
-          <MetricCard
-            key={metric.benchmark}
-            metric={metric}
-            entry={summaries.get(metric.benchmark)}
-            lookup={lookup}
-            loading={loading}
+        )}
+        {example.metrics.length > 0 && (
+          <Grid columns={{ minWidth: 240, max: 4 }} gap={3}>
+            {example.metrics.map((metric) => (
+              <MetricCard
+                key={metric.benchmark}
+                metric={metric}
+                entry={summaries.get(metric.benchmark)}
+                lookup={lookup}
+                loading={loading}
+              />
+            ))}
+          </Grid>
+        )}
+        <Grid columns={{ minWidth: 280, max: 2 }} gap={3}>
+          <Placeholder
+            title="What it costs to run"
+            body="Estimated hosting cost for this app at a given number of users, derived from these metrics."
           />
-        ))}
-      </div>
-      <div className="mt-3 grid gap-3 sm:grid-cols-2">
-        <Placeholder
-          title="What it costs to run"
-          body="Estimated hosting cost for this app at a given number of users, derived from these metrics."
-        />
-        <Placeholder
-          title="Compared with alternatives"
-          body="Metrics, cost and code size for the same app built on the closest competing stacks."
-        />
-      </div>
-    </section>
+          <Placeholder
+            title="Compared with alternatives"
+            body="Metrics, cost and code size for the same app built on the closest competing stacks."
+          />
+        </Grid>
+      </VStack>
+    </VStack>
   );
 }
 
@@ -261,73 +302,92 @@ function MiscBenchmarks({ summaries, loading }: { summaries: Summaries; loading:
     return [...grouped.entries()].sort(([a], [b]) => order.indexOf(a) - order.indexOf(b));
   }, [summaries]);
   return (
-    <section id="benchmarks" className="scroll-mt-24 border-t border-fd-border py-14">
-      <h2 className="text-3xl font-medium tracking-tight">More benchmarks</h2>
-      <p className="mt-2 max-w-3xl text-fd-muted-foreground">
-        Every other wallclock benchmark we track, grouped by the workload it belongs to. Hover or
-        focus a number for its history.
-      </p>
-      {loading && <p className="mt-6 text-sm text-fd-muted-foreground">Reading CodSpeed…</p>}
+    <VStack as="section" id="benchmarks" gap={6} className="scroll-mt-24">
+      <VStack gap={2}>
+        <Heading level={2}>More benchmarks</Heading>
+        <Text as="p" color="secondary" display="block" className="max-w-3xl">
+          Every other wallclock benchmark we track, grouped by the workload it belongs to. Hover,
+          focus or tap a number for its history.
+        </Text>
+        {loading && (
+          <Text type="supporting" display="block">
+            Reading CodSpeed…
+          </Text>
+        )}
+      </VStack>
       {groups.map(([suite, entries]) => (
-        <div key={suite} className="mt-8">
-          <h3 className="text-sm font-medium uppercase tracking-wider text-fd-muted-foreground">
-            {suite}
-          </h3>
-          <div className="mt-2 divide-y divide-fd-border rounded-xl border border-fd-border">
-            {entries
-              .sort((a, b) => a.bench.name.localeCompare(b.bench.name))
-              .map(({ bench, summary }) => {
-                const metadata = getBenchmarkMetadata(bench.name);
-                const previous = summary.history.at(-2);
-                return (
-                  <div
-                    key={bench.id}
-                    className="flex flex-wrap items-center justify-between gap-x-6 gap-y-1 px-4 py-2.5"
-                  >
-                    <div className="min-w-0 flex-1">
-                      <div className="text-sm">
-                        {metadata?.title ?? bench.name.replaceAll("_", " ")}
-                      </div>
-                      <div className="truncate font-mono text-[11px] text-fd-muted-foreground">
-                        {bench.name}
-                      </div>
-                    </div>
-                    <div
-                      className="group relative text-right outline-none focus-visible:ring-2 focus-visible:ring-fd-primary"
-                      tabIndex={0}
-                      aria-label={`${bench.name}: ${displayedTime(summary.headline.median, true)}. Focus for history.`}
-                    >
-                      <div className="text-sm font-medium tabular-nums">
-                        {displayedTime(summary.headline.median, true)}
-                        {previous && (
-                          <span className="ml-2 text-xs font-normal">
-                            <Change
-                              previous={previous.point.median}
-                              current={summary.headline.median}
-                            />
-                          </span>
-                        )}
-                      </div>
-                      <div className="text-[11px] text-fd-muted-foreground">
-                        {metadata
-                          ? `${formatThroughput(summary.headline.median, metadata, true)} · `
-                          : ""}
-                        {summary.basis === "release" ? summary.label : "main"}
-                      </div>
-                      <HistoryPopover
-                        benchmarkId={bench.id}
-                        name={bench.name}
-                        summary={summary}
-                        align="right"
-                      />
-                    </div>
-                  </div>
-                );
-              })}
-          </div>
-        </div>
+        <VStack key={suite} gap={2}>
+          <Heading level={3}>{suite}</Heading>
+          <Table density="compact" verticalAlign="top">
+            <TableHeader>
+              <TableRow>
+                <TableHeaderCell>Benchmark</TableHeaderCell>
+                <TableHeaderCell>Median</TableHeaderCell>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {entries
+                .sort((a, b) => a.bench.name.localeCompare(b.bench.name))
+                .map(({ bench, summary }) => {
+                  const metadata = getBenchmarkMetadata(bench.name);
+                  const previous = summary.history.at(-2);
+                  const time = displayedTime(summary.headline.median, true);
+                  return (
+                    <TableRow key={bench.id}>
+                      <TableCell>
+                        <VStack gap={0.5}>
+                          <Text display="block">
+                            {metadata?.title ?? bench.name.replaceAll("_", " ")}
+                          </Text>
+                          <Text type="code" color="secondary" display="block" className="break-all">
+                            {bench.name}
+                          </Text>
+                        </VStack>
+                      </TableCell>
+                      <TableCell>
+                        <WithHistory
+                          benchmarkId={bench.id}
+                          name={bench.name}
+                          summary={summary}
+                          label={bench.name}
+                          alignment="end"
+                        >
+                          <div
+                            className="benchmark-median"
+                            tabIndex={0}
+                            aria-label={`${bench.name}: ${time}. Focus for history.`}
+                          >
+                            <VStack gap={0.5}>
+                              <Text weight="medium" hasTabularNumbers display="block">
+                                {time}
+                                {previous && (
+                                  <>
+                                    {" "}
+                                    <Change
+                                      previous={previous.point.median}
+                                      current={summary.headline.median}
+                                    />
+                                  </>
+                                )}
+                              </Text>
+                              <Text type="supporting" display="block">
+                                {metadata
+                                  ? `${formatThroughput(summary.headline.median, metadata, true)} · `
+                                  : ""}
+                                {summary.basis === "release" ? summary.label : "main"}
+                              </Text>
+                            </VStack>
+                          </div>
+                        </WithHistory>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+            </TableBody>
+          </Table>
+        </VStack>
       ))}
-    </section>
+    </VStack>
   );
 }
 
@@ -341,72 +401,52 @@ export function Showcase() {
   const released = [...summaries.values()].some((entry) => entry.summary.basis === "release");
 
   return (
-    <main className="mx-auto w-full max-w-[1400px] px-4 pt-14 sm:px-8">
-      <header className="max-w-3xl">
-        <div className="font-mono text-xs uppercase tracking-widest text-fd-muted-foreground">
-          Examples &amp; benchmarks
-        </div>
-        <h1 className="mt-3 text-4xl font-medium tracking-tight sm:text-5xl">
-          Real apps, measured on every commit.
-        </h1>
-        <p className="mt-4 text-lg text-fd-muted-foreground">
-          Each example is a working app in the Jazz repository. The numbers under it come from
-          benchmarks of that same workload, run in CI on CodSpeed. We show the latest released
-          numbers; hover any of them for how they changed across releases.
-        </p>
-        <nav className="mt-6 flex flex-wrap gap-2 text-sm" aria-label="Examples">
-          {heroExamples.map((example) => (
-            <a
-              key={example.id}
-              href={`#${example.id}`}
-              className="rounded-full border border-fd-border px-3 py-1 hover:border-fd-primary"
-            >
-              {example.title}
-            </a>
-          ))}
-          <a
-            href="#benchmarks"
-            className="rounded-full border border-fd-border px-3 py-1 hover:border-fd-primary"
-          >
-            More benchmarks
-          </a>
-        </nav>
-        {error && (
-          <p
-            className="mt-6 rounded-lg border border-fd-border bg-fd-muted p-3 text-sm"
-            role="alert"
-          >
-            {error}
-          </p>
-        )}
-        {data && !released && (
-          <p
-            className="mt-6 rounded-lg border border-fd-border bg-fd-muted p-3 text-sm"
-            role="status"
-          >
-            Release attribution is unavailable right now, so these are the latest measurements on
-            main.
-          </p>
-        )}
-        <p className="mt-6 text-xs text-fd-muted-foreground">
-          * Estimated times: CodSpeed wallclock medians divided by {ESTIMATE_DIVISOR}, a rough
-          allowance for a typical modern machine being faster than the shared CI runner. This is
-          illustrative, not a measured prediction for your hardware; every popover also shows the
-          measured runner time.
-        </p>
-      </header>
-      <div className="mt-10">
+    <div className="mx-auto w-full max-w-(--fd-layout-width) px-4 pb-24 pt-14">
+      <VStack gap={10}>
+        <VStack as="header" gap={4} className="max-w-3xl">
+          <Heading level={1}>Real apps, measured on every commit</Heading>
+          <Text as="p" type="large" color="secondary" display="block">
+            Each example is a working app in the Jazz repository. The numbers under it come from
+            benchmarks of that same workload, run in CI on CodSpeed. We show the latest released
+            numbers; hover any of them for how they changed across releases.
+          </Text>
+          <nav aria-label="Examples">
+            <HStack gap={2} wrap="wrap">
+              {heroExamples.map((example) => (
+                <Button
+                  key={example.id}
+                  label={example.title}
+                  href={`#${example.id}`}
+                  variant="secondary"
+                  size="sm"
+                />
+              ))}
+              <Button label="More benchmarks" href="#benchmarks" variant="secondary" size="sm" />
+            </HStack>
+          </nav>
+          {error && <Banner status="error" title={error} />}
+          {data && !released && (
+            <Banner
+              status="info"
+              title="Release attribution is unavailable right now, so these are the latest measurements on main."
+            />
+          )}
+          <Text as="p" type="supporting" display="block">
+            * Estimated times: CodSpeed wallclock medians divided by {ESTIMATE_DIVISOR}, a rough
+            allowance for a typical modern machine being faster than the shared CI runner. This is
+            illustrative, not a measured prediction for your hardware; every history card also shows
+            the measured runner time.
+          </Text>
+        </VStack>
         {heroExamples.map((example) => (
-          <Hero
-            key={example.id}
-            example={example}
-            summaries={summaries}
-            lookup={lookup}
-            loading={loading}
-          />
+          <VStack key={example.id} gap={10}>
+            <Divider />
+            <Hero example={example} summaries={summaries} lookup={lookup} loading={loading} />
+          </VStack>
         ))}
-      </div>
-      <MiscBenchmarks summaries={summaries} loading={loading} />
-    </main>
+        <Divider />
+        <MiscBenchmarks summaries={summaries} loading={loading} />
+      </VStack>
+    </div>
   );
 }
