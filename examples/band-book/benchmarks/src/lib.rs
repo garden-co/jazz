@@ -7,7 +7,7 @@ use jazz::db::{
     PreparedQuery, Propagation, ReadOpts, SeededRowIdSource, SubscriptionEvent, SubscriptionStream,
     block_on,
 };
-use jazz::groove::{db::StorageReadMetrics, records::Value};
+use jazz::groove::{db::StorageReadMetrics, records::Value, storage::BoxedStorage};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::CurrentRow;
 use jazz::query::{OrderDirection, Query, col, eq, lit};
@@ -15,7 +15,7 @@ use jazz::schema::JazzSchema;
 use jazz::tools::public_schema::{Operation, PolicyExpr};
 use jazz::tools::{ColumnType, SchemaBuilder, TablePolicies, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
-use jazz_storage_rocksdb::{Durability, RocksDbStorage};
+use jazz_storage_rocksdb::{Durability, RocksDbStorageFactory};
 
 pub const OWNERS: usize = 100;
 pub const OWNERS_PER_ORG: usize = 4;
@@ -104,7 +104,7 @@ pub fn schema_with_composite_indexes(policy: Policy, composite_indexes: bool) ->
         .expect("compile public document schema")
 }
 
-fn open(path: &Path, schema: &JazzSchema) -> Db {
+fn open(path: &Path, schema: &JazzSchema) -> Db<BoxedStorage> {
     open_measured(path, schema).0
 }
 
@@ -114,15 +114,14 @@ struct OpenTimings {
     receipt: DbOpenReceipt,
 }
 
-fn open_measured(path: &Path, schema: &JazzSchema) -> (Db, OpenTimings) {
-    let column_families = schema.column_families();
-    let refs = column_families
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
+fn open_measured(path: &Path, schema: &JazzSchema) -> (Db<BoxedStorage>, OpenTimings) {
     let start = Instant::now();
-    let storage = RocksDbStorage::open_with_durability(path, &refs, Durability::WalNoSync)
-        .expect("open document RocksDB");
+    let storage = block_on(jazz::storage_codec_profile::open_node_storage(
+        &RocksDbStorageFactory::with_durability(Durability::WalNoSync),
+        path.to_path_buf(),
+        schema.column_families(),
+    ))
+    .expect("open document RocksDB");
     let storage_us = start.elapsed().as_micros();
     let start = Instant::now();
     let (db, receipt) = block_on(Db::open_history_complete_with_receipt_for_test(
@@ -324,7 +323,7 @@ impl Fixture {
 }
 
 pub struct Session {
-    db: Db,
+    db: Db<BoxedStorage>,
     prepared: PreparedQuery,
     identity: AuthorSubject,
     pub reopen_us: u128,
