@@ -7,7 +7,7 @@ fn relay_with_system_binding(subscription: SubscriptionKey) -> PeerState {
 }
 
 fn system_authority_reset(
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     shape: &ValidatedQuery,
     binding: &Binding,
     subscription: SubscriptionKey,
@@ -25,7 +25,7 @@ fn system_authority_reset(
 }
 
 fn receiver_rows(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     shape: &ValidatedQuery,
     binding: &Binding,
     tier: DurabilityTier,

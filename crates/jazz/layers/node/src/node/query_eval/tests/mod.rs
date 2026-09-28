@@ -204,11 +204,7 @@ fn collect_binding_source_projected_fields(
     }
 }
 
-fn register_query_shape(
-    node: &mut NodeState<RocksDbStorage>,
-    shape: &ValidatedQuery,
-    opts: RegisterShapeOptions,
-) {
+fn register_query_shape(node: &mut NodeState, shape: &ValidatedQuery, opts: RegisterShapeOptions) {
     node.apply_sync_message_settled(SyncMessage::RegisterShape {
         shape_id: shape.shape_id(),
         ast: ShapeAst::from_validated(shape),
@@ -217,16 +213,12 @@ fn register_query_shape(
     .unwrap();
 }
 
-fn subscribe_query_binding(
-    node: &mut NodeState<RocksDbStorage>,
-    shape: &ValidatedQuery,
-    binding: &Binding,
-) {
+fn subscribe_query_binding(node: &mut NodeState, shape: &ValidatedQuery, binding: &Binding) {
     subscribe_query_binding_with_opts(node, shape, binding, RegisterShapeOptions::default());
 }
 
 fn subscribe_query_binding_with_opts(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     shape: &ValidatedQuery,
     binding: &Binding,
     opts: RegisterShapeOptions,
@@ -235,7 +227,7 @@ fn subscribe_query_binding_with_opts(
 }
 
 fn subscribe_query_binding_with_opts_and_session(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     shape: &ValidatedQuery,
     binding: &Binding,
     opts: RegisterShapeOptions,
@@ -261,7 +253,7 @@ fn subscribe_query_binding_with_opts_and_session(
 }
 
 fn register_shape_binding_for_receiver(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     shape: &ValidatedQuery,
     binding: &Binding,
 ) {
@@ -270,7 +262,7 @@ fn register_shape_binding_for_receiver(
 }
 
 fn lowered_current_app_rows_graph(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     shape: &ValidatedQuery,
     binding: &Binding,
     identity: AuthorSubject,
@@ -454,15 +446,12 @@ fn public_seeded_recursive_access_policy(seed_claim: &str) -> PublicPolicyExpr {
     }
 }
 
-fn open_node() -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
+fn open_node() -> (tempfile::TempDir, NodeState) {
     let schema = schema();
     open_node_with_uuid(NodeUuid::from_bytes([9; 16]), schema)
 }
 
-fn open_node_with_uuid(
-    node_uuid: NodeUuid,
-    schema: JazzSchema,
-) -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
+fn open_node_with_uuid(node_uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, NodeState) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -476,13 +465,7 @@ fn open_node_with_uuid(
 /// Stores a version in the non-base schema partition. The extra `body`
 /// cell makes using the base history descriptor observably wrong at the
 /// native row-batch boundary.
-fn evolved_todos_version() -> (
-    tempfile::TempDir,
-    NodeState<RocksDbStorage>,
-    TableSchema,
-    RowUuid,
-    TxId,
-) {
+fn evolved_todos_version() -> (tempfile::TempDir, NodeState, TableSchema, RowUuid, TxId) {
     let base = public_query_eval_schema(
         PublicSchemaBuilder::new()
             .table(PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text)),
@@ -599,7 +582,7 @@ fn recursive_schema() -> JazzSchema {
     )
 }
 
-fn open_recursive_node() -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
+fn open_recursive_node() -> (tempfile::TempDir, NodeState) {
     open_node_with_uuid(NodeUuid::from_bytes([9; 16]), recursive_schema())
 }
 
@@ -640,7 +623,7 @@ fn row(idx: usize) -> RowUuid {
 }
 
 fn commit_global_cells(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     table: &str,
     row_uuid: RowUuid,
     cells: BTreeMap<String, Value>,
@@ -680,7 +663,7 @@ fn current_titles(
 }
 
 fn historical_titles_via_full_scan(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     table: &TableSchema,
     position: GlobalTime,
 ) -> BTreeMap<RowUuid, Value> {
@@ -706,7 +689,7 @@ fn historical_titles_via_full_scan(
 }
 
 fn delete_global(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     table: &str,
     row_uuid: RowUuid,
     now_ms: u64,
@@ -733,12 +716,7 @@ fn author(byte: u8) -> AuthorSubject {
     AuthorSubject::for_test_bytes([byte; 16])
 }
 
-fn commit_issue(
-    node: &mut NodeState<RocksDbStorage>,
-    idx: usize,
-    state: &str,
-    assignee: AuthorSubject,
-) {
+fn commit_issue(node: &mut NodeState, idx: usize, state: &str, assignee: AuthorSubject) {
     node.commit_mergeable_unit_settled(
         MergeableCommit::new("issues", row(idx), 1_000 + idx as u64)
             .made_by(AuthorSubject::SYSTEM)
@@ -752,12 +730,7 @@ fn commit_issue(
     .expect("commit issue");
 }
 
-fn commit_signed_metric(
-    node: &mut NodeState<RocksDbStorage>,
-    idx: usize,
-    bucket: &str,
-    score: i64,
-) {
+fn commit_signed_metric(node: &mut NodeState, idx: usize, bucket: &str, score: i64) {
     node.commit_mergeable_unit_settled(
         MergeableCommit::new("metrics", row(idx), 1_000 + idx as u64)
             .made_by(AuthorSubject::SYSTEM)
@@ -770,7 +743,7 @@ fn commit_signed_metric(
 }
 
 fn commit_global_issue(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     idx: usize,
     state: &str,
     assignee: AuthorSubject,
@@ -798,12 +771,7 @@ fn commit_global_issue(
     tx_id
 }
 
-fn commit_member(
-    node: &mut NodeState<RocksDbStorage>,
-    idx: usize,
-    issue: RowUuid,
-    user: AuthorSubject,
-) {
+fn commit_member(node: &mut NodeState, idx: usize, issue: RowUuid, user: AuthorSubject) {
     node.commit_mergeable_unit_settled(
         MergeableCommit::new("issue_members", row(10_000 + idx), 10_000 + idx as u64)
             .made_by(AuthorSubject::SYSTEM)
@@ -815,12 +783,7 @@ fn commit_member(
     .expect("commit member");
 }
 
-fn commit_global_user(
-    node: &mut NodeState<RocksDbStorage>,
-    user: AuthorSubject,
-    name: &str,
-    seq: u64,
-) {
+fn commit_global_user(node: &mut NodeState, user: AuthorSubject, name: &str, seq: u64) {
     let tx_id = node
         .commit_mergeable_settled(
             MergeableCommit::new("users", RowUuid(user.test_uuid()), 2_000 + seq)
@@ -841,7 +804,7 @@ fn commit_global_user(
 }
 
 fn commit_global_member(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     idx: usize,
     issue: RowUuid,
     user: AuthorSubject,

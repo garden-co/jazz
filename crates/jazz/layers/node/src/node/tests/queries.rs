@@ -50,8 +50,8 @@ fn access_path_doc_cells(
 }
 
 fn seed_access_path_docs(
-    writer: &mut NodeState<RocksDbStorage>,
-    core: &mut NodeState<RocksDbStorage>,
+    writer: &mut NodeState,
+    core: &mut NodeState,
 ) -> (RowUuid, RowUuid, AuthorSubject) {
     let owner_a = user(0xa1);
     let owner_b = user(0xb2);
@@ -73,7 +73,7 @@ fn seed_access_path_docs(
 }
 
 fn query_rows_by_uuid(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     query: Query,
     tier: DurabilityTier,
 ) -> (Vec<RowUuid>, QueryEngineReadMetrics) {
@@ -90,7 +90,7 @@ fn query_rows_by_uuid(
 }
 
 fn query_rows_by_uuid_for_identity(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     query: Query,
     tier: DurabilityTier,
     identity: AuthorSubject,
@@ -121,7 +121,7 @@ fn query_rows_by_uuid_for_identity(
 }
 
 fn maintained_rows_by_uuid_for_identity(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     query: Query,
     tier: DurabilityTier,
     identity: AuthorSubject,
@@ -1262,7 +1262,7 @@ fn local_current_from_ahead_index_matches_history_argmax_for_seeded_commits() {
 }
 
 fn assert_local_current_matches_history_argmax(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     seed: u64,
     step: u64,
 ) {
@@ -1277,7 +1277,7 @@ fn assert_local_current_matches_history_argmax(
 }
 
 fn history_argmax_current_rows(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
 ) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
     let table = node.table("todos").unwrap().clone();
     let versions = node.query_table_versions("todos").unwrap();
@@ -3445,7 +3445,7 @@ fn query_templates_bind_distinct_prepared_probes_without_reusing_authority() {
     let reader = user(0xe3);
     core.set_test_provider_claims(reader, BTreeMap::from([("tenant".to_owned(), Value::Uuid(owner.test_uuid()))]));
     let shape = Query::from("docs").filter(eq(col("status"), crate::query::param("status"))).validate(&core.catalogue.schema).unwrap();
-    let read = |core: &mut NodeState<RocksDbStorage>, status: &str| {
+    let read = |core: &mut NodeState, status: &str| {
         let binding = shape.bind(BTreeMap::from([("status".to_owned(), Value::String(status.to_owned()))])).unwrap();
         let (receiver, maintained, ..) = core.open_seeded_maintained_subscription_view(&shape, &binding, reader, DurabilityTier::Global, &crate::protocol::ReadViewSpec::default()).unwrap();
         let rows = maintained.active_result_members().iter().filter_map(crate::protocol::ResultMemberEntry::as_row)
@@ -3480,7 +3480,7 @@ fn query_template_arguments_rebind_residual_predicates_and_isolate_claims() {
     let shape = Query::from("docs")
         .filter(crate::query::gt(col("status"), crate::query::param("floor")))
         .validate(&core.catalogue.schema).unwrap();
-    let read = |core: &mut NodeState<RocksDbStorage>, floor: &str| {
+    let read = |core: &mut NodeState, floor: &str| {
         let binding = shape.bind(BTreeMap::from([("floor".into(), Value::String(floor.into()))])).unwrap();
         core.query_rows_for_link(&shape, &binding, DurabilityTier::Global, reader).unwrap()
             .into_iter().map(|row| row.row_uuid()).collect::<Vec<_>>()
@@ -3502,7 +3502,7 @@ fn literal_query_families_keep_values_out_of_the_reusable_program() {
     let (_writer_dir, mut writer) = open_node_with_schema(node(0xf4), access_path_schema());
     let (_core_dir, mut core) = open_node_with_schema(node(0xf5), access_path_schema());
     let (first, second, _) = seed_access_path_docs(&mut writer, &mut core);
-    let read = |core: &mut NodeState<RocksDbStorage>, status: &str| {
+    let read = |core: &mut NodeState, status: &str| {
         query_rows_by_uuid(core, Query::from("docs").filter(eq(col("status"), lit(status))), DurabilityTier::Global).0
     };
     assert_eq!(read(&mut core, "open"), vec![first]);

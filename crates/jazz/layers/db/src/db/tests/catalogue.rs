@@ -9,7 +9,7 @@ fn open_offline_catalogue_replica(
     storage: groove::storage::TestStorage,
     identity: DbIdentity,
     backend: bool,
-) -> Db<groove::storage::TestStorage> {
+) -> Db {
     let config = DbConfig::new(schema, storage, identity);
     if backend {
         // SAFETY: this fixture explicitly admits Bob's synthetic backend identity.
@@ -23,7 +23,7 @@ fn open_offline_catalogue_replica(
 }
 
 fn offline_catalogue_remote_read<'a>(
-    db: &'a Db<groove::storage::TestStorage>,
+    db: &'a Db,
     query: &'a PreparedQuery,
 ) -> Pin<Box<dyn Future<Output = Result<Vec<CurrentRow>, Error>> + 'a>> {
     Box::pin(db.all(
@@ -36,13 +36,13 @@ fn offline_catalogue_remote_read<'a>(
 }
 
 fn offline_catalogue_serialized_read(
-    db: &Db<groove::storage::TestStorage>,
+    db: &Db,
 ) -> Pin<Box<dyn Future<Output = Result<SerializedReadResult, Error>> + '_>> {
     offline_catalogue_serialized_read_with_deadline(db, None)
 }
 
 fn offline_catalogue_serialized_read_with_deadline(
-    db: &Db<groove::storage::TestStorage>,
+    db: &Db,
     deadline: Option<std::time::Instant>,
 ) -> Pin<Box<dyn Future<Output = Result<SerializedReadResult, Error>> + '_>> {
     Box::pin(async move {
@@ -64,23 +64,15 @@ fn offline_catalogue_serialized_read_with_deadline(
     })
 }
 
-fn tick_offline_catalogue_connection(
-    connection: &Rc<LocalMutex<PeerConnection<groove::storage::TestStorage>>>,
-) {
+fn tick_offline_catalogue_connection(connection: &Rc<LocalMutex<PeerConnection>>) {
     block_on(Box::pin(connection.borrow_mut().tick())).unwrap();
 }
 
-fn assert_offline_catalogue_all_denied(
-    db: &Db<groove::storage::TestStorage>,
-    query: &PreparedQuery,
-) {
+fn assert_offline_catalogue_all_denied(db: &Db, query: &PreparedQuery) {
     assert!(block_on(Box::pin(db.all(query, ReadOpts::default()))).is_err());
 }
 
-fn assert_offline_catalogue_relation_denied(
-    db: &Db<groove::storage::TestStorage>,
-    query: &PreparedQuery,
-) {
+fn assert_offline_catalogue_relation_denied(db: &Db, query: &PreparedQuery) {
     assert!(
         block_on(Box::pin(
             db.all_relation_snapshot(query, ReadOpts::default())
@@ -97,10 +89,7 @@ fn assert_offline_catalogue_relation_denied(
     );
 }
 
-fn assert_offline_catalogue_subscription_denied(
-    db: &Db<groove::storage::TestStorage>,
-    query: &PreparedQuery,
-) {
+fn assert_offline_catalogue_subscription_denied(db: &Db, query: &PreparedQuery) {
     assert!(block_on(Box::pin(db.subscribe(query, ReadOpts::default()))).is_err());
 }
 
@@ -608,9 +597,9 @@ fn assert_snapshot_preserves_offline_enum_rows(descendant: bool) {
 }
 
 pub(super) fn assert_authority_rejects_staged_write(
-    client: &Db<RocksDbStorage>,
+    client: &Db,
     server: &CoreDb,
-    write: &WriteHandle<RocksDbStorage>,
+    write: &WriteHandle,
 ) {
     assert_eq!(
         write.write_state().unwrap(),

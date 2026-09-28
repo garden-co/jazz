@@ -148,7 +148,7 @@ fn receive_poll_backpressure_defers_schema_admission_and_failed_is_terminal() {
 }
 
 fn finish_catalogue_bootstrap_before_control_backpressure(
-    subscriber: &Rc<LocalMutex<PeerConnection<RocksDbStorage>>>,
+    subscriber: &Rc<LocalMutex<PeerConnection>>,
     outbound: &Rc<RefCell<VecDeque<SyncMessage>>>,
 ) {
     subscriber.borrow_mut().transport = Box::new(BackpressureOnceTransport {

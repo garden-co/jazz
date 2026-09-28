@@ -30,7 +30,7 @@ fn view_updates_drop_unknown_usage_site_bindings() {
 /// consume the same physical row; the wire must carry that version only once.
 fn covered_input_receiver_fixture() -> (
     tempfile::TempDir,
-    NodeState<RocksDbStorage>,
+    NodeState,
     crate::protocol::AuthorityResultKey,
     crate::protocol::SupportingRow,
     crate::protocol::ViewUpdatePayload,
@@ -127,7 +127,7 @@ fn covered_input_receiver_fixture() -> (
 // Malformed ingress has no public construction boundary; assert the complete
 // receiver update is rejected before either its inputs or receipt advance.
 fn assert_covered_input_rejected_atomically(
-    receiver: &mut NodeState<RocksDbStorage>,
+    receiver: &mut NodeState,
     authority_result: &crate::protocol::AuthorityResultKey,
     update: crate::protocol::ViewUpdatePayload,
 ) {

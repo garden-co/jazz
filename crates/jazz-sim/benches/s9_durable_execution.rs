@@ -43,10 +43,10 @@ const EVENTS: &str = "events";
 
 struct WorkerHarness {
     _dir: TempDir,
-    db: Db<RocksDbStorage>,
+    db: Db,
     author: AuthorSubject,
     _relay_dir: TempDir,
-    relay: NodeState<RocksDbStorage>,
+    relay: NodeState,
     relay_peer: PeerState,
     client_peer: PeerState,
     query_server: DirectDbQueryServer,
@@ -54,7 +54,7 @@ struct WorkerHarness {
     hydrated_tables: BTreeSet<String>,
     outbound: Rc<RefCell<VecDeque<SyncMessage>>>,
     inbound: Rc<RefCell<VecDeque<SyncMessage>>>,
-    _upstream: Rc<futures::lock::Mutex<jazz::db::PeerConnection<RocksDbStorage>>>,
+    _upstream: Rc<futures::lock::Mutex<jazz::db::PeerConnection>>,
 }
 
 struct QueueTransport {
@@ -526,7 +526,7 @@ fn next_runnable_instance(oracle: &[u64], offset: usize, config: &Config) -> Opt
 }
 
 struct AcceptState<'a> {
-    core: &'a mut NodeState<RocksDbStorage>,
+    core: &'a mut NodeState,
     global_time: &'a mut u64,
     accepted_schedule: &'a mut Vec<Transition>,
     oracle: &'a mut [u64],
@@ -557,7 +557,7 @@ fn record_accept(
 
 fn apply_transition(
     client: &mut WorkerHarness,
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     instance: usize,
     expected_step: u64,
     steps_per_instance: usize,
@@ -628,7 +628,7 @@ fn apply_transition(
 }
 
 fn append_step_and_event(
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     global_time: &mut u64,
     transition: Transition,
     now_ms: u64,
@@ -680,7 +680,7 @@ fn append_step_and_event(
     accept_global(core, event_tx.0, global_time);
 }
 
-fn seed_fixture(config: &Config, core: &mut NodeState<RocksDbStorage>, global_time: &mut u64) {
+fn seed_fixture(config: &Config, core: &mut NodeState, global_time: &mut u64) {
     let tx = commit_mergeable_unit_settled(
         core,
         MergeableCommit::new(WORKFLOWS, workflow_row(), 1).cells(cells_map([
@@ -956,11 +956,7 @@ fn emit_summary(input: SummaryInputs<'_>) {
     );
 }
 
-fn assert_dashboard_matches(
-    node: &mut NodeState<RocksDbStorage>,
-    oracle: &[u64],
-    steps_per_instance: usize,
-) {
+fn assert_dashboard_matches(node: &mut NodeState, oracle: &[u64], steps_per_instance: usize) {
     let schema = schema();
     let table = table_schema(&schema, INSTANCES);
     let running = jazz::db::block_on(node.current_rows(INSTANCES, DurabilityTier::Local))
@@ -975,7 +971,7 @@ fn assert_dashboard_matches(
     assert_eq!(running, expected);
 }
 
-fn assert_tailers_gap_free(node: &mut NodeState<RocksDbStorage>, oracle: &[u64]) {
+fn assert_tailers_gap_free(node: &mut NodeState, oracle: &[u64]) {
     let schema = schema();
     let table = table_schema(&schema, EVENTS);
     let mut seen = BTreeMap::<usize, BTreeSet<u64>>::new();
@@ -996,7 +992,7 @@ fn assert_tailers_gap_free(node: &mut NodeState<RocksDbStorage>, oracle: &[u64])
     }
 }
 
-fn assert_resume_matches(node: &mut NodeState<RocksDbStorage>, oracle: &[u64]) {
+fn assert_resume_matches(node: &mut NodeState, oracle: &[u64]) {
     let schema = schema();
     let table = table_schema(&schema, INSTANCES);
     let rows = jazz::db::block_on(node.current_rows(INSTANCES, DurabilityTier::Local)).unwrap();
@@ -1009,12 +1005,7 @@ fn assert_resume_matches(node: &mut NodeState<RocksDbStorage>, oracle: &[u64]) {
     }
 }
 
-fn sync_tables(
-    core: &mut NodeState<RocksDbStorage>,
-    node: &mut NodeState<RocksDbStorage>,
-    peer: &mut PeerState,
-    tables: &[&str],
-) {
+fn sync_tables(core: &mut NodeState, node: &mut NodeState, peer: &mut PeerState, tables: &[&str]) {
     for table in tables {
         register_table_receiver(node, table, peer.identity());
         let update = table_query_update(core, peer, table, true);
@@ -1022,11 +1013,7 @@ fn sync_tables(
     }
 }
 
-fn register_table_receiver(
-    node: &mut NodeState<RocksDbStorage>,
-    table: &str,
-    identity: AuthorSubject,
-) {
+fn register_table_receiver(node: &mut NodeState, table: &str, identity: AuthorSubject) {
     let shape = Query::from(table).validate(&schema()).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     register_query_receiver(
@@ -1043,7 +1030,7 @@ fn register_table_receiver(
 }
 
 fn table_query_update(
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     peer: &mut PeerState,
     table: &str,
     reset: bool,
@@ -1057,11 +1044,7 @@ fn table_query_update(
     }
 }
 
-fn sync_worker_tables(
-    core: &mut NodeState<RocksDbStorage>,
-    worker: &mut WorkerHarness,
-    tables: &[&str],
-) {
+fn sync_worker_tables(core: &mut NodeState, worker: &mut WorkerHarness, tables: &[&str]) {
     for table in tables {
         let reset = worker.hydrated_tables.insert((*table).to_owned());
         if reset {
@@ -1155,7 +1138,7 @@ fn open_worker(node_uuid: NodeUuid, relay_uuid: NodeUuid, schema: JazzSchema) ->
     worker
 }
 
-fn accept_global(core: &mut NodeState<RocksDbStorage>, tx: jazz::tx::TxId, global_time: &mut u64) {
+fn accept_global(core: &mut NodeState, tx: jazz::tx::TxId, global_time: &mut u64) {
     jazz::db::block_on(core.apply_fate_update(
         tx,
         Fate::Accepted,
@@ -1201,7 +1184,7 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (TempDir, NodeState<RocksDbStorage>) {
+fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (TempDir, NodeState) {
     let dir = tempfile::tempdir().unwrap();
     let refs = schema.column_families();
     let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -1214,11 +1197,7 @@ fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (TempDir, NodeState<Roc
     (dir, node)
 }
 
-fn open_db(
-    node_uuid: NodeUuid,
-    schema: JazzSchema,
-    author: AuthorSubject,
-) -> (TempDir, Db<RocksDbStorage>) {
+fn open_db(node_uuid: NodeUuid, schema: JazzSchema, author: AuthorSubject) -> (TempDir, Db) {
     let dir = tempfile::tempdir().unwrap();
     let refs = schema.column_families();
     let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();

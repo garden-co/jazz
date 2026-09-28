@@ -24,7 +24,7 @@ fn capability_admission_reuses_only_exact_claim_context_and_clears_with_plans() 
         .validate_runtime(&schema)
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    let set_claim = |node: &mut NodeState<RocksDbStorage>, value: AuthorSubject| {
+    let set_claim = |node: &mut NodeState, value: AuthorSubject| {
         node.set_test_provider_claims(
             alice,
             BTreeMap::from([(
@@ -33,7 +33,7 @@ fn capability_admission_reuses_only_exact_claim_context_and_clears_with_plans() 
             )]),
         );
     };
-    let admit = |node: &mut NodeState<RocksDbStorage>| {
+    let admit = |node: &mut NodeState| {
         crate::local_executor::block_on(node.ensure_peer_maintained_subscription_view_supported(
             &shape,
             &binding,

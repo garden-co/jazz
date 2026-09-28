@@ -126,7 +126,7 @@ fn authorization_proofs_are_existential_before_top_by_windows() {
         .validate(&core.catalogue.schema)
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    let query_rows = |core: &mut NodeState<RocksDbStorage>| {
+    let query_rows = |core: &mut NodeState| {
         core.query_rows_for_link(&shape, &binding, DurabilityTier::Global, reader)
             .unwrap()
             .into_iter()

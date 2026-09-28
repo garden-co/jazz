@@ -4,14 +4,7 @@ use super::*;
 
 // Use the public Db point-read API here: client query handles record predicates,
 // which cannot exercise the name-only RowRead/AbsentRead migration boundary.
-fn renamed_point_read_views(
-    reuse_name: bool,
-) -> (
-    Db<doctest_support::MemoryStorage>,
-    Db<doctest_support::MemoryStorage>,
-    impl Fn(),
-    CoreDb,
-) {
+fn renamed_point_read_views(reuse_name: bool) -> (Db, Db, impl Fn(), CoreDb) {
     let before = build_public_db_test_schema(
         PublicSchemaBuilder::new()
             .table(PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text)),
@@ -1919,7 +1912,7 @@ fn exclusive_tx_overlay_scopes_same_row_uuid_by_table() {
         expected_shared: &RowCells,
         expected_all: BTreeMap<RowUuid, RowCells>,
     ) where
-        T: ExclusiveTxOps<RocksDbStorage>,
+        T: ExclusiveTxOps,
     {
         assert_eq!(
             tx.read(table_name, shared_row).unwrap().as_ref(),
@@ -2746,7 +2739,7 @@ fn mergeable_read_for_write_is_decided_only_by_the_authority() {
         client.tick().unwrap();
     }
 
-    let stage_update = |client: &Db<RocksDbStorage>, author, use_upsert| {
+    let stage_update = |client: &Db, author, use_upsert| {
         block_on(client.transaction_for_identity(author, async |tx| {
             let cells = BTreeMap::from([("title".to_owned(), Value::String("edited".to_owned()))]);
             if use_upsert {

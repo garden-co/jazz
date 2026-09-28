@@ -1274,7 +1274,7 @@ fn prepared_policy_plan_is_recompiled_after_same_identity_claim_revision_changes
     let identity = author(0x84);
     let shape = Query::from("issues").validate_runtime(&schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    let visible_for = |node: &mut NodeState<RocksDbStorage>| {
+    let visible_for = |node: &mut NodeState| {
         node.query_rows_for_link(&shape, &binding, DurabilityTier::Local, identity)
             .unwrap()
             .into_iter()
@@ -1315,7 +1315,7 @@ fn production_policy_union_labels_survive_reorder_and_unrelated_insertion() {
             inherits: Vec::new(),
         }
     }
-    fn labels(node: &NodeState<RocksDbStorage>, branches: &[&str]) -> BTreeSet<String> {
+    fn labels(node: &NodeState, branches: &[&str]) -> BTreeSet<String> {
         let mut query = Query::from("issues");
         query.policy_branches = branches.iter().map(|state| branch(state)).collect();
         let shape = query.validate_runtime(&schema()).unwrap();

@@ -4,7 +4,7 @@
 
 use super::*;
 
-fn fixture() -> (tempfile::TempDir, NodeState<RocksDbStorage>, JazzSchema) {
+fn fixture() -> (tempfile::TempDir, NodeState, JazzSchema) {
     let schema = public_query_eval_schema(
         PublicSchemaBuilder::new()
             .table(
@@ -58,7 +58,7 @@ fn fixture() -> (tempfile::TempDir, NodeState<RocksDbStorage>, JazzSchema) {
 }
 
 fn read(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     schema: &JazzSchema,
     query: Query,
     who: AuthorSubject,
@@ -69,11 +69,7 @@ fn read(
         .unwrap()
 }
 
-fn parent_ids(
-    node: &mut NodeState<RocksDbStorage>,
-    schema: &JazzSchema,
-    who: AuthorSubject,
-) -> BTreeSet<RowUuid> {
+fn parent_ids(node: &mut NodeState, schema: &JazzSchema, who: AuthorSubject) -> BTreeSet<RowUuid> {
     read(node, schema, Query::from("parents"), who)
         .into_iter()
         .map(|row| row.row_uuid())
@@ -213,7 +209,7 @@ fn admitted_program_handoff_preserves_live_inputs_and_reader_isolation() {
 }
 
 fn admit_label_queries(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     schema: &JazzSchema,
     alice: AuthorSubject,
     count: usize,
@@ -267,7 +263,7 @@ fn dashboard_sized_admission_batch_hands_every_program_to_its_installer() {
 }
 
 fn installs_without_compiling(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     alice: AuthorSubject,
     (shape, binding): &(ValidatedQuery, Binding),
 ) -> bool {
@@ -589,7 +585,7 @@ fn local_unavailable_inputs_also_filter_include_deleted_app_sources() {
     let scope = node.local_read_policy_binding(alice).unwrap();
     node.set_local_row_unavailable(&scope, "parents", row(1), true)
         .unwrap();
-    let read = |node: &mut NodeState<RocksDbStorage>, identity| {
+    let read = |node: &mut NodeState, identity| {
         node.query_rows_including_deleted_in_authorization_mode(
             &shape,
             &binding,
@@ -744,10 +740,7 @@ fn local_unavailable_inputs_keep_include_deleted_limit_after_exclusion() {
     }
 }
 
-fn reopen_availability_node(
-    dir: &tempfile::TempDir,
-    schema: &JazzSchema,
-) -> NodeState<RocksDbStorage> {
+fn reopen_availability_node(dir: &tempfile::TempDir, schema: &JazzSchema) -> NodeState {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage =

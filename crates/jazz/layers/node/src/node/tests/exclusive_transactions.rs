@@ -1628,7 +1628,7 @@ fn authority_parks_child_until_unknown_exclusive_parent_rejects() {
 }
 
 fn register_shape_binding_for_receiver(
-    node: &mut crate::node::NodeState<RocksDbStorage>,
+    node: &mut crate::node::NodeState,
     shape: &crate::query::ValidatedQuery,
     binding: &crate::query::Binding,
 ) {

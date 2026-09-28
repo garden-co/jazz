@@ -2619,7 +2619,7 @@ fn encoder_trust_is_assigned_by_connection_role() {
 /// tick cannot finish without outside help. Host bindings poll a tick and
 /// then service the network, so a tick that waits for a peer reply which only
 /// a later turn can request never completes there (#3349).
-fn finish_tick_or_report_stall(db: &Db<RocksDbStorage>) -> Result<(), String> {
+fn finish_tick_or_report_stall(db: &Db) -> Result<(), String> {
     let mut tick = std::pin::pin!(db.tick());
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
     for _ in 0..20_000 {

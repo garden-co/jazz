@@ -20,7 +20,7 @@ fn covered_input_rows(update: &SyncMessage) -> BTreeSet<RowUuid> {
 /// a peer rehydrates it; an unscoped test `Subscribe` followed by a SYSTEM
 /// peer would exercise the deliberately rejected scope-replacement path.
 fn subscribe_query_binding_as_system(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     shape: &ValidatedQuery,
     binding: &Binding,
     opts: &RegisterShapeOptions,
@@ -700,7 +700,7 @@ fn maintained_root_order_keeps_occurrence_sidecar_aligned() {
     let query = Query::from("todos").order_by("rank", OrderDirection::Asc);
     let table = TableSchema::new("todos", [ColumnSchema::new("rank", ColumnType::U64)]);
 
-    NodeState::<RocksDbStorage>::sort_query_rows_with_occurrences(
+    NodeState::<BoxedStorage>::sort_query_rows_with_occurrences(
         &query,
         Some(&table),
         &mut rows,
@@ -772,7 +772,7 @@ fn maintained_aggregate_order_preserves_raw_nullable_keys_and_reports_corrupt_ro
         .order_by("count", OrderDirection::Desc)
         .offset(1)
         .limit(1);
-    NodeState::<RocksDbStorage>::sort_query_rows_with_occurrences(
+    NodeState::<BoxedStorage>::sort_query_rows_with_occurrences(
         &query,
         None,
         &mut rows,
@@ -791,7 +791,7 @@ fn maintained_aggregate_order_preserves_raw_nullable_keys_and_reports_corrupt_ro
     );
     let mut windowed_rows = rows.clone();
     let mut windowed_occurrences = occurrences.clone();
-    NodeState::<RocksDbStorage>::apply_aggregate_window_with_occurrences(
+    NodeState::<BoxedStorage>::apply_aggregate_window_with_occurrences(
         &query,
         &mut windowed_rows,
         &mut windowed_occurrences,
@@ -810,7 +810,7 @@ fn maintained_aggregate_order_preserves_raw_nullable_keys_and_reports_corrupt_ro
     malformed.record =
         std::sync::Arc::new(OwnedRecord::new(vec![], *malformed.record.descriptor()));
     assert!(
-        NodeState::<RocksDbStorage>::sort_query_rows_with_occurrences(
+        NodeState::<BoxedStorage>::sort_query_rows_with_occurrences(
             &query,
             None,
             &mut vec![malformed],

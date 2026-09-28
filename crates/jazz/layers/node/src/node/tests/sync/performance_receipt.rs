@@ -152,7 +152,7 @@ fn policy_graph_version(
 }
 
 fn seed_policy_graph_known_global(
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     schema: &JazzSchema,
     rows: Vec<(&str, RowUuid, BTreeMap<String, Value>)>,
 ) {
@@ -186,7 +186,7 @@ fn seed_policy_graph_known_global(
 fn open_policy_graph_memory_node(
     node_uuid: NodeUuid,
     schema: JazzSchema,
-) -> NodeState<MemoryStorage> {
+) -> NodeState {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     NodeState::new(

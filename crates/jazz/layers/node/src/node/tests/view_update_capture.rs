@@ -149,7 +149,7 @@ fn assert_maintained_subscription_view_tick(
     update
 }
 
-fn capture_receiver(schema: &JazzSchema, receiver_id: u8) -> NodeState<MemoryStorage> {
+fn capture_receiver(schema: &JazzSchema, receiver_id: u8) -> NodeState {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -166,7 +166,7 @@ fn capture_receiver(schema: &JazzSchema, receiver_id: u8) -> NodeState<MemorySto
 }
 
 fn register_capture_receiver(
-    receiver: &mut NodeState<MemoryStorage>,
+    receiver: &mut NodeState,
     shape: &ValidatedQuery,
     binding: &Binding,
     identity: AuthorSubject,
@@ -217,7 +217,7 @@ fn maintained_view_capture_schema() -> JazzSchema {
     )
 }
 
-fn install_test_provider_claims(core: &mut NodeState<RocksDbStorage>, identity: AuthorSubject) {
+fn install_test_provider_claims(core: &mut NodeState, identity: AuthorSubject) {
     if matches!(identity, AuthorSubject::Authenticated(_)) {
         core.set_test_provider_claims(
             identity,
@@ -230,7 +230,7 @@ fn install_test_provider_claims(core: &mut NodeState<RocksDbStorage>, identity: 
 }
 
 fn accept_owner_capture_row(
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     parents: &mut BTreeMap<RowUuid, (Option<TxId>, Option<TxId>)>,
     row_uuid: RowUuid,
     owner: AuthorSubject,
@@ -248,7 +248,7 @@ fn accept_owner_capture_row(
 }
 
 fn accept_capture_delete(
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     parents: &mut BTreeMap<RowUuid, (Option<TxId>, Option<TxId>)>,
     row_uuid: RowUuid,
     made_at: u64,
@@ -311,7 +311,7 @@ struct MaintainedSubscriptionViewSubscription {
     tables: BTreeMap<String, TableSchema>,
     previous_result_set: BTreeSet<ResultRowEntry>,
     peer_complete_tx_payloads: BTreeSet<TxId>,
-    receiver: NodeState<MemoryStorage>,
+    receiver: NodeState,
     receiver_result_set: BTreeSet<ResultRowEntry>,
     receiver_previous_result_set: BTreeSet<ResultRowEntry>,
     receiver_shape: ValidatedQuery,
@@ -322,7 +322,7 @@ struct MaintainedSubscriptionViewSubscription {
 
 impl MaintainedSubscriptionViewSubscription {
     fn new(
-        core: &mut NodeState<RocksDbStorage>,
+        core: &mut NodeState,
         shape: &ValidatedQuery,
         binding: &Binding,
         subscription_key: SubscriptionKey,
@@ -391,7 +391,7 @@ impl MaintainedSubscriptionViewSubscription {
 
     fn update(
         &mut self,
-        core: &mut NodeState<RocksDbStorage>,
+        core: &mut NodeState,
         shape: &ValidatedQuery,
         subscription_key: SubscriptionKey,
         identity: AuthorSubject,
@@ -545,7 +545,7 @@ impl MaintainedSubscriptionViewSubscription {
 
     fn view_update(
         &mut self,
-        core: &mut NodeState<RocksDbStorage>,
+        core: &mut NodeState,
         _shape: &ValidatedQuery,
         subscription_key: SubscriptionKey,
         result_member_adds: Vec<ResultRowEntry>,
@@ -1057,7 +1057,7 @@ fn team_cells(name: &str) -> BTreeMap<String, Value> {
 type CaptureLayerParents = BTreeMap<(&'static str, RowUuid), (Option<TxId>, Option<TxId>)>;
 
 fn accept_recursive_row(
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     parents: &mut CaptureLayerParents,
     table: &'static str,
     row_uuid: RowUuid,
@@ -1077,7 +1077,7 @@ fn accept_recursive_row(
 }
 
 fn delete_recursive_row(
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     parents: &mut CaptureLayerParents,
     table: &'static str,
     row_uuid: RowUuid,
@@ -1339,7 +1339,7 @@ fn seeded_maintained_subscription_view_multitable_capture(
     let mut parents = CaptureLayerParents::new();
     let mut txs = BTreeMap::<(&'static str, RowUuid), TxId>::new();
 
-    let accept = |core: &mut NodeState<RocksDbStorage>,
+    let accept = |core: &mut NodeState,
                   parents: &mut CaptureLayerParents,
                   txs: &mut BTreeMap<(&'static str, RowUuid), TxId>,
                   table: &'static str,
@@ -1676,7 +1676,7 @@ fn seeded_real_peer_maintained_subscription_view_capture(seed: u64, identity: Au
         (identity, seed, "initial"),
     );
 
-    let assert_tick = |core: &mut NodeState<RocksDbStorage>,
+    let assert_tick = |core: &mut NodeState,
                        peer: &mut PeerState,
                        txs: &BTreeMap<RowUuid, TxId>,
                        expected_add_rows: &[RowUuid],

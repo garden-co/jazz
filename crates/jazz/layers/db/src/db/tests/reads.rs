@@ -383,7 +383,7 @@ fn prepared_query_discards_graph_handle_when_runtime_changes() {
     );
 }
 
-fn seed_issue_project(db: &Db<RocksDbStorage>, author: AuthorSubject) {
+fn seed_issue_project(db: &Db, author: AuthorSubject) {
     db.seed_settled_mergeable_for_bootstrap(
         "projects",
         row(10),
@@ -630,7 +630,7 @@ fn open_point_join_db(
     nullable: bool,
     junction_select: PublicPolicyExpr,
     links: &[(RowUuid, RowUuid, &str, &str)],
-) -> Db<RocksDbStorage> {
+) -> Db {
     let grants = || {
         PublicTablePolicies::new()
             .with_insert(PublicPolicyExpr::True)
@@ -705,7 +705,7 @@ fn point_join_link_cells(nullable: bool, issue: RowUuid, tag: &str, scope: &str)
 /// control by id afterwards. Asserts both agree and returns the point join's
 /// rows together with the number of secondary-index probes it made.
 fn point_join_matches_unindexed_control(
-    db: &Db<RocksDbStorage>,
+    db: &Db,
     issue: RowUuid,
     opts: &ReadOpts,
     reader: AuthorSubject,
@@ -907,7 +907,7 @@ fn point_join_tracks_unsettled_link_insert_move_and_delete_like_control() {
     }
 }
 
-fn open_ordered_page_db() -> Db<RocksDbStorage> {
+fn open_ordered_page_db() -> Db {
     let grants = PublicTablePolicies::new()
         .with_select(PublicPolicyExpr::True)
         .with_insert(PublicPolicyExpr::True)
@@ -964,11 +964,7 @@ fn ordered_page_cells(bucket: &str, rank: i64, flag: bool) -> RowCells {
 /// Reads every page shape for `bucket` and compares it with the same query
 /// without a limit, truncated afterwards. The unlimited query never takes the
 /// bounded ordered-page probe, so it is the unbounded control.
-fn ordered_pages_match_unbounded_control(
-    db: &Db<RocksDbStorage>,
-    tier: DurabilityTier,
-    label: &str,
-) {
+fn ordered_pages_match_unbounded_control(db: &Db, tier: DurabilityTier, label: &str) {
     let opts = ReadOpts {
         tier,
         local_updates: LocalUpdates::Immediate,
@@ -1129,7 +1125,7 @@ fn ordered_composite_pages_match_unbounded_query() {
     );
 }
 
-fn open_composite_equality_db() -> Db<RocksDbStorage> {
+fn open_composite_equality_db() -> Db {
     let schema = build_public_db_test_schema(
         PublicSchemaBuilder::new()
             .table(
@@ -1207,11 +1203,7 @@ fn open_composite_equality_db() -> Db<RocksDbStorage> {
 /// compared with the same query under a limit no page reaches. A limit makes
 /// the first result decline composite-equality selection, so it is the
 /// control.
-fn composite_equality_reads_match_control(
-    db: &Db<RocksDbStorage>,
-    tier: DurabilityTier,
-    label: &str,
-) {
+fn composite_equality_reads_match_control(db: &Db, tier: DurabilityTier, label: &str) {
     let opts = ReadOpts {
         tier,
         local_updates: LocalUpdates::Immediate,
@@ -1338,10 +1330,7 @@ fn first_result_uses_guarded_composite_equality_index() {
 
 /// Reads `query` once at Global and returns its rows with the storage reads
 /// it took.
-fn global_page_with_reads(
-    db: &Db<RocksDbStorage>,
-    query: Query,
-) -> (Vec<RowUuid>, groove::db::StorageReadMetrics) {
+fn global_page_with_reads(db: &Db, query: Query) -> (Vec<RowUuid>, groove::db::StorageReadMetrics) {
     let prepared = db.prepare_query(&query).unwrap();
     db.node.node.borrow().reset_storage_read_metrics();
     let rows = block_on(db.all_for_identity(
@@ -1574,7 +1563,7 @@ fn open_covered_join_db(
     nullable: bool,
     tag_single_index: bool,
     junction_select: PublicPolicyExpr,
-) -> Db<RocksDbStorage> {
+) -> Db {
     let grants = || {
         PublicTablePolicies::new()
             .with_insert(PublicPolicyExpr::True)
@@ -1650,7 +1639,7 @@ fn open_covered_join_db(
 /// cannot drop a row. Asserts both agree and returns the sorted rows with the
 /// number of complete current rows the covered-key read hydrated.
 fn covered_join_matches_unfiltered_control(
-    db: &Db<RocksDbStorage>,
+    db: &Db,
     opts: &ReadOpts,
     reader: AuthorSubject,
     label: &str,

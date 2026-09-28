@@ -12,7 +12,7 @@ enum WritePolicyOperation {
 }
 
 fn assert_lowered_write_policy_case(
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     label: &str,
     operation: WritePolicyOperation,
     table: &TableSchema,

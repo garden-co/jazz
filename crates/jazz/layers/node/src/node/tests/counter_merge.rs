@@ -400,7 +400,7 @@ fn duplicate_merges_over_same_frontier_refold_to_identical_cells() {
 }
 
 fn ingest_counter_version(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     schema: &JazzSchema,
     row_uuid: RowUuid,
     tx_id: TxId,
@@ -423,7 +423,7 @@ fn ingest_counter_version(
 }
 
 fn ingest_todos_version(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     schema: &JazzSchema,
     table: &TableSchema,
     row_uuid: RowUuid,
@@ -443,7 +443,7 @@ fn ingest_todos_version(
 }
 
 fn ingest_direct_version(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     schema: &JazzSchema,
     table: &TableSchema,
     row_uuid: RowUuid,
@@ -488,7 +488,7 @@ fn ingest_direct_version(
 }
 
 fn merge_with_parent_set(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     row_uuid: RowUuid,
     parents: &[TxId],
 ) -> VersionRow {

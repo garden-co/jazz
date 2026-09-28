@@ -25,7 +25,7 @@ use futures_channel::oneshot;
 use futures_core::Stream;
 use groove::records::{BorrowedRecord, OwnedRecord, RecordDescriptor, Value};
 use groove::schema::ColumnType as GrooveColumnType;
-use groove::storage::{OrderedKvStorage, ReopenableStorage};
+use groove::storage::{BoxedStorage, OrderedKvStorage, ReopenableStorage};
 use thiserror::Error;
 #[cfg(feature = "cold-settle-attribution")]
 use web_time::Instant;
@@ -96,7 +96,7 @@ pub use wire_transport::{WireFlushStatus, WireSendOutcome, WireTransportAdapter}
 /// intentionally part of the existing `Node` owner rather than a parallel
 /// async facade. A future operation scheduler may replace it with finer-grained
 /// owned sessions once the async lifecycle has settled.
-pub type SharedNodeState<S> = Rc<LocalMutex<NodeState<S>>>;
+pub type SharedNodeState<S = BoxedStorage> = Rc<LocalMutex<NodeState<S>>>;
 
 const DEFAULT_CHUNK_FORWARD_HOPS: u8 = 8;
 const MAX_PENDING_CHUNK_DEMANDS: usize = 4096;
@@ -1437,7 +1437,7 @@ impl groove::chunks::MissingChunkResolver for PeerChunkResolver {
     }
 }
 #[doc(hidden)]
-pub type WeakNodeState<S> = Weak<LocalMutex<NodeState<S>>>;
+pub type WeakNodeState<S = BoxedStorage> = Weak<LocalMutex<NodeState<S>>>;
 
 /// One pending owner schema, shared with its authenticated upstream connections.
 /// Shared futures release their waiter registrations when individual reads cancel.
@@ -1792,7 +1792,7 @@ impl<F: Future> Future for StackSafeFuture<F> {
 }
 
 /// Thread-affine high-level database handle.
-pub struct Db<S>
+pub struct Db<S = BoxedStorage>
 where
     S: OrderedKvStorage,
 {
@@ -3339,7 +3339,7 @@ pub mod doctest_support {
     }
 
     /// Open a fresh Db over in-memory storage.
-    pub async fn open_todos_db() -> Result<Db<MemoryStorage>, Error> {
+    pub async fn open_todos_db() -> Result<Db, Error> {
         let schema = schema();
         let cfs = schema.column_families();
         let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -3885,7 +3885,7 @@ macro_rules! row {
 /// [`MergeableTx`] and [`MergeableTxRef`] implement this trait, so mergeable
 /// CRUD has one definition regardless of who owns the transaction lifetime.
 /// Import this trait to call its methods.
-pub trait MergeableTxOps<S>
+pub trait MergeableTxOps<S = BoxedStorage>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
@@ -4181,7 +4181,7 @@ where
 /// This handle owns the transaction lifetime and abandons an uncommitted
 /// transaction on drop. Use [`MergeableTxRef`] when a caller retains an
 /// [`OpenTransactionId`] between calls and must not close the transaction on return.
-pub struct MergeableTx<'a, S>
+pub struct MergeableTx<'a, S = BoxedStorage>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
@@ -4230,7 +4230,7 @@ where
 ///
 /// Construct this with [`Db::mergeable_tx_ref`] when another layer owns the
 /// [`OpenTransactionId`] lifetime. Dropping this ref never abandons the transaction.
-pub struct MergeableTxRef<'a, S>
+pub struct MergeableTxRef<'a, S = BoxedStorage>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
@@ -4268,7 +4268,7 @@ where
 /// [`ExclusiveTx`] and [`ExclusiveTxRef`] implement this trait, so exclusive
 /// operations have one definition regardless of who owns the transaction
 /// lifetime. Import this trait to call its methods.
-pub trait ExclusiveTxOps<S>
+pub trait ExclusiveTxOps<S = BoxedStorage>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
@@ -4450,7 +4450,7 @@ where
 /// This handle owns the transaction lifetime and abandons an uncommitted
 /// transaction on drop. Use [`ExclusiveTxRef`] when a caller retains an
 /// [`OpenTransactionId`] between calls and must not close the transaction on return.
-pub struct ExclusiveTx<'a, S>
+pub struct ExclusiveTx<'a, S = BoxedStorage>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
@@ -4506,7 +4506,7 @@ where
 ///
 /// Construct this with [`Db::exclusive_tx_ref`] when another layer owns the
 /// [`OpenTransactionId`] lifetime. Dropping this ref never abandons the transaction.
-pub struct ExclusiveTxRef<'a, S>
+pub struct ExclusiveTxRef<'a, S = BoxedStorage>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
@@ -4528,7 +4528,7 @@ where
 }
 
 /// Handle for an applied local write.
-pub struct WriteHandle<S>
+pub struct WriteHandle<S = BoxedStorage>
 where
     S: OrderedKvStorage,
 {

@@ -898,8 +898,8 @@ fn grouped_aggregate_frontiers_preserve_identity_and_validate_payloads() {
 }
 
 fn commit_metric_global_to_authority(
-    writer: &mut NodeState<RocksDbStorage>,
-    authority: &mut NodeState<RocksDbStorage>,
+    writer: &mut NodeState,
+    authority: &mut NodeState,
     row_uuid: RowUuid,
     bucket: &str,
     score: i64,

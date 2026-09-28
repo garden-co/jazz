@@ -2119,10 +2119,7 @@ fn internal_observer_does_not_consume_authority_rejection() {
     assert_eq!(events.borrow()[0].code, "permission_denied");
 }
 
-fn enqueue_incomplete_upsert(
-    db: &Db<RocksDbStorage>,
-    kind: Option<TransactionKind>,
-) -> WriteHandle<RocksDbStorage> {
+fn enqueue_incomplete_upsert(db: &Db, kind: Option<TransactionKind>) -> WriteHandle {
     match kind {
         None => db
             .enqueue_upsert(
@@ -4237,7 +4234,7 @@ fn default_insert_keeps_subject_and_made_by_equal() {
     assert_eq!(prepared_read(&db, &db.table("todos")).len(), 1);
 }
 
-fn queued_local_publication(db: &Db<RocksDbStorage>, expects_upload_unit: bool) -> TxId {
+fn queued_local_publication(db: &Db, expects_upload_unit: bool) -> TxId {
     let publications = db.node.pending_local_publications.borrow();
     assert_eq!(
         publications.len(),
@@ -4249,11 +4246,7 @@ fn queued_local_publication(db: &Db<RocksDbStorage>, expects_upload_unit: bool) 
     publication.published.tx_id()
 }
 
-fn cancel_during_subscription_refresh<F, T>(
-    db: &Db<RocksDbStorage>,
-    future: F,
-    expects_upload_unit: bool,
-) -> TxId
+fn cancel_during_subscription_refresh<F, T>(db: &Db, future: F, expects_upload_unit: bool) -> TxId
 where
     F: Future<Output = Result<T, Error>>,
 {
@@ -4281,7 +4274,7 @@ where
     panic!("publication never transferred to the node-owned persistence queue")
 }
 
-fn settle_cancelled_local_publication(db: &Db<RocksDbStorage>, tx_id: TxId) {
+fn settle_cancelled_local_publication(db: &Db, tx_id: TxId) {
     block_on(db.tick()).unwrap();
     assert!(db.node.pending_local_publications.borrow().is_empty());
     assert_eq!(

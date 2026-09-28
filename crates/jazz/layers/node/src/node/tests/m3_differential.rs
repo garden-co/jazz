@@ -33,7 +33,7 @@ struct DifferentialShape {
 
 struct DifferentialOracle {
     peers: Vec<PeerState>,
-    receivers: Vec<NodeState<MemoryStorage>>,
+    receivers: Vec<NodeState>,
     shapes: Vec<DifferentialShape>,
     rows: Vec<BTreeMap<(String, RowUuid), BTreeMap<String, Value>>>,
     aggregates: Vec<AggregateDifferential>,
@@ -46,7 +46,7 @@ struct AggregateDifferential {
     identity: AuthorSubject,
     subscription: SubscriptionKey,
     peer: PeerState,
-    receiver: NodeState<MemoryStorage>,
+    receiver: NodeState,
     output: &'static str,
     agreement: AggregateAgreement,
     values: BTreeMap<u64, Value>,
@@ -1609,7 +1609,7 @@ fn relation_doc_access_shape() -> Query {
     .expect("single-hop relation facade should normalize")
 }
 
-fn seed_m3_differential_base(core: &mut NodeState<RocksDbStorage>, seed: u64) {
+fn seed_m3_differential_base(core: &mut NodeState, seed: u64) {
     let alice = user(0xa1);
     let bob = user(0xb2);
     for (team, name, identity) in [
@@ -1810,7 +1810,7 @@ fn seed_m3_differential_base(core: &mut NodeState<RocksDbStorage>, seed: u64) {
 
 type TableLayerParents = BTreeMap<(&'static str, RowUuid), (Option<TxId>, Option<TxId>)>;
 
-fn m3_differential_parent_map(core: &mut NodeState<RocksDbStorage>) -> TableLayerParents {
+fn m3_differential_parent_map(core: &mut NodeState) -> TableLayerParents {
     let mut parents = BTreeMap::new();
     for table in [
         "docs",
@@ -1874,7 +1874,7 @@ fn team_edge_commit(
 }
 
 fn accept_with_parent(
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     parents: &mut TableLayerParents,
     table: &'static str,
     row_uuid: RowUuid,
@@ -1894,7 +1894,7 @@ fn accept_with_parent(
 }
 
 fn delete_with_parent(
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     parents: &mut TableLayerParents,
     table: &'static str,
     row_uuid: RowUuid,
@@ -1914,7 +1914,7 @@ fn delete_with_parent(
 }
 
 fn add_visible_doc(
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     parents: &mut TableLayerParents,
     step: u64,
 ) {
@@ -1941,7 +1941,7 @@ fn add_visible_doc(
 }
 
 fn add_hidden_doc(
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     parents: &mut TableLayerParents,
     step: u64,
 ) {
@@ -1956,7 +1956,7 @@ fn add_hidden_doc(
 }
 
 fn revoke_edge_access(
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     parents: &mut TableLayerParents,
     step: u64,
 ) {
@@ -1964,7 +1964,7 @@ fn revoke_edge_access(
 }
 
 fn grant_edge_access(
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     parents: &mut TableLayerParents,
     step: u64,
 ) {
@@ -1985,7 +1985,7 @@ fn grant_edge_access(
 }
 
 fn delete_visible_child(
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     parents: &mut TableLayerParents,
     step: u64,
 ) {
@@ -1993,7 +1993,7 @@ fn delete_visible_child(
 }
 
 fn restore_visible_child(
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     parents: &mut TableLayerParents,
     step: u64,
 ) {
@@ -2011,7 +2011,7 @@ fn restore_visible_child(
 }
 
 fn update_created_at_match(
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     parents: &mut TableLayerParents,
     step: u64,
 ) {
@@ -2097,7 +2097,7 @@ fn one_shot_aggregate_values<S: OrderedKvStorage>(
 /// The authority ships only the exact, policy-scoped source closure. Output is
 /// deliberately computed by a separately registered client receiver; it must
 /// never be read back from authority result facts on the update.
-fn maintained_receiver(schema: &JazzSchema, receiver_id: u8) -> NodeState<MemoryStorage> {
+fn maintained_receiver(schema: &JazzSchema, receiver_id: u8) -> NodeState {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()

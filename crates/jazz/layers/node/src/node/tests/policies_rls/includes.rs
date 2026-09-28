@@ -243,7 +243,7 @@ fn point_read_authorization_selects_only_the_requested_row() {
     );
 }
 
-fn required_include_shape(core: &NodeState<RocksDbStorage>, include: Include) -> ValidatedQuery {
+fn required_include_shape(core: &NodeState, include: Include) -> ValidatedQuery {
     Query::from("roots")
         .include_with(include)
         .validate(&core.catalogue.schema)
@@ -251,7 +251,7 @@ fn required_include_shape(core: &NodeState<RocksDbStorage>, include: Include) ->
 }
 
 fn required_include_rows(
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     shape: &ValidatedQuery,
     identity: AuthorSubject,
 ) -> Vec<CurrentRow> {
@@ -267,7 +267,7 @@ fn required_include_rows(
 }
 
 fn seed_required_include_fixture(
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     readable_owner: AuthorSubject,
 ) {
     core.set_test_provider_claims(
@@ -303,7 +303,7 @@ fn seed_required_include_fixture(
     core.accept_global_for_test(root_tx).unwrap();
 }
 
-fn seed_missing_required_include_fixture(core: &mut NodeState<RocksDbStorage>) {
+fn seed_missing_required_include_fixture(core: &mut NodeState) {
     let root_tx = core
         .commit_mergeable_many_settled(vec![
             MergeableCommit::new("roots", row(0xd1), 20).cells(BTreeMap::from([
@@ -321,7 +321,7 @@ fn seed_missing_required_include_fixture(core: &mut NodeState<RocksDbStorage>) {
     core.accept_global_for_test(root_tx).unwrap();
 }
 
-fn seed_null_required_include_fixture(core: &mut NodeState<RocksDbStorage>) {
+fn seed_null_required_include_fixture(core: &mut NodeState) {
     let root_tx = core
         .commit_mergeable_many_settled(vec![
             MergeableCommit::new("roots", row(0xd1), 20)
@@ -367,7 +367,7 @@ fn multi_segment_required_include_rls_schema() -> JazzSchema {
 }
 
 fn seed_multi_segment_include_fixture(
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     readable_owner: AuthorSubject,
 ) {
     core.set_test_provider_claims(

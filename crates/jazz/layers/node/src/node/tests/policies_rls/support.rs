@@ -1,6 +1,6 @@
 // Shared accepted-write, priority, recursion, and maintained-view assertions.
 
-fn accept_global(core: &mut NodeState<RocksDbStorage>, commit: MergeableCommit) -> TxId {
+fn accept_global(core: &mut NodeState, commit: MergeableCommit) -> TxId {
     let tx_id = core.commit_mergeable_settled(commit).unwrap();
     core.accept_global_for_test(tx_id).unwrap();
     tx_id
@@ -85,7 +85,7 @@ fn recursive_reachable_schema() -> JazzSchema {
     )
 }
 
-fn seed_recursive_reachable_fixture(core: &mut NodeState<RocksDbStorage>) {
+fn seed_recursive_reachable_fixture(core: &mut NodeState) {
     for id in 1..=5 {
         accept_global(
             core,
@@ -138,7 +138,7 @@ fn team(id: u8) -> uuid::Uuid {
 }
 
 fn assert_query_engine_maintained_seed_matches_public_rows_and_witnesses(
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     shape: &ValidatedQuery,
     binding: &Binding,
     identity: AuthorSubject,
@@ -198,7 +198,7 @@ fn assert_query_engine_maintained_seed_matches_public_rows_and_witnesses(
 }
 
 fn assert_maintained_view_cold_snapshot_seed_matches_one_shot(
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     shape: &ValidatedQuery,
     binding: &Binding,
     identity: AuthorSubject,

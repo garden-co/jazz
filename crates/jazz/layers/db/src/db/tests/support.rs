@@ -169,7 +169,7 @@ pub(super) fn rocks_storage(schema: &JazzSchema) -> RocksDbStorage {
     RocksDbStorage::open(&path, &refs).unwrap()
 }
 
-pub(super) fn open_db(node: u8, author: AuthorSubject, schema: &JazzSchema) -> Db<RocksDbStorage> {
+pub(super) fn open_db(node: u8, author: AuthorSubject, schema: &JazzSchema) -> Db {
     let storage = rocks_storage(schema);
     block_on(Db::open(DbConfig {
         schema: schema.clone(),
@@ -1818,7 +1818,7 @@ pub(super) fn issue_cells(
 }
 
 pub(super) struct CoreDb {
-    pub(super) server: Node<RocksDbStorage>,
+    pub(super) server: Node,
     schema: JazzSchema,
     author: AuthorSubject,
     pub(super) next_now_ms: Cell<u64>,
@@ -1870,7 +1870,7 @@ impl CoreDb {
             .author_schema_lineage_publication(schema, lens, new_tables, dropped_tables)?)
     }
 
-    pub(super) fn node(&self) -> SharedNodeState<RocksDbStorage> {
+    pub(super) fn node(&self) -> SharedNodeState {
         self.server.node()
     }
 
@@ -1912,11 +1912,7 @@ impl CoreDb {
         .map_err(Into::into)
     }
 
-    pub(super) fn insert(
-        &self,
-        table: &str,
-        cells: RowCells,
-    ) -> Result<WriteHandle<RocksDbStorage>, Error> {
+    pub(super) fn insert(&self, table: &str, cells: RowCells) -> Result<WriteHandle, Error> {
         let row = self.id_source.borrow_mut().next_row_id();
         self.insert_with_id(table, row, cells)
     }
@@ -1926,7 +1922,7 @@ impl CoreDb {
         table: &str,
         row: RowUuid,
         cells: RowCells,
-    ) -> Result<WriteHandle<RocksDbStorage>, Error> {
+    ) -> Result<WriteHandle, Error> {
         let node = self.server.node();
         let published = block_on(
             node.borrow_mut().commit_mergeable(
@@ -1955,7 +1951,7 @@ impl CoreDb {
         branch: BranchSelector,
         row: RowUuid,
         cells: RowCells,
-    ) -> Result<WriteHandle<RocksDbStorage>, Error> {
+    ) -> Result<WriteHandle, Error> {
         let node = self.server.node();
         let published = block_on(
             node.borrow_mut().commit_mergeable(
@@ -2009,7 +2005,7 @@ impl CoreDb {
         made_by: AuthorSubject,
         table: &str,
         cells: RowCells,
-    ) -> Result<WriteHandle<RocksDbStorage>, Error> {
+    ) -> Result<WriteHandle, Error> {
         let row = self.id_source.borrow_mut().next_row_id();
         let node = self.server.node();
         let published = block_on(
@@ -2039,7 +2035,7 @@ impl CoreDb {
         table: &str,
         row: RowUuid,
         patch: RowCells,
-    ) -> Result<WriteHandle<RocksDbStorage>, Error> {
+    ) -> Result<WriteHandle, Error> {
         self.update_attributed(self.author, table, row, patch)
     }
 
@@ -2049,7 +2045,7 @@ impl CoreDb {
         table: &str,
         row: RowUuid,
         patch: RowCells,
-    ) -> Result<WriteHandle<RocksDbStorage>, Error> {
+    ) -> Result<WriteHandle, Error> {
         let table_schema = self
             .schema
             .tables
@@ -2099,7 +2095,7 @@ impl CoreDb {
         &self,
         transport: Box<dyn Transport>,
         identity: AuthorSubject,
-    ) -> Rc<LocalMutex<PeerConnection<RocksDbStorage>>> {
+    ) -> Rc<LocalMutex<PeerConnection>> {
         self.server.accept_subscriber_with_claims(
             transport,
             identity,
@@ -2112,7 +2108,7 @@ impl CoreDb {
         transport: Box<dyn Transport>,
         identity: AuthorSubject,
         trust: CommitUnitTrust,
-    ) -> Rc<LocalMutex<PeerConnection<RocksDbStorage>>> {
+    ) -> Rc<LocalMutex<PeerConnection>> {
         self.server.accept_subscriber_with_claims_and_trust(
             transport,
             identity,
@@ -2127,7 +2123,7 @@ impl CoreDb {
         identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
         admission_epoch: u64,
-    ) -> Rc<LocalMutex<PeerConnection<RocksDbStorage>>> {
+    ) -> Rc<LocalMutex<PeerConnection>> {
         self.server.accept_scope_isolated_relay_subscriber(
             transport,
             identity,
@@ -2141,7 +2137,7 @@ impl CoreDb {
         transport: Box<dyn Transport>,
         identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
-    ) -> Rc<LocalMutex<PeerConnection<RocksDbStorage>>> {
+    ) -> Rc<LocalMutex<PeerConnection>> {
         self.server
             .accept_test_subscriber_with_claims(transport, identity, claims)
     }
@@ -2151,7 +2147,7 @@ impl CoreDb {
         transport: Box<dyn Transport>,
         identity: AuthorSubject,
         cursor: ResumeCursor,
-    ) -> Rc<LocalMutex<PeerConnection<RocksDbStorage>>> {
+    ) -> Rc<LocalMutex<PeerConnection>> {
         self.server
             .accept_subscriber_with_resume(transport, identity, cursor)
     }

@@ -91,7 +91,7 @@ fn schema() -> JazzSchema {
     compile_schema(&builder.build())
 }
 
-fn open_client(seed: u8, author: AuthorSubject, schema: JazzSchema) -> Db<TestStorage> {
+fn open_client(seed: u8, author: AuthorSubject, schema: JazzSchema) -> Db {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open(
@@ -108,7 +108,7 @@ fn open_client(seed: u8, author: AuthorSubject, schema: JazzSchema) -> Db<TestSt
     .expect("open client")
 }
 
-fn open_server(seed: u8, schema: JazzSchema) -> Db<TestStorage> {
+fn open_server(seed: u8, schema: JazzSchema) -> Db {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open_history_complete(
@@ -145,11 +145,7 @@ fn cells(title: &str, owner: AuthorSubject) -> BTreeMap<String, Value> {
     ])
 }
 
-fn seed_fixture(
-    server: &Db<TestStorage>,
-    visible_owner: AuthorSubject,
-    hidden_owner: AuthorSubject,
-) {
+fn seed_fixture(server: &Db, visible_owner: AuthorSubject, hidden_owner: AuthorSubject) {
     for (idx, table) in TABLES.iter().enumerate() {
         server
             .seed_settled_mergeable_for_bootstrap(
@@ -256,8 +252,8 @@ fn drain_events(
 }
 
 fn drive(
-    server: &Db<TestStorage>,
-    client: &Db<TestStorage>,
+    server: &Db,
+    client: &Db,
     streams: &mut BTreeMap<&'static str, jazz::db::SubscriptionStream>,
     table_schemas: &BTreeMap<&'static str, TableSchema>,
     traces: &mut BTreeMap<&'static str, Vec<EventTrace>>,
@@ -272,7 +268,7 @@ fn drive(
 }
 
 fn final_rows(
-    client: &Db<TestStorage>,
+    client: &Db,
     table_schemas: &BTreeMap<&'static str, TableSchema>,
 ) -> BTreeMap<&'static str, Vec<RowSummary>> {
     TABLES

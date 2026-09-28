@@ -750,7 +750,7 @@ fn trusted_catalogue_snapshot_imports_historical_lineage_without_rebuilding_acti
 }
 
 fn write_catalogue_record(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     kind: &[u8],
     id: uuid::Uuid,
     payload: Vec<u8>,
@@ -889,7 +889,7 @@ fn pending_catalogue_write_pointer_reopen_rejects_duplicate_revision() {
     ));
 }
 
-fn delete_catalogue_record(node: &mut NodeState<RocksDbStorage>, kind: &[u8], id: uuid::Uuid) {
+fn delete_catalogue_record(node: &mut NodeState, kind: &[u8], id: uuid::Uuid) {
     let mut batch = node.database.open_batch();
     batch.delete(
         "jazz_catalogue",
@@ -920,7 +920,7 @@ fn test_catalogue_kind(kind: &[u8]) -> crate::node::codec::CatalogueRecordKind {
 }
 
 fn write_raw_catalogue_kind(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     kind: u64,
     id: uuid::Uuid,
 ) {
@@ -981,7 +981,7 @@ fn catalogue_kernel_kind_fixture_is_exact_and_closed() {
     assert!(CatalogueRecordKind::from_key(u64::MAX).is_err());
 }
 
-fn delete_catalogue_pointer(node: &mut NodeState<RocksDbStorage>, revision: u64) {
+fn delete_catalogue_pointer(node: &mut NodeState, revision: u64) {
     let mut batch = node.database.open_batch();
     batch.delete(
         "jazz_catalogue_pointer",
@@ -993,13 +993,13 @@ node.database.finish_persistence(persisted).unwrap();
 }
 
 fn write_schema_mapping_record(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     alias: SchemaVersionAlias,
     schema: SchemaVersionId,
     mapping: &SchemaPhysicalMapping,
 ) {
     let mut batch = node.database.open_batch();
-    NodeState::<RocksDbStorage>::write_schema_version_mapping_to_batch(
+    NodeState::<BoxedStorage>::write_schema_version_mapping_to_batch(
         &mut batch, alias, schema, mapping,
     )
     .unwrap();
@@ -1008,7 +1008,7 @@ let persisted = crate::local_executor::block_on(applied.persist());
 node.database.finish_persistence(persisted).unwrap();
 }
 
-fn delete_schema_mapping_record(node: &mut NodeState<RocksDbStorage>, alias: SchemaVersionAlias) {
+fn delete_schema_mapping_record(node: &mut NodeState, alias: SchemaVersionAlias) {
     let mut batch = node.database.open_batch();
     batch.delete(
         "jazz_schema_versions",
@@ -1022,7 +1022,7 @@ node.database.finish_persistence(persisted).unwrap();
 fn fresh_dynamic_catalogue_open(
     path: &std::path::Path,
     node_uuid: NodeUuid,
-) -> Result<NodeState<RocksDbStorage>, Error> {
+) -> Result<NodeState, Error> {
     let empty_schema = empty_public_test_schema();
     let cfs = empty_schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -1030,7 +1030,7 @@ fn fresh_dynamic_catalogue_open(
     NodeState::new_catalogue_uninitialized(node_uuid, storage).resolve()
 }
 
-fn write_active_lineage_record(node: &mut NodeState<RocksDbStorage>, staged: &StagedSchemaLineage) {
+fn write_active_lineage_record(node: &mut NodeState, staged: &StagedSchemaLineage) {
     write_catalogue_record(
         node,
         b"schema_lineage_staged",

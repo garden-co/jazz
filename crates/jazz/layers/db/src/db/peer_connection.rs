@@ -445,7 +445,7 @@ fn admitted_provenance_matches(admitted: AuthorSubject, made_by: AuthorSubject) 
 /// simply both at once (one upstream connection plus many subscriber
 /// connections); peer authority (relay/core) stays below this facade in
 /// [`crate::peer`].
-pub struct PeerConnection<S>
+pub struct PeerConnection<S = BoxedStorage>
 where
     S: OrderedKvStorage,
 {
