@@ -87,6 +87,19 @@ const ops = {
     const row = wait ? await write.wait({ tier: wait }) : (write.value ?? write);
     return { id: row.id };
   },
+  // Bulk writer for the oversized first-sync case: `count` rows with a body of
+  // `size` chars, written in batches that each wait for `wait` tier.
+  async bulkInsert({ count, size, batch = 200, wait = "global", prefix = "bulk" }) {
+    const body = "B".repeat(size);
+    const started = Date.now();
+    for (let i = 0; i < count; i += batch) {
+      const writes = [];
+      for (let j = i; j < Math.min(count, i + batch); j++)
+        writes.push(db.insert(app.docs, { label: `${prefix}-${j}`, body, author: "bulk" }));
+      await Promise.all(writes.map((w) => w.wait({ tier: wait })));
+    }
+    return { count, size, ms: Date.now() - started };
+  },
   async update({ id, values, wait }) {
     const write = db.update(app.docs, id, values);
     if (wait) await write.wait({ tier: wait });
@@ -134,6 +147,25 @@ const ops = {
       `sub ${sub} ${absent ? "absent" : "has"} ${id}`,
       ms,
     ).then(() => ({ updates: state.updates }));
+  },
+  // Wait until a subscription holds exactly `count` rows whose label starts
+  // with `prefix`; reports how many updates it took (a partial publish shows
+  // up as intermediate counts).
+  async expectSubCount({ sub, count, prefix, ms = 20000 }) {
+    const state = subs.get(sub);
+    const counts = new Set();
+    const started = Date.now();
+    await waitFor(
+      () => {
+        if (state.error) throw new Error(`subscription error: ${state.error}`);
+        const n = state.rows?.filter((r) => r.label.startsWith(prefix)).length ?? null;
+        if (n !== null) counts.add(n);
+        return { done: n === count, value: { updates: state.updates, n } };
+      },
+      `sub ${sub} count ${count}`,
+      ms,
+    );
+    return { updates: state.updates, counts: [...counts], ms: Date.now() - started };
   },
   async disconnect() {
     await db.disconnect();

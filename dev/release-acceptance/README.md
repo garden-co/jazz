@@ -213,8 +213,22 @@ published one is `node_modules/jazz-tools/bin/native/jazz-tools-linux-x64`
 ```
 
 Run `node dev/release-acceptance/mixed-version.mjs /absolute/config.json`.
-Optional keys: `only` (cell names), `skipLarge` (skip the 800KB value checks),
-`largeSizes`. Each cell uses a fresh server store, deploys schema (mixed cells
+Optional keys: `only` (cell names; naming an opt-in cell runs it),
+`skipLarge` (skip the 800KB value checks), `largeSizes`, `deadlineMinutes`.
+
+Checks that only make sense for some version pairs are opt-in:
+
+- `legacyEdgeTier: true`: old clients also write and read with the retired
+  `"edge"` durability name (alpha.56 and earlier).
+- `serverEdges: true`: runs the `edge` cells, which start an old server as an
+  edge (`--upstream-url`) in front of a new Core and check that the new CLI
+  refuses `--upstream-url` (alpha.56 -> alpha.57, where server edges were removed).
+- `oversized: { "count": 4800, "size": 60000, "batch": 20, "readerMinutes": 15 }`:
+  runs the `oversized-first-sync-*` cells, where a fresh whole-table subscriber's
+  first snapshot exceeds the routed payload limit (#3520). These take a long time;
+  raise `deadlineMinutes` (150 was enough for the alpha.57 run).
+
+The alpha.56 -> alpha.57 check used all three. Each cell uses a fresh server store, deploys schema (mixed cells
 deploy with the other version's CLI), and drives two client processes through
 global-tier insert/update/delete, remote point reads, subscriptions in both
 directions, 800KB chunked values, the legacy `"edge"` tier from old clients,

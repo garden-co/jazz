@@ -11,8 +11,12 @@
 //       "old": { "project": "/abs/project-with-jazz-tools@current", "cli": "/abs/jazz-tools-binary" },
 //       "new": { "project": "/abs/project-with-jazz-tools@candidate", "cli": "/abs/jazz-tools-binary" }
 //     },
-//     "only": ["cell-name", ...],  // optional
-//     "skipLarge": false           // optional: skip the 800KB value checks
+//     "only": ["cell-name", ...],  // optional; also runs opt-in cells named here
+//     "skipLarge": false,          // optional: skip the 800KB value checks
+//     "legacyEdgeTier": false,     // old clients still accept the "edge" tier
+//     "serverEdges": false,        // run the retired server-edge cells
+//     "oversized": null,           // {count,size,batch,readerMinutes}: oversized first sync
+//     "deadlineMinutes": 30        // whole-run watchdog
 //   }
 //
 // Each `project` is an external npm project with `jazz-tools` (and its native
@@ -22,7 +26,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { spawn } from "node:child_process";
 import {
   readFileSync,
   writeFileSync,
@@ -171,6 +174,8 @@ class Client {
       try {
         msg = JSON.parse(line);
       } catch {
+        this.stdoutLog ??= openSync(join(dir, `client-${name}.stdout.log`), "a", 0o600);
+        writeFileSync(this.stdoutLog, `${line}\n`);
         return; // library logging on stdout
       }
       this.pending.get(msg.rpc)?.(msg);
@@ -390,8 +395,8 @@ async function syncCell(name, sv, va, vb, { deployer = sv, upgradeTo } = {}) {
       [A, va],
       [B, vb],
     ]) {
-      if (v.key !== "old") continue;
-      // alpha.56 apps may still use the retired "edge" durability name.
+      if (v.key !== "old" || !legacyEdgeTier) continue;
+      // Pre-alpha.57 apps may still use the retired "edge" durability name.
       await check(name, `${c.name}-legacy-edge-tier-write+read`, async () => {
         const id = (
           await c.call("insert", {
@@ -586,6 +591,71 @@ async function largeValueCell(name, sv, writer, reader) {
   }
 }
 
+/**
+ * Oversized first sync (#3477/#3520): a fresh whole-table subscriber whose
+ * initial snapshot exceeds the 256 MiB routed payload limit. `writer` fills
+ * the table with settled rows of just-under-inline-limit bodies; then fresh
+ * readers of each version subscribe and must receive every row.
+ */
+async function oversizedCell(name, sv, writer, readers) {
+  const cell = newCell(name);
+  const server = new Server(name, cell.dir, cell.ctx);
+  const clients = [];
+  const count = input.oversized?.count ?? 4800;
+  const size = input.oversized?.size ?? 60_000;
+  const ms = (input.oversized?.readerMinutes ?? 15) * 60_000;
+  try {
+    await check(
+      name,
+      "server-start",
+      async () => ({ url: await server.start(sv), server: sv.version }),
+      { fatal: true },
+    );
+    await check(name, "deploy", () => deploy(name, cell.dir, server, sv), { fatal: true });
+    const open = async (v, cname) => {
+      const c = new Client(name, cell.dir, v, cname);
+      clients.push(c);
+      await c.call("open", {
+        name: cname,
+        appId: cell.ctx.appId,
+        serverUrl: server.url,
+        ms: 30000,
+      });
+      return c;
+    };
+    const W = await open(writer, "w");
+    await check(
+      name,
+      `${writer.key}-writer-bulk-${count}x${size}B-global`,
+      async () =>
+        W.call("bulkInsert", { count, size, batch: input.oversized?.batch ?? 20, ms: 60 * 60_000 }),
+      { fatal: true },
+    );
+    await W.close();
+    const probe = async (label) => {
+      for (const v of readers)
+        await check(name, `${label}-${v.key}-reader-gets-all-${count}`, async () => {
+          const R = await open(v, `r-${label}-${v.key}`);
+          await R.call("subscribe", { sub: "all", tier: "global" });
+          const got = await R.call("expectSubCount", { sub: "all", count, prefix: "bulk-", ms });
+          await R.close();
+          return got;
+        });
+    };
+    await probe("fresh-subscriber");
+    await check(name, "server-restart", async () => {
+      await server.stop();
+      await server.start(sv, { log: "server-restart.log" });
+    });
+    await probe("fresh-subscriber-after-restart");
+  } catch (error) {
+    record(name, "cell-aborted", "fail", { error: String(error?.message ?? error).slice(0, 4000) });
+  } finally {
+    for (const c of clients) await c.close();
+    await server.stop();
+  }
+}
+
 /** Legacy server-edge topologies. Edges are removed on the candidate. */
 async function edgeCells() {
   {
@@ -630,7 +700,8 @@ async function edgeCells() {
         .map((l) => (existsSync(join(edgeDir, l)) ? readFileSync(join(edgeDir, l), "utf8") : ""))
         .join("\n");
       const coreLog = readFileSync(join(cell.dir, "server.log"), "utf8");
-      const hints = [...(logs + "\n" + coreLog).split("\n")]
+      const hints = (logs + "\n" + coreLog)
+        .split("\n")
         .filter((l) => /edge|role|handshake|hello|reject|unsupported/i.test(l))
         .slice(0, 20);
       record(name, "log-evidence", "info", { lines: hints });
@@ -658,6 +729,21 @@ async function edgeCells() {
     });
   }
 }
+
+// Version-pair-specific behavior is opt-in so the harness fits any pair:
+//   legacyEdgeTier: old clients still accept the retired "edge" durability
+//     name (alpha.56 and earlier).
+//   serverEdges: the old CLI can run as a server edge (`--upstream-url`) and
+//     the new one has removed edges (alpha.56 -> alpha.57).
+//   oversized: { count, size, batch, readerMinutes } enables the heavy
+//     oversized first-sync cells (default 4800 x 60KB rows, up to 15 min each).
+const legacyEdgeTier = input.legacyEdgeTier === true;
+const OPTIONAL = {
+  edge: input.serverEdges === true,
+  "oversized-first-sync-new-server-old-writer": Boolean(input.oversized),
+  "oversized-first-sync-old-server-new-writer": Boolean(input.oversized),
+  "oversized-first-sync-new-server-new-only": Boolean(input.oversized),
+};
 
 const CELLS = {
   "baseline-old-server-old-clients": () =>
@@ -689,19 +775,28 @@ const CELLS = {
   "large-values-old-server-old-clients": () =>
     largeValueCell("large-values-old-server-old-clients", V.old, V.old, V.old),
   edge: edgeCells,
+  "oversized-first-sync-new-server-old-writer": () =>
+    oversizedCell("oversized-first-sync-new-server-old-writer", V.new, V.old, [V.old, V.new]),
+  "oversized-first-sync-old-server-new-writer": () =>
+    oversizedCell("oversized-first-sync-old-server-new-writer", V.old, V.new, [V.new, V.old]),
+  "oversized-first-sync-new-server-new-only": () =>
+    oversizedCell("oversized-first-sync-new-server-new-only", V.new, V.new, [V.new]),
 };
 
-const watchdog = setTimeout(() => {
-  console.error("whole-run deadline exceeded");
-  void processes.terminate(1);
-}, 30 * 60_000);
+const watchdog = setTimeout(
+  () => {
+    console.error("whole-run deadline exceeded");
+    void processes.terminate(1);
+  },
+  (input.deadlineMinutes ?? 30) * 60_000,
+);
 try {
   record("run", "versions", "info", {
     old: { version: V.old.version, cli: V.old.cli },
     new: { version: V.new.version, cli: V.new.cli },
   });
   for (const [name, cell] of Object.entries(CELLS)) {
-    if (input.only && !input.only.includes(name)) continue;
+    if (input.only ? !input.only.includes(name) : OPTIONAL[name] === false) continue;
     await cell();
   }
 } finally {
