@@ -2,8 +2,8 @@
 
 Status: draft. The Cloud side lives in `garden-co/infra`
 (`services/cloud/packages/dashboard/src/app/api/v1`). Nothing here is deployed
-until the dashboard ships that API and WorkOS CLI Auth is enabled for the
-dashboard's AuthKit client.
+until the dashboard ships that API. WorkOS CLI Auth needs no configuration:
+it is available automatically for hosted AuthKit, which the dashboard uses.
 
 ## Why
 
@@ -115,8 +115,9 @@ Every route except `cli/config` and `regions` requires
 
 - verifies the RS256 signature against
   `https://api.workos.com/sso/jwks/<WORKOS_CLIENT_ID>` (cached), and checks the
-  issuer (`https://api.workos.com/user_management/<client>`, overridable with
-  `WORKOS_JWT_ISSUER`), expiry and a `user_…` subject;
+  issuer (`https://api.workos.com/user_management/<client>`, plus any
+  comma-separated extras in `WORKOS_JWT_ISSUER`, e.g. for the
+  `auth.jazz.tools` custom domain), expiry and a `user_…` subject;
 - never reads cookies on these routes, so they are not exposed to CSRF;
 - resolves the owning team of an app from the caller's own active
   memberships. A team ID is never trusted from the caller for app routes;
@@ -206,8 +207,9 @@ session plus 15-minute app tokens scoped to what the user may do.
 
 ## Rollout
 
-1. In WorkOS, enable CLI Auth (device authorization) for the dashboard's
-   AuthKit client in each environment.
+1. Nothing to enable in WorkOS: CLI Auth is automatic for hosted AuthKit.
+   If tokens carry the `auth.jazz.tools` custom domain as issuer, add it to
+   the dashboard's `WORKOS_JWT_ISSUER`.
 2. Deploy tenant manager (status by `teamId`), then the dashboard. The API is
    additive; nothing existing changes behaviour.
 3. Release the CLI. Older dashboards answer 404 on `/api/v1/cli/config`, which
