@@ -1,4 +1,4 @@
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { connect, createServer, type Socket } from "node:net";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -9,6 +9,7 @@ import type { Db } from "../runtime/db.js";
 import type { AccountStore } from "../accounts/persistence.js";
 
 const app = s.defineApp({
+  plaintext: s.table({ title: s.string(), done: s.boolean() }, {}),
   projects: s.table({ title: s.string() }, {}),
   notes: s
     .table({ projectId: s.uuid(), body: s.string() }, { project: s.rel("projects", "projectId") })
@@ -69,7 +70,12 @@ async function transportGate(targetUrl: string) {
   };
 }
 
-it.each(["unknown-recipient", "provisional-update", "rejected-founder"] as const)(
+it.each([
+  "unknown-recipient",
+  "provisional-update",
+  "rejected-founder",
+  "plaintext-transaction",
+] as const)(
   "keeps automatic offline initialization fail-closed across %s",
   async (scenario) => {
     const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
@@ -80,6 +86,8 @@ it.each(["unknown-recipient", "provisional-update", "rejected-founder"] as const
       const founderAccount = await localAccountConfig(server.appId, gate.url);
       const permissions = definePermissions(app, ({ policy, session }) => {
         policy.projects.allowRead.always();
+        policy.plaintext.allowRead.always();
+        policy.plaintext.allowInsert.always();
         policy.projects.allowInsert.always();
         policy.notes.allowRead.always();
         policy.notes.allowInsert.always();
@@ -110,6 +118,30 @@ it.each(["unknown-recipient", "provisional-update", "rejected-founder"] as const
       gate.block();
       const founder = await createDb({ ...founderAccount, e2ee: { app, store: privateStore() } });
       clients.push(founder);
+
+      if (scenario === "plaintext-transaction") {
+        await expect(
+          founder.transaction(async (tx) => {
+            expect(await tx.all(app.plaintext, { tier: "local" })).toEqual([]);
+          }),
+        ).rejects.toThrow();
+        const onError = vi.fn();
+        founder.onMutationError(onError);
+        for (const kind of ["mergeable", "exclusive"] as const) {
+          const tx =
+            kind === "exclusive" ? founder.beginExclusiveTransaction() : founder.beginTransaction();
+          tx.insert(app.plaintext, { title: "Must not publish", done: false });
+          tx.upsert(app.plaintext, crypto.randomUUID(), { done: true });
+          await expect(tx.commit().wait({ tier: "local" })).rejects.toThrow();
+          expect(await founder.all(app.plaintext, { tier: "local" })).toEqual([]);
+        }
+        const valid = await founder
+          .insert(app.plaintext, { title: "Ordinary local write", done: false })
+          .wait({ tier: "local" });
+        expect(await founder.all(app.plaintext, { tier: "local" })).toEqual([valid]);
+        expect(onError).not.toHaveBeenCalled();
+        return;
+      }
 
       if (scenario === "unknown-recipient") {
         let pulls = 0;
