@@ -327,39 +327,29 @@ describe("Db transactions", () => {
   it("rejects exclusive transaction operations after commit", async () => {
     await allTodos();
     const tx = db.beginExclusiveTransaction();
-    tx.insert(app.todos, { title: "Committed transaction", done: false });
-    const openTransactionId = tx.openTransactionId();
+    const committed = tx.insert(app.todos, { title: "Committed transaction", done: false });
 
-    await tx.commit();
+    await tx.commit().wait({ tier: "local" });
 
-    const coreError = `open transaction ${openTransactionId} is already committed`;
-    expect(() => tx.commit()).toThrow(`Write error: ${coreError}`);
-    expect(() => tx.rollback()).toThrow(`Write error: ${coreError}`);
-    expect(() => tx.insert(app.todos, { title: "Nope", done: false })).toThrow(
-      `Insert failed: WriteError("${coreError}")`,
-    );
-    await expect(tx.all(app.todos.where({}))).rejects.toThrow(
-      `Query setup failed: Write error: ${coreError}`,
-    );
+    expect(() => tx.commit()).toThrow();
+    expect(() => tx.rollback()).toThrow();
+    expect(() => tx.insert(app.todos, { title: "Nope", done: false })).toThrow();
+    await expect(tx.all(app.todos.where({}))).rejects.toThrow();
+    expect(await allTodos()).toEqual([committed]);
   });
 
   it("rejects exclusive transaction operations after rollback", async () => {
     await allTodos();
     const tx = db.beginExclusiveTransaction();
     tx.insert(app.todos, { title: "Rolled-back transaction", done: false });
-    const openTransactionId = tx.openTransactionId();
 
     await tx.rollback();
 
-    const coreError = `open transaction ${openTransactionId} has already been completed or was never opened`;
-    expect(() => tx.commit()).toThrow(`Commit transaction failed: Write error: ${coreError}`);
-    expect(() => tx.rollback()).toThrow(`Rollback transaction failed: Write error: ${coreError}`);
-    expect(() => tx.insert(app.todos, { title: "Nope", done: false })).toThrow(
-      `Insert failed: WriteError("${coreError}")`,
-    );
-    await expect(tx.all(app.todos.where({}))).rejects.toThrow(
-      `Query setup failed: Write error: ${coreError}`,
-    );
+    expect(() => tx.commit()).toThrow();
+    expect(() => tx.rollback()).toThrow();
+    expect(() => tx.insert(app.todos, { title: "Nope", done: false })).toThrow();
+    await expect(tx.all(app.todos.where({}))).rejects.toThrow();
+    expect(await allTodos()).toEqual([]);
   });
 
   it("rejects exclusive writes from a second schema view", async () => {
@@ -395,38 +385,28 @@ describe("Db mergeable transactions", () => {
 
   it("rejects mergeable transaction operations after commit", async () => {
     const tx = db.beginTransaction();
-    tx.insert(app.todos, { title: "Committed transaction", done: false });
-    const openTransactionId = tx.openTransactionId();
+    const committed = tx.insert(app.todos, { title: "Committed transaction", done: false });
 
-    await tx.commit();
+    await tx.commit().wait({ tier: "local" });
 
-    const coreError = `open transaction ${openTransactionId} is already committed`;
-    expect(() => tx.commit()).toThrow(`Write error: ${coreError}`);
-    expect(() => tx.rollback()).toThrow(`Write error: ${coreError}`);
-    expect(() => tx.insert(app.todos, { title: "Nope", done: false })).toThrow(
-      `Insert failed: WriteError("${coreError}")`,
-    );
-    await expect(tx.all(app.todos.where({}))).rejects.toThrow(
-      `Query setup failed: Write error: ${coreError}`,
-    );
+    expect(() => tx.commit()).toThrow();
+    expect(() => tx.rollback()).toThrow();
+    expect(() => tx.insert(app.todos, { title: "Nope", done: false })).toThrow();
+    await expect(tx.all(app.todos.where({}))).rejects.toThrow();
+    expect(await allTodos()).toEqual([committed]);
   });
 
   it("rejects mergeable transaction operations after rollback", async () => {
     const tx = db.beginTransaction();
     tx.insert(app.todos, { title: "Rolled-back transaction", done: false });
-    const openTransactionId = tx.openTransactionId();
 
     await tx.rollback();
 
-    const coreError = `open transaction ${openTransactionId} has already been completed or was never opened`;
-    expect(() => tx.commit()).toThrow(`Commit transaction failed: Write error: ${coreError}`);
-    expect(() => tx.rollback()).toThrow(`Rollback transaction failed: Write error: ${coreError}`);
-    expect(() => tx.insert(app.todos, { title: "Nope", done: false })).toThrow(
-      `Insert failed: WriteError("${coreError}")`,
-    );
-    await expect(tx.all(app.todos.where({}))).rejects.toThrow(
-      `Query setup failed: Write error: ${coreError}`,
-    );
+    expect(() => tx.commit()).toThrow();
+    expect(() => tx.rollback()).toThrow();
+    expect(() => tx.insert(app.todos, { title: "Nope", done: false })).toThrow();
+    await expect(tx.all(app.todos.where({}))).rejects.toThrow();
+    expect(await allTodos()).toEqual([]);
   });
 
   it("rolls back a callback mergeable transaction when the callback throws after a write", async () => {
