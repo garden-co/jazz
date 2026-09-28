@@ -14,8 +14,9 @@
 )]
 
 //! Jazz's query-engine layer: lowers queries, relations and policies into
-//! groove IVM programs. It sits directly above `jazz-protocol`. The `jazz`
-//! crate re-exports it as `jazz::node::query_engine`, its old path.
+//! groove IVM programs. It sits directly above `jazz-protocol`. The node
+//! layer uses it internally as `node::query_engine`, its old path, and
+//! re-exports the items the public API needs from `jazz::node`.
 
 /// Re-export of the underlying groove crate.
 pub use groove;
