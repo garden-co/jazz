@@ -59,6 +59,9 @@ base64 = "0.22"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 
 [dev-dependencies]
+# Jazz's own tests (and the layer crates' test helpers they call) need the
+# `testing` feature, so a featureless `cargo test -p jazz` enables it here.
+jazz = { path = ".", default-features = false, features = ["testing"] }
 divan.workspace = true
 groove = { workspace = true, default-features = false, features = ["test"] }
 jazz-benchmark-guard = { path = "../benchmark-guard" }
