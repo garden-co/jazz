@@ -51,6 +51,7 @@ const SOCIAL = [
 ];
 
 const LINKS = [
+  { label: "Examples", href: "/examples" },
   { label: "Blog", href: "/blog" },
   { label: "Docs", href: "/docs" },
 ];
