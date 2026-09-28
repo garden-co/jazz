@@ -516,6 +516,9 @@ export class Spaces {
       // deliver revalidates the exact epoch and eligibility in its own authority transaction.
       await this.deliver(expected, state.root, secret, device);
       this.assertOpen();
+      // Delivery adds accepted metadata after the preparation snapshot.
+      // Retain that coherent state before callers can immediately go offline.
+      await this.readAcceptedSnapshot(expected, expected.id);
     } finally {
       secret?.fill(0);
       device.privateKey.fill(0);
