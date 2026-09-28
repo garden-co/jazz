@@ -135,6 +135,11 @@ function printWrapperHelp() {
     "  migrations create     Generate a typed structural migration stub from snapshots or schema hashes",
   );
   console.log("  migrations graph      Visualize the full migration graph");
+  console.log("  login                 Sign in to Jazz Cloud with your dashboard account");
+  console.log("  logout                Forget the stored Jazz Cloud session");
+  console.log("  whoami                Show the signed-in Jazz Cloud user and teams");
+  console.log("  teams list            List your Jazz Cloud teams");
+  console.log("  apps <command>        Manage Jazz Cloud apps (run `apps --help`)");
   console.log("  create                Create a new resource");
   console.log("  server                Run a Jazz server");
   console.log("  help                  Print this message");
@@ -157,7 +162,12 @@ if (!command || command === "--help" || command === "-h") {
   command === "validate" ||
   command === "deploy" ||
   command === "migrations" ||
-  command === "schema"
+  command === "schema" ||
+  command === "login" ||
+  command === "logout" ||
+  command === "whoami" ||
+  command === "teams" ||
+  command === "apps"
 ) {
   const tsCliPath = join(here, "..", "dist", "cli.js");
   if (!existsSync(tsCliPath)) {
