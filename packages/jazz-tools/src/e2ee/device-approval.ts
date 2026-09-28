@@ -17,6 +17,7 @@ import {
   successorContext,
   successorSigningBytes,
   publicSuccessorSigningBytes,
+  successorTargetId,
   verifySuccessor,
 } from "./account-successor.js";
 import type { AccountSuccessor } from "./account-successor.js";
@@ -350,7 +351,10 @@ export class DeviceApproval {
         publicRecord.epochId !== successor.epochId ||
         publicRecord.predecessor !== successor.predecessor ||
         publicRecord.signerId !== successor.signerId ||
-        publicRecord.removedDeviceId !== successor.removedDeviceId ||
+        publicRecord.action !== successor.action ||
+        (publicRecord.removedDeviceId ?? null) !== (successor.removedDeviceId ?? null) ||
+        (publicRecord.retiredRecoveryRootId ?? null) !==
+          (successor.retiredRecoveryRootId ?? null) ||
         publicRecord.membership.length !== successor.membership.length ||
         !publicRecord.membership.every((byte, i) => byte === successor.membership[i])
       )
@@ -371,7 +375,9 @@ export class DeviceApproval {
         continue;
       let revision: string[];
       let recorded: string[];
+      let targetId: string;
       try {
+        targetId = successorTargetId(successor);
         successorSigningBytes(this.application, successor);
         revision = decodeEpochIds(successor.revision);
         recorded = decodeEpochIds(successor.membership);
@@ -386,16 +392,17 @@ export class DeviceApproval {
       if (revision.length !== eligible.size || revision.some((id) => !eligible.has(id))) continue;
       const members = this.members(prior, eligible);
       const signer = raw.requests.find((row) => row.id === successor.signerId);
+      const removesDevice = successor.action === "remove-device";
       if (
         !signer ||
         !members.has(signer.id) ||
-        !members.has(successor.removedDeviceId) ||
+        (removesDevice && !members.has(targetId)) ||
         signer.signingMechanism !== this.signer.mechanism.id ||
         signer.signingVersion !== this.signer.mechanism.version ||
         !(await verifySuccessor(this.application, successor, this.signer, signer.signingPublicKey))
       )
         continue;
-      members.delete(successor.removedDeviceId);
+      if (removesDevice) members.delete(targetId);
       if (recorded.length !== members.size || recorded.some((id) => !members.has(id))) continue;
       view = {
         ...view,
@@ -403,7 +410,7 @@ export class DeviceApproval {
         successor,
         epochPosition: position,
         baseMembers: members,
-        revoked: new Set([...view.revoked, successor.removedDeviceId]),
+        revoked: removesDevice ? new Set([...view.revoked, targetId]) : view.revoked,
         identity: {
           ...view.identity,
           epochId: successor.epochId,
@@ -847,12 +854,23 @@ export class DeviceApproval {
   }
 
   async revoke(deviceId: string): Promise<void> {
+    await this.rotateAccountKey("remove-device", deviceId);
+  }
+
+  async retireRecoveryRoot(rootId: string): Promise<void> {
+    await this.rotateAccountKey("retire-recovery-root", rootId);
+  }
+
+  private async rotateAccountKey(
+    action: "remove-device" | "retire-recovery-root",
+    targetId: string,
+  ): Promise<void> {
     this.throwBackgroundError();
     const snapshot = await this.currentSnapshot();
     const secret = await this.accountKey(snapshot);
     if (!secret || snapshot.revoked.has(this.deviceId)) {
       secret?.fill(0);
-      throw new Error("An active E2EE device must revoke devices");
+      throw new Error("An active E2EE device must rotate the account key");
     }
     const device = await this.loadDevice().catch((error: unknown) => {
       secret.fill(0);
@@ -863,8 +881,13 @@ export class DeviceApproval {
       const revision = await this.eligibleApprovals(snapshot, secret);
       this.assertOpen();
       const members = this.members(snapshot, revision);
-      if (!members.has(this.deviceId) || !members.delete(deviceId))
-        throw new Error("Unknown or inactive E2EE device");
+      if (!members.has(this.deviceId))
+        throw new Error("An active E2EE device must rotate the account key");
+      if (action === "remove-device") {
+        if (!members.delete(targetId)) throw new Error("Unknown or inactive E2EE device");
+      } else if (!snapshot.publicState.recoveryRoots.some((root) => root.id === targetId)) {
+        throw new Error("Unknown or inactive E2EE recovery root");
+      }
       const proposal = await exclusiveE2eeTransaction(this.db, async (tx) => {
         const existing = await tx.all(this.tables.__e2ee_account_successors, { tier: "global" });
         this.assertOpen();
@@ -946,10 +969,15 @@ export class DeviceApproval {
             secret,
           );
           this.assertOpen();
+          const actionTarget =
+            action === "remove-device"
+              ? { removedDeviceId: targetId }
+              : { retiredRecoveryRootId: targetId };
           const row = {
             ...coordinates,
             signerId: this.deviceId,
-            removedDeviceId: deviceId,
+            action,
+            ...actionTarget,
             membership: encodeEpochIds(members),
             revision: encodeEpochIds(revision),
             verification,
@@ -965,7 +993,8 @@ export class DeviceApproval {
           const publicRow = {
             ...coordinates,
             signerId: row.signerId,
-            removedDeviceId: row.removedDeviceId,
+            action: row.action,
+            ...actionTarget,
             membership: row.membership,
             revision: encodePublicApprovalRevision(publicApprovals.map((approval) => approval.id)),
           };
@@ -978,6 +1007,7 @@ export class DeviceApproval {
           const { id, ...columns } = row;
           const { id: publicId, ...publicColumns } = publicRow;
           for (const root of snapshot.publicState.recoveryRoots) {
+            if (action === "retire-recovery-root" && root.id === targetId) continue;
             if (
               root.mechanism !== this.keys.mechanism.id ||
               root.version !== this.keys.mechanism.version

@@ -149,6 +149,14 @@ export class E2ee {
       completion.catch(() => {});
       return { wait: () => completion };
     },
+    revoke: (rootId: string): { wait(): Promise<void> } => {
+      const completion = (async () => {
+        await this.prepare();
+        await this.approval!.retireRecoveryRoot(rootId);
+      })();
+      completion.catch(() => {});
+      return { wait: () => completion };
+    },
   };
 
   private async inspectRecovery(material: string): Promise<RecoveryStatus> {

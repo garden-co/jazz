@@ -5,6 +5,7 @@ export function applyDeviceRequestPermissions({
   policy,
   session,
   allOf,
+  anyOf,
 }: PolicyContext<typeof deviceRequestApp>): void {
   const recoveryRoots = policy.__e2ee_recovery_roots;
   recoveryRoots.allowRead.where(session.where({ authMode: { in: ["local-first", "external"] } }));
@@ -53,10 +54,24 @@ export function applyDeviceRequestPermissions({
         id: record.signerId,
         "$createdBy.account": session.user.account,
       }),
-      policy.__e2ee_device_requests.exists.where({
-        id: record.removedDeviceId,
-        "$createdBy.account": session.user.account,
-      }),
+      anyOf([
+        allOf([
+          { action: "remove-device" },
+          { removedDeviceId: { isNull: false }, retiredRecoveryRootId: { isNull: true } },
+          policy.__e2ee_device_requests.exists.where({
+            id: record.removedDeviceId,
+            "$createdBy.account": session.user.account,
+          }),
+        ]),
+        allOf([
+          { action: "retire-recovery-root" },
+          { removedDeviceId: { isNull: true }, retiredRecoveryRootId: { isNull: false } },
+          policy.__e2ee_recovery_roots.exists.where({
+            id: record.retiredRecoveryRootId,
+            accountId: session.user.account,
+          }),
+        ]),
+      ]),
     ]),
   );
   publicSuccessors.allowUpdate.never();
@@ -136,10 +151,24 @@ export function applyDeviceRequestPermissions({
         id: record.signerId,
         "$createdBy.account": session.user.account,
       }),
-      policy.__e2ee_device_requests.exists.where({
-        id: record.removedDeviceId,
-        "$createdBy.account": session.user.account,
-      }),
+      anyOf([
+        allOf([
+          { action: "remove-device" },
+          { removedDeviceId: { isNull: false }, retiredRecoveryRootId: { isNull: true } },
+          policy.__e2ee_device_requests.exists.where({
+            id: record.removedDeviceId,
+            "$createdBy.account": session.user.account,
+          }),
+        ]),
+        allOf([
+          { action: "retire-recovery-root" },
+          { removedDeviceId: { isNull: true }, retiredRecoveryRootId: { isNull: false } },
+          policy.__e2ee_recovery_roots.exists.where({
+            id: record.retiredRecoveryRootId,
+            accountId: session.user.account,
+          }),
+        ]),
+      ]),
     ]),
   );
   successors.allowUpdate.never();
