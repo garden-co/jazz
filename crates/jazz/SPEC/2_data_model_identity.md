@@ -136,14 +136,19 @@ record (§2.7) in every `created_by` / `updated_by` cell: each node interns the 
 
 | position | field    | type                      | meaning                             |
 | -------- | -------- | ------------------------- | ----------------------------------- |
-| 0        | `id`     | `U64` (primary key)       | the `AuthorAlias`, allocated from 1 |
+| 0        | `id`     | `U32` (primary key)       | the `AuthorAlias`, allocated from 1 |
 | 1        | `author` | `RowAuthor` native record | exact durable author record bytes   |
 
-The alias field in a physical row is a fixed-width Groove `U64`: eight bytes,
-little-endian, in the record's fixed-field region, exactly like `tx_node_id`
-and `schema_version`. Alias `0` is never allocated. A new alias is allocated as
-the resident maximum plus one, and its `jazz_authors` row is written in the
-same Groove batch as the first row image that stores it (and repeated, as an
+The alias field in a physical row (and the `jazz_authors.id` key) is a
+fixed-width Groove `U32`: four bytes, little-endian, in the record's
+fixed-field region (the `jazz_authors` primary key uses Groove's ordinary
+order-preserving `U32` key encoding). Alias `0` is never allocated. A new
+alias is allocated as the resident maximum plus one. When `u32::MAX` is
+already allocated, staging a row whose author has no alias fails closed with
+`AuthorAliasSpaceExhausted` before that row is encoded, so the write needing
+it fails: allocation never wraps, never reuses a gap, and never falls back to
+storing the full record; rows whose authors already hold aliases keep writing
+normally. A new alias's `jazz_authors` row is written in the same Groove batch as the first row image that stores it (and repeated, as an
 idempotent upsert, in every batch that stores it until the row is observed in
 resident storage), so no stored alias can outlive a dropped or failed batch
 without its mapping. The mapping is keyed by exact bytes: expansion returns the
@@ -448,7 +453,7 @@ because the UUID bytes match.
 `(branch_key, row_uuid, tx_time, tx_node_alias, schema_version_alias, parents,
 created_by, created_at, updated_by, updated_at)`, followed by declared
 `user_{column}` cells in application declaration order. `created_by` and
-`updated_by` are `RowAuthor` records in the logical row image and `U64`
+`updated_by` are `RowAuthor` records in the logical row image and `U32`
 `AuthorAlias` values in the physical `jazz_physical_{id}_history` table
 (§2.2); deletion-layer records keep full authors. The deletion relation
 adds `physical_table_id` at position 1 and ends with `_deletion` at position 11;
@@ -479,7 +484,7 @@ Derived global-current content positions `0..=10` are `(branch_key, row_uuid,
 tx_time, tx_node_alias, schema_version_alias, parents, created_by,
 created_at_ms, updated_by, updated_at_ms, nullable global_time)`, followed by
 the declared user cells. As in history, `created_by` / `updated_by` are
-`RowAuthor` records logically and `U64` `AuthorAlias` values in the physical
+`RowAuthor` records logically and `U32` `AuthorAlias` values in the physical
 `jazz_physical_{id}_global_current`, `_ahead_current` and `_ahead_shadow`
 tables (§2.2). The deletion-current record appends `_deletion` at
 position 11 and has no user cells. `jazz_global_changes` positions `0..=7` are

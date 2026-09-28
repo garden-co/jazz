@@ -1394,12 +1394,14 @@ fn authors_table() -> GrooveTableSchema {
         "jazz_authors",
         [
             // node-local-derived: allocated by row-author alias interning.
-            column("id", GrooveColumnType::U64),
+            // 4-byte little-endian; 0 is reserved and allocation fails
+            // closed at `u32::MAX` rather than wrapping.
+            column("id", GrooveColumnType::U32),
             // The exact durable `RowAuthor` record bytes the alias stands for.
             column("author", crate::ids::RowAuthor::value_type()),
         ],
     )
-    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U32))
 }
 
 fn transactions_table() -> GrooveTableSchema {

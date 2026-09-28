@@ -1532,7 +1532,8 @@ impl ProjectField {
         }
     }
 
-    /// Expand a compact `U64` dictionary code into the dictionary's value.
+    /// Expand a compact unsigned (`U32` or `U64`) dictionary code into the
+    /// dictionary's value.
     /// A code absent from the dictionary fails execution; callers must
     /// install every code before a row carrying it can reach a projection.
     pub fn dictionary(
@@ -1604,15 +1605,16 @@ pub enum ProjectExpr {
         remaps: RecursiveEnumRemaps,
         omit_unrepresentable: bool,
     },
-    /// Expand a `U64` code through an append-only [`ValueDictionary`].
+    /// Expand a `U32` or `U64` code through an append-only [`ValueDictionary`].
     Dictionary {
         source: FieldRef,
         dictionary: ValueDictionary,
     },
 }
 
-/// Append-only, process-local dictionary from a compact `u64` code to one
-/// value of a fixed type.
+/// Append-only, process-local dictionary from a compact unsigned code to one
+/// value of a fixed type. Stored codes may be `U32` or `U64`; both index the
+/// same `u64` code space.
 ///
 /// A storage layer can persist the code instead of a repeated wide value and
 /// let projections expand it back at the read boundary. The dictionary is a

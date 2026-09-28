@@ -3,7 +3,7 @@
 // Logical row images (history/current descriptors, `VersionRow`, query
 // graphs, policies, wire records) carry the full `RowAuthor` record in
 // `created_by` / `updated_by`. The physical tables below store a node-local
-// `AuthorAlias` (`U64`) there instead. Writes translate record -> alias
+// `AuthorAlias` (`U32`, 4-byte little-endian) there instead. Writes translate record -> alias
 // (allocating a durable `jazz_authors` row in the same batch on first use);
 // reads translate alias -> exact record bytes, through the shared author
 // dictionary for Groove projections and through `expand_physical_row_authors`
@@ -38,7 +38,7 @@ fn physical_system_column(
     shape: ContentProjectionShape,
 ) -> GrooveColumnSchema {
     if physical_row_authors_aliased(shape) && is_row_author_column(&column.name) {
-        GrooveColumnSchema::new(column.name, records::ValueType::U64)
+        GrooveColumnSchema::new(column.name, records::ValueType::U32)
     } else {
         column
     }
@@ -51,7 +51,7 @@ fn physical_system_value_type(
     shape: ContentProjectionShape,
 ) -> records::ValueType {
     if physical_row_authors_aliased(shape) && is_row_author_column(name) {
-        records::ValueType::U64
+        records::ValueType::U32
     } else {
         logical.clone()
     }
@@ -63,7 +63,7 @@ pub(super) fn descriptor_has_author_aliases(descriptor: &records::RecordDescript
         descriptor
             .fields()
             .get(*index)
-            .is_some_and(|field| field.value_type == records::ValueType::U64)
+            .is_some_and(|field| field.value_type == records::ValueType::U32)
     })
 }
 
@@ -79,7 +79,7 @@ where
             .await?
         {
             let record = raw.record();
-            let alias = AuthorAlias(record.get_u64(AuthorAliasRowRecord::FIELD_ID_IDX)?);
+            let alias = AuthorAlias(record.get_u32(AuthorAliasRowRecord::FIELD_ID_IDX)?);
             let span = record
                 .descriptor()
                 .field_span(record.raw(), AuthorAliasRowRecord::FIELD_AUTHOR_IDX)?;
@@ -106,7 +106,7 @@ where
         for alias in provisional {
             if self
                 .database
-                .primary_key_get_raw("jazz_authors", &[Value::U64(alias.0)])
+                .primary_key_get_raw("jazz_authors", &[Value::U32(alias.0)])
                 .await?
                 .is_some()
             {
@@ -128,7 +128,7 @@ where
         let record = version.record.borrowed();
         let mut staged = None;
         for index in ROW_AUTHOR_FIELDS {
-            if record.descriptor().fields()[index].value_type == records::ValueType::U64 {
+            if record.descriptor().fields()[index].value_type == records::ValueType::U32 {
                 continue;
             }
             let span = record.descriptor().field_span(record.raw(), index)?;
@@ -136,12 +136,12 @@ where
             let (alias, needs_row) = self
                 .author_aliases
                 .stage(author)
-                .map_err(|_| Error::InvalidStoredValue("row author alias exhausted"))?;
+                .map_err(|_| Error::AuthorAliasSpaceExhausted)?;
             if needs_row && staged != Some(alias) {
                 batch.update(
                     "jazz_authors",
                     vec![
-                        Value::U64(alias.0),
+                        Value::U32(alias.0),
                         Value::Record(OwnedRecord::new(author.to_vec(), {
                             let records::ValueType::Record(descriptor) = RowAuthor::value_type()
                             else {
@@ -184,7 +184,7 @@ where
             input.raw().len() + 128,
             |index, output| {
                 if ROW_AUTHOR_FIELDS.contains(&index) {
-                    let alias = AuthorAlias(input.get_u64(index)?);
+                    let alias = AuthorAlias(input.get_u32(index)?);
                     let author = aliases.author_record(alias).ok_or(
                         Error::InvalidStoredValue("stored row author alias is not in jazz_authors"),
                     )?;

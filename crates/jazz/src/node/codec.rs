@@ -51,7 +51,7 @@ groove::define_record! {
 groove::impl_record_field_u64!(TxTime);
 groove::impl_record_field_u64!(GlobalTime);
 groove::impl_record_field_u64!(NodeAlias);
-groove::impl_record_field_u64!(AuthorAlias);
+groove::impl_record_field_u32!(AuthorAlias);
 groove::impl_record_field_u64!(SchemaVersionAlias);
 groove::impl_record_field_uuid!(NodeUuid);
 groove::impl_record_field_uuid!(SchemaFamilyId);

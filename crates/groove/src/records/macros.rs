@@ -592,6 +592,40 @@ macro_rules! impl_record_field_u64 {
 }
 
 #[macro_export]
+macro_rules! impl_record_field_u32 {
+    ($ty:ty) => {
+        impl $crate::records::RecordField for $ty {
+            fn read(
+                record: &$crate::records::BorrowedRecord<'_>,
+                idx: usize,
+            ) -> Result<Self, $crate::records::Error> {
+                record.get_u32(idx).map(Self)
+            }
+
+            fn to_value(&self) -> $crate::records::Value {
+                $crate::records::Value::U32(self.0)
+            }
+
+            const COLUMN_KIND: $crate::records::FieldKind = $crate::records::FieldKind::U32;
+
+            fn read_raw(
+                bytes: &[u8],
+                value_type: &$crate::records::ValueType,
+            ) -> Result<Self, $crate::records::Error> {
+                <u32 as $crate::records::RecordField>::read_raw(bytes, value_type).map(Self)
+            }
+
+            fn read_tuple_raw(
+                bytes: &[u8],
+                value_type: &$crate::records::ValueType,
+            ) -> Result<Self, $crate::records::Error> {
+                <u32 as $crate::records::RecordField>::read_tuple_raw(bytes, value_type).map(Self)
+            }
+        }
+    };
+}
+
+#[macro_export]
 macro_rules! impl_record_field_bytes16 {
     ($ty:ty) => {
         impl $crate::records::RecordField for $ty {

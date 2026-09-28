@@ -38,11 +38,12 @@ pub struct NodeAlias(pub u64);
 ///
 /// Physical row tables store this alias in place of the full [`RowAuthor`]
 /// record; the node's `jazz_authors` table maps it back. It never crosses the
-/// wire and another node's alias numbers are meaningless here.
+/// wire and another node's alias numbers are meaningless here. Stored as a
+/// 4-byte little-endian `U32`; `0` is reserved and never allocated.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
 )]
-pub struct AuthorAlias(pub u64);
+pub struct AuthorAlias(pub u32);
 
 /// Content-addressed schema version identity.
 #[derive(

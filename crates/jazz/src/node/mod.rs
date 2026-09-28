@@ -3081,6 +3081,10 @@ pub enum Error {
     /// The internal packed HLC exhausted its final physical/logical position.
     #[error(transparent)]
     ClockOverflow(#[from] crate::time::HlcOverflow),
+    /// Every node-local `u32` row-author alias is allocated, so a new author
+    /// cannot be stored. Allocation fails closed; it never wraps or reuses.
+    #[error("row author alias space exhausted: all u32 aliases on this node are allocated")]
+    AuthorAliasSpaceExhausted,
     /// Error returned by query validation or binding.
     #[error("{0}")]
     Query(#[source] Box<QueryError>),

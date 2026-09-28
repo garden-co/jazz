@@ -384,7 +384,7 @@ where
                     return PhysicalWriteField::Enum { source, column };
                 }
                 if ROW_AUTHOR_FIELDS.contains(&source)
-                    && field.value_type == records::ValueType::U64
+                    && field.value_type == records::ValueType::U32
                     && history_descriptor.fields()[source].value_type != field.value_type
                 {
                     return PhysicalWriteField::AuthorAlias(source);
@@ -798,12 +798,12 @@ where
                     PhysicalWriteField::AuthorAlias(source) => {
                         let span = input.descriptor().field_span(input.raw(), *source)?;
                         if input.descriptor().fields()[*source].value_type
-                            == records::ValueType::U64
+                            == records::ValueType::U32
                         {
                             output.extend_from_slice(&input.raw()[span]);
                             return Ok(());
                         }
-                        Value::U64(self.staged_author_alias(&input.raw()[span])?.0)
+                        Value::U32(self.staged_author_alias(&input.raw()[span])?.0)
                     }
                     PhysicalWriteField::CreatedAtMillis => {
                         Value::U64(version.created_at().physical_ms())
@@ -864,7 +864,7 @@ where
                 if let PhysicalWriteField::AuthorAlias(_) = field
                     && let Value::Record(author) = &values[index]
                 {
-                    values[index] = Value::U64(self.staged_author_alias(author.raw())?.0);
+                    values[index] = Value::U32(self.staged_author_alias(author.raw())?.0);
                 }
             }
             assert_eq!(

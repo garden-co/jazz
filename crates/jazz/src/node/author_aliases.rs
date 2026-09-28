@@ -9,6 +9,11 @@
 //! physical-to-logical read projections expand aliases through, so a read
 //! never pays a storage lookup per row.
 //!
+//! Aliases are 4-byte (`u32`) node-local numbers allocated densely from 1;
+//! `0` is reserved. Allocation fails closed with
+//! [`AuthorAliasSpaceExhausted`] once `u32::MAX` is taken: it never wraps and
+//! never reuses an alias. The in-memory dictionary stays indexed by alias.
+//!
 //! Aliases are storage shorthand only. Logical rows, query graphs, policies
 //! and wire records always carry the full author record.
 
@@ -35,7 +40,7 @@ const AUTHOR_DICTIONARY_NAME: &str = "jazz_authors";
 pub(crate) struct AuthorAliases {
     by_record: FxHashMap<Box<[u8]>, AuthorAlias>,
     dictionary: ValueDictionary,
-    max_alias: u64,
+    max_alias: u32,
     provisional: BTreeSet<AuthorAlias>,
     expanded_descriptors: FxHashMap<RecordDescriptor, RecordDescriptor>,
 }
@@ -56,6 +61,10 @@ impl Default for AuthorAliases {
 #[derive(Debug)]
 pub(crate) struct AuthorAliasConflict;
 
+/// Every `u32` alias is allocated; a new author cannot be aliased.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct AuthorAliasSpaceExhausted;
+
 impl AuthorAliases {
     /// The shared dictionary registered read projections expand through.
     pub(crate) fn dictionary(&self) -> &ValueDictionary {
@@ -69,7 +78,7 @@ impl AuthorAliases {
 
     /// Exact encoded author record bound to `alias`, if resident.
     pub(crate) fn author_record(&self, alias: AuthorAlias) -> Option<Arc<[u8]>> {
-        self.dictionary.get(alias.0)
+        self.dictionary.get(u64::from(alias.0))
     }
 
     /// Install one durable `jazz_authors` row. Rejects a row that maps an
@@ -88,7 +97,7 @@ impl AuthorAliases {
             return Err(AuthorAliasConflict);
         }
         self.dictionary
-            .install(alias.0, author_record)
+            .install(u64::from(alias.0), author_record)
             .map_err(|_| AuthorAliasConflict)?;
         self.by_record.insert(author_record.into(), alias);
         self.max_alias = self.max_alias.max(alias.0);
@@ -99,14 +108,25 @@ impl AuthorAliases {
     /// Alias for storing `author_record`, allocating a provisional one when
     /// the author is new to this node. Returns whether the caller's batch
     /// must also carry the author row (true while the alias is provisional).
-    pub(crate) fn stage(&mut self, author_record: &[u8]) -> Result<(AuthorAlias, bool), ()> {
+    ///
+    /// A new author after `u32::MAX` has been allocated fails closed with
+    /// [`AuthorAliasSpaceExhausted`]; known authors keep resolving.
+    pub(crate) fn stage(
+        &mut self,
+        author_record: &[u8],
+    ) -> Result<(AuthorAlias, bool), AuthorAliasSpaceExhausted> {
         if let Some(alias) = self.by_record.get(author_record).copied() {
             return Ok((alias, self.provisional.contains(&alias)));
         }
-        let alias = AuthorAlias(self.max_alias.checked_add(1).ok_or(())?);
+        let alias = AuthorAlias(
+            self.max_alias
+                .checked_add(1)
+                .ok_or(AuthorAliasSpaceExhausted)?,
+        );
+        // Every alias above `max_alias` is unbound, so this cannot conflict.
         self.dictionary
-            .install(alias.0, author_record)
-            .map_err(|_| ())?;
+            .install(u64::from(alias.0), author_record)
+            .expect("fresh author alias is unbound");
         self.by_record.insert(author_record.into(), alias);
         self.max_alias = alias.0;
         self.provisional.insert(alias);
@@ -190,5 +210,23 @@ mod tests {
                 .install_durable(AuthorAlias(3), b"author-a")
                 .is_err()
         );
+    }
+
+    // Internal: exhausting four billion aliases is not reachable through the
+    // public API in a test (nor affordable through the dense dictionary), so
+    // the allocator boundary is pinned directly by raising the high-water mark.
+    #[test]
+    fn staging_fails_closed_when_u32_aliases_are_exhausted() {
+        let mut aliases = AuthorAliases::default();
+        let (known, _) = aliases.stage(b"author-a").unwrap();
+        aliases.confirm(known);
+        aliases.max_alias = u32::MAX;
+
+        // No wrap to 0 or 1, no reuse: a new author is refused.
+        assert_eq!(aliases.stage(b"author-b"), Err(AuthorAliasSpaceExhausted));
+        assert_eq!(aliases.alias_for(b"author-b"), None);
+        assert!(!aliases.has_provisional());
+        // Already-aliased authors keep resolving after exhaustion.
+        assert_eq!(aliases.stage(b"author-a").unwrap(), (known, false));
     }
 }
