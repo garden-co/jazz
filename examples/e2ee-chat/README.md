@@ -75,6 +75,12 @@ The test scripts use the maintained correctness-consumer gate to select receipt-
 
 `test:unit` runs real-server owner/membership/encryption restrictions, atomic candidate-bundle denial, sharing retry and ciphertext-observer coverage. `test:browser` runs concurrent/reopened/aborted key-store operations against real Chromium IndexedDB.
 
+The permission receipts use three isolated server/account contexts: sharing retry,
+owner-only administration and atomic denial, and ciphertext visibility without a
+decryption key. Each retains a 60-second limit rather than accumulating unrelated
+security checks into one deadline. Administration checks first prove that the
+recipient can send; visibility checks use an already accepted image.
+
 `test:e2e` starts the actual Vite app at port 5183 and places the Jazz server behind a TCP gate. It closes existing connections and rejects new ones, including worker connections, while leaving Vite reachable. Through the UI, it creates a chat and selects a real PNG File while partitioned, verifies exact downloaded bytes, terminates Chromium and reopens the same persistent profile while still offline. It verifies the same account, message text, exact PNG bytes and **Local · acceptance unconfirmed** status after restart. It then unblocks the server, uses **Reload chat** to reconnect, observes **Available from server**, shares with a second automatically initialised account, verifies the recipient's exact image download and reply, reloads the recipient and checks outsider denial. Screenshots cover offline creation, process restart and recipient delivery; a trace is retained on failure. The test never injects an SDK client or mocks the server.
 
 It also sends a non-decodable image with an allowed MIME type and verifies that the UI shows an unavailable-image message without a broken image or download link.
