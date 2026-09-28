@@ -27,6 +27,18 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
+    "./e2ee": {
+      "types": "./dist/e2ee/index.d.ts",
+      "default": "./dist/e2ee/index.js"
+    },
+    "./e2ee/browser": {
+      "types": "./dist/e2ee/browser.d.ts",
+      "default": "./dist/e2ee/browser.js"
+    },
+    "./e2ee/native": {
+      "types": "./dist/e2ee/native.d.ts",
+      "default": "./dist/e2ee/native.js"
+    },
     "./backend": {
       "types": "./dist/backend/index.d.ts",
       "default": "./dist/backend/index.js"
@@ -142,13 +154,14 @@
   "scripts": {
     "build": "pnpm build:runtime && pnpm build:test && pnpm build:svelte && pnpm build:solid",
     "build:react-native": "tsc --project tsconfig.json",
-    "build:runtime": "node scripts/clean-dist.mjs && tsc && node scripts/bundle-broker-worker.mjs && node scripts/verify-runtime-sourcemaps.mjs",
+    "build:runtime": "node scripts/clean-dist.mjs && tsc && node scripts/bundle-broker-worker.mjs && node scripts/bundle-e2ee-crypto.mjs && node scripts/verify-runtime-sourcemaps.mjs",
     "build:svelte": "svelte-package -i src/svelte -o dist/svelte --tsconfig tsconfig.svelte.json && node scripts/cleanup-generated-src-types.mjs",
     "build:solid": "vite build --config vite.config.solid.ts --mode solid-dom && vite build --config vite.config.solid.ts --mode solid-ssr && tsc --project tsconfig.solid.json --emitDeclarationOnly",
     "check": "tsc --noEmit",
     "test": "pnpm test:classic-api || status=1; pnpm test:stage-binary || status=1; pnpm test:browser:contract || status=1; pnpm test:node || status=1; pnpm test:react || status=1; pnpm test:svelte || status=1; pnpm test:solid || status=1; pnpm typecheck:react-native || status=1; exit ${status:-0}",
     "test:stage-binary": "node --test scripts/stage-binary.test.mjs",
     "test:classic-api": "node --test scripts/classic-api.test.mjs",
+    "test:crypto-package": "node --test scripts/bundle-e2ee-crypto.test.mjs && node ../../dev/gates/run-correctness-consumer.mjs -- node scripts/verify-e2ee-package.mjs",
     "test:node": "node ../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.ts",
     "test:topology-fixture": "node ../../dev/gates/run-correctness-consumer.mjs -- bash -lc 'pnpm typecheck:topology && pnpm exec vitest run --config vitest.config.ts tests/topology/harness.test.ts'",
     "typecheck:topology": "tsc --project tests/topology/tsconfig.json",
@@ -204,6 +217,8 @@
     "better-auth": "1.7.1",
     "fake-indexeddb": "^5.0.2",
     "jsdom": "^26.0.0",
+    "libsodium": "0.8.3",
+    "libsodium-wrappers": "0.8.3",
     "react-dom": "^19.0.0",
     "solid-js": "^1.9.13",
     "svelte": "^5.0.0",
