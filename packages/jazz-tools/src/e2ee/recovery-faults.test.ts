@@ -1,4 +1,4 @@
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
@@ -212,3 +212,94 @@ it.each(["parser", "recipient-open", "signing"])(
   },
   60_000,
 );
+
+it("publishes neither recovery approval when the public approval write is refused", async () => {
+  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  const clients: Awaited<ReturnType<typeof createDb>>[] = [];
+  const store = () => {
+    let saved: string | null = null;
+    return {
+      async read() {
+        return saved;
+      },
+      async update(transform: (current: string | null) => string) {
+        saved = transform(saved);
+      },
+    };
+  };
+  try {
+    await deploy({
+      serverUrl: server.url,
+      appId: server.appId,
+      adminSecret: server.adminSecret,
+      schema: deviceRequestApp,
+      permissions: deviceRequestPermissions,
+    });
+    const account = await localAccountConfig(server.appId, server.url);
+    const owner = await createDb({ ...account, e2ee: { store: store() } });
+    const recovering = await createDb({ ...account, e2ee: { store: store() } });
+    clients.push(owner, recovering);
+    const [creator] = await owner.e2ee.devices.list();
+    const { material } = await owner.e2ee.recovery.create().wait();
+    const pending = (await recovering.e2ee.devices.list()).find((row) => row.id !== creator!.id)!;
+    const privateBefore = await recovering.all(deviceRequestApp.__e2ee_device_approvals, {
+      tier: "edge",
+    });
+    const publicBefore = await recovering.all(deviceRequestApp.__e2ee_public_device_approvals, {
+      tier: "edge",
+    });
+    const originalTransaction = recovering.transaction.bind(recovering);
+    let injected = 0;
+    const transactionFault = vi.spyOn(recovering, "transaction").mockImplementation((callback) =>
+      originalTransaction((tx) =>
+        callback(
+          new Proxy(tx, {
+            get(target, property) {
+              if (property === "insert") {
+                const insert = Reflect.get(target, property, target) as (
+                  ...args: unknown[]
+                ) => unknown;
+                return (...args: unknown[]) => {
+                  const [table, data, options] = args;
+                  if (table === deviceRequestApp.__e2ee_public_device_approvals) {
+                    injected++;
+                    return insert.call(
+                      target,
+                      table,
+                      {
+                        ...(data as Record<string, unknown>),
+                        deviceId: crypto.randomUUID(),
+                      },
+                      options,
+                    );
+                  }
+                  return insert.apply(target, args);
+                };
+              }
+              const value = Reflect.get(target, property, target);
+              return typeof value === "function" ? value.bind(target) : value;
+            },
+          }) as typeof tx,
+        ),
+      ),
+    );
+
+    await expect(recovering.e2ee.recovery.use(material).wait()).rejects.toThrow();
+    expect(injected).toBe(1);
+    expect(
+      await recovering.all(deviceRequestApp.__e2ee_device_approvals, { tier: "edge" }),
+    ).toEqual(privateBefore);
+    expect(
+      await recovering.all(deviceRequestApp.__e2ee_public_device_approvals, { tier: "edge" }),
+    ).toEqual(publicBefore);
+
+    transactionFault.mockRestore();
+    await recovering.e2ee.recovery.use(material).wait();
+    expect(await recovering.e2ee.devices.list()).toContainEqual(
+      expect.objectContaining({ id: pending.id, state: "active", keyReadiness: "verified" }),
+    );
+  } finally {
+    await Promise.all(clients.map((client) => client.shutdown()));
+    await server.stop();
+  }
+}, 60_000);
