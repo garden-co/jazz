@@ -100,7 +100,7 @@ function m3OracleTestBinary() {
   const result = run("cargo", [
     "test",
     "-p",
-    "jazz",
+    "jazz-node",
     "--lib",
     "--features",
     m3Features,
@@ -114,7 +114,7 @@ function m3OracleTestBinary() {
       const message = JSON.parse(line);
       if (
         message.reason === "compiler-artifact" &&
-        message.target?.name === "jazz" &&
+        message.target?.name === "jazz_node" &&
         typeof message.executable === "string"
       )
         executable = message.executable;

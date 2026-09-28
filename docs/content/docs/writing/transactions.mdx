@@ -58,10 +58,15 @@ The callback form commits automatically when the callback finishes. In TypeScrip
 transaction back if the callback throws or returns a rejected promise. In Rust, it leaves the
 transaction uncommitted if the callback returns `Err`.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-transaction-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts" meta='title="app.ts"'>
+      ../examples/docs/todo-effect/src/docs-snippets.ts#writing-transaction-effect
     </include>
   </Tab>
   <Tab value="Rust">
@@ -116,9 +121,18 @@ A transaction can fail at three points:
 3. The authority can reject a committed transaction later. In TypeScript, `wait(...)` then rejects
    with `PersistedWriteRejectedError` and Jazz removes the rejected local changes.
 
-<include cwd lang="ts" meta='title="app.ts"'>
-  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-transaction-errors-ts
-</include>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="app.ts"'>
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-transaction-errors-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts" meta='title="app.ts"'>
+      ../examples/docs/todo-effect/src/docs-snippets.ts#writing-transaction-errors-effect
+    </include>
+  </Tab>
+</Tabs>
 
 Use `db.onMutationError(...)` as a fallback for later rejections when your code does not keep and
 wait on the transaction result.
@@ -129,10 +143,15 @@ An exclusive transaction reads from a stable transaction snapshot. The authority
 and writes, then accepts or rejects the transaction as one serialisable unit. This is useful when a
 write is valid only if the data you just read has not changed in a conflicting transaction.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-exclusive-transaction-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts" meta='title="app.ts"'>
+      ../examples/docs/todo-effect/src/docs-snippets.ts#writing-exclusive-transaction-effect
     </include>
   </Tab>
   <Tab value="Rust">

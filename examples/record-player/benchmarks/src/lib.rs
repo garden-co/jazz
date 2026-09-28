@@ -14,7 +14,7 @@ use jazz::tx::DurabilityTier;
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
-type BenchDb = Db<MemoryStorage>;
+type BenchDb = Db;
 
 /// Deterministic record catalogue and one ordered playlist.
 pub struct Fixture {

@@ -92,7 +92,7 @@ fn policy_with_all_writes(read: PolicyExpr) -> TablePolicies {
         .with_delete(read)
 }
 
-fn open_db() -> (Db<MemoryStorage>, JazzSchema) {
+fn open_db() -> (Db, JazzSchema) {
     let schema = compile_schema(
         &SchemaBuilder::new()
             .table(
@@ -122,7 +122,7 @@ fn open_db() -> (Db<MemoryStorage>, JazzSchema) {
     (db, schema)
 }
 
-fn open_history_complete_db() -> (Db<MemoryStorage>, JazzSchema) {
+fn open_history_complete_db() -> (Db, JazzSchema) {
     let schema = compile_schema(
         &SchemaBuilder::new()
             .table(
@@ -151,7 +151,7 @@ fn open_history_complete_db() -> (Db<MemoryStorage>, JazzSchema) {
     (db, schema)
 }
 
-fn open_rocks_db(path: &std::path::Path, schema: &JazzSchema) -> Db<RocksDbStorage> {
+fn open_rocks_db(path: &std::path::Path, schema: &JazzSchema) -> Db {
     let families = schema.column_families();
     let storage = RocksDbStorage::open(
         path,
@@ -1000,7 +1000,7 @@ fn branch_view_reachability_consumes_effective_sources() {
     );
 }
 
-fn open_policy_db() -> (Db<MemoryStorage>, JazzSchema) {
+fn open_policy_db() -> (Db, JazzSchema) {
     let schema = compile_schema(
         &SchemaBuilder::new()
             .table(
@@ -1942,7 +1942,7 @@ fn indexed_branch_view_copy_on_write_and_reopen_keep_branch_coordinates_distinct
 }
 
 fn assert_branch_view_copy_on_write_receipt(
-    db: &Db<RocksDbStorage>,
+    db: &Db,
     schema: &JazzSchema,
     base: &BranchSelector,
     copied: RowUuid,
