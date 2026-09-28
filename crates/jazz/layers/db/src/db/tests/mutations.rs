@@ -5930,6 +5930,16 @@ enum ReopenReadChange {
 /// Reopening a pending publication must replay its original observations, not
 /// re-read current authority state or reconstruct empty exclusive evidence.
 fn pending_exclusive_reopen_replay(change: ReopenReadChange, dependent: bool) {
+    std::thread::Builder::new()
+        .name("pending-exclusive-reopen".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || pending_exclusive_reopen_replay_on_test_stack(change, dependent))
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+fn pending_exclusive_reopen_replay_on_test_stack(change: ReopenReadChange, dependent: bool) {
     block_on(async {
         let schema = doctest_support::schema();
         let dir = tempfile::tempdir().unwrap();

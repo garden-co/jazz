@@ -44,7 +44,6 @@ pub struct Transaction {
     #[serde(default)]
     pub contribution_merge: Option<ContributionMergeProvenance>,
 }
-
 impl Transaction {
     /// Mergeable units need no read proof; exclusive units require every field.
     #[doc(hidden)]

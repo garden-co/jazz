@@ -3869,6 +3869,7 @@ pub(super) fn known_transaction_payload_matches(
     redacted_existing == redacted_incoming
 }
 
+
 /// Copy a transaction for a carrier boundary or duplicate comparison without
 /// its local-only policy capability. Durable provenance remains untouched.
 pub fn transaction_without_permission_subject(tx: &Transaction) -> Transaction {
