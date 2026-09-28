@@ -44,7 +44,7 @@ fn schema() -> JazzSchema {
     compile_schema(&source)
 }
 
-fn open_db() -> Db<TestStorage> {
+fn open_db() -> Db {
     let schema = schema();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -67,7 +67,7 @@ fn cells(values: impl IntoIterator<Item = (&'static str, Value)>) -> BTreeMap<St
         .collect()
 }
 
-fn stored_row(db: &Db<TestStorage>, row_id: RowUuid) -> BTreeMap<String, Value> {
+fn stored_row(db: &Db, row_id: RowUuid) -> BTreeMap<String, Value> {
     let table = schema()
         .tables()
         .iter()

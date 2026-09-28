@@ -36,9 +36,25 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../
 export const SRC = path.join(repoRoot, "crates/jazz/src");
 const ALLOW = path.join(repoRoot, "dev/gates/jazz-module-layers.allow");
 
-// External crates re-exported from lib.rs (`pub use groove;`). Paths through
-// them leave the jazz crate, so they are not layer references.
-const EXTERNAL_REEXPORTS = new Set(["groove"]);
+// Modules that lib.rs re-exports from other crates (`pub use groove;`,
+// `pub use jazz_types::ids;`). Paths through them leave the jazz crate, so
+// they are not layer references: Cargo already keeps the extracted layers
+// below this crate.
+function externalReexports(src) {
+  const names = new Set(["groove"]);
+  let lib = "";
+  try {
+    lib = fs.readFileSync(path.join(src, "lib.rs"), "utf8");
+  } catch {
+    return names;
+  }
+  for (const m of lib.matchAll(
+    /^\s*(?:pub(?:\([a-z]+\))?\s+)?use\s+(jazz_[a-z_]+)::([a-z_]+)\s*;/gm,
+  )) {
+    names.add(m[2]);
+  }
+  return names;
+}
 
 // Layers, lowest first. `deps` lists the layers a layer may reference besides
 // itself. Layers that are not each other's dependency compile in parallel once
@@ -59,47 +75,17 @@ export const LAYERS = {
 // File-path prefixes (relative to crates/jazz/src) and their layer. The
 // longest matching prefix wins; anything unmatched is facade.
 export const LAYER_OF_PATH = [
-  ["ids.rs", "types"],
-  ["time.rs", "types"],
-  ["debug_env.rs", "types"],
-  ["object.rs", "types"],
-  ["app_id.rs", "types"],
-  ["identity.rs", "types"],
-  ["account_registry.rs", "types"],
-  ["account_registry/", "types"],
-  ["delivery_diagnostics.rs", "types"],
-  ["postcard_exact.rs", "types"],
-  ["local_executor.rs", "types"],
-
-  ["schema.rs", "model"],
-  ["query.rs", "model"],
-  ["query/", "model"],
-  ["tx.rs", "model"],
-  ["model/", "model"],
-
-  ["protocol.rs", "protocol"],
-  ["protocol/", "protocol"],
-  ["wire.rs", "protocol"],
-  ["wire/", "protocol"],
-  ["protocol_limits.rs", "protocol"],
-  ["authorization_scope.rs", "protocol"],
-  ["storage_codec_profile.rs", "protocol"],
-
-  ["node/query_engine.rs", "engine"],
-  ["node/query_engine/", "engine"],
-  ["node/", "node"],
-
-  ["peer.rs", "peer"],
-  ["peer/", "peer"],
-
-  ["db.rs", "db"],
-  ["db/", "db"],
-  ["foreground_node_lease.rs", "db"],
-  ["cold_settle_attribution.rs", "db"],
-  ["result_tree.rs", "db"],
+  // types, model, protocol and engine: extracted to
+  // crates/jazz/layers/{types,model,protocol,engine}; node and peer: extracted
+  // together to crates/jazz/layers/node (node tests drive PeerState); db:
+  // extracted to crates/jazz/layers/db. Only the facade remains here.
 ];
 
 export function layerOf(rel) {
+  return defaultLayerOf(rel);
+}
+
+function defaultLayerOf(rel) {
   let best = null;
   for (const [prefix, layer] of LAYER_OF_PATH) {
     if (rel === prefix || (prefix.endsWith("/") && rel.startsWith(prefix))) {
@@ -338,7 +324,8 @@ function identifiers(text) {
   return new Set(text.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []);
 }
 
-export function analyze({ includeTests = false, src = SRC } = {}) {
+export function analyze({ includeTests = false, src = SRC, layerOf = defaultLayerOf } = {}) {
+  const EXTERNAL_REEXPORTS = externalReexports(src);
   const files = walk(src).map((full) => path.relative(src, full).split(path.sep).join("/"));
   const moduleFile = new Map(); // "a::b" -> rel
   for (const rel of files) moduleFile.set(modulePathOf(rel).join("::"), rel);
@@ -481,7 +468,6 @@ export function analyze({ includeTests = false, src = SRC } = {}) {
       if (!includeTests && inTest(offset)) continue;
       let target;
       if (segs[0] === "crate") {
-        if (EXTERNAL_REEXPORTS.has(segs[1])) continue;
         target = segs.slice(1);
       } else if (segs[0] === "super") {
         // `super` names the parent of the module the reference sits in.
@@ -493,6 +479,7 @@ export function analyze({ includeTests = false, src = SRC } = {}) {
         }
         target = [...base, ...segs.slice(k)];
       } else continue;
+      if (EXTERNAL_REEXPORTS.has(target[0])) continue;
       const to = resolve(target);
       const toLayer = layerOf(to);
       if (!allowed.has(toLayer)) {

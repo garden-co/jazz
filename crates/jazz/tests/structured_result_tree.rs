@@ -41,7 +41,7 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_db() -> Db<TestStorage> {
+fn open_db() -> Db {
     let schema = schema();
     let column_families = schema.column_families();
     let references = column_families

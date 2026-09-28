@@ -18,7 +18,7 @@ const LABELS: usize = 8;
 const ARTISTS: usize = 32;
 const CATALOGS: usize = 4;
 
-type BenchDb = Db<MemoryStorage>;
+type BenchDb = Db;
 
 /// Prepared BigLabel fixture. Construction and seeding are intentionally kept
 /// outside the measured closure.
