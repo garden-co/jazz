@@ -1,9 +1,9 @@
 //! The local-first opening gates and the host remote-link hint.
 //!
-//! A read that asks for [`EmptyOpening::WaitForRemote`] evaluates exactly like
+//! A read that asks for [`FirstLoad::WaitForRemote`] evaluates exactly like
 //! a local-first read, except that its unsettled opening is withheld for at
 //! most a caller-chosen timeout while the authoritative server could still
-//! answer. The deprecated [`EmptyOpening::AwaitRemote`] withholds only an
+//! answer. The deprecated [`FirstLoad::AwaitRemote`] withholds only an
 //! *empty* unsettled opening, without a timeout. "Could answer" is one
 //! definition shared by subscriptions and one-shot reads: see
 //! [`RemoteLinkHint`]. Everything here is host-API state; none of it is
@@ -24,15 +24,15 @@ use super::*;
 /// or the link is lost.
 pub const REMOTE_LINK_ATTEMPT_WINDOW: Duration = Duration::from_secs(5);
 
-/// What a local-first read does with its unsettled opening.
+/// What a local-first read does with its first load (its unsettled opening).
 ///
 /// This is a host read option, not a durable encoding: it is never persisted
 /// or sent to a peer. Its serde form exists only for the host JSON read-option
-/// ABI, where an absent field means [`EmptyOpening::Deliver`].
+/// ABI, where an absent field means [`FirstLoad::Deliver`].
 #[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize,
 )]
-pub enum EmptyOpening {
+pub enum FirstLoad {
     /// Deliver the opening as evaluated (ordinary local-first behaviour).
     #[default]
     Deliver,
@@ -40,7 +40,7 @@ pub enum EmptyOpening {
     /// opening, empty or not, for at most `timeout_ms` while the remote could
     /// answer.
     ///
-    /// It applies to the same reads as [`EmptyOpening::AwaitRemote`] and
+    /// It applies to the same reads as [`FirstLoad::AwaitRemote`] and
     /// shares its link rules, its authority witness and its strict remote
     /// offset window; the only differences are that a non-empty opening waits
     /// too and that every wait ends at the deadline. While the remote could
@@ -53,7 +53,7 @@ pub enum EmptyOpening {
     ///   local updates) if it arrives in time, and otherwise the local-first
     ///   result, dropping the pending remote read.
     ///
-    /// A zero timeout is [`EmptyOpening::Deliver`]. When the remote cannot
+    /// A zero timeout is [`FirstLoad::Deliver`]. When the remote cannot
     /// answer, the read is plain local-first at once.
     WaitForRemote {
         /// The longest the opening may wait, in milliseconds.
@@ -63,7 +63,7 @@ pub enum EmptyOpening {
     /// local opening while the remote could answer, without a timeout.
     ///
     /// Kept only for the deprecated `LocalFirstUnlessEmpty` read tier; new
-    /// callers use [`EmptyOpening::WaitForRemote`].
+    /// callers use [`FirstLoad::WaitForRemote`].
     ///
     /// Applies to client-local reads at the local tier with full
     /// propagation; other reads ignore it. While the remote could answer:
@@ -86,7 +86,7 @@ pub enum EmptyOpening {
     AwaitRemote,
 }
 
-impl EmptyOpening {
+impl FirstLoad {
     /// The gate this option asks for, if any: `Some(None)` for the unbounded
     /// empty-only gate, `Some(Some(timeout))` for a server-wait timeout.
     fn requested_wait(self) -> Option<Option<Duration>> {
@@ -577,8 +577,8 @@ where
 {
     /// Report what the host knows about the path to the authoritative server.
     ///
-    /// This drives [`EmptyOpening::WaitForRemote`] and
-    /// [`EmptyOpening::AwaitRemote`] reads only; it never changes
+    /// This drives [`FirstLoad::WaitForRemote`] and
+    /// [`FirstLoad::AwaitRemote`] reads only; it never changes
     /// write durability or turns a strict remote read into a local one.
     /// `NoServer` and `Failed` release every held empty opening; `Attempting`
     /// lets empty openings wait until [`REMOTE_LINK_ATTEMPT_WINDOW`] after
@@ -590,16 +590,16 @@ where
         self.node.remote_link.set_hint(hint);
     }
 
-    /// Resolve an [`EmptyOpening::WaitForRemote`] or
-    /// [`EmptyOpening::AwaitRemote`] subscription request: the effective read
+    /// Resolve an [`FirstLoad::WaitForRemote`] or
+    /// [`FirstLoad::AwaitRemote`] subscription request: the effective read
     /// options and the gate to install, if any.
-    pub(super) fn resolve_empty_opening(
+    pub(super) fn resolve_first_load(
         &self,
         prepared: &PreparedQuery,
         mut opts: ReadOpts,
         authorization_mode: QueryAuthorizationMode,
     ) -> (ReadOpts, Option<OpeningGate>) {
-        let Some(timeout) = std::mem::take(&mut opts.empty_opening).requested_wait() else {
+        let Some(timeout) = std::mem::take(&mut opts.first_load).requested_wait() else {
             return (opts, None);
         };
         if authorization_mode != QueryAuthorizationMode::ClientLocal
@@ -640,7 +640,7 @@ where
         self.node.remote_link.register(state);
     }
 
-    /// One-shot [`EmptyOpening::AwaitRemote`] read shared by host bindings and
+    /// One-shot [`FirstLoad::AwaitRemote`] read shared by host bindings and
     /// the native facade.
     ///
     /// `local` and `remote` produce the local-first and strict remote results
@@ -691,7 +691,7 @@ where
         }
     }
 
-    /// One-shot [`EmptyOpening::WaitForRemote`] read shared by host bindings
+    /// One-shot [`FirstLoad::WaitForRemote`] read shared by host bindings
     /// and the native facade: local first with a server-wait timeout.
     ///
     /// `local` and `remote` produce the local-first and remote (Global tier,

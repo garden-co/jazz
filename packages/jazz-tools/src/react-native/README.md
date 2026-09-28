@@ -70,9 +70,9 @@ For an upstream admitted by native code, `await db.disconnect()` stops the
 native socket before publishing explicit offline state. `await db.reconnect()`
 restarts it with native-owned credentials. These calls work before the first
 query and require no JavaScript server URL. Local-first reads with a
-`waitForServerMs` timeout never wait on the native socket while it is explicitly
+`firstLoadRemoteWaitMs` timeout never wait on the native socket while it is explicitly
 offline, down, or reconnecting; the first result waits for the server, at most
 for the timeout, only while it is connected or making its first connection, and
 falls back to the local result if the connection drops. The deprecated
 `ReadTier.LocalFirstUnlessEmpty` follows the same reachability rules for an
-empty result; replace it with `ReadTier.LocalFirst` plus `waitForServerMs`.
+empty result; replace it with `ReadTier.LocalFirst` plus `firstLoadRemoteWaitMs`.

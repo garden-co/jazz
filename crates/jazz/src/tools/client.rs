@@ -15,9 +15,9 @@ use std::time::Duration;
 use futures::task::{ArcWake, waker};
 
 use crate::db::{
-    Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity,
-    EmptyOpening as CoreEmptyOpening, Error as CoreDbError, ErrorCode as CoreDbErrorCode,
-    ExclusiveTxOps, LocalUpdates as CoreLocalUpdates, PeerConnection as CorePeerConnection,
+    Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, Error as CoreDbError,
+    ErrorCode as CoreDbErrorCode, ExclusiveTxOps, FirstLoad as CoreFirstLoad,
+    LocalUpdates as CoreLocalUpdates, PeerConnection as CorePeerConnection,
     Propagation as CorePropagation, ReadOpts as CoreReadOpts, RemoteLinkHint as CoreRemoteLinkHint,
     SubscriptionEvent as CoreSubscriptionEvent, SubscriptionOutputRow as CoreSubscriptionOutputRow,
     TickScheduler, TickUrgency, Transport as CoreTransport, WireTransportAdapter,
@@ -3424,7 +3424,7 @@ impl JazzClient {
             propagation: CorePropagation::Full,
             include_deleted: false,
             read_view: CoreReadViewSpec::default(),
-            empty_opening: CoreEmptyOpening::Deliver,
+            first_load: CoreFirstLoad::Deliver,
         }
     }
 
@@ -3436,15 +3436,15 @@ impl JazzClient {
             ReadTier::LocalFirst | ReadTier::LocalFirstUnlessEmpty => CoreLocalUpdates::Immediate,
         };
         if tier == ReadTier::LocalFirstUnlessEmpty {
-            opts.empty_opening = CoreEmptyOpening::AwaitRemote;
+            opts.first_load = CoreFirstLoad::AwaitRemote;
         }
         opts
     }
 
-    fn core_read_opts_local_first(wait_for_server: Duration) -> CoreReadOpts {
+    fn core_read_opts_local_first(first_load_remote_wait: Duration) -> CoreReadOpts {
         let mut opts = Self::core_read_opts_for_read_tier(ReadTier::LocalFirst);
-        opts.empty_opening = CoreEmptyOpening::WaitForRemote {
-            timeout_ms: u64::try_from(wait_for_server.as_millis()).unwrap_or(u64::MAX),
+        opts.first_load = CoreFirstLoad::WaitForRemote {
+            timeout_ms: u64::try_from(first_load_remote_wait.as_millis()).unwrap_or(u64::MAX),
         };
         opts
     }
@@ -3939,13 +3939,13 @@ impl JazzClient {
         self.subscribe_with_read_tier(query, ReadTier::Remote).await
     }
 
-    /// Subscribe local first, waiting up to `wait_for_server` for the
+    /// Subscribe local first, waiting up to `first_load_remote_wait` for the
     /// server's answer before the first delivery.
     ///
     /// While the server could answer (a link is live, or its first connection
     /// attempt is still young), the core stream withholds its opening, empty
     /// or not, until the server has answered, the link is lost, or
-    /// `wait_for_server` elapses, whichever comes first. Offline, without a
+    /// `first_load_remote_wait` elapses, whichever comes first. Offline, without a
     /// server, or with a zero wait it opens on local data at once. Afterwards
     /// it behaves exactly like [`ReadTier::LocalFirst`]: local writes show
     /// immediately and remote changes as they arrive. An offset window is
@@ -3953,13 +3953,16 @@ impl JazzClient {
     pub async fn subscribe_local_first(
         &self,
         query: Query,
-        wait_for_server: Duration,
+        first_load_remote_wait: Duration,
     ) -> Result<SubscriptionStream> {
-        self.subscribe_with_opts(query, Self::core_read_opts_local_first(wait_for_server))
-            .await
+        self.subscribe_with_opts(
+            query,
+            Self::core_read_opts_local_first(first_load_remote_wait),
+        )
+        .await
     }
 
-    /// One-shot local-first query that waits up to `wait_for_server` for the
+    /// One-shot local-first query that waits up to `first_load_remote_wait` for the
     /// server's answer.
     ///
     /// While the server could answer, returns the server's result (with this
@@ -3970,13 +3973,13 @@ impl JazzClient {
     pub async fn query_local_first(
         &self,
         query: Query,
-        wait_for_server: Duration,
+        first_load_remote_wait: Duration,
     ) -> Result<Vec<QueryResult>> {
         let in_transaction = self
             .write_context
             .as_ref()
             .is_some_and(|ctx| ctx.transaction_id.is_some());
-        if wait_for_server.is_zero() || in_transaction {
+        if first_load_remote_wait.is_zero() || in_transaction {
             return self
                 .query_with_opts(
                     query,
@@ -3992,7 +3995,7 @@ impl JazzClient {
         backend
             .0
             .read_local_first_within(
-                wait_for_server,
+                first_load_remote_wait,
                 || self.query_with_opts(query, local_opts),
                 || self.query_with_opts(remote_query, remote_opts),
             )
@@ -4001,7 +4004,7 @@ impl JazzClient {
 
     /// Subscribe using a product-level read tier.
     ///
-    /// `LocalFirstUnlessEmpty` (deprecated) passes the core `EmptyOpening::AwaitRemote`
+    /// `LocalFirstUnlessEmpty` (deprecated) passes the core `FirstLoad::AwaitRemote`
     /// option through: the core stream withholds only an empty, unsettled
     /// local opening while the server could answer, and then behaves exactly
     /// like `LocalFirst`. An offset window is read as a strict remote view
@@ -4989,8 +4992,8 @@ mod tests {
             CoreLocalUpdates::Immediate
         );
         assert_eq!(
-            JazzClient::core_read_opts_for_read_tier(ReadTier::LocalFirstUnlessEmpty).empty_opening,
-            CoreEmptyOpening::AwaitRemote
+            JazzClient::core_read_opts_for_read_tier(ReadTier::LocalFirstUnlessEmpty).first_load,
+            CoreFirstLoad::AwaitRemote
         );
         assert_eq!(
             core_legacy_read_tier(DurabilityTier::Local),

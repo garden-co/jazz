@@ -19,7 +19,7 @@ use futures_util::{Stream, StreamExt};
 #[cfg(target_arch = "wasm32")]
 use idb_tree::IndexedDbPageStore;
 use jazz::db::{
-    block_on, ConnectionSessionContext, Db, DbConfig, DbIdentity, EmptyOpening, Error, ErrorCode,
+    block_on, ConnectionSessionContext, Db, DbConfig, DbIdentity, Error, ErrorCode, FirstLoad,
     InitialSyncFlushCadence, LargeValueUpdate, LocalUpdates, MutationErrorCallback, PeerConnection,
     PermissionAdvice, Propagation, ReadOpts, RemoteLinkHint, RowCells, SeededRowIdSource,
     SerializedReadResult, SerializedSubscriptionAuthorization, StreamingMutationKind,
@@ -3228,7 +3228,7 @@ fn read_opts_from_js(value: JsValue) -> Result<ReadOpts, JsValue> {
         }
     }
     if let Some(tier) = optional_string_prop(&value, "tier")? {
-        (opts.tier, opts.empty_opening) = read_tier_from_str(&tier)?;
+        (opts.tier, opts.first_load) = read_tier_from_str(&tier)?;
     }
     if let Some(local_updates) = optional_string_prop(&value, "local_updates")? {
         opts.local_updates = match local_updates.as_str() {
@@ -3247,8 +3247,8 @@ fn read_opts_from_js(value: JsValue) -> Result<ReadOpts, JsValue> {
     if let Some(include_deleted) = optional_bool_prop(&value, "include_deleted")? {
         opts.include_deleted = include_deleted;
     }
-    if let Some(timeout_ms) = optional_wait_ms_prop(&value, "server_wait_ms")? {
-        opts.empty_opening = local_first_server_wait(&opts, timeout_ms);
+    if let Some(timeout_ms) = optional_wait_ms_prop(&value, "first_load_remote_wait_ms")? {
+        opts.first_load = local_first_server_wait(&opts, timeout_ms);
     }
     Ok(opts)
 }
@@ -3256,11 +3256,11 @@ fn read_opts_from_js(value: JsValue) -> Result<ReadOpts, JsValue> {
 /// A local-first read's server-wait timeout. It applies only to a
 /// local-first read without another opening gate; `Remote` reads and the
 /// deprecated local-first-unless-empty tier ignore it.
-fn local_first_server_wait(opts: &ReadOpts, timeout_ms: u64) -> EmptyOpening {
-    if opts.tier == DurabilityTier::Local && opts.empty_opening == EmptyOpening::Deliver {
-        EmptyOpening::WaitForRemote { timeout_ms }
+fn local_first_server_wait(opts: &ReadOpts, timeout_ms: u64) -> FirstLoad {
+    if opts.tier == DurabilityTier::Local && opts.first_load == FirstLoad::Deliver {
+        FirstLoad::WaitForRemote { timeout_ms }
     } else {
-        opts.empty_opening
+        opts.first_load
     }
 }
 
@@ -3290,18 +3290,18 @@ fn durability_tier_from_str(tier: &str) -> Result<DurabilityTier, JsValue> {
 
 /// Read-only binding lowering. Write waits keep `durability_tier_from_str`, so
 /// a product read choice can never change write-settlement semantics.
-fn read_tier_from_str(tier: &str) -> Result<(DurabilityTier, EmptyOpening), JsValue> {
+fn read_tier_from_str(tier: &str) -> Result<(DurabilityTier, FirstLoad), JsValue> {
     if let Some(message) = removed_read_tier(tier) {
         return Err(JsValue::from_str(message));
     }
     match tier {
-        "local-first" | "LocalFirst" => Ok((DurabilityTier::Local, EmptyOpening::Deliver)),
+        "local-first" | "LocalFirst" => Ok((DurabilityTier::Local, FirstLoad::Deliver)),
         // The core owns the local-first-unless-empty gate.
         "local-first-unless-empty" | "LocalFirstUnlessEmpty" => {
-            Ok((DurabilityTier::Local, EmptyOpening::AwaitRemote))
+            Ok((DurabilityTier::Local, FirstLoad::AwaitRemote))
         }
-        "remote" | "Remote" => Ok((DurabilityTier::Global, EmptyOpening::Deliver)),
-        _ => durability_tier_from_str(tier).map(|tier| (tier, EmptyOpening::Deliver)),
+        "remote" | "Remote" => Ok((DurabilityTier::Global, FirstLoad::Deliver)),
+        _ => durability_tier_from_str(tier).map(|tier| (tier, FirstLoad::Deliver)),
     }
 }
 
@@ -4069,11 +4069,11 @@ mod dynamic_schema_view_tests {
     fn read_tier_names_lower_to_existing_core_tiers() {
         assert_eq!(
             read_tier_from_str("local-first").expect("local-first read tier"),
-            (DurabilityTier::Local, EmptyOpening::Deliver)
+            (DurabilityTier::Local, FirstLoad::Deliver)
         );
         assert_eq!(
             read_tier_from_str("remote").expect("strict remote read tier"),
-            (DurabilityTier::Global, EmptyOpening::Deliver)
+            (DurabilityTier::Global, FirstLoad::Deliver)
         );
         for name in ["remote-if-possible", "RemoteIfPossible"] {
             assert!(removed_read_tier(name).is_some(), "{name} was removed");
@@ -4081,7 +4081,7 @@ mod dynamic_schema_view_tests {
         for name in ["local-first-unless-empty", "LocalFirstUnlessEmpty"] {
             assert_eq!(
                 read_tier_from_str(name).expect("local-first-unless-empty read tier"),
-                (DurabilityTier::Local, EmptyOpening::AwaitRemote),
+                (DurabilityTier::Local, FirstLoad::AwaitRemote),
                 "{name} reads local-first with the core empty-opening gate"
             );
         }

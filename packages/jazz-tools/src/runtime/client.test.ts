@@ -636,11 +636,19 @@ describe("public read tiers", () => {
     runtime.query.mockResolvedValue([]);
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
     const reads = [
-      [{ tier: ReadTier.LocalFirst, waitForServerMs: 500 }, "local", '{"server_wait_ms":500}'],
-      [{ tier: "local", waitForServerMs: 250.9 }, "local", '{"server_wait_ms":250}'],
-      [{ tier: ReadTier.LocalFirst, waitForServerMs: 0 }, "local", undefined],
       [
-        { tier: ReadTier.Remote, waitForServerMs: 500 },
+        { tier: ReadTier.LocalFirst, firstLoadRemoteWaitMs: 500 },
+        "local",
+        '{"first_load_remote_wait_ms":500}',
+      ],
+      [
+        { tier: "local", firstLoadRemoteWaitMs: 250.9 },
+        "local",
+        '{"first_load_remote_wait_ms":250}',
+      ],
+      [{ tier: ReadTier.LocalFirst, firstLoadRemoteWaitMs: 0 }, "local", undefined],
+      [
+        { tier: ReadTier.Remote, firstLoadRemoteWaitMs: 500 },
         "global",
         JSON.stringify({ local_updates: "deferred" }),
       ],
@@ -651,11 +659,11 @@ describe("public read tiers", () => {
       expect(runtime.query.mock.calls[0]?.[2]).toBe(nativeTier);
       expect(runtime.query.mock.calls[0]?.[3]).toBe(optionsJson);
     }
-    expect(publicQueryExecutionOptions({ waitForServerMs: 300 })).toEqual({
-      waitForServerMs: 300,
+    expect(publicQueryExecutionOptions({ firstLoadRemoteWaitMs: 300 })).toEqual({
+      firstLoadRemoteWaitMs: 300,
     });
-    expect(() => publicQueryExecutionOptions({ waitForServerMs: -1 })).toThrow(
-      "waitForServerMs must be a non-negative number of milliseconds",
+    expect(() => publicQueryExecutionOptions({ firstLoadRemoteWaitMs: -1 })).toThrow(
+      "firstLoadRemoteWaitMs must be a non-negative number of milliseconds",
     );
   });
 

@@ -1,4 +1,4 @@
-//! Local first with a server-wait timeout (`EmptyOpening::WaitForRemote`):
+//! Local first with a server-wait timeout (`FirstLoad::WaitForRemote`):
 //! the opening, empty or not, waits a bounded time for the server's answer
 //! while the remote could answer, and never waits when it cannot.
 //!
@@ -21,7 +21,7 @@ mod common;
 use duplex_transport::duplex;
 use jazz::block_on;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, EmptyOpening, LocalUpdates, ReadOpts, RemoteLinkHint,
+    Db, DbConfig, DbIdentity, FirstLoad, LocalUpdates, ReadOpts, RemoteLinkHint,
     SerializedReadResult, SubscriptionEvent, SubscriptionStream,
 };
 use jazz::groove::records::Value;
@@ -114,9 +114,9 @@ fn turn(client: &Db<TestStorage>, server: Option<&Db<TestStorage>>) {
     }
 }
 
-fn wait_for_server(timeout: Duration) -> ReadOpts {
+fn first_load_remote_wait(timeout: Duration) -> ReadOpts {
     ReadOpts {
-        empty_opening: EmptyOpening::WaitForRemote {
+        first_load: FirstLoad::WaitForRemote {
             timeout_ms: timeout.as_millis() as u64,
         },
         ..ReadOpts::default()
@@ -300,7 +300,7 @@ fn a_warm_cache_waits_for_the_servers_answer() {
     let alice = warm_client(0x71, &server);
     seed(&server, 10, "k");
 
-    let mut stream = subscribe(&alice, &items(), wait_for_server(LONG));
+    let mut stream = subscribe(&alice, &items(), first_load_remote_wait(LONG));
     assert_withheld(&mut stream, &alice, None, 5);
     let (reset, mut rows, settled) = opening(first_event(&mut stream, &alice, Some(&server)));
     rows.sort();
@@ -313,7 +313,7 @@ fn a_warm_cache_waits_for_the_servers_answer() {
         &alice,
         Some(&server),
         &items(),
-        wait_for_server(LONG),
+        first_load_remote_wait(LONG),
         MAX_TURNS,
     );
     rows.sort();
@@ -333,7 +333,7 @@ fn the_timeout_releases_the_local_result() {
     let server = seeded_server();
     let alice = warm_client(0x72, &server);
 
-    let mut stream = subscribe(&alice, &items(), wait_for_server(SHORT));
+    let mut stream = subscribe(&alice, &items(), first_load_remote_wait(SHORT));
     assert_withheld(&mut stream, &alice, None, 3);
     std::thread::sleep(SHORT + Duration::from_millis(50));
     let (reset, mut rows, settled) = opening(first_event(&mut stream, &alice, None));
@@ -344,7 +344,7 @@ fn the_timeout_releases_the_local_result() {
     );
     assert_eq!(rows, all_rows());
 
-    let mut rows = slow_one_shot(&alice, &items(), wait_for_server(SHORT));
+    let mut rows = slow_one_shot(&alice, &items(), first_load_remote_wait(SHORT));
     rows.sort();
     assert_eq!(
         rows,
@@ -370,19 +370,28 @@ fn nothing_waits_when_the_server_cannot_answer_or_the_timeout_is_zero() {
         let alice = fresh_client(node);
         connect(&alice, &server);
         alice.set_remote_link_hint(hint);
-        let mut stream = subscribe(&alice, &items(), wait_for_server(LONG));
+        let mut stream = subscribe(&alice, &items(), first_load_remote_wait(LONG));
         let (reset, rows, settled) = opening(first_event(&mut stream, &alice, None));
         assert!(reset && rows.is_empty() && !settled, "{hint:?}");
-        assert!(one_shot(&alice, None, &items(), wait_for_server(LONG), 3).is_empty());
+        assert!(one_shot(&alice, None, &items(), first_load_remote_wait(LONG), 3).is_empty());
     }
 
     let bob = fresh_client(0x75);
     connect(&bob, &server);
     bob.set_remote_link_hint(RemoteLinkHint::Live);
-    let mut stream = subscribe(&bob, &items(), wait_for_server(Duration::ZERO));
+    let mut stream = subscribe(&bob, &items(), first_load_remote_wait(Duration::ZERO));
     let (reset, rows, settled) = opening(first_event(&mut stream, &bob, None));
     assert!(reset && rows.is_empty() && !settled);
-    assert!(one_shot(&bob, None, &items(), wait_for_server(Duration::ZERO), 3).is_empty());
+    assert!(
+        one_shot(
+            &bob,
+            None,
+            &items(),
+            first_load_remote_wait(Duration::ZERO),
+            3
+        )
+        .is_empty()
+    );
 }
 
 /// A held opening is released as soon as the link fails, long before its
@@ -395,7 +404,7 @@ fn nothing_waits_when_the_server_cannot_answer_or_the_timeout_is_zero() {
 fn a_failed_link_releases_a_held_opening_before_its_timeout() {
     let server = seeded_server();
     let alice = warm_client(0x76, &server);
-    let mut stream = subscribe(&alice, &items(), wait_for_server(LONG));
+    let mut stream = subscribe(&alice, &items(), first_load_remote_wait(LONG));
     assert_withheld(&mut stream, &alice, None, 3);
     alice.set_remote_link_hint(RemoteLinkHint::Failed);
     let (reset, mut rows, settled) = opening(first_event(&mut stream, &alice, None));

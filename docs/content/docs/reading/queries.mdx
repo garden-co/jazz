@@ -103,12 +103,12 @@ The aliases `"local"` and `"global"` remain accepted for reads; write waits use
 ### Waiting briefly for the server
 
 A local-first read can wait a bounded time for the server before its first result. Pass
-`waitForServerMs` (the option name is provisional and may change before it is stable):
+`firstLoadRemoteWaitMs`:
 
 ```ts
-const todos = await db.all(app.todos, { tier: "local-first", waitForServerMs: 500 });
-db.subscribe(app.todos, onChange, { tier: "local-first", waitForServerMs: 500 });
-const rows = useAll(app.todos, { tier: "local-first", waitForServerMs: 500 });
+const todos = await db.all(app.todos, { tier: "local-first", firstLoadRemoteWaitMs: 500 });
+db.subscribe(app.todos, onChange, { tier: "local-first", firstLoadRemoteWaitMs: 500 });
+const rows = useAll(app.todos, { tier: "local-first", firstLoadRemoteWaitMs: 500 });
 ```
 
 In Rust, use `client.query_local_first(query, Duration::from_millis(500))` and
@@ -116,7 +116,7 @@ In Rust, use `client.query_local_first(query, Duration::from_millis(500))` and
 
 - Only the initial load waits: a one-shot read, or a subscription's first callback. While the
   client looks online (its connection is live, or its connection attempt started less than 5 s
-  ago), Jazz waits up to `waitForServerMs` for the server's answer and shows that result, together
+  ago), Jazz waits up to `firstLoadRemoteWaitMs` for the server's answer and shows that result, together
   with your own pending writes. If the server has not answered in time, it shows the local result.
 - It waits even when the local cache already has data, but never longer than the timeout. Use it
   to avoid showing a stale or empty snapshot on a fresh device.
@@ -132,9 +132,9 @@ In Rust, use `client.query_local_first(query, Duration::from_millis(500))` and
 <Callout type="warn" title="local-first-unless-empty is deprecated">
   `"local-first-unless-empty"` (`ReadTier.LocalFirstUnlessEmpty`) still works as before but warns
   once and will be removed in the next breaking release. Replace it with `"local-first"` plus a
-  `waitForServerMs` of, for example, a few seconds. The old tier waited without a timeout, but only
-  when the local result was empty; `waitForServerMs` also waits when the cache has data, bounded by
-  the timeout.
+  `firstLoadRemoteWaitMs` of, for example, a few seconds. The old tier waited without a timeout, but
+  only when the local result was empty; `firstLoadRemoteWaitMs` also waits when the cache has data,
+  bounded by the timeout.
 </Callout>
 
 ### Own writes
@@ -142,7 +142,7 @@ In Rust, use `client.query_local_first(query, Duration::from_millis(500))` and
 The read tier also determines how a subscription treats your own local writes:
 
 - `"local-first"` shows pending local writes using locally known data.
-- `"local-first"` with `waitForServerMs` shows pending local writes exactly like `"local-first"`, including in a first result that came from the server.
+- `"local-first"` with `firstLoadRemoteWaitMs` shows pending local writes exactly like `"local-first"`, including in a first result that came from the server.
 - `"remote"` has no pending overlay: writes appear when reflected in the server's query scope.
 
 See [Durability Tiers](/docs/reference/durability-tiers) for the full reference, including which APIs accept these options and how they compose.

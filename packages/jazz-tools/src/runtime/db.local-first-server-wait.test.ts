@@ -35,7 +35,7 @@ it("opens a client with local rows on the server's answer when it arrives in tim
     const unsubscribe = reader.subscribe(
       app.entries,
       (rows) => deliveries.push(rows.map((row) => row.title).sort()),
-      { tier: ReadTier.LocalFirst, waitForServerMs: 30_000 },
+      { tier: ReadTier.LocalFirst, firstLoadRemoteWaitMs: 30_000 },
     );
     await expect.poll(() => deliveries.length, { timeout: 10_000 }).toBeGreaterThan(0);
     // The local row alone is not shown first: the opening waited for the server.
@@ -45,9 +45,9 @@ it("opens a client with local rows on the server's answer when it arrives in tim
     const fresh = await createDb(await localAccountConfig(server.appId, server.url));
     dbs.push(fresh);
     expect(
-      (await fresh.all(app.entries, { tier: ReadTier.LocalFirst, waitForServerMs: 30_000 })).map(
-        (row) => row.title,
-      ),
+      (
+        await fresh.all(app.entries, { tier: ReadTier.LocalFirst, firstLoadRemoteWaitMs: 30_000 })
+      ).map((row) => row.title),
     ).toContain("Already on the server");
   } finally {
     for (const db of dbs) await db.shutdown();
@@ -77,12 +77,12 @@ it("does not wait for a server that is unreachable", async () => {
     const unsubscribe = db.subscribe(
       app.entries,
       (rows) => deliveries.push(rows.map((row) => row.title)),
-      { tier: ReadTier.LocalFirst, waitForServerMs: 60_000 },
+      { tier: ReadTier.LocalFirst, firstLoadRemoteWaitMs: 60_000 },
     );
     await expect.poll(() => deliveries.length, { timeout: 10_000 }).toBeGreaterThan(0);
     expect(deliveries[0]).toEqual([]);
     expect(
-      await db.all(app.entries, { tier: ReadTier.LocalFirst, waitForServerMs: 60_000 }),
+      await db.all(app.entries, { tier: ReadTier.LocalFirst, firstLoadRemoteWaitMs: 60_000 }),
     ).toEqual([]);
     // Bounded by the first-connection wait, never by the timeout.
     expect(Date.now() - started).toBeLessThan(8_000);

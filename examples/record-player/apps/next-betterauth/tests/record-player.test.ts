@@ -110,7 +110,7 @@ describe("RecordPlayer scenario receipt", () => {
       ),
     ).resolves.toEqual([]);
 
-    expect(capturedOptions).toEqual({ tier: "local-first", waitForServerMs: 5_000 });
+    expect(capturedOptions).toEqual({ tier: "local-first", firstLoadRemoteWaitMs: 5_000 });
     const runtimeQuery = JSON.parse(translateQuery(capturedQuery!._build(), app.wasmSchema));
     expect(runtimeQuery.table).toBe("playlist_entries");
     expect(runtimeQuery.conditions).toEqual([

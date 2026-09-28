@@ -3124,9 +3124,9 @@ impl Drop for PermissionAdviceFuture {
 }
 
 mod catalogue;
-mod empty_opening;
-pub use empty_opening::{EmptyOpening, REMOTE_LINK_ATTEMPT_WINDOW, RemoteLinkHint};
-use empty_opening::{OpeningGate, OpeningRoute, RemoteLinkTracker};
+mod first_load;
+pub use first_load::{FirstLoad, REMOTE_LINK_ATTEMPT_WINDOW, RemoteLinkHint};
+use first_load::{OpeningGate, OpeningRoute, RemoteLinkTracker};
 mod lifecycle;
 mod mutation_errors;
 mod mutations;
@@ -3224,9 +3224,9 @@ pub struct ReadOpts {
     /// Semantic read view to evaluate against.
     pub read_view: ReadViewSpec,
     /// What to do with an empty, unsettled opening. Host read-option state
-    /// only; an absent serde field is [`EmptyOpening::Deliver`].
+    /// only; an absent serde field is [`FirstLoad::Deliver`].
     #[serde(default)]
-    pub empty_opening: EmptyOpening,
+    pub first_load: FirstLoad,
 }
 
 impl Default for ReadOpts {
@@ -3237,7 +3237,7 @@ impl Default for ReadOpts {
             propagation: Propagation::Full,
             include_deleted: false,
             read_view: ReadViewSpec::default(),
-            empty_opening: EmptyOpening::Deliver,
+            first_load: FirstLoad::Deliver,
         }
     }
 }
@@ -4824,7 +4824,7 @@ struct SubscriptionPublication {
     deferred: Option<SubscriptionPublicationSnapshot>,
     reset: bool,
     unresolved: BTreeSet<OutputOccurrenceId>,
-    /// Armed `EmptyOpening::WaitForRemote` or `EmptyOpening::AwaitRemote`
+    /// Armed `FirstLoad::WaitForRemote` or `FirstLoad::AwaitRemote`
     /// gate, cleared once it releases.
     opening_gate: Option<OpeningGate>,
     /// This stream is a gated (`WaitForRemote` or `AwaitRemote`) offset window

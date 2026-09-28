@@ -947,7 +947,7 @@ where
         allow_pending_overlay: bool,
     ) -> Result<SubscriptionStream, Error> {
         let local_first_opts = ReadOpts {
-            empty_opening: super::EmptyOpening::Deliver,
+            first_load: super::FirstLoad::Deliver,
             ..opts.clone()
         };
         // Boxed so this wrapper adds no inline opener frame to its callers.
@@ -990,7 +990,7 @@ where
         ensure_supported_subscription_read_opts(&opts)?;
         self.validate_prepared_shape_for_registration(prepared)
             .await?;
-        let (opts, opening_gate) = self.resolve_empty_opening(prepared, opts, authorization_mode);
+        let (opts, opening_gate) = self.resolve_first_load(prepared, opts, authorization_mode);
         let requested_read_tier = effective_read_tier(&opts);
         // A non-durable foreground (a browser tab over its worker, an RN
         // foreground over the relay) registers Local coverage, which settles

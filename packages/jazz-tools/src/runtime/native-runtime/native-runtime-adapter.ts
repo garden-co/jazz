@@ -1191,7 +1191,7 @@ export class NativeRuntimeAdapter implements Runtime {
    * A native host owns its socket and exposes status only by request; each
    * request also lets the relay report the link to the core read gate. Poll
    * only while someone listens and this runtime has issued a read that may
-   * wait for the server (local first with `waitForServerMs`, or the
+   * wait for the server (local first with `firstLoadRemoteWaitMs`, or the
    * deprecated local-first-unless-empty tier), so apps that never wait pay
    * nothing.
    */
@@ -1212,7 +1212,7 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private noteReadTier(tier?: string | null, optionsJson?: string | null): void {
-    if (tier !== LOCAL_FIRST_UNLESS_EMPTY && !readWaitsForServer(optionsJson)) return;
+    if (tier !== LOCAL_FIRST_UNLESS_EMPTY && !readFirstLoadWaitsForRemote(optionsJson)) return;
     const owner = this.ownerRuntime;
     if (owner.unlessEmptyReadSeen) return;
     owner.unlessEmptyReadSeen = true;
@@ -4351,8 +4351,11 @@ function readOptions(
   if (tier != null) readOptions.tier = tier;
   if (includeDeleted) readOptions.include_deleted = true;
   if (options.local_updates != null) readOptions.local_updates = options.local_updates;
-  if (typeof options.server_wait_ms === "number" && options.server_wait_ms > 0) {
-    readOptions.server_wait_ms = options.server_wait_ms;
+  if (
+    typeof options.first_load_remote_wait_ms === "number" &&
+    options.first_load_remote_wait_ms > 0
+  ) {
+    readOptions.first_load_remote_wait_ms = options.first_load_remote_wait_ms;
   }
   if (options.propagation === "local-only") readOptions.propagation = "local_only";
   if (options.propagation === "full") readOptions.propagation = "full";
@@ -4361,12 +4364,14 @@ function readOptions(
   return readOptions;
 }
 
-/** A read whose initial load may wait for the server (`waitForServerMs`). */
-function readWaitsForServer(optionsJson?: string | null): boolean {
+/** A read whose initial load may wait for the server (`firstLoadRemoteWaitMs`). */
+function readFirstLoadWaitsForRemote(optionsJson?: string | null): boolean {
   if (optionsJson == null) return false;
   try {
-    const options = JSON.parse(optionsJson) as { server_wait_ms?: unknown };
-    return typeof options.server_wait_ms === "number" && options.server_wait_ms > 0;
+    const options = JSON.parse(optionsJson) as { first_load_remote_wait_ms?: unknown };
+    return (
+      typeof options.first_load_remote_wait_ms === "number" && options.first_load_remote_wait_ms > 0
+    );
   } catch {
     return false;
   }

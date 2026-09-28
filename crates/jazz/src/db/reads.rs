@@ -244,10 +244,10 @@ where
     /// release callback lets a host defer attachment cleanup when dropping a
     /// pending operation while its runtime owner is already borrowed.
     ///
-    /// An [`EmptyOpening::WaitForRemote`] request from a client-local read
+    /// An [`FirstLoad::WaitForRemote`] request from a client-local read
     /// outside a transaction applies the shared one-shot rule of
     /// [`Db::read_local_first_within`], and a deprecated
-    /// [`EmptyOpening::AwaitRemote`] request the rule of
+    /// [`FirstLoad::AwaitRemote`] request the rule of
     /// [`Db::read_local_first_unless_empty`]: the local-first read runs with
     /// the caller's coverage requirement, and the strict remote read (Global
     /// tier, immediate local updates) always requires coverage. Each phase
@@ -269,18 +269,18 @@ where
         F: Fn(QueryAttachment),
         E: Fn() -> bool,
     {
-        let empty_opening = std::mem::take(&mut opts.empty_opening);
+        let first_load = std::mem::take(&mut opts.first_load);
         let gated = open_tx.is_none()
             && author.is_none()
             && opts.propagation == Propagation::Full
             && effective_read_tier(&opts) == DurabilityTier::Local;
-        let wait_timeout = match empty_opening {
-            EmptyOpening::WaitForRemote { timeout_ms } if gated && timeout_ms > 0 => {
+        let wait_timeout = match first_load {
+            FirstLoad::WaitForRemote { timeout_ms } if gated && timeout_ms > 0 => {
                 Some(std::time::Duration::from_millis(timeout_ms))
             }
             _ => None,
         };
-        let await_remote = gated && empty_opening == EmptyOpening::AwaitRemote;
+        let await_remote = gated && first_load == FirstLoad::AwaitRemote;
         if let Some(timeout) = wait_timeout {
             let remote_opts = ReadOpts {
                 tier: DurabilityTier::Global,

@@ -264,9 +264,9 @@ Bindings expose the separate, read-only `ReadTier` vocabulary:
 | `LocalFirstUnlessEmpty` | deprecated; as `LocalFirst`, but an empty opening waits for the first remote view while a remote can serve; `offset > 0` reads the remote window | immediate        | as `LocalFirst`, plus the opening gate   |
 
 Product reads have two tiers, `LocalFirst` and `Remote`. `LocalFirst` takes an
-optional server-wait timeout (TypeScript `waitForServerMs`, a provisional name;
+optional server-wait timeout (TypeScript `firstLoadRemoteWaitMs`;
 Rust `JazzClient::query_local_first` / `subscribe_local_first` with a
-`Duration`; host JSON read-option field `server_wait_ms`). Zero means plain
+`Duration`; host JSON read-option field `first_load_remote_wait_ms`). Zero means plain
 `LocalFirst`; `Remote` ignores the timeout. `LocalFirstUnlessEmpty` is
 deprecated (`#[deprecated]` in Rust, a one-time runtime warning in
 TypeScript) and will be removed in the next breaking release; callers migrate
@@ -308,14 +308,14 @@ attribution. A write wait must name a transaction created by that attachment.
 The server wait and `LocalFirstUnlessEmpty` are implemented once, in the core
 `Db`, so every host (Rust facade, WASM, NAPI, native relay) shares one
 definition. Bindings lower a local-first read with a non-zero server wait to
-`ReadOpts { tier: Local, local_updates: Immediate, empty_opening:
-EmptyOpening::WaitForRemote { timeout_ms } }`, and the deprecated tier to
-the same options with `EmptyOpening::AwaitRemote`; they pass them through and
+`ReadOpts { tier: Local, local_updates: Immediate, first_load:
+FirstLoad::WaitForRemote { timeout_ms } }`, and the deprecated tier to
+the same options with `FirstLoad::AwaitRemote`; they pass them through and
 run no probe query and no catch-up timer. Host bindings accept the timeout as
-the `server_wait_ms` read-option field. Both variants use one _opening gate_;
+the `first_load_remote_wait_ms` read-option field. Both variants use one _opening gate_;
 a `WaitForRemote` gate additionally carries a deadline. The gate applies only
 to product reads (client-local serving, `Propagation::Full`, effective tier
-`Local`); any other read ignores the option. `EmptyOpening` is a host read
+`Local`); any other read ignores the option. `FirstLoad` is a host read
 option only: it is never persisted or sent to a peer, so no wire or on-disk
 bytes change.
 

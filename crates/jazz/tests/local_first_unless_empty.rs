@@ -1,4 +1,4 @@
-//! The core `Db` local-first-unless-empty gate (`EmptyOpening::AwaitRemote`)
+//! The core `Db` local-first-unless-empty gate (`FirstLoad::AwaitRemote`)
 //! and the host remote-link hint.
 //!
 //! Every client here is a core `Db` connected to a history-complete server
@@ -22,7 +22,7 @@ mod common;
 use duplex_transport::duplex;
 use jazz::block_on;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, EmptyOpening, LocalUpdates, REMOTE_LINK_ATTEMPT_WINDOW, ReadOpts,
+    Db, DbConfig, DbIdentity, FirstLoad, LocalUpdates, REMOTE_LINK_ATTEMPT_WINDOW, ReadOpts,
     RemoteLinkHint, SerializedReadResult, SubscriptionEvent, SubscriptionStream, TickScheduler,
     TickUrgency,
 };
@@ -118,7 +118,7 @@ fn turn(client: &Db<TestStorage>, server: Option<&Db<TestStorage>>) {
 
 fn unless_empty() -> ReadOpts {
     ReadOpts {
-        empty_opening: EmptyOpening::AwaitRemote,
+        first_load: FirstLoad::AwaitRemote,
         ..ReadOpts::default()
     }
 }

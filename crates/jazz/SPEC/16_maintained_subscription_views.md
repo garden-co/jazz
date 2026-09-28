@@ -314,14 +314,14 @@ answer may be published; it does not select another evaluator:
 - `remote` waits for a fresh settled closure for its exact usage-site
   subscription and evaluates only that closure, without pending local changes.
   It waits while offline;
-- `local-first` with a server wait (`EmptyOpening::WaitForRemote
+- `local-first` with a server wait (`FirstLoad::WaitForRemote
 { timeout_ms }`) evaluates exactly like `local-first`; it differs only in
   withholding any unsettled first answer until the usage's first settled
   authority closure, rejection, link loss, or the deadline, whichever comes
   first, while a remote can answer, and in reading an `offset > 0` window as
   the strict remote view (falling back to the local window at the deadline)
   (ch. 13);
-- deprecated `local-first-unless-empty` (`EmptyOpening::AwaitRemote`) shares
+- deprecated `local-first-unless-empty` (`FirstLoad::AwaitRemote`) shares
   that opening gate, but withholds only an empty first answer and has no
   deadline (ch. 13);
 - a core `Global` read with immediate local updates (no longer a product tier)

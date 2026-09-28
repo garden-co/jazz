@@ -354,18 +354,18 @@ export type DurabilityTier = "local" | "global";
  *
  * There are two tiers: `LocalFirst` and `Remote`. A local-first read can also
  * wait a bounded time for the server on its initial load; see
- * {@link QueryExecutionOptions.waitForServerMs}.
+ * {@link QueryExecutionOptions.firstLoadRemoteWaitMs}.
  */
 export const ReadTier = {
   /**
    * Cached local knowledge and pending writes; still syncs while connected.
-   * Set `waitForServerMs` to let the initial load wait for the server first.
+   * Set `firstLoadRemoteWaitMs` to let the initial load wait for the server first.
    */
   LocalFirst: "local-first",
   /** Current remote query scope, without pending local writes; waits offline. */
   Remote: "remote",
   /**
-   * @deprecated Use `ReadTier.LocalFirst` with `waitForServerMs` instead.
+   * @deprecated Use `ReadTier.LocalFirst` with `firstLoadRemoteWaitMs` instead.
    * This tier will be removed in the next breaking release.
    *
    * Local knowledge and pending writes, delivered immediately. Only when the
@@ -391,7 +391,7 @@ export function warnDeprecatedReadTier(tier: unknown): void {
   if (!isLocalFirstUnlessEmptyTier(tier) || warnedDeprecatedLocalFirstUnlessEmpty) return;
   warnedDeprecatedLocalFirstUnlessEmpty = true;
   console.warn(
-    'The "local-first-unless-empty" tier is deprecated and will be removed in the next breaking release. Use ReadTier.LocalFirst with waitForServerMs instead.',
+    'The "local-first-unless-empty" tier is deprecated and will be removed in the next breaking release. Use ReadTier.LocalFirst with firstLoadRemoteWaitMs instead.',
   );
 }
 
@@ -399,17 +399,17 @@ export function warnDeprecatedReadTier(tier: unknown): void {
  * @internal A local-first read's server wait, or `undefined` for none.
  * Throws for a value that is not a non-negative number of milliseconds.
  */
-export function normalizeWaitForServerMs(value: unknown): number | undefined {
+export function normalizeFirstLoadRemoteWaitMs(value: unknown): number | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
-    throw new Error("waitForServerMs must be a non-negative number of milliseconds.");
+    throw new Error("firstLoadRemoteWaitMs must be a non-negative number of milliseconds.");
   }
   const ms = Math.floor(value);
   return ms > 0 ? ms : undefined;
 }
 
 const REMOVED_REMOTE_IF_POSSIBLE =
-  'The "remote-if-possible" tier was removed. Use ReadTier.LocalFirst with waitForServerMs, or ReadTier.Remote for server-confirmed reads.';
+  'The "remote-if-possible" tier was removed. Use ReadTier.LocalFirst with firstLoadRemoteWaitMs, or ReadTier.Remote for server-confirmed reads.';
 
 /** @internal Throw the migration error for read tiers removed in alpha.57. */
 export function rejectRemovedReadTier(tier: unknown): void {
@@ -467,7 +467,7 @@ export interface QueryExecutionOptions {
   /** Product read tier. @deprecated DurabilityTier values remain accepted with their old meaning. */
   tier?: QueryReadTier;
   /**
-   * Local-first reads only (provisional name): how long the initial load may
+   * Local-first reads only: how long the initial load may
    * wait for the server's answer, in milliseconds. Defaults to `0`, which
    * shows local data at once.
    *
@@ -479,7 +479,7 @@ export interface QueryExecutionOptions {
    * for local-first: local writes show immediately and remote changes as
    * they arrive. `ReadTier.Remote` ignores it.
    */
-  waitForServerMs?: number;
+  firstLoadRemoteWaitMs?: number;
   /** Admit exact-head history, falling back to an optional live or frozen base. */
   branch?: BranchView;
 }
@@ -501,10 +501,10 @@ export function publicQueryExecutionOptions(
   rejectRemovedReadTier(candidate.tier);
   const result: QueryExecutionOptions = {};
   if (isPublicQueryReadTier(candidate.tier)) result.tier = candidate.tier;
-  const waitForServerMs = normalizeWaitForServerMs(
-    (candidate as { waitForServerMs?: unknown }).waitForServerMs,
+  const firstLoadRemoteWaitMs = normalizeFirstLoadRemoteWaitMs(
+    (candidate as { firstLoadRemoteWaitMs?: unknown }).firstLoadRemoteWaitMs,
   );
-  if (waitForServerMs !== undefined) result.waitForServerMs = waitForServerMs;
+  if (firstLoadRemoteWaitMs !== undefined) result.firstLoadRemoteWaitMs = firstLoadRemoteWaitMs;
   if (candidate.branch !== undefined) result.branch = candidate.branch as BranchView;
   return result;
 }
@@ -533,7 +533,7 @@ export type InternalQueryExecutionOptions = Omit<QueryExecutionOptions, "tier"> 
 export interface ResolvedQueryExecutionOptions {
   tier: RuntimeReadTier;
   /** Server wait of a local-first read; absent when it does not wait. */
-  waitForServerMs?: number;
+  firstLoadRemoteWaitMs?: number;
   localUpdates: LocalUpdatesMode;
   propagation: QueryPropagation;
   visibility: QueryVisibility;
@@ -686,13 +686,13 @@ export function resolveEffectiveQueryExecutionOptions(
 ): ResolvedQueryExecutionOptions {
   const selectedTier = options?.tier ?? resolveDefaultDurabilityTier(context);
   const tier = resolveReadTier(selectedTier);
-  const waitForServerMs =
+  const firstLoadRemoteWaitMs =
     tier === "local" && selectedTier !== "local-only"
-      ? normalizeWaitForServerMs(options?.waitForServerMs)
+      ? normalizeFirstLoadRemoteWaitMs(options?.firstLoadRemoteWaitMs)
       : undefined;
   return {
     tier,
-    ...(waitForServerMs !== undefined ? { waitForServerMs } : {}),
+    ...(firstLoadRemoteWaitMs !== undefined ? { firstLoadRemoteWaitMs } : {}),
     localUpdates:
       options?.localUpdates ?? (selectedTier === ReadTier.Remote ? "deferred" : "immediate"),
     propagation: selectedTier === "local-only" ? "local-only" : (options?.propagation ?? "full"),
@@ -738,7 +738,7 @@ function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): st
   const payload: {
     propagation?: QueryPropagation;
     local_updates?: LocalUpdatesMode;
-    server_wait_ms?: number;
+    first_load_remote_wait_ms?: number;
     transaction_id?: string;
     read_view?: {
       source: {
@@ -760,8 +760,8 @@ function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): st
   if (options.openTransactionId) {
     payload.transaction_id = options.openTransactionId;
   }
-  if (options.waitForServerMs !== undefined && options.waitForServerMs > 0) {
-    payload.server_wait_ms = options.waitForServerMs;
+  if (options.firstLoadRemoteWaitMs !== undefined && options.firstLoadRemoteWaitMs > 0) {
+    payload.first_load_remote_wait_ms = options.firstLoadRemoteWaitMs;
   }
   if (options.branch) {
     const base = options.branch.base;
@@ -779,7 +779,7 @@ function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): st
     !payload.propagation &&
     !payload.local_updates &&
     !payload.transaction_id &&
-    !payload.server_wait_ms &&
+    !payload.first_load_remote_wait_ms &&
     !payload.read_view
   ) {
     return undefined;

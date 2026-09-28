@@ -267,8 +267,8 @@ where
     pub(super) pending_relay_subscription_rejections: PendingRelaySubscriptionRejections,
     pub(super) connections: RefCell<Vec<Rc<LocalMutex<PeerConnection<S>>>>>,
     pub(super) scheduler: SharedTickScheduler,
-    /// Remote reachability for `EmptyOpening::WaitForRemote` and
-    /// `EmptyOpening::AwaitRemote` reads.
+    /// Remote reachability for `FirstLoad::WaitForRemote` and
+    /// `FirstLoad::AwaitRemote` reads.
     pub(super) remote_link: Rc<RemoteLinkTracker>,
     query_runtime_wake_pending: Arc<AtomicBool>,
     query_runtime_waker: Rc<RefCell<Option<Waker>>>,

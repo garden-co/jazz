@@ -63,7 +63,7 @@ export class JazzRecordPlayerStore {
   }
 
   /**
-   * The server's page when it answers within `waitForServerMs`; the cached
+   * The server's page when it answers within `firstLoadRemoteWaitMs`; the cached
    * page offline or after the timeout.
    */
   async playlistWindow(
@@ -77,7 +77,7 @@ export class JazzRecordPlayerStore {
         .orderBy("position", "asc")
         .offset(offset)
         .limit(limit),
-      { tier: "local-first", waitForServerMs: 5_000 },
+      { tier: "local-first", firstLoadRemoteWaitMs: 5_000 },
     );
     return rows.map((row) => ({
       id: row.id,
