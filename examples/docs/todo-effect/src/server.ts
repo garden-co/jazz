@@ -37,6 +37,8 @@ const createTodo = HttpRouter.add(
   "/api/todos",
   Effect.gen(function* () {
     const jazz = yield* Jazz;
+    // A missing or invalid bearer token fails `forCurrentRequest` before this
+    // runs, and currently surfaces as a 500 (typed auth errors: #3655).
     const account = jazz.db.getAuthState().session?.user.account;
     if (!account) {
       return yield* HttpServerResponse.json({ error: "Account required" }, { status: 401 });
@@ -97,6 +99,7 @@ export const listDoneTodos = Effect.gen(function* () {
   return yield* jazz.all(schemaApp.todos.where({ done: true }));
 });
 
+// A standalone route: mount it with the quickstart routes below if you want it served.
 export const listDoneTodosRoute = HttpRouter.add(
   "GET",
   "/api/todos/done",
