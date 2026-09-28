@@ -70,7 +70,7 @@ h6 {
   max-width: 46rem;
 }
 
-.docs-body .docs-heading {
+.docs-body :is(.docs-heading, [id]) {
   scroll-margin-top: 5rem;
 }
 
@@ -157,6 +157,16 @@ h6 {
   font-size: inherit;
   line-height: inherit;
   color: inherit;
+}
+/* Banner descriptions default to the secondary text colour, which drops below
+   AA on the tinted warning and error backgrounds; callout prose is primary
+   text, and its links keep that colour with an underline to stand out. */
+.docs-callout {
+  color: var(--color-text-primary);
+}
+.docs-callout a {
+  color: inherit;
+  text-decoration-line: underline;
 }
 .docs-callout .astryx-code {
   font-size: inherit;

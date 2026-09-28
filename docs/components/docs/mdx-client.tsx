@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { Children, isValidElement, useEffect, useState, type ReactNode } from "react";
 import { Banner } from "@astryxdesign/core/Banner";
 import { ClickableCard } from "@astryxdesign/core/ClickableCard";
 import { CodeBlock } from "@astryxdesign/core/CodeBlock";
@@ -106,7 +106,15 @@ export function Callout({
   );
 }
 
-/** MDX `<Accordions>` as an Astryx `CollapsibleGroup`. */
+/** Ids of the `<Accordion id>` items directly inside an `<Accordions>`. */
+function accordionIds(children: ReactNode): string[] {
+  return Children.toArray(children).flatMap((child) =>
+    isValidElement<{ id?: string }>(child) && child.props.id ? [child.props.id] : [],
+  );
+}
+
+/** MDX `<Accordions>` as an Astryx `CollapsibleGroup`. An item whose `id` is
+    the URL hash opens, so `/docs/faq#reset-browser-storage` lands on it open. */
 export function Accordions({
   type = "single",
   children,
@@ -114,18 +122,50 @@ export function Accordions({
   type?: "single" | "multiple";
   children?: ReactNode;
 }) {
+  const [open, setOpen] = useState<string[]>([]);
+  const ids = accordionIds(children);
+  const idKey = ids.join("\n");
+
+  useEffect(() => {
+    const known = new Set(idKey.split("\n"));
+    const openHashTarget = () => {
+      const hash = decodeURIComponent(window.location.hash.slice(1));
+      if (!hash || !known.has(hash)) return;
+      setOpen((current) =>
+        type === "single" ? [hash] : current.includes(hash) ? current : [...current, hash],
+      );
+      requestAnimationFrame(() => document.getElementById(hash)?.scrollIntoView());
+    };
+    openHashTarget();
+    window.addEventListener("hashchange", openHashTarget);
+    return () => window.removeEventListener("hashchange", openHashTarget);
+  }, [idKey, type]);
+
   return (
     <div className="docs-block">
-      <CollapsibleGroup type={type} hasDividers>
+      <CollapsibleGroup
+        type={type}
+        value={type === "single" ? (open[0] ?? "") : open}
+        onChange={(value) => setOpen(Array.isArray(value) ? value : value ? [value] : [])}
+        hasDividers
+      >
         {children}
       </CollapsibleGroup>
     </div>
   );
 }
 
-export function Accordion({ title, children }: { title: string; children?: ReactNode }) {
+export function Accordion({
+  id,
+  title,
+  children,
+}: {
+  id?: string;
+  title: string;
+  children?: ReactNode;
+}) {
   return (
-    <Collapsible value={title} trigger={title} defaultIsOpen={false}>
+    <Collapsible id={id} value={id ?? title} trigger={title} defaultIsOpen={false}>
       <div className="docs-callout">{children}</div>
     </Collapsible>
   );
