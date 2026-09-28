@@ -596,11 +596,12 @@ where
             for schema in versions.iter().map(VersionRecord::schema_version).collect::<BTreeSet<_>>() {
                 self.ensure_schema_version_alias(schema).await?;
             }
+            self.settle_provisional_author_aliases().await?;
             let mut batch = self.database.open_batch();
             let mut version_bundles = Vec::new();
             for version in versions {
                 let stored = self.prepare_exact_history_version(existing.node_alias, tx.tx_id.time, &version).await?;
-                let (table, record) = self.version_storage_write_binding(&stored)?;
+                let (table, record) = self.version_storage_write_binding(&stored, &mut batch)?;
                 let key = self.version_storage_primary_key(&stored)?;
                 if global_time.is_some() && matches!(fate, Fate::Accepted) && !self.minting_global_time {
                     // The authority's post-image replaces this node's copy.
@@ -794,6 +795,7 @@ where
             .collect::<Vec<_>>();
         self.prepare_authored_schema_variants_for_commit(&eligible_versions).await?;
 
+        self.settle_provisional_author_aliases().await?;
         let mut batch = self.database.open_batch();
         self.sync_metrics.receiver_bulk_ingest_commits += 1;
         self.sync_metrics.receiver_bulk_bundle_ingests += eligible.len() as u64;
@@ -877,7 +879,7 @@ where
                     (author_schema != self.catalogue.local_schema_version_id)
                         .then_some(author_schema),
                 )?;
-                let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
+                let (history_table, groove_record) = self.version_storage_write_binding(&stored, &mut batch)?;
                 batch.insert_raw(
                     history_table.as_ref(),
                     self.version_storage_primary_key(&stored)?,

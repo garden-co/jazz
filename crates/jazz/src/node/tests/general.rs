@@ -1633,8 +1633,10 @@ fn malformed_persisted_authored_column_ids_never_reenter_derived_current_state()
                 None,
             )
             .unwrap();
-            let (history_table, raw) = node.version_storage_write_binding(&corrupted).unwrap();
             let mut corruption = node.database.open_batch();
+            let (history_table, raw) = node
+                .version_storage_write_binding(&corrupted, &mut corruption)
+                .unwrap();
             corruption.update_raw(
                 history_table.to_string(),
                 node.version_storage_primary_key(&corrupted).unwrap(),

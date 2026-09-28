@@ -1979,7 +1979,8 @@ fn projection_source_ref(expression: &ProjectExpr) -> Option<&FieldRef> {
         | ProjectExpr::RecordField { source: field, .. }
         | ProjectExpr::EnumTagRemap { source: field, .. }
         | ProjectExpr::EnumRemap { source: field, .. }
-        | ProjectExpr::RecursiveEnumRemap { source: field, .. } => Some(field),
+        | ProjectExpr::RecursiveEnumRemap { source: field, .. }
+        | ProjectExpr::Dictionary { source: field, .. } => Some(field),
         ProjectExpr::Literal(_)
         | ProjectExpr::TypedLiteral { .. }
         | ProjectExpr::Null(_)
@@ -1994,7 +1995,8 @@ fn projection_source_ref_mut(expression: &mut ProjectExpr) -> Option<&mut FieldR
         | ProjectExpr::RecordField { source: field, .. }
         | ProjectExpr::EnumTagRemap { source: field, .. }
         | ProjectExpr::EnumRemap { source: field, .. }
-        | ProjectExpr::RecursiveEnumRemap { source: field, .. } => Some(field),
+        | ProjectExpr::RecursiveEnumRemap { source: field, .. }
+        | ProjectExpr::Dictionary { source: field, .. } => Some(field),
         ProjectExpr::Literal(_)
         | ProjectExpr::TypedLiteral { .. }
         | ProjectExpr::Null(_)

@@ -398,6 +398,7 @@ pub(super) fn physical_version_storage_tables(
             .iter()
             .take(HistoryRowRecord::USER_CELLS)
             .cloned()
+            .map(|column| physical_system_column(column, ContentProjectionShape::History))
             .collect::<Vec<_>>();
         let trailing_history_columns = template
             .columns
@@ -824,6 +825,7 @@ pub(super) fn physical_version_storage_tables(
             .iter()
             .take(GlobalCurrentRowRecord::USER_CELLS)
             .cloned()
+            .map(|column| physical_system_column(column, ContentProjectionShape::Current))
             .collect::<Vec<_>>();
         let current_trailing_columns = logical_global
             .columns
@@ -1243,7 +1245,11 @@ fn physical_descriptor_with_enum_registries(
                         }
                     }
                 } else {
-                    field.value_type.clone()
+                    physical_system_value_type(
+                        &name,
+                        &field.value_type,
+                        ContentProjectionShape::Current,
+                    )
                 };
                 Ok(records::DescriptorField {
                     name: Some(name),

@@ -383,6 +383,12 @@ where
                 {
                     return PhysicalWriteField::Enum { source, column };
                 }
+                if ROW_AUTHOR_FIELDS.contains(&source)
+                    && field.value_type == records::ValueType::U64
+                    && history_descriptor.fields()[source].value_type != field.value_type
+                {
+                    return PhysicalWriteField::AuthorAlias(source);
+                }
                 if history_descriptor.fields()[source].value_type == field.value_type {
                     PhysicalWriteField::Copy(source)
                 } else {
@@ -739,6 +745,7 @@ where
     pub(super) fn version_storage_write_binding(
         &mut self,
         version: &VersionRow,
+        batch: &mut DatabaseBatch,
     ) -> Result<
         (
             groove::Intern<String>,
@@ -756,6 +763,7 @@ where
             version.table(),
             PhysicalWriteTarget::History,
         )?;
+        self.stage_row_author_aliases(version, batch)?;
         Ok((
             groove::Intern::new(plan.storage_table.clone()),
             self.encode_physical_version_record(&plan, version, None)?,
@@ -786,6 +794,16 @@ where
                     }
                     PhysicalWriteField::Copy(source) | PhysicalWriteField::Decode(source) => {
                         input.get_idx(*source)?
+                    }
+                    PhysicalWriteField::AuthorAlias(source) => {
+                        let span = input.descriptor().field_span(input.raw(), *source)?;
+                        if input.descriptor().fields()[*source].value_type
+                            == records::ValueType::U64
+                        {
+                            output.extend_from_slice(&input.raw()[span]);
+                            return Ok(());
+                        }
+                        Value::U64(self.staged_author_alias(&input.raw()[span])?.0)
                     }
                     PhysicalWriteField::CreatedAtMillis => {
                         Value::U64(version.created_at().physical_ms())
@@ -842,6 +860,13 @@ where
                     HistoryRowRecord::USER_CELLS
                 },
             )?;
+            for (index, field) in plan.write_fields.iter().enumerate() {
+                if let PhysicalWriteField::AuthorAlias(_) = field
+                    && let Value::Record(author) = &values[index]
+                {
+                    values[index] = Value::U64(self.staged_author_alias(author.raw())?.0);
+                }
+            }
             assert_eq!(
                 encoded.record().raw(),
                 plan.physical_descriptor.create(&values)?

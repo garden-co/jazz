@@ -214,6 +214,7 @@ where
             }
             self.node_aliases.insert(uuid, NodeAlias(alias));
         }
+        self.load_author_aliases().await?;
         let alias_to_node = self
             .node_aliases
             .iter()

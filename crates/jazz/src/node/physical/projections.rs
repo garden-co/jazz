@@ -1360,18 +1360,24 @@ where
                 self.database.table_schema(&physical_storage)?,
             )?
         };
+        // Author aliases are physical shorthand: expand them back into the
+        // logical author records here, at the physical-to-logical boundary.
+        let author_dictionary = self.author_aliases.dictionary().clone();
         let mut fields = target_storage
             .record_schema()
             .fields()
             .iter()
             .take(user_cells)
             .map(|field| {
-                ProjectField::named(
-                    field
-                        .name
-                        .clone()
-                        .expect("Jazz history system fields are named"),
-                )
+                let name = field
+                    .name
+                    .clone()
+                    .expect("Jazz history system fields are named");
+                if physical_row_authors_aliased(shape) && is_row_author_column(&name) {
+                    ProjectField::dictionary(name.clone(), name, author_dictionary.clone())
+                } else {
+                    ProjectField::named(name)
+                }
             })
             .collect::<Vec<_>>();
         for column in &target_table.columns {

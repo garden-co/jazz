@@ -127,6 +127,34 @@ provenance, or sent across a node boundary. Missing, malformed, or colliding
 mappings fail closed before decode or mutation. Different replicas may assign
 different local aliases to the same global identity.
 
+Row authors follow the same discipline. Physical history tables
+(`jazz_physical_{id}_history`) do not repeat the full structured `RowAuthor`
+record (§2.7) in every `created_by` / `updated_by` cell: each node interns the exact author record bytes to a local
+`AuthorAlias` and stores that alias instead. The mapping lives in the
+`jazz_authors` metadata table:
+
+| position | field    | type                      | meaning                             |
+| -------- | -------- | ------------------------- | ----------------------------------- |
+| 0        | `id`     | `U64` (primary key)       | the `AuthorAlias`, allocated from 1 |
+| 1        | `author` | `RowAuthor` native record | exact durable author record bytes   |
+
+The alias field in a physical row is a fixed-width Groove `U64`: eight bytes,
+little-endian, in the record's fixed-field region, exactly like `tx_node_id`
+and `schema_version`. Alias `0` is never allocated. A new alias is allocated as
+the resident maximum plus one, and its `jazz_authors` row is written in the
+same Groove batch as the first row image that stores it (and repeated, as an
+idempotent upsert, in every batch that stores it until the row is observed in
+resident storage), so no stored alias can outlive a dropped or failed batch
+without its mapping. The mapping is keyed by exact bytes: expansion returns the
+author record byte-for-byte, so provenance, policies, ordering and wire bytes
+are unchanged. All mappings load on recovery into an in-memory table; reads
+expand aliases from it without a storage lookup. The alias is purely physical
+shorthand: logical row images, query graphs, policy evaluation, public
+`$createdBy` / `$updatedBy`, and every wire record carry the full author, and
+another node never sees or interprets these alias numbers. No index orders or
+keys on an author column, so the alias's numeric order carries no meaning.
+`jazz_transactions.made_by` keeps the full record.
+
 ### 2.3 Application schema
 
 An application schema declares the logical tables, columns, references, access
@@ -325,7 +353,8 @@ accepted/reopen/rebuild receipts for the same coordinate.
 
 **Lowered tables.** `lower_to_groove()` produces:
 
-- _metadata_ — `jazz_nodes`, `jazz_schema_versions` (including durable physical
+- _metadata_ — `jazz_nodes`, `jazz_authors` (§2.2 row-author aliases),
+  `jazz_schema_versions` (including durable physical
   and branch mappings), `jazz_catalogue`, and
   `jazz_catalogue_pointer`;
 - _transaction/audit_ — `jazz_transactions` keyed `(time, node_id)`,
@@ -417,7 +446,10 @@ because the UUID bytes match.
 **Version/provenance record.** Content history positions `0..=9` are
 `(branch_key, row_uuid, tx_time, tx_node_alias, schema_version_alias, parents,
 created_by, created_at, updated_by, updated_at)`, followed by declared
-`user_{column}` cells in application declaration order. The deletion relation
+`user_{column}` cells in application declaration order. `created_by` and
+`updated_by` are `RowAuthor` records in the logical row image and `U64`
+`AuthorAlias` values in the physical `jazz_physical_{id}_history` table
+(§2.2). The deletion relation
 adds `physical_table_id` at position 1 and ends with `_deletion` at position 11;
 it has no user cells. The replicated `WireRowRecord` positions are
 `(row_uuid, parents, created_by, created_at_ms, updated_by, updated_at_ms,

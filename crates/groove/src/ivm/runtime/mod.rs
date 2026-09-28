@@ -468,6 +468,8 @@ pub enum IvmRuntimeError {
     GraphOutputMismatch,
     #[error("enum tag {tag} is absent from this projection target")]
     EnumTagProjectionAbsent { tag: u8 },
+    #[error("dictionary {dictionary} has no value for code {code}")]
+    DictionaryCodeAbsent { dictionary: String, code: u64 },
     #[error("enum tag projection requires an enum value")]
     EnumTagProjectionNonEnum,
     #[error("payload enum tag {tag} is absent from this projection target")]

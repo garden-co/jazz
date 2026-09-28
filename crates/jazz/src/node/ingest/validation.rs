@@ -87,6 +87,7 @@ where
         durability: DurabilityTier,
     ) -> Result<PublishedTransaction, Error> {
         let tx_id = tx.tx_id;
+        self.settle_provisional_author_aliases().await?;
         let mut batch = self.database.open_batch();
         let _ = self.stage_transaction_and_versions_with_current_indexes(
             &mut batch,
@@ -130,6 +131,7 @@ where
         update_current_indexes: bool,
         view_scoped_cardinality: bool,
     ) -> Result<(), Error> {
+        self.settle_provisional_author_aliases().await?;
         let batch = self.database.open_batch();
         self.ingest_transaction_and_versions_with_current_indexes_in_batch(
             batch, tx, versions, fate, global_time, durability, update_current_indexes,
@@ -347,7 +349,7 @@ where
                 content_versions.push(stored.clone());
             }
             stored_versions.push(stored.clone());
-            let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
+            let (history_table, groove_record) = self.version_storage_write_binding(&stored, batch)?;
             let storage_key = self.version_storage_primary_key(&stored)?;
             if global_time.is_some() && matches!(fate, Fate::Accepted) && !self.minting_global_time {
                 // The authority's post-image replaces this node's own copy.
@@ -644,6 +646,7 @@ where
             return self.apply_fate_update(tx.tx_id, fate, None, None).await;
         }
         let tx_node_alias = self.ensure_node_alias(tx.tx_id.node).await?;
+        self.settle_provisional_author_aliases().await?;
         let mut batch = self.database.open_batch();
         batch.insert(
             "jazz_transactions",

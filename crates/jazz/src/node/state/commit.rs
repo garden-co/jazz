@@ -302,6 +302,7 @@ where
             .collect::<BTreeSet<_>>();
         self.ensure_large_value_stages_current(&staged_ids).await?;
         let tx_node_alias = self.ensure_node_alias(tx_id.node).await?;
+        self.settle_provisional_author_aliases().await?;
         let mut batch = self.database.open_batch();
         for (_, commit) in &commits {
             for staged_id in &commit.staged_large_values {
@@ -465,7 +466,7 @@ where
             };
             let overlay = image_cells.map(&row_version).transpose()?;
             let stored = row_version(cells)?;
-            let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
+            let (history_table, groove_record) = self.version_storage_write_binding(&stored, &mut batch)?;
             batch.insert_raw(
                 history_table.as_ref(),
                 self.version_storage_primary_key(&stored)?,

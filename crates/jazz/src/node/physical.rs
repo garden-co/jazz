@@ -35,7 +35,12 @@ pub(super) struct PreparedPhysicalWritePlan {
 enum PhysicalWriteField {
     Copy(usize),
     Decode(usize),
-    Enum { source: usize, column: usize },
+    Enum {
+        source: usize,
+        column: usize,
+    },
+    /// A logical `RowAuthor` record stored as its node-local alias.
+    AuthorAlias(usize),
     CreatedAtMillis,
     UpdatedAtMillis,
     GlobalTime,
@@ -48,4 +53,5 @@ include!("physical/enum_lookup.rs");
 include!("physical/projections.rs");
 include!("physical/storage.rs");
 include!("physical/descriptors.rs");
+include!("physical/authors.rs");
 include!("physical/tests.rs");

@@ -884,6 +884,7 @@ where
             relay_authority_session_owner: None,
             pending_persistence: BTreeSet::new(),
             node_aliases: NodeAliases::default(),
+            author_aliases: AuthorAliases::default(),
             absent_node_alias: None,
             ahead_current_keys: FxHashMap::default(),
             ahead_shadow_dirty: Vec::new(),

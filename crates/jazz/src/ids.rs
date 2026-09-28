@@ -34,6 +34,16 @@ impl NodeUuid {
 )]
 pub struct NodeAlias(pub u64);
 
+/// Node-local integer alias for one durable row author in compact storage.
+///
+/// Physical row tables store this alias in place of the full [`RowAuthor`]
+/// record; the node's `jazz_authors` table maps it back. It never crosses the
+/// wire and another node's alias numbers are meaningless here.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub struct AuthorAlias(pub u64);
+
 /// Content-addressed schema version identity.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,

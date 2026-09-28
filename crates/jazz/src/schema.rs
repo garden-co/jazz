@@ -477,6 +477,7 @@ impl RuntimeSchema {
     pub fn storage_tables(&self) -> Vec<GrooveTableSchema> {
         vec![
             nodes_table(),
+            authors_table(),
             schema_versions_table(),
             catalogue_table(),
             catalogue_pointer_table(),
@@ -1383,6 +1384,19 @@ fn nodes_table() -> GrooveTableSchema {
             // node-local-derived: allocated by node alias interning.
             column("id", GrooveColumnType::U64),
             column("uuid", GrooveColumnType::Uuid),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
+}
+
+fn authors_table() -> GrooveTableSchema {
+    GrooveTableSchema::new(
+        "jazz_authors",
+        [
+            // node-local-derived: allocated by row-author alias interning.
+            column("id", GrooveColumnType::U64),
+            // The exact durable `RowAuthor` record bytes the alias stands for.
+            column("author", crate::ids::RowAuthor::value_type()),
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))

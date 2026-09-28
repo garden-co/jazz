@@ -1931,6 +1931,15 @@ fn lift_literal_filter_node(
                                 project_source_from_joined_filter_input(&input_output, source)?;
                             Ok(ProjectField::renamed(source, field.output_name.clone()))
                         }
+                        ProjectExpr::Dictionary { source, dictionary } => {
+                            let source =
+                                project_source_from_joined_filter_input(&input_output, source)?;
+                            Ok(ProjectField::dictionary(
+                                source,
+                                field.output_name.clone(),
+                                dictionary.clone(),
+                            ))
+                        }
                         ProjectExpr::Literal(value) => Ok(ProjectField::literal(
                             field.output_name.clone(),
                             value.clone(),
@@ -2385,6 +2394,18 @@ fn project_fields_against_rewritten_input(
                             target.clone(),
                             remaps.clone(),
                         )
+                    });
+                }
+                ProjectExpr::Dictionary { source, dictionary } => {
+                    let source =
+                        rewritten_projection_source(&original_output, &rewritten_output, source)?;
+                    return Ok(ProjectField {
+                        expression: ProjectExpr::Dictionary {
+                            source: FieldRef::name(source),
+                            dictionary: dictionary.clone(),
+                        },
+                        output_name: field.output_name.clone(),
+                        output_identity: field.output_identity.clone(),
                     });
                 }
                 ProjectExpr::Literal(_)

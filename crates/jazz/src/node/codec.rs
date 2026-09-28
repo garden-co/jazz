@@ -51,6 +51,7 @@ groove::define_record! {
 groove::impl_record_field_u64!(TxTime);
 groove::impl_record_field_u64!(GlobalTime);
 groove::impl_record_field_u64!(NodeAlias);
+groove::impl_record_field_u64!(AuthorAlias);
 groove::impl_record_field_u64!(SchemaVersionAlias);
 groove::impl_record_field_uuid!(NodeUuid);
 groove::impl_record_field_uuid!(SchemaFamilyId);
@@ -354,6 +355,15 @@ groove::define_record! {
     pub(super) struct NodeAliasRowRecord {
         0 => id: NodeAlias,
         1 => uuid: NodeUuid,
+    }
+}
+
+groove::define_record! {
+    /// One `jazz_authors` row: a node-local author alias and the exact
+    /// durable `RowAuthor` record it stands for in physical row tables.
+    pub(super) struct AuthorAliasRowRecord {
+        0 => id: AuthorAlias,
+        1 => author: RowAuthor,
     }
 }
 
@@ -2020,6 +2030,12 @@ pub(super) fn debug_assert_lowered_layouts(schema: &JazzSchema) {
             .expect("nodes table")
             .record_schema();
         NodeAliasRowRecord::assert_layout(&node_descriptor);
+
+        let author_descriptor = groove_schema
+            .table("jazz_authors")
+            .expect("authors table")
+            .record_schema();
+        AuthorAliasRowRecord::assert_layout(&author_descriptor);
 
         let tx_descriptor = groove_schema
             .table("jazz_transactions")

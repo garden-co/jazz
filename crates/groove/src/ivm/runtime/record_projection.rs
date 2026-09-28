@@ -617,6 +617,18 @@ pub(super) fn project_descriptor(
                         .clone()
                 }
                 ProjectExpr::RecursiveEnumRemap { target, .. } => target.clone(),
+                ProjectExpr::Dictionary { source, dictionary } => {
+                    let source_idx = resolve_field_ref(input, source)?;
+                    let source_type = &input
+                        .fields()
+                        .get(source_idx)
+                        .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(source_idx))?
+                        .value_type;
+                    if source_type != &ValueType::U64 {
+                        return Err(IvmRuntimeError::UnsupportedOperator);
+                    }
+                    dictionary.value_type().clone()
+                }
             };
             Ok(
                 DescriptorField::new(project_field.output_name.clone(), value_type)
@@ -1141,7 +1153,8 @@ pub(super) fn project_field_expr(
         | ProjectExpr::NullableFlat(source)
         | ProjectExpr::EnumTagRemap { source, .. }
         | ProjectExpr::EnumRemap { source, .. }
-        | ProjectExpr::RecursiveEnumRemap { source, .. } => {
+        | ProjectExpr::RecursiveEnumRemap { source, .. }
+        | ProjectExpr::Dictionary { source, .. } => {
             *source = FieldRef::Resolved(resolve_field_ref(input, source)?);
         }
         ProjectExpr::Literal(_)
@@ -1247,7 +1260,31 @@ pub(super) fn project_field_value(
                 "root",
             )?
         }
+        ProjectExpr::Dictionary {
+            source: field,
+            dictionary,
+        } => expand_dictionary_code(resolved(field)?, dictionary)?,
     })
+}
+
+/// Expand one dictionary code into its installed value.
+pub(super) fn expand_dictionary_code(
+    code: Value,
+    dictionary: &crate::ivm::ValueDictionary,
+) -> Result<Value, IvmRuntimeError> {
+    let Value::U64(code) = code else {
+        return Err(IvmRuntimeError::UnsupportedOperator);
+    };
+    let encoded = dictionary
+        .get(code)
+        .ok_or_else(|| IvmRuntimeError::DictionaryCodeAbsent {
+            dictionary: dictionary.name().to_owned(),
+            code,
+        })?;
+    Ok(records::decode_single_field_value(
+        &encoded,
+        dictionary.value_type(),
+    )?)
 }
 
 pub(super) fn remap_enum_tag(value: Value, tags: &[Option<u8>]) -> Result<Value, IvmRuntimeError> {
@@ -1587,7 +1624,8 @@ pub(super) fn raw_projection_fields(
                 }
                 ProjectExpr::EnumTagRemap { .. }
                 | ProjectExpr::EnumRemap { .. }
-                | ProjectExpr::RecursiveEnumRemap { .. } => RawProjectionField::Evaluate,
+                | ProjectExpr::RecursiveEnumRemap { .. }
+                | ProjectExpr::Dictionary { .. } => RawProjectionField::Evaluate,
             })
         })
         .collect::<Result<Vec<_>, IvmRuntimeError>>()?;

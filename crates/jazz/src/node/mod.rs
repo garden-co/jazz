@@ -37,9 +37,9 @@ pub(crate) use query_eval::{
 
 use self::query_engine::user_column_field;
 use crate::ids::{
-    AuthorSubject, MigrationLensId, NodeAlias, NodeUuid, PhysicalColumnId, PhysicalTableId,
-    RowAuthor, RowUuid, SchemaFamilyId, SchemaLineagePublicationId, SchemaVersionAlias,
-    SchemaVersionId,
+    AuthorAlias, AuthorSubject, MigrationLensId, NodeAlias, NodeUuid, PhysicalColumnId,
+    PhysicalTableId, RowAuthor, RowUuid, SchemaFamilyId, SchemaLineagePublicationId,
+    SchemaVersionAlias, SchemaVersionId,
 };
 #[cfg(test)]
 use crate::protocol::ProgramFactEntry;
@@ -327,6 +327,8 @@ mod global_state;
 mod ingest;
 mod node_aliases;
 pub(crate) use node_aliases::NodeAliases;
+mod author_aliases;
+pub(crate) use author_aliases::AuthorAliases;
 pub(crate) mod maintained_subscription_view;
 mod merge_ops;
 mod open_tx;
@@ -567,6 +569,9 @@ pub struct NodeState<S> {
     pending_persistence: BTreeSet<TxId>,
     /// Mapping from stable node UUIDs to compact on-disk aliases.
     pub(crate) node_aliases: NodeAliases,
+    /// Mapping from exact durable row-author records to compact on-disk
+    /// aliases, plus the dictionary physical read projections expand through.
+    pub(crate) author_aliases: AuthorAliases,
     /// One completed catalogue scan proved this UUID absent. The sole alias
     /// writer invalidates it before any await; transaction absence is never
     /// memoized. Fixed size bounds memory under arbitrary peer UUID churn.

@@ -3870,7 +3870,8 @@ fn content_version_witness_graph_from_visible_graph(
             | ProjectExpr::RecordField { source: key, .. }
             | ProjectExpr::EnumTagRemap { source: key, .. }
             | ProjectExpr::EnumRemap { source: key, .. }
-            | ProjectExpr::RecursiveEnumRemap { source: key, .. } => key,
+            | ProjectExpr::RecursiveEnumRemap { source: key, .. }
+            | ProjectExpr::Dictionary { source: key, .. } => key,
             ProjectExpr::Literal(_)
             | ProjectExpr::TypedLiteral { .. }
             | ProjectExpr::Null(_)
@@ -4249,7 +4250,8 @@ fn bind_witness_carrier_fields(mut fields: Vec<ProjectField>) -> Vec<ProjectFiel
             | ProjectExpr::NullableFlat(source)
             | ProjectExpr::EnumTagRemap { source, .. }
             | ProjectExpr::EnumRemap { source, .. }
-            | ProjectExpr::RecursiveEnumRemap { source, .. } => Some(source),
+            | ProjectExpr::RecursiveEnumRemap { source, .. }
+            | ProjectExpr::Dictionary { source, .. } => Some(source),
             _ => None,
         };
         if let Some(source @ FieldRef::Name(_)) = source {

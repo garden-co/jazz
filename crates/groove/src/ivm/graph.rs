@@ -1532,9 +1532,29 @@ impl ProjectField {
         }
     }
 
+    /// Expand a compact `U64` dictionary code into the dictionary's value.
+    /// A code absent from the dictionary fails execution; callers must
+    /// install every code before a row carrying it can reach a projection.
+    pub fn dictionary(
+        source_name: impl Into<String>,
+        output_name: impl Into<String>,
+        dictionary: ValueDictionary,
+    ) -> Self {
+        let output_name = output_name.into();
+        Self {
+            expression: ProjectExpr::Dictionary {
+                source: FieldRef::name(source_name),
+                dictionary,
+            },
+            output_identity: FieldIdentity::Name(output_name.clone()),
+            output_name,
+        }
+    }
+
     pub fn source(&self) -> Option<&FieldRef> {
         match &self.expression {
             ProjectExpr::Field(source)
+            | ProjectExpr::Dictionary { source, .. }
             | ProjectExpr::RecordField { source, .. }
             | ProjectExpr::Nullable(source)
             | ProjectExpr::NullableFlat(source)
@@ -1584,6 +1604,124 @@ pub enum ProjectExpr {
         remaps: RecursiveEnumRemaps,
         omit_unrepresentable: bool,
     },
+    /// Expand a `U64` code through an append-only [`ValueDictionary`].
+    Dictionary {
+        source: FieldRef,
+        dictionary: ValueDictionary,
+    },
+}
+
+/// Append-only, process-local dictionary from a compact `u64` code to one
+/// value of a fixed type.
+///
+/// A storage layer can persist the code instead of a repeated wide value and
+/// let projections expand it back at the read boundary. The dictionary is a
+/// shared handle: the owner appends entries while registered projections
+/// read them, so a newly installed code needs no projection re-registration.
+/// Entries are immutable once installed. Codes are meaningful only inside
+/// the process that installed them; they are never a portable encoding.
+///
+/// Identity: two handles are equal only when they share one dictionary
+/// allocation. The hash covers the stable name and value type only, so graph
+/// node ids stay deterministic across runs.
+#[derive(Clone)]
+pub struct ValueDictionary {
+    inner: Arc<ValueDictionaryInner>,
+}
+
+struct ValueDictionaryInner {
+    name: String,
+    value_type: ValueType,
+    entries: std::sync::RwLock<Vec<Option<Arc<[u8]>>>>,
+}
+
+/// An attempt to rebind an installed dictionary code to a different value.
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+#[error("dictionary {dictionary} code {code} is already bound to a different value")]
+pub struct ValueDictionaryConflict {
+    pub dictionary: String,
+    pub code: u64,
+}
+
+impl ValueDictionary {
+    pub fn new(name: impl Into<String>, value_type: ValueType) -> Self {
+        Self {
+            inner: Arc::new(ValueDictionaryInner {
+                name: name.into(),
+                value_type,
+                entries: std::sync::RwLock::new(Vec::new()),
+            }),
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.inner.name
+    }
+
+    pub fn value_type(&self) -> &ValueType {
+        &self.inner.value_type
+    }
+
+    /// Install `code -> value` from the value's single-field encoding under
+    /// [`Self::value_type`]. Reinstalling identical bytes is a no-op.
+    pub fn install(&self, code: u64, encoded: &[u8]) -> Result<(), ValueDictionaryConflict> {
+        let conflict = || ValueDictionaryConflict {
+            dictionary: self.inner.name.clone(),
+            code,
+        };
+        let index = usize::try_from(code).map_err(|_| conflict())?;
+        let mut entries = self
+            .inner
+            .entries
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if entries.len() <= index {
+            entries.resize(index + 1, None);
+        }
+        match &entries[index] {
+            Some(existing) if existing.as_ref() == encoded => Ok(()),
+            Some(_) => Err(conflict()),
+            None => {
+                entries[index] = Some(Arc::from(encoded));
+                Ok(())
+            }
+        }
+    }
+
+    /// The single-field encoding bound to `code`, if installed.
+    pub fn get(&self, code: u64) -> Option<Arc<[u8]>> {
+        let index = usize::try_from(code).ok()?;
+        self.inner
+            .entries
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(index)
+            .and_then(Clone::clone)
+    }
+}
+
+impl std::fmt::Debug for ValueDictionary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ValueDictionary")
+            .field("name", &self.inner.name)
+            .field("value_type", &self.inner.value_type)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for ValueDictionary {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+}
+
+impl Eq for ValueDictionary {}
+
+impl Hash for ValueDictionary {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.inner.name.hash(state);
+        self.inner.value_type.hash(state);
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

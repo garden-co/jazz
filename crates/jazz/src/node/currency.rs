@@ -364,12 +364,30 @@ where
     ) -> Result<Option<VersionRow>, Error> {
         let history_table =
             physical_history_table_name(self.physical_table_id_for_schema(schema_version, table)?);
+        // Compare and build the image in the logical author representation:
+        // either physical side may store author aliases.
         let Some(history_descriptor) = self
             .database
             .table_schema(&history_table)?
             .record_schema_for_variant(variant_tag)
         else {
             return Ok(None);
+        };
+        let history_descriptor = if descriptor_has_author_aliases(&history_descriptor) {
+            self.author_aliases
+                .expanded_descriptor(history_descriptor, &ROW_AUTHOR_FIELDS)
+        } else {
+            history_descriptor
+        };
+        let expanded_current;
+        let current = if descriptor_has_author_aliases(&current.descriptor()) {
+            expanded_current = self.expand_physical_row_authors(OwnedRecord::new(
+                current.raw().to_vec(),
+                current.descriptor(),
+            ))?;
+            expanded_current.borrowed()
+        } else {
+            current
         };
         let current_descriptor = current.descriptor();
         let global_time_idx = GlobalCurrentRowRecord::FIELD_GLOBAL_TIME_IDX;
@@ -660,6 +678,7 @@ where
     ) -> Result<VersionRow, Error> {
         #[cfg(test)]
         HISTORY_PAYLOAD_DECODES.with(|count| count.set(count.get() + 1));
+        let record = self.expand_physical_row_authors(record)?;
         let record_view = record.borrowed();
         let schema_alias =
             SchemaVersionAlias(record_view.get_u64(HistoryRowRecord::FIELD_SCHEMA_VERSION_IDX)?);

@@ -406,7 +406,7 @@ where
         batch: &mut DatabaseBatch,
         version: &VersionRow,
     ) -> Result<(), Error> {
-        let (history_table, record) = self.version_storage_write_binding(version)?;
+        let (history_table, record) = self.version_storage_write_binding(version, batch)?;
         batch.update_raw(
             history_table.as_ref(),
             self.version_storage_primary_key(version)?,
@@ -432,6 +432,7 @@ where
         // Validate node-local authored column aliases before deriving
         // the current carrier; encoding itself retains trusted bytes.
         let _ = self.authored_columns_for_version(version)?;
+        self.stage_row_author_aliases(version, batch)?;
         let physical = self.encode_physical_version_record(&plan, version, Some(global_time))?;
         batch.update_raw(
             plan.storage_table.clone(),
@@ -549,6 +550,7 @@ where
             PhysicalWriteTarget::AheadCurrent,
         )?;
         let _ = self.authored_columns_for_version(version)?;
+        self.stage_row_author_aliases(version, batch)?;
         let physical = self.encode_physical_version_record(&plan, version, None)?;
         batch.update_raw(
             plan.storage_table.clone(),
@@ -810,6 +812,7 @@ where
         // the delete below only drops an overlay this transaction owns.
         self.rebuild_ahead_current_keys().await?;
         let settling = tx_ids.iter().copied().collect::<BTreeSet<_>>();
+        self.settle_provisional_author_aliases().await?;
         let mut batch = self.database.open_batch();
         for tx_id in &tx_ids {
             for version in self.query_versions_for_tx(*tx_id).await? {
