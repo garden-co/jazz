@@ -80,18 +80,24 @@ joins that worker before publishing offline state; reconnect restarts it using
 the retained native admission. Trusted scope revocation and host teardown
 stop the worker and retire the admission. A bearer session requires HTTPS/WSS for remote Core; plaintext is
 accepted only for `localhost`, IP loopback, or the documented Android emulator
-host aliases (`10.0.2.2` and `10.0.3.2`). Typed network-unavailability I/O failures and
+host aliases (`10.0.2.2` and `10.0.3.2`). Typed network-unavailability I/O
+failures, including `BrokenPipe`, explicitly tagged hostname-resolution
+failures, TLS `UnexpectedEof` when a peer closes without `close_notify`, and
 handshake timeouts leave local relay work available while the worker retries.
-An I/O wrapper alone is insufficient: rustls certificate/protocol failures
+HTTP 408, 425, 429, 500, 502, 503, and 504 responses before authenticated wire
+admission are likewise retryable; other statuses, including authorization
+denials and unsupported server capabilities, remain terminal. An I/O wrapper
+alone is insufficient: rustls certificate and other TLS protocol failures
 arrive as `InvalidData` I/O errors and remain terminal, as do unknown I/O kinds.
 A structured pre-Hello `NotReady`/`Later` response is likewise retryable,
-matching browser admission. Authentication denial, invalid protocol, TLS, and
-unclassified connection failures remain terminal; diagnostic text never selects
-this category. A retryable failure cannot clear a previous terminal denial.
-A failed bridge, owner pump, or established transport is also recorded as a
-scope terminal error and surfaced to
-foreground ticks until a later authenticated reconnect clears it; it may never
-silently degrade into an indefinitely pending foreground operation.
+matching browser admission. Authentication denial, malformed wire/WebSocket
+protocol, TLS certificate or protocol failures other than the reconnectable
+EOF, and unclassified connection failures remain terminal; diagnostic text
+never selects this category. A retryable failure cannot clear a previous
+terminal denial. A failed bridge, owner pump, or established transport is
+also recorded as a scope terminal error and surfaced to foreground ticks until
+a later authenticated reconnect clears it; it may never silently degrade into
+an indefinitely pending foreground operation.
 
 Opening a foreground returns its in-memory client handle synchronously. If
 the persistent owner is busy, the host retains normal subscriber admission as
