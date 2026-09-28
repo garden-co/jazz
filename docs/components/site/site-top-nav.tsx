@@ -12,7 +12,7 @@ import { IconButton } from "@astryxdesign/core/IconButton";
 import { TopNav, TopNavHeading, TopNavItem } from "@astryxdesign/core/TopNav";
 import { JazzLogo } from "@/components/brand/jazz-logo";
 import { gitConfig } from "@/lib/layout.shared";
-import { SiteSearch } from "./site-search";
+import { SearchField, SearchIconButton, SiteSearch } from "./site-search";
 
 function BrandIcon({ path }: { path: string }) {
   return (
@@ -58,51 +58,63 @@ const LINKS = [
 /** The jazz.tools header shared by the homepage, blog and docs. */
 export function SiteTopNav() {
   const pathname = usePathname();
+  const [isSearchOpen, setSearchOpen] = useState(false);
+  const openSearch = () => setSearchOpen(true);
   return (
-    <TopNav
-      label="Main"
-      heading={
-        <TopNavHeading
-          logo={<JazzLogo className="h-6 w-auto" label="Jazz home" />}
-          headingHref="/"
-        />
-      }
-      startContent={
-        <>
-          {LINKS.map((link) => (
-            <TopNavItem
-              key={link.href}
-              label={link.label}
-              href={link.href}
-              isSelected={pathname === link.href || pathname.startsWith(`${link.href}/`)}
-            />
-          ))}
-          <TopNavItem label="Dashboard" href="https://v2.dashboard.jazz.tools" />
-        </>
-      }
-      endContent={
-        <HStack gap={1} vAlign="center">
-          <SiteSearch />
-          {/* Below the drawer breakpoint the bar keeps only search, theme and
-              the drawer toggle; the social links would push the toggle off screen. */}
-          <span className="contents max-md:hidden">
-            {SOCIAL.map((link) => (
-              <Button
+    <>
+      <TopNav
+        label="Main"
+        heading={
+          <TopNavHeading
+            logo={<JazzLogo className="h-6 w-auto" label="Jazz home" />}
+            headingHref="/"
+          />
+        }
+        startContent={
+          <>
+            {LINKS.map((link) => (
+              <TopNavItem
                 key={link.href}
                 label={link.label}
                 href={link.href}
-                target="_blank"
-                rel="noreferrer noopener"
-                variant="ghost"
-                size="sm"
-                isIconOnly
-                icon={<BrandIcon path={link.icon} />}
+                isSelected={pathname === link.href || pathname.startsWith(`${link.href}/`)}
               />
             ))}
+            <TopNavItem label="Dashboard" href="https://v2.dashboard.jazz.tools" />
+          </>
+        }
+        centerContent={
+          <span className="site-search-field contents max-md:hidden">
+            <SearchField onOpen={openSearch} />
           </span>
-          <ThemeToggle />
-        </HStack>
-      }
-    />
+        }
+        endContent={
+          <HStack gap={1} vAlign="center">
+            <span className="contents md:hidden">
+              <SearchIconButton onOpen={openSearch} />
+            </span>
+            {/* Below the drawer breakpoint the bar keeps only search, theme and
+              the drawer toggle; the social links would push the toggle off screen. */}
+            <span className="contents max-md:hidden">
+              {SOCIAL.map((link) => (
+                <Button
+                  key={link.href}
+                  label={link.label}
+                  href={link.href}
+                  target="_blank"
+                  rel="noreferrer noopener"
+                  variant="ghost"
+                  size="sm"
+                  isIconOnly
+                  icon={<BrandIcon path={link.icon} />}
+                />
+              ))}
+            </span>
+            <ThemeToggle />
+          </HStack>
+        }
+      />
+      <SiteSearch isOpen={isSearchOpen} setOpen={setSearchOpen} />
+    </>
   );
 }

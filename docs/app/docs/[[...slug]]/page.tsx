@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { findNeighbour } from "fumadocs-core/page-tree";
+import { ArrowLeft, ArrowRight } from "lucide-react";
 import { ClickableCard } from "@astryxdesign/core/ClickableCard";
 import { Divider } from "@astryxdesign/core/Divider";
 import { Layout, LayoutContent, LayoutPanel } from "@astryxdesign/core/Layout";
@@ -28,7 +29,16 @@ function NeighbourCard({
     <ClickableCard label={`${direction}: ${name}`} href={item.url} padding={3}>
       <VStack gap={0.5}>
         <Text type="supporting" color="secondary" display="block">
-          {direction}
+          <span
+            className={`inline-flex items-center gap-1.5 ${direction === "Next" ? "flex-row-reverse" : ""}`}
+          >
+            {direction === "Next" ? (
+              <ArrowRight aria-hidden className="size-3.5" />
+            ) : (
+              <ArrowLeft aria-hidden className="size-3.5" />
+            )}
+            {direction}
+          </span>
         </Text>
         <Text weight="medium" display="block">
           {name}

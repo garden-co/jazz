@@ -132,3 +132,11 @@ h6 {
     display: none;
   }
 }
+
+/* The top nav's search trigger reads as a field: label left, shortcut right. */
+.site-search-field > button {
+  justify-content: flex-start;
+}
+.site-search-field > button > span > span:last-child {
+  flex: 1;
+}

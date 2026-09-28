@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type Dispatch, type SetStateAction, useEffect, useMemo, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { Search } from "lucide-react";
 import { Button } from "@astryxdesign/core/Button";
@@ -63,14 +63,51 @@ function Marked({ text }: { text: string }) {
   );
 }
 
+/** Search trigger styled as a field, for the centre of the desktop top nav. */
+export function SearchField({ onOpen }: { onOpen: () => void }) {
+  return (
+    <Button
+      label="Search the docs"
+      variant="secondary"
+      size="sm"
+      width={320}
+      icon={<Icon icon={Search} size="sm" />}
+      onClick={onOpen}
+    >
+      <span className="flex w-full items-center justify-between gap-3">
+        <span>Search the docs</span>
+        <Kbd keys="mod+k" />
+      </span>
+    </Button>
+  );
+}
+
+/** Compact search trigger for narrow screens. */
+export function SearchIconButton({ onOpen }: { onOpen: () => void }) {
+  return (
+    <IconButton
+      label="Search"
+      variant="ghost"
+      size="sm"
+      icon={<Icon icon={Search} size="sm" />}
+      onClick={onOpen}
+    />
+  );
+}
+
 /**
  * Site search on Astryx `CommandPalette`, backed by the Fumadocs search
- * endpoint (`/api/search`). Opens with the button or Cmd/Ctrl+K; picking a
- * result navigates to it.
+ * endpoint (`/api/search`). The caller owns the open state and renders the
+ * triggers; Cmd/Ctrl+K toggles it and picking a result navigates to it.
  */
-export function SiteSearch() {
+export function SiteSearch({
+  isOpen,
+  setOpen,
+}: {
+  isOpen: boolean;
+  setOpen: Dispatch<SetStateAction<boolean>>;
+}) {
   const router = useRouter();
-  const [isOpen, setOpen] = useState(false);
   // The palette reports the picked item's id; map it back to its URL.
   const urls = useRef(new Map<string, string>());
 
@@ -83,7 +120,7 @@ export function SiteSearch() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [setOpen]);
 
   const source = useMemo<SearchSource<SearchItem>>(() => {
     let controller: AbortController | undefined;
@@ -109,54 +146,29 @@ export function SiteSearch() {
   }, []);
 
   return (
-    <>
-      <span className="contents max-md:hidden">
-        <Button
-          label="Search"
-          variant="secondary"
-          size="sm"
-          icon={<Icon icon={Search} size="sm" />}
-          onClick={() => setOpen(true)}
+    <CommandPalette<SearchItem>
+      isOpen={isOpen}
+      onOpenChange={setOpen}
+      searchSource={source}
+      label="Search the docs"
+      input={<CommandPaletteInput placeholder="Search the docs" />}
+      emptyBootstrapText="Type to search the docs"
+      emptySearchText="No results"
+      onValueChange={(id) => {
+        const url = urls.current.get(id);
+        if (url) router.push(url);
+      }}
+      renderItem={(item) => (
+        <Text
+          display="block"
+          color={item.auxiliaryData?.type === "page" ? "primary" : "secondary"}
+          weight={item.auxiliaryData?.type === "page" ? "medium" : undefined}
+          maxLines={1}
         >
-          <span className="flex items-center gap-3">
-            Search
-            <Kbd keys="mod+k" />
-          </span>
-        </Button>
-      </span>
-      <span className="contents md:hidden">
-        <IconButton
-          label="Search"
-          variant="ghost"
-          size="sm"
-          icon={<Icon icon={Search} size="sm" />}
-          onClick={() => setOpen(true)}
-        />
-      </span>
-      <CommandPalette<SearchItem>
-        isOpen={isOpen}
-        onOpenChange={setOpen}
-        searchSource={source}
-        label="Search the docs"
-        input={<CommandPaletteInput placeholder="Search the docs" />}
-        emptyBootstrapText="Type to search the docs"
-        emptySearchText="No results"
-        onValueChange={(id) => {
-          const url = urls.current.get(id);
-          if (url) router.push(url);
-        }}
-        renderItem={(item) => (
-          <Text
-            display="block"
-            color={item.auxiliaryData?.type === "page" ? "primary" : "secondary"}
-            weight={item.auxiliaryData?.type === "page" ? "medium" : undefined}
-            maxLines={1}
-          >
-            {item.auxiliaryData?.type === "heading" && "# "}
-            <Marked text={item.auxiliaryData?.marked ?? item.label} />
-          </Text>
-        )}
-      />
-    </>
+          {item.auxiliaryData?.type === "heading" && "# "}
+          <Marked text={item.auxiliaryData?.marked ?? item.label} />
+        </Text>
+      )}
+    />
   );
 }
