@@ -11,8 +11,11 @@ import { Jazz, JazzBackend, JazzWriteRejected } from "./backend/index.js";
 const app = s.defineApp({
   notes: s.table({ text: s.string() }, {}),
   posts: s.table({ text: s.string() }, {}),
+  diaries: s.table({ text: s.string() }, {}),
 });
-const permissions = s.definePermissions(app, ({ policy }) => {
+const permissions = s.definePermissions(app, ({ policy, isCreator }) => {
+  policy.diaries.allowRead.where(isCreator);
+  policy.diaries.allowInsert.always();
   policy.posts.allowRead.always();
   policy.posts.allowInsert.always();
   policy.posts.allowUpdate.always();
@@ -107,6 +110,64 @@ describe("JazzBackend Effect layer", () => {
       }
       expect(result.denied).toBeInstanceOf(JazzWriteRejected);
       expect(result.seenByClient).toMatchObject({ _tag: "Some" });
+    } finally {
+      await server.stop();
+      await issuer.stop();
+    }
+  }, 60_000);
+  it("isolates concurrent request handlers to each user's own permissions", async () => {
+    const issuer = await startTestJwtIssuer();
+    const appId = randomUUID();
+    const auth = {
+      jwksUrl: issuer.jwksUrl,
+      jwtIssuer: issuer.issuer,
+      jwtAudience: issuer.audience,
+    };
+    const server = await startLocalJazzServer({ appId, ...auth });
+    try {
+      await deploy({
+        serverUrl: server.url,
+        appId,
+        adminSecret: server.adminSecret,
+        schema: resolveSchemaSource(app),
+        permissions,
+      });
+      const backendLayer = JazzBackend.layer({
+        appId,
+        serverUrl: server.url,
+        app,
+        permissions,
+        ...auth,
+        driver: { type: "memory" },
+        initial: { backendSecret: server.backendSecret },
+      });
+      const users = ["diarist-a", "diarist-b"];
+      const requests = await Promise.all(
+        users.map(async (user) => ({
+          headers: { authorization: `Bearer ${await issuer.jwtForUser(user)}` },
+        })),
+      );
+      const account = { account: "login-or-register" } as const;
+
+      // One handler, written once: write an entry, then read every visible entry.
+      const writeThenRead = (text: string) =>
+        Effect.gen(function* () {
+          const jazz = yield* Jazz;
+          yield* jazz.insert(app.diaries, { text }, { wait: "global" });
+          const rows = yield* jazz.all(app.diaries, { tier: "global" });
+          return rows.map((row) => row.text).sort();
+        });
+
+      const seen = await Effect.runPromise(
+        Effect.all(
+          users.map((user, index) =>
+            writeThenRead(`${user} entry`).pipe(JazzBackend.forRequest(requests[index]!, account)),
+          ),
+          { concurrency: "unbounded" },
+        ).pipe(Effect.provide(backendLayer)),
+      );
+
+      expect(seen).toEqual([["diarist-a entry"], ["diarist-b entry"]]);
     } finally {
       await server.stop();
       await issuer.stop();

@@ -94,7 +94,9 @@ export interface JazzDb extends JazzReads {
    * Run `body` in a mergeable transaction. The transaction commits when
    * `body` succeeds and rolls back when it fails, dies or is interrupted.
    * The effect completes once the commit is applied locally, or durable at
-   * `options.wait` when given.
+   * `options.wait` when given. Once `body` has succeeded the commit is kept:
+   * interrupting the durability wait interrupts the effect but does not undo
+   * the commit.
    */
   transaction<A, E, R>(
     body: (tx: JazzTransaction) => Effect.Effect<A, E, R>,
@@ -106,6 +108,7 @@ export interface JazzDb extends JazzReads {
    * authority. Commits and rolls back like {@link transaction}, then waits for
    * the authority's verdict: a conflicting transaction fails with
    * {@link JazzWriteRejected}, which makes `Effect.retry` a natural fit.
+   * Interrupting the verdict wait does not withdraw the committed transaction.
    */
   exclusiveTransaction<A, E, R>(
     body: (tx: JazzTransaction) => Effect.Effect<A, E, R>,

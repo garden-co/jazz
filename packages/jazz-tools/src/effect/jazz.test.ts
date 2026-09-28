@@ -60,7 +60,9 @@ async function trackedJazzLayer(name: string) {
 
 const titles = (rows: ReadonlyArray<{ title: string }>) => rows.map((row) => row.title).sort();
 
-describe("Jazz Effect service", () => {
+// The first test pays for loading the native runtime, which can exceed
+// vitest's default 5 s when other suites load theirs concurrently.
+describe("Jazz Effect service", { timeout: 30_000 }, () => {
   it("writes and reads rows", async () => {
     const result = await run(
       await jazzLayer("crud"),

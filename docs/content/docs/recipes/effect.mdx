@@ -72,7 +72,8 @@ const logOpenCount = Effect.gen(function* () {
 ## Transactions
 
 `jazz.transaction(tx => ...)` commits when the inner Effect succeeds and rolls back when it fails, dies
-or is interrupted. Its typed errors pass through unchanged.
+or is interrupted. Its typed errors pass through unchanged. Once the inner Effect has succeeded the commit
+is kept, even if the fiber is interrupted while it waits for durability.
 
 ```ts
 const addGroceries = Effect.gen(function* () {
