@@ -214,19 +214,21 @@ it.each([
       const data = { projectId: project.id, body: "Original value" };
       let noteId: string;
       let completed: Promise<unknown>;
+      // Policy rejection and portable accepted keys require authority acceptance,
+      // not merely the provisional initialization's local durability.
       if (mode === "exclusive" || mode === "mergeable") {
         const tx =
           mode === "exclusive" ? writer.beginExclusiveTransaction() : writer.beginTransaction();
         tx.insert(app.events, { message: "Same transaction" });
         noteId = tx.insert(app.notes, data).id;
-        completed = tx.commit().wait({ tier: "local" });
+        completed = tx.commit().wait({ tier: "global" });
       } else if (mode === "upsert") {
         noteId = crypto.randomUUID();
-        completed = writer.upsert(app.notes, noteId, data).wait({ tier: "local" });
+        completed = writer.upsert(app.notes, noteId, data).wait({ tier: "global" });
       } else {
         const write = writer.insert(app.notes, data);
         noteId = write.value.id;
-        completed = write.wait({ tier: "local" });
+        completed = write.wait({ tier: "global" });
       }
       // A deferred retry must retain the original values and provisional ID.
       data.body = "Changed after the mutation returned";

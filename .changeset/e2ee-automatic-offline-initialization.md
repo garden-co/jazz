@@ -16,3 +16,15 @@ Authorize relayed exclusive writes as complete transactions so explicitly marked
 Split persistent browser B-tree leaves by encoded byte size, including separator capacity, so uneven encrypted-history records do not overflow a child page despite fitting a valid split. Existing stored data remains compatible.
 
 Keep React Native initialisation payload types behind the existing foreground command API without adding a separate relay export.
+
+Preserve ordinary transaction behavior on mixed encrypted/plaintext schemas.
+Initialization-capable nullable upserts still seal and journal before local
+acknowledgement. Keep device-only enrollment on accepted-history setup, admit the
+local browser owner before checking catalogue readiness, and hydrate cold legacy
+scope rows without replacing the transaction snapshot. Verified, promoted keys can
+reopen against a fresh database; pending and unpromoted journal entries still
+require their original owner's exact transaction evidence.
+
+Transfer application wait ownership before deferred transaction submission can
+deliver a rejection callback. Waited failures remain on their returned handles;
+unwaited failures retain their once-only fallback notification.
