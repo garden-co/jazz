@@ -3,21 +3,21 @@ use std::{future::Future, pin::Pin};
 
 /// Logical source request made by query, policy, or fact lowering.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SourceRequest {
+pub struct SourceRequest {
     /// Logical source requested by the compiler.
-    pub(crate) source: SourceId,
+    pub source: SourceId,
     /// Query-visible row scope expected from this source.
-    pub(crate) visibility: RowVisibility,
+    pub visibility: RowVisibility,
     /// Authorization semantics that must be applied to this source before it
     /// participates in the program.
-    pub(crate) authorization: SourceAuthorizationRequest,
+    pub authorization: SourceAuthorizationRequest,
     /// Structural row metadata required by all consumers of this source.
-    pub(crate) requirements: SourceRequirements,
+    pub requirements: SourceRequirements,
 }
 
 /// Source authorization requested by query-engine lowering.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) enum SourceAuthorizationRequest {
+pub enum SourceAuthorizationRequest {
     /// System/internal program. The source is already authorized by the caller.
     #[default]
     System,
@@ -41,40 +41,40 @@ pub(crate) enum SourceAuthorizationRequest {
 
 /// Logical authorization requirement for one protected source.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct PolicyAuthorizationPlan {
+pub struct PolicyAuthorizationPlan {
     /// Protected source whose rows are gated by this policy proof.
-    pub(crate) protected_source: SourceId,
+    pub protected_source: SourceId,
     /// Decision role requested for the protected source.
-    pub(crate) role: PolicyDecisionRole,
+    pub role: PolicyDecisionRole,
     /// Row id field in the protected source graph.
-    pub(crate) protected_row_field: String,
+    pub protected_row_field: String,
     /// Binding-source shape shared with the enclosing prepared program.
-    pub(crate) binding_source_shape: Option<String>,
+    pub binding_source_shape: Option<String>,
     /// User params from the enclosing prepared program that must be present in
     /// the shared binding descriptor.
-    pub(crate) binding_user_params: BTreeMap<String, ColumnType>,
+    pub binding_user_params: BTreeMap<String, ColumnType>,
     /// Typed claim slots from the enclosing prepared program. Nested policy
     /// plans share this binding descriptor, so they must retain claims used by
     /// an ancestor policy branch as claims, rather than reclassifying them as
     /// ordinary parameters.
-    pub(crate) binding_claim_params: BTreeMap<String, ProgramClaimParam>,
+    pub binding_claim_params: BTreeMap<String, ProgramClaimParam>,
 }
 
 /// Orthogonal source row requirements derived from app output and requested
 /// facts. This avoids resolver behavior switches such as "policy source" or
 /// "delivery source"; every need is explicit.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
-pub(crate) struct SourceRequirements {
+pub struct SourceRequirements {
     /// Public/app fields needed by output projection.
-    pub(crate) app_fields: FieldRequirement,
+    pub app_fields: FieldRequirement,
     /// Internal metadata needed by facts, sync, transaction validation, and
     /// policy witnesses.
-    pub(crate) metadata: BTreeSet<SourceMetadataRequirement>,
+    pub metadata: BTreeSet<SourceMetadataRequirement>,
 }
 
 /// Internal source metadata requirement.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum SourceMetadataRequirement {
+pub enum SourceMetadataRequirement {
     /// Include version identity fields on source rows.
     VersionWitnesses,
     /// Include nullable global settle position for current winners.
@@ -99,7 +99,7 @@ pub(crate) enum SourceMetadataRequirement {
 
 /// Public field requirement for a source.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
-pub(crate) enum FieldRequirement {
+pub enum FieldRequirement {
     /// No app-facing fields are required from this source.
     #[default]
     None,
@@ -118,7 +118,7 @@ pub(crate) enum FieldRequirement {
 ///
 /// This is not the Groove runtime source resolver. New code must keep this
 /// trait on the preparation side of `lower_resolved_query_program`.
-pub(crate) trait SourceGraphPreparer {
+pub trait SourceGraphPreparer {
     /// Prepare one source request into a concrete Groove graph and row shape.
     fn prepare_source_graph<'a>(
         &'a mut self,
@@ -128,76 +128,78 @@ pub(crate) trait SourceGraphPreparer {
 
 /// Concrete source selected for one logical source request.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ResolvedSource {
+pub struct ResolvedSource {
     /// Catalogue-owned IDs for logical columns in the selected read schema.
-    pub(crate) stored_column_ids: BTreeMap<String, crate::ids::PhysicalColumnId>,
+    pub stored_column_ids: BTreeMap<String, crate::ids::PhysicalColumnId>,
     /// Logical table schema after schema/lens resolution.
-    pub(crate) table_schema: TableSchema,
+    pub table_schema: TableSchema,
     /// Concrete groove graph source.
-    pub(crate) graph: GraphBuilder,
+    pub graph: GraphBuilder,
     /// Canonical row shape emitted by the source graph.
-    pub(crate) row_shape: SourceRowShape,
+    pub row_shape: SourceRowShape,
     /// Hidden routing fields emitted by the source graph outside the app row
     /// descriptor.
-    pub(crate) routing_fields: BTreeSet<String>,
+    pub routing_fields: BTreeSet<String>,
     /// The public row is a view-relative rendering rather than necessarily
     /// the immutable content version named by its witness.
-    pub(crate) requires_result_payload: bool,
+    pub requires_result_payload: bool,
     /// Content version rows for the same source, when version witnesses are
     /// requested explicitly.
-    pub(crate) content_version: Option<ContentVersionSource>,
+    pub content_version: Option<ContentVersionSource>,
     /// Deletion register rows for the same source, when requested explicitly.
-    pub(crate) deletion_register: Option<DeletionRegisterSource>,
+    pub deletion_register: Option<DeletionRegisterSource>,
     /// Current authorized deleted-row preimage for this same source
     /// occurrence. The deletion terminal semijoins its raw register witness
     /// against this graph, so a tombstone is never authorization by itself.
-    pub(crate) authorized_deletion_preimage: Option<AuthorizedDeletionPreimage>,
+    pub authorized_deletion_preimage: Option<AuthorizedDeletionPreimage>,
 }
 
 /// The authorization proof for a deletion is route-scoped, not only row-scoped.
 /// Keep the route contract with its graph so reusable programs cannot borrow
 /// another binding's proof after projecting down to the deletion version key.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct AuthorizedDeletionPreimage {
-    pub(crate) graph: GraphBuilder,
-    pub(crate) routing_fields: BTreeSet<String>,
+pub struct AuthorizedDeletionPreimage {
+    #[doc(hidden)]
+    pub graph: GraphBuilder,
+    #[doc(hidden)]
+    pub routing_fields: BTreeSet<String>,
 }
 
 /// Concrete content-version source selected by node-side source resolution.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ContentVersionSource {
+pub struct ContentVersionSource {
     /// Graph emitting current content history rows with canonical storage fields.
-    pub(crate) graph: GraphBuilder,
+    pub graph: GraphBuilder,
     /// Field containing row identity.
-    pub(crate) row_uuid_field: String,
+    pub row_uuid_field: String,
 }
 
 /// Concrete deletion-register source selected by node-side source resolution.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct DeletionRegisterSource {
+pub struct DeletionRegisterSource {
     /// Graph emitting current deletion-register rows with canonical storage fields.
-    pub(crate) graph: GraphBuilder,
+    pub graph: GraphBuilder,
     /// Field containing row identity.
-    pub(crate) row_uuid_field: String,
+    pub row_uuid_field: String,
 }
 
 /// Canonical row shape emitted by source resolution.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SourceRowShape {
+pub struct SourceRowShape {
     /// Logical source emitted by this source.
-    pub(crate) source: SourceId,
+    pub source: SourceId,
     /// Descriptor of the record emitted by this source.
-    pub(crate) descriptor: RecordDescriptor,
+    pub descriptor: RecordDescriptor,
     /// Field containing row identity.
-    pub(crate) row_uuid_field: String,
+    pub row_uuid_field: String,
     /// Internal metadata fields emitted by this source, keyed by the matching
     /// requirement.
-    pub(crate) metadata: BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
+    pub metadata: BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
 }
 
 /// Concrete source metadata fields emitted for one requirement.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum SourceMetadataFields {
+pub enum SourceMetadataFields {
     /// Version identity fields for payload/replacement witnesses.
     VersionWitnesses {
         /// Schema version field.
@@ -260,16 +262,16 @@ pub(crate) enum SourceMetadataFields {
 
 /// Source resolution failure that must not fall back to a different engine.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SourceResolutionError {
+pub struct SourceResolutionError {
     /// Source request that failed.
-    pub(crate) request: Box<SourceRequest>,
+    pub request: Box<SourceRequest>,
     /// Explicit unsupported source shape.
-    pub(crate) gap: SourceGap,
+    pub gap: SourceGap,
 }
 
 /// Source-resolution gap.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum SourceGap {
+pub enum SourceGap {
     /// A scoped local-availability input could not be installed (including capacity).
     LocalAvailabilityInput,
     /// Recursive policy proof compilation revisited a table already on the
@@ -297,27 +299,27 @@ pub(crate) enum SourceGap {
 
 /// Capability status for an unsupported requested program.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct CapabilityReport {
+pub struct CapabilityReport {
     /// Unsupported pieces. An empty list means the requested program is supported.
-    pub(crate) gaps: Vec<UnsupportedReason>,
+    pub gaps: Vec<UnsupportedReason>,
     /// Human-readable debugging and test artifact for the failed lowering.
-    pub(crate) explain: ExplainPlan,
+    pub explain: ExplainPlan,
 }
 
 /// Result type for query-engine capability checks. The report is intentionally
 /// rich enough for design/test diagnostics, so keep it boxed at API boundaries.
-pub(crate) type CapabilityResult<T> = Result<T, Box<CapabilityReport>>;
+pub type CapabilityResult<T> = Result<T, Box<CapabilityReport>>;
 
 impl CapabilityReport {
     /// Whether the requested program can run on the unified lowering path.
-    pub(crate) fn is_supported(&self) -> bool {
+    pub fn is_supported(&self) -> bool {
         self.gaps.is_empty()
     }
 }
 
 /// Reason a request is not yet supported by unified lowering.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum UnsupportedReason {
+pub enum UnsupportedReason {
     /// Source/frontier/schema view is not yet representable.
     Source(SourceGap),
     /// A policy/session claim was referenced but not present in the policy context.
@@ -332,17 +334,17 @@ pub(crate) enum UnsupportedReason {
 
 /// Debug artifact for query-engine tests and design audits.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct ExplainPlan {
+pub struct ExplainPlan {
     /// Normalized input summary.
-    pub(crate) input: String,
+    pub input: String,
     /// Source/frontier decisions.
-    pub(crate) read: Vec<String>,
+    pub read: Vec<String>,
     /// Policy rewrite decisions.
-    pub(crate) policy: Vec<String>,
+    pub policy: Vec<String>,
     /// Output/fact decisions.
-    pub(crate) output: Vec<String>,
+    pub output: Vec<String>,
     /// Capability decisions.
-    pub(crate) capabilities: Vec<String>,
+    pub capabilities: Vec<String>,
     /// Physical graph summaries.
-    pub(crate) physical: Vec<String>,
+    pub physical: Vec<String>,
 }

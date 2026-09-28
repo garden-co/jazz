@@ -31,7 +31,7 @@ pub enum CurrentRowResultVisibility {
 impl CurrentRowResultVisibility {
     /// Classify metadata constructed by the CurrentRow producer, not a wire
     /// field guessed by a consumer. Explicit application outputs bypass this.
-    pub(crate) fn current_row_metadata(name: &str) -> Self {
+    pub fn current_row_metadata(name: &str) -> Self {
         match name {
             "$createdBy" | "$createdAt" | "$updatedBy" | "$updatedAt" => Self::PublicProvenance,
             _ => Self::HiddenMetadata,
@@ -64,7 +64,8 @@ pub enum CurrentRowPublicationField {
 }
 
 impl CurrentRowPublicationField {
-    pub(crate) fn public_name(&self) -> Option<&str> {
+    #[doc(hidden)]
+    pub fn public_name(&self) -> Option<&str> {
         match self {
             Self::StoredColumn { output_name, .. } | Self::UnresolvedSourceCell { output_name } => {
                 Some(output_name)
@@ -82,7 +83,8 @@ impl CurrentRowPublicationField {
         }
     }
 
-    pub(crate) fn application_name(&self) -> Option<&str> {
+    #[doc(hidden)]
+    pub fn application_name(&self) -> Option<&str> {
         match self {
             Self::StoredColumn { output_name, .. } | Self::UnresolvedSourceCell { output_name } => {
                 Some(output_name)
@@ -95,7 +97,8 @@ impl CurrentRowPublicationField {
         }
     }
 
-    pub(crate) fn role(&self) -> CurrentRowBindingRole {
+    #[doc(hidden)]
+    pub fn role(&self) -> CurrentRowBindingRole {
         match self {
             Self::StoredColumn { .. } | Self::UnresolvedSourceCell { .. } => {
                 CurrentRowBindingRole::PhysicalColumn

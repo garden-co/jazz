@@ -14,13 +14,15 @@ fn trace_template(event: &str) {
 /// Only immutable, unbound descriptions live here. In particular, this cache
 /// never owns a receiver InputSource, an index probe, or authorized rows.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct QueryProgramTemplateCache {
+pub struct QueryProgramTemplateCache {
     entries: VecDeque<TemplateEntry>,
     physical: groove::ivm::TypedGraphTemplateCache,
     #[cfg(any(test, feature = "testing"))]
-    pub(crate) hits: usize,
+    #[doc(hidden)]
+    pub hits: usize,
     #[cfg(any(test, feature = "testing"))]
-    pub(crate) argument_hits: usize,
+    #[doc(hidden)]
+    pub argument_hits: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -48,7 +50,8 @@ struct ParameterizedProgram {
 }
 
 impl QueryProgramTemplateCache {
-    pub(crate) fn clear(&mut self) {
+    #[doc(hidden)]
+    pub fn clear(&mut self) {
         self.entries.clear();
         self.physical.clear();
     }
@@ -79,7 +82,8 @@ impl QueryProgramTemplateCache {
         program
     }
 
-    pub(crate) fn lower(
+    #[doc(hidden)]
+    pub fn lower(
         &mut self,
         compilation: QueryProgramCompilation,
         sources: ResolvedQuerySources,

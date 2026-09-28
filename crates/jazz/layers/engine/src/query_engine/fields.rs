@@ -2,21 +2,25 @@ use super::ClaimPath;
 use crate::schema::TableSchema;
 use groove::records::DescriptorField;
 
-pub(crate) use crate::schema::APP_COLUMN_PREFIX as USER_COLUMN_PREFIX;
+pub use crate::schema::APP_COLUMN_PREFIX as USER_COLUMN_PREFIX;
 /// Physical namespace for aggregate result values.
 ///
 /// Public aggregate output names are unique, but aliases may still match
 /// non-grouped source columns. Keep aggregate values separate from source-row
 /// fields in compiler records; public-name validation does not replace carriers.
-pub(crate) const AGGREGATE_OUTPUT_PREFIX: &str = "__jazz_aggregate_";
-pub(crate) const LEFT_JOIN_PREFIX: &str = "left.";
-pub(crate) const RIGHT_JOIN_PREFIX: &str = "right.";
-pub(crate) const CLOSURE_REQUIRED_ELEMENT: &str = "__closure_required_element";
+pub const AGGREGATE_OUTPUT_PREFIX: &str = "__jazz_aggregate_";
+#[doc(hidden)]
+pub const LEFT_JOIN_PREFIX: &str = "left.";
+#[doc(hidden)]
+pub const RIGHT_JOIN_PREFIX: &str = "right.";
+#[doc(hidden)]
+pub const CLOSURE_REQUIRED_ELEMENT: &str = "__closure_required_element";
 
 const ROUTE_PARAM_PREFIX: &str = "__jazz_route_";
 const CLAIM_PARAM_PREFIX: &str = "__jazz_claim_";
 
-pub(crate) fn user_column_field(column: &str) -> String {
+#[doc(hidden)]
+pub fn user_column_field(column: &str) -> String {
     crate::schema::app_storage_column_name(column)
 }
 
@@ -24,7 +28,7 @@ pub(crate) fn user_column_field(column: &str) -> String {
 /// maintained terminals use the same row representation for shape-default
 /// values, so this belongs to the compiler vocabulary rather than either
 /// materialization path.
-pub(crate) fn current_row_field_names(table: &TableSchema) -> Vec<String> {
+pub fn current_row_field_names(table: &TableSchema) -> Vec<String> {
     let mut fields = vec!["row_uuid".to_owned()];
     fields.extend(
         table
@@ -43,7 +47,8 @@ pub(crate) fn current_row_field_names(table: &TableSchema) -> Vec<String> {
     fields
 }
 
-pub(crate) fn aggregate_output_field(output: &str) -> String {
+#[doc(hidden)]
+pub fn aggregate_output_field(output: &str) -> String {
     aggregate_output_column(output)
 }
 
@@ -51,11 +56,12 @@ pub(crate) fn aggregate_output_field(output: &str) -> String {
 /// cell namespace.  The unprefixed aggregate field is a compiler-internal
 /// graph record name only; it must be normalized before it crosses the
 /// app-row boundary.
-pub(crate) fn aggregate_output_app_field(output: &str) -> String {
+pub fn aggregate_output_app_field(output: &str) -> String {
     user_column_field(&aggregate_output_field(output))
 }
 
-pub(crate) fn aggregate_output_column(output: &str) -> String {
+#[doc(hidden)]
+pub fn aggregate_output_column(output: &str) -> String {
     if output.starts_with(AGGREGATE_OUTPUT_PREFIX) {
         output.to_owned()
     } else {
@@ -63,14 +69,15 @@ pub(crate) fn aggregate_output_column(output: &str) -> String {
     }
 }
 
-pub(crate) fn aggregate_output_logical_name(column: &str) -> Option<&str> {
+#[doc(hidden)]
+pub fn aggregate_output_logical_name(column: &str) -> Option<&str> {
     column.strip_prefix(AGGREGATE_OUTPUT_PREFIX)
 }
 
 /// A typed application identity may use the spelling of an engine field.
 /// Only unchanged engine carriers are private; an explicit different identity
 /// must retain its application name.
-pub(crate) fn descriptor_public_name(field: &DescriptorField) -> Option<&str> {
+pub fn descriptor_public_name(field: &DescriptorField) -> Option<&str> {
     let name = field.logical_name()?;
     if field.name.as_deref() != Some(name) {
         return Some(name);
@@ -100,27 +107,33 @@ pub(crate) fn descriptor_public_name(field: &DescriptorField) -> Option<&str> {
     aggregate_output_logical_name(name).or_else(|| (!name.starts_with("__jazz_")).then_some(name))
 }
 
-pub(crate) fn join_field(prefix: &str, field: &str) -> String {
+#[doc(hidden)]
+pub fn join_field(prefix: &str, field: &str) -> String {
     format!("{prefix}{field}")
 }
 
-pub(crate) fn left_field(field: &str) -> String {
+#[doc(hidden)]
+pub fn left_field(field: &str) -> String {
     join_field(LEFT_JOIN_PREFIX, field)
 }
 
-pub(crate) fn right_field(field: &str) -> String {
+#[doc(hidden)]
+pub fn right_field(field: &str) -> String {
     join_field(RIGHT_JOIN_PREFIX, field)
 }
 
-pub(crate) fn route_param_field(param: &str) -> String {
+#[doc(hidden)]
+pub fn route_param_field(param: &str) -> String {
     format!("{ROUTE_PARAM_PREFIX}{param}")
 }
 
-pub(crate) fn route_param_from_field(field: &str) -> Option<&str> {
+#[doc(hidden)]
+pub fn route_param_from_field(field: &str) -> Option<&str> {
     field.strip_prefix(ROUTE_PARAM_PREFIX)
 }
 
-pub(crate) fn claim_param_field(path: &ClaimPath) -> String {
+#[doc(hidden)]
+pub fn claim_param_field(path: &ClaimPath) -> String {
     if let [segment] = path.0.as_slice()
         && !segment.contains('_')
         && !segment.contains(':')
@@ -136,7 +149,8 @@ pub(crate) fn claim_param_field(path: &ClaimPath) -> String {
     field
 }
 
-pub(crate) fn claim_path_from_param_field(field: &str) -> Option<ClaimPath> {
+#[doc(hidden)]
+pub fn claim_path_from_param_field(field: &str) -> Option<ClaimPath> {
     let mut rest = field.strip_prefix(CLAIM_PARAM_PREFIX)?;
     if let Some(typed) = rest.strip_prefix("typed:") {
         let (len, tail) = typed.split_once(':')?;
@@ -164,7 +178,8 @@ pub(crate) fn claim_path_from_param_field(field: &str) -> Option<ClaimPath> {
     Some(ClaimPath(segments))
 }
 
-pub(crate) fn table_user_column_field(table: &str, column: &str) -> String {
+#[doc(hidden)]
+pub fn table_user_column_field(table: &str, column: &str) -> String {
     format!("{USER_COLUMN_PREFIX}_{table}__{column}")
 }
 

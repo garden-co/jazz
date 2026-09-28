@@ -3,21 +3,21 @@ use crate::protocol::{ProgramSourceId, ProgramSourceRole};
 
 /// One validated API request before semantic lowering.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct QueryProgramRequest {
+pub struct QueryProgramRequest {
     /// Host-selected authorization behavior for ordinary query execution.
     /// This is compiler configuration, not query or binding data, and must
     /// never be derived from a wire request.
-    pub(crate) authorization_mode: QueryAuthorizationMode,
+    pub authorization_mode: QueryAuthorizationMode,
     /// Exact data views used for source resolution.
-    pub(crate) reads: RequestedReadSet,
+    pub reads: RequestedReadSet,
     /// Identity, claims, and policy mode used by policy augmentation.
-    pub(crate) policy: PolicyContext,
+    pub policy: PolicyContext,
     /// Normalized row-set input. Dry-run permission probes are represented as
     /// candidate/proposed-row sources plus `PolicyDecision` terminal facts, not
     /// as a second compiler body.
-    pub(crate) input: RowSetProgramInput,
+    pub input: RowSetProgramInput,
     /// App-facing rows and internal facts requested from the program.
-    pub(crate) output: RowSetOutputRequest,
+    pub output: RowSetOutputRequest,
 }
 
 /// Trust boundary for ordinary query lowering.
@@ -26,13 +26,15 @@ pub(crate) struct QueryProgramRequest {
 /// execution consumes that already-authorized settled view (or its own local
 /// overlay) and deliberately never evaluates read policy again.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum QueryAuthorizationMode {
+pub enum QueryAuthorizationMode {
+    #[doc(hidden)]
     TrustedServing,
+    #[doc(hidden)]
     ClientLocal,
 }
 
 /// Normalizes every public query surface into the same row-set shape algebra.
-pub(crate) trait RowSetNormalizer {
+pub trait RowSetNormalizer {
     /// Normalize ordinary table-rooted Jazz queries.
     fn normalize_query(&self, query: &Query) -> CapabilityResult<NormalizedRowSetShape>;
 
@@ -45,76 +47,78 @@ pub(crate) trait RowSetNormalizer {
 
 /// Normalized row-set query plus this caller's binding values.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct RowSetProgramInput {
+pub struct RowSetProgramInput {
     /// Binding-independent normalized query shape.
-    pub(crate) shape: NormalizedRowSetShape,
+    pub shape: NormalizedRowSetShape,
     /// Binding values for this use. Bindings are route inputs, not compiled
     /// shape identity.
-    pub(crate) binding: ProgramBinding,
+    pub binding: ProgramBinding,
 }
 
 /// Normalized binding values for one program instance.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ProgramBinding {
+pub struct ProgramBinding {
     /// Binding id derived from canonical binding values.
-    pub(crate) id: BindingId,
+    pub id: BindingId,
     /// Groove binding-source shape name used by prepared query graphs.
-    pub(crate) source_shape: Option<String>,
+    pub source_shape: Option<String>,
     /// User params that must be present in the prepared binding descriptor even
     /// when this subplan does not read them directly.
-    pub(crate) extra_user_params: BTreeMap<String, ColumnType>,
+    pub extra_user_params: BTreeMap<String, ColumnType>,
     /// Validated user parameter types for this program instance.
-    pub(crate) param_types: BTreeMap<String, ColumnType>,
+    pub param_types: BTreeMap<String, ColumnType>,
     /// Trusted claim parameters discovered before binding-source retargeting.
-    pub(crate) claim_params: BTreeMap<String, ProgramClaimParam>,
+    pub claim_params: BTreeMap<String, ProgramClaimParam>,
     /// Values by parameter name.
-    pub(crate) values: BTreeMap<String, Value>,
+    pub values: BTreeMap<String, Value>,
 }
 
 /// One claim parameter required by a prepared binding source.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ProgramClaimParam {
-    pub(crate) path: ClaimPath,
-    pub(crate) ty: ColumnType,
+pub struct ProgramClaimParam {
+    #[doc(hidden)]
+    pub path: ClaimPath,
+    #[doc(hidden)]
+    pub ty: ColumnType,
 }
 
 /// Binding-independent normalized query shape.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct NormalizedRowSetShape {
+pub struct NormalizedRowSetShape {
     /// Opaque identity derived from canonicalized `root`, `result`, and
     /// `nodes`.
-    pub(crate) identity: NormalizedShapeIdentity,
+    pub identity: NormalizedShapeIdentity,
     /// Terminal expression node for this row-set program.
-    pub(crate) root: RowSetNodeId,
+    pub root: RowSetNodeId,
     /// App/result identity emitted by the root node.
-    pub(crate) result: ResultId,
+    pub result: ResultId,
     /// Extra sources that do not affect app-row membership directly but are
     /// part of maintained/sync payload closure.
-    pub(crate) auxiliary_sources: BTreeSet<SourceId>,
+    pub auxiliary_sources: BTreeSet<SourceId>,
     /// Reference/include closure paths that contribute maintained result
     /// membership and may gate root membership.
-    pub(crate) closure_paths: Vec<ClosurePath>,
+    pub closure_paths: Vec<ClosurePath>,
     /// Join-side rows that are part of the materialized maintained/sync
     /// payload when they contribute to a visible root result.
-    pub(crate) join_contributions: Vec<JoinContribution>,
+    pub join_contributions: Vec<JoinContribution>,
     /// Parent rows consumed by a caller-requested `inherits` semi-join.
     ///
     /// Unlike policy-internal inheritance proofs, these rows remain part of
     /// the receiver's query semantics. The authority filters them through the
     /// parent read policy, then publishes precisely the admitted parents that
     /// visible child rows reference.
-    pub(crate) inherited_contributions: Vec<InheritedContribution>,
+    pub inherited_contributions: Vec<InheritedContribution>,
     /// Reachable access rows that contribute to a visible root result through
     /// a recursive closure.
-    pub(crate) reachable_contributions: Vec<ReachableContribution>,
+    pub reachable_contributions: Vec<ReachableContribution>,
     /// Normalized expression DAG. Public query and relation surfaces both
     /// normalize here before lowering.
-    pub(crate) nodes: BTreeMap<RowSetNodeId, RowSetExpr>,
+    pub nodes: BTreeMap<RowSetNodeId, RowSetExpr>,
 }
 
 /// One maintained/sync closure path rooted at the app result rows.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ClosurePath {
+pub enum ClosurePath {
     /// Default one-hop root reference payload included when the user did not
     /// request an explicit include for the same root reference.
     ImplicitRootReference {
@@ -136,7 +140,7 @@ pub(crate) enum ClosurePath {
 
 /// Root-membership gate semantics for explicit include paths.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ClosureRootGate {
+pub enum ClosureRootGate {
     /// Required includes demand that every non-null/non-empty reference value
     /// resolves through the rest of the path; null scalar refs and empty arrays
     /// are vacuously satisfied.
@@ -148,88 +152,88 @@ pub(crate) enum ClosureRootGate {
 
 /// One reference hop inside a closure path.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ClosurePathSegment {
+pub struct ClosurePathSegment {
     /// Source occurrence containing the reference column.
-    pub(crate) parent: SourceId,
+    pub parent: SourceId,
     /// Target occurrence reached by the reference column.
-    pub(crate) target: SourceId,
+    pub target: SourceId,
     /// Public source column name, without the internal `user_` prefix.
-    pub(crate) source_field: String,
+    pub source_field: String,
 }
 
 /// One join-side contribution payload rooted at the app result rows.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct JoinContribution {
+pub struct JoinContribution {
     /// Nested contributors are restricted to their already-admitted parent
     /// rows. None anchors the contribution at the visible query root.
-    pub(crate) parent: Option<SourceId>,
+    pub parent: Option<SourceId>,
     /// Stable contribution name for diagnostics/sinks.
-    pub(crate) id: String,
+    pub id: String,
     /// Source occurrence for the contributing join rows.
-    pub(crate) source: SourceId,
+    pub source: SourceId,
     /// Normalized relation node that proves payload rows contribute to visible roots.
-    pub(crate) input: RowSetNodeId,
+    pub input: RowSetNodeId,
     /// Predicate between admitted parent (or visible root) rows and this relation.
-    pub(crate) membership: PredicateExpr,
+    pub membership: PredicateExpr,
 }
 
 /// One caller-requested inherited-parent source consumed by a root semi-join.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct InheritedContribution {
+pub struct InheritedContribution {
     /// Stable normalized path, for example `query:inherits:0`.
-    pub(crate) id: String,
+    pub id: String,
     /// Parent source occurrence read by the receiver query.
-    pub(crate) source: SourceId,
+    pub source: SourceId,
     /// Parent relation after its authority-side read policy has been applied.
-    pub(crate) input: RowSetNodeId,
+    pub input: RowSetNodeId,
     /// The child-reference = parent-row-id semi-join predicate.
-    pub(crate) membership: PredicateExpr,
+    pub membership: PredicateExpr,
 }
 
 /// One reachable-via access contribution rooted at the app result rows.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ReachableContribution {
+pub struct ReachableContribution {
     /// Stable contribution name for diagnostics/sinks.
-    pub(crate) id: String,
+    pub id: String,
     /// Access source occurrence for the contributing access rows.
-    pub(crate) access_source: SourceId,
+    pub access_source: SourceId,
     /// Physical edge occurrence evaluated by the recursive step. Its admitted
     /// rows are carried through the recursion-owned witness stream, not
     /// reconstructed from the final reachable frontier.
-    pub(crate) edge_source: SourceId,
+    pub edge_source: SourceId,
     /// Normalized access rows already joined against the recursive closure.
-    pub(crate) access_input: RowSetNodeId,
+    pub access_input: RowSetNodeId,
     /// Public access-row column that references the root result row id.
-    pub(crate) root_ref_field: String,
+    pub root_ref_field: String,
 }
 
 /// Derived identity for a normalized row-set shape.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct NormalizedShapeIdentity {
+pub struct NormalizedShapeIdentity {
     /// Content-addressed normalized shape id.
-    pub(crate) shape_id: ShapeId,
+    pub shape_id: ShapeId,
     /// Canonical normalized IR bytes.
-    pub(crate) canonical: Vec<u8>,
+    pub canonical: Vec<u8>,
 }
 
 /// Stable node id inside a normalized row-set expression DAG.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct RowSetNodeId(pub(crate) String);
+pub struct RowSetNodeId(pub String);
 
 /// Stable identity for one logical source occurrence in a normalized program.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct SourceId {
+pub struct SourceId {
     /// Logical table emitted by this source.
-    pub(crate) table: String,
+    pub table: String,
     /// Stable path/role inside the normalized query.
-    pub(crate) path: SourcePath,
+    pub path: SourcePath,
 }
 
 impl SourceId {
     /// Convert the normalized source identity into the frozen wire vocabulary.
     /// This is deliberately structural: sink names and runtime graph ids are
     /// diagnostic implementation details and are not safe cross-peer keys.
-    pub(crate) fn program_source_id(&self) -> ProgramSourceId {
+    pub fn program_source_id(&self) -> ProgramSourceId {
         ProgramSourceId {
             table: self.table.clone().into(),
             path: self
@@ -257,26 +261,26 @@ impl SourceId {
 
 /// Stable source path inside a normalized row-set program.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct SourcePath {
+pub struct SourcePath {
     /// Stable path components inside the normalized query. Nested arrays,
     /// union branches, recursive subplans, and correlated children extend this
     /// path instead of creating a second source identity.
-    pub(crate) components: Vec<SourceRole>,
+    pub components: Vec<SourceRole>,
 }
 
 /// Program-local path identity with explicit owning source context.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct ProgramPathId {
+pub struct ProgramPathId {
     /// Source/root that owns the path. The path is the edge from this owner to
     /// `child`; there is no separate relative path namespace.
-    pub(crate) owner: SourceId,
+    pub owner: SourceId,
     /// Terminal child source whose rows form this path's targets.
-    pub(crate) child: SourceId,
+    pub child: SourceId,
 }
 
 /// App/result identity emitted by a row-set program.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum ResultId {
+pub enum ResultId {
     /// Real table rows. The row reference may come from one source occurrence,
     /// a union of real-row source alternatives, or a terminal projected row id;
     /// it remains a real row for policy and version witnesses.
@@ -302,7 +306,7 @@ pub(crate) enum ResultId {
 
 /// Real-row terminal identity independent of one source occurrence.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum ResultRowRef {
+pub enum ResultRowRef {
     /// Real rows supplied by one source occurrence.
     Source(SourceId),
     /// Real rows supplied by equivalent source alternatives, such as relation
@@ -321,18 +325,18 @@ pub(crate) enum ResultRowRef {
 
 /// Stable identity contract for synthetic result rows.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct SyntheticIdentitySpec {
+pub struct SyntheticIdentitySpec {
     /// Logical synthetic table/relation name.
-    pub(crate) table: String,
+    pub table: String,
     /// Columns that define stable row identity.
-    pub(crate) key_columns: Vec<String>,
+    pub key_columns: Vec<String>,
     /// Columns that define replacement/revision identity.
-    pub(crate) revision_columns: Vec<String>,
+    pub revision_columns: Vec<String>,
 }
 
 /// Stable source role inside a normalized row-set program.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum SourceRole {
+pub enum SourceRole {
     /// Root query source.
     Root,
     /// Named relation/join/path alias.
@@ -351,7 +355,7 @@ pub(crate) enum SourceRole {
 
 /// Typed normalized row-set expression node.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum RowSetExpr {
+pub enum RowSetExpr {
     /// Logical source scan.
     Source {
         /// Logical source.
@@ -479,20 +483,20 @@ pub(crate) enum RowSetExpr {
 
 /// One column emitted by a non-table value row source.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ValueSourceColumn {
+pub struct ValueSourceColumn {
     /// Output column name.
-    pub(crate) name: String,
+    pub name: String,
     /// Value expression for seed rows. Binding-source columns should use
     /// `NormalizedValueRef::Param`; inline values may use literals or trusted
     /// policy-context claims.
-    pub(crate) value: NormalizedValueRef,
+    pub value: NormalizedValueRef,
     /// Groove column type.
-    pub(crate) ty: ColumnType,
+    pub ty: ColumnType,
 }
 
 /// Non-table value source mode.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ValueSourceMode {
+pub enum ValueSourceMode {
     /// Runtime binding source populated from query bindings.
     Binding,
     /// Inline single-row value source.
@@ -501,25 +505,25 @@ pub(crate) enum ValueSourceMode {
 
 /// One projected row value.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RowProjection {
+pub struct RowProjection {
     /// Output field.
-    pub(crate) output: TypedOutputField,
+    pub output: TypedOutputField,
     /// Value expression.
-    pub(crate) value: NormalizedValueRef,
+    pub value: NormalizedValueRef,
 }
 
 /// One union branch.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct UnionInput {
+pub struct UnionInput {
     /// Input node id.
-    pub(crate) node: RowSetNodeId,
+    pub node: RowSetNodeId,
     /// Stable branch label.
-    pub(crate) label: String,
+    pub label: String,
 }
 
 /// Predicate expression.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum PredicateExpr {
+pub enum PredicateExpr {
     /// Always true.
     True,
     /// Always false.
@@ -562,8 +566,11 @@ pub(crate) enum PredicateExpr {
     /// Case-tag test and payload-record predicate for a tagged enum source
     /// field. Payload source fields are relative to the selected case.
     EnumMatch {
+        #[doc(hidden)]
         value: NormalizedValueRef,
+        #[doc(hidden)]
         case_tag: u32,
+        #[doc(hidden)]
         payload: Box<PredicateExpr>,
     },
     /// Boolean conjunction.
@@ -576,7 +583,7 @@ pub(crate) enum PredicateExpr {
 
 /// Comparison operator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum ComparisonOp {
+pub enum ComparisonOp {
     /// Equal.
     Eq,
     /// Not equal.
@@ -593,7 +600,7 @@ pub(crate) enum ComparisonOp {
 
 /// Normalized value reference.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum NormalizedValueRef {
+pub enum NormalizedValueRef {
     /// Field on a source row.
     SourceField {
         /// Source identity.
@@ -630,7 +637,7 @@ pub(crate) enum NormalizedValueRef {
 
 /// First-class provenance fields exposed by public query surfaces.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum ProvenanceField {
+pub enum ProvenanceField {
     /// `$createdAt`.
     CreatedAt,
     /// `$createdBy`.
@@ -643,7 +650,7 @@ pub(crate) enum ProvenanceField {
 
 /// Normalized row-id reference.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum RowIdRef {
+pub enum RowIdRef {
     /// Row id from a current source in this node.
     Source(SourceId),
     /// Row id carried by recursive frontier state.
@@ -652,15 +659,15 @@ pub(crate) enum RowIdRef {
 
 /// Stable carried tuple identity for recursive frontier state.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct FrontierId(pub(crate) String);
+pub struct FrontierId(pub String);
 
 /// Path into trusted claim/session data.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct ClaimPath(pub(crate) Vec<String>);
+pub struct ClaimPath(pub Vec<String>);
 
 /// Normalized join mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum JoinMode {
+pub enum JoinMode {
     /// Required match; drop parent/source rows with no target.
     Inner,
     /// Existence semi-join; left rows pass when at least one right match exists;
@@ -672,7 +679,7 @@ pub(crate) enum JoinMode {
 
 /// Correlated path/relation coverage requirement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum CorrelationRequirement {
+pub enum CorrelationRequirement {
     /// Parent may remain even when no children are covered.
     Optional,
     /// Parent requires at least one readable child.
@@ -683,18 +690,18 @@ pub(crate) enum CorrelationRequirement {
 
 /// Aggregate output expression.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct AggregateExpr {
+pub struct AggregateExpr {
     /// Output field.
-    pub(crate) output: TypedOutputField,
+    pub output: TypedOutputField,
     /// Aggregate function.
-    pub(crate) function: AggregateFunction,
+    pub function: AggregateFunction,
     /// Input value, when required by the aggregate.
-    pub(crate) input: Option<NormalizedValueRef>,
+    pub input: Option<NormalizedValueRef>,
 }
 
 /// Aggregate function.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum AggregateFunction {
+pub enum AggregateFunction {
     /// Count rows.
     Count,
     /// Sum values.
@@ -709,16 +716,16 @@ pub(crate) enum AggregateFunction {
 
 /// Ordered key in a normalized row-set program.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct OrderKey {
+pub struct OrderKey {
     /// Value to order by.
-    pub(crate) value: NormalizedValueRef,
+    pub value: NormalizedValueRef,
     /// Ascending or descending.
-    pub(crate) direction: SortDirection,
+    pub direction: SortDirection,
 }
 
 /// Sort direction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum SortDirection {
+pub enum SortDirection {
     /// Ascending order.
     Asc,
     /// Descending order.
@@ -727,7 +734,7 @@ pub(crate) enum SortDirection {
 
 /// Query-visible deletion behavior.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum RowVisibility {
+pub enum RowVisibility {
     /// Only currently visible rows.
     Visible,
     /// Include root deletion markers. Joins/includes still resolve visible

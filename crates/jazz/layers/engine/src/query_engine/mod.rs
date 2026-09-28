@@ -40,22 +40,22 @@ mod output;
 mod policy;
 mod publication;
 mod read;
-pub(crate) use binding_values::coerce_prepared_binding_value;
+pub use binding_values::coerce_prepared_binding_value;
 pub use publication::{
     CurrentRowBindingRole, CurrentRowPublicationField, CurrentRowResultVisibility,
 };
 mod resolver;
 mod schemas;
 
-pub(crate) use fields::*;
-pub(crate) use input::*;
+pub use fields::*;
+pub use input::*;
 #[allow(unused_imports)]
-pub(crate) use lowering::*;
-pub(crate) use output::*;
-pub(crate) use policy::*;
-pub(crate) use read::*;
-pub(crate) use resolver::*;
-pub(crate) use schemas::*;
+pub use lowering::*;
+pub use output::*;
+pub use policy::*;
+pub use read::*;
+pub use resolver::*;
+pub use schemas::*;
 
 #[cfg(test)]
 mod tests;

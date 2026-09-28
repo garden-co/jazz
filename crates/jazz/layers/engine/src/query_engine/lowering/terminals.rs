@@ -5,8 +5,8 @@
 //! schemas used to decode those outputs.
 
 use super::*;
-use crate::node::query_engine::CurrentRowPublicationField;
-use crate::node::query_engine::coerce_prepared_binding_value;
+use crate::query_engine::CurrentRowPublicationField;
+use crate::query_engine::coerce_prepared_binding_value;
 use groove::records::{DescriptorField, FieldIdentity};
 
 /// Share execution only after proving the complete typed source/routing schema
@@ -110,7 +110,7 @@ fn resolved_source_public_name(source: &ResolvedSource, field: &str) -> Option<S
         .fields()
         .iter()
         .find(|candidate| candidate.name.as_deref() == Some(field))
-        .and_then(crate::node::query_engine::descriptor_public_name)
+        .and_then(crate::query_engine::descriptor_public_name)
         .map(str::to_owned)
 }
 
@@ -122,7 +122,7 @@ fn source_publication_field(source: &ResolvedSource, name: String) -> CurrentRow
         },
         None => CurrentRowPublicationField::ResultField {
             name,
-            visibility: crate::node::query_engine::CurrentRowResultVisibility::ApplicationCell,
+            visibility: crate::query_engine::CurrentRowResultVisibility::ApplicationCell,
         },
     }
 }
@@ -143,16 +143,16 @@ fn collect_publication_fields(
                 (CollectFieldOrigin::SourceRow, _) => CurrentRowPublicationField::ResultField {
                     name: field.output.clone(),
                     visibility:
-                        crate::node::query_engine::CurrentRowResultVisibility::current_row_metadata(
+                        crate::query_engine::CurrentRowResultVisibility::current_row_metadata(
                             field.source_field.as_deref().unwrap_or(&field.output),
                         ),
                 },
                 _ => CurrentRowPublicationField::ResultField {
                     name: field.output.clone(),
                     visibility: if field.is_row_id {
-                        crate::node::query_engine::CurrentRowResultVisibility::HiddenMetadata
+                        crate::query_engine::CurrentRowResultVisibility::HiddenMetadata
                     } else {
-                        crate::node::query_engine::CurrentRowResultVisibility::ApplicationCell
+                        crate::query_engine::CurrentRowResultVisibility::ApplicationCell
                     },
                 },
             };
@@ -164,7 +164,7 @@ fn collect_publication_fields(
             slot.collection_field.clone(),
             CurrentRowPublicationField::ResultField {
                 name: slot.collection_field.clone(),
-                visibility: crate::node::query_engine::CurrentRowResultVisibility::ApplicationCell,
+                visibility: crate::query_engine::CurrentRowResultVisibility::ApplicationCell,
             },
         )
     }));
@@ -598,13 +598,13 @@ pub(super) fn lowered_terminals(
                     .filter(|field| field.name.as_ref() == Some(row_id))
                     .filter_map(|field| {
                         let carrier = field.name.clone()?;
-                        let binding = match crate::node::query_engine::descriptor_public_name(field)
+                        let binding = match crate::query_engine::descriptor_public_name(field)
                         {
                             Some(name) => source_publication_field(source, name.to_owned()),
                             None => CurrentRowPublicationField::ResultField {
                                 name: carrier.clone(),
                                 visibility:
-                                    crate::node::query_engine::CurrentRowResultVisibility::current_row_metadata(
+                                    crate::query_engine::CurrentRowResultVisibility::current_row_metadata(
                                         &carrier,
                                     ),
                             },
@@ -729,7 +729,8 @@ pub(super) fn lowered_terminals(
                     .map(|requested| {
                         let binding = CurrentRowPublicationField::ResultField {
                             name: requested.alias.clone(),
-                            visibility: crate::node::query_engine::CurrentRowResultVisibility::ApplicationCell,
+                            visibility:
+                                crate::query_engine::CurrentRowResultVisibility::ApplicationCell,
                         };
                         (requested.alias.clone(), binding)
                     })
@@ -810,7 +811,7 @@ pub(super) fn lowered_terminals(
                             descriptor
                                 .field_index(&field.name)
                                 .and_then(|index| descriptor.fields().get(index))
-                                .and_then(crate::node::query_engine::descriptor_public_name)
+                                .and_then(crate::query_engine::descriptor_public_name)
                                 .unwrap_or(field.name.as_str())
                                 .to_owned(),
                         )
@@ -2226,7 +2227,7 @@ fn lowered_aggregate_terminals(
                             CurrentRowPublicationField::ResultField {
                                 name: output.output.name.clone(),
                                 visibility:
-                                    crate::node::query_engine::CurrentRowResultVisibility::ApplicationCell,
+                                    crate::query_engine::CurrentRowResultVisibility::ApplicationCell,
                             },
                         );
                     }
@@ -2646,7 +2647,7 @@ fn fact_output_with_terminal(
                             CurrentRowPublicationField::ResultField {
                                 name: field.name.clone(),
                                 visibility:
-                                    crate::node::query_engine::CurrentRowResultVisibility::ApplicationCell,
+                                    crate::query_engine::CurrentRowResultVisibility::ApplicationCell,
                             }
                         } else if let Some(name) = resolved_source_public_name(source, &field.name)
                         {
@@ -2655,7 +2656,7 @@ fn fact_output_with_terminal(
                             CurrentRowPublicationField::ResultField {
                                 name: field.name.clone(),
                                 visibility:
-                                    crate::node::query_engine::CurrentRowResultVisibility::current_row_metadata(
+                                    crate::query_engine::CurrentRowResultVisibility::current_row_metadata(
                                         &field.name,
                                     ),
                             }
@@ -4755,8 +4756,7 @@ mod publication_schema_tests {
                 "_app_title".to_owned(),
                 CurrentRowPublicationField::ResultField {
                     name: "title".to_owned(),
-                    visibility:
-                        crate::node::query_engine::CurrentRowResultVisibility::ApplicationCell,
+                    visibility: crate::query_engine::CurrentRowResultVisibility::ApplicationCell,
                 },
             )]),
             hidden_fields: BTreeSet::from(["route".to_owned()]),

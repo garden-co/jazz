@@ -2309,7 +2309,8 @@ fn lower_value_source(
 }
 
 #[cfg(test)]
-pub(crate) fn binding_value_source_projection_fields_for_test(
+#[doc(hidden)]
+pub fn binding_value_source_projection_fields_for_test(
     request: &QueryProgramRequest,
     columns: &[ValueSourceColumn],
 ) -> Result<BTreeSet<String>, UnsupportedReason> {

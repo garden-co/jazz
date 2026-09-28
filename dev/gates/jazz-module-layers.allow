@@ -17,8 +17,6 @@ db/tests/transactions.rs -> binding_codec.rs
 db/tests/transactions.rs -> tools/test_support.rs
 node/codec.rs -> tools/mod.rs
 node/physical/tests.rs -> lib.rs
-node/query_engine/lowering/terminals.rs -> lib.rs
-node/query_engine/tests/mod.rs -> lib.rs
 node/query_eval/authorization.rs -> lib.rs
 node/query_eval/authorization.rs -> tools/mod.rs
 node/query_eval/tests/authorization.rs -> tools/mod.rs

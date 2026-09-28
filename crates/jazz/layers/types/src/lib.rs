@@ -48,3 +48,6 @@ pub mod time;
 #[doc(hidden)]
 #[cfg(any(test, feature = "testing"))]
 pub mod delivery_diagnostics;
+#[doc(hidden)]
+#[cfg(any(test, feature = "testing"))]
+pub mod legacy_test_future;

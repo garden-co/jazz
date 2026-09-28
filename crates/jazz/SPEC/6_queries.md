@@ -479,7 +479,7 @@ join sees the accumulated wide left row, and the final terminal input carries
 every source needed for the tuple and its identity. The contribution lowerer
 used for include closure intentionally does something narrower: it projects a
 join to `RIGHT_JOIN_PREFIX` only
-(`crates/jazz/src/node/query_engine/lowering.rs:5199-5251`). That projection is
+(`crates/jazz/layers/engine/src/query_engine/lowering.rs:5199-5251`). That projection is
 correct for a source-membership fact, but MUST NOT be reused for flat output.
 
 This is achievable with the existing Groove join representation. An inner join

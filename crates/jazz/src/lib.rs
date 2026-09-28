@@ -113,7 +113,6 @@
 // they poll futures directly so suspension and ordering remain observable.
 #[cfg(test)]
 pub(crate) mod legacy_test_future {
-    use std::future::Future;
 
     use crate::ids::{AuthorSubject, SchemaVersionId};
     use crate::model::transaction::OpenTransactionId;
@@ -123,101 +122,9 @@ pub(crate) mod legacy_test_future {
     use crate::tx::{DurabilityTier, Fate, Transaction, TxId};
     use groove::storage::{OrderedKvStorage, ReopenableStorage};
 
-    #[allow(clippy::wrong_self_convention)]
-    pub(crate) trait ResultFutureExt<T, E>: Future<Output = Result<T, E>> {
-        fn unwrap(self) -> T
-        where
-            Self: Sized,
-            E: std::fmt::Debug,
-        {
-            crate::local_executor::block_on(self).unwrap()
-        }
-
-        fn expect(self, message: &str) -> T
-        where
-            Self: Sized,
-            E: std::fmt::Debug,
-        {
-            crate::local_executor::block_on(self).expect(message)
-        }
-
-        fn unwrap_or_else<F>(self, op: F) -> T
-        where
-            Self: Sized,
-            F: FnOnce(E) -> T,
-        {
-            crate::local_executor::block_on(self).unwrap_or_else(op)
-        }
-
-        fn unwrap_err(self) -> E
-        where
-            Self: Sized,
-            T: std::fmt::Debug,
-        {
-            crate::local_executor::block_on(self).unwrap_err()
-        }
-
-        fn expect_err(self, message: &str) -> E
-        where
-            Self: Sized,
-            T: std::fmt::Debug,
-        {
-            crate::local_executor::block_on(self).expect_err(message)
-        }
-
-        fn is_err(self) -> bool
-        where
-            Self: Sized,
-        {
-            crate::local_executor::block_on(self).is_err()
-        }
-
-        fn is_ok(self) -> bool
-        where
-            Self: Sized,
-        {
-            crate::local_executor::block_on(self).is_ok()
-        }
-    }
-
-    impl<F, T, E> ResultFutureExt<T, E> for F where F: Future<Output = Result<T, E>> {}
-
-    #[allow(clippy::wrong_self_convention)]
-    pub(crate) trait OptionFutureExt<T>: Future<Output = Option<T>> {
-        fn unwrap(self) -> T
-        where
-            Self: Sized,
-        {
-            crate::local_executor::block_on(self).unwrap()
-        }
-
-        fn expect(self, message: &str) -> T
-        where
-            Self: Sized,
-        {
-            crate::local_executor::block_on(self).expect(message)
-        }
-
-        fn is_none(self) -> bool
-        where
-            Self: Sized,
-        {
-            crate::local_executor::block_on(self).is_none()
-        }
-    }
-
-    impl<F, T> OptionFutureExt<T> for F where F: Future<Output = Option<T>> {}
-
-    pub(crate) trait FutureResolveExt: Future {
-        fn resolve(self) -> Self::Output
-        where
-            Self: Sized,
-        {
-            crate::local_executor::block_on(self)
-        }
-    }
-
-    impl<F> FutureResolveExt for F where F: Future {}
+    pub(crate) use jazz_types::legacy_test_future::{
+        FutureResolveExt, OptionFutureExt, ResultFutureExt,
+    };
 
     pub(crate) trait SettledNodeTestExt {
         fn commit_mergeable_settled(&mut self, commit: MergeableCommit) -> Result<TxId, Error>;

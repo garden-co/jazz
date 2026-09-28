@@ -92,7 +92,7 @@ rebuilds Jazz a second time for the testkit.
 **Jazz module layers.** `crates/jazz/src` is being split into crates bottom-up
 (types → model → protocol → engine → node → peer → db → facade). Extracted
 layers live in `crates/jazz/layers/<layer>` as their own crates (`jazz-types`,
-`jazz-model`, `jazz-protocol` so far), so CI path filters on `crates/jazz/**` still cover them; `jazz`
+`jazz-model`, `jazz-protocol`, `jazz-engine` so far), so CI path filters on `crates/jazz/**` still cover them; `jazz`
 re-exports each of their modules under its old path (`jazz::ids`,
 `crate::ids`). An item a higher layer uses must be `pub` in the lower crate
 (`#[doc(hidden)]` when it is internal); test helpers other layers need are
@@ -169,7 +169,7 @@ boundary. Ordinary small package builds may use Turbo normally, but must never
 add `.native-artifacts/**`, WASM `pkg/**`, or the correctness-artifact store as
 cacheable outputs.
 
-- `cargo test -p jazz -p jazz-types -p jazz-model -p jazz-protocol` (the layer crates carry the moved unit
+- `cargo test -p jazz -p jazz-types -p jazz-model -p jazz-protocol -p jazz-engine` (the layer crates carry the moved unit
   tests; `-p jazz` alone skips them)
 - `cargo test -p groove`
 - `cargo test -p jazz --no-default-features --features testing,transport-compression-zstd` (matches `crates/jazz/TESTING_GUIDELINES.md`).

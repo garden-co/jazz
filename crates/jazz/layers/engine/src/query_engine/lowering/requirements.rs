@@ -204,7 +204,8 @@ pub(super) fn source_requirements(
 }
 
 #[cfg(test)]
-pub(crate) fn source_requirements_for_test(
+#[doc(hidden)]
+pub fn source_requirements_for_test(
     request: &QueryProgramRequest,
 ) -> CapabilityResult<BTreeMap<SourceId, SourceRequirements>> {
     let plan = analyze_query_plan(request).map_err(|gaps| {

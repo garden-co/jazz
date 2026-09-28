@@ -187,7 +187,7 @@ impl ProgramArgumentRecipes {
                     }
                 };
                 let value = if recipe.coerce {
-                    crate::node::query_engine::coerce_prepared_binding_value(value, &recipe.ty)
+                    crate::query_engine::coerce_prepared_binding_value(value, &recipe.ty)
                 } else {
                     value
                 };

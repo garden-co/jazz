@@ -2042,6 +2042,7 @@ dependencies = [
  "jazz",
  "jazz-benchmark-guard",
  "jazz-compression",
+ "jazz-engine",
  "jazz-model",
  "jazz-protocol",
  "jazz-storage-rocksdb",
@@ -2118,6 +2119,19 @@ dependencies = [
  "jazz-ruzstd",
  "lz4_flex 0.11.6",
  "zstd",
+]
+
+[[package]]
+name = "jazz-engine"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "groove",
+ "jazz-model",
+ "jazz-protocol",
+ "jazz-types",
+ "postcard",
+ "uuid",
 ]
 
 [[package]]
