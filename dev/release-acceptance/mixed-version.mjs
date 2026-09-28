@@ -673,38 +673,24 @@ async function edgeCells() {
       await check(name, "deploy", () => deploy(name, cell.dir, core, V.new), {
         fatal: true,
       });
-      let edgeUp = false;
-      await check(name, "old-edge-start", async () => {
-        await edge.start(V.old, { upstreamUrl: core.url, log: "edge.log" });
-        edgeUp = true;
+      // A retired edge must be refused explicitly by the new Core, not
+      // accepted or left hanging silently.
+      await check(name, "old-edge-rejected-explicitly-by-new-core", async () => {
+        let ready = false;
+        try {
+          await edge.start(V.old, { upstreamUrl: core.url, log: "edge.log" });
+          ready = true;
+        } catch {}
+        const edgeLog = existsSync(join(edgeDir, "edge.log"))
+          ? readFileSync(join(edgeDir, "edge.log"), "utf8")
+          : "";
+        const rejection = edgeLog
+          .split("\n")
+          .find((l) => /UnsupportedFeature|no longer supported/.test(l));
+        assert(!ready, "old edge became ready behind the new Core");
+        assert(rejection, "no explicit rejection in the edge log");
+        return { rejection: rejection.slice(0, 400) };
       });
-      if (edgeUp) {
-        await check(name, "old-client-via-old-edge-write-global", async () => {
-          const A = new Client(name, cell.dir, V.old, "a");
-          clients.push(A);
-          await A.call("open", {
-            name: "a",
-            appId: cell.ctx.appId,
-            serverUrl: edge.url,
-            ms: 20000,
-          });
-          await A.call("insert", {
-            values: { label: "e", body: "via-edge", author: "old" },
-            wait: "global",
-            ms: 15000,
-          });
-        });
-      }
-      await delay(500);
-      const logs = ["edge.log"]
-        .map((l) => (existsSync(join(edgeDir, l)) ? readFileSync(join(edgeDir, l), "utf8") : ""))
-        .join("\n");
-      const coreLog = readFileSync(join(cell.dir, "server.log"), "utf8");
-      const hints = (logs + "\n" + coreLog)
-        .split("\n")
-        .filter((l) => /edge|role|handshake|hello|reject|unsupported/i.test(l))
-        .slice(0, 20);
-      record(name, "log-evidence", "info", { lines: hints });
     } finally {
       for (const c of clients) await c.close();
       await edge.stop();
