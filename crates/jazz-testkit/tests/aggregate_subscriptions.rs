@@ -627,13 +627,13 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
             let (a1, _, tx) = writer
                 .insert("metrics", row_input!("bucket" => "a", "score" => 10))
                 .expect("insert a1");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &writer,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
             .await;
             if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
-                eprintln!("JAZZ_COVERED_INPUT_TRACE stage=aggregate_test_a1_edge_done");
+                eprintln!("JAZZ_COVERED_INPUT_TRACE stage=aggregate_test_a1_global_done");
             }
             count_stream
                 .wait_for_values(vec![vec![Value::Timestamp(1)]], "count after a1")
@@ -654,7 +654,7 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
             let (b1, _, tx) = writer
                 .insert("metrics", row_input!("bucket" => "b", "score" => 7))
                 .expect("insert b1");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &writer,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -673,7 +673,7 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
                 .await;
 
             let delete_tx = writer.delete("metrics", b1).expect("delete b1 and empty b");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &writer,
                 &[delete_tx.expect("ordinary mutation commits immediately")],
             )
@@ -681,7 +681,7 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
             let (_b2, _, insert_tx) = writer
                 .insert("metrics", row_input!("bucket" => "b", "score" => 5))
                 .expect("repopulate b");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &writer,
                 &[insert_tx.expect("ordinary mutation commits immediately")],
             )
@@ -697,7 +697,7 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
                 .await;
 
             let tx = writer.delete("metrics", a1).expect("delete a1");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &writer,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -756,7 +756,7 @@ async fn aggregate_subscription_group_field_named_count_uses_structural_wire_slo
             let (_, _, tx) = writer
                 .insert("metrics", row_input!("count" => "group", "score" => 1))
                 .expect("insert grouped sum metric");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &writer,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -836,7 +836,7 @@ async fn aggregate_subscription_uses_core_canonical_order_for_mixed_outputs() {
                     .expect("insert mixed aggregate metric");
                 txs.push(tx.expect("ordinary mutation commits immediately"));
             }
-            support::wait_for_edge_txs(&writer, &txs).await;
+            support::wait_for_global_txs(&writer, &txs).await;
             stream
                 .wait_for_values(
                     vec![vec![
@@ -981,7 +981,7 @@ async fn grouped_null_aggregate_membership_survives_absence_and_replacement() {
                 rows.push(row);
                 txs.push(tx.expect("ordinary mutation commits immediately"));
             }
-            support::wait_for_edge_txs(&writer, &txs).await;
+            support::wait_for_global_txs(&writer, &txs).await;
             stream
                 .wait_for_values(
                     vec![
@@ -1008,7 +1008,7 @@ async fn grouped_null_aggregate_membership_survives_absence_and_replacement() {
             let tx = writer
                 .delete("metrics", rows[2])
                 .expect("delete gone group");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &writer,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -1037,7 +1037,7 @@ async fn grouped_null_aggregate_membership_survives_absence_and_replacement() {
                     row_input!("bucket" => "changed", "score" => Value::Null),
                 )
                 .expect("replace changed aggregate group");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &writer,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -1100,7 +1100,7 @@ async fn maintained_integer_sum_accumulates_multiple_deltas_and_retracts_empty_g
             let (first, _, tx) = writer
                 .insert("metrics", row_input!("bucket" => "same", "score" => 10))
                 .expect("insert first metric");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &writer,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -1115,7 +1115,7 @@ async fn maintained_integer_sum_accumulates_multiple_deltas_and_retracts_empty_g
             let (second, _, tx) = writer
                 .insert("metrics", row_input!("bucket" => "same", "score" => 7))
                 .expect("insert second metric");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &writer,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -1130,7 +1130,7 @@ async fn maintained_integer_sum_accumulates_multiple_deltas_and_retracts_empty_g
             let tx = writer
                 .delete("metrics", first)
                 .expect("delete first metric");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &writer,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -1145,7 +1145,7 @@ async fn maintained_integer_sum_accumulates_multiple_deltas_and_retracts_empty_g
             let tx = writer
                 .delete("metrics", second)
                 .expect("delete second metric");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &writer,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -1204,7 +1204,7 @@ async fn maintained_double_avg_of_two_max_values_stays_finite_and_retracts() {
                     row_input!("bucket" => "same", "score" => Value::Double(max)),
                 )
                 .expect("insert first maximum metric");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &writer,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -1224,7 +1224,7 @@ async fn maintained_double_avg_of_two_max_values_stays_finite_and_retracts() {
                     row_input!("bucket" => "same", "score" => Value::Double(max)),
                 )
                 .expect("insert second maximum metric");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &writer,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -1250,7 +1250,7 @@ async fn maintained_double_avg_of_two_max_values_stays_finite_and_retracts() {
             let tx = writer
                 .delete("metrics", first)
                 .expect("delete first maximum metric");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &writer,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -1267,7 +1267,7 @@ async fn maintained_double_avg_of_two_max_values_stays_finite_and_retracts() {
             let tx = writer
                 .delete("metrics", second)
                 .expect("delete second maximum metric");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &writer,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -1798,7 +1798,7 @@ async fn integer_counter_columns_merge_signed_public_values() {
             let (counter_id, _, tx) = alice
                 .insert("counters", row_input!("name" => "shared", "count" => 0))
                 .expect("insert counter");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &alice,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -1835,12 +1835,12 @@ async fn integer_counter_columns_merge_signed_public_values() {
                     vec![("count".to_owned(), Value::Integer(5))],
                 )
                 .expect("bob updates counter");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &alice,
                 &[alice_tx.expect("ordinary mutation commits immediately")],
             )
             .await;
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &bob,
                 &[bob_tx.expect("ordinary mutation commits immediately")],
             )
@@ -1895,7 +1895,7 @@ async fn bigint_counter_columns_merge_signed_public_values() {
                     row_input!("name" => "shared", "count" => Value::BigInt(base)),
                 )
                 .expect("insert counter");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &alice,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -1932,12 +1932,12 @@ async fn bigint_counter_columns_merge_signed_public_values() {
                     vec![("count".to_owned(), Value::BigInt(base + 5))],
                 )
                 .expect("bob updates counter");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &alice,
                 &[alice_tx.expect("ordinary mutation commits immediately")],
             )
             .await;
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &bob,
                 &[bob_tx.expect("ordinary mutation commits immediately")],
             )
@@ -2024,7 +2024,7 @@ async fn aggregate_subscription_spy_stays_at_policy_visible_truth() {
                     row_input!("owner_id" => admin_id.clone(), "score" => 10),
                 )
                 .expect("insert admin row");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &admin,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -2047,7 +2047,7 @@ async fn aggregate_subscription_spy_stays_at_policy_visible_truth() {
             let tx = admin
                 .delete("metrics", admin_row)
                 .expect("delete admin row");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &admin,
                 &[tx.expect("ordinary mutation commits immediately")],
             )

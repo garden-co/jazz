@@ -30,7 +30,7 @@ Optional settings are `appId`, a public admitted `session`, and
 they hand the JWT only to native private-session admission and attach the
 canonical schema through the production C ABI. The public Db receives only
 its cookie-session mirror and opaque native capability. Tests own real local
-Edge/Core topology setup. Trusted fixture controls are `nativeHost.revoke`,
+Core topology setup. Trusted fixture controls are `nativeHost.revoke`,
 `beginPrivateSession`, and `attachCanonicalSchema`; there is no simulated
 transport or row engine.
 

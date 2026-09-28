@@ -43,8 +43,22 @@ type BrowserFollowerPortRpcRequest =
 
 // Connection policy, not an operation deadline. A matching pong keeps even
 // an indefinitely pending server/durability wait alive.
-const PROBE_INTERVAL_MS = 30_000;
-const PROBE_REPLY_MS = 30_000;
+const DEFAULT_PROBE_TIMING: BrowserFollowerProbeTiming = Object.freeze({
+  intervalMs: 30_000,
+  replyMs: 30_000,
+});
+let probeTiming = DEFAULT_PROBE_TIMING;
+
+export type BrowserFollowerProbeTiming = Readonly<{ intervalMs: number; replyMs: number }>;
+
+/**
+ * Scale the probe policy for real-worker liveness tests in this page realm.
+ * No runtime option or worker message reaches it; pass nothing to restore.
+ * Connections read it whenever they arm a watchdog.
+ */
+export function setBrowserFollowerProbeTimingForTest(timing?: BrowserFollowerProbeTiming): void {
+  probeTiming = timing ?? DEFAULT_PROBE_TIMING;
+}
 const CALLBACK_SUSPENSION_SLACK_MS = 1_000;
 
 /** Connects one tab's non-durable in-memory runtime to the elected worker. */
@@ -75,6 +89,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       | "onAuthFailure"
       | "onAuthRestored"
       | "onExplicitOfflineChange"
+      | "onRemoteLinkChange"
       | "onFailure"
       | "onStorageReset"
       | "onStorageInvalidated"
@@ -306,7 +321,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
   private armWatchdog(): void {
     if (this.closed || this.failed || this.pending.size === 0 || this.watchdogTimer !== null)
       return;
-    this.scheduleWatchdog(PROBE_INTERVAL_MS, false);
+    this.scheduleWatchdog(probeTiming.intervalMs, false);
   }
 
   private scheduleWatchdog(delay: number, awaitingReply: boolean): void {
@@ -339,7 +354,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     const nonce = this.nextProbeNonce++;
     this.probeNonce = nonce;
     // Arm first so a synchronous adapter reply cannot leave an expiry behind.
-    this.scheduleWatchdog(PROBE_REPLY_MS, true);
+    this.scheduleWatchdog(probeTiming.replyMs, true);
     try {
       this.port.postMessage({
         type: "runtime-probe",
@@ -385,13 +400,20 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       this.callbacks.onExplicitOfflineChange?.(message.explicitlyDisconnected);
       return;
     }
+    if (message.type === "remote-link") {
+      // The worker keeps reconnecting after a published outage. Once it is
+      // live again, release the relayed error so Global reads work again.
+      if (message.state === "connected") this.runtime.clearRemoteServerTransportError();
+      this.callbacks.onRemoteLinkChange?.(message.state);
+      return;
+    }
     if (message.type === "mutation-error") {
       this.runtime.reportRemoteMutationError(message.event);
       return;
     }
     if (message.type === "transport-error") {
       // Keep this distinct from a fate rejection. The runtime records the
-      // error before any later port teardown so active Edge/Global waits and
+      // error before any later port teardown so active Global waits and
       // remote subscriptions wake, while Local durability stays valid.
       this.runtime.reportRemoteServerTransportError(deserializeBrowserRelayError(message.error));
       return;

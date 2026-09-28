@@ -353,7 +353,7 @@ describe("History & Conflict Management", () => {
     );
 
     // Both updates start concurrently — creating diverged tips — then settle
-    // at the edge so a fresh peer has an authoritative conflict winner to read.
+    // at Core so a fresh peer has an authoritative conflict winner to read.
     const aliceConflictTitle = "alice-edit";
     const bobConflictTitle = "bob-edit";
     expect(aliceConflictTitle).not.toBe(bobConflictTitle);
@@ -369,7 +369,7 @@ describe("History & Conflict Management", () => {
       bobConflict.wait({ tier: "global" }),
     ]);
 
-    // Compare edge-tier reads: a local tier may still intentionally include a
+    // Compare global-tier reads: a local tier may still intentionally include a
     // client's own optimistic conflict while upstream reconciliation is pending.
     let convergedTitle = "";
     await waitForCondition(

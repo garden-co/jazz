@@ -2,10 +2,10 @@ import { testWasmDelivery } from "../../dev/gates/test-wasm-delivery.mjs";
 import { createWorkerFaultBundleFixture } from "./tests/browser/worker-fault-bundle-node.js";
 import { recoverPendingIndexedDbWrites } from "./tests/browser/indexeddb-pending-recovery-node.js";
 import {
-  liveEdgeBackendOpen,
-  liveEdgeBackendInsert,
-  liveEdgeBackendClose,
-} from "./tests/browser/live-edge-replay-node.js";
+  liveAuthorityBackendOpen,
+  liveAuthorityBackendInsert,
+  liveAuthorityBackendClose,
+} from "./tests/browser/live-authority-replay-node.js";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { defineConfig } from "vitest/config";
 import wasm from "vite-plugin-wasm";
@@ -158,10 +158,10 @@ export default defineConfig({
           writeFileSync(output, `${JSON.stringify(records, null, 2)}\n`, { flag: "wx" });
           return output;
         },
-        liveEdgeBackendOpen: async (_context, info) => liveEdgeBackendOpen(info),
-        liveEdgeBackendInsert: async (_context, appId, seed, title) =>
-          liveEdgeBackendInsert(appId, seed, title),
-        liveEdgeBackendClose: async (_context, appId) => liveEdgeBackendClose(appId),
+        liveAuthorityBackendOpen: async (_context, info) => liveAuthorityBackendOpen(info),
+        liveAuthorityBackendInsert: async (_context, appId, seed, title) =>
+          liveAuthorityBackendInsert(appId, seed, title),
+        liveAuthorityBackendClose: async (_context, appId) => liveAuthorityBackendClose(appId),
         jazzBrowserTopologyLog: async (_context, status, label, elapsedMs) => {
           console.info(`[jazz-browser-topology] ${status} ${label} (${elapsedMs}ms)`);
         },

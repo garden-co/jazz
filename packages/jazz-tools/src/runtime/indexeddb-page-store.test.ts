@@ -64,6 +64,29 @@ describe("IndexedDbPageStore", () => {
     store.close();
   });
 
+  it("reads several pages in request order, with null for absent ids", async () => {
+    const name = databaseName();
+    const store = await IndexedDbPageStore.open(name);
+    await store.commit({
+      expectedGeneration: 0,
+      metadata: { pageSize: INDEXEDDB_BTREE_PAGE_SIZE, rootPageId: 7, nextPageId: 8 },
+      pages: new Map([
+        [7, new Uint8Array([1, 2, 3])],
+        [3, new Uint8Array([4, 5])],
+      ]),
+    });
+
+    expect(await store.readPages([3, 5, 7, 3])).toEqual([
+      new Uint8Array([4, 5]),
+      null,
+      new Uint8Array([1, 2, 3]),
+      new Uint8Array([4, 5]),
+    ]);
+    expect(await store.readPages([])).toEqual([]);
+    await expect(store.readPages([1, -1])).rejects.toThrow();
+    store.close();
+  });
+
   it("pins an explicit browser owner across release/reopen and rejects another owner before mutation", async () => {
     const name = databaseName();
     const alice = await IndexedDbPageStore.open(name, { owner: "app:alice" });

@@ -168,7 +168,7 @@ export function verifyCorrectnessTestArtifacts(
       const problem = verifyWasmGlueAbi(readFileSync(workerWasm), readFileSync(workerGlue, "utf8"));
       if (problem) failures.push(`broker worker ${problem}`);
     }
-    const rust = text("crates/jazz/src/wire.rs", rootDir);
+    const rust = text("crates/jazz/layers/protocol/src/wire.rs", rootDir);
     const ts = text("packages/jazz-tools/src/runtime/native-runtime/websocket.ts", rootDir);
     const rustVersion = rust.match(/^pub const WIRE_PROTOCOL_VERSION: u16 = (\d+);$/m)?.[1];
     const tsVersion = ts.match(/^export const WIRE_PROTOCOL_VERSION = (\d+);$/m)?.[1];

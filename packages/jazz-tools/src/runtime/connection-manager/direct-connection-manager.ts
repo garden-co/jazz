@@ -140,7 +140,7 @@ export class DirectConnectionManager extends ConnectionManager {
         await this.clientEntry?.client.disconnectTransport();
       }
       // An in-flight or failed disconnect is not permission for a
-      // RemoteIfPossible read to fall back locally.
+      // read to treat the Db as explicitly offline.
       this.isDisconnected = true;
       this.publishExplicitOfflineState();
     });

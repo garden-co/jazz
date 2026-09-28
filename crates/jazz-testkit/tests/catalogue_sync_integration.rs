@@ -22,7 +22,7 @@ use serde_json::json;
 use support::{
     PublishedPermissionsHead, TestingClient, deny_all_select_permissions, has_added_id,
     has_removed, publish_allow_all_permissions, publish_permissions, push_catalogue_in_memory,
-    wait_for, wait_for_edge_query_ready, wait_for_query, wait_for_query_results,
+    wait_for, wait_for_query, wait_for_query_results, wait_for_remote_query_ready,
     wait_for_subscription_update,
 };
 use tempfile::TempDir;
@@ -48,7 +48,7 @@ fn user_values_v3(name: &str, email: &str, role: &str) -> HashMap<String, Value>
 /// without first hydrating the table. Alice stays on v1; Bob writes a v2 array
 /// field which the backward lens must omit from Alice's result.
 ///
-/// alice(v1) connects --> bob(v2) inserts --> edge --> alice's ID-filtered read
+/// alice(v1) connects --> bob(v2) inserts --> server --> alice's ID-filtered read
 #[tokio::test]
 async fn cold_old_schema_id_query_reads_new_array_column_row() {
     tokio::task::LocalSet::new()
@@ -121,7 +121,7 @@ async fn cold_old_schema_id_query_reads_new_array_column_row() {
                     ),
                 )
                 .expect("insert new-schema row");
-            support::wait_for_edge_txs(&bob, &[tx.expect("insert transaction")]).await;
+            support::wait_for_global_txs(&bob, &[tx.expect("insert transaction")]).await;
             let rows = tokio::time::timeout(
                 Duration::from_secs(10),
                 alice.query(
@@ -809,19 +809,19 @@ async fn dynamic_server_denies_reads_until_permissions_head_is_published_impl() 
     )
     .await;
 
-    wait_for_edge_query_ready(&reader, "users", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&reader, "users", Duration::from_secs(30)).await;
 
     let admin = jazz_testkit::connect(
         server.make_client_context_for_user(schema.clone(), test_user_id("admin-dynamic")),
     )
     .await
     .expect("connect admin");
-    wait_for_edge_query_ready(&admin, "users", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&admin, "users", Duration::from_secs(30)).await;
 
     let (user_obj_id, _, transaction_id) = admin
         .insert("users", user_values_v1("visible after permissions"))
         .expect("admin creates user after permissions publish");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &admin,
         &[transaction_id.expect("ordinary mutation commits immediately")],
     )
@@ -914,8 +914,8 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish_im
         &schema,
     )
     .await;
-    wait_for_edge_query_ready(&observer, "users", Duration::from_secs(30)).await;
-    wait_for_edge_query_ready(&writer, "users", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&observer, "users", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&writer, "users", Duration::from_secs(30)).await;
 
     let rows_after_publish = wait_for_query(
         &observer,
@@ -931,7 +931,7 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish_im
     let (accepted_row_id, _, transaction_id) = writer
         .insert("users", user_values_v1("accepted after permissions"))
         .expect("post-publish create should succeed");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &writer,
         &[transaction_id.expect("ordinary mutation commits immediately")],
     )
@@ -967,7 +967,7 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish_im
             )],
         )
         .expect("update should succeed once permissions exist");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &writer,
         &[transaction_id.expect("ordinary mutation commits immediately")],
     )
@@ -992,7 +992,7 @@ async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish_im
     let transaction_id = writer
         .delete("users", accepted_row_id)
         .expect("delete should succeed once permissions exist");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &writer,
         &[transaction_id.expect("ordinary mutation commits immediately")],
     )
@@ -1061,13 +1061,13 @@ async fn dynamic_server_rejects_user_write_after_permissions_timeout_impl() {
         &schema,
     )
     .await;
-    wait_for_edge_query_ready(&observer, "users", Duration::from_secs(30)).await;
-    wait_for_edge_query_ready(&writer, "users", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&observer, "users", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&writer, "users", Duration::from_secs(30)).await;
 
     let (allowed_row_id, _, transaction_id) = writer
         .insert("users", user_values_v1("accepted after timeout window"))
         .expect("create should succeed after permissions publish");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &writer,
         &[transaction_id.expect("ordinary mutation commits immediately")],
     )
@@ -1139,12 +1139,12 @@ async fn dynamic_server_live_subscription_replays_on_first_permissions_head_and_
     )
     .await
     .expect("connect admin");
-    wait_for_edge_query_ready(&admin, "users", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&admin, "users", Duration::from_secs(30)).await;
 
     let (user_obj_id, _, transaction_id) = admin
         .insert("users", user_values_v1("subscription target"))
         .expect("admin creates user after permissions publish");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &admin,
         &[transaction_id.expect("ordinary mutation commits immediately")],
     )
@@ -1245,12 +1245,12 @@ async fn column_addition_new_client_can_read_old_rows_impl() {
     .await
     .expect("connect alice");
 
-    wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
     let (user_obj_id, _, transaction_id) = alice
         .insert("users", user_values_v1("Alice Smith"))
         .expect("alice creates user after permissions publish");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &alice,
         &[transaction_id.expect("ordinary mutation commits immediately")],
     )
@@ -1263,7 +1263,7 @@ async fn column_addition_new_client_can_read_old_rows_impl() {
     .await
     .expect("connect bob");
 
-    wait_for_edge_query_ready(&bob, "users", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&bob, "users", Duration::from_secs(30)).await;
 
     let bob_rows = wait_for_query(
         &bob,
@@ -1334,12 +1334,12 @@ async fn cannot_read_from_old_schema_until_lens_is_added_impl() {
         ))
         .await
         .expect("connect alice");
-    wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
     let (row_id, _, transaction_id) = alice
         .insert("users", user_values_v1("Alice Pending Lens"))
         .expect("alice creates v1 user");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &alice,
         &[transaction_id.expect("ordinary mutation commits immediately")],
     )
@@ -1389,7 +1389,7 @@ async fn cannot_read_from_old_schema_until_lens_is_added_impl() {
     assert_eq!(resumed_rows.len(), 1);
     assert_eq!(resumed_rows[0].key, row_id);
     drop(pending_query);
-    wait_for_edge_query_ready(&bob, "users", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&bob, "users", Duration::from_secs(30)).await;
 
     let rows = wait_for_query(
         &bob,
@@ -1458,12 +1458,12 @@ async fn multi_hop_column_additions_new_client_can_read_old_rows_impl() {
     )
     .await
     .expect("connect alice");
-    wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
     let (alice_row_id, _, alice_tx_id) = alice
         .insert("users", user_values_v1("Alice Multi-Hop"))
         .expect("alice creates v1 user");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &alice,
         &[alice_tx_id.expect("ordinary mutation commits immediately")],
     )
@@ -1474,12 +1474,12 @@ async fn multi_hop_column_additions_new_client_can_read_old_rows_impl() {
     )
     .await
     .expect("connect bob");
-    wait_for_edge_query_ready(&bob, "users", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&bob, "users", Duration::from_secs(30)).await;
 
     let (bob_row_id, _, bob_tx_id) = bob
         .insert("users", user_values_v2("Bob Multi-Hop", "bob@example.com"))
         .expect("bob creates v2 user");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &bob,
         &[bob_tx_id.expect("ordinary mutation commits immediately")],
     )
@@ -1490,7 +1490,7 @@ async fn multi_hop_column_additions_new_client_can_read_old_rows_impl() {
     )
     .await
     .expect("connect charlie");
-    wait_for_edge_query_ready(&charlie, "users", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&charlie, "users", Duration::from_secs(30)).await;
 
     let (charlie_row_id, _, charlie_tx_id) = charlie
         .insert(
@@ -1498,7 +1498,7 @@ async fn multi_hop_column_additions_new_client_can_read_old_rows_impl() {
             user_values_v3("Charlie Multi-Hop", "charlie@example.com", "admin"),
         )
         .expect("charlie creates v3 user");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &charlie,
         &[charlie_tx_id.expect("ordinary mutation commits immediately")],
     )
@@ -1611,12 +1611,12 @@ async fn multi_hop_column_renames_new_client_can_read_old_rows_impl() {
     )
     .await
     .expect("connect alice");
-    wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
     let (row_id, _, transaction_id) = alice
         .insert("users", rename_chain_values_v1("alice@example.com"))
         .expect("alice creates v1 user");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &alice,
         &[transaction_id.expect("ordinary mutation commits immediately")],
     )
@@ -1627,7 +1627,7 @@ async fn multi_hop_column_renames_new_client_can_read_old_rows_impl() {
     )
     .await
     .expect("connect bob");
-    wait_for_edge_query_ready(&bob, "users", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&bob, "users", Duration::from_secs(30)).await;
 
     let rows = wait_for_query(
         &bob,
@@ -1694,12 +1694,12 @@ async fn multi_hop_column_renames_old_client_can_read_new_rows_impl() {
     )
     .await
     .expect("connect bob");
-    wait_for_edge_query_ready(&bob, "users", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&bob, "users", Duration::from_secs(30)).await;
 
     let (row_id, _, transaction_id) = bob
         .insert("users", rename_chain_values_v3("bob@example.com"))
         .expect("bob creates v3 user");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &bob,
         &[transaction_id.expect("ordinary mutation commits immediately")],
     )
@@ -1710,7 +1710,7 @@ async fn multi_hop_column_renames_old_client_can_read_new_rows_impl() {
     )
     .await
     .expect("connect alice");
-    wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
     let rows = wait_for_query(
         &alice,
@@ -1773,12 +1773,12 @@ async fn table_rename_new_client_can_read_old_rows_impl() {
     )
     .await
     .expect("connect alice");
-    wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
     let (row_id, _, transaction_id) = alice
         .insert("users", table_rename_values_v1("alice@example.com"))
         .expect("alice creates v1 user");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &alice,
         &[transaction_id.expect("ordinary mutation commits immediately")],
     )
@@ -1789,7 +1789,7 @@ async fn table_rename_new_client_can_read_old_rows_impl() {
     )
     .await
     .expect("connect bob");
-    wait_for_edge_query_ready(&bob, "people", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&bob, "people", Duration::from_secs(30)).await;
 
     let rows = wait_for_query(
         &bob,
@@ -1848,7 +1848,7 @@ async fn table_rename_subscription_reacts_to_old_branch_updates_impl() {
     )
     .await
     .expect("connect bob");
-    wait_for_edge_query_ready(&bob, "people", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&bob, "people", Duration::from_secs(30)).await;
 
     let query = jazz::query::Query::from("people");
     let mut stream = bob
@@ -1874,7 +1874,7 @@ async fn table_rename_subscription_reacts_to_old_branch_updates_impl() {
     )
     .await
     .expect("connect alice");
-    wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
     let (row_id, _, _) = alice
         .insert("users", table_rename_values_v1("alice@example.com"))
@@ -1962,7 +1962,7 @@ async fn table_rename_subscription_reacts_to_new_branch_updates_after_schema_evo
     ))
     .await
     .expect("connect alice");
-    wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
     let query = jazz::query::Query::from("users");
     let mut stream = alice
@@ -1999,19 +1999,19 @@ async fn table_rename_subscription_reacts_to_new_branch_updates_after_schema_evo
         &v2_schema,
     )
     .await;
-    wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
     let bob = jazz_testkit::connect(
         server.make_client_context_for_user(v2_schema, test_user_id("bob-table-rename-evolve-sub")),
     )
     .await
     .expect("connect bob");
-    wait_for_edge_query_ready(&bob, "people", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&bob, "people", Duration::from_secs(30)).await;
 
     let (row_id, _, transaction_id) = bob
         .insert("people", table_rename_values_v2("bob@example.com"))
         .expect("bob creates v2 person");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &bob,
         &[transaction_id.expect("ordinary mutation commits immediately")],
     )
@@ -2077,12 +2077,12 @@ async fn table_rename_update_and_delete_copy_on_write_impl() {
     ))
     .await
     .expect("connect alice");
-    wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
     let (row_id, _, transaction_id) = alice
         .insert("users", table_rename_values_v1("alice@example.com"))
         .expect("alice creates v1 user");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &alice,
         &[transaction_id.expect("ordinary mutation commits immediately")],
     )
@@ -2106,7 +2106,7 @@ async fn table_rename_update_and_delete_copy_on_write_impl() {
         ))
         .await
         .expect("connect bob");
-    wait_for_edge_query_ready(&bob, "people", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&bob, "people", Duration::from_secs(30)).await;
 
     let transaction_id = bob
         .update(
@@ -2124,7 +2124,7 @@ async fn table_rename_update_and_delete_copy_on_write_impl() {
             ],
         )
         .expect("bob updates renamed row");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &bob,
         &[transaction_id.expect("ordinary mutation commits immediately")],
     )
@@ -2153,7 +2153,7 @@ async fn table_rename_update_and_delete_copy_on_write_impl() {
     let transaction_id = bob
         .delete("people", row_id)
         .expect("bob deletes renamed row");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &bob,
         &[transaction_id.expect("ordinary mutation commits immediately")],
     )
@@ -2209,8 +2209,8 @@ async fn table_rename_join_query_translates_join_target_on_old_branch_impl() {
     )
     .await
     .expect("connect alice");
-    wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
-    wait_for_edge_query_ready(&alice, "posts", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&alice, "users", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&alice, "posts", Duration::from_secs(30)).await;
 
     let author_id = jazz::tools::ObjectId::new();
     // `people.id` is normalized to the row identity by the flat-join planner.
@@ -2231,7 +2231,7 @@ async fn table_rename_join_query_translates_join_target_on_old_branch_impl() {
             table_rename_join_post_values(author_id, "Hello from v1"),
         )
         .expect("alice creates v1 post");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &alice,
         &[
             user_tx.expect("ordinary mutation commits immediately"),
@@ -2245,8 +2245,8 @@ async fn table_rename_join_query_translates_join_target_on_old_branch_impl() {
     )
     .await
     .expect("connect bob");
-    wait_for_edge_query_ready(&bob, "people", Duration::from_secs(30)).await;
-    wait_for_edge_query_ready(&bob, "posts", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&bob, "people", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&bob, "posts", Duration::from_secs(30)).await;
 
     let query = Query::from("posts").flat_join("people", "posts.author_id", "people.id");
     let rows = wait_for_query_results(
@@ -2280,7 +2280,7 @@ async fn table_rename_join_query_translates_join_target_on_old_branch_impl() {
 /// A v2 reader reconstructs an array relation from canonical v1 rows after
 /// the root table was renamed from `users` to `people`.
 ///
-/// alice ──v1 user + post──► edge ──canonical versions──► bob(v2)
+/// alice ──v1 user + post──► server ──canonical versions──► bob(v2)
 ///
 /// `id` is the public spelling of Jazz's row UUID in correlations, so Alice
 /// supplies the same UUID for the row and the foreign-key value. The separate
@@ -2319,8 +2319,8 @@ async fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch_impl() {
     )
     .await
     .expect("connect alice");
-    wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
-    wait_for_edge_query_ready(&alice, "posts", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&alice, "users", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&alice, "posts", Duration::from_secs(30)).await;
 
     let author_id = jazz::tools::ObjectId::new();
     let (author_row_id, _, user_tx) = alice
@@ -2337,7 +2337,7 @@ async fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch_impl() {
             table_rename_join_post_values(author_id, "Alice post"),
         )
         .expect("alice creates v1 post");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &alice,
         &[
             user_tx.expect("ordinary mutation commits immediately"),
@@ -2351,8 +2351,8 @@ async fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch_impl() {
     )
     .await
     .expect("connect bob");
-    wait_for_edge_query_ready(&bob, "people", Duration::from_secs(30)).await;
-    wait_for_edge_query_ready(&bob, "posts", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&bob, "people", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&bob, "posts", Duration::from_secs(30)).await;
 
     // INV-QUERY-29: this lookup intentionally selects every related post, so
     // preserve that unbounded query at the public query boundary.
@@ -2431,7 +2431,7 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
         .ready_on("users", Duration::from_secs(30))
         .connect()
         .await;
-    wait_for_edge_query_ready(&admin, "posts", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&admin, "posts", Duration::from_secs(30)).await;
 
     let (_, _, user_tx) = admin
         .insert("users", legacy_join_provenance_user_values("bob"))
@@ -2442,7 +2442,7 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
             legacy_join_provenance_post_values("bob", "Bob private post"),
         )
         .expect("admin creates legacy post");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &admin,
         &[
             user_tx.expect("ordinary mutation commits immediately"),
@@ -2459,7 +2459,7 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
         .ready_on("users", Duration::from_secs(30))
         .connect()
         .await;
-    wait_for_edge_query_ready(&current_admin, "posts", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&current_admin, "posts", Duration::from_secs(30)).await;
     let (second_post_id, _, transaction_id) = current_admin
         .insert(
             "posts",
@@ -2470,7 +2470,7 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
             ),
         )
         .expect("admin creates current-schema post");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &current_admin,
         &[transaction_id.expect("ordinary mutation commits immediately")],
     )
@@ -2484,7 +2484,7 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
         .ready_on("users", Duration::from_secs(30))
         .connect()
         .await;
-    wait_for_edge_query_ready(&alice, "posts", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&alice, "posts", Duration::from_secs(30)).await;
 
     let bob = TestingClient::builder()
         .with_server(&server)
@@ -2494,7 +2494,7 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
         .ready_on("users", Duration::from_secs(30))
         .connect()
         .await;
-    wait_for_edge_query_ready(&bob, "posts", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&bob, "posts", Duration::from_secs(30)).await;
 
     let query = Query::from("users").flat_join("posts", "users.name", "posts.owner_name");
 
@@ -2534,7 +2534,7 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
             vec![("viewer_name".to_owned(), Value::Text(test_user_id("alice")))],
         )
         .expect("move one joined occurrence to Alice's policy scope");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &bob,
         &[transaction_id.expect("ordinary mutation commits immediately")],
     )
@@ -2618,7 +2618,7 @@ async fn multi_hop_table_renames_and_column_rename_impl() {
     )
     .await
     .expect("connect alice");
-    wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
     let (alice_row_id, _, transaction_id) = alice
         .insert(
@@ -2626,7 +2626,7 @@ async fn multi_hop_table_renames_and_column_rename_impl() {
             multi_hop_table_rename_values_v1("alice@example.com"),
         )
         .expect("alice creates v1 user");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &alice,
         &[transaction_id.expect("ordinary mutation commits immediately")],
     )
@@ -2644,7 +2644,7 @@ async fn multi_hop_table_renames_and_column_rename_impl() {
     )
     .await
     .expect("connect bob");
-    wait_for_edge_query_ready(&bob, "people", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&bob, "people", Duration::from_secs(30)).await;
 
     let (bob_row_id, _, transaction_id) = bob
         .insert(
@@ -2652,7 +2652,7 @@ async fn multi_hop_table_renames_and_column_rename_impl() {
             multi_hop_table_rename_values_v2("bob@example.com"),
         )
         .expect("bob creates v2 person");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &bob,
         &[transaction_id.expect("ordinary mutation commits immediately")],
     )
@@ -2672,7 +2672,7 @@ async fn multi_hop_table_renames_and_column_rename_impl() {
         ))
         .await
         .expect("connect carol");
-    wait_for_edge_query_ready(&carol, "members", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&carol, "members", Duration::from_secs(30)).await;
 
     let (carol_row_id, _, transaction_id) = carol
         .insert(
@@ -2680,7 +2680,7 @@ async fn multi_hop_table_renames_and_column_rename_impl() {
             multi_hop_table_rename_values_v3("carol@example.com"),
         )
         .expect("carol creates v3 member");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &carol,
         &[transaction_id.expect("ordinary mutation commits immediately")],
     )
@@ -2760,12 +2760,12 @@ async fn removed_table_then_readded_does_not_resurface_old_rows_impl() {
     )
     .await
     .expect("connect alice");
-    wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
     let (alice_row_id, _, transaction_id) = alice
         .insert("users", removed_readded_values_v1("Alice Old Lineage"))
         .expect("alice creates v1 user");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &alice,
         &[transaction_id.expect("ordinary mutation commits immediately")],
     )
@@ -2784,7 +2784,7 @@ async fn removed_table_then_readded_does_not_resurface_old_rows_impl() {
     )
     .await
     .expect("connect bob");
-    wait_for_edge_query_ready(&bob, "users", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&bob, "users", Duration::from_secs(30)).await;
 
     let (bob_row_id, _, transaction_id) = bob
         .insert(
@@ -2792,7 +2792,7 @@ async fn removed_table_then_readded_does_not_resurface_old_rows_impl() {
             removed_readded_values_v3("Bob New Lineage", "bob@example.com"),
         )
         .expect("bob creates v3 user");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &bob,
         &[transaction_id.expect("ordinary mutation commits immediately")],
     )
@@ -2875,7 +2875,7 @@ async fn column_addition_old_client_can_read_new_rows_impl() {
     .await
     .expect("connect bob");
 
-    wait_for_edge_query_ready(&bob, "users", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&bob, "users", Duration::from_secs(30)).await;
 
     let user_email = "bob@example.com";
     let (user_obj_id, _, _) = bob
@@ -2887,7 +2887,7 @@ async fn column_addition_old_client_can_read_new_rows_impl() {
         jazz::query::Query::from("users"),
         jazz::tools::ReadTier::Remote,
         Duration::from_secs(25),
-        "bob's v2 user settled at edge",
+        "bob's v2 user settled at server",
         |rows| (rows.len() == 1 && rows[0].0 == user_obj_id).then_some(rows),
     )
     .await;
@@ -2899,7 +2899,7 @@ async fn column_addition_old_client_can_read_new_rows_impl() {
     .await
     .expect("connect alice");
 
-    wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
     let alice_rows = wait_for_query(
         &alice,
@@ -2965,12 +2965,12 @@ async fn keeps_authorization_through_v1_head_impl() {
     .await
     .expect("connect alice");
 
-    wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
     let (user_obj_id, _, transaction_id) = alice
         .insert("users", user_values_v1("Alice Through Lens"))
         .expect("alice creates user after v1 permissions publish");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &alice,
         &[transaction_id.expect("ordinary mutation commits immediately")],
     )
@@ -3009,7 +3009,7 @@ async fn keeps_authorization_through_v1_head_impl() {
     )
     .await
     .expect("connect bob");
-    wait_for_edge_query_ready(&bob, "users", Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&bob, "users", Duration::from_secs(30)).await;
 
     let bob_rows = wait_for_query(
         &bob,

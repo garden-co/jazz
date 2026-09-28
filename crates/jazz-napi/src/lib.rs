@@ -66,11 +66,12 @@ use jazz::db::LargeValueUpdate as CoreLargeValueUpdate;
 use jazz::db::StreamingMutationKind as CoreStreamingMutationKind;
 use jazz::db::{
     ConnectionSessionContext as CoreConnectionSessionContext, Db as CoreDb,
-    DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity,
+    DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, EmptyOpening as CoreEmptyOpening,
     InitialSyncFlushCadence as CoreInitialSyncFlushCadence, LocalUpdates as CoreLocalUpdates,
     MutationErrorCallback as CoreMutationErrorCallback, PeerConnection as CorePeerConnection,
-    Propagation as CorePropagation, ReadOpts as CoreReadOpts, RowCells as CoreRowCells,
-    SeededRowIdSource as CoreSeededRowIdSource, SerializedReadResult as CoreSerializedReadResult,
+    Propagation as CorePropagation, ReadOpts as CoreReadOpts, RemoteLinkHint as CoreRemoteLinkHint,
+    RowCells as CoreRowCells, SeededRowIdSource as CoreSeededRowIdSource,
+    SerializedReadResult as CoreSerializedReadResult,
     SerializedSubscriptionAuthorization as CoreSerializedSubscriptionAuthorization,
     StreamingValueUpload as CoreStreamingValueUpload,
     StreamingValueUploadCleanupTicket as CoreStreamingValueUploadCleanupTicket,
@@ -306,8 +307,8 @@ type NapiDbInner = Rc<RefCell<Option<NapiDbInnerStorage>>>;
 
 #[derive(Clone)]
 enum NapiDbInnerStorage {
-    Memory(Rc<CoreDb<CoreMemoryStorage>>),
-    Persistent(Rc<CoreDb<CoreRocksDbStorage>>),
+    Memory(Rc<CoreDb>),
+    Persistent(Rc<CoreDb>),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -711,14 +712,8 @@ impl StreamingOwnerLifecycle {
     }
 }
 enum NapiWrite {
-    Memory {
-        db: Rc<CoreDb<CoreMemoryStorage>>,
-        write: WriteHandle<CoreMemoryStorage>,
-    },
-    Persistent {
-        db: Rc<CoreDb<CoreRocksDbStorage>>,
-        write: WriteHandle<CoreRocksDbStorage>,
-    },
+    Memory { db: Rc<CoreDb>, write: WriteHandle },
+    Persistent { db: Rc<CoreDb>, write: WriteHandle },
 }
 
 #[derive(Clone, Default)]
@@ -793,6 +788,13 @@ impl CoreTickScheduler for NapiTickScheduler {
             Ok(format!("after:{delay_ms}")),
             ThreadsafeFunctionCallMode::NonBlocking,
         );
+    }
+
+    fn drops_pending_ticks(&self) -> bool {
+        // `tick` drives `Db::tick` through `core_poll_once`, which drops it
+        // while it still waits on outside progress (cooperative yields are
+        // polled again in the same turn).
+        true
     }
 
     fn query_runtime_waker(&self) -> Option<Waker> {
@@ -1181,7 +1183,7 @@ pub struct SubscriptionDeltaEvent {
     #[napi(js_name = "terminalOperations")]
     pub terminal_operations: Vec<SubscriptionTerminalOperation>,
     pub settled: bool,
-    #[napi(ts_type = "'None' | 'Local' | 'Edge' | 'Global'")]
+    #[napi(ts_type = "'None' | 'Local' | 'Global'")]
     pub tier: String,
 }
 
@@ -1234,7 +1236,7 @@ pub struct SubscriptionInvalidAuthoritySourceClosureReason {
 #[napi(object)]
 pub struct SubscriptionTerminalOperation {
     #[napi(js_name = "root_key")]
-    pub root_key: Vec<u32>,
+    pub root_key: Uint8Array,
     pub path: Vec<SubscriptionTerminalPathSegment>,
     pub edit: SubscriptionTerminalEdit,
 }
@@ -1248,7 +1250,7 @@ pub struct SubscriptionTerminalCollectionPathSegment {
 #[napi(object)]
 pub struct SubscriptionTerminalKeyPathSegment {
     #[napi(js_name = "Key")]
-    pub key: Vec<u32>,
+    pub key: Uint8Array,
 }
 
 #[napi(object)]
@@ -1260,8 +1262,8 @@ pub struct SubscriptionTerminalInsertEdit {
 #[napi(object)]
 pub struct SubscriptionTerminalInsert {
     pub index: f64,
-    pub key: Vec<u32>,
-    pub value: Vec<u32>,
+    pub key: Uint8Array,
+    pub value: Uint8Array,
 }
 
 #[napi(object)]
@@ -1272,8 +1274,8 @@ pub struct SubscriptionTerminalUpdateEdit {
 
 #[napi(object)]
 pub struct SubscriptionTerminalUpdate {
-    pub key: Vec<u32>,
-    pub value: Vec<u32>,
+    pub key: Uint8Array,
+    pub value: Uint8Array,
 }
 
 #[napi(object)]
@@ -1284,7 +1286,7 @@ pub struct SubscriptionTerminalRemoveEdit {
 
 #[napi(object)]
 pub struct SubscriptionTerminalRemove {
-    pub key: Vec<u32>,
+    pub key: Uint8Array,
 }
 
 #[napi(object)]
@@ -1295,7 +1297,7 @@ pub struct SubscriptionTerminalMoveEdit {
 
 #[napi(object)]
 pub struct SubscriptionTerminalMove {
-    pub key: Vec<u32>,
+    pub key: Uint8Array,
     pub index: f64,
 }
 
@@ -1325,12 +1327,12 @@ pub type SubscriptionTerminalEdit = Either4<
 
 enum NapiTransportInner {
     Memory {
-        db: Rc<CoreDb<CoreMemoryStorage>>,
-        connection: Option<Rc<LocalMutex<CorePeerConnection<CoreMemoryStorage>>>>,
+        db: Rc<CoreDb>,
+        connection: Option<Rc<LocalMutex<CorePeerConnection>>>,
     },
     Persistent {
-        db: Rc<CoreDb<CoreRocksDbStorage>>,
-        connection: Option<Rc<LocalMutex<CorePeerConnection<CoreRocksDbStorage>>>>,
+        db: Rc<CoreDb>,
+        connection: Option<Rc<LocalMutex<CorePeerConnection>>>,
     },
     Closed,
 }
@@ -1361,13 +1363,13 @@ impl NapiTransportInner {
 
 enum NapiSubscription {
     Memory {
-        db: Rc<CoreDb<CoreMemoryStorage>>,
+        db: Rc<CoreDb>,
         stream: SubscriptionStream,
         pending_events: VecDeque<CoreSubscriptionEvent>,
         pending_batch: Option<PendingNativeSubscriptionBatch>,
     },
     Persistent {
-        db: Rc<CoreDb<CoreRocksDbStorage>>,
+        db: Rc<CoreDb>,
         stream: SubscriptionStream,
         pending_events: VecDeque<CoreSubscriptionEvent>,
         pending_batch: Option<PendingNativeSubscriptionBatch>,
@@ -3248,6 +3250,28 @@ impl NapiDb {
         Ok(())
     }
 
+    /// Report what the host knows about the path to the authoritative server
+    /// (`"none" | "attempting" | "live" | "failed"`; the TypeScript names
+    /// `"connecting" | "connected" | "unavailable"` are accepted as aliases).
+    /// Drives only `local-first-unless-empty` reads. The core timestamps each
+    /// `"attempting"` report as the start of a new attempt; until this is
+    /// first called, reachability is derived from this runtime's own upstream.
+    #[napi(js_name = "setRemoteLinkHint")]
+    pub fn set_remote_link_hint(&self, state: String) -> napi::Result<()> {
+        let hint = CoreRemoteLinkHint::from_host_str(&state).ok_or_else(|| {
+            napi::Error::from_reason(format!("unknown remote link state {state}"))
+        })?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => db.set_remote_link_hint(hint),
+            NapiDbInnerStorage::Persistent(db) => db.set_remote_link_hint(hint),
+        }
+        Ok(())
+    }
+
     #[napi(js_name = "connectUpstream")]
     pub fn connect_upstream(&self) -> napi::Result<Transport> {
         let db = self.inner.borrow();
@@ -3646,7 +3670,7 @@ fn open_core_db<S>(
     config: CoreOpenDbConfig,
     identity: CoreDbIdentity,
     backend_attribution: bool,
-) -> napi::Result<CoreDb<S>>
+) -> napi::Result<CoreDb>
 where
     S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
 {
@@ -3784,10 +3808,7 @@ fn core_delegated_session_from_napi(
         .transpose()
 }
 
-fn core_write_memory(
-    db: Rc<CoreDb<CoreMemoryStorage>>,
-    write: WriteHandle<CoreMemoryStorage>,
-) -> napi::Result<Write> {
+fn core_write_memory(db: Rc<CoreDb>, write: WriteHandle) -> napi::Result<Write> {
     let tx_id = write.mergeable_tx_id();
     let result = WriteResult {
         row_id: write.row_uuid(),
@@ -3802,10 +3823,7 @@ fn core_write_memory(
     })
 }
 
-fn core_write_persistent(
-    db: Rc<CoreDb<CoreRocksDbStorage>>,
-    write: WriteHandle<CoreRocksDbStorage>,
-) -> napi::Result<Write> {
+fn core_write_persistent(db: Rc<CoreDb>, write: WriteHandle) -> napi::Result<Write> {
     let tx_id = write.mergeable_tx_id();
     let result = WriteResult {
         row_id: write.row_uuid(),
@@ -3890,13 +3908,35 @@ where
     Ok(stats.subscription_events as u32)
 }
 
+/// Drive `future` for one host turn and drop it if it is still waiting.
+///
+/// A future that yields cooperatively wakes itself before returning
+/// `Pending` (Groove evaluation yields between bounded operator turns). It
+/// expects to be polled again, and dropping it loses the work it holds, such as
+/// a received view update that was mid-apply. Such yields are polled again
+/// here in the same turn. Only a future waiting on outside progress, which
+/// has not woken itself, is dropped as before.
 fn core_poll_once<F: Future>(future: F) -> Option<F::Output> {
     let mut future = Box::pin(future);
-    let waker = futures::task::noop_waker();
+    let yielded = std::sync::Arc::new(SelfWake::default());
+    let waker = waker(yielded.clone());
     let mut context = Context::from_waker(&waker);
-    match future.as_mut().poll(&mut context) {
-        Poll::Ready(output) => Some(output),
-        Poll::Pending => None,
+    loop {
+        match future.as_mut().poll(&mut context) {
+            Poll::Ready(output) => return Some(output),
+            Poll::Pending if yielded.0.swap(false, Ordering::AcqRel) => continue,
+            Poll::Pending => return None,
+        }
+    }
+}
+
+/// Records whether a polled future woke itself.
+#[derive(Default)]
+struct SelfWake(std::sync::atomic::AtomicBool);
+
+impl ArcWake for SelfWake {
+    fn wake_by_ref(arc_self: &std::sync::Arc<Self>) {
+        arc_self.0.store(true, Ordering::Release);
     }
 }
 
@@ -3962,10 +4002,7 @@ fn commit_timestamp_ms() -> napi::Result<u64> {
         .map_err(|_| napi::Error::from_reason("commit clock exceeds u64 milliseconds"))
 }
 
-fn core_commit_tx_memory(
-    db: &Rc<CoreDb<CoreMemoryStorage>>,
-    open_tx: CoreOpenTransactionId,
-) -> napi::Result<Write> {
+fn core_commit_tx_memory(db: &Rc<CoreDb>, open_tx: CoreOpenTransactionId) -> napi::Result<Write> {
     let write = db
         .enqueue_commit_mergeable_handle_at_ms(open_tx, commit_timestamp_ms()?)
         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
@@ -3974,7 +4011,7 @@ fn core_commit_tx_memory(
 }
 
 fn core_commit_tx_persistent(
-    db: &Rc<CoreDb<CoreRocksDbStorage>>,
+    db: &Rc<CoreDb>,
     open_tx: CoreOpenTransactionId,
 ) -> napi::Result<Write> {
     let write = db
@@ -3984,7 +4021,7 @@ fn core_commit_tx_persistent(
 }
 
 fn core_commit_exclusive_tx_memory(
-    db: &Rc<CoreDb<CoreMemoryStorage>>,
+    db: &Rc<CoreDb>,
     open_tx: CoreOpenTransactionId,
 ) -> napi::Result<Write> {
     let write = db
@@ -3995,7 +4032,7 @@ fn core_commit_exclusive_tx_memory(
 }
 
 fn core_commit_exclusive_tx_persistent(
-    db: &Rc<CoreDb<CoreRocksDbStorage>>,
+    db: &Rc<CoreDb>,
     open_tx: CoreOpenTransactionId,
 ) -> napi::Result<Write> {
     let write = db
@@ -4013,7 +4050,7 @@ fn core_read_opts_from_json(value: Option<JsonValue>) -> napi::Result<CoreReadOp
         return Ok(opts);
     }
     if let Some(tier) = optional_json_string_prop(&value, "tier")? {
-        opts.tier = core_read_tier_from_str(&tier)?;
+        (opts.tier, opts.empty_opening) = core_read_tier_from_str(&tier)?;
     }
     if let Some(local_updates) = optional_json_string_prop(&value, "local_updates")? {
         opts.local_updates = match local_updates.as_str() {
@@ -4305,16 +4342,18 @@ fn core_durability_tier_from_str(tier: &str) -> napi::Result<CoreDurabilityTier>
 
 /// Read-only binding lowering. Write waits keep the durability-tier parser so
 /// `remote` names cannot accidentally become a write settlement tier.
-fn core_read_tier_from_str(tier: &str) -> napi::Result<CoreDurabilityTier> {
+fn core_read_tier_from_str(tier: &str) -> napi::Result<(CoreDurabilityTier, CoreEmptyOpening)> {
     match tier {
-        "local-first" | "LocalFirst" => Ok(CoreDurabilityTier::Local),
-        // NAPI has no explicit-offline state of its own. The TypeScript
-        // connection manager resolves RemoteIfPossible before the ABI call;
-        // direct NAPI callers therefore retain strict remote behavior.
-        "remote" | "Remote" | "remote-if-possible" | "RemoteIfPossible" => {
-            Ok(CoreDurabilityTier::Global)
+        "local-first" | "LocalFirst" => Ok((CoreDurabilityTier::Local, CoreEmptyOpening::Deliver)),
+        // The core owns the local-first-unless-empty gate.
+        "local-first-unless-empty" | "LocalFirstUnlessEmpty" => {
+            Ok((CoreDurabilityTier::Local, CoreEmptyOpening::AwaitRemote))
         }
-        _ => core_durability_tier_from_str(tier),
+        "remote-if-possible" | "RemoteIfPossible" => Err(napi::Error::from_reason(
+            "the remote-if-possible tier was removed; use local-first-unless-empty, or remote for server-confirmed reads",
+        )),
+        "remote" | "Remote" => Ok((CoreDurabilityTier::Global, CoreEmptyOpening::Deliver)),
+        _ => core_durability_tier_from_str(tier).map(|tier| (tier, CoreEmptyOpening::Deliver)),
     }
 }
 
@@ -4463,8 +4502,8 @@ mod test_fixture_export {
 
 /// Convert terminal edits without serde_json so binary subscription deltas keep
 /// their typed-array representation. Root descriptors retain the upstream
-/// postcard encoding; ordered keys and edit payloads retain their number-array
-/// representation for the existing TypeScript terminal consumer.
+/// postcard encoding; ordered keys and edit payloads cross as one `Uint8Array`
+/// each, not one N-API element per byte (#3369).
 fn core_terminal_operation_to_napi(
     operation: &jazz::groove::ivm::TerminalOperation,
 ) -> napi::Result<SubscriptionTerminalOperation> {
@@ -4485,7 +4524,7 @@ fn core_terminal_operation_to_napi(
                 })
             }
             TerminalPathSegment::Key(key) => Either::B(SubscriptionTerminalKeyPathSegment {
-                key: terminal_bytes_to_numbers(key),
+                key: terminal_bytes(key),
             }),
         })
         .collect();
@@ -4493,38 +4532,38 @@ fn core_terminal_operation_to_napi(
         TerminalEdit::Insert { index, key, value } => Either4::A(SubscriptionTerminalInsertEdit {
             insert: SubscriptionTerminalInsert {
                 index: *index as f64,
-                key: terminal_bytes_to_numbers(key),
-                value: terminal_bytes_to_numbers(value),
+                key: terminal_bytes(key),
+                value: terminal_bytes(value),
             },
         }),
         TerminalEdit::Update { key, value } => Either4::B(SubscriptionTerminalUpdateEdit {
             update: SubscriptionTerminalUpdate {
-                key: terminal_bytes_to_numbers(key),
-                value: terminal_bytes_to_numbers(value),
+                key: terminal_bytes(key),
+                value: terminal_bytes(value),
             },
         }),
         TerminalEdit::Remove { key } => Either4::C(SubscriptionTerminalRemoveEdit {
             remove: SubscriptionTerminalRemove {
-                key: terminal_bytes_to_numbers(key),
+                key: terminal_bytes(key),
             },
         }),
         TerminalEdit::Move { key, index } => Either4::D(SubscriptionTerminalMoveEdit {
             move_edit: SubscriptionTerminalMove {
-                key: terminal_bytes_to_numbers(key),
+                key: terminal_bytes(key),
                 index: *index as f64,
             },
         }),
     };
 
     Ok(SubscriptionTerminalOperation {
-        root_key: terminal_bytes_to_numbers(&operation.root_key),
+        root_key: terminal_bytes(&operation.root_key),
         path,
         edit,
     })
 }
 
-fn terminal_bytes_to_numbers(bytes: &[u8]) -> Vec<u32> {
-    bytes.iter().copied().map(u32::from).collect()
+fn terminal_bytes(bytes: &[u8]) -> Uint8Array {
+    Uint8Array::new(bytes.to_vec())
 }
 
 // ============================================================================
@@ -5238,12 +5277,31 @@ mod tests {
     fn read_tier_names_lower_to_existing_core_tiers() {
         assert_eq!(
             core_read_tier_from_str("local-first").expect("local-first read tier"),
-            jazz::tx::DurabilityTier::Local
+            (
+                jazz::tx::DurabilityTier::Local,
+                jazz::db::EmptyOpening::Deliver
+            )
         );
         assert_eq!(
-            core_read_tier_from_str("remote-if-possible").expect("strict remote read tier"),
-            jazz::tx::DurabilityTier::Global
+            core_read_tier_from_str("remote").expect("strict remote read tier"),
+            (
+                jazz::tx::DurabilityTier::Global,
+                jazz::db::EmptyOpening::Deliver
+            )
         );
+        for name in ["remote-if-possible", "RemoteIfPossible"] {
+            assert!(core_read_tier_from_str(name).is_err(), "{name} was removed");
+        }
+        for name in ["local-first-unless-empty", "LocalFirstUnlessEmpty"] {
+            assert_eq!(
+                core_read_tier_from_str(name).expect("local-first-unless-empty read tier"),
+                (
+                    jazz::tx::DurabilityTier::Local,
+                    jazz::db::EmptyOpening::AwaitRemote
+                ),
+                "{name} reads local-first with the core empty-opening gate"
+            );
+        }
         assert!(
             super::core_durability_tier_from_str("remote").is_err(),
             "write waits must not accept read-only tier names"
@@ -7259,30 +7317,30 @@ mod tests {
         assert_eq!(payload.tier, "Global");
         assert_eq!(payload.terminal_operations.len(), 4);
         let insert = &payload.terminal_operations[0];
-        assert_eq!(insert.root_key, vec![0, 255]);
+        assert_eq!(insert.root_key.as_ref(), [0, 255]);
         assert!(matches!(
             insert.path.as_slice(),
             [Either::A(collection), Either::B(key)]
-                if collection.collection == "children" && key.key == vec![1, 254]
+                if collection.collection == "children" && key.key.as_ref() == [1, 254]
         ));
         assert!(matches!(
             &insert.edit,
             Either4::A(edit)
                 if edit.insert.index == 3.0
-                    && edit.insert.key == vec![2, 253]
-                    && edit.insert.value == (0_u32..=u8::MAX.into()).collect::<Vec<_>>()
+                    && edit.insert.key.as_ref() == [2, 253]
+                    && edit.insert.value.as_ref() == (0_u8..=u8::MAX).collect::<Vec<_>>()
         ));
         assert!(matches!(
             &payload.terminal_operations[1].edit,
-            Either4::B(edit) if edit.update.key == vec![5] && edit.update.value == vec![6]
+            Either4::B(edit) if edit.update.key.as_ref() == [5] && edit.update.value.as_ref() == [6]
         ));
         assert!(matches!(
             &payload.terminal_operations[2].edit,
-            Either4::C(edit) if edit.remove.key == vec![8]
+            Either4::C(edit) if edit.remove.key.as_ref() == [8]
         ));
         assert!(matches!(
             &payload.terminal_operations[3].edit,
-            Either4::D(edit) if edit.move_edit.key == vec![10] && edit.move_edit.index == 11.0
+            Either4::D(edit) if edit.move_edit.key.as_ref() == [10] && edit.move_edit.index == 11.0
         ));
     }
 

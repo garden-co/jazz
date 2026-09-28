@@ -125,7 +125,7 @@ function instrumentDb(db: Db, interruptFirstConfirmation = false): InstrumentedD
 
     if (!interruptFirstConfirmation) return result;
     const realWait = result.wait.bind(result);
-    // Fault only after the real edge receipt resolves: the runtime has committed,
+    // Fault only after the real server receipt resolves: the runtime has committed,
     // but the Inspector observes the same ambiguity as a lost confirmation.
     return new Proxy(result, {
       get(target, property) {
