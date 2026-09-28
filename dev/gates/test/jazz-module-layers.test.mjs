@@ -126,3 +126,23 @@ test("impls a split crate could not hold are reported", () => {
     ],
   );
 });
+
+test("impl Trait parameters are not implementation blocks", () => {
+  const src = crateFixture({
+    "lib.rs": "pub mod ids;\npub mod node;\n",
+    "ids.rs": "pub struct Hash;\n",
+    "node/mod.rs": [
+      "fn opaque_hash(value: &impl std::hash::Hash) -> u64 {",
+      "    use std::hash::Hasher;",
+      "    let mut hash = std::collections::hash_map::DefaultHasher::new();",
+      "    value.hash(&mut hash);",
+      "    hash.finish()",
+      "}",
+      "impl crate::ids::Hash {}",
+    ].join("\n"),
+  });
+  assert.deepEqual(
+    analyze({ src }).map((v) => [v.line, v.path]),
+    [[7, "impl crate::ids::Hash"]],
+  );
+});

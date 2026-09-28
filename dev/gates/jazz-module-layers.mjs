@@ -303,9 +303,13 @@ function implHeaders(s) {
     for (; end < s.length; end++) {
       const ch = s[end];
       if (ch === "<" || ch === "(" || ch === "[") depth++;
-      else if ((ch === ">" && s[end - 1] !== "-") || ch === ")" || ch === "]") depth--;
-      else if (depth === 0 && (ch === "{" || ch === ";")) break;
+      else if ((ch === ">" && s[end - 1] !== "-") || ch === ")" || ch === "]") {
+        if (--depth < 0) break;
+      } else if (depth === 0 && (ch === "{" || ch === ";")) break;
     }
+    // An unmatched closing delimiter means this is an `impl Trait` type
+    // inside a parameter or generic argument, not an implementation block.
+    if (depth < 0) continue;
     let header = s.slice(k, end).replace(/\s+/g, " ").trim();
     header = header.replace(/ where .*$/, "");
     const parts = splitTopLevel(header, " for ");
