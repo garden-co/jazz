@@ -26,7 +26,7 @@ use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TablePolicies, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 
-type DirectDb = Db<MemoryStorage>;
+type DirectDb = Db;
 
 fn author() -> AuthorSubject {
     AuthorSubject::for_test_uuid(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"))
