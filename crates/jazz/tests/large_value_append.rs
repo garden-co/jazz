@@ -21,7 +21,7 @@ use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
-fn open_db(node: u8) -> Db<TestStorage> {
+fn open_db(node: u8) -> Db {
     let schema = compile_schema(
         &SchemaBuilder::new()
             .table(
@@ -72,7 +72,7 @@ fn bytes(len: usize, seed: u64) -> Vec<u8> {
         .collect()
 }
 
-fn insert(db: &Db<TestStorage>, row: RowUuid, body: String, blob: Vec<u8>) {
+fn insert(db: &Db, row: RowUuid, body: String, blob: Vec<u8>) {
     jazz::block_on(db.insert(
         "docs",
         BTreeMap::from([
@@ -87,11 +87,11 @@ fn insert(db: &Db<TestStorage>, row: RowUuid, body: String, blob: Vec<u8>) {
     .expect("insert large row");
 }
 
-fn read_all(db: &Db<TestStorage>, row: RowUuid, column: &str, len: usize) -> Vec<u8> {
+fn read_all(db: &Db, row: RowUuid, column: &str, len: usize) -> Vec<u8> {
     jazz::block_on(db.read_value_range("docs", row, column, 0..len as u64)).expect("read value")
 }
 
-fn append(db: &Db<TestStorage>, row: RowUuid, column: &str, suffix: &[u8]) {
+fn append(db: &Db, row: RowUuid, column: &str, suffix: &[u8]) {
     jazz::block_on(db.append_value("docs", row, column, suffix.to_vec())).expect("append");
 }
 
