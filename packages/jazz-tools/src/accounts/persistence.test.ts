@@ -188,6 +188,7 @@ it("converges automatic sessions on one durable root before opening clients", as
     exportLocalFirstSecret(b.getSnapshot().account!),
   );
   expect(JSON.parse(value!)).toMatchObject({ selected: 0, roots: [firstSecret] });
+  expect(JSON.parse(value!).generatedHere).toEqual([firstSecret]);
 });
 
 it("does not reselect an automatic root after an interleaved selection", async () => {
