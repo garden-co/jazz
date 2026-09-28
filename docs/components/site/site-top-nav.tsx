@@ -66,7 +66,7 @@ export function SiteTopNav() {
         label="Main"
         heading={
           <TopNavHeading
-            logo={<JazzLogo className="h-6 w-auto" label="Jazz home" />}
+            logo={<JazzLogo className="h-[1.8rem] w-auto" label="Jazz home" />}
             headingHref="/"
           />
         }
