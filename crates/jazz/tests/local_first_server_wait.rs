@@ -72,7 +72,7 @@ fn row(index: usize) -> RowUuid {
 }
 
 /// A server holding rows `a..j` (`row(0)..row(9)`).
-fn seeded_server() -> Db<TestStorage> {
+fn seeded_server() -> Db {
     let server = block_on(Db::open_history_complete(config(
         0x51,
         AuthorSubject::SYSTEM,
@@ -92,7 +92,7 @@ fn seeded_server() -> Db<TestStorage> {
 }
 
 /// A fresh client whose local store holds none of the server's rows.
-fn fresh_client(node: u8) -> Db<TestStorage> {
+fn fresh_client(node: u8) -> Db {
     block_on(Db::open(config(
         node,
         AuthorSubject::for_test_bytes([node; 16]),
@@ -100,13 +100,13 @@ fn fresh_client(node: u8) -> Db<TestStorage> {
     .expect("open client")
 }
 
-fn connect(client: &Db<TestStorage>, server: &Db<TestStorage>) {
+fn connect(client: &Db, server: &Db) {
     let (client_transport, server_transport) = duplex();
     let _upstream = block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, AuthorSubject::SYSTEM);
 }
 
-fn turn(client: &Db<TestStorage>, server: Option<&Db<TestStorage>>) {
+fn turn(client: &Db, server: Option<&Db>) {
     block_on(client.tick()).expect("tick client");
     if let Some(server) = server {
         block_on(server.tick()).expect("tick server");
@@ -132,7 +132,7 @@ fn items() -> Query {
     Query::from("items")
 }
 
-fn subscribe(client: &Db<TestStorage>, query: &Query, opts: ReadOpts) -> SubscriptionStream {
+fn subscribe(client: &Db, query: &Query, opts: ReadOpts) -> SubscriptionStream {
     let prepared = client.prepare_query(query).expect("prepare query");
     block_on(client.subscribe(&prepared, opts)).expect("subscribe")
 }
@@ -140,8 +140,8 @@ fn subscribe(client: &Db<TestStorage>, query: &Query, opts: ReadOpts) -> Subscri
 /// The first event, driving owner turns until one is published.
 fn first_event(
     stream: &mut SubscriptionStream,
-    client: &Db<TestStorage>,
-    server: Option<&Db<TestStorage>>,
+    client: &Db,
+    server: Option<&Db>,
 ) -> SubscriptionEvent {
     for _ in 0..MAX_TURNS {
         if let Some(event) = stream.try_next_event() {
@@ -155,8 +155,8 @@ fn first_event(
 /// Drive owner turns and assert the stream publishes nothing.
 fn assert_withheld(
     stream: &mut SubscriptionStream,
-    client: &Db<TestStorage>,
-    server: Option<&Db<TestStorage>>,
+    client: &Db,
+    server: Option<&Db>,
     turns: usize,
 ) {
     for _ in 0..turns {
@@ -187,8 +187,8 @@ fn opening(event: SubscriptionEvent) -> (bool, Vec<RowUuid>, bool) {
 /// Run a host one-shot read to completion, driving owner turns between polls
 /// the way bindings re-poll a pending native read.
 fn one_shot(
-    client: &Db<TestStorage>,
-    server: Option<&Db<TestStorage>>,
+    client: &Db,
+    server: Option<&Db>,
     query: &Query,
     opts: ReadOpts,
     max_turns: usize,
@@ -228,7 +228,7 @@ fn all_rows() -> Vec<RowUuid> {
 }
 
 /// A client whose cache holds `a..j`, still connected to the server.
-fn warm_client(node: u8, server: &Db<TestStorage>) -> Db<TestStorage> {
+fn warm_client(node: u8, server: &Db) -> Db {
     let client = fresh_client(node);
     connect(&client, server);
     client.set_remote_link_hint(RemoteLinkHint::Live);
@@ -246,7 +246,7 @@ fn warm_client(node: u8, server: &Db<TestStorage>) -> Db<TestStorage> {
     client
 }
 
-fn seed(server: &Db<TestStorage>, index: usize, label: &str) {
+fn seed(server: &Db, index: usize, label: &str) {
     server
         .seed_settled_mergeable_for_bootstrap(
             "items",
@@ -259,7 +259,7 @@ fn seed(server: &Db<TestStorage>, index: usize, label: &str) {
 
 /// Run a one-shot read, sleeping between owner turns so a wall-clock
 /// deadline can pass while the server stays silent.
-fn slow_one_shot(client: &Db<TestStorage>, query: &Query, opts: ReadOpts) -> Vec<RowUuid> {
+fn slow_one_shot(client: &Db, query: &Query, opts: ReadOpts) -> Vec<RowUuid> {
     let bytes = postcard::to_allocvec(query).expect("encode query");
     let read = client.all_serialized_query(
         &bytes,

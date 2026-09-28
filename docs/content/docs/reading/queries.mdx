@@ -10,10 +10,15 @@ import DurabilityTiersTable from "../../partials/durability-tiers-table.mdx";
 
 A one-shot query runs once against the database without subscribing to changes.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-oneshot-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts">
+      ../examples/docs/todo-effect/src/docs-snippets.ts#reading-oneshot-effect
     </include>
   </Tab>
   <Tab value="Rust">
@@ -27,10 +32,15 @@ A one-shot query runs once against the database without subscribing to changes.
 
 Subscribe to a query to receive updates whenever the underlying data changes.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-subscriptions-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts">
+      ../examples/docs/todo-effect/src/docs-snippets.ts#reading-subscriptions-effect
     </include>
   </Tab>
   <Tab value="Rust">
@@ -81,10 +91,15 @@ behavior and how subscriptions change between offline and online operation.
 The aliases `"local"` and `"global"` remain accepted for reads; write waits use
 `"local"` and `"global"`.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-durability-tier-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts">
+      ../examples/docs/todo-effect/src/docs-snippets.ts#reading-durability-tier-effect
     </include>
   </Tab>
   <Tab value="Rust">
@@ -162,9 +177,18 @@ You can select and filter on Jazz's magic columns just like other columns. They 
 These are useful for showing authorship, when a row last changed, or building "my created items"
 views without storing duplicate ownership fields.
 
-<include cwd lang="ts">
-  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-edit-metadata-magic-columns-ts
-</include>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-edit-metadata-magic-columns-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts">
+      ../examples/docs/todo-effect/src/docs-snippets.ts#reading-edit-metadata-magic-columns-effect
+    </include>
+  </Tab>
+</Tabs>
 
 See [Permissions](/docs/auth/permissions) for policy examples using `$createdBy` and the other
 magic columns.

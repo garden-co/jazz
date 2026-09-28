@@ -67,8 +67,8 @@ use crate::tools::{
     SubscriptionStreamItem,
 };
 
-type CoreClientDb = CoreDb<CoreStorage>;
-type BackendConnection = Rc<LocalMutex<CorePeerConnection<CoreStorage>>>;
+type CoreClientDb = CoreDb;
+type BackendConnection = Rc<LocalMutex<CorePeerConnection>>;
 
 // Credit windows bound protocol ingress; charge tiny frames as one physical slot
 // too, so a peer cannot turn the byte limit into an unbounded allocation count.

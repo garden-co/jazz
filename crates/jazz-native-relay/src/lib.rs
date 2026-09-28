@@ -3445,7 +3445,7 @@ impl NativeRelayClient {
     /// across JSI/JNI/Swift boundaries.
     pub fn with_db<T: Send + 'static>(
         &self,
-        operation: impl FnOnce(&Db<MemoryStorage>) -> Result<T, RelayError> + Send + 'static,
+        operation: impl FnOnce(&Db) -> Result<T, RelayError> + Send + 'static,
     ) -> Result<T, RelayError> {
         let id = self.id;
         self.relay.run(move |worker| {
@@ -4955,7 +4955,7 @@ struct ConnectedClient {
     refreshed_claims: Option<BTreeMap<String, Value>>,
     retiring: bool,
     admitted_scope_advice: bool,
-    db: Rc<Db<MemoryStorage>>,
+    db: Rc<Db>,
     tick: Option<RelayTickFuture>,
     upstream_io: RelayPeerIo,
     served_io: Option<RelayPeerIo>,
@@ -4976,8 +4976,8 @@ struct ConnectedClient {
     next_foreground_handle: u64,
     // The core stores weak references for lifecycle ownership; retaining both
     // endpoints is what keeps the normal peer protocol connection alive.
-    _upstream: Rc<LocalMutex<PeerConnection<MemoryStorage>>>,
-    _served: Option<Rc<LocalMutex<PeerConnection<SqliteStorage>>>>,
+    _upstream: Rc<LocalMutex<PeerConnection>>,
+    _served: Option<Rc<LocalMutex<PeerConnection>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -5119,11 +5119,8 @@ type ForegroundOperationFuture =
     Pin<Box<dyn Future<Output = Result<ForegroundOperationResult, RelayError>> + 'static>>;
 
 type RelayTickFuture = Pin<Box<dyn Future<Output = Result<(), jazz::db::Error>>>>;
-type RelayAdmissionFuture = Pin<
-    Box<
-        dyn Future<Output = Result<Rc<LocalMutex<PeerConnection<SqliteStorage>>>, jazz::db::Error>>,
-    >,
->;
+type RelayAdmissionFuture =
+    Pin<Box<dyn Future<Output = Result<Rc<LocalMutex<PeerConnection>>, jazz::db::Error>>>>;
 
 /// A peer's chunk lane must progress even while its semantic tick or a
 /// foreground read owns the node. Retain both the endpoint and any suspended
@@ -5351,13 +5348,7 @@ impl ClosingForeground {
 type UpstreamTransition = Pin<
     Box<
         dyn Future<
-            Output = Result<
-                Option<(
-                    Rc<LocalMutex<PeerConnection<SqliteStorage>>>,
-                    NativeRelayWire,
-                )>,
-                RelayError,
-            >,
+            Output = Result<Option<(Rc<LocalMutex<PeerConnection>>, NativeRelayWire)>, RelayError>,
         >,
     >,
 >;
@@ -5369,13 +5360,13 @@ struct RelayWorker {
     drive_error: Option<RelayError>,
     #[cfg(test)]
     drive_turns: u64,
-    persistent: Rc<Db<SqliteStorage>>,
+    persistent: Rc<Db>,
     persistent_tick: Option<RelayTickFuture>,
     upstream_io: RelayPeerIo,
     pending_foreground_wakes: PendingForegroundWakes,
     foreground_wake_generations: BTreeMap<u64, Arc<AtomicU64>>,
     owner_wake_queued: Arc<AtomicBool>,
-    _upstream: Rc<LocalMutex<PeerConnection<SqliteStorage>>>,
+    _upstream: Rc<LocalMutex<PeerConnection>>,
     upstream_attached: bool,
     socket_generation: u64,
     socket_wire: Option<NativeRelayWire>,
@@ -6325,7 +6316,7 @@ impl RelayWorker {
         &self,
         client: u64,
         transaction: u64,
-    ) -> Result<(Rc<Db<MemoryStorage>>, ForegroundTransaction), RelayError> {
+    ) -> Result<(Rc<Db>, ForegroundTransaction), RelayError> {
         let client = self.foreground_client(client)?;
         let transaction = client
             .transactions
@@ -11190,7 +11181,7 @@ mod tests {
                     )
                 })
                 .unwrap();
-            thread_local! { static CLOSED_DB: RefCell<std::rc::Weak<Db<MemoryStorage>>> = const { RefCell::new(std::rc::Weak::new()) }; }
+            thread_local! { static CLOSED_DB: RefCell<std::rc::Weak<Db>> = const { RefCell::new(std::rc::Weak::new()) }; }
             relay
                 .run(move |worker| {
                     CLOSED_DB.with(|weak| {
@@ -11216,7 +11207,7 @@ mod tests {
                 .start_foreground_read(query, "{}".into(), Some(tx))
                 .unwrap();
             assert!(matches!(pending, ForegroundOperationPoll::Pending { .. }));
-            thread_local! { static CLOSED_WRITE: RefCell<Option<Rc<jazz::db::WriteHandle<MemoryStorage>>>> = const { RefCell::new(None) }; }
+            thread_local! { static CLOSED_WRITE: RefCell<Option<Rc<jazz::db::WriteHandle>>> = const { RefCell::new(None) }; }
             if committed {
                 let tx_id = client.commit_foreground_transaction(tx).unwrap();
                 relay
@@ -11316,7 +11307,7 @@ mod tests {
         let id = client.id;
         let observed = Arc::new(AtomicBool::new(false));
         let receipt = Arc::clone(&observed);
-        thread_local! { static RETIRED_DB: RefCell<std::rc::Weak<Db<MemoryStorage>>> = const { RefCell::new(std::rc::Weak::new()) }; }
+        thread_local! { static RETIRED_DB: RefCell<std::rc::Weak<Db>> = const { RefCell::new(std::rc::Weak::new()) }; }
         relay
             .run(move |worker| {
                 let db = Rc::clone(&worker.foreground_client(id)?.db);

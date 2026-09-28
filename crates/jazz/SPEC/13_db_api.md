@@ -485,7 +485,7 @@ state.
 **Implementation status (2026-07-27).** Local live reads currently use a named
 local materialized-row bridge while maintained-view integration continues;
 `db_facade_subscription_accepts_local_tier_for_alpha_style_live_reads`
-(`crates/jazz/src/db/tests.rs:3886`) covers the local-tier behavior. This is an
+(`crates/jazz/layers/db/src/db/tests.rs:3886`) covers the local-tier behavior. This is an
 implementation staging note, not a semantic exception.
 
 ### 13.4 Writes
@@ -759,8 +759,8 @@ Facade errors carry an `ErrorCode` plus a message:
 (§13.5). Read policies evaluate `claim("user")` plus admission/session-provided
 runtime claims (ch. 7); client query bindings never supply policy claims.
 `Db::open_history_complete` and `Db::at` provide history-complete facade reads;
-ordinary client facades remain history-incomplete (`crates/jazz/src/db.rs:383`,
-`crates/jazz/src/db.rs:637`). Branch operations otherwise remain at the `Node`
+ordinary client facades remain history-incomplete (`crates/jazz/layers/db/src/db.rs:383`,
+`crates/jazz/layers/db/src/db.rs:637`). Branch operations otherwise remain at the `Node`
 level (ch. 11). The initial binding ABI design is below; remaining
 **designed but not yet on the facade** surface stays in the Open questions
 section.

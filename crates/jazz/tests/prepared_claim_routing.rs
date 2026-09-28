@@ -55,7 +55,7 @@ fn test_user_claims(region: &str) -> BTreeMap<String, Value> {
     BTreeMap::from([(provider_claim("region"), Value::String(region.to_owned()))])
 }
 
-type BenchDb = Db<TestStorage>;
+type BenchDb = Db;
 
 fn row(tag: u8) -> RowUuid {
     RowUuid::from_bytes([tag; 16])
