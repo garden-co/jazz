@@ -159,29 +159,40 @@ account invalidation already shuts down its Db contexts.
 
 `__e2ee_account_successors` is immutable and account-owned. Its row ID is the
 independent proposal UUID, not a slot reserved by the predecessor epoch ID.
-Columns are `accountId`, `predecessor`, `epochId`, `signerId`, `removedDeviceId`, `membership`,
-`revision`, `verification`, `history`, `deliveries` and `signature`.
-The epoch and device identifiers are lower-case hyphenated UUIDv4 strings.
-A successor cannot reuse its predecessor's epoch ID.
+Columns are `accountId`, `predecessor`, `epochId`, `signerId`, `action`,
+`removedDeviceId`, `retiredRecoveryRootId`, `membership`, `revision`,
+`verification`, `history`, `deliveries` and `signature`. `action` is exactly
+`remove-device` or `retire-recovery-root`. Exactly one target column is present:
+`removedDeviceId` for device removal and `retiredRecoveryRootId` for root
+retirement. The epoch and target identifiers are lower-case hyphenated UUIDv4
+strings. A successor cannot reuse its predecessor's epoch ID.
 
 `membership` and `revision` are canonical compact UTF-8 JSON arrays of sorted,
-unique UUID strings: remaining device IDs and the approval IDs used to establish
+unique UUID strings: active device IDs and the approval IDs used to establish
 the predecessor membership. `deliveries` is a canonical compact UTF-8 JSON array
 of `[deviceId, envelopeBytes]` pairs sorted by device ID. Envelope bytes are
-integer arrays in 0–255, with 1–65,536 elements. Its recipients must exactly
-match `membership`; the removed device cannot remain in that set. Readers
-reject alternate JSON whitespace, duplicate IDs and malformed byte values.
-These are local format choices for signed metadata, not a new sync protocol.
+integer arrays in 0–255, with 1–65,536 elements. Delivery recipients exactly
+match membership. A `remove-device` action excludes its target device; a
+`retire-recovery-root` action preserves the exact active-device membership.
+Readers reject alternate JSON whitespace, duplicate IDs and malformed byte
+values. These are local format choices for signed metadata, not a new sync
+protocol.
 
 The signing prefix uses canonical context version one with application equal
 to the verified account scope tuple, policy `jazz.e2ee.account-successor.v1`,
 scope `account`, identifier `accountId`, table `__e2ee_account_successors`, row
 equal to the proposal ID, epoch equal to the successor, column `signature` and
-recipient equal to `signerId`. Append these fields in order, each preceded by
-its four-byte unsigned big-endian byte length: UTF-8 `predecessor`, UTF-8 `removedDeviceId`, then
-the exact `membership`, `revision`, `verification`, `history` and `deliveries`
-bytes. Fields above `2^32 - 1` bytes are rejected. The configured signer signs
-the complete record using its versioned signature envelope.
+recipient equal to `signerId`. Append UTF-8 `predecessor`, UTF-8 `action`, and
+the action-selected target UUID, followed by `membership`, `revision`,
+`verification`, `history` and `deliveries`; each field has a four-byte unsigned
+big-endian length prefix. Fields above `2^32 - 1` bytes are rejected. The
+configured signer signs the complete record using its versioned signature
+envelope.
+
+This successor frame is E05's unreleased v1 contract and is deliberately
+hard-cut in place before E05 ships: no producer, released data, or independent
+consumer of the previous E05 frame is supported, and implementations do not
+dual-read it. Both independently framed C fixtures pin the updated format.
 
 Format validation alone does not authorise a successor. Readers replay the
 complete permitted history from a globally accepted covered snapshot, ordered
@@ -190,23 +201,24 @@ A valid successor must reference the current predecessor, be signed by an
 eligible device and include exactly the eligible approvals accepted before its
 transaction. A supplied subset is not proof of complete membership.
 
-A key-free approval confers eligibility at its accepted transaction position,
-not when its key delivery arrives. Its epoch must have been established by an
-earlier authority transaction, including for the first account epoch: pre-epoch
-and same-transaction grants cannot become eligible retroactively.
-The signer must be eligible before that
-transaction; a grant cannot authorise another grant in the same transaction.
-Challenges, proofs and referenced requests must exist no later than the grant.
-Competing successors for one predecessor in the same transaction are rejected
-together, and a successor cannot depend on another successor in that transaction.
-These rules avoid using row IDs to invent an intra-transaction order.
+A recovery-root retirement is accepted only if its target is a valid,
+unretired root strictly before the successor position. Any recovery-root
+registration sharing the successor position makes that successor unordered and
+invalid; row IDs never establish intra-transaction order. The retirement
+rotates the account key without changing device membership. It sends the new
+key to every active device and every other root active before the transition,
+never to the retired root. Recovery-backed approvals signed before retirement
+remain in history; same-position and later grants from that root do not.
+Historical deliveries remain audit records. Retirement does not erase old
+plaintext/epoch keys or revoke devices enrolled through the root; device
+membership revocation remains a separate `remove-device` transition.
 
 Before delivering an account key, the approving client confirms that its grant
 remains eligible in the current epoch. A grant accepted by ordinary Jazz policies
 after its signer was removed is not a valid cryptographic grant. Adapter errors
 must fail the read, not be interpreted as invalid signatures to skip.
 
-The signed frame is pinned by `fixtures/e2ee-account-successor.c`, independently
+The signed frame is pinned by `fixtures/e2ee-account-successor.c`.
 
 ## Public device approval statement, version 1
 
@@ -244,20 +256,27 @@ before key delivery. Acceptance alone does not prove signer eligibility.
 ## Public account successor statement, version 1
 
 `__e2ee_public_account_successors` contains `id`, `accountId`, `predecessor`,
-`epochId`, `signerId`, `removedDeviceId`, `membership`, `revision` and `signature`.
+`epochId`, `signerId`, `action`, `removedDeviceId`, `retiredRecoveryRootId`,
+`membership`, `revision` and `signature`. `action` is exactly `remove-device`
+or `retire-recovery-root`, with exactly one target column present according to
+the action; the signed frame includes the selected target UUID as specified
+above.
 IDs other than the account ID are lower-case hyphenated UUIDv4 strings; the
 new epoch must differ from its predecessor. Membership uses the canonical sorted,
-unique UUIDv4 array defined for private successors and must not contain the removed
-device. The public revision is a canonical JSON array of sorted, unique, non-empty
-row-ID strings. It preserves raw candidates even when their IDs are not UUIDv4;
-otherwise an invalid candidate could prevent a legitimate rotation.
+unique UUIDv4 array defined for private successors. Device removal excludes its
+target, while root retirement leaves the device set unchanged. The public
+revision is a canonical JSON array of sorted, unique, non-empty row-ID strings.
+It preserves raw candidates even when their IDs are not UUIDv4; otherwise an
+invalid candidate could prevent a legitimate rotation.
 
 The signature context uses the verified application tuple, policy
 `jazz.e2ee.public-account-successor.v1`, scope `account`, identifier `accountId`,
 table `__e2ee_public_account_successors`, row `id`, column `signature`, epoch
-`epochId` and recipient `signerId`. Append four uint32-big-endian-length-prefixed
-fields: UTF-8 predecessor, UTF-8 removed device ID, membership bytes and revision
-bytes. `fixtures/e2ee-public-account-successor.c` independently pins this frame.
+`epochId` and recipient `signerId`. Append five uint32-big-endian-length-prefixed
+fields: UTF-8 predecessor, UTF-8 action, UTF-8 target ID, membership bytes and
+revision bytes. The version-one frame is hard-cut before E05 ships; see the
+private successor compatibility assumption above. The independent C fixture
+pins this key-free frame.
 
 The public revision contains every observed public approval statement ID for
 this account and predecessor epoch, including unverified candidates. It is not
@@ -270,9 +289,10 @@ These atomic-pair guarantees describe the producer, not the insert policy:
 arbitrary account-authored public rows still require independent verification.
 Before consuming a successor, a public reader must establish complete authority
 coverage, match its revision against the predecessor's accepted public approval
-history, validate signer eligibility, and derive the resulting membership from
-valid approvals and the removal. A signature or claimed membership list alone
-is insufficient. The public reader validates these requirements before granting eligibility.
+history, validate signer eligibility, and derive membership using device removal
+or unchanged membership for root retirement. A signature or claimed membership
+list alone is insufficient. The public reader validates these requirements
+before granting eligibility.
 
 ## Local device store, version 2
 
