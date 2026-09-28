@@ -150,6 +150,7 @@ fn native_transport_error(error: WebSocketClientError) -> NativeTransportError {
                 error.kind(),
                 std::io::ErrorKind::ConnectionRefused
                     | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::BrokenPipe
                     | std::io::ErrorKind::ConnectionAborted
                     | std::io::ErrorKind::NotConnected
                     | std::io::ErrorKind::TimedOut
@@ -166,12 +167,15 @@ fn native_transport_error(error: WebSocketClientError) -> NativeTransportError {
             )
         }
         WebSocketClientError::HandshakeTimeout => true,
-        // An HTTP 5xx response is a typed server-unavailability result before
-        // the authenticated wire handshake. It must retry like a refused
-        // connection; 4xx responses remain terminal authorization/admission
-        // failures.
+        // Only HTTP statuses that describe transient availability are
+        // retryable. This includes request timeout, too early, throttling,
+        // and common temporary server failures. Authorization, unsupported
+        // features, and other unclassified responses remain terminal.
         WebSocketClientError::Connect(tokio_tungstenite::tungstenite::Error::Http(response)) => {
-            response.status().is_server_error()
+            matches!(
+                response.status().as_u16(),
+                408 | 425 | 429 | 500 | 502 | 503 | 504
+            )
         }
         WebSocketClientError::ServerWireError(error) => {
             error.code == jazz::wire::WireErrorCode::NotReady

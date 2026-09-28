@@ -81,12 +81,15 @@ the retained native admission. Trusted scope revocation and host teardown
 stop the worker and retire the admission. A bearer session requires HTTPS/WSS for remote Core; plaintext is
 accepted only for `localhost`, IP loopback, or the documented Android emulator
 host aliases (`10.0.2.2` and `10.0.3.2`). Typed network-unavailability I/O
-failures, explicitly tagged hostname-resolution failures, TLS `UnexpectedEof`
-when a peer closes without `close_notify`, and handshake timeouts leave local
-relay work available while the worker retries. An I/O wrapper alone is
-insufficient: rustls certificate and other TLS protocol failures arrive as
-`InvalidData` I/O errors and remain terminal, as do unknown I/O kinds. A
-structured pre-Hello `NotReady`/`Later` response is likewise retryable,
+failures, including `BrokenPipe`, explicitly tagged hostname-resolution
+failures, TLS `UnexpectedEof` when a peer closes without `close_notify`, and
+handshake timeouts leave local relay work available while the worker retries.
+HTTP 408, 425, 429, 500, 502, 503, and 504 responses before authenticated wire
+admission are likewise retryable; other statuses, including authorization
+denials and unsupported server capabilities, remain terminal. An I/O wrapper
+alone is insufficient: rustls certificate and other TLS protocol failures
+arrive as `InvalidData` I/O errors and remain terminal, as do unknown I/O kinds.
+A structured pre-Hello `NotReady`/`Later` response is likewise retryable,
 matching browser admission. Authentication denial, malformed wire/WebSocket
 protocol, TLS certificate or protocol failures other than the reconnectable
 EOF, and unclassified connection failures remain terminal; diagnostic text
