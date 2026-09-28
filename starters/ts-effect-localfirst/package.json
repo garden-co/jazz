@@ -16,7 +16,7 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.58.2",
-    "jsdom": "^26.0.0",
+    "jsdom": "catalog:default",
     "typescript": "catalog:default",
     "vite": "catalog:default",
     "vitest": "catalog:default"

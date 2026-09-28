@@ -314,15 +314,7 @@ impl IvmRuntime {
                 .retain(|key, _| !removed.contains(&key.node));
             self.arrangement_states
                 .retain(|key, _| !removed.contains(&key.input));
-            let mut removed_bytes = 0usize;
-            self.eval_memo.retain(|key, entry| {
-                let keep = !removed.contains(&key.node);
-                if !keep {
-                    removed_bytes = removed_bytes.saturating_add(entry.payload_bytes);
-                }
-                keep
-            });
-            self.eval_memo_bytes = self.eval_memo_bytes.saturating_sub(removed_bytes);
+            self.remove_retained_eval_memos_for_nodes(&removed);
             for node in removed {
                 self.arrangement_keys_by_input.remove(&node);
                 self.node_meta.remove(&node);

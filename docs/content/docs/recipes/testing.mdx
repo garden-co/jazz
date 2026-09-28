@@ -45,13 +45,12 @@ describe("todo permissions", () => {
   it("allows owners to update their own todos", async () => {
     const aliceAccount = crypto.randomUUID();
     const bobAccount = crypto.randomUUID();
-    const todo = await testApp.seed((db) => {
-      const { value } = db.insert(app.todos, {
+    const todo = await testApp.seed((db) =>
+      db.insert(app.todos, {
         title: "Buy milk",
         ownerId: aliceAccount,
-      });
-      return value;
-    });
+      }),
+    );
 
     const alice = testApp.as({
       issuer: "https://auth.example.test",

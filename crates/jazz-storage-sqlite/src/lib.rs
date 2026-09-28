@@ -71,6 +71,9 @@ impl Durability {
 pub struct SqliteStorage {
     path: PathBuf,
     durability: Durability,
+    /// The codec profile this handle was opened with. The store pins it in
+    /// its epoch manifest, so a column-family reopen must present it again.
+    codec_profile: StorageCodecProfile,
     column_families: RefCell<BTreeMap<String, i64>>,
     connection: RefCell<Option<Connection>>,
     write_flush_cadence: RefCell<Option<WriteFlushCadence>>,
@@ -277,6 +280,7 @@ impl SqliteStorage {
         let storage = Self {
             path,
             durability,
+            codec_profile: codec_profile.clone(),
             column_families: RefCell::new(BTreeMap::new()),
             connection: RefCell::new(Some(connection)),
             write_flush_cadence: RefCell::new(None),
@@ -626,12 +630,13 @@ impl ReopenableStorage for SqliteStorage {
             }
             let path = self.path.clone();
             let durability = self.durability;
+            let codec_profile = self.codec_profile.clone();
             drop(self);
             let refs = column_families
                 .iter()
                 .map(String::as_str)
                 .collect::<Vec<_>>();
-            Self::open_with_durability(path, &refs, durability)
+            Self::open_with_durability_and_codec_profile(path, &refs, durability, &codec_profile)
         })
     }
 }

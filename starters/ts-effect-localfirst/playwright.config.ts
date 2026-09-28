@@ -25,7 +25,7 @@ export default defineConfig({
     // new process group, which Playwright's shutdown does not kill, so the run hangs.
     command: PROD
       ? "node node_modules/vite/bin/vite.js preview --port 5173 --strictPort"
-      : "pnpm dev",
+      : "node node_modules/vite/bin/vite.js --port 5173 --strictPort",
     url: BASE_URL,
     reuseExistingServer: false,
     timeout: PROD ? 120_000 : 60_000,

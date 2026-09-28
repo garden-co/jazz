@@ -64,6 +64,45 @@ where
     Ok(operations)
 }
 
+/// How much of an upload finalization must re-read before issuing a receipt.
+#[derive(Clone, Copy)]
+enum UploadValidation<'a> {
+    /// Peer pushes, fresh local preparations and anything else whose content
+    /// is not yet known to be valid: authenticate every reachable node and
+    /// re-read the complete logical value.
+    Full,
+    /// Groove derived this descriptor itself (append, splice, consolidation)
+    /// from `base`, a published and hence fully valid descriptor. Only the
+    /// newly staged nodes, the reused nodes' edge claims (proven against the
+    /// base tree) and the edit tail are checked; the text validity of the
+    /// reused base is inherited. Falls back to `Full` whenever that cannot be
+    /// established.
+    DerivedFrom(&'a crate::large_values::LargeValueRef),
+}
+
+/// Whether `root` is an active large-value root: it holds a staging receipt
+/// (issued only after validation) or a durably published reference. A node
+/// that is merely reachable from some other root does not qualify.
+async fn large_value_root_is_active<S>(
+    storage: &S,
+    root: &crate::large_values::NodeRef,
+) -> Result<bool, Error>
+where
+    S: OrderedKvStorage + ?Sized,
+{
+    let Some(encoded) = storage
+        .get(
+            LARGE_VALUE_METADATA_CF.to_owned(),
+            large_value_root_key(root)?,
+        )
+        .await?
+    else {
+        return Ok(false);
+    };
+    let references = decode_large_value_root_references(&encoded)?;
+    Ok(references.durable > 0 || references.staged > 0)
+}
+
 /// Return the staged-receipt metadata transition without committing it. This
 /// lets pending-upload promotion compose receipt registration and retainer
 /// release in one storage batch.
@@ -703,8 +742,13 @@ impl Database {
     /// local value. Such edits deliberately reuse unchanged base-tree nodes,
     /// so bind their exact derived descriptor before finalization rather than
     /// applying the raw-upload rule that every reachable node be newly owned.
+    ///
+    /// `base` is the published descriptor the edit was derived from. Because
+    /// it is already fully valid, finalization validates only what the
+    /// derivation added (see [`UploadValidation::DerivedFrom`]).
     async fn stage_derived_large_value_preparation(
         &self,
+        base: &crate::large_values::LargeValueRef,
         prepared: crate::large_values::PreparedLargeValue,
     ) -> Result<crate::large_values::StagedLargeValue, Error> {
         let upload_id = crate::large_values::StagedLargeValueId(*uuid::Uuid::new_v4().as_bytes());
@@ -716,8 +760,13 @@ impl Database {
         .await?;
         self.bind_pending_upload_descriptor(upload_id, &prepared.value_ref)
             .await?;
-        self.finalize_large_value_upload(upload_id, prepared.value_ref)
-            .await
+        self.finalize_large_value_upload_with_presence(
+            upload_id,
+            prepared.value_ref,
+            UploadValidation::DerivedFrom(base),
+        )
+        .await?
+        .ok_or_else(|| Error::InvalidLargeValueMetadata("pending upload is missing".to_owned()))
     }
 
     /// Install one bounded batch belonging to a remote push upload. Receipt
@@ -1226,6 +1275,33 @@ impl Database {
         &self,
         value: &crate::large_values::LargeValueRef,
     ) -> Result<(), Error> {
+        self.validate_large_value_edit_tail(value).await?;
+        let mut validator = crate::large_values::LogicalValueValidator::new(value)
+            .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
+        let mut offset = 0_u64;
+        while offset < value.byte_length {
+            let end = offset
+                .saturating_add(crate::large_values::LEAF_MIN_BYTES as u64)
+                .min(value.byte_length);
+            let bytes = self.read_large_value_range(value, offset..end).await?;
+            crate::large_values::record_finalize_validation_bytes(bytes.len());
+            validator
+                .push(&bytes)
+                .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
+            offset = end;
+        }
+        validator
+            .finish(value)
+            .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
+        Ok(())
+    }
+
+    /// Replay a descriptor's edit tail against its immutable base tree. This
+    /// reads only the base ranges each edit needs, never the whole value.
+    async fn validate_large_value_edit_tail(
+        &self,
+        value: &crate::large_values::LargeValueRef,
+    ) -> Result<(), Error> {
         let mut inputs = crate::ivm::runtime::evaluation_session::EvaluationInputs::default();
         let provider = self.ivm_runtime.chunk_provider();
         loop {
@@ -1241,28 +1317,13 @@ impl Database {
                             .get(request.clone())
                             .await
                             .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
+                        crate::large_values::record_finalize_validation_bytes(bytes.bytes().len());
                         inputs.install_chunk_from_provider(request, bytes);
                     }
                 }
                 Err(error) => return Err(error.into()),
             }
         }
-        let mut validator = crate::large_values::LogicalValueValidator::new(value)
-            .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
-        let mut offset = 0_u64;
-        while offset < value.byte_length {
-            let end = offset
-                .saturating_add(crate::large_values::LEAF_MIN_BYTES as u64)
-                .min(value.byte_length);
-            let bytes = self.read_large_value_range(value, offset..end).await?;
-            validator
-                .push(&bytes)
-                .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
-            offset = end;
-        }
-        validator
-            .finish(value)
-            .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
         Ok(())
     }
 
@@ -1274,7 +1335,7 @@ impl Database {
         upload_id: crate::large_values::StagedLargeValueId,
         value_ref: crate::large_values::LargeValueRef,
     ) -> Result<crate::large_values::StagedLargeValue, Error> {
-        self.finalize_large_value_upload_with_presence(upload_id, value_ref)
+        self.finalize_large_value_upload_with_presence(upload_id, value_ref, UploadValidation::Full)
             .await?
             .ok_or_else(|| Error::InvalidLargeValueMetadata("pending upload is missing".to_owned()))
     }
@@ -1287,7 +1348,7 @@ impl Database {
         upload_id: crate::large_values::StagedLargeValueId,
         value_ref: crate::large_values::LargeValueRef,
     ) -> Result<Option<crate::large_values::StagedLargeValue>, Error> {
-        self.finalize_large_value_upload_with_presence(upload_id, value_ref)
+        self.finalize_large_value_upload_with_presence(upload_id, value_ref, UploadValidation::Full)
             .await
     }
 
@@ -1295,6 +1356,7 @@ impl Database {
         &self,
         upload_id: crate::large_values::StagedLargeValueId,
         value_ref: crate::large_values::LargeValueRef,
+        validation: UploadValidation<'_>,
     ) -> Result<Option<crate::large_values::StagedLargeValue>, Error> {
         let _lifecycle = self.large_value_lifecycle.lock().await;
         if let Some(staged) =
@@ -1319,22 +1381,41 @@ impl Database {
             ));
         }
         let uploaded_chunks = upload.chunks.iter().cloned().collect();
-        crate::large_values::validate_finalized_upload(
-            &value_ref,
-            self.local_chunk_reader(),
-            &uploaded_chunks,
-            upload.descriptor.is_some(),
-        )
-        .await
-        .map_err(|error| match error {
-            crate::large_values::ReachabilityError::LargeValue(error) => {
-                crate::ivm::runtime::IvmRuntimeError::from(error)
+        // JSON validity is a whole-document property, so JSON edits keep the
+        // complete logical pass. (Groove only admits complete JSON
+        // replacement, which rewrites the whole value anyway.) A base root
+        // with no staging receipt or durable reference was never admitted
+        // here, so its validity cannot be inherited either. The base
+        // descriptor itself is authenticated against that root node inside
+        // `validate_derived_upload`.
+        let derived = match validation {
+            UploadValidation::DerivedFrom(base)
+                if upload.descriptor.is_some()
+                    && value_ref.kind != crate::large_values::LargeValueKind::Json
+                    && large_value_root_is_active(&self.storage, &base.root).await? =>
+            {
+                crate::large_values::validate_derived_upload(
+                    &value_ref,
+                    base,
+                    self.local_chunk_reader(),
+                    &uploaded_chunks,
+                )
+                .await?
             }
-            crate::large_values::ReachabilityError::Chunk(error) => {
-                crate::ivm::runtime::IvmRuntimeError::from(error)
-            }
-        })?;
-        self.validate_completed_large_value(&value_ref).await?;
+            UploadValidation::DerivedFrom(_) | UploadValidation::Full => false,
+        };
+        if derived {
+            self.validate_large_value_edit_tail(&value_ref).await?;
+        } else {
+            crate::large_values::validate_finalized_upload(
+                &value_ref,
+                self.local_chunk_reader(),
+                &uploaded_chunks,
+                upload.descriptor.is_some(),
+            )
+            .await?;
+            self.validate_completed_large_value(&value_ref).await?;
+        }
 
         // Persist the exact descriptor and retry receipt before promotion. A
         // crash here remains retryable with this identity, never one minted
@@ -1683,11 +1764,12 @@ impl Database {
         &self,
         value: crate::large_values::LargeValueRef,
     ) -> Result<crate::large_values::StagedLargeValue, Error> {
-        let prepared = self.consolidate_large_value(value).await?;
+        let prepared = self.consolidate_large_value(value.clone()).await?;
         // Consolidation retains authenticated unchanged base nodes. Keep the
         // derived-receipt distinction here, where this local provenance is
         // still known, rather than weakening raw peer-upload admission.
-        self.stage_derived_large_value_preparation(prepared).await
+        self.stage_derived_large_value_preparation(&value, prepared)
+            .await
     }
 
     /// Prepare an append using the bounded edit tail, consolidating through a
@@ -1718,8 +1800,9 @@ impl Database {
         value: crate::large_values::LargeValueRef,
         bytes: Vec<u8>,
     ) -> Result<crate::large_values::StagedLargeValue, Error> {
-        let prepared = self.append_large_value(value, bytes).await?;
-        self.stage_derived_large_value_preparation(prepared).await
+        let prepared = self.append_large_value(value.clone(), bytes).await?;
+        self.stage_derived_large_value_preparation(&value, prepared)
+            .await
     }
 
     /// Prepare an arbitrary byte-coordinate splice. Text boundary/UTF-16 and
@@ -1781,9 +1864,10 @@ impl Database {
         insert_bytes: Vec<u8>,
     ) -> Result<crate::large_values::StagedLargeValue, Error> {
         let prepared = self
-            .edit_large_value(value, offset, delete_length, insert_bytes)
+            .edit_large_value(value.clone(), offset, delete_length, insert_bytes)
             .await?;
-        self.stage_derived_large_value_preparation(prepared).await
+        self.stage_derived_large_value_preparation(&value, prepared)
+            .await
     }
 
     /// Read one byte-coordinate range from the final logical scalar while the

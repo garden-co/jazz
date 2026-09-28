@@ -8,6 +8,11 @@ access. In the browser, the todo list uses the `Jazz` service from
 `jazz-tools/effect/backend` to act on Jazz as the signed-in user. No UI
 framework.
 
+The server host is Hono, which serves Better Auth, the built app and the SPA
+fallback. The Effect routes are an `effect/http` `HttpRouter`, mounted under
+`/api/todos/*` with `HttpRouter.toWebHandler`, so you can grow them into a
+standalone `effect/http` server without rewriting them.
+
 ## What this starter gives you
 
 - Email/password sign-up and sign-in required upfront — no anonymous access.

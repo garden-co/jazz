@@ -56,7 +56,10 @@ repository:
   },
   "output": "/absolute/new/private/receipt-directory",
   "packages": {
-    "jazz-tools": { "tarball": "/absolute/jazz-tools.tgz", "sha256": "<sha256>" },
+    "jazz-tools": {
+      "tarball": "/absolute/jazz-tools.tgz",
+      "sha256": "<sha256>"
+    },
     "jazz-napi": { "tarball": "/absolute/jazz-napi.tgz", "sha256": "<sha256>" },
     "jazz-wasm": { "tarball": "/absolute/jazz-wasm.tgz", "sha256": "<sha256>" },
     "@garden-co/jazz-napi-linux-x64-gnu": {
@@ -180,3 +183,77 @@ locators, and SIGINT/SIGTERM cleanup including TERM-resistant descendants. They
 make no network requests and do not count as package or Cloud acceptance.
 The CLI provenance tests inject API fixture responses and generated tiny ZIPs
 to check source/workflow/run/digest/entry binding and executable/package equality.
+
+## Mixed-version wire acceptance
+
+`mixed-version.mjs` runs real `jazz-tools server` binaries and real Node
+clients from two installed versions against each other (the runbook's
+"current client vs candidate server, candidate client vs current server, and
+the candidate pair"). Prepare two external projects, one with the published
+release (`npm i jazz-tools@<current>`) and one with the candidate's packed
+`jazz-tools`, `jazz-napi` and `jazz-wasm` tarballs (use npm `overrides` so the
+candidate packages win over the registry). Pair each with its native CLI: the
+published one is `node_modules/jazz-tools/bin/native/jazz-tools-linux-x64`
+(chmod +x), the candidate is `cargo build --release -p jazz-cli --bin jazz-tools`.
+
+```json
+{
+  "output": "/absolute/new/output-dir",
+  "versions": {
+    "old": {
+      "project": "/abs/old-project",
+      "cli": "/abs/old/jazz-tools-linux-x64"
+    },
+    "new": {
+      "project": "/abs/new-project",
+      "cli": "/abs/jazz/target/release/jazz-tools"
+    }
+  }
+}
+```
+
+Run `node dev/release-acceptance/mixed-version.mjs /absolute/config.json`.
+Optional keys: `only` (cell names; naming an opt-in cell runs it),
+`skipLarge` (skip the 800KB value checks), `largeSizes`, `deadlineMinutes`.
+
+Checks that only make sense for some version pairs are opt-in:
+
+- `legacyEdgeTier: true`: old clients also write and read with the retired
+  `"edge"` durability name (alpha.56 and earlier).
+- `serverEdges: true`: runs the `edge` cells, which start an old server as an
+  edge (`--upstream-url`) in front of a new Core and check that the new CLI
+  refuses `--upstream-url` (alpha.56 -> alpha.57, where server edges were removed).
+- `oversized: { "count": 4800, "size": 60000, "batch": 20, "readerMinutes": 15 }`:
+  runs the `oversized-first-sync-*` cells, where a fresh whole-table subscriber's
+  first snapshot exceeds the routed payload limit (#3520). These take a long time;
+  raise `deadlineMinutes` (150 was enough for the alpha.57 run).
+
+The alpha.56 -> alpha.57 check used all three.
+
+Every other cell runs by default. That includes the `rolling-upgrade-*` cells,
+which restart the old server as the new version on the same store and port;
+in-place upgrade applies to any version pair.
+
+Each cell uses a fresh server store and deploys schema (mixed cells deploy with
+the other version's CLI). It then drives two client processes through
+global-tier insert/update/delete, remote point reads, subscriptions in both
+directions, 800KB chunked values, disconnect/offline write/reconnect, a server
+restart or in-place server upgrade on the same store with a write made while it
+was down, and fresh clients. The `large-values-*` cells probe fresh subscribers
+against tables holding large rows.
+
+Unknown config keys and unknown cell names in `only` are rejected, a run where
+no cell ran fails, and every skipped cell gets a `skip` entry with its reason.
+To keep a known, tracked failure from turning the run red, list it in
+`knownFailures` as `{"<cell>:<check>": "#NNNN"}`; it is recorded as
+`known-fail` and does not affect the exit code. If the whole-run deadline
+fires, a `deadline` failure and `results.json` are written before exit.
+
+Results are written to `<output>/results.json`; set `JAZZ_MIXED_TRACE=1` for
+per-command client traces and `RUST_LOG` for server logs.
+
+The client driver and CLI calls assume the current API: `createJazzSession`
+with a persistent driver, the `"global"` durability tier,
+`jazz-tools server --bound-port-file --allow-local-first-auth` and
+`jazz-tools deploy --schema-dir`. A release that renames any of these needs
+matching edits to `mixed-version.mjs` and `mixed-version-client.mjs`.

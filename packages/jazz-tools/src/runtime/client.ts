@@ -821,13 +821,27 @@ function copyWriteWaitReadiness<T extends WriteHandle<unknown, unknown>>(
 
 let warnedRemovedEdgeWriteTier = false;
 
+const writeWaitTiers: ReadonlySet<string> = new Set<DurabilityTier>(["local", "global"]);
+
 /**
  * The write has already been applied by the time a caller picks a wait tier,
  * so a removed tier must not reject: a caller that retries on rejection would
  * duplicate the write. `"edge"` waits for the stronger `"global"` instead.
+ *
+ * Any other unknown tier (a typo from plain JavaScript or a cast) is rejected
+ * here, before reaching the native runtime, with a `TypeError` that says the
+ * write was already applied, so it cannot be mistaken for a rejected write.
  */
 function resolveWriteWaitTier(tier: DurabilityTier | "edge"): DurabilityTier {
-  if (tier !== "edge") return tier;
+  if (tier !== "edge") {
+    if (!writeWaitTiers.has(tier)) {
+      throw new TypeError(
+        `Unknown wait tier ${JSON.stringify(tier)}; expected "local" or "global". ` +
+          "The write was already applied: do not retry it.",
+      );
+    }
+    return tier;
+  }
   if (!warnedRemovedEdgeWriteTier) {
     warnedRemovedEdgeWriteTier = true;
     console.warn('The "edge" tier was removed. wait({ tier: "edge" }) now waits for "global".');

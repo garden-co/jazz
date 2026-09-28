@@ -42,5 +42,6 @@ pub mod cold_settle_attribution;
 pub mod db;
 /// Host-facing exclusive lifecycle for foreground transaction-node identities.
 pub mod foreground_node_lease;
+pub(crate) mod positional_order;
 /// Canonical recursive structured query-result boundary types.
 pub mod result_tree;

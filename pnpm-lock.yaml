@@ -2379,7 +2379,7 @@ importers:
         specifier: ^1.58.2
         version: 1.58.2
       jsdom:
-        specifier: ^26.0.0
+        specifier: catalog:default
         version: 26.1.0
       typescript:
         specifier: catalog:default
