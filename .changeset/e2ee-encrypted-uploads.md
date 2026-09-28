@@ -15,6 +15,8 @@ recipient device delivery after authoritative acceptance; a denied later deliver
 does not roll back accepted data and requires explicit reconciliation.
 Capture the declaring Db's access context once for staging and publication,
 preserving backend write-session and attribution boundaries.
+Refresh the retained accepted-history snapshot after successful initial delivery
+so an immediate offline write does not compare against pre-delivery metadata.
 
 Version stream records independently from ordinary encrypted cells, including the
 cipher adapter mechanism and authenticated context. Ordinary queries return
