@@ -2,4 +2,4 @@
 "jazz-tools": patch
 ---
 
-Ordered subscriptions update their snapshot positions incrementally instead of rebuilding them on every change.
+Writes into large ordered subscriptions no longer slow down as the result grows: snapshot positions now update incrementally instead of being rebuilt on every change.
