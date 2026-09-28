@@ -253,8 +253,10 @@ where
         } else {
             self.admit_contribution_merge_for_storage(storage_tx)?
         };
+        let made_by = self.stage_transaction_author_alias(storage_tx.made_by, batch)?;
         let tx_values = transaction_values_with_cardinality_scope(
             tx_node_alias,
+            made_by,
             storage_tx,
             fate.clone(),
             global_time,
@@ -648,10 +650,12 @@ where
         let tx_node_alias = self.ensure_node_alias(tx.tx_id.node).await?;
         self.settle_provisional_author_aliases().await?;
         let mut batch = self.database.open_batch();
+        let made_by = self.stage_transaction_author_alias(tx.made_by, &mut batch)?;
         batch.insert(
             "jazz_transactions",
             transaction_values(
                 tx_node_alias,
+                made_by,
                 &tx,
                 fate.clone(),
                 None,

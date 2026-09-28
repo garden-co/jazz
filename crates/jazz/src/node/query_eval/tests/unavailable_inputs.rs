@@ -1237,6 +1237,8 @@ fn local_unavailable_confirmed_row_keeps_pending_successor() {
         "jazz_transactions",
         transaction_values(
             stored.node_alias,
+            node.resident_transaction_author_alias(stored.tx.made_by)
+                .unwrap(),
             &stored.tx,
             Fate::Accepted,
             Some(global_time),

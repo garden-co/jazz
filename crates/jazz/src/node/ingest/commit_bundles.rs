@@ -824,6 +824,7 @@ where
             let contribution_merge = self.contribution_merge_storage_value(
                 tx.contribution_merge.as_ref(),
             )?;
+            let made_by = self.stage_transaction_author_alias(tx.made_by, &mut batch)?;
             batch.insert(
                 "jazz_transactions",
                 // A reset may bulk-load only the view-authorized rows of an
@@ -832,6 +833,7 @@ where
                 // later sibling view can extend the same local projection.
                 transaction_values_with_cardinality_scope(
                     tx_node_alias,
+                    made_by,
                     tx,
                     (*first.fate).clone(),
                     first.global_time,

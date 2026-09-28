@@ -1,13 +1,16 @@
-// Row-author aliasing at the physical storage boundary.
+// Row- and transaction-author aliasing at the physical storage boundary.
 //
 // Logical row images (history/current descriptors, `VersionRow`, query
 // graphs, policies, wire records) carry the full `RowAuthor` record in
-// `created_by` / `updated_by`. The physical tables below store a node-local
-// `AuthorAlias` (`U32`, 4-byte little-endian) there instead. Writes translate record -> alias
+// `created_by` / `updated_by`, and in-memory / wire transactions carry the
+// full `made_by` subject. The physical row tables below and
+// `jazz_transactions.made_by` store a node-local `AuthorAlias` (`U32`, 4-byte
+// little-endian) there instead. Writes translate record -> alias
 // (allocating a durable `jazz_authors` row in the same batch on first use);
 // reads translate alias -> exact record bytes, through the shared author
-// dictionary for Groove projections and through `expand_physical_row_authors`
-// for direct storage reads.
+// dictionary for Groove projections, through `expand_physical_row_authors`
+// for direct row reads and through `stored_transaction_made_by` for
+// transaction rows.
 
 /// Field indices of `created_by` / `updated_by`. The history and current
 /// layouts share this system prefix, so one pair serves both.
@@ -26,6 +29,13 @@ fn physical_row_authors_aliased(shape: ContentProjectionShape) -> bool {
     match shape {
         ContentProjectionShape::History | ContentProjectionShape::Current => true,
     }
+}
+
+fn row_author_descriptor() -> records::RecordDescriptor {
+    let records::ValueType::Record(descriptor) = RowAuthor::value_type() else {
+        unreachable!("row author is a record type")
+    };
+    *descriptor
 }
 
 fn is_row_author_column(name: &str) -> bool {
@@ -133,28 +143,77 @@ where
             }
             let span = record.descriptor().field_span(record.raw(), index)?;
             let author = &record.raw()[span];
-            let (alias, needs_row) = self
-                .author_aliases
-                .stage(author)
-                .map_err(|_| Error::AuthorAliasSpaceExhausted)?;
-            if needs_row && staged != Some(alias) {
-                batch.update(
-                    "jazz_authors",
-                    vec![
-                        Value::U32(alias.0),
-                        Value::Record(OwnedRecord::new(author.to_vec(), {
-                            let records::ValueType::Record(descriptor) = RowAuthor::value_type()
-                            else {
-                                unreachable!("row author is a record type")
-                            };
-                            *descriptor
-                        })),
-                    ],
-                );
-                staged = Some(alias);
+            if staged == Some(author) {
+                continue;
             }
+            self.stage_author_alias(author, batch)?;
+            staged = Some(author);
         }
         Ok(())
+    }
+
+    /// Alias for storing one exact encoded author record. A new or
+    /// still-provisional alias also upserts its `jazz_authors` row into
+    /// `batch`, so the mapping is durable atomically with its first use.
+    fn stage_author_alias(
+        &mut self,
+        author: &[u8],
+        batch: &mut DatabaseBatch,
+    ) -> Result<AuthorAlias, Error> {
+        let (alias, needs_row) = self
+            .author_aliases
+            .stage(author)
+            .map_err(|_| Error::AuthorAliasSpaceExhausted)?;
+        if needs_row {
+            batch.update(
+                "jazz_authors",
+                vec![
+                    Value::U32(alias.0),
+                    Value::Record(OwnedRecord::new(author.to_vec(), row_author_descriptor())),
+                ],
+            );
+        }
+        Ok(alias)
+    }
+
+    /// Alias stored in `jazz_transactions.made_by` for a transaction authored
+    /// by `made_by`, staged into `batch` exactly like a row author. Callers
+    /// put the transaction row into the same `batch`.
+    pub(super) fn stage_transaction_author_alias(
+        &mut self,
+        made_by: AuthorSubject,
+        batch: &mut DatabaseBatch,
+    ) -> Result<AuthorAlias, Error> {
+        let author =
+            RowAuthor::from_persisted_subject(made_by).map_err(|_| Error::UnadmittedWriteAuthor)?;
+        self.stage_author_alias(author.encoded_record().raw(), batch)
+    }
+
+    /// Resident alias of `made_by`, without allocating. `None` when no row
+    /// or transaction stored on this node has that exact author.
+    pub(super) fn resident_transaction_author_alias(
+        &self,
+        made_by: AuthorSubject,
+    ) -> Option<AuthorAlias> {
+        let author = RowAuthor::from_persisted_subject(made_by).ok()?;
+        self.author_aliases
+            .alias_for(author.encoded_record().raw())
+    }
+
+    /// Decode `jazz_transactions.made_by` (a stored alias) back to the
+    /// transaction's author subject.
+    pub(super) fn stored_transaction_made_by(
+        &self,
+        record: records::BorrowedRecord<'_>,
+    ) -> Result<AuthorSubject, Error> {
+        let alias = AuthorAlias(record.get_u32(TransactionRowRecord::FIELD_MADE_BY_IDX)?);
+        let author = self.author_aliases.author_record(alias).ok_or(
+            Error::InvalidStoredValue("stored transaction author alias is not in jazz_authors"),
+        )?;
+        let descriptor = row_author_descriptor();
+        Ok(RowAuthor::from_record(descriptor.bind(&author))
+            .map_err(|_| Error::InvalidStoredValue("invalid durable transaction author"))?
+            .as_author_subject())
     }
 
     /// Alias of a staged author record for physical encoding.

@@ -159,7 +159,20 @@ shorthand: logical row images, query graphs, policy evaluation, public
 `$createdBy` / `$updatedBy`, and every wire record carry the full author, and
 another node never sees or interprets these alias numbers. No index orders or
 keys on an author column, so the alias's numeric order carries no meaning.
-`jazz_transactions.made_by` keeps the full record.
+
+`jazz_transactions.made_by` uses the same table, allocator and rules: it stores
+the `U32` `AuthorAlias` of the exact `RowAuthor` record of the transaction's
+author (four bytes instead of the full record, whose account UUID plus issuer
+and subject strings are typically 60+ bytes). A transaction row whose author is
+new or still provisional carries its `jazz_authors` upsert in the same batch,
+and exhaustion fails the transaction write closed exactly as for a row. The
+alias is translated at the storage boundary only: stored-transaction decoding
+resolves it to the author through the resident table (a missing mapping fails
+closed as an invalid stored value), so the in-memory and wire `Transaction`,
+fate/replay decisions, `$madeBy`, policy evaluation and every sync message
+still carry the full author. The pending-replay scan compares aliases directly,
+which is exact because the mapping is a bijection on record bytes.
+`jazz_rejected_transactions.made_by` still stores the full record.
 
 ### 2.3 Application schema
 
@@ -391,7 +404,7 @@ bytes, not RocksDB SSTs, SQLite pages, or IndexedDB implementation files.
 
 **Transaction audit record.** `jazz_transactions` has permanent logical field
 positions `0..=18`: `(time: TxTime, node_id: NodeAlias, kind, n_total_writes,
-made_by, base_snapshot, row_read_set, absent_read_set, predicate_read_set,
+made_by: AuthorAlias (U32, §2.2), base_snapshot, row_read_set, absent_read_set, predicate_read_set,
 user_metadata_json, contribution_merge, permission_subject,
 view_scoped_cardinality_marker, fate, global_time, rejection_reason,
 cascade_root, reason_detail, durability)`. `TxKind` is `Mergeable=0`,

@@ -237,7 +237,8 @@ groove::define_record! {
         1 => node_id: NodeAlias,
         2 => kind: TxKind,
         3 => n_total_writes: u32,
-        4 => made_by: RowAuthor,
+        // Node-local alias into `jazz_authors`; see `stored_transaction_made_by`.
+        4 => made_by: AuthorAlias,
         5 => base_snapshot: Option<Value>,
         6 => row_read_set: Option<Value>,
         7 => absent_read_set: Option<Value>,
@@ -3366,6 +3367,7 @@ pub(super) fn runtime_result_identity_bytes(
 
 pub(super) fn transaction_values(
     node_alias: NodeAlias,
+    made_by: AuthorAlias,
     tx: &Transaction,
     fate: Fate,
     global_time: Option<GlobalTime>,
@@ -3374,6 +3376,7 @@ pub(super) fn transaction_values(
 ) -> Result<Vec<Value>, Error> {
     transaction_values_with_cardinality_scope(
         node_alias,
+        made_by,
         tx,
         fate,
         global_time,
@@ -3385,6 +3388,7 @@ pub(super) fn transaction_values(
 
 pub(super) fn transaction_values_with_cardinality_scope(
     node_alias: NodeAlias,
+    made_by: AuthorAlias,
     tx: &Transaction,
     fate: Fate,
     global_time: Option<GlobalTime>,
@@ -3400,9 +3404,7 @@ pub(super) fn transaction_values_with_cardinality_scope(
             TxKind::Exclusive => "exclusive".to_owned(),
         }),
         Value::U32(tx.n_total_writes),
-        RowAuthor::from_persisted_subject(tx.made_by)
-            .map_err(|_| Error::UnadmittedWriteAuthor)?
-            .to_value(),
+        Value::U32(made_by.0),
         Value::Nullable(None),
         Value::Nullable(None),
         Value::Nullable(None),

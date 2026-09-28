@@ -74,10 +74,12 @@ where
         let contribution_merge = self.contribution_merge_storage_value(
             stored.tx.contribution_merge.as_ref(),
         )?;
+        let made_by = self.stage_transaction_author_alias(stored.tx.made_by, &mut batch)?;
         batch.update(
             "jazz_transactions",
             transaction_values_with_cardinality_scope(
                 stored.node_alias,
+                made_by,
                 &stored.tx,
                 stored.fate.clone(),
                 stored.global_time,

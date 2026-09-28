@@ -1412,7 +1412,9 @@ fn transactions_table() -> GrooveTableSchema {
             column("node_id", GrooveColumnType::U64),
             column("kind", tx_kind_column()),
             column("n_total_writes", GrooveColumnType::U32),
-            column("made_by", crate::ids::RowAuthor::value_type()),
+            // node-local-derived: the author's `AuthorAlias` into
+            // `jazz_authors` (4-byte little-endian), never the full record.
+            column("made_by", GrooveColumnType::U32),
             column("base_snapshot", GrooveColumnType::Bytes.nullable()),
             column("row_read_set", GrooveColumnType::Bytes.nullable()),
             column("absent_read_set", GrooveColumnType::Bytes.nullable()),

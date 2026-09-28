@@ -375,10 +375,7 @@ where
         {
             let record = raw.record();
             let fate = record.get_enum(TransactionRowRecord::FIELD_FATE_IDX)?;
-            let made_by =
-                RowAuthor::from_record(record.get_record(TransactionRowRecord::FIELD_MADE_BY_IDX)?)
-                    .map_err(|_| groove::records::Error::NonCanonicalRecord)?
-                    .as_author_subject();
+            let made_by = self.stored_transaction_made_by(record)?;
             let durability = durability_from_discriminant(
                 record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)?,
             )?;
@@ -426,6 +423,13 @@ where
             author
         };
 
+        // Stored transaction authors are exact-byte `jazz_authors` aliases,
+        // so compare aliases: an author with no resident alias authored no
+        // stored transaction.
+        let Some(durable_author) = self.resident_transaction_author_alias(durable_author) else {
+            return Ok(PendingTransactionScan::default());
+        };
+
         let mut scan = PendingTransactionScan::default();
         for raw in self
             .database
@@ -439,11 +443,7 @@ where
             scan.records_visited += 1;
             let record = raw.record();
             if NodeAlias(record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?) != node_alias
-                || RowAuthor::from_record(
-                    record.get_record(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
-                )
-                .map_err(|_| groove::records::Error::NonCanonicalRecord)?
-                .as_author_subject()
+                || AuthorAlias(record.get_u32(TransactionRowRecord::FIELD_MADE_BY_IDX)?)
                     != durable_author
             {
                 continue;

@@ -845,7 +845,7 @@ fn reopen_with_noncanonical_contribution_provenance(
         batch.update(
             "jazz_transactions",
             transaction_values(
-                stored.node_alias,
+                stored.node_alias, core.resident_transaction_author_alias(stored.tx.made_by).unwrap(),
                 &stored.tx,
                 stored.fate,
                 stored.global_time,
@@ -905,7 +905,7 @@ fn reopen_with_corrupt_contribution_coordinate(
         batch.update(
             "jazz_transactions",
             transaction_values(
-                stored.node_alias,
+                stored.node_alias, core.resident_transaction_author_alias(stored.tx.made_by).unwrap(),
                 &stored.tx,
                 stored.fate,
                 stored.global_time,
@@ -1096,7 +1096,7 @@ fn recovery_sweeps_ahead_rows_for_globally_fated_transactions() {
         batch.update(
             "jazz_transactions",
             transaction_values(
-                stored.node_alias,
+                stored.node_alias, node.resident_transaction_author_alias(stored.tx.made_by).unwrap(),
                 &stored.tx,
                 stored.fate.clone(),
                 stored.global_time,
@@ -1283,7 +1283,7 @@ where
     batch.update(
         "jazz_transactions",
         transaction_values(
-            stored.node_alias,
+            stored.node_alias, node.resident_transaction_author_alias(stored.tx.made_by).unwrap(),
             &stored.tx,
             stored.fate.clone(),
             stored.global_time,
@@ -1443,7 +1443,7 @@ fn reopen_refuses_preexisting_sequenced_non_global_transaction() {
         batch.update(
             "jazz_transactions",
             transaction_values(
-                stored.node_alias,
+                stored.node_alias, node.resident_transaction_author_alias(stored.tx.made_by).unwrap(),
                 &stored.tx,
                 Fate::Accepted,
                 Some(GlobalTime(7)),
@@ -2468,7 +2468,7 @@ fn transaction_status_projects_state_without_decoding_payloads() {
             let durability = DurabilityTier::from_discriminant(tag).unwrap();
             for global_time in [None, Some(GlobalTime(42))] {
                 let mut values = transaction_values(
-                    stored.node_alias, &stored.tx, fate.clone(), global_time, durability,
+                    stored.node_alias, core.resident_transaction_author_alias(stored.tx.made_by).unwrap(), &stored.tx, fate.clone(), global_time, durability,
                     core.contribution_merge_storage_value(None).unwrap(),
                 ).unwrap();
                 values[TransactionRowRecord::FIELD_DURABILITY_IDX] = Value::EnumTag(tag);
@@ -2505,7 +2505,7 @@ fn transaction_status_projects_state_without_decoding_payloads() {
         provenance.substitutions[0].sources.push(duplicate);
         stored.tx.contribution_merge = Some(provenance);
         let values = transaction_values(
-            stored.node_alias,
+            stored.node_alias, core.resident_transaction_author_alias(stored.tx.made_by).unwrap(),
             &stored.tx,
             stored.fate.clone(),
             stored.global_time,
@@ -2663,7 +2663,7 @@ fn legacy_edge_acceptance_reopens_as_replayable_local_write() {
             .unwrap();
         let stored = writer.query_transaction(tx_id).unwrap().unwrap();
         let mut values = transaction_values(
-            stored.node_alias,
+            stored.node_alias, writer.resident_transaction_author_alias(stored.tx.made_by).unwrap(),
             &stored.tx,
             Fate::Accepted,
             None,
@@ -2715,7 +2715,7 @@ impl<S: OrderedKvStorage> NodeState<S> {
     pub(crate) async fn persist_legacy_edge_receipt_for_test(&mut self, tx_id: TxId) {
         let stored = self.query_transaction(tx_id).await.unwrap().unwrap();
         let mut values = transaction_values(
-            stored.node_alias,
+            stored.node_alias, self.resident_transaction_author_alias(stored.tx.made_by).unwrap(),
             &stored.tx,
             Fate::Accepted,
             None,

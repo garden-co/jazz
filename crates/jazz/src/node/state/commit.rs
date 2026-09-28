@@ -309,10 +309,12 @@ where
                 batch.accept_large_value(*staged_id);
             }
         }
+        let made_by_alias = self.stage_transaction_author_alias(tx.made_by, &mut batch)?;
         batch.insert(
             "jazz_transactions",
             transaction_values(
                 tx_node_alias,
+                made_by_alias,
                 &tx,
                 Fate::Pending,
                 None,
