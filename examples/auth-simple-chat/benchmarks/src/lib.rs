@@ -31,7 +31,7 @@ pub const AUTHORS: usize = 16;
 /// Seeding transaction size; not part of any measured closure.
 const SEED_BATCH: usize = 1_000;
 
-type BenchDb = Db<MemoryStorage>;
+type BenchDb = Db;
 
 /// A signed-in user whose token carries no role claim.
 pub fn guest() -> AuthorSubject {

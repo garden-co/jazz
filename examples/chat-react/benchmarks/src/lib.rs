@@ -29,7 +29,7 @@ pub const PAGE: usize = 21;
 const MEMBERS_PER_CHAT: usize = 4;
 const SEED_BATCH: usize = 1_000;
 
-type BenchDb = Db<MemoryStorage>;
+type BenchDb = Db;
 
 pub fn user(index: usize) -> AuthorSubject {
     let id = uuid::Uuid::from_bytes(tagged(0xc0, index, true));

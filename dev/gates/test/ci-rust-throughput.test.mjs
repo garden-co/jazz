@@ -74,7 +74,7 @@ const toolBundleValidator = fs.readFileSync(
   "utf8",
 );
 const m3Differential = fs.readFileSync(
-  path.join(root, "crates/jazz/src/node/tests/m3_differential.rs"),
+  path.join(root, "crates/jazz/layers/node/src/node/tests/m3_differential.rs"),
   "utf8",
 );
 const jobs = (() => {
@@ -357,7 +357,7 @@ test("continuous soak precompiles outside seed watchdogs and preserves failure a
     assert.match(run, /timeout --kill-after=30s "\$\{PRECOMPILE_TIMEOUT_SECONDS\}s"/);
     assert.match(
       run,
-      /cargo test -p jazz --lib --no-default-features \\\n\s+--features testing,transport-compression-zstd --no-run \\\n/,
+      /cargo test -p jazz-node --lib --no-default-features \\\n\s+--features testing,transport-compression-zstd --no-run \\\n/,
     );
     assert.doesNotMatch(run, /--no-exec/);
   };
@@ -633,9 +633,9 @@ test("Rust CI keeps the bounded real differential oracle in its shared command p
   );
   assert.match(
     localCi,
-    /cargo test -p jazz --lib --no-default-features --features testing,transport-compression-zstd --no-run --message-format=json/,
+    /cargo test -p jazz-node --lib --no-default-features --features testing,transport-compression-zstd --no-run --message-format=json/,
   );
-  assert.match(localCi, /message\.target\.name === "jazz"/);
+  assert.match(localCi, /message\.target\.name === "jazz_node"/);
   assert.match(
     localCi,
     /timeout 60s env[\s\S]*JAZZ_SEED=11[\s\S]*JAZZ_DIFFERENTIAL_CHURN_DEPTHS=10,1000[\s\S]*JAZZ_DIFFERENTIAL_STEP_COUNT=3[\s\S]*m3_maintained_one_shot_differential_oracle --exact --ignored/,

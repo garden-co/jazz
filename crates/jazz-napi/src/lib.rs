@@ -307,8 +307,8 @@ type NapiDbInner = Rc<RefCell<Option<NapiDbInnerStorage>>>;
 
 #[derive(Clone)]
 enum NapiDbInnerStorage {
-    Memory(Rc<CoreDb<CoreMemoryStorage>>),
-    Persistent(Rc<CoreDb<CoreRocksDbStorage>>),
+    Memory(Rc<CoreDb>),
+    Persistent(Rc<CoreDb>),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -712,14 +712,8 @@ impl StreamingOwnerLifecycle {
     }
 }
 enum NapiWrite {
-    Memory {
-        db: Rc<CoreDb<CoreMemoryStorage>>,
-        write: WriteHandle<CoreMemoryStorage>,
-    },
-    Persistent {
-        db: Rc<CoreDb<CoreRocksDbStorage>>,
-        write: WriteHandle<CoreRocksDbStorage>,
-    },
+    Memory { db: Rc<CoreDb>, write: WriteHandle },
+    Persistent { db: Rc<CoreDb>, write: WriteHandle },
 }
 
 #[derive(Clone, Default)]
@@ -1333,12 +1327,12 @@ pub type SubscriptionTerminalEdit = Either4<
 
 enum NapiTransportInner {
     Memory {
-        db: Rc<CoreDb<CoreMemoryStorage>>,
-        connection: Option<Rc<LocalMutex<CorePeerConnection<CoreMemoryStorage>>>>,
+        db: Rc<CoreDb>,
+        connection: Option<Rc<LocalMutex<CorePeerConnection>>>,
     },
     Persistent {
-        db: Rc<CoreDb<CoreRocksDbStorage>>,
-        connection: Option<Rc<LocalMutex<CorePeerConnection<CoreRocksDbStorage>>>>,
+        db: Rc<CoreDb>,
+        connection: Option<Rc<LocalMutex<CorePeerConnection>>>,
     },
     Closed,
 }
@@ -1369,13 +1363,13 @@ impl NapiTransportInner {
 
 enum NapiSubscription {
     Memory {
-        db: Rc<CoreDb<CoreMemoryStorage>>,
+        db: Rc<CoreDb>,
         stream: SubscriptionStream,
         pending_events: VecDeque<CoreSubscriptionEvent>,
         pending_batch: Option<PendingNativeSubscriptionBatch>,
     },
     Persistent {
-        db: Rc<CoreDb<CoreRocksDbStorage>>,
+        db: Rc<CoreDb>,
         stream: SubscriptionStream,
         pending_events: VecDeque<CoreSubscriptionEvent>,
         pending_batch: Option<PendingNativeSubscriptionBatch>,
@@ -3676,7 +3670,7 @@ fn open_core_db<S>(
     config: CoreOpenDbConfig,
     identity: CoreDbIdentity,
     backend_attribution: bool,
-) -> napi::Result<CoreDb<S>>
+) -> napi::Result<CoreDb>
 where
     S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
 {
@@ -3814,10 +3808,7 @@ fn core_delegated_session_from_napi(
         .transpose()
 }
 
-fn core_write_memory(
-    db: Rc<CoreDb<CoreMemoryStorage>>,
-    write: WriteHandle<CoreMemoryStorage>,
-) -> napi::Result<Write> {
+fn core_write_memory(db: Rc<CoreDb>, write: WriteHandle) -> napi::Result<Write> {
     let tx_id = write.mergeable_tx_id();
     let result = WriteResult {
         row_id: write.row_uuid(),
@@ -3832,10 +3823,7 @@ fn core_write_memory(
     })
 }
 
-fn core_write_persistent(
-    db: Rc<CoreDb<CoreRocksDbStorage>>,
-    write: WriteHandle<CoreRocksDbStorage>,
-) -> napi::Result<Write> {
+fn core_write_persistent(db: Rc<CoreDb>, write: WriteHandle) -> napi::Result<Write> {
     let tx_id = write.mergeable_tx_id();
     let result = WriteResult {
         row_id: write.row_uuid(),
@@ -4014,10 +4002,7 @@ fn commit_timestamp_ms() -> napi::Result<u64> {
         .map_err(|_| napi::Error::from_reason("commit clock exceeds u64 milliseconds"))
 }
 
-fn core_commit_tx_memory(
-    db: &Rc<CoreDb<CoreMemoryStorage>>,
-    open_tx: CoreOpenTransactionId,
-) -> napi::Result<Write> {
+fn core_commit_tx_memory(db: &Rc<CoreDb>, open_tx: CoreOpenTransactionId) -> napi::Result<Write> {
     let write = db
         .enqueue_commit_mergeable_handle_at_ms(open_tx, commit_timestamp_ms()?)
         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
@@ -4026,7 +4011,7 @@ fn core_commit_tx_memory(
 }
 
 fn core_commit_tx_persistent(
-    db: &Rc<CoreDb<CoreRocksDbStorage>>,
+    db: &Rc<CoreDb>,
     open_tx: CoreOpenTransactionId,
 ) -> napi::Result<Write> {
     let write = db
@@ -4036,7 +4021,7 @@ fn core_commit_tx_persistent(
 }
 
 fn core_commit_exclusive_tx_memory(
-    db: &Rc<CoreDb<CoreMemoryStorage>>,
+    db: &Rc<CoreDb>,
     open_tx: CoreOpenTransactionId,
 ) -> napi::Result<Write> {
     let write = db
@@ -4047,7 +4032,7 @@ fn core_commit_exclusive_tx_memory(
 }
 
 fn core_commit_exclusive_tx_persistent(
-    db: &Rc<CoreDb<CoreRocksDbStorage>>,
+    db: &Rc<CoreDb>,
     open_tx: CoreOpenTransactionId,
 ) -> napi::Result<Write> {
     let write = db
