@@ -48,7 +48,9 @@ inventory omits either smoke binary or any named scenario case. The realistic
 benchmark workflow runs `dev/gates/benchmark-smoke.sh --compile-ci` to check
 all maintained benchmark APIs on same-repository benchmark-labeled PRs,
 non-bot default-branch pushes, manual runs, and nightly. CodSpeed evaluates the
-example benchmark crates on benchmark-labeled PRs and nightly; native `jazz`
+example benchmark crates on benchmark-labeled PRs and on every default-branch
+push, coalescing bursts to the running and latest commit, so each PR compares
+against its exact main baseline or one at most a burst older (#3488); native `jazz`
 and `jazz-sim` timing remains in the realistic benchmark workflow until it is
 ported. No local omnibus benchmark script is a push gate. A change to a public
 `jazz` type additionally gates the full workspace, including examples.
@@ -77,7 +79,7 @@ replacing the former fixed `-j 2` guidance.
   the `--lib` test binary before separately bounding its semantic execution,
   then executes the bounded, real seed-11 smoke
   `JAZZ_SEED=11 JAZZ_DIFFERENTIAL_CHURN_DEPTHS=10,1000 JAZZ_DIFFERENTIAL_STEP_COUNT=3
-cargo test -p jazz --lib node::tests::harness::m3_maintained_one_shot_differential_oracle -- --exact --ignored`.
+cargo test -p jazz-node --lib node::tests::harness::m3_maintained_one_shot_differential_oracle -- --exact --ignored`.
   That smoke preserves the oracle assertions but is not a substitute for the
   quarantined multi-seed gate.
 - **Incremental delivery canary** —
@@ -139,7 +141,7 @@ lower-level tests that best pin an invariant.
 
 **Current coverage limit (verified 2026-08-04).**
 `m3_maintained_one_shot_differential_oracle` compares only
-`BTreeSet<(table, RowUuid)>` (`crates/jazz/src/node/tests/m3_differential.rs:896-936`).
+`BTreeSet<(table, RowUuid)>` (`crates/jazz/layers/node/src/node/tests/m3_differential.rs:896-936`).
 It discards cells, content versions, relation edges, position/order, and
 duplicates. It therefore proves root-membership convergence only; it does not
 prove output content, ordering, nested association, or delivery shape. The

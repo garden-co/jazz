@@ -58,12 +58,7 @@ impl Transport for Carrier {
         self.incoming.borrow_mut().pop_front()
     }
 }
-fn connect(
-    upstream: &Db<MemoryStorage>,
-    downstream: &Db<MemoryStorage>,
-    author: AuthorSubject,
-    relay: bool,
-) {
+fn connect(upstream: &Db, downstream: &Db, author: AuthorSubject, relay: bool) {
     let a = Rc::new(RefCell::new(VecDeque::new()));
     let b = Rc::new(RefCell::new(VecDeque::new()));
     block_on(downstream.connect_upstream(Box::new(Carrier {
@@ -85,7 +80,7 @@ fn connect(
         upstream.accept_subscriber(transport, author);
     }
 }
-fn open(schema: &JazzSchema, tag: u8, author: AuthorSubject, core: bool) -> Db<MemoryStorage> {
+fn open(schema: &JazzSchema, tag: u8, author: AuthorSubject, core: bool) -> Db {
     let families = schema.column_families();
     let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     let config = DbConfig::new(
@@ -125,9 +120,9 @@ pub struct FanoutReceipt {
 /// Two teams have equally sized tables; Alice can read only team zero. The
 /// overview intentionally has no tenant predicate, so policy is load-bearing.
 pub struct FanoutFixture {
-    core: Db<MemoryStorage>,
-    relay: Db<MemoryStorage>,
-    foreground: Db<MemoryStorage>,
+    core: Db,
+    relay: Db,
+    foreground: Db,
     rows_per_team: usize,
     keyed_lists: usize,
     streams: Vec<SubscriptionStream>,
