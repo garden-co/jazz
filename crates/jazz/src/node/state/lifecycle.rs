@@ -884,6 +884,7 @@ where
             history_complete,
             authored_commit_durability: DurabilityTier::Local,
             authoritative_scalar_exit_refresh: false,
+            client_local_literal_shapes: std::collections::HashMap::new(),
             relay_authority_session_owner: None,
             pending_persistence: BTreeSet::new(),
             node_aliases: NodeAliases::default(),
@@ -1001,9 +1002,14 @@ where
         )?;
         lowered.tables.extend(current_tables);
         let layout = StorageLayout::jazz_class_v1();
-        Database::new_with_storage_layout(lowered, storage, layout)
-            .await
-            .map_err(Error::from)
+        let mut database = Database::new_with_storage_layout(lowered, storage, layout).await?;
+        // Jazz publishes plain ordered results from membership and version
+        // deltas and never reads their generic root positions; only root
+        // collectors' own positional edits reach its views. Collecting the
+        // positions would make every write to an ordered subscription
+        // proportional to its result size (#2086).
+        database.set_plain_output_root_positions_enabled(false);
+        Ok(database)
     }
 
     pub(crate) fn committed_global_time(&self) -> GlobalTime {
@@ -1058,7 +1064,7 @@ where
     /// coverage; it is neither persisted nor an authorization policy input.
     pub(crate) fn configure_scope_isolated_client_relay(
         &mut self,
-        scope: crate::db::ClientRelayScope,
+        scope: crate::node::relay_scope::ClientRelayScope,
     ) -> Result<(), Error> {
         if let Some(current) = &self.relay_authority_session_owner
             && !current.same_owner(&scope)
@@ -1074,7 +1080,7 @@ where
 
     /// The immutable host-admitted scope carried by this relay. Downstream
     /// relay/repair setup may observe its presence, but never manufacture one.
-    pub(crate) fn client_relay_scope(&self) -> Option<&crate::db::ClientRelayScope> {
+    pub(crate) fn client_relay_scope(&self) -> Option<&crate::node::relay_scope::ClientRelayScope> {
         self.relay_authority_session_owner.as_ref()
     }
 
@@ -1084,7 +1090,7 @@ where
         // SAFETY: direct node tests model the host-admitted scope with a fixed
         // synthetic owner; production code has no toggle-shaped API.
         let scope =
-            crate::db::ClientRelayScope::test_unbound_storage_owner("test-relay-scope".into());
+            crate::node::relay_scope::ClientRelayScope::test_unbound_storage_owner("test-relay-scope".into());
         self.configure_scope_isolated_client_relay(scope)
             .expect("test scope is stable");
     }

@@ -50,13 +50,19 @@ runs:
       shell: bash
       run: pnpm install --frozen-lockfile
 
+    # Every v1 key was left reserved but never finalized: restores reported
+    # "No cache found" while main's saves failed with "Unable to reserve cache".
+    # A fresh prefix starts clean, and only default-branch pushes save, so PR
+    # runs can no longer race main for (and strand) a key they would never be
+    # allowed to share.
     - name: Cache Rust build artifacts
       if: inputs.rust-cache == 'true'
       uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       with:
         cache-on-failure: true
         cache-bin: false
-        prefix-key: blacksmith-rocksdb-v1
+        save-if: ${{ github.ref == 'refs/heads/main' }}
+        prefix-key: blacksmith-rocksdb-v2
         key: repo-${{ env.CACHE_SCOPE_REPOSITORY_ID }}
 
     - name: Start isolated sccache daemon

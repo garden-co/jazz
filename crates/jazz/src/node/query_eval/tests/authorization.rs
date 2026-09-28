@@ -1404,7 +1404,7 @@ fn owner_policy_does_not_materialize_unreferenced_large_scalar_candidates() {
                 cells.get("payload").cloned()
             );
             for insert_candidate in [true, false] {
-                let allowed = crate::db::block_on(
+                let allowed = crate::local_executor::block_on(
                     node.write_policy_query_allows_candidate_with_provenance_for_schema(
                         schema_version,
                         &table,
@@ -1436,7 +1436,7 @@ fn owner_policy_does_not_materialize_unreferenced_large_scalar_candidates() {
             Value::String(raw.clone())
         };
         let content_policy = Query::from("lazy_documents").filter(eq(col("payload"), lit(literal)));
-        let result = crate::db::block_on(
+        let result = crate::local_executor::block_on(
             node.write_policy_query_allows_candidate_with_provenance_for_schema(
                 schema_version,
                 &table,
@@ -1545,7 +1545,7 @@ fn nullable_json_policy_candidates_preserve_logical_wrappers() {
                     }
                 }
                 for insert_candidate in [true, false] {
-                    match crate::db::block_on(
+                    match crate::local_executor::block_on(
                         node.write_policy_query_allows_candidate_with_provenance_for_schema(
                             schema_version,
                             &table,

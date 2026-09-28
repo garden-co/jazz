@@ -3703,7 +3703,7 @@ fn queued_transaction_upsert_validates_insert_after_staged_overlay() {
                     .column_with_default(
                         "done",
                         PublicColumnType::Boolean,
-                        crate::tools::public_api::types::Value::Boolean(false),
+                        crate::model::public_api::types::Value::Boolean(false),
                     ),
             ),
         );

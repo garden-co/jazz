@@ -716,7 +716,7 @@ fn upload_start_is_rate_admitted_before_pending_metadata_is_written() {
         })]
     ));
     assert!(
-        crate::db::block_on(receiver.database.pending_large_value_uploads())
+        crate::local_executor::block_on(receiver.database.pending_large_value_uploads())
             .unwrap()
             .is_empty(),
         "rate-limited starts must not create durable pending metadata"
@@ -733,7 +733,7 @@ fn expired_staged_tree_requires_reupload_before_row_publication() {
         max_age_ms: 1,
     });
     let logical = "expired staged body/".repeat(8_000);
-    let (commit, _) = crate::db::block_on(node.attach_large_cell_for_test(
+    let (commit, _) = crate::local_executor::block_on(node.attach_large_cell_for_test(
         MergeableCommit::new("todos", row(0x7b), 10).cells(BTreeMap::from([(
             "title".to_owned(),
             Value::String("title".to_owned()),
@@ -745,7 +745,7 @@ fn expired_staged_tree_requires_reupload_before_row_publication() {
     .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(3));
     assert_eq!(
-        crate::db::block_on(node.evict_expired_staged_large_values()).unwrap(),
+        crate::local_executor::block_on(node.evict_expired_staged_large_values()).unwrap(),
         1,
         "host maintenance evicts the abandoned staged root"
     );
@@ -770,7 +770,7 @@ fn delayed_staged_tree_publishes_while_receipt_remains_present() {
         max_age_ms: 0,
     });
     let logical = "delayed staged body/".repeat(8_000);
-    let (commit, _) = crate::db::block_on(node.attach_large_cell_for_test(
+    let (commit, _) = crate::local_executor::block_on(node.attach_large_cell_for_test(
         MergeableCommit::new("todos", row(0x7c), 10).cells(BTreeMap::from([(
             "title".to_owned(),
             Value::String("title".to_owned()),
@@ -794,7 +794,7 @@ fn pushed_chunks_must_be_staged_before_the_referencing_authority_commit() {
     let (_receiver_dir, mut receiver) = open_node_with_schema(node(0x7d), schema.clone());
     let (_missing_dir, mut missing) = open_node_with_schema(node(0x7e), schema);
     let logical = "pushed body/".repeat(8_000);
-    let (commit, value_ref) = crate::db::block_on(writer.attach_large_cell_for_test(
+    let (commit, value_ref) = crate::local_executor::block_on(writer.attach_large_cell_for_test(
         MergeableCommit::new("todos", row(0x7c), 10).cells(BTreeMap::from([(
             "title".to_owned(),
             Value::String("title".to_owned()),
@@ -841,7 +841,7 @@ fn pushed_chunks_must_be_staged_before_the_referencing_authority_commit() {
                 let chunks = nodes
                     .into_iter()
                     .map(|node_ref| {
-                        let encoded = crate::db::block_on(writer.local_chunk(
+                        let encoded = crate::local_executor::block_on(writer.local_chunk(
                             node_ref.locator,
                             node_ref.object_hash,
                         ))
@@ -1016,7 +1016,7 @@ fn rate_limited_upload_preserves_pending_claim_for_retry() {
         })]
     ));
     assert_eq!(
-        crate::db::block_on(receiver.database.pending_large_value_uploads())
+        crate::local_executor::block_on(receiver.database.pending_large_value_uploads())
             .unwrap()
             .len(),
         1,
@@ -1091,10 +1091,10 @@ fn maintenance_evicts_pending_upload_after_the_configured_age() {
     });
     std::thread::sleep(std::time::Duration::from_millis(2));
     assert_eq!(
-        crate::db::block_on(receiver.evict_expired_staged_large_values()).unwrap(),
+        crate::local_executor::block_on(receiver.evict_expired_staged_large_values()).unwrap(),
         1
     );
-    assert!(crate::db::block_on(receiver.database.pending_large_value_uploads())
+    assert!(crate::local_executor::block_on(receiver.database.pending_large_value_uploads())
         .unwrap()
         .is_empty());
 }
@@ -1181,11 +1181,11 @@ fn delayed_chunk_upload_succeeds_while_pending_journal_remains_present() {
             other => panic!("delayed upload did not resume: {other:?}"),
         }
     }
-    assert!(crate::db::block_on(receiver.database.pending_large_value_uploads())
+    assert!(crate::local_executor::block_on(receiver.database.pending_large_value_uploads())
         .unwrap()
         .is_empty());
     assert_eq!(
-        crate::db::block_on(receiver.database.staged_large_values())
+        crate::local_executor::block_on(receiver.database.staged_large_values())
             .unwrap()
             .len(),
         1
@@ -1242,7 +1242,7 @@ fn handcrafted_large_descriptor_is_rejected_but_node_staged_preparation_can_publ
         "title".to_owned(),
         Value::String("title".to_owned()),
     )]));
-    let (admitted, _) = crate::db::block_on(node.attach_large_cell_for_test(
+    let (admitted, _) = crate::local_executor::block_on(node.attach_large_cell_for_test(
         logical_commit,
         "body",
         groove::large_values::LargeValueKind::String,
@@ -1599,8 +1599,8 @@ fn malformed_persisted_authored_column_ids_never_reenter_derived_current_state()
             // immutable persisted history row with malformed raw bytes.
             let mut cleanup = node.database.open_batch();
             node.write_ahead_current_delete(&mut cleanup, &version).unwrap();
-            let applied = crate::db::block_on(node.database.apply_batch(cleanup)).unwrap();
-            let persisted = crate::db::block_on(applied.persist());
+            let applied = crate::local_executor::block_on(node.database.apply_batch(cleanup)).unwrap();
+            let persisted = crate::local_executor::block_on(applied.persist());
             node.database.finish_persistence(persisted).unwrap();
             assert_eq!(ahead_current_row_count(&mut node, "todos"), 0);
 
@@ -1608,7 +1608,7 @@ fn malformed_persisted_authored_column_ids_never_reenter_derived_current_state()
                 .schema_version_for_alias(version.schema_version_alias())
                 .unwrap();
             let table = node
-                .table_in_schema(version.table(), schema_version)
+                .table_in_schema_ref(version.table(), schema_version)
                 .unwrap()
                 .clone();
             let corrupted = VersionRow::from_parts_with_schema_version(
@@ -1640,8 +1640,8 @@ fn malformed_persisted_authored_column_ids_never_reenter_derived_current_state()
                 node.version_storage_primary_key(&corrupted).unwrap(),
                 raw,
             );
-            let applied = crate::db::block_on(node.database.apply_batch(corruption)).unwrap();
-            let persisted = crate::db::block_on(applied.persist());
+            let applied = crate::local_executor::block_on(node.database.apply_batch(corruption)).unwrap();
+            let persisted = crate::local_executor::block_on(applied.persist());
             node.database.finish_persistence(persisted).unwrap();
         }
 

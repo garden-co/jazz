@@ -1,7 +1,7 @@
 // Write attribution, ownership, joins, rejection, and cleanup.
 
 use crate::query::{Include, JoinMode, OrderDirection};
-use crate::tools::public_api::relation_ir::{
+use crate::model::public_api::relation_ir::{
     ColumnRef as PublicRelColumnRef, JoinCondition as PublicRelJoinCondition,
     JoinKind as PublicRelJoinKind, PredicateCmpOp as PublicRelPredicateCmpOp,
     PredicateExpr as PublicRelPredicateExpr, RelExpr as PublicRelExpr,
@@ -209,8 +209,8 @@ fn local_authority_keeps_insert_and_update_policies_distinct() {
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let coalesced_row = row(0x94);
     let open_tx = OpenTransactionId::new();
-    crate::db::block_on(core.open_mergeable(open_tx, author, Some(author))).unwrap();
-    crate::db::block_on(core.tx_write_mergeable(
+    crate::local_executor::block_on(core.open_mergeable(open_tx, author, Some(author))).unwrap();
+    crate::local_executor::block_on(core.tx_write_mergeable(
         open_tx,
         "todos",
         coalesced_row,
@@ -221,7 +221,7 @@ fn local_authority_keeps_insert_and_update_policies_distinct() {
         false,
     ))
     .unwrap();
-    crate::db::block_on(core.tx_patch_mergeable(
+    crate::local_executor::block_on(core.tx_patch_mergeable(
         open_tx,
         "todos",
         coalesced_row,
@@ -342,7 +342,7 @@ fn authority_read_for_write_check_is_mergeable_only() {
     };
     tx.kind = TxKind::Exclusive;
     assert!(
-        crate::db::block_on(core.commit_unit_satisfies_write_policies(&tx, &versions, None))
+        crate::local_executor::block_on(core.commit_unit_satisfies_write_policies(&tx, &versions, None))
             .unwrap(),
         "exclusive admission keeps its pre-existing write-policy-only helper semantics"
     );

@@ -408,7 +408,7 @@ fn empty_history_reset_concurrent_heads_are_atomic_across_cancellation() {
         }
         drop(reader);
         control.resume();
-        let storage = crate::db::block_on(reopen_handle.reopen(families.clone())).unwrap();
+        let storage = crate::local_executor::block_on(reopen_handle.reopen(families.clone())).unwrap();
         let mut reopened =
             NodeState::new_with_shared_test_catalogue(node(0xe2), schema.clone(), storage).unwrap();
         let present = bundles
@@ -3004,7 +3004,7 @@ fn discarded_pending_identity_survives_reopen_and_later_pending_carrier() {
         let VersionCarrier::Bundle(conflicting_bundle) = &mut conflicting else { unreachable!() };
         conflicting_bundle.tx.made_by = AuthorSubject::system_at(node(9));
         assert!(matches!(
-            crate::db::block_on(reader.remember_discarded_pending_view_transactions(&[conflicting])),
+            crate::local_executor::block_on(reader.remember_discarded_pending_view_transactions(&[conflicting])),
             Err(Error::ConflictingCommitUnit(id)) if id == tx_id
         ));
         let stored = reader.query_transaction(tx_id).unwrap().unwrap();
@@ -3090,5 +3090,5 @@ fn discarded_pending_identity_accepts_redacted_exclusive_read_sets() {
     let mut conflict = redacted;
     let VersionCarrier::Bundle(bundle) = &mut conflict else { unreachable!() };
     bundle.tx.user_metadata_json = Some("true".to_owned());
-    assert!(matches!(crate::db::block_on(reader.remember_discarded_pending_view_transactions(&[conflict])), Err(Error::ConflictingCommitUnit(id)) if id == tx_id));
+    assert!(matches!(crate::local_executor::block_on(reader.remember_discarded_pending_view_transactions(&[conflict])), Err(Error::ConflictingCommitUnit(id)) if id == tx_id));
 }

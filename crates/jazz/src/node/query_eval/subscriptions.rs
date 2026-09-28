@@ -587,7 +587,7 @@ where
                 "subscription authority result binding view disagrees with usage",
             ));
         }
-        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+        if crate::debug_env::covered_input_trace() {
             eprintln!(
                 "JAZZ_COVERED_INPUT_TRACE stage=subscribe_receipt binding={binding_view_key:?} delegated={:?} authority={authority_result_key:?}",
                 subscribe.delegated_session,

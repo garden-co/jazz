@@ -526,7 +526,7 @@ fn physical_manifest_cache_never_outlives_its_facts_across_cancelled_receive_wri
         }
         drop(reader);
         control.resume();
-        let storage = crate::db::block_on(reopen_handle.reopen(families.clone())).unwrap();
+        let storage = crate::local_executor::block_on(reopen_handle.reopen(families.clone())).unwrap();
         let reopened =
             NodeState::new_with_shared_test_catalogue(node(0xe7), schema.clone(), storage).unwrap();
         assert!(
@@ -2251,7 +2251,7 @@ fn scope_updates_are_volatile_while_native_rows_survive_reopen() {
         "scope updates must not write durable membership"
     );
     assert!(
-        crate::db::block_on(
+        crate::local_executor::block_on(
             reader
                 .database
                 .direct_record_store(crate::schema::KNOWN_STATE_FACTS_STORE)
@@ -2349,9 +2349,9 @@ fn legacy_scope_caches_are_discarded_without_losing_native_or_pending_rows() {
     ].into_iter().enumerate() {
         let mut key = cursor_key.clone();
         key.push(Value::Bytes(vec![index as u8; 32]));
-        crate::db::block_on(store.set(&key, &[Value::Bytes(bytes)])).unwrap();
+        crate::local_executor::block_on(store.set(&key, &[Value::Bytes(bytes)])).unwrap();
     }
-    crate::db::block_on(
+    crate::local_executor::block_on(
         reader
             .database
             .direct_record_store(crate::schema::KNOWN_STATE_FACTS_STORE)
@@ -2372,7 +2372,7 @@ fn legacy_scope_caches_are_discarded_without_losing_native_or_pending_rows() {
         crate::schema::SETTLED_PROGRAM_FACTS_STORE,
     ] {
         assert!(
-            crate::db::block_on(
+            crate::local_executor::block_on(
                 reopened
                     .database
                     .direct_record_store(name)

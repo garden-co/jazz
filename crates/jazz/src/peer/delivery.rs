@@ -8,7 +8,7 @@ use super::*;
 #[cfg(debug_assertions)]
 use crate::ids::RowUuid;
 #[cfg(debug_assertions)]
-use crate::tools::OutputOccurrenceId;
+use crate::object::OutputOccurrenceId;
 
 /// Produce the one unambiguous unordered transition between two exact sets.
 /// Runtime terminals may have crossed intermediate states while a publisher

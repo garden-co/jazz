@@ -427,7 +427,7 @@ where
             } else if let Some(session_claims) = self.session_claims.get(&identity) {
                 claims.extend(session_claims.clone());
             }
-            claims.extend(crate::tools::policy_claims::author_policy_claims(identity));
+            claims.extend(crate::model::policy_claims::author_policy_claims(identity));
             PolicyContext::Identity {
                 mode: PolicyEnforcementMode::Enforcing,
                 permission_subject: identity,
@@ -1413,7 +1413,7 @@ where
         _operation: AuthorizationScopeOperation,
     ) -> SchemaVersionId {
         let write_schema = self.catalogue.active_schema.schema;
-        let has_policy_table = self.table_in_schema(table, write_schema).is_ok();
+        let has_policy_table = self.table_in_schema_ref(table, write_schema).is_ok();
         if has_policy_table {
             write_schema
         } else {
@@ -1540,10 +1540,10 @@ mod authorization_scope_compiler_tests {
     use super::*;
     use crate::ids::NodeUuid;
     use crate::legacy_test_future::{ResultFutureExt as _, SettledNodeTestExt as _};
+    use crate::model::public_schema::OperationPolicy as PublicOperationPolicy;
     use crate::node::NodeState;
     use crate::protocol::TableLens;
     use crate::schema::WritePolicies;
-    use crate::tools::public_schema::OperationPolicy as PublicOperationPolicy;
     use crate::tools::{
         ColumnType as PublicColumnType, PolicyExpr as PublicPolicyExpr,
         SchemaBuilder as PublicSchemaBuilder, TablePolicies as PublicTablePolicies,

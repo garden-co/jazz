@@ -21,13 +21,13 @@ use groove::schema::{
 use groove::storage::StorageLayout;
 
 use crate::ids::SchemaVersionId;
-use crate::protocol::{BranchColumnValue, BranchKey, BranchSelector};
+use crate::model::branch::{BranchColumnValue, BranchKey, BranchSelector};
+use crate::model::public_schema::Schema as PublicSchema;
 use crate::query::Query;
 #[cfg(test)]
 use crate::query::{claim, col, eq};
-use crate::tools::public_schema::Schema as PublicSchema;
 
-pub use crate::tools::public_schema_convert::SchemaConversionError;
+pub use crate::model::public_schema_convert::SchemaConversionError;
 
 /// Namespace used for schema-version UUIDv5 ids.
 pub const SCHEMA_VERSION_NAMESPACE: uuid::Uuid =
@@ -81,7 +81,7 @@ impl JazzSchema {
 
     /// Compile a developer-authored public schema and retain its durable source.
     pub fn new(schema: &PublicSchema) -> Result<Self, SchemaConversionError> {
-        crate::tools::public_schema_convert::convert_public_schema(schema)
+        crate::model::public_schema_convert::convert_public_schema(schema)
     }
 
     /// Structural catalogue payload, independent of the active permissions.
@@ -647,7 +647,8 @@ impl RuntimeSchema {
                     ("subject", ValueType::String),
                     (
                         "claims_v1",
-                        crate::protocol::policy_binding_directory_claims_value_type(),
+                        crate::model::policy_directory::policy_binding_directory_claims_value_type(
+                        ),
                     ),
                 ]),
             ))
@@ -691,7 +692,7 @@ impl RuntimeSchema {
                     ("global_table", ValueType::Uuid),
                     ("row", ValueType::Uuid),
                 ]),
-                crate::node::local_availability_record_descriptor(),
+                local_availability_record_descriptor(),
             ))
             .with_direct_record_store(DirectRecordStoreSchema::new(
                 SCOPE_RELAY_REPAIR_LEDGER_STORE,
@@ -1221,6 +1222,15 @@ impl TableSchema {
 
     /// Return per-layer global-current tables for content and register winners.
     pub fn global_current_storage_tables(&self) -> Vec<GrooveTableSchema> {
+        vec![
+            self.global_current_content_storage_table(),
+            self.global_current_register_storage_table(),
+        ]
+    }
+
+    /// The content-winner table of [`Self::global_current_storage_tables`],
+    /// without building the register table alongside it.
+    pub fn global_current_content_storage_table(&self) -> GrooveTableSchema {
         let indexed_columns = self.global_current_indexed_columns();
         let mut content_columns = vec![
             column("branch_key", GrooveColumnType::Bytes),
@@ -1271,30 +1281,31 @@ impl TableSchema {
                     .chain(columns.iter().map(|column| app_storage_column_name(column))),
             ));
         }
-        vec![
-            content_table,
-            GrooveTableSchema::new(
-                format!("jazz_{}_register_global_current", self.name),
-                [
-                    column("branch_key", GrooveColumnType::Bytes),
-                    column("row_uuid", GrooveColumnType::Uuid),
-                    column("tx_time", GrooveColumnType::U64),
-                    column("tx_node_id", GrooveColumnType::U64),
-                    column("schema_version", GrooveColumnType::U64),
-                    column("parents", tx_id_column().array_of()),
-                    column("created_by", crate::ids::RowAuthor::value_type()),
-                    column("created_at", GrooveColumnType::U64),
-                    column("updated_by", crate::ids::RowAuthor::value_type()),
-                    column("updated_at", GrooveColumnType::U64),
-                    column("global_time", GrooveColumnType::U64.nullable()),
-                    column("_deletion", deletion_column()),
-                ],
-            )
-            .with_primary_key(PrimaryKey::composite([
-                PrimaryKeyColumn::bytes("branch_key"),
-                PrimaryKeyColumn::uuid("row_uuid"),
-            ])),
-        ]
+        content_table
+    }
+
+    fn global_current_register_storage_table(&self) -> GrooveTableSchema {
+        GrooveTableSchema::new(
+            format!("jazz_{}_register_global_current", self.name),
+            [
+                column("branch_key", GrooveColumnType::Bytes),
+                column("row_uuid", GrooveColumnType::Uuid),
+                column("tx_time", GrooveColumnType::U64),
+                column("tx_node_id", GrooveColumnType::U64),
+                column("schema_version", GrooveColumnType::U64),
+                column("parents", tx_id_column().array_of()),
+                column("created_by", crate::ids::RowAuthor::value_type()),
+                column("created_at", GrooveColumnType::U64),
+                column("updated_by", crate::ids::RowAuthor::value_type()),
+                column("updated_at", GrooveColumnType::U64),
+                column("global_time", GrooveColumnType::U64.nullable()),
+                column("_deletion", deletion_column()),
+            ],
+        )
+        .with_primary_key(PrimaryKey::composite([
+            PrimaryKeyColumn::bytes("branch_key"),
+            PrimaryKeyColumn::uuid("row_uuid"),
+        ]))
     }
 
     /// Return per-layer ahead-of-global candidate tables.
@@ -2094,6 +2105,92 @@ fn rejected_transactions_table() -> GrooveTableSchema {
         PrimaryKeyColumn::integer("time", IntegerKeyType::U64),
         PrimaryKeyColumn::integer("node_id", IntegerKeyType::U64),
     ]))
+}
+
+/// Whether a stored column's physical encoding stays readable under another
+/// table schema's column: same merge strategy and a value type that only
+/// appends enum variants or cases.
+pub(crate) fn physical_column_epoch_is_compatible(
+    source_table: &TableSchema,
+    source_column_name: &str,
+    target_table: &TableSchema,
+    target_column_name: &str,
+) -> bool {
+    let Some(source_column) = source_table
+        .columns
+        .iter()
+        .find(|column| column.name == source_column_name)
+    else {
+        return false;
+    };
+    let Some(target_column) = target_table
+        .columns
+        .iter()
+        .find(|column| column.name == target_column_name)
+    else {
+        return false;
+    };
+
+    physical_value_epoch_is_compatible(&source_column.column_type, &target_column.column_type)
+        && source_table.merge_strategy(source_column_name)
+            == target_table.merge_strategy(target_column_name)
+}
+
+pub(crate) fn physical_value_epoch_is_compatible(
+    source: &groove::records::ValueType,
+    target: &groove::records::ValueType,
+) -> bool {
+    use groove::records::ValueType;
+    match (source, target) {
+        (ValueType::EnumTag(left), ValueType::EnumTag(right)) => {
+            right.variants.starts_with(&left.variants)
+        }
+        (ValueType::Enum(left), ValueType::Enum(right)) => {
+            right.cases.len() >= left.cases.len()
+                && left.cases.iter().zip(&right.cases).all(|(a, b)| {
+                    a.name == b.name && physical_record_epoch_is_compatible(&a.payload, &b.payload)
+                })
+        }
+        (ValueType::Tuple(left), ValueType::Tuple(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(a, b)| physical_value_epoch_is_compatible(a, b))
+        }
+        (ValueType::Array(left), ValueType::Array(right))
+        | (ValueType::Nullable(left), ValueType::Nullable(right)) => {
+            physical_value_epoch_is_compatible(left, right)
+        }
+        (ValueType::Record(left), ValueType::Record(right)) => {
+            physical_record_epoch_is_compatible(left, right)
+        }
+        _ => source == target,
+    }
+}
+
+fn physical_record_epoch_is_compatible(
+    source: &groove::records::RecordDescriptor,
+    target: &groove::records::RecordDescriptor,
+) -> bool {
+    source.fields().len() == target.fields().len()
+        && source.fields().iter().zip(target.fields()).all(|(a, b)| {
+            a.name == b.name && physical_value_epoch_is_compatible(&a.value_type, &b.value_type)
+        })
+}
+
+/// Record layout of a row's local-availability receipt column.
+pub(crate) fn local_availability_record_descriptor() -> groove::records::RecordDescriptor {
+    groove::records::RecordDescriptor::new([
+        ("format_v1", groove::records::ValueType::U8),
+        ("unavailable", groove::records::ValueType::Bool),
+        ("core", groove::records::ValueType::Uuid),
+        ("core_epoch", groove::records::ValueType::U64),
+        ("claims_revision", groove::records::ValueType::U64),
+        ("policy_epoch", groove::records::ValueType::U64),
+        ("settled_through", groove::records::ValueType::U64),
+        ("evaluation_seq", groove::records::ValueType::U64),
+    ])
 }
 
 #[cfg(test)]

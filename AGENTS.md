@@ -76,6 +76,32 @@ filter is an error before any test run. For a library test, use
 `dev/t --test target_name unique::module::test_name`. The wrapper preserves the
 core gate's `-p jazz --no-default-features --features testing,transport-compression-zstd` selection.
 
+**Merged integration-test binaries.** `jazz`, `groove` and `jazz-testkit` set
+`autotests = false`: their flat `tests/*.rs` files compile as modules of one
+binary per crate (`tests/integration/main.rs`, or `tests/all/main.rs` in the
+testkit), so an edit relinks one test executable instead of dozens. A flat
+file's tests are therefore addressed as `dev/t --test integration
+<file>::<test>`. Add a new flat test file to that `main.rs` with
+`#[path = "../<file>.rs"] mod <file>;`; `dev/gates/test/rust-test-targets.test.mjs`
+fails if a flat file is built by no target or by two. Only files that install a
+`#[global_allocator]` or are selected by name in a gate stay separate `[[test]]`
+targets. Jazz's own tests share `jazz-testkit/src/duplex_transport.rs` by
+`#[path]`, not through a testkit dev-dependency, so a Jazz edit no longer
+rebuilds Jazz a second time for the testkit.
+
+**Jazz module layers.** `crates/jazz/src` is being split into crates bottom-up.
+`dev/gates/jazz-module-layers.mjs` assigns each file to a layer (types → model
+→ protocol → engine → node → peer → db → facade) and fails CI lint on any
+production `crate::`/`super::` reference to a higher layer, and on an inherent
+or foreign-trait `impl` whose type lives in a lower layer (it would break
+coherence once the layers are crates). Basic types
+(`object`, `app_id`, `identity`) sit at the crate root and the public data model
+lives in `model/`; `tools` only re-exports them. Put new code in the lowest layer
+that its dependencies allow. Test-only upward references are ratcheted in
+`dev/gates/jazz-module-layers.allow`: remove a pair when you fix it, never add
+one by hand (`--write-allow` refreshes the list and refuses while production
+is unclean; `--report [--tests]` lists references).
+
 **Canonical gates:** do not let born-red or rotted targets accumulate silently.
 For ordinary Rust/core work, the full gate set is:
 
@@ -193,8 +219,11 @@ Benchmark work has three deliberately separate gates:
   default-branch pushes, manual runs, and nightly. Keep correctness assertions
   in tests, not in a timing receipt.
 - CodSpeed currently compares the example benchmark crates only. Apply the
-  `benchmark` label when that coverage is relevant; it refreshes nightly on the
-  default branch. Native `jazz` and `jazz-sim` timing remains in the
+  `benchmark` label when that coverage is relevant; it runs on every
+  default-branch merge (a burst of merges measures the running and the latest
+  commit). A report footnoted "No successful run was found on `main`" compared
+  against an older main run; any change between that run and the PR's base is
+  not attributable to the PR (#3488). Native `jazz` and `jazz-sim` timing remains in the
   realistic benchmark workflow (same-repository benchmark-labeled PRs,
   non-bot default-branch pushes, manual runs, and nightly) until those suites
   are ported to CodSpeed. Do not run a repository-wide benchmark suite before

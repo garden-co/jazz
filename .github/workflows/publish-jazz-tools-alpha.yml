@@ -177,6 +177,50 @@ jobs:
           echo "release_pr_head_ref=${{ steps.gate.outputs.release_pr_head_ref }}"
           echo "release_pr_head_sha=${{ steps.gate.outputs.release_pr_head_sha }}"
 
+  # Publication requires the release test tier on the exact tree being
+  # published: CI, starters E2E and RN device acceptance on the Version
+  # Packages PR head, which changesets-release-pr.yml dispatches. Dry runs
+  # build candidates before that tier has run, so they skip this gate.
+  release-test-gate:
+    name: Require release tests on the published tree
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 5
+    needs: [release-push-gate]
+    if: >-
+      needs.release-push-gate.outputs.should_run == 'true' &&
+      (inputs.mode || github.event.inputs.mode || 'publish') == 'publish'
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          sparse-checkout: dev/scripts
+      - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          SHA: ${{ github.sha }}
+          RELEASE_PR_HEAD_REF: ${{ needs.release-push-gate.outputs.release_pr_head_ref }}
+          RELEASE_PR_HEAD_SHA: ${{ needs.release-push-gate.outputs.release_pr_head_sha }}
+        with:
+          script: |
+            const { evaluateReleaseTestGate } = await import(
+              `${process.env.GITHUB_WORKSPACE}/dev/scripts/release-test-gate.mjs`
+            );
+            const { ok, lines } = await evaluateReleaseTestGate({
+              github,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: process.env.SHA,
+              headSha: process.env.RELEASE_PR_HEAD_SHA,
+              headRef: process.env.RELEASE_PR_HEAD_REF,
+            });
+            for (const line of lines) core.info(line);
+            if (!ok) {
+              core.setFailed(
+                "Release tests have not passed on the tree being published. Rerun or dispatch the failing workflow on the Version Packages PR head, then rerun this workflow.",
+              );
+            }
+
   resolve-preview-artifacts:
     name: Resolve preview artifact source
     runs-on: blacksmith-4vcpu-ubuntu-2404
@@ -352,11 +396,16 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     needs:
       - release-push-gate
+      - release-test-gate
       - resolve-preview-artifacts
       - build
     if: >-
       always() &&
       needs.release-push-gate.outputs.should_run == 'true' &&
+      (
+        needs.release-test-gate.result == 'success' ||
+        (inputs.mode || github.event.inputs.mode || 'publish') == 'dry-run'
+      ) &&
       (
         needs.resolve-preview-artifacts.outputs.use_preview_artifacts == 'true' ||
         needs.build.result == 'success'

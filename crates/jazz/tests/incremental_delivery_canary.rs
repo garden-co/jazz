@@ -5,7 +5,9 @@ use std::time::{Duration, Instant};
 
 mod common;
 
-use jazz_testkit::duplex_transport;
+// Shared with jazz-testkit by path so Jazz needs no testkit dev-dependency.
+#[path = "../../jazz-testkit/src/duplex_transport.rs"]
+mod duplex_transport;
 
 use jazz::block_on;
 use jazz::db::{

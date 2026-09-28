@@ -13177,20 +13177,27 @@ mod tests {
         // Rust coalesces pending signals until the owner flushes them. Keep
         // both wakes in one owner operation so its flush cannot race between
         // them; cross-operation callback coalescing belongs to the platform.
-        relay
-            .run(move |_| {
-                query_waker.wake_by_ref();
-                query_waker.wake_by_ref();
-                Ok(())
-            })
-            .unwrap();
+        // Count the callbacks inside that operation: once it returns, the
+        // drive turn the wake requested runs on the owner thread and queues
+        // its own callback, concurrently with this thread's assertions.
+        let storage_wake_callbacks = {
+            let reader_wake = Arc::clone(&reader_wake);
+            relay
+                .run(move |worker| {
+                    let before = reader_wake.queued();
+                    query_waker.wake_by_ref();
+                    query_waker.wake_by_ref();
+                    worker.flush_foreground_wakes();
+                    Ok(reader_wake.queued() - before)
+                })
+                .unwrap()
+        };
         assert!(
             reader_wake.wait_for_queued(1),
             "the storage wake must cross the native foreground callback"
         );
         assert_eq!(
-            reader_wake.queued(),
-            1,
+            storage_wake_callbacks, 1,
             "coalesced storage wakes queue one native owner callback"
         );
         // #3273: the owner consumes the wake in its own drive turn instead of

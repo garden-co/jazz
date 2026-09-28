@@ -16,6 +16,8 @@
     "test:examples:e2e": "node tests/examples.browser.mjs"
   },
   "dependencies": {
+    "@astryxdesign/core": "0.6.3",
+    "@garden-co/design": "github:garden-co/design#15b62bc8c47ccf4a98b71df854a672ab872d01cd",
     "@vercel/analytics": "^2.0.1",
     "feed": "^5.2.1",
     "fumadocs-core": "16.6.2",
@@ -23,6 +25,7 @@
     "fumadocs-ui": "16.6.2",
     "lucide-react": "^0.563.0",
     "next": "catalog:default",
+    "next-themes": "^0.4.6",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "simple-icons": "^16.17.0",

@@ -83,15 +83,15 @@ impl LocalMaintainedViewSubscription {
     pub(crate) fn decoded_terminal_records(
         &self,
     ) -> Result<
-        BTreeMap<OutputOccurrenceId, crate::db::terminal_record::TerminalRecordState>,
-        crate::db::Error,
+        BTreeMap<OutputOccurrenceId, crate::node::terminal_record::TerminalRecordState>,
+        crate::node::api_error::Error,
     > {
         self.maintained
             .decoded_terminal_records()
             .iter()
             .map(|(key, record)| {
                 Ok((
-                    crate::db::terminal_root_occurrence_id_with_root_union(
+                    crate::node::terminal_root::terminal_root_occurrence_id_with_root_union(
                         key,
                         self.terminal_root_layout()
                             .is_some_and(|layout| layout.root_union_arm),
@@ -102,7 +102,9 @@ impl LocalMaintainedViewSubscription {
             .collect()
     }
 
-    pub(crate) fn terminal_root_layout(&self) -> Option<&crate::db::TerminalRootLayout> {
+    pub(crate) fn terminal_root_layout(
+        &self,
+    ) -> Option<&crate::node::terminal_root::TerminalRootLayout> {
         self.terminal_schemas.terminal_root_layout()
     }
 
@@ -467,7 +469,7 @@ where
                 read_view.clone(),
             ),
         };
-        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+        if crate::debug_env::covered_input_trace() {
             eprintln!(
                 "JAZZ_COVERED_INPUT_TRACE stage=open root_terminal={} sources={} initial_received={}",
                 local.has_root_collector(),
@@ -475,7 +477,7 @@ where
                 local.initial_received,
             );
         }
-        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+        if crate::debug_env::covered_input_trace() {
             eprintln!(
                 "JAZZ_COVERED_INPUT_TRACE stage=initial_transitions adds={} removes={} facts_adds={} facts_removes={} terminal_ops={}",
                 transitions.adds.len(),
@@ -884,7 +886,7 @@ where
             CoveredInstall::Complete => self.database.apply_input_source_deltas(deltas).await,
         }
         .map_err(Error::Groove)?;
-        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+        if crate::debug_env::covered_input_trace() {
             eprintln!(
                 "JAZZ_COVERED_INPUT_TRACE stage=incremental_receiver_delta predecessor={} generation={} tick={} processed={}",
                 incremental.predecessor_generation,
@@ -995,7 +997,7 @@ where
                 // Opening a usage site is not a claim that every source is
                 // empty.  Keep strict receivers pending until an exact reset
                 // manifest arrives; this is deliberately not an error.
-                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                if crate::debug_env::covered_input_trace() {
                     eprintln!(
                         "JAZZ_COVERED_INPUT_TRACE stage=covered_closure_pending sources={}",
                         receiver.sources.len(),
@@ -1066,7 +1068,7 @@ where
             CoveredInstall::Complete => self.database.replace_input_sources(replacements).await,
         }
         .map_err(Error::Groove)?;
-        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+        if crate::debug_env::covered_input_trace() {
             eprintln!(
                 "JAZZ_COVERED_INPUT_TRACE stage=replaced sources={replacement_record_counts:?} tick={} processed={} notifications={} notification_records={}",
                 replacement_metrics.tick,
@@ -1241,7 +1243,7 @@ where
                             deltas.terminal_sinks.len()
                         );
                     }
-                    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                    if crate::debug_env::covered_input_trace() {
                         eprintln!(
                             "JAZZ_COVERED_INPUT_TRACE stage=drain sinks={} terminals={}",
                             deltas.sinks.len(),
@@ -1255,7 +1257,7 @@ where
                         &self.node_aliases,
                     )?;
                     terminal_operations.extend(transitions.terminal_operations);
-                    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                    if crate::debug_env::covered_input_trace() {
                         eprintln!(
                             "JAZZ_COVERED_INPUT_TRACE stage=transitions terminal_ops={} adds={} removes={}",
                             terminal_operations.len(),
@@ -1457,7 +1459,7 @@ where
                         local.result_query.aggregate.is_some(),
                     )?
                 {
-                    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                    if crate::debug_env::covered_input_trace() {
                         eprintln!(
                             "JAZZ_COVERED_INPUT_TRACE stage=local_maintained_added table={} occurrence={occurrence_id:?}",
                             row.table(),

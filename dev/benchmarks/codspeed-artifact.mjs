@@ -7,34 +7,126 @@ import { chmod, copyFile, mkdir, readFile, lstat, readdir, writeFile } from "nod
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-// The single list of native wall-time workloads. `matrix` prints it for the
-// CodSpeed workflow's build and measurement jobs, so adding an example here is
-// the only workflow change it needs. Each workload names the Cargo package
-// `jazz-example-<workload>-benchmark` with a `walltime` bench target.
-export const workloads = [
-  "todo",
-  "permissioned-resources",
-  "policy-scoped-documents",
-  "band-chat",
-  "world-tour",
-  "poster-shop",
-  "record-player",
-  "wequencer",
-];
-const format = "jazz-codspeed-benchmark-artifact-v1";
+// The single table of CodSpeed wall-time workloads. `matrix` prints the names
+// for the workflow's build and measurement jobs and `measure` their measurement
+// settings, so adding a workload here is the only workflow change it needs.
+// One Cargo invocation per workload, so feature unification across workloads
+// can never change what a receipt measures. Each entry reproduces the exact
+// package, benches, features, thread stack and timeout the workload was
+// measured with before builds moved off the macro runner (#3174).
+const mimalloc = "jazz-benchmark-guard/mimalloc";
+const nativeStack = 4194304;
+const nativeExample = (name) => ({
+  package: `jazz-example-${name}-benchmark`,
+  benches: ["walltime"],
+  features: mimalloc,
+  minStack: nativeStack,
+  timeout: 20,
+});
+const workloadSpecs = {
+  todo: nativeExample("todo"),
+  "permissioned-resources": nativeExample("permissioned-resources"),
+  "policy-scoped-documents": nativeExample("policy-scoped-documents"),
+  "band-chat": nativeExample("band-chat"),
+  "world-tour": nativeExample("world-tour"),
+  chat: nativeExample("chat"),
+  "auth-chat": nativeExample("auth-chat"),
+  "poster-shop": nativeExample("poster-shop"),
+  "record-player": nativeExample("record-player"),
+  wequencer: nativeExample("wequencer"),
+  "epic-drop": nativeExample("epic-drop"),
+  "jamazon-warehouse": nativeExample("jamazon-warehouse"),
+  "music-agent": nativeExample("music-agent"),
+  "big-label": {
+    package: "jazz-example-big-label-benchmark",
+    benches: ["ingest_walltime", "loads"],
+    features: null,
+    minStack: null,
+    timeout: 25,
+  },
+  w1: {
+    package: "jazz-example-benchmark-w1",
+    benches: ["reads_memory_walltime", "reads_rocksdb_walltime", "ahead_current"],
+    features: null,
+    minStack: null,
+    timeout: 40,
+  },
+  "route-subscription": {
+    package: "jazz",
+    benches: ["route_subscription_curve"],
+    features: "testing",
+    minStack: null,
+    timeout: 25,
+  },
+  "groove-ivm": {
+    package: "groove",
+    benches: ["pull_vs_snapshot", "steady_state"],
+    features: null,
+    minStack: null,
+    timeout: 40,
+  },
+  "selective-hydration": {
+    package: "jazz",
+    benches: ["selective_global_hydration"],
+    features: "testing",
+    minStack: null,
+    timeout: 35,
+  },
+};
+export const workloads = Object.keys(workloadSpecs);
+const format = "jazz-codspeed-benchmark-artifact-v2";
 // Observed codspeed-macro checkout root. Relative DWARF paths still receive
 // origin=unknown; match the absolute repository root uploaded by the runner.
 export const measurementWorkspace = "/actions-runner/_work/jazz/jazz";
-const contract = {
+const baseContract = {
   rust: "1.93.1",
   codspeed: "5.0.1",
   target: "aarch64-unknown-linux-gnu",
   mode: "walltime",
   profile: "bench",
-  features: "jazz-benchmark-guard/mimalloc",
-  bench: "walltime",
   sourcePaths: { kind: "measurement-workspace-absolute", root: measurementWorkspace },
 };
+
+function spec(workload) {
+  assert.ok(Object.hasOwn(workloadSpecs, workload), "unknown workload");
+  return workloadSpecs[workload];
+}
+
+export function contractFor(workload) {
+  const { package: pkg, benches, features } = spec(workload);
+  return { ...baseContract, package: pkg, benches, features };
+}
+
+// Per-workload measurement settings for the macro runner. An empty
+// RUST_MIN_STACK is unset to Rust std: the default thread stack.
+export function measureSettings() {
+  return Object.fromEntries(
+    workloads.map((w) => [
+      w,
+      {
+        min_stack: workloadSpecs[w].minStack ? String(workloadSpecs[w].minStack) : "",
+        timeout: workloadSpecs[w].timeout,
+      },
+    ]),
+  );
+}
+
+// Arguments after `cargo codspeed build -m walltime` / `cargo codspeed run -m walltime`.
+// Features are chosen at build time only; cargo-codspeed rejects them on `run`.
+export function buildArgs(workload) {
+  const { package: pkg, benches, features } = spec(workload);
+  return [
+    "--package",
+    pkg,
+    ...benches.flatMap((bench) => ["--bench", bench]),
+    ...(features ? ["--features", features] : []),
+  ];
+}
+
+export function runArgs(workload) {
+  const { package: pkg, benches } = spec(workload);
+  return ["--package", pkg, ...benches.flatMap((bench) => ["--bench", bench])];
+}
 
 export function sourcePathFlags(buildWorkspace) {
   assert.ok(path.isAbsolute(buildWorkspace), "absolute build workspace required");
@@ -97,9 +189,11 @@ async function digest(file) {
 }
 
 export function artifactPaths(workload) {
-  assert.ok(workloads.includes(workload), "unknown workload");
+  const { package: pkg, benches } = spec(workload);
   return {
-    binary: `target/codspeed/walltime/jazz-example-${workload}-benchmark/walltime`,
+    binaries: Object.fromEntries(
+      benches.map((bench) => [bench, `target/codspeed/walltime/${pkg}/${bench}`]),
+    ),
     bundle: `target/codspeed-artifact-${workload}`,
   };
 }
@@ -107,17 +201,23 @@ export function artifactPaths(workload) {
 // Exported for filesystem contract tests; the CLI always obtains its own context
 // and checks the real host. Hashes catch stale/corrupt artifacts, not a hostile
 // workflow author who can also change this verifier.
+function bundleFiles(workload) {
+  return [...spec(workload).benches, "cargo-codspeed"].sort();
+}
+
 export async function seal(workload, identity, cli) {
   validateContext(identity);
-  const { binary, bundle } = artifactPaths(workload);
+  const { binaries, bundle } = artifactPaths(workload);
   await mkdir(bundle, { recursive: true });
-  await copyFile(binary, path.join(bundle, "walltime"));
+  for (const [bench, binary] of Object.entries(binaries)) {
+    await copyFile(binary, path.join(bundle, bench));
+  }
   await copyFile(cli, path.join(bundle, "cargo-codspeed"));
   const files = {};
-  for (const name of ["walltime", "cargo-codspeed"]) {
+  for (const name of bundleFiles(workload)) {
     files[name] = await digest(path.join(bundle, name));
   }
-  const manifest = { format, ...identity, workload, contract, files };
+  const manifest = { format, ...identity, workload, contract: contractFor(workload), files };
   await writeFile(path.join(bundle, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
   return manifest;
 }
@@ -125,16 +225,17 @@ export async function seal(workload, identity, cli) {
 export async function verify(workload, identity) {
   validateContext(identity);
   const { bundle } = artifactPaths(workload);
-  assert.deepEqual((await readdir(bundle)).sort(), ["cargo-codspeed", "manifest.json", "walltime"]);
+  const expected = bundleFiles(workload);
+  assert.deepEqual((await readdir(bundle)).sort(), [...expected, "manifest.json"].sort());
   const manifest = JSON.parse(await readFile(path.join(bundle, "manifest.json"), "utf8"));
   assert.equal(manifest.format, format, "unsupported manifest version");
   assert.equal(manifest.workload, workload, "wrong workload");
-  assert.deepEqual(manifest.contract, contract, "build contract mismatch");
+  assert.deepEqual(manifest.contract, contractFor(workload), "build contract mismatch");
   for (const key of ["source", "run", "compiler"]) {
     assert.equal(manifest[key], identity[key], `${key} mismatch`);
   }
-  assert.deepEqual(Object.keys(manifest.files).sort(), ["cargo-codspeed", "walltime"]);
-  for (const name of ["walltime", "cargo-codspeed"]) {
+  assert.deepEqual(Object.keys(manifest.files).sort(), expected);
+  for (const name of expected) {
     assert.equal(
       await digest(path.join(bundle, name)),
       manifest.files[name],
@@ -167,10 +268,18 @@ async function main() {
     console.log(JSON.stringify(workloads));
     return;
   }
-  const { binary, bundle } = artifactPaths(workload);
+  if (action === "measure") {
+    console.log(JSON.stringify(measureSettings()));
+    return;
+  }
+  if (action === "build-args" || action === "run-args") {
+    console.log((action === "build-args" ? buildArgs : runArgs)(workload).join(" "));
+    return;
+  }
+  const { binaries, bundle } = artifactPaths(workload);
   assert.ok(
     ["seal", "install"].includes(action),
-    "usage: codspeed-artifact.mjs seal|install WORKLOAD | rustflags | matrix",
+    "usage: codspeed-artifact.mjs seal|install|build-args|run-args WORKLOAD | rustflags | matrix | measure",
   );
   await platform();
   const identity = context();
@@ -188,7 +297,7 @@ async function main() {
     }
     const cli = command("which", ["cargo-codspeed"]);
     verifyCodspeedVersion(cli);
-    await checkExecutable(binary, true);
+    for (const binary of Object.values(binaries)) await checkExecutable(binary, true);
     await checkExecutable(cli);
     const manifest = await seal(workload, identity, cli);
     console.log(JSON.stringify(manifest, null, 2));
@@ -196,15 +305,17 @@ async function main() {
     // Fail before executing the downloaded CLI if the runner's layout drifts.
     verifyMeasurementWorkspace(process.cwd());
     await verify(workload, identity);
-    // upload-artifact normalizes permissions. Restore only the two verified
+    // upload-artifact normalizes permissions. Restore only the verified
     // executables, at fixed paths; never execute a path supplied by a manifest.
-    for (const name of ["walltime", "cargo-codspeed"]) {
+    for (const name of bundleFiles(workload)) {
       await chmod(path.join(bundle, name), 0o755);
-      await checkExecutable(path.join(bundle, name), name === "walltime");
+      await checkExecutable(path.join(bundle, name), name !== "cargo-codspeed");
     }
-    await mkdir(path.dirname(binary), { recursive: true });
-    await copyFile(path.join(bundle, "walltime"), binary);
-    await chmod(binary, 0o755);
+    for (const [bench, binary] of Object.entries(binaries)) {
+      await mkdir(path.dirname(binary), { recursive: true });
+      await copyFile(path.join(bundle, bench), binary);
+      await chmod(binary, 0o755);
+    }
     await writeFile(process.env.GITHUB_PATH, `${path.resolve(bundle)}\n`, { flag: "a" });
     console.log(
       `Verified ${workload} for ${identity.source}; no compilation on measurement runner.`,

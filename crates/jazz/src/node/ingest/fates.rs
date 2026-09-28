@@ -326,7 +326,7 @@ where
             }
         }
         for version in versions {
-            self.table_in_schema(version.table(), version.schema_version())?;
+            self.table_in_schema_ref(version.table(), version.schema_version())?;
             let table_id =
                 self.physical_table_id_for_schema(version.schema_version(), version.table())?;
             let current = self.visible_global_layer_tx_id_now_memoized(
@@ -1126,7 +1126,7 @@ where
                 let schema_version = self
                     .schema_version_for_alias(version.schema_version_alias())
                     .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
-                let table_schema = self.table_in_schema(version.table(), schema_version)?;
+                let table_schema = self.table_in_schema_ref(version.table(), schema_version)?;
                 let rejected_version_table = table_schema.rejected_versions_storage_table();
                 let rejected_version_values = rejected_version_values(&table_schema, version)?;
                 let rejected_version_record = owned_record_from_storage_values(

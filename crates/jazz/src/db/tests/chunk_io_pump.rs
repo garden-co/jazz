@@ -66,7 +66,7 @@ impl ChunkStorage for DeferredChunkStorage {
 
 fn deferred_local_chunk_reader() -> (groove::chunks::LocalChunkReader, Rc<DeferredChunkStorage>) {
     let storage = Rc::new(DeferredChunkStorage::default());
-    let mut database = crate::db::block_on(groove::db::Database::new(
+    let mut database = crate::local_executor::block_on(groove::db::Database::new(
         groove::schema::DatabaseSchema::new(Vec::<groove::schema::TableSchema>::new()),
         groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF])
             .expect("valid memory storage families"),
@@ -124,7 +124,7 @@ fn auxiliary_decoder() -> AuxiliaryChannelEndpoint {
 
 #[test]
 fn auxiliary_pump_completes_a_suspended_groove_chunk_read_without_a_semantic_tick() {
-    crate::db::block_on(async {
+    crate::local_executor::block_on(async {
         let source = Rc::new(groove::chunks::MemoryChunkStorage::new());
         let destination = Rc::new(groove::chunks::MemoryChunkStorage::new());
         let schema = groove::schema::DatabaseSchema::new(Vec::<groove::schema::TableSchema>::new());
@@ -217,7 +217,7 @@ fn auxiliary_pump_completes_a_suspended_groove_chunk_read_without_a_semantic_tic
 fn subscriber_auxiliary_responses_are_bounded_to_one_chunk_per_logical_message() {
     let resolver = PeerChunkResolver::default();
     let schema = groove::schema::DatabaseSchema::new(Vec::<groove::schema::TableSchema>::new());
-    let database = crate::db::block_on(groove::db::Database::new(
+    let database = crate::local_executor::block_on(groove::db::Database::new(
         schema,
         groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF])
             .expect("valid memory storage families"),
@@ -277,7 +277,7 @@ fn subscriber_auxiliary_responses_are_bounded_to_one_chunk_per_logical_message()
 fn bounded_auxiliary_drain_keeps_large_response_batches_fifo_and_within_bytes() {
     let resolver = PeerChunkResolver::default();
     let schema = groove::schema::DatabaseSchema::new(Vec::<groove::schema::TableSchema>::new());
-    let database = crate::db::block_on(groove::db::Database::new(
+    let database = crate::local_executor::block_on(groove::db::Database::new(
         schema,
         groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF])
             .expect("valid memory storage families"),
@@ -346,7 +346,7 @@ fn bounded_auxiliary_drain_keeps_large_response_batches_fifo_and_within_bytes() 
 fn dropping_the_last_suspended_consumer_cancels_unsent_chunk_demand() {
     let resolver = PeerChunkResolver::default();
     let schema = groove::schema::DatabaseSchema::new(Vec::<groove::schema::TableSchema>::new());
-    let database = crate::db::block_on(groove::db::Database::new(
+    let database = crate::local_executor::block_on(groove::db::Database::new(
         schema,
         groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF])
             .expect("valid memory storage families"),
@@ -378,7 +378,7 @@ fn dropping_the_last_suspended_consumer_cancels_unsent_chunk_demand() {
 fn failed_send_restore_keeps_its_relay_reservation_across_later_admission() {
     let resolver = PeerChunkResolver::default();
     let schema = groove::schema::DatabaseSchema::new(Vec::<groove::schema::TableSchema>::new());
-    let database = crate::db::block_on(groove::db::Database::new(
+    let database = crate::local_executor::block_on(groove::db::Database::new(
         schema,
         groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF])
             .expect("valid memory storage families"),
@@ -447,7 +447,7 @@ fn failed_send_restore_keeps_its_relay_reservation_across_later_admission() {
 // auxiliary request is not owned by a socket until its reservation commits.
 #[test]
 fn reserved_wire_chunk_request_retries_after_backpressure_without_changing_its_id() {
-    crate::db::block_on(async {
+    crate::local_executor::block_on(async {
         let resolver = PeerChunkResolver::default();
         let database = groove::db::Database::new(
             groove::schema::DatabaseSchema::new(Vec::<groove::schema::TableSchema>::new()),
@@ -510,7 +510,7 @@ fn reserved_wire_chunk_request_retries_after_backpressure_without_changing_its_i
 #[test]
 fn reserved_wire_chunk_response_restores_its_relay_obligation_after_backpressure() {
     let resolver = PeerChunkResolver::default();
-    let database = crate::db::block_on(groove::db::Database::new(
+    let database = crate::local_executor::block_on(groove::db::Database::new(
         groove::schema::DatabaseSchema::new(Vec::<groove::schema::TableSchema>::new()),
         groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF])
             .expect("valid memory storage families"),
@@ -571,7 +571,7 @@ fn reserved_wire_chunk_response_restores_its_relay_obligation_after_backpressure
 fn partial_drain_then_disconnect_releases_only_that_connections_obligations() {
     let resolver = PeerChunkResolver::default();
     let schema = groove::schema::DatabaseSchema::new(Vec::<groove::schema::TableSchema>::new());
-    let database = crate::db::block_on(groove::db::Database::new(
+    let database = crate::local_executor::block_on(groove::db::Database::new(
         schema,
         groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF])
             .expect("valid memory storage families"),
@@ -672,7 +672,7 @@ fn mixed_waiter_and_immediate_response_saturation_never_exceeds_the_shared_cap()
 fn completion_transfers_a_relay_reservation_until_the_response_is_acknowledged() {
     let resolver = PeerChunkResolver::default();
     let schema = groove::schema::DatabaseSchema::new(Vec::<groove::schema::TableSchema>::new());
-    let database = crate::db::block_on(groove::db::Database::new(
+    let database = crate::local_executor::block_on(groove::db::Database::new(
         schema,
         groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF])
             .expect("valid memory storage families"),
@@ -766,7 +766,7 @@ fn detach_during_peer_tick_chunk_lookup_drops_missing_and_found_outcomes() {
             &schema,
         );
         let storage = Rc::new(DeferredChunkStorage::default());
-        crate::db::block_on(async {
+        crate::local_executor::block_on(async {
             server
                 .node
                 .node
@@ -777,7 +777,7 @@ fn detach_during_peer_tick_chunk_lookup_drops_missing_and_found_outcomes() {
         let (mut client_transport, server_transport) = duplex();
         let subscriber = server.accept_subscriber(server_transport, AuthorSubject::SYSTEM);
         // Finish authenticated startup before exercising the control under test.
-        crate::db::block_on(subscriber.borrow_mut().tick()).unwrap();
+        crate::local_executor::block_on(subscriber.borrow_mut().tick()).unwrap();
         assert!(matches!(
             client_transport.try_recv(),
             Some(SyncMessage::CatalogueSnapshot(_))
@@ -842,7 +842,7 @@ fn detach_during_peer_tick_chunk_lookup_drops_missing_and_found_outcomes() {
 // hop-local wire-protocol contract, not a user-visible database operation.
 #[test]
 fn five_concurrent_chunk_demands_are_delivered_in_two_decodable_batches() {
-    crate::db::block_on(async {
+    crate::local_executor::block_on(async {
         let source = Rc::new(groove::chunks::MemoryChunkStorage::new());
         let destination = Rc::new(groove::chunks::MemoryChunkStorage::new());
         let schema = groove::schema::DatabaseSchema::new(Vec::<groove::schema::TableSchema>::new());
@@ -935,7 +935,7 @@ fn five_concurrent_chunk_demands_are_delivered_in_two_decodable_batches() {
 
 #[test]
 fn retryable_chunk_response_preserves_retry_delay_and_allows_a_later_fulfillment() {
-    crate::db::block_on(async {
+    crate::local_executor::block_on(async {
         let resolver = PeerChunkResolver::default();
         let schema = groove::schema::DatabaseSchema::new(Vec::<groove::schema::TableSchema>::new());
         let database = groove::db::Database::new(
@@ -1001,7 +1001,7 @@ fn retryable_chunk_response_preserves_retry_delay_and_allows_a_later_fulfillment
 
 #[test]
 fn a_late_response_from_a_disconnected_upstream_cannot_complete_reassigned_demand() {
-    crate::db::block_on(async {
+    crate::local_executor::block_on(async {
         let resolver = PeerChunkResolver::default();
         let schema = groove::schema::DatabaseSchema::new(Vec::<groove::schema::TableSchema>::new());
         let database = groove::db::Database::new(
@@ -1082,7 +1082,7 @@ fn a_late_response_from_a_disconnected_upstream_cannot_complete_reassigned_deman
 /// ```
 #[test]
 fn a_later_registered_upstream_retries_demand_drained_by_a_disconnected_predecessor() {
-    crate::db::block_on(async {
+    crate::local_executor::block_on(async {
         let resolver = PeerChunkResolver::default();
         let schema = groove::schema::DatabaseSchema::new(Vec::<groove::schema::TableSchema>::new());
         let database = groove::db::Database::new(
@@ -1162,7 +1162,7 @@ fn a_later_registered_upstream_retries_demand_drained_by_a_disconnected_predeces
 #[test]
 fn complete_auxiliary_response_with_wrong_protocol_version_is_rejected_without_resolving_pending_chunk()
  {
-    crate::db::block_on(async {
+    crate::local_executor::block_on(async {
         let resolver = PeerChunkResolver::default();
         let database = groove::db::Database::new(
             groove::schema::DatabaseSchema::new(Vec::<groove::schema::TableSchema>::new()),
@@ -1231,7 +1231,7 @@ fn complete_auxiliary_response_with_wrong_protocol_version_is_rejected_without_r
 // route auxiliary frames without re-entering the database's semantic interface.
 #[test]
 fn paired_wire_context_governs_auxiliary_frames_in_both_directions() {
-    crate::db::block_on(async {
+    crate::local_executor::block_on(async {
         let author = AuthorSubject::for_test_bytes([0x52; 16]);
         let database = open_db(0x52, author, &schema());
         let (client_bytes, _server_bytes) = super::byte_duplex_raw();

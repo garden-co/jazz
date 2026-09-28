@@ -2632,7 +2632,7 @@ fn maintained_array_collector_retains_authorized_parent_trees_incrementally() {
         ]),
     ))
     .unwrap();
-    crate::db::block_on(node.drive_query_runtime()).unwrap();
+    crate::local_executor::block_on(node.drive_query_runtime()).unwrap();
     let mut changed_root_keys = BTreeSet::new();
     while let Ok(deltas) = subscription.try_recv() {
         let transitions = maintained
@@ -2788,7 +2788,7 @@ fn maintained_nested_collector_keeps_two_route_keys_internal_across_sibling_arra
         ]),
     ))
     .unwrap();
-    crate::db::block_on(node.drive_query_runtime()).unwrap();
+    crate::local_executor::block_on(node.drive_query_runtime()).unwrap();
     let mut changed_root_keys = BTreeSet::new();
     while let Ok(deltas) = subscription.try_recv() {
         changed_root_keys.extend(

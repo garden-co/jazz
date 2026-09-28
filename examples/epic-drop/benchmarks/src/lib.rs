@@ -62,41 +62,29 @@ pub struct Fixture {
 }
 
 impl Fixture {
+    /// One folder holding one streamed file of `file_bytes`.
     pub fn new(file_bytes: usize) -> Self {
+        Self::with_files(1, file_bytes)
+    }
+
+    /// One folder holding `file_count` streamed files of `file_bytes` each.
+    /// The first file is the range/download target.
+    pub fn with_files(file_count: usize, file_bytes: usize) -> Self {
+        assert!(file_count > 0, "fixture requires at least one file");
         assert!(
             file_bytes > INLINE_VALUE_MAX_BYTES,
             "exercise the indirect large-value path"
         );
-        let schema = schema();
-        let refs = schema.column_families();
-        let storage = TestStorage::new(&refs.iter().map(String::as_str).collect::<Vec<_>>());
-        let db = open(schema.clone(), storage);
-        insert_folder(&db);
-
-        let write = block_on(db.insert_streaming_value_with_id(
-            "files",
-            file_id(),
-            BTreeMap::from([
-                ("folder_id".to_owned(), Value::Uuid(folder_id().0)),
-                ("name".to_owned(), Value::String("live-set.wav".to_owned())),
-                (
-                    "content_type".to_owned(),
-                    Value::String("audio/wav".to_owned()),
-                ),
-                (
-                    "size_bytes".to_owned(),
-                    Value::I32(i32::try_from(file_bytes).expect("benchmark file size fits an int")),
-                ),
-                (
-                    "owner_id".to_owned(),
-                    Value::String("demo-owner".to_owned()),
-                ),
-            ]),
-            "contents",
-            PatternReader::new(file_bytes),
-        ))
-        .expect("stream file into fixture");
-        block_on(write.wait(DurabilityTier::Local)).expect("fixture file reaches local durability");
+        let db = open_seeded_db();
+        stream_file(&db, file_id(), "live-set.wav", file_bytes);
+        for index in 1..file_count {
+            stream_file(
+                &db,
+                numbered_file_id(index),
+                &format!("take-{index:04}.wav"),
+                file_bytes,
+            );
+        }
 
         let list = db
             .prepare_query(
@@ -127,6 +115,98 @@ impl Fixture {
         ))
         .expect("read bounded file range")
     }
+
+    /// Read the whole first file back, as a "download" button would.
+    pub fn download_file(&self) -> Vec<u8> {
+        block_on(self.db.read_value_range(
+            "files",
+            file_id(),
+            "contents",
+            0..self.file_bytes as u64,
+        ))
+        .expect("read whole file")
+    }
+}
+
+/// An opened EpicDrop database with its folder in place and no files yet.
+/// Each upload streams one new file and waits for local durability.
+pub struct UploadFixture {
+    db: BenchDb,
+}
+
+impl UploadFixture {
+    pub fn new() -> Self {
+        Self {
+            db: open_seeded_db(),
+        }
+    }
+
+    pub fn upload(&self, index: usize, file_bytes: usize) -> usize {
+        stream_file(
+            &self.db,
+            numbered_file_id(index),
+            &format!("upload-{index:04}.wav"),
+            file_bytes,
+        );
+        file_bytes
+    }
+
+    /// Untimed receipt: the uploaded file's listed size and a byte window.
+    pub fn uploaded_range(&self, index: usize, range: std::ops::Range<u64>) -> Vec<u8> {
+        block_on(
+            self.db
+                .read_value_range("files", numbered_file_id(index), "contents", range),
+        )
+        .expect("read uploaded file range")
+    }
+}
+
+impl Default for UploadFixture {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn numbered_file_id(index: usize) -> RowUuid {
+    let mut bytes = [0x43; 16];
+    bytes[8..].copy_from_slice(&(index as u64).to_be_bytes());
+    RowUuid::from_bytes(bytes)
+}
+
+fn open_seeded_db() -> BenchDb {
+    let schema = schema();
+    let refs = schema.column_families();
+    let storage = TestStorage::new(&refs.iter().map(String::as_str).collect::<Vec<_>>());
+    let db = open(schema, storage);
+    insert_folder(&db);
+    db
+}
+
+fn stream_file(db: &BenchDb, id: RowUuid, name: &str, file_bytes: usize) {
+    let write = block_on(db.insert_streaming_value_with_id(
+        "files",
+        id,
+        BTreeMap::from([
+            ("folder_id".to_owned(), Value::Uuid(folder_id().0)),
+            ("name".to_owned(), Value::String(name.to_owned())),
+            (
+                "content_type".to_owned(),
+                Value::String("audio/wav".to_owned()),
+            ),
+            (
+                "size_bytes".to_owned(),
+                Value::I32(i32::try_from(file_bytes).expect("benchmark file size fits an int")),
+            ),
+            (
+                "owner_id".to_owned(),
+                Value::String("demo-owner".to_owned()),
+            ),
+        ]),
+        "contents",
+        PatternReader::new(file_bytes),
+    ))
+    .expect("stream file into fixture");
+    block_on(write.wait(DurabilityTier::Local)).expect("streamed file reaches local durability");
 }
 
 fn schema() -> JazzSchema {
@@ -186,9 +266,12 @@ fn insert_folder(db: &BenchDb) {
 
 pub fn expected_range(file_bytes: usize) -> Vec<u8> {
     let start = file_bytes / 2;
-    (start..start + RANGE_BYTES as usize)
-        .map(|offset| (offset % 251) as u8)
-        .collect()
+    expected_bytes(start..start + RANGE_BYTES as usize)
+}
+
+/// The deterministic source pattern for any byte window of a fixture file.
+pub fn expected_bytes(range: std::ops::Range<usize>) -> Vec<u8> {
+    range.map(|offset| (offset % 251) as u8).collect()
 }
 
 #[cfg(test)]

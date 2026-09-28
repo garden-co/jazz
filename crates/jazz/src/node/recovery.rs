@@ -140,7 +140,7 @@ where
                 let logical_table =
                     self.logical_table_for_physical_alias(table_id, schema_alias)?;
                 let logical_descriptor = self
-                    .table_in_schema(&logical_table, schema_version)?
+                    .table_in_schema_ref(&logical_table, schema_version)?
                     .rejected_versions_storage_table()
                     .record_schema();
                 versions.push(RejectedVersion::new(

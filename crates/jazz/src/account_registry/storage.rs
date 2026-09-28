@@ -281,7 +281,7 @@ mod tests {
 
     #[test]
     fn login_or_register_flush_failure_requires_recovery_before_admission() {
-        crate::db::block_on(async {
+        crate::local_executor::block_on(async {
             let storage = FailFlush {
                 inner: MemoryStorage::new(&[CF]).unwrap(),
                 fail: Default::default(),
@@ -322,7 +322,7 @@ mod tests {
     // behavior: this uses the public durable API and real storage adapter.
     #[test]
     fn login_or_register_recovery_preserves_assignment_and_denials() {
-        crate::db::block_on(async {
+        crate::local_executor::block_on(async {
             let storage = MemoryStorage::new(&[CF]).unwrap();
             let mut registry = StoredAccountRegistry::open(storage.clone()).await.unwrap();
             let principal = Principal {
@@ -339,7 +339,7 @@ mod tests {
                     subject: Uuid::new_v4().to_string(),
                 },
                 Principal {
-                    issuer: crate::tools::identity::LOCAL_FIRST_ISSUER.into(),
+                    issuer: crate::identity::LOCAL_FIRST_ISSUER.into(),
                     subject: Uuid::new_v4().to_string(),
                 },
             ] {
@@ -426,7 +426,7 @@ mod tests {
     // Journal corruption cannot be constructed through the public command API.
     #[test]
     fn recovery_rejects_old_versions_gaps_and_corrupt_records() {
-        crate::db::block_on(async {
+        crate::local_executor::block_on(async {
             let command = AccountCommand::Register {
                 principal: Principal {
                     issuer: "i".into(),
@@ -458,7 +458,7 @@ mod tests {
 
     #[test]
     fn recovery_retains_link_nonce_consumption_after_revocation() {
-        crate::db::block_on(async {
+        crate::local_executor::block_on(async {
             let storage = MemoryStorage::new(&[CF]).unwrap();
             let mut registry = StoredAccountRegistry::open(storage.clone()).await.unwrap();
             let approver = Principal {
@@ -515,7 +515,7 @@ mod tests {
 
     #[test]
     fn recovery_retains_revocation_and_competing_owners_fail_closed() {
-        crate::db::block_on(async {
+        crate::local_executor::block_on(async {
             let storage = MemoryStorage::new(&[CF]).unwrap();
             let mut first = StoredAccountRegistry::open(storage.clone()).await.unwrap();
             let mut stale = StoredAccountRegistry::open(storage.clone()).await.unwrap();
@@ -565,7 +565,7 @@ mod stale_admission_tests {
     // Unlike the conflicting-write test, this stale owner never mutates.
     #[test]
     fn read_only_stale_owner_cannot_admit_a_revoked_identity() {
-        crate::db::block_on(async {
+        crate::local_executor::block_on(async {
             let storage = MemoryStorage::new(&[CF]).unwrap();
             let mut writer = StoredAccountRegistry::open(storage.clone()).await.unwrap();
             let alice = Principal {

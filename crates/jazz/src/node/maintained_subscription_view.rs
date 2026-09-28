@@ -23,9 +23,12 @@ use super::query_engine::{
     ResultMembershipSchema, ResultMembershipVersionSchema, TypedOutputField, VersionWitnessSchema,
     VersionedRowRefSchema,
 };
-use crate::db::{TerminalRootCarrier, TerminalRootLayout, TerminalRootPublicField};
 use crate::ids::{NodeAlias, RowAuthor, RowUuid, SchemaVersionAlias};
+use crate::node::terminal_root::{
+    TerminalRootCarrier, TerminalRootLayout, TerminalRootPublicField,
+};
 use crate::node::{CurrentRowPublicationField, CurrentRowResultVisibility};
+use crate::object::{ObjectId, OutputOccurrenceId};
 #[cfg(test)]
 use crate::protocol::CoveredInputEntry;
 use crate::protocol::{
@@ -35,7 +38,6 @@ use crate::protocol::{
 };
 use crate::schema::{RuntimeSchema, TableSchema};
 use crate::time::{GlobalTime, TxTime};
-use crate::tools::{ObjectId, OutputOccurrenceId};
 use crate::tx::TxId;
 
 type TableSchemas = BTreeMap<String, TableSchema>;
@@ -58,8 +60,25 @@ struct VersionDecodePlan {
     authored_columns_idx: usize,
 }
 
+/// The lone-subscriber token stays with the view its subscription installed:
+/// a clone that outlives that subscription must not keep the next subscriber
+/// of the shape on the shared path, so clones start without it.
+#[derive(Debug, Default)]
+struct ClientLocalLiteralToken {
+    _held: Option<std::sync::Arc<()>>,
+}
+
+impl Clone for ClientLocalLiteralToken {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct MaintainedSubscriptionView {
+    /// Held while this view is the lone literal-graph subscriber of its
+    /// Local-tier client-local shape; see `NodeState::client_local_literal_shapes`.
+    client_local_literal_token: ClientLocalLiteralToken,
     /// Test receipt from the exact program passed to subscribe_lowered_program,
     /// not from an unrelated prepared AppRows plan or caller-supplied label.
     #[cfg(test)]
@@ -94,7 +113,8 @@ pub(crate) struct MaintainedSubscriptionView {
     structured_app_rows: BTreeMap<Vec<u8>, BTreeMap<Vec<u8>, i64>>,
     /// A root switches from its encoded seed to decoded state on its first
     /// descendant edit. Never retain a second encoded copy while it evolves.
-    structured_terminal_records: BTreeMap<Vec<u8>, crate::db::terminal_record::TerminalRecordState>,
+    structured_terminal_records:
+        BTreeMap<Vec<u8>, crate::node::terminal_record::TerminalRecordState>,
     /// Runtime terminal edits address roots by their opaque Groove key. Keep
     /// the compiler-emitted association solely to target a root's descendants;
     /// it must never be used to collapse retained occurrence records.
@@ -141,6 +161,7 @@ pub(crate) struct MaintainedSubscriptionView {
 impl Default for MaintainedSubscriptionView {
     fn default() -> Self {
         Self {
+            client_local_literal_token: ClientLocalLiteralToken::default(),
             #[cfg(test)]
             compiled_authorization_mode: None,
             read_view: Default::default(),
@@ -552,6 +573,10 @@ fn terminal_root_uuid_from_key(key: &[u8]) -> Option<RowUuid> {
 }
 
 impl MaintainedSubscriptionView {
+    pub(crate) fn hold_client_local_literal_token(&mut self, token: std::sync::Arc<()>) {
+        self.client_local_literal_token = ClientLocalLiteralToken { _held: Some(token) };
+    }
+
     pub(crate) fn set_read_view(&mut self, read_view: crate::protocol::ReadViewKey) {
         self.read_view = read_view;
     }
@@ -684,9 +709,7 @@ impl MaintainedSubscriptionView {
         // whole active closure here would turn every incremental tick into a
         // snapshot-sized operation.
         for (sink, terminal) in deltas.terminal_sinks {
-            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some()
-                && !terminal.operations.is_empty()
-            {
+            if crate::debug_env::covered_input_trace() && !terminal.operations.is_empty() {
                 eprintln!(
                     "JAZZ_COVERED_INPUT_TRACE stage=terminal_operations sink={sink} kind={:?} operations={}",
                     schemas.get(&sink)?,
@@ -768,7 +791,7 @@ impl MaintainedSubscriptionView {
             }
         }
         for (sink, deltas) in deltas.sinks {
-            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() && !deltas.is_empty() {
+            if crate::debug_env::covered_input_trace() && !deltas.is_empty() {
                 eprintln!(
                     "JAZZ_COVERED_INPUT_TRACE stage=terminal_sink sink={sink} kind={:?} records={}",
                     schemas.get(&sink)?,
@@ -809,7 +832,7 @@ impl MaintainedSubscriptionView {
                 delta_transitions.requires_authoritative_membership_reconcile;
         }
         self.finalize_multisink_transitions(&mut transitions, node_aliases);
-        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some()
+        if crate::debug_env::covered_input_trace()
             && (!transitions.adds.is_empty()
                 || !transitions.program_fact_adds.is_empty()
                 || !transitions.program_fact_removes.is_empty())
@@ -937,7 +960,7 @@ impl MaintainedSubscriptionView {
             if weight == 0 {
                 continue;
             }
-            if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+            if crate::debug_env::covered_input_trace() {
                 eprintln!(
                     "JAZZ_COVERED_INPUT_TRACE stage=apply_decoded_event event={event:?} weight={weight}"
                 );
@@ -1325,7 +1348,7 @@ impl MaintainedSubscriptionView {
 
     pub(crate) fn decoded_terminal_records(
         &self,
-    ) -> &BTreeMap<Vec<u8>, crate::db::terminal_record::TerminalRecordState> {
+    ) -> &BTreeMap<Vec<u8>, crate::node::terminal_record::TerminalRecordState> {
         &self.structured_terminal_records
     }
 
@@ -1421,9 +1444,9 @@ impl MaintainedSubscriptionView {
                         "collector terminal root has non-unit multiplicity",
                     ));
                 }
-                let state = crate::db::terminal_record::TerminalRecordState::new(OwnedRecord::new(
-                    raw, descriptor,
-                ))
+                let state = crate::node::terminal_record::TerminalRecordState::new(
+                    OwnedRecord::new(raw, descriptor),
+                )
                 .map_err(|_| {
                     super::Error::InvalidStoredValue("invalid retained collector terminal record")
                 })?;
@@ -1827,7 +1850,7 @@ fn rebind_terminal_operation_to_layout(
     if operation.root_descriptor == layout.root_descriptor {
         return Ok(operation);
     }
-    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+    if crate::debug_env::covered_input_trace() {
         eprintln!(
             "JAZZ_COVERED_INPUT_TRACE terminal_descriptor_mismatch operation={:?} layout={:?}",
             operation.root_descriptor, layout.root_descriptor,

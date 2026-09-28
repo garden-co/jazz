@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::node::query_engine::RequestedSourceExpr;
-use groove::db::SubscriptionLifetime;
+use groove::db::{RootIndirectValues, SubscriptionLifetime};
 
 /// A first-result consumer owns exactly its subscription and, when needed,
 /// its prepared shape. Dropping a suspended read cannot keep a binding alive
@@ -16,6 +16,9 @@ struct HydrationSubscription<'a> {
     database: &'a mut groove::db::Database,
     subscription: Option<MultisinkSubscription>,
     prepared_shape: Option<PreparedShapeId>,
+    /// The shape came from `prepare_shared`: other retained bindings may hold
+    /// it, so release it only if none does.
+    shared_shape: bool,
 }
 
 impl HydrationSubscription<'_> {
@@ -24,9 +27,13 @@ impl HydrationSubscription<'_> {
             self.database.unsubscribe(subscription.id());
         }
         if let Some(shape) = self.prepared_shape.take() {
-            self.database
-                .retire_prepared_shape(shape)
-                .map_err(Error::Groove)?;
+            if self.shared_shape {
+                self.database.release_shared_prepared_shape(shape);
+            } else {
+                self.database
+                    .retire_prepared_shape(shape)
+                    .map_err(Error::Groove)?;
+            }
         }
         Ok(())
     }
@@ -545,6 +552,13 @@ fn version_identity_fields(schema: &VersionIdentityFields) -> Vec<String> {
 
 const COMPILED_QUERY_PROGRAM_CACHE_MAX_ENTRIES: usize = 32;
 
+/// Unused admission products kept for their installers. A client opens a
+/// whole screen of subscriptions before any installer runs, so this must
+/// cover a realistic batch: at 32, a 61-list dashboard recompiled the 29
+/// oldest programs. Still well below the 256-proof budget; eviction only
+/// repeats compilation.
+pub(super) const ADMISSION_HANDOFF_MAX_PROGRAMS: usize = 128;
+
 /// An admission proof may hand its immutable compiler output to the first
 /// matching installer. No evaluator, live binding, rows or subscription is retained.
 /// Consuming the program leaves the cheap capability proof resident.
@@ -669,8 +683,8 @@ where
                 });
         }
         if let Some(program) = program {
-            // Keep the existing small compiled-program budget independently
-            // of the larger proof budget. An abandoned admission cannot retain
+            // Keep a bounded compiled-program budget independently of the
+            // larger proof budget. An abandoned admission cannot retain
             // arbitrarily many executable descriptions; eviction only repeats
             // compilation, never rejects a query. The first installer takes
             // ownership, so used programs do not occupy this handoff budget.
@@ -680,7 +694,7 @@ where
                 .iter()
                 .filter(|entry| entry.program.is_some())
                 .count()
-                >= COMPILED_QUERY_PROGRAM_CACHE_MAX_ENTRIES
+                >= ADMISSION_HANDOFF_MAX_PROGRAMS
             {
                 if let Some(oldest) = self
                     .query
@@ -887,9 +901,7 @@ where
             );
         }
         self.restore_expired_policy_compilation_state();
-        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some()
-            && !covered_input_sources.is_empty()
-        {
+        if crate::debug_env::covered_input_trace() && !covered_input_sources.is_empty() {
             eprintln!(
                 "JAZZ_COVERED_INPUT_TRACE stage=compile_receiver_program requested_sources={:?} runtime_sources={:?}",
                 request.reads.primary.sources.keys().collect::<Vec<_>>(),
@@ -1321,6 +1333,7 @@ where
             prepared_claim_binding_mode,
             progress_waker,
             SubscriptionLifetime::Retained,
+            RootIndirectValues::Materialize,
         )
         .await
         .map(|(subscription, _)| subscription)
@@ -1336,6 +1349,7 @@ where
         prepared_claim_binding_mode: PreparedClaimBindingMode,
         progress_waker: Option<&std::task::Waker>,
         lifetime: SubscriptionLifetime,
+        root_indirect_values: RootIndirectValues,
     ) -> Result<(MultisinkSubscription, Option<PreparedShapeId>), Error> {
         // Subscription opening performs one bounded IVM poll.  When that poll
         // finds cold storage, retain the node owner's wake route so the
@@ -1346,10 +1360,15 @@ where
             let sinks = lowered_program_sinks(&program);
             return self
                 .database
-                .subscribe_with_lifetime(sinks, lifetime, progress_waker)
+                .subscribe_with_lifetime_and_root_values(
+                    sinks,
+                    lifetime,
+                    root_indirect_values,
+                    progress_waker,
+                )
                 .map(|subscription| (subscription, None))
                 .map_err(|error| {
-                    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                    if crate::debug_env::covered_input_trace() {
                         eprintln!(
                             "JAZZ_COVERED_INPUT_TRACE stage=subscribe_receiver_error error={error:?}"
                         );
@@ -1392,31 +1411,47 @@ where
                 .with_route_value_indices(route_value_indices))
             })
             .collect::<Result<Vec<_>, Error>>()?;
-        let prepared = self
-            .database
-            .prepare(terminals, binding_source_shape, binding_descriptor)
-            .await
-            .map_err(|error| {
-                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
-                    eprintln!(
-                        "JAZZ_COVERED_INPUT_TRACE stage=prepare_receiver_error error={error:?}"
-                    );
-                }
-                Error::Groove(error)
-            })?;
+        // Retained client-local subscribers of identical terminals share one
+        // prepared shape, which retires itself with its last retained
+        // binding. Serving installs keep a shape per subscriber for now. A
+        // first-result read owns a private shape and retires it on return.
+        let shared_shape = lifetime == SubscriptionLifetime::Retained
+            && binding_source_shape.ends_with(":client-local");
+        let prepared = if shared_shape {
+            self.database
+                .prepare_shared(terminals, binding_source_shape, binding_descriptor)
+                .await
+        } else {
+            self.database
+                .prepare(terminals, binding_source_shape, binding_descriptor)
+                .await
+        }
+        .map_err(|error| {
+            if crate::debug_env::covered_input_trace() {
+                eprintln!("JAZZ_COVERED_INPUT_TRACE stage=prepare_receiver_error error={error:?}");
+            }
+            Error::Groove(error)
+        })?;
         // prepare() allocates a caller-owned shape. Own it before the binding
         // await so cancellation during cold hydration also releases it.
         let mut owner = HydrationSubscription {
             database: &mut self.database,
             subscription: None,
             prepared_shape: Some(prepared.id()),
+            shared_shape,
         };
         let subscription = owner
             .database
-            .bind_shape_with_lifetime(prepared.id(), &values, lifetime, progress_waker)
+            .bind_shape_with_lifetime_and_root_values(
+                prepared.id(),
+                &values,
+                lifetime,
+                root_indirect_values,
+                progress_waker,
+            )
             .await
             .map_err(|error| {
-                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                if crate::debug_env::covered_input_trace() {
                     eprintln!("JAZZ_COVERED_INPUT_TRACE stage=bind_receiver_error error={error:?}");
                 }
                 Error::Groove(error)
@@ -1425,10 +1460,14 @@ where
         Ok((subscription, Some(prepared.id())))
     }
 
+    /// `root_indirect_values` decides which root fields the result rebuilds
+    /// into logical large values. Callers that keep a field physical must
+    /// drop it, or hydrate it, before rows cross a public boundary.
     pub(super) async fn hydrate_lowered_program_once(
         &mut self,
         mut program: QueryProgram,
         binding: &Binding,
+        root_indirect_values: RootIndirectValues,
     ) -> Result<RecordDeltas, Error> {
         // Hydrate through the same live installation as a retained consumer.
         // The native CurrentRow boundary still consumes the compiler's
@@ -1459,12 +1498,14 @@ where
                 PreparedClaimBindingMode::Strict,
                 None,
                 SubscriptionLifetime::FirstResult,
+                root_indirect_values,
             )
             .await?;
         let mut owner = HydrationSubscription {
             database: &mut self.database,
             subscription: Some(subscription),
             prepared_shape,
+            shared_shape: false,
         };
         let result = futures::future::poll_fn(|cx| {
             let subscription = owner

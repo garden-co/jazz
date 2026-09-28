@@ -6,6 +6,9 @@
 //! "the server has not answered yet" is a deterministic state rather than a
 //! race.
 
+// Shared with jazz-testkit by path so Jazz needs no testkit dev-dependency.
+#[path = "../../jazz-testkit/src/duplex_transport.rs"]
+mod duplex_transport;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -16,6 +19,7 @@ use std::time::Duration;
 
 mod common;
 
+use duplex_transport::duplex;
 use jazz::block_on;
 use jazz::db::{
     Db, DbConfig, DbIdentity, EmptyOpening, LocalUpdates, REMOTE_LINK_ATTEMPT_WINDOW, ReadOpts,
@@ -29,7 +33,6 @@ use jazz::query::{OrderDirection, Query};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
-use jazz_testkit::duplex_transport::duplex;
 
 use common::{allow_all_policies, compile_schema};
 

@@ -274,7 +274,7 @@ fn maintained_global_index_snapshot_waits_for_settled_source() {
     );
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, client_author);
     let query = Query::from("documents").filter(eq(col("team"), lit(Value::Uuid(team.0))));
     server.node().borrow_mut().reset_query_engine_read_metrics();
@@ -5980,5 +5980,46 @@ fn cancelled_pending_read_releases_fence_preserving_later_operation() {
     assert!(
         advanced.get(),
         "cancellation must release the read fence without dropping later work"
+    );
+}
+
+/// A historical read (`Db::at`) that orders by a column it doesn't select
+/// returns rows in that column's order and does not return the column (#3495).
+/// Internal test: the public API offers no way to name a settled global-time
+/// position from an integration test.
+#[test]
+fn historical_read_orders_by_unselected_column_without_returning_it() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let core = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    // Row-id order is b, a; `done` order is a (false), b (true).
+    core.insert_with_id("todos", row(0x41), cells("b", true, author))
+        .unwrap();
+    core.insert_with_id("todos", row(0x42), cells("a", false, author))
+        .unwrap();
+    let now = core.node().borrow().committed_global_time();
+    let table = &schema.tables[0];
+    let rows = core
+        .at(
+            now,
+            &Query::from("todos")
+                .order_by("done", crate::query::OrderDirection::Asc)
+                .select(["title"]),
+        )
+        .unwrap();
+    assert!(
+        rows.iter().all(|row| row.cell(table, "done").is_none()),
+        "an unselected order key must not be returned"
+    );
+    let titles = rows
+        .iter()
+        .map(|row| row.cell(table, "title"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        titles,
+        [
+            Some(Value::String("a".to_owned())),
+            Some(Value::String("b".to_owned()))
+        ]
     );
 }

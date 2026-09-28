@@ -237,7 +237,7 @@ fn authority_batch_rejects_later_malformed_closure_without_advancing_receipt() {
     let mut malformed = successor.clone();
     let duplicate = malformed.supporting_rows.added_rows()[0].clone();
     malformed.supporting_rows.added_rows_mut().push(duplicate);
-    let error = crate::db::block_on(receiver.apply_view_updates_in_batch(vec![
+    let error = crate::local_executor::block_on(receiver.apply_view_updates_in_batch(vec![
         payload_view_update_parts(successor),
         payload_view_update_parts(malformed),
     ]))
@@ -288,7 +288,7 @@ fn authority_same_batch_snapshots_compare_each_successor_and_replay() {
     let mut empty = successor.clone();
     empty.supporting_rows = crate::protocol::SupportingRowsUpdate::snapshot(Vec::new());
     empty.version_carriers.clear();
-    crate::db::block_on(receiver.apply_view_updates_in_batch(vec![
+    crate::local_executor::block_on(receiver.apply_view_updates_in_batch(vec![
         payload_view_update_parts(successor.clone()),
         payload_view_update_parts(empty),
         payload_view_update_parts(successor.clone()),

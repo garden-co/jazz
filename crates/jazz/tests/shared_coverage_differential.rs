@@ -1,3 +1,6 @@
+// Shared with jazz-testkit by path so Jazz needs no testkit dev-dependency.
+#[path = "../../jazz-testkit/src/duplex_transport.rs"]
+mod duplex_transport;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::pin;
@@ -5,6 +8,7 @@ use std::task::{Context, Poll, Waker};
 
 mod common;
 
+use duplex_transport::duplex;
 use jazz::db::{
     Db, DbConfig, DbIdentity, LocalUpdates, Propagation, ReadOpts, SeededRowIdSource,
     SubscriptionEvent,
@@ -16,7 +20,6 @@ use jazz::query::Query;
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
-use jazz_testkit::duplex_transport::duplex;
 
 use common::{compile_schema, session_eq};
 

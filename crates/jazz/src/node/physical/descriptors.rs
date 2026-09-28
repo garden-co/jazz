@@ -1152,7 +1152,7 @@ fn physical_current_descriptor(
     table: &TableSchema,
     mapping: &TablePhysicalMapping,
 ) -> Result<records::RecordDescriptor, Error> {
-    let logical_descriptor = table.global_current_storage_tables()[0].record_schema();
+    let logical_descriptor = table.global_current_content_storage_table().record_schema();
     let physical_names = physical_current_field_names(table, mapping)?;
     if logical_descriptor.fields().len() != physical_names.len() {
         return Err(Error::InvalidStoredValue(
@@ -1343,71 +1343,3 @@ fn physical_row_field_names(
     Ok(fields)
 }
 
-pub(crate) fn physical_column_epoch_is_compatible(
-    source_table: &TableSchema,
-    source_column_name: &str,
-    target_table: &TableSchema,
-    target_column_name: &str,
-) -> bool {
-    let Some(source_column) = source_table
-        .columns
-        .iter()
-        .find(|column| column.name == source_column_name)
-    else {
-        return false;
-    };
-    let Some(target_column) = target_table
-        .columns
-        .iter()
-        .find(|column| column.name == target_column_name)
-    else {
-        return false;
-    };
-
-    physical_value_epoch_is_compatible(&source_column.column_type, &target_column.column_type)
-        && source_table.merge_strategy(source_column_name)
-            == target_table.merge_strategy(target_column_name)
-}
-
-pub(crate) fn physical_value_epoch_is_compatible(
-    source: &records::ValueType,
-    target: &records::ValueType,
-) -> bool {
-    use records::ValueType;
-    match (source, target) {
-        (ValueType::EnumTag(left), ValueType::EnumTag(right)) => {
-            right.variants.starts_with(&left.variants)
-        }
-        (ValueType::Enum(left), ValueType::Enum(right)) => {
-            right.cases.len() >= left.cases.len()
-                && left.cases.iter().zip(&right.cases).all(|(a, b)| {
-                    a.name == b.name && physical_record_epoch_is_compatible(&a.payload, &b.payload)
-                })
-        }
-        (ValueType::Tuple(left), ValueType::Tuple(right)) => {
-            left.len() == right.len()
-                && left
-                    .iter()
-                    .zip(right)
-                    .all(|(a, b)| physical_value_epoch_is_compatible(a, b))
-        }
-        (ValueType::Array(left), ValueType::Array(right))
-        | (ValueType::Nullable(left), ValueType::Nullable(right)) => {
-            physical_value_epoch_is_compatible(left, right)
-        }
-        (ValueType::Record(left), ValueType::Record(right)) => {
-            physical_record_epoch_is_compatible(left, right)
-        }
-        _ => source == target,
-    }
-}
-
-fn physical_record_epoch_is_compatible(
-    source: &records::RecordDescriptor,
-    target: &records::RecordDescriptor,
-) -> bool {
-    source.fields().len() == target.fields().len()
-        && source.fields().iter().zip(target.fields()).all(|(a, b)| {
-            a.name == b.name && physical_value_epoch_is_compatible(&a.value_type, &b.value_type)
-        })
-}

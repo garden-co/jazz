@@ -25,8 +25,8 @@ use super::super::protocol::{
 };
 use super::super::query::{Binding, ValidatedQuery};
 use super::super::schema::TableSchema;
-use super::super::tools::OutputOccurrenceId;
 use super::super::tx::{DurabilityTier, TxId};
+use crate::object::OutputOccurrenceId;
 
 pub(super) fn fast_current_membership_position(
     known_state: &Option<KnownStateDeclaration>,

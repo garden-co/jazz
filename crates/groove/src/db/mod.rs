@@ -1341,8 +1341,8 @@ impl crate::chunks::ChunkInstallObserver for MetadataChunkInstallObserver {
 pub use crate::ivm::{
     CollectByField, GraphBuilder, InputSourceDelta, InputSourceId, InputSourceReplacement,
     IvmRuntimeError, MultisinkDeltas, MultisinkSubscription, PredicateExpr, PreparedShapeId,
-    ProjectField, PublicationUpdate, RoutedMultisinkTerminal, Subscription, SubscriptionError,
-    SubscriptionEvent, SubscriptionId, SubscriptionLifetime,
+    ProjectField, PublicationUpdate, RootIndirectValues, RoutedMultisinkTerminal, Subscription,
+    SubscriptionError, SubscriptionEvent, SubscriptionId, SubscriptionLifetime,
 };
 
 /// Schema-aware database facade over storage and IVM subscriptions.

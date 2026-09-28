@@ -379,3 +379,8 @@ mod tests {
         assert_eq!(current.counter(), 37_856);
     }
 }
+
+// Durable record-field encodings for these types. They live beside the types
+// so the impls stay coherent once this layer is its own crate.
+groove::impl_record_field_u64!(TxTime);
+groove::impl_record_field_u64!(GlobalTime);

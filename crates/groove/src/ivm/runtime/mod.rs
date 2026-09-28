@@ -197,6 +197,7 @@ pub struct IvmRuntime {
     gc_candidates: HashSet<NodeId>,
     prepared_shapes: HashMap<PreparedShapeId, RoutedMultisinkShapeState>,
     auto_direct_families: HashMap<AutoDirectFamilyKey, PreparedShapeId>,
+    shared_prepared_shapes: HashMap<subscriptions::SharedShapeKey, PreparedShapeId>,
     binding_sources: subscriptions::BindingSources,
     input_source_runtime_namespace: u64,
     next_input_source_id: u64,
@@ -239,6 +240,10 @@ pub struct IvmRuntime {
     next_shape_id: u64,
     logical_nodes_requested: u64,
     auto_direct_family_enabled: bool,
+    /// Whether plain ordered outputs receive generic root positions (insert
+    /// indices and moves). A consumer that never reads them turns this off,
+    /// so an unbounded TopBy keeps its delta-only path.
+    plain_output_root_positions: bool,
     collect_tick_runtime_stats: bool,
 }
 
@@ -305,9 +310,11 @@ impl IvmRuntime {
             next_shape_id: 1,
             logical_nodes_requested: 0,
             auto_direct_family_enabled: true,
+            plain_output_root_positions: true,
             collect_tick_runtime_stats: false,
             prepared_shapes: HashMap::default(),
             auto_direct_families: HashMap::default(),
+            shared_prepared_shapes: HashMap::default(),
             binding_sources: subscriptions::BindingSources::default(),
             input_source_runtime_namespace: NEXT_INPUT_SOURCE_RUNTIME_NAMESPACE
                 .fetch_add(1, Ordering::Relaxed),
@@ -389,6 +396,16 @@ impl IvmRuntime {
 
     pub fn set_auto_direct_family_enabled(&mut self, enabled: bool) {
         self.auto_direct_family_enabled = enabled;
+    }
+
+    /// Enable or disable generic root positions for plain ordered outputs.
+    /// Structured collectors are unaffected: they own their positional edits.
+    pub fn set_plain_output_root_positions_enabled(&mut self, enabled: bool) {
+        self.plain_output_root_positions = enabled;
+    }
+
+    pub fn plain_output_root_positions_enabled(&self) -> bool {
+        self.plain_output_root_positions
     }
 
     pub fn schema(&self) -> &DatabaseSchema {
@@ -498,6 +515,8 @@ pub enum IvmRuntimeError {
     PersistRecordMismatch,
     #[error("binding sources can only be evaluated through prepared shapes")]
     BindingSourceRequiresPrepare,
+    #[error("physical root values are only supported for first-result subscriptions")]
+    PhysicalRootValuesRequireFirstResult,
     #[error("multisink subscription must have at least one sink")]
     EmptyMultisinkSubscription,
     #[error("multisink sink already exists: {0}")]

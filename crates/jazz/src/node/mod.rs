@@ -41,6 +41,7 @@ use crate::ids::{
     RowAuthor, RowUuid, SchemaFamilyId, SchemaLineagePublicationId, SchemaVersionAlias,
     SchemaVersionId,
 };
+use crate::model::transaction::OpenTransactionId;
 #[cfg(test)]
 use crate::protocol::ProgramFactEntry;
 use crate::protocol::{
@@ -60,7 +61,6 @@ use crate::schema::{
     registered_column_transform,
 };
 use crate::time::{GlobalTime, TxTime};
-use crate::tools::OpenTransactionId;
 use crate::tx::{
     AbsentRead, BranchWriteIntent, BranchWriteOperation, ContributionComponent,
     ContributionCoordinate, ContributionDot, ContributionMergeProvenance, ContributionSubstitution,
@@ -317,6 +317,7 @@ fn hydrate_nested_payload_enum_cases(
     Ok(())
 }
 
+pub mod api_error;
 mod catalogue_ingest;
 mod codec;
 mod currency;
@@ -334,11 +335,18 @@ mod policy;
 pub(crate) mod query_engine;
 mod query_eval;
 mod recovery;
+pub mod relay_scope;
 mod row_availability;
 mod source_resolution;
 pub(crate) mod supporting_frontier;
+pub(crate) mod terminal_record;
+pub mod terminal_root;
 mod views;
+
 pub(crate) use open_tx::{TransactionBranchRowState, TransactionInsertTargetState};
+pub use query_engine::{
+    CurrentRowBindingRole, CurrentRowPublicationField, CurrentRowResultVisibility,
+};
 #[cfg(feature = "testing")]
 pub(crate) use query_eval::LocalMaintainedViewSubscriptionFootprint;
 #[cfg(test)]
@@ -562,6 +570,13 @@ pub struct NodeState<S> {
     /// Disabled unless a core serving shell owns the complete policy inputs.
     /// This is runtime capability, never wire or durable authorization evidence.
     authoritative_scalar_exit_refresh: bool,
+    /// Local-tier client-local subscriptions that kept their literal graph
+    /// because no sibling of their shape was open, keyed by the prepared
+    /// binding-source name they would share, with the binding they hold. A
+    /// live token tells the next subscriber with a different binding to
+    /// prepare the shared shape instead.
+    client_local_literal_shapes:
+        std::collections::HashMap<String, (std::sync::Weak<()>, crate::query::Binding)>,
     /// Durability recorded for commits authored by this process.
     ///
     /// Ordinary storage-backed nodes author at `Local`. A browser main-thread
@@ -571,7 +586,7 @@ pub struct NodeState<S> {
     /// This process is the durable browser relay that owns upstream Core
     /// authority sessions for a non-durable client. This is process-local
     /// topology, never schema policy or persisted state.
-    relay_authority_session_owner: Option<crate::db::ClientRelayScope>,
+    relay_authority_session_owner: Option<crate::node::relay_scope::ClientRelayScope>,
     /// Resident transactions whose Groove persistence receipt has not settled.
     pending_persistence: BTreeSet<TxId>,
     /// Mapping from stable node UUIDs to compact on-disk aliases.
@@ -962,7 +977,7 @@ where
 
     fn accept_global_for_test(&mut self, tx_id: TxId) -> Result<(), Error> {
         let global_time = self.allocate_global_time_for_test();
-        crate::db::block_on(self.apply_fate_update(
+        crate::local_executor::block_on(self.apply_fate_update(
             tx_id,
             Fate::Accepted,
             Some(global_time),
@@ -1733,107 +1748,6 @@ pub struct CurrentRow {
     record: std::sync::Arc<OwnedRecord>,
     deleted: bool,
     publication_fields: std::sync::Arc<Vec<CurrentRowPublicationField>>,
-}
-
-/// Constructor-time source or logical role before publication is finalized.
-///
-/// This role is never serialized. The single publication metadata owner below
-/// carries authoritative catalogue IDs, names and application-cell visibility.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CurrentRowBindingRole {
-    /// A persisted CurrentRow field using Jazz's private physical name.
-    PhysicalColumn,
-    /// A query, relation, or collector field using its public logical name.
-    LogicalField,
-}
-
-/// Application cells, public provenance, and private engine metadata have
-/// different publication roles even when their names happen to be identical.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CurrentRowResultVisibility {
-    /// A query-visible application cell, included in subscription cell comparison.
-    ApplicationCell,
-    /// Public magic provenance, available to explicit projections and row metadata.
-    PublicProvenance,
-    /// Engine bookkeeping carried only for decoding/internal identity.
-    HiddenMetadata,
-}
-
-impl CurrentRowResultVisibility {
-    /// Classify metadata constructed by the CurrentRow producer, not a wire
-    /// field guessed by a consumer. Explicit application outputs bypass this.
-    pub(crate) fn current_row_metadata(name: &str) -> Self {
-        match name {
-            "$createdBy" | "$createdAt" | "$updatedBy" | "$updatedAt" => Self::PublicProvenance,
-            _ => Self::HiddenMetadata,
-        }
-    }
-}
-
-/// One producer-owned publication binding. Runtime query slots are separate.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CurrentRowPublicationField {
-    /// A source application cell with its authoritative catalogue identity.
-    StoredColumn {
-        /// Exact catalogue column identity.
-        id: PhysicalColumnId,
-        /// Application output name, including explicit aliases.
-        output_name: String,
-    },
-    /// A derived or metadata field with an explicit name and visibility.
-    ResultField {
-        /// Exact name sent to the host.
-        name: String,
-        /// Explicit application/provenance/internal role assigned by the producer.
-        visibility: CurrentRowResultVisibility,
-    },
-    /// Construction-only source cell, resolved before publication.
-    UnresolvedSourceCell {
-        /// Source application name in the selected read schema.
-        output_name: String,
-    },
-}
-
-impl CurrentRowPublicationField {
-    pub(crate) fn public_name(&self) -> Option<&str> {
-        match self {
-            Self::StoredColumn { output_name, .. } | Self::UnresolvedSourceCell { output_name } => {
-                Some(output_name)
-            }
-            Self::ResultField {
-                name,
-                visibility:
-                    CurrentRowResultVisibility::ApplicationCell
-                    | CurrentRowResultVisibility::PublicProvenance,
-            } => Some(name),
-            Self::ResultField {
-                visibility: CurrentRowResultVisibility::HiddenMetadata,
-                ..
-            } => None,
-        }
-    }
-
-    pub(crate) fn application_name(&self) -> Option<&str> {
-        match self {
-            Self::StoredColumn { output_name, .. } | Self::UnresolvedSourceCell { output_name } => {
-                Some(output_name)
-            }
-            Self::ResultField {
-                name,
-                visibility: crate::node::CurrentRowResultVisibility::ApplicationCell,
-            } => Some(name),
-            Self::ResultField { .. } => None,
-        }
-    }
-
-    fn role(&self) -> CurrentRowBindingRole {
-        match self {
-            Self::StoredColumn { .. } | Self::UnresolvedSourceCell { .. } => {
-                CurrentRowBindingRole::PhysicalColumn
-            }
-            Self::ResultField { .. } => CurrentRowBindingRole::LogicalField,
-        }
-    }
 }
 
 /// Work performed by the durable local-write replay lookup.

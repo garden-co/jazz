@@ -858,8 +858,8 @@ fn declared_known_state_view_update_repairs_withheld_row_version_body() {
             groove::db::PrimaryKeyValue::U64(tx_node_alias.0),
         ]),
     );
-    let applied = crate::db::block_on(reader.database.apply_batch(batch)).unwrap();
-    let persisted = crate::db::block_on(applied.persist());
+    let applied = crate::local_executor::block_on(reader.database.apply_batch(batch)).unwrap();
+    let persisted = crate::local_executor::block_on(applied.persist());
     reader.database.finish_persistence(persisted).unwrap();
     assert_eq!(
         reader

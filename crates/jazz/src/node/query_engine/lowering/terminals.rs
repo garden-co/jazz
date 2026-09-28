@@ -5,8 +5,8 @@
 //! schemas used to decode those outputs.
 
 use super::*;
-use crate::node::CurrentRowPublicationField;
-use crate::node::query_eval::coerce_prepared_binding_value;
+use crate::node::query_engine::CurrentRowPublicationField;
+use crate::node::query_engine::coerce_prepared_binding_value;
 use groove::records::{DescriptorField, FieldIdentity};
 
 /// Share execution only after proving the complete typed source/routing schema
@@ -122,7 +122,7 @@ fn source_publication_field(source: &ResolvedSource, name: String) -> CurrentRow
         },
         None => CurrentRowPublicationField::ResultField {
             name,
-            visibility: crate::node::CurrentRowResultVisibility::ApplicationCell,
+            visibility: crate::node::query_engine::CurrentRowResultVisibility::ApplicationCell,
         },
     }
 }
@@ -142,16 +142,17 @@ fn collect_publication_fields(
                 }
                 (CollectFieldOrigin::SourceRow, _) => CurrentRowPublicationField::ResultField {
                     name: field.output.clone(),
-                    visibility: crate::node::CurrentRowResultVisibility::current_row_metadata(
-                        field.source_field.as_deref().unwrap_or(&field.output),
-                    ),
+                    visibility:
+                        crate::node::query_engine::CurrentRowResultVisibility::current_row_metadata(
+                            field.source_field.as_deref().unwrap_or(&field.output),
+                        ),
                 },
                 _ => CurrentRowPublicationField::ResultField {
                     name: field.output.clone(),
                     visibility: if field.is_row_id {
-                        crate::node::CurrentRowResultVisibility::HiddenMetadata
+                        crate::node::query_engine::CurrentRowResultVisibility::HiddenMetadata
                     } else {
-                        crate::node::CurrentRowResultVisibility::ApplicationCell
+                        crate::node::query_engine::CurrentRowResultVisibility::ApplicationCell
                     },
                 },
             };
@@ -163,7 +164,7 @@ fn collect_publication_fields(
             slot.collection_field.clone(),
             CurrentRowPublicationField::ResultField {
                 name: slot.collection_field.clone(),
-                visibility: crate::node::CurrentRowResultVisibility::ApplicationCell,
+                visibility: crate::node::query_engine::CurrentRowResultVisibility::ApplicationCell,
             },
         )
     }));
@@ -603,7 +604,7 @@ pub(super) fn lowered_terminals(
                             None => CurrentRowPublicationField::ResultField {
                                 name: carrier.clone(),
                                 visibility:
-                                    crate::node::CurrentRowResultVisibility::current_row_metadata(
+                                    crate::node::query_engine::CurrentRowResultVisibility::current_row_metadata(
                                         &carrier,
                                     ),
                             },
@@ -728,7 +729,7 @@ pub(super) fn lowered_terminals(
                     .map(|requested| {
                         let binding = CurrentRowPublicationField::ResultField {
                             name: requested.alias.clone(),
-                            visibility: crate::node::CurrentRowResultVisibility::ApplicationCell,
+                            visibility: crate::node::query_engine::CurrentRowResultVisibility::ApplicationCell,
                         };
                         (requested.alias.clone(), binding)
                     })
@@ -2225,7 +2226,7 @@ fn lowered_aggregate_terminals(
                             CurrentRowPublicationField::ResultField {
                                 name: output.output.name.clone(),
                                 visibility:
-                                    crate::node::CurrentRowResultVisibility::ApplicationCell,
+                                    crate::node::query_engine::CurrentRowResultVisibility::ApplicationCell,
                             },
                         );
                     }
@@ -2645,7 +2646,7 @@ fn fact_output_with_terminal(
                             CurrentRowPublicationField::ResultField {
                                 name: field.name.clone(),
                                 visibility:
-                                    crate::node::CurrentRowResultVisibility::ApplicationCell,
+                                    crate::node::query_engine::CurrentRowResultVisibility::ApplicationCell,
                             }
                         } else if let Some(name) = resolved_source_public_name(source, &field.name)
                         {
@@ -2654,7 +2655,7 @@ fn fact_output_with_terminal(
                             CurrentRowPublicationField::ResultField {
                                 name: field.name.clone(),
                                 visibility:
-                                    crate::node::CurrentRowResultVisibility::current_row_metadata(
+                                    crate::node::query_engine::CurrentRowResultVisibility::current_row_metadata(
                                         &field.name,
                                     ),
                             }
@@ -4754,7 +4755,8 @@ mod publication_schema_tests {
                 "_app_title".to_owned(),
                 CurrentRowPublicationField::ResultField {
                     name: "title".to_owned(),
-                    visibility: crate::node::CurrentRowResultVisibility::ApplicationCell,
+                    visibility:
+                        crate::node::query_engine::CurrentRowResultVisibility::ApplicationCell,
                 },
             )]),
             hidden_fields: BTreeSet::from(["route".to_owned()]),

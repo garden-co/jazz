@@ -60,9 +60,7 @@ pub(super) fn descriptor() -> RecordDescriptor {
 
 fn principal_value(principal: &Principal) -> Result<Value, String> {
     for component in [&principal.issuer, &principal.subject] {
-        if component.len() > MAX_COMPONENT
-            || !crate::tools::identity::principal_is_nonempty(component)
-        {
+        if component.len() > MAX_COMPONENT || !crate::identity::principal_is_nonempty(component) {
             return Err("invalid account principal component".into());
         }
     }

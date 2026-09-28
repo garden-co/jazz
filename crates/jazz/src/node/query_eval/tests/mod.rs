@@ -20,6 +20,15 @@ use groove::schema::{ColumnSchema, ColumnType};
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 
 use crate::ids::{AuthorSubject, NodeUuid, RowUuid};
+use crate::model::public_schema::{
+    CmpOp as PublicCmpOp, PolicyValue as PublicPolicyValue, RelColumnRef as PublicRelColumnRef,
+    RelExpr as PublicRelExpr, RelJoinCondition as PublicRelJoinCondition,
+    RelJoinKind as PublicRelJoinKind, RelKeyRef as PublicRelKeyRef,
+    RelPredicateCmpOp as PublicRelPredicateCmpOp, RelPredicateExpr as PublicRelPredicateExpr,
+    RelProjectColumn as PublicRelProjectColumn, RelProjectExpr as PublicRelProjectExpr,
+    RelRecursionBound as PublicRelRecursionBound, RelValueRef as PublicRelValueRef,
+    RowIdRef as PublicRelRowIdRef,
+};
 use crate::node::query_engine::{CoverageScope, FieldRequirement};
 use crate::node::{MergeableCommit, NodeState};
 use crate::peer::PeerState;
@@ -32,15 +41,6 @@ use crate::query::{
     lit, lte, param, table,
 };
 use crate::schema::{JazzSchema, TableSchema};
-use crate::tools::public_schema::{
-    CmpOp as PublicCmpOp, PolicyValue as PublicPolicyValue, RelColumnRef as PublicRelColumnRef,
-    RelExpr as PublicRelExpr, RelJoinCondition as PublicRelJoinCondition,
-    RelJoinKind as PublicRelJoinKind, RelKeyRef as PublicRelKeyRef,
-    RelPredicateCmpOp as PublicRelPredicateCmpOp, RelPredicateExpr as PublicRelPredicateExpr,
-    RelProjectColumn as PublicRelProjectColumn, RelProjectExpr as PublicRelProjectExpr,
-    RelRecursionBound as PublicRelRecursionBound, RelValueRef as PublicRelValueRef,
-    RowIdRef as PublicRelRowIdRef,
-};
 use crate::tools::{
     ColumnType as PublicColumnType, PolicyExpr as PublicPolicyExpr,
     SchemaBuilder as PublicSchemaBuilder, TablePolicies as PublicTablePolicies,

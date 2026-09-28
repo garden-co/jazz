@@ -116,10 +116,10 @@ pub(crate) mod legacy_test_future {
     use std::future::Future;
 
     use crate::ids::{AuthorSubject, SchemaVersionId};
+    use crate::model::transaction::OpenTransactionId;
     use crate::node::{ContributionMergeRequest, Error, MergeableCommit, NodeState};
     use crate::protocol::{CatalogueSnapshot, SyncMessage, VersionRecord};
     use crate::time::{GlobalTime, TxTime};
-    use crate::tools::OpenTransactionId;
     use crate::tx::{DurabilityTier, Fate, Transaction, TxId};
     use groove::storage::{OrderedKvStorage, ReopenableStorage};
 
@@ -130,7 +130,7 @@ pub(crate) mod legacy_test_future {
             Self: Sized,
             E: std::fmt::Debug,
         {
-            crate::db::block_on(self).unwrap()
+            crate::local_executor::block_on(self).unwrap()
         }
 
         fn expect(self, message: &str) -> T
@@ -138,7 +138,7 @@ pub(crate) mod legacy_test_future {
             Self: Sized,
             E: std::fmt::Debug,
         {
-            crate::db::block_on(self).expect(message)
+            crate::local_executor::block_on(self).expect(message)
         }
 
         fn unwrap_or_else<F>(self, op: F) -> T
@@ -146,7 +146,7 @@ pub(crate) mod legacy_test_future {
             Self: Sized,
             F: FnOnce(E) -> T,
         {
-            crate::db::block_on(self).unwrap_or_else(op)
+            crate::local_executor::block_on(self).unwrap_or_else(op)
         }
 
         fn unwrap_err(self) -> E
@@ -154,7 +154,7 @@ pub(crate) mod legacy_test_future {
             Self: Sized,
             T: std::fmt::Debug,
         {
-            crate::db::block_on(self).unwrap_err()
+            crate::local_executor::block_on(self).unwrap_err()
         }
 
         fn expect_err(self, message: &str) -> E
@@ -162,21 +162,21 @@ pub(crate) mod legacy_test_future {
             Self: Sized,
             T: std::fmt::Debug,
         {
-            crate::db::block_on(self).expect_err(message)
+            crate::local_executor::block_on(self).expect_err(message)
         }
 
         fn is_err(self) -> bool
         where
             Self: Sized,
         {
-            crate::db::block_on(self).is_err()
+            crate::local_executor::block_on(self).is_err()
         }
 
         fn is_ok(self) -> bool
         where
             Self: Sized,
         {
-            crate::db::block_on(self).is_ok()
+            crate::local_executor::block_on(self).is_ok()
         }
     }
 
@@ -188,21 +188,21 @@ pub(crate) mod legacy_test_future {
         where
             Self: Sized,
         {
-            crate::db::block_on(self).unwrap()
+            crate::local_executor::block_on(self).unwrap()
         }
 
         fn expect(self, message: &str) -> T
         where
             Self: Sized,
         {
-            crate::db::block_on(self).expect(message)
+            crate::local_executor::block_on(self).expect(message)
         }
 
         fn is_none(self) -> bool
         where
             Self: Sized,
         {
-            crate::db::block_on(self).is_none()
+            crate::local_executor::block_on(self).is_none()
         }
     }
 
@@ -213,7 +213,7 @@ pub(crate) mod legacy_test_future {
         where
             Self: Sized,
         {
-            crate::db::block_on(self)
+            crate::local_executor::block_on(self)
         }
     }
 
@@ -291,7 +291,7 @@ pub(crate) mod legacy_test_future {
         S: OrderedKvStorage + ReopenableStorage,
     {
         fn commit_mergeable_settled(&mut self, commit: MergeableCommit) -> Result<TxId, Error> {
-            crate::db::block_on(async {
+            crate::local_executor::block_on(async {
                 let published = self.commit_mergeable(commit).await?;
                 self.persist_and_settle_transaction(published).await
             })
@@ -301,7 +301,7 @@ pub(crate) mod legacy_test_future {
             &mut self,
             commit: MergeableCommit,
         ) -> Result<(TxId, SyncMessage), Error> {
-            crate::db::block_on(async {
+            crate::local_executor::block_on(async {
                 let (published, unit) = self.commit_mergeable_unit(commit).await?;
                 let tx_id = self.persist_and_settle_transaction(published).await?;
                 Ok((tx_id, unit))
@@ -312,7 +312,7 @@ pub(crate) mod legacy_test_future {
             &mut self,
             commits: Vec<MergeableCommit>,
         ) -> Result<TxId, Error> {
-            crate::db::block_on(async {
+            crate::local_executor::block_on(async {
                 let published = self.commit_mergeable_many(commits).await?;
                 self.persist_and_settle_transaction(published).await
             })
@@ -322,7 +322,7 @@ pub(crate) mod legacy_test_future {
             &mut self,
             request: ContributionMergeRequest,
         ) -> Result<Option<TxId>, Error> {
-            crate::db::block_on(async {
+            crate::local_executor::block_on(async {
                 let Some(published) = self.merge_branch_contributions(request).await? else {
                     return Ok(None);
                 };
@@ -337,7 +337,7 @@ pub(crate) mod legacy_test_future {
             schema: SchemaVersionId,
             commit: MergeableCommit,
         ) -> Result<TxId, Error> {
-            crate::db::block_on(async {
+            crate::local_executor::block_on(async {
                 let published = self.commit_mergeable_in_schema(schema, commit).await?;
                 self.persist_and_settle_transaction(published).await
             })
@@ -348,7 +348,7 @@ pub(crate) mod legacy_test_future {
             commit: MergeableCommit,
             made_at: TxTime,
         ) -> Result<TxId, Error> {
-            crate::db::block_on(async {
+            crate::local_executor::block_on(async {
                 let published = self.commit_mergeable_at(commit, made_at).await?;
                 self.persist_and_settle_transaction(published).await
             })
@@ -362,7 +362,7 @@ pub(crate) mod legacy_test_future {
         where
             F: FnMut() -> u64,
         {
-            crate::db::block_on(async {
+            crate::local_executor::block_on(async {
                 let published = self.commit_mergeable_open(open, next_now_ms).await?;
                 self.persist_and_settle_transaction(published).await
             })
@@ -372,7 +372,7 @@ pub(crate) mod legacy_test_future {
             &mut self,
             snapshot: CatalogueSnapshot,
         ) -> Result<(), Error> {
-            crate::db::block_on(async {
+            crate::local_executor::block_on(async {
                 let outcome = self.apply_trusted_catalogue_snapshot(snapshot).await?;
                 self.persist_and_settle_outcome(outcome).await
             })
@@ -384,7 +384,7 @@ pub(crate) mod legacy_test_future {
             author: AuthorSubject,
             now_ms: u64,
         ) -> Result<(TxId, SyncMessage), Error> {
-            crate::db::block_on(async {
+            crate::local_executor::block_on(async {
                 let (published, unit) = self.commit_exclusive(tx_id, author, now_ms).await?;
                 let tx_id = self.persist_and_settle_transaction(published).await?;
                 Ok((tx_id, unit))
@@ -395,7 +395,7 @@ pub(crate) mod legacy_test_future {
             &mut self,
             message: SyncMessage,
         ) -> Result<Vec<SyncMessage>, Error> {
-            crate::db::block_on(async {
+            crate::local_executor::block_on(async {
                 let outcome = self.apply_sync_message(message).await?;
                 self.persist_and_settle_outcome(outcome).await
             })
@@ -413,14 +413,14 @@ pub(crate) mod legacy_test_future {
                 ))?
                 .schema
                 .clone();
-            crate::db::block_on(self.activate_schema(pointer.revision, schema))
+            crate::local_executor::block_on(self.activate_schema(pointer.revision, schema))
         }
 
         fn apply_trusted_catalogue_message_settled(
             &mut self,
             message: SyncMessage,
         ) -> Result<Vec<SyncMessage>, Error> {
-            crate::db::block_on(async {
+            crate::local_executor::block_on(async {
                 let outcome = self.apply_trusted_catalogue_message(message).await?;
                 self.persist_and_settle_outcome(outcome).await
             })
@@ -432,14 +432,14 @@ pub(crate) mod legacy_test_future {
             versions: Vec<VersionRecord>,
             now_ms: u64,
         ) -> Result<Vec<SyncMessage>, Error> {
-            crate::db::block_on(async {
+            crate::local_executor::block_on(async {
                 let outcome = self.ingest_commit_unit(tx, versions, now_ms).await?;
                 self.persist_and_settle_outcome(outcome).await
             })
         }
 
         fn finalize_local_mergeable_commit_settled(&mut self, tx_id: TxId) -> Result<(), Error> {
-            crate::db::block_on(async {
+            crate::local_executor::block_on(async {
                 let outcome = self.finalize_local_mergeable_commit(tx_id).await?;
                 self.persist_and_settle_outcome(outcome).await
             })
@@ -449,7 +449,7 @@ pub(crate) mod legacy_test_future {
             &mut self,
             tx_id: TxId,
         ) -> Option<(Fate, Option<GlobalTime>, DurabilityTier)> {
-            crate::db::block_on(self.transaction_state(tx_id))
+            crate::local_executor::block_on(self.transaction_state(tx_id))
         }
     }
 }
@@ -459,6 +459,10 @@ pub use groove;
 
 /// Shared, fail-closed state for authority-issued authorization-scope receipts.
 pub mod account_registry;
+/// Application identifiers.
+// Moved out of `tools`, which keeps its existing documentation policy.
+#[allow(missing_docs)]
+pub mod app_id;
 pub mod authorization_scope;
 /// Shared binary row payload contract for the NAPI and WASM bindings.
 pub mod binding_codec;
@@ -467,19 +471,37 @@ pub mod binding_codec;
 pub mod cold_settle_attribution;
 /// High-level thread-affine database facade.
 pub mod db;
+/// Diagnostic environment switches, read once per process.
+mod debug_env;
 /// Host-facing exclusive lifecycle for foreground transaction-node identities.
 pub mod foreground_node_lease;
 /// Poll ready-immediate database futures without an async runtime.
 pub use db::block_on;
+/// Authenticated principal identity helpers.
+// Moved out of `tools`, which keeps its existing documentation policy.
+#[allow(missing_docs)]
+pub mod identity;
 /// Wire-stable identifiers.
 pub mod ids;
+/// Driver for ready-immediate thread-affine futures.
+pub mod local_executor;
+/// Public data model: schema builders, values, policies and lenses.
+// Moved out of `tools`, which keeps its existing documentation policy.
+#[allow(missing_docs)]
+pub mod model;
 /// Storage-backed node implementation and local API.
 pub mod node;
+/// Object, branch and query-result identifiers.
+// Moved out of `tools`, which keeps its existing documentation policy.
+#[allow(missing_docs)]
+pub mod object;
 /// Independent semantic oracle used by tests and harnesses.
 #[cfg(any(test, feature = "testing"))]
 pub mod oracle;
 /// Per-peer sync state and metrics.
 pub mod peer;
+/// Canonical, whole-input postcard decoding.
+pub mod postcard_exact;
 /// Simulation-first sync and local event messages.
 pub mod protocol;
 /// Protocol admission and semantic size limits.

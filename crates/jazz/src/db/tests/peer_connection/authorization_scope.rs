@@ -1609,7 +1609,7 @@ fn assert_delayed_duplicate_usage_reset(replacement_row: bool) {
         .unwrap();
 
     let (client_transport, server_transport, client_sent, server_sent) = duplex_with_taps();
-    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let subscriber = server.accept_subscriber(server_transport, client_author);
     let query = Query::from("todos").filter(eq(col("title"), lit("live")));
     let prepared = prepared(&client, &query);
@@ -1767,7 +1767,7 @@ fn late_detached_view_update_does_not_cover_equal_shape_reattachment() {
     let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc1, client_author, &schema);
     let (client_transport, server_transport, _client_sent, server_sent) = duplex_with_taps();
-    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let subscriber = server.accept_subscriber(server_transport, client_author);
     let query = Query::from("todos");
     let prepared = prepared(&client, &query);
@@ -2461,7 +2461,7 @@ fn subscriber_cannot_spoof_authority_view_updates() {
     let schema = schema();
     let relay = open_db(0x7a, AuthorSubject::SYSTEM, &schema);
     let (relay_transport, mut authority_transport) = duplex();
-    let _upstream = crate::db::block_on(relay.connect_upstream(relay_transport));
+    let _upstream = crate::local_executor::block_on(relay.connect_upstream(relay_transport));
     let query = Query::from("todos");
     let mut stream = prepared_subscribe(&relay, &query, global_subscribe_opts()).unwrap();
     relay.tick().unwrap();
@@ -2723,7 +2723,7 @@ fn resume_cursor_restores_connection_claims_before_serving_same_identity_sibling
         .unwrap();
 
     let (client_transport, server_transport) = duplex();
-    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let subscriber = server.accept_subscriber_with_claims(server_transport, reader, normal_claims);
     let cursor = subscriber.borrow_mut().take_resume_cursor().unwrap();
     assert!(server.server.detach_connection(&subscriber));
@@ -2733,11 +2733,13 @@ fn resume_cursor_restores_connection_claims_before_serving_same_identity_sibling
     // resumed ordinary session must restore its own empty invite context, not
     // inherit the process-local compiler cache that this sibling last bound.
     let (sibling_transport, sibling_server_transport) = duplex();
-    let _sibling_upstream = crate::db::block_on(sibling.connect_upstream(sibling_transport));
+    let _sibling_upstream =
+        crate::local_executor::block_on(sibling.connect_upstream(sibling_transport));
     let _sibling_subscriber =
         server.accept_subscriber_with_claims(sibling_server_transport, reader, invite_claims);
     let (resumed_transport, resumed_server_transport) = duplex();
-    let _resumed_upstream = crate::db::block_on(client.connect_upstream(resumed_transport));
+    let _resumed_upstream =
+        crate::local_executor::block_on(client.connect_upstream(resumed_transport));
     let _resumed = server.accept_subscriber_with_resume(resumed_server_transport, reader, cursor);
 
     let query = prepared(
@@ -2800,7 +2802,7 @@ fn subscriber_wire_claims_cannot_escalate_host_admission() {
         .unwrap();
 
     let (client_transport, server_transport, client_sent) = duplex_with_client_outbound_tap();
-    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber_with_claims(server_transport, reader, normal_claims);
     let dropped_before = server
         .node()
@@ -3340,7 +3342,7 @@ fn cloned_usage_reset_failure_still_publishes_canonical_delta_to_every_sibling()
         .unwrap();
 
     let (client_transport, server_transport, client_sent, server_sent) = duplex_with_taps();
-    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
     let subscriber = server.accept_subscriber(server_transport, client_author);
     let query = Query::from("todos").filter(eq(col("title"), lit("live")));
     let prepared = prepared(&client, &query);

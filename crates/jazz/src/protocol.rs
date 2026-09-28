@@ -11,21 +11,20 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 use groove::large_values::Locator;
-use groove::records::{
-    EnumCase, EnumSchema, EnumValue, OwnedRecord, RecordDescriptor, ScalarEnumSchema, Value,
-    ValueType,
-};
+#[cfg(test)]
+use groove::records::ValueType;
+use groove::records::{OwnedRecord, RecordDescriptor, Value};
 
 use crate::ids::{
     AuthorSubject, MigrationLensId, NodeUuid, RowAuthor, RowUuid, SchemaLineagePublicationId,
     SchemaVersionId,
 };
+use crate::object::{ObjectId, OutputOccurrenceId, ResultKey};
 use crate::query::{BindingId, Query, RelationQuery, ShapeId};
 use crate::schema::{JazzSchema, TableSchema};
 use crate::time::GlobalTime;
 use crate::time::TxTime;
-use crate::tools::{ObjectId, OutputOccurrenceId, ResultKey};
-use crate::tx::{DeletionEvent, DurabilityTier, Fate, Snapshot, Transaction, TxId};
+use crate::tx::{DeletionEvent, DurabilityTier, Fate, Transaction, TxId};
 
 /// Uninhabited payload preserving retired postcard discriminants.
 #[doc(hidden)]
@@ -2345,7 +2344,7 @@ fn force_singleton_version_carriers() -> bool {
     if FORCE_SINGLETON_VERSION_CARRIERS_FOR_TESTS.load(AtomicOrdering::Relaxed) {
         return true;
     }
-    std::env::var_os("JAZZ_FORCE_SINGLETON_VERSION_CARRIERS").is_some()
+    crate::debug_env::force_singleton_version_carriers()
 }
 
 #[cfg(test)]
@@ -2593,7 +2592,7 @@ impl PolicyBindingKey {
     /// from the separately stored exact identity when they match it. Other
     /// scalar bindings remain exact; authorization validation lives at admission.
     pub(crate) fn directory_value(&self) -> Result<Value, String> {
-        let derived = crate::tools::policy_claims::canonical_policy_binding_claims(
+        let derived = crate::model::policy_claims::canonical_policy_binding_claims(
             &self.identity,
             BTreeMap::new(),
         );
@@ -2626,7 +2625,7 @@ impl PolicyBindingKey {
         let value = record.get_idx(1).map_err(|error| error.to_string())?;
         let mut claims = policy_binding_directory_claims_from_value(value)?;
         for (bit, (name, expected)) in
-            crate::tools::policy_claims::canonical_policy_binding_claims(&identity, BTreeMap::new())
+            crate::model::policy_claims::canonical_policy_binding_claims(&identity, BTreeMap::new())
                 .into_iter()
                 .enumerate()
         {
@@ -2645,396 +2644,10 @@ impl PolicyBindingKey {
     }
 }
 
-/// The durable, typed payload used by the policy-binding directory.
-///
-/// This deliberately flattens a recursively shaped claims map into ordinary
-/// Groove records instead of inventing another opaque byte codec.  Each root
-/// node carries its claim name; containers name their children only by their
-/// position.  The representation supports the policy-claim value vocabulary
-/// admitted at public boundaries (scalars, nullable values, arrays, and
-/// tuples), and rejects engine-owned values such as rows or large-value refs.
-/// Those values are not valid policy claims because their physical identity is
-/// local storage state rather than a portable session assertion.
-pub(crate) fn policy_binding_directory_claims_value(
-    claims: &BTreeMap<String, Value>,
-) -> Result<Value, String> {
-    let mut nodes = Vec::new();
-    for (name, value) in claims {
-        encode_policy_claim_node(&mut nodes, Some(name), value)?;
-    }
-    Ok(Value::Array(nodes))
-}
-
-/// Decode and validate the normal Groove representation of policy claims.
-pub(crate) fn policy_binding_directory_claims_from_value(
-    value: Value,
-) -> Result<BTreeMap<String, Value>, String> {
-    let Value::Array(nodes) = value else {
-        return Err("policy binding directory claims must be an array".to_owned());
-    };
-    if nodes.len() > POLICY_CLAIM_DIRECTORY_MAX_NODES {
-        return Err("policy binding directory claims exceed node limit".to_owned());
-    }
-    let mut cursor = 0;
-    let mut claims = BTreeMap::new();
-    while cursor < nodes.len() {
-        let (name, value) = decode_policy_claim_node(&nodes, &mut cursor, true)?;
-        let Some(name) = name else {
-            return Err("policy binding directory root claim is unnamed".to_owned());
-        };
-        if claims.insert(name, value).is_some() {
-            return Err("policy binding directory contains duplicate claim names".to_owned());
-        }
-    }
-    Ok(claims)
-}
-
-fn policy_directory_descriptor() -> RecordDescriptor {
-    RecordDescriptor::new([
-        ("derived_v1", ValueType::U8),
-        (
-            "claims_v1",
-            ValueType::Array(Box::new(ValueType::Record(Box::new(
-                *policy_claim_node_descriptor(),
-            )))),
-        ),
-    ])
-}
-
-fn policy_directory_payload(presence: u8, claims: Value) -> Result<Value, String> {
-    let descriptor = policy_directory_descriptor();
-    Ok(Value::Record(OwnedRecord::new(
-        descriptor
-            .create(&[Value::U8(presence), claims])
-            .map_err(|error| error.to_string())?,
-        descriptor,
-    )))
-}
-
-/// Direct-store value type for the collision-checked policy-binding directory.
-pub(crate) fn policy_binding_directory_claims_value_type() -> ValueType {
-    ValueType::Record(Box::new(policy_directory_descriptor()))
-}
-
-const POLICY_CLAIM_DIRECTORY_MAX_NODES: usize = 1024;
-
-const POLICY_CLAIM_U8: u32 = 0;
-const POLICY_CLAIM_U16: u32 = 1;
-const POLICY_CLAIM_U32: u32 = 2;
-const POLICY_CLAIM_U64: u32 = 3;
-const POLICY_CLAIM_I32: u32 = 4;
-const POLICY_CLAIM_I64: u32 = 5;
-const POLICY_CLAIM_F64: u32 = 6;
-const POLICY_CLAIM_BOOL: u32 = 7;
-const POLICY_CLAIM_STRING: u32 = 8;
-const POLICY_CLAIM_BYTES: u32 = 9;
-const POLICY_CLAIM_UUID: u32 = 10;
-const POLICY_CLAIM_ENUM_TAG: u32 = 11;
-const POLICY_CLAIM_NULL: u32 = 12;
-const POLICY_CLAIM_TUPLE: u32 = 13;
-const POLICY_CLAIM_ARRAY: u32 = 14;
-const POLICY_CLAIM_NULLABLE: u32 = 15;
-
-fn policy_claim_kind_type() -> ValueType {
-    ValueType::EnumTag(
-        ScalarEnumSchema::new(
-            "jazz.internal.policy_claim_directory_node_kind.v1",
-            [
-                "u8", "u16", "u32", "u64", "i32", "i64", "f64", "bool", "string", "bytes", "uuid",
-                "enum_tag", "null", "tuple", "array", "nullable",
-            ],
-        )
-        .expect("fixed policy-claim node kinds are valid"),
-    )
-}
-
-fn policy_claim_value_schema() -> &'static EnumSchema {
-    static SCHEMA: std::sync::OnceLock<EnumSchema> = std::sync::OnceLock::new();
-    SCHEMA.get_or_init(|| {
-        let empty = || RecordDescriptor::new(Vec::<(String, ValueType)>::new());
-        let scalar = |name: &str, value_type: ValueType| {
-            EnumCase::new(name, RecordDescriptor::new([("value", value_type)]))
-        };
-        EnumSchema::new(
-            "jazz.internal.policy_claim_directory_value.v1",
-            [
-                scalar("u8", ValueType::U8),
-                scalar("u16", ValueType::U16),
-                scalar("u32", ValueType::U32),
-                scalar("u64", ValueType::U64),
-                scalar("i32", ValueType::I32),
-                scalar("i64", ValueType::I64),
-                scalar("f64", ValueType::F64),
-                scalar("bool", ValueType::Bool),
-                scalar("string", ValueType::String),
-                scalar("bytes", ValueType::Bytes),
-                scalar("uuid", ValueType::Uuid),
-                scalar("enum_tag", ValueType::U8),
-                EnumCase::new("null", empty()),
-                EnumCase::new("tuple", empty()),
-                EnumCase::new("array", empty()),
-                EnumCase::new("nullable", empty()),
-            ],
-        )
-        .expect("fixed policy-claim value enum is valid")
-    })
-}
-
-fn policy_claim_node_descriptor() -> &'static RecordDescriptor {
-    static DESCRIPTOR: std::sync::OnceLock<RecordDescriptor> = std::sync::OnceLock::new();
-    DESCRIPTOR.get_or_init(|| {
-        RecordDescriptor::new([
-            ("name", ValueType::Nullable(Box::new(ValueType::String))),
-            ("kind", policy_claim_kind_type()),
-            ("children", ValueType::U32),
-            (
-                "value",
-                ValueType::Enum(Box::new(policy_claim_value_schema().clone())),
-            ),
-        ])
-    })
-}
-
-fn encode_policy_claim_node(
-    nodes: &mut Vec<Value>,
-    name: Option<&str>,
-    value: &Value,
-) -> Result<(), String> {
-    if nodes.len() >= POLICY_CLAIM_DIRECTORY_MAX_NODES {
-        return Err("policy binding directory claims exceed node limit".to_owned());
-    }
-    let (kind, enum_value, children): (u8, EnumValue, Vec<&Value>) = match value {
-        Value::U8(value) => (
-            POLICY_CLAIM_U8 as u8,
-            policy_claim_scalar(POLICY_CLAIM_U8, Value::U8(*value))?,
-            vec![],
-        ),
-        Value::U16(value) => (
-            POLICY_CLAIM_U16 as u8,
-            policy_claim_scalar(POLICY_CLAIM_U16, Value::U16(*value))?,
-            vec![],
-        ),
-        Value::U32(value) => (
-            POLICY_CLAIM_U32 as u8,
-            policy_claim_scalar(POLICY_CLAIM_U32, Value::U32(*value))?,
-            vec![],
-        ),
-        Value::U64(value) => (
-            POLICY_CLAIM_U64 as u8,
-            policy_claim_scalar(POLICY_CLAIM_U64, Value::U64(*value))?,
-            vec![],
-        ),
-        Value::I32(value) => (
-            POLICY_CLAIM_I32 as u8,
-            policy_claim_scalar(POLICY_CLAIM_I32, Value::I32(*value))?,
-            vec![],
-        ),
-        Value::I64(value) => (
-            POLICY_CLAIM_I64 as u8,
-            policy_claim_scalar(POLICY_CLAIM_I64, Value::I64(*value))?,
-            vec![],
-        ),
-        Value::F64(value) => (
-            POLICY_CLAIM_F64 as u8,
-            policy_claim_scalar(POLICY_CLAIM_F64, Value::F64(*value))?,
-            vec![],
-        ),
-        Value::Bool(value) => (
-            POLICY_CLAIM_BOOL as u8,
-            policy_claim_scalar(POLICY_CLAIM_BOOL, Value::Bool(*value))?,
-            vec![],
-        ),
-        Value::String(value) => (
-            POLICY_CLAIM_STRING as u8,
-            policy_claim_scalar(POLICY_CLAIM_STRING, Value::String(value.clone()))?,
-            vec![],
-        ),
-        Value::Bytes(value) => (
-            POLICY_CLAIM_BYTES as u8,
-            policy_claim_scalar(POLICY_CLAIM_BYTES, Value::Bytes(value.clone()))?,
-            vec![],
-        ),
-        Value::Uuid(value) => (
-            POLICY_CLAIM_UUID as u8,
-            policy_claim_scalar(POLICY_CLAIM_UUID, Value::Uuid(*value))?,
-            vec![],
-        ),
-        Value::EnumTag(value) => (
-            POLICY_CLAIM_ENUM_TAG as u8,
-            policy_claim_scalar(POLICY_CLAIM_ENUM_TAG, Value::U8(*value))?,
-            vec![],
-        ),
-        Value::Nullable(None) => (
-            POLICY_CLAIM_NULL as u8,
-            policy_claim_container(POLICY_CLAIM_NULL)?,
-            vec![],
-        ),
-        Value::Nullable(Some(value)) => (
-            POLICY_CLAIM_NULLABLE as u8,
-            policy_claim_container(POLICY_CLAIM_NULLABLE)?,
-            vec![value],
-        ),
-        Value::Tuple(values) => (
-            POLICY_CLAIM_TUPLE as u8,
-            policy_claim_container(POLICY_CLAIM_TUPLE)?,
-            values.iter().collect(),
-        ),
-        Value::Array(values) => (
-            POLICY_CLAIM_ARRAY as u8,
-            policy_claim_container(POLICY_CLAIM_ARRAY)?,
-            values.iter().collect(),
-        ),
-        Value::Record(_) | Value::Enum(_) | Value::Large(_) => {
-            return Err(
-                "policy binding directory does not admit engine-owned claim values".to_owned(),
-            );
-        }
-    };
-    let child_count = u32::try_from(children.len())
-        .map_err(|_| "policy binding directory has too many child claims".to_owned())?;
-    let descriptor = policy_claim_node_descriptor();
-    let raw = descriptor
-        .create(&[
-            Value::Nullable(name.map(|name| Box::new(Value::String(name.to_owned())))),
-            Value::EnumTag(kind),
-            Value::U32(child_count),
-            Value::Enum(enum_value),
-        ])
-        .map_err(|error| format!("policy binding directory claim node is invalid: {error}"))?;
-    nodes.push(Value::Record(OwnedRecord::new(raw, *descriptor)));
-    for child in children {
-        encode_policy_claim_node(nodes, None, child)?;
-    }
-    Ok(())
-}
-
-fn policy_claim_scalar(tag: u32, value: Value) -> Result<EnumValue, String> {
-    let schema = policy_claim_value_schema();
-    EnumValue::create(
-        tag,
-        schema.case(tag).expect("fixed tag").payload.clone(),
-        &[value],
-    )
-    .map_err(|error| format!("policy binding directory scalar is invalid: {error}"))
-}
-
-fn policy_claim_container(tag: u32) -> Result<EnumValue, String> {
-    let schema = policy_claim_value_schema();
-    EnumValue::create(
-        tag,
-        schema.case(tag).expect("fixed tag").payload.clone(),
-        &[],
-    )
-    .map_err(|error| format!("policy binding directory container is invalid: {error}"))
-}
-
-fn decode_policy_claim_node(
-    nodes: &[Value],
-    cursor: &mut usize,
-    root: bool,
-) -> Result<(Option<String>, Value), String> {
-    let node = nodes
-        .get(*cursor)
-        .ok_or_else(|| "policy binding directory claim tree ended early".to_owned())?;
-    *cursor += 1;
-    let Value::Record(record) = node else {
-        return Err("policy binding directory node must be a record".to_owned());
-    };
-    if record.descriptor() != policy_claim_node_descriptor() {
-        return Err("policy binding directory node has unexpected descriptor".to_owned());
-    }
-    let values = record
-        .to_values()
-        .map_err(|error| format!("policy binding directory node cannot decode: {error}"))?;
-    let [
-        name,
-        Value::EnumTag(kind),
-        Value::U32(children),
-        Value::Enum(enum_value),
-    ] = values.as_slice()
-    else {
-        return Err("policy binding directory node has invalid fields".to_owned());
-    };
-    let name = match name {
-        Value::Nullable(Some(name)) => match name.as_ref() {
-            Value::String(name) => Some(name.clone()),
-            _ => return Err("policy binding directory name must be string".to_owned()),
-        },
-        Value::Nullable(None) => None,
-        _ => return Err("policy binding directory name must be nullable string".to_owned()),
-    };
-    if root != name.is_some() {
-        return Err(if root {
-            "policy binding directory root claim is unnamed".to_owned()
-        } else {
-            "policy binding directory child claim is named".to_owned()
-        });
-    }
-    let expected_tag = u32::from(*kind);
-    if enum_value.tag() != expected_tag || expected_tag > POLICY_CLAIM_NULLABLE {
-        return Err("policy binding directory kind and value disagree".to_owned());
-    }
-    let payload = enum_value
-        .record()
-        .to_values()
-        .map_err(|error| format!("policy binding directory value cannot decode: {error}"))?;
-    let child_count = usize::try_from(*children)
-        .map_err(|_| "policy binding directory child count overflows".to_owned())?;
-    let scalar = |expected: u32| -> Result<Value, String> {
-        if expected_tag != expected || child_count != 0 || payload.len() != 1 {
-            return Err(
-                "policy binding directory scalar has invalid children or payload".to_owned(),
-            );
-        }
-        Ok(payload[0].clone())
-    };
-    let value = match expected_tag {
-        POLICY_CLAIM_U8 => scalar(POLICY_CLAIM_U8)?,
-        POLICY_CLAIM_U16 => scalar(POLICY_CLAIM_U16)?,
-        POLICY_CLAIM_U32 => scalar(POLICY_CLAIM_U32)?,
-        POLICY_CLAIM_U64 => scalar(POLICY_CLAIM_U64)?,
-        POLICY_CLAIM_I32 => scalar(POLICY_CLAIM_I32)?,
-        POLICY_CLAIM_I64 => scalar(POLICY_CLAIM_I64)?,
-        POLICY_CLAIM_F64 => scalar(POLICY_CLAIM_F64)?,
-        POLICY_CLAIM_BOOL => scalar(POLICY_CLAIM_BOOL)?,
-        POLICY_CLAIM_STRING => scalar(POLICY_CLAIM_STRING)?,
-        POLICY_CLAIM_BYTES => scalar(POLICY_CLAIM_BYTES)?,
-        POLICY_CLAIM_UUID => scalar(POLICY_CLAIM_UUID)?,
-        POLICY_CLAIM_ENUM_TAG => match scalar(POLICY_CLAIM_ENUM_TAG)? {
-            Value::U8(value) => Value::EnumTag(value),
-            _ => return Err("policy binding directory enum tag must be u8".to_owned()),
-        },
-        POLICY_CLAIM_NULL => {
-            if child_count != 0 || !payload.is_empty() {
-                return Err("policy binding directory null has payload or children".to_owned());
-            }
-            Value::Nullable(None)
-        }
-        POLICY_CLAIM_TUPLE | POLICY_CLAIM_ARRAY | POLICY_CLAIM_NULLABLE => {
-            if !payload.is_empty() {
-                return Err("policy binding directory container has payload".to_owned());
-            }
-            if expected_tag == POLICY_CLAIM_NULLABLE && child_count != 1 {
-                return Err("policy binding directory nullable must have one child".to_owned());
-            }
-            let mut children = Vec::with_capacity(child_count);
-            for _ in 0..child_count {
-                let (_, child) = decode_policy_claim_node(nodes, cursor, false)?;
-                children.push(child);
-            }
-            match expected_tag {
-                POLICY_CLAIM_TUPLE => Value::Tuple(children),
-                POLICY_CLAIM_ARRAY => Value::Array(children),
-                POLICY_CLAIM_NULLABLE => {
-                    Value::Nullable(Some(Box::new(children.pop().expect("one child"))))
-                }
-                _ => unreachable!(),
-            }
-        }
-        _ => return Err("policy binding directory node kind is unknown".to_owned()),
-    };
-    Ok((name, value))
-}
+pub(crate) use crate::model::policy_directory::{
+    policy_binding_directory_claims_from_value, policy_binding_directory_claims_value,
+    policy_directory_descriptor, policy_directory_payload,
+};
 
 /// Versioned query AST carried by shape registration.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -3337,323 +2950,9 @@ impl ReadViewSourceSpec {
     fn canonicalize(&mut self) {}
 }
 
-/// Canonical named values for one schema-wide branch selector.
-#[derive(
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Deserialize,
-    serde::Serialize,
-)]
-pub struct BranchSelector {
-    /// Canonically encoded typed values keyed by branch-column name.
-    pub values: BTreeMap<String, BranchColumnValue>,
-}
-
-impl BranchSelector {
-    /// Construct a selector from named branch-column values.
-    pub fn new(values: impl IntoIterator<Item = (impl Into<String>, Value)>) -> Self {
-        Self {
-            values: values
-                .into_iter()
-                .map(|(name, value)| (name.into(), BranchColumnValue::from(value)))
-                .collect(),
-        }
-    }
-}
-
-impl BranchViewBase {
-    /// Use the live current contents of a base branch.
-    pub fn current(branch: BranchSelector) -> Self {
-        Self::Current(branch)
-    }
-
-    /// Freeze a base branch at an application-resolved snapshot reference.
-    pub fn snapshot(branch: BranchSelector, snapshot: SnapshotRef) -> Self {
-        Self::Snapshot { branch, snapshot }
-    }
-}
-
-/// Error decoding the frozen branch-coordinate codec.
-#[derive(Debug, thiserror::Error)]
-pub enum BranchCodecError {
-    /// The envelope version, tag, length, ordering, or payload is invalid.
-    #[error("invalid branch codec envelope")]
-    InvalidEnvelope,
-    /// The supplied value or declared column type cannot be a branch column.
-    #[error("unsupported branch column type")]
-    UnsupportedType,
-    /// The encoded scalar tag does not match the declared schema type.
-    #[error("branch column encoding does not match its declared type")]
-    TypeMismatch,
-    /// Groove rejected the declared-type payload.
-    #[error("invalid Groove branch column payload: {0}")]
-    Groove(#[from] groove::records::Error),
-}
-
-const BRANCH_COLUMN_CODEC_VERSION: u8 = 1;
-const BRANCH_COLUMN_U8: u8 = 0;
-const BRANCH_COLUMN_U16: u8 = 1;
-const BRANCH_COLUMN_U32: u8 = 2;
-const BRANCH_COLUMN_U64: u8 = 3;
-const BRANCH_COLUMN_I32: u8 = 4;
-const BRANCH_COLUMN_I64: u8 = 5;
-const BRANCH_COLUMN_STRING: u8 = 6;
-const BRANCH_COLUMN_UUID: u8 = 7;
-const BRANCH_COLUMN_ENUM_TAG: u8 = 8;
-
-/// Canonical wire/storage encoding of one branch-column value.
-///
-/// Byte zero is the codec version, byte one is a permanently assigned scalar
-/// tag, and the remainder is the canonical Groove encoding under the declared
-/// column type. Keeping the tag outside Groove lets a selector cross the wire
-/// before a table is chosen while exact [`BranchKey`] construction still
-/// re-encodes and validates the payload against that table's schema.
-#[derive(
-    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
-pub struct BranchColumnValue(pub Vec<u8>);
-
-impl From<Value> for BranchColumnValue {
-    fn from(value: Value) -> Self {
-        let value_type = match &value {
-            Value::U8(_) => ValueType::U8,
-            Value::U16(_) => ValueType::U16,
-            Value::U32(_) => ValueType::U32,
-            Value::U64(_) => ValueType::U64,
-            Value::I32(_) => ValueType::I32,
-            Value::I64(_) => ValueType::I64,
-            Value::String(_) => ValueType::String,
-            Value::Uuid(_) => ValueType::Uuid,
-            Value::EnumTag(tag) => {
-                return Self(vec![
-                    BRANCH_COLUMN_CODEC_VERSION,
-                    BRANCH_COLUMN_ENUM_TAG,
-                    *tag,
-                ]);
-            }
-            // Preserve `BranchSelector::new` as an infallible constructor.
-            // Schema projection rejects this unknown tag before it can become
-            // an exact key or persistent coordinate.
-            _ => return Self(vec![BRANCH_COLUMN_CODEC_VERSION, u8::MAX]),
-        };
-        Self::encode_typed(&value, &value_type)
-            .expect("inferred branch selector type accepts its value")
-    }
-}
-
-impl BranchColumnValue {
-    /// Encode one value using its schema-declared Groove column type.
-    pub(crate) fn encode_typed(
-        value: &Value,
-        value_type: &ValueType,
-    ) -> Result<Self, BranchCodecError> {
-        let tag = branch_column_tag(value_type).ok_or(BranchCodecError::UnsupportedType)?;
-        let descriptor = RecordDescriptor::new([("value", value_type.clone())]);
-        let payload = descriptor.create(std::slice::from_ref(value))?;
-        let mut bytes = Vec::with_capacity(2 + payload.len());
-        bytes.extend([BRANCH_COLUMN_CODEC_VERSION, tag]);
-        bytes.extend(payload);
-        Ok(Self(bytes))
-    }
-
-    /// Decode a selector value before a table-specific type is available.
-    pub fn decode(&self) -> Result<Value, BranchCodecError> {
-        let (tag, payload) = self.envelope()?;
-        if tag == BRANCH_COLUMN_ENUM_TAG {
-            return match payload {
-                [tag] => Ok(Value::EnumTag(*tag)),
-                _ => Err(BranchCodecError::InvalidEnvelope),
-            };
-        }
-        let value_type = branch_column_type(tag).ok_or(BranchCodecError::InvalidEnvelope)?;
-        self.decode_as(&value_type)
-    }
-
-    /// Decode and canonically validate an exact key value against its schema.
-    pub(crate) fn decode_as(&self, value_type: &ValueType) -> Result<Value, BranchCodecError> {
-        let (tag, payload) = self.envelope()?;
-        if branch_column_tag(value_type) != Some(tag) {
-            return Err(BranchCodecError::TypeMismatch);
-        }
-        let descriptor = RecordDescriptor::new([("value", value_type.clone())]);
-        let value = descriptor.get_idx(payload, 0)?;
-        if descriptor.create(std::slice::from_ref(&value))? != payload {
-            return Err(BranchCodecError::InvalidEnvelope);
-        }
-        Ok(value)
-    }
-
-    fn envelope(&self) -> Result<(u8, &[u8]), BranchCodecError> {
-        match self.0.as_slice() {
-            [BRANCH_COLUMN_CODEC_VERSION, tag, payload @ ..] => Ok((*tag, payload)),
-            _ => Err(BranchCodecError::InvalidEnvelope),
-        }
-    }
-}
-
-fn branch_column_tag(value_type: &ValueType) -> Option<u8> {
-    match value_type {
-        ValueType::U8 => Some(BRANCH_COLUMN_U8),
-        ValueType::U16 => Some(BRANCH_COLUMN_U16),
-        ValueType::U32 => Some(BRANCH_COLUMN_U32),
-        ValueType::U64 => Some(BRANCH_COLUMN_U64),
-        ValueType::I32 => Some(BRANCH_COLUMN_I32),
-        ValueType::I64 => Some(BRANCH_COLUMN_I64),
-        ValueType::String => Some(BRANCH_COLUMN_STRING),
-        ValueType::Uuid => Some(BRANCH_COLUMN_UUID),
-        ValueType::EnumTag(_) => Some(BRANCH_COLUMN_ENUM_TAG),
-        _ => None,
-    }
-}
-
-fn branch_column_type(tag: u8) -> Option<ValueType> {
-    match tag {
-        BRANCH_COLUMN_U8 => Some(ValueType::U8),
-        BRANCH_COLUMN_U16 => Some(ValueType::U16),
-        BRANCH_COLUMN_U32 => Some(ValueType::U32),
-        BRANCH_COLUMN_U64 => Some(ValueType::U64),
-        BRANCH_COLUMN_I32 => Some(ValueType::I32),
-        BRANCH_COLUMN_I64 => Some(ValueType::I64),
-        BRANCH_COLUMN_STRING => Some(ValueType::String),
-        BRANCH_COLUMN_UUID => Some(ValueType::Uuid),
-        _ => None,
-    }
-}
-
-const BRANCH_KEY_CODEC_VERSION: u8 = 1;
-
-/// Exact, table-projected branch coordinate carried by every row version.
-#[derive(
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Deserialize,
-    serde::Serialize,
-)]
-pub struct BranchKey {
-    /// Values ordered by branch-column name.
-    pub values: Vec<(String, BranchColumnValue)>,
-}
-
-impl BranchKey {
-    /// Check and encode the physical branch-local row-key prefix.
-    pub fn try_canonical_bytes(&self) -> Result<Vec<u8>, BranchCodecError> {
-        if !self.is_canonical() {
-            return Err(BranchCodecError::InvalidEnvelope);
-        }
-        let mut bytes = Vec::new();
-        bytes.push(BRANCH_KEY_CODEC_VERSION);
-        put_branch_component_len(&mut bytes, self.values.len());
-        for (name, value) in &self.values {
-            put_branch_component_len(&mut bytes, name.len());
-            bytes.extend(name.as_bytes());
-            put_branch_component_len(&mut bytes, value.0.len());
-            bytes.extend(&value.0);
-        }
-        Ok(bytes)
-    }
-
-    /// Canonical bytes for an already-validated key.
-    pub fn canonical_bytes(&self) -> Vec<u8> {
-        self.try_canonical_bytes()
-            .expect("branch keys must be canonical before serialization")
-    }
-
-    /// Decode a persisted exact branch key.
-    pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, BranchCodecError> {
-        let [BRANCH_KEY_CODEC_VERSION, rest @ ..] = bytes else {
-            return Err(BranchCodecError::InvalidEnvelope);
-        };
-        let mut cursor = rest;
-        let count = take_branch_component_len(&mut cursor)?;
-        if count > cursor.len() / 8 {
-            return Err(BranchCodecError::InvalidEnvelope);
-        }
-        let mut values = Vec::with_capacity(count);
-        for _ in 0..count {
-            let name_len = take_branch_component_len(&mut cursor)?;
-            let name = take_branch_component(&mut cursor, name_len)?;
-            let name = std::str::from_utf8(name)
-                .map_err(|_| BranchCodecError::InvalidEnvelope)?
-                .to_owned();
-            if name.is_empty() {
-                return Err(BranchCodecError::InvalidEnvelope);
-            }
-            let value_len = take_branch_component_len(&mut cursor)?;
-            let value = BranchColumnValue(take_branch_component(&mut cursor, value_len)?.to_vec());
-            value.decode()?;
-            if values.last().is_some_and(|(previous, _)| previous >= &name) {
-                return Err(BranchCodecError::InvalidEnvelope);
-            }
-            values.push((name, value));
-        }
-        if !cursor.is_empty() {
-            return Err(BranchCodecError::InvalidEnvelope);
-        }
-        Ok(Self { values })
-    }
-
-    /// Whether this key has the one portable ordering and value encoding.
-    pub fn is_canonical(&self) -> bool {
-        self.values.windows(2).all(|pair| pair[0].0 < pair[1].0)
-            && self
-                .values
-                .iter()
-                .all(|(name, value)| !name.is_empty() && value.decode().is_ok())
-    }
-}
-
-fn put_branch_component_len(bytes: &mut Vec<u8>, len: usize) {
-    let len = u32::try_from(len).expect("branch codec component exceeds u32");
-    bytes.extend(len.to_le_bytes());
-}
-
-fn take_branch_component_len(cursor: &mut &[u8]) -> Result<usize, BranchCodecError> {
-    let encoded = take_branch_component(cursor, 4)?;
-    Ok(u32::from_le_bytes(
-        encoded
-            .try_into()
-            .map_err(|_| BranchCodecError::InvalidEnvelope)?,
-    ) as usize)
-}
-
-fn take_branch_component<'a>(
-    cursor: &mut &'a [u8],
-    len: usize,
-) -> Result<&'a [u8], BranchCodecError> {
-    let (value, rest) = cursor
-        .split_at_checked(len)
-        .ok_or(BranchCodecError::InvalidEnvelope)?;
-    *cursor = rest;
-    Ok(value)
-}
-
-/// Optional base composed underneath the live head of a branch view.
-#[derive(
-    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
-pub enum BranchViewBase {
-    /// A base that continues to observe current writes.
-    Current(BranchSelector),
-    /// A base frozen at one resolved snapshot.
-    Snapshot {
-        /// Branch key read at the frozen cut.
-        branch: BranchSelector,
-        /// Historic frontier shared by every source in the view.
-        snapshot: SnapshotRef,
-    },
-}
+pub use crate::model::branch::{
+    BranchCodecError, BranchColumnValue, BranchKey, BranchSelector, BranchViewBase, SnapshotRef,
+};
 
 /// Wire source selected by a read view.
 #[derive(
@@ -3684,33 +2983,6 @@ pub enum ReadViewSourceSpec {
         /// Historic frontier to read.
         snapshot: SnapshotRef,
     },
-}
-
-/// Dotted snapshot ref used by historic read views.
-#[derive(
-    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
-pub struct SnapshotRef {
-    /// Node that owns the local snapshot prefix.
-    pub owner: NodeUuid,
-    /// Contiguous global base visible at snapshot time.
-    pub global_base: GlobalTime,
-    /// Owner-local HLC prefix visible at snapshot time.
-    pub local_base: TxTime,
-    /// Individual transaction dots above the frontier.
-    #[serde(default)]
-    pub dots: Vec<TxId>,
-}
-
-impl From<Snapshot> for SnapshotRef {
-    fn from(snapshot: Snapshot) -> Self {
-        Self {
-            owner: snapshot.owner,
-            global_base: snapshot.global_base,
-            local_base: snapshot.local_base,
-            dots: snapshot.dots,
-        }
-    }
 }
 
 /// Usage-site subscription attach for one registered shape.
@@ -4822,7 +4094,7 @@ pub(crate) fn canonical_catalogue_schema_bytes(schema: &SchemaVersion) -> Result
 }
 
 fn compile_public_schema_json(bytes: &[u8]) -> Result<JazzSchema, String> {
-    crate::tools::public_schema_convert::decode_public_schema_json(bytes)
+    crate::model::public_schema_convert::decode_public_schema_json(bytes)
 }
 
 impl serde::Serialize for SchemaVersion {
@@ -5142,7 +4414,7 @@ impl PhysicalIdentityManifest {
                             .then_some(source_name)
                     })
                     .is_some_and(|source_name| {
-                        crate::node::physical::physical_column_epoch_is_compatible(
+                        crate::schema::physical_column_epoch_is_compatible(
                             source_table,
                             source_name,
                             target_table,
@@ -5315,7 +4587,7 @@ impl PhysicalIdentityManifest {
                     .columns
                     .get(&target_name)
                     .ok_or("physical identity inherited column missing")?;
-                let compatible = crate::node::physical::physical_column_epoch_is_compatible(
+                let compatible = crate::schema::physical_column_epoch_is_compatible(
                     source_table_schema,
                     &source_name,
                     target_table_schema,
@@ -6367,11 +5639,12 @@ pub enum OutboxMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::public_schema::{
+    use crate::model::public_schema::{
         ColumnType as PublicColumnType, PolicyExpr, SchemaBuilder, TablePolicies,
         TableSchemaBuilder,
     };
     use crate::tx::TxKind;
+    use groove::records::ValueType;
     use groove::schema::{ColumnSchema, ColumnType};
 
     // Internal wire corpus: byte compatibility and interning work cannot be
@@ -6570,7 +5843,7 @@ mod tests {
             )));
         let provider = BTreeMap::from([("role".into(), Value::String("editor".into()))]);
         let claims =
-            crate::tools::policy_claims::canonical_policy_binding_claims(&identity, provider);
+            crate::model::policy_claims::canonical_policy_binding_claims(&identity, provider);
         let key = PolicyBindingKey::from_canonical_parts(identity, claims.clone());
         let encoded = key.directory_value().unwrap();
         let Value::Record(fields) = encoded.clone() else {
@@ -6612,7 +5885,7 @@ mod tests {
             )
             .is_err()
         );
-        let derived = crate::tools::policy_claims::canonical_policy_binding_claims(
+        let derived = crate::model::policy_claims::canonical_policy_binding_claims(
             &identity,
             BTreeMap::new(),
         );
@@ -6684,9 +5957,9 @@ mod tests {
         assert_eq!(key.as_bytes(), "\0claim-path-v1:0:4:é:x".as_bytes());
         assert_eq!(crate::query::operand_claim_path(&key)[1..], unusual);
 
-        let object = crate::tools::policy_claims::json_value_to_policy_claim(
+        let object = crate::model::policy_claims::json_value_to_policy_claim(
             serde_json::json!({"slug": "north", "revoked": null}),
-            crate::tools::policy_claims::NumericClaimOrigin::ExactJson,
+            crate::model::policy_claims::NumericClaimOrigin::ExactJson,
         )
         .unwrap()
         .unwrap();
@@ -8016,3 +7289,11 @@ mod tests {
 }
 #[cfg(test)]
 pub(crate) mod supporting_set_test_oracle;
+
+// Durable record-field encodings for these types. They live beside the types
+// so the impls stay coherent once this layer is its own crate.
+groove::impl_record_field_enum!(ResultRowLayer {
+    ResultRowLayer::Content = 0,
+    ResultRowLayer::Deletion = 1,
+    ResultRowLayer::ContentOrDeletion = 2,
+});

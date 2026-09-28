@@ -22,22 +22,28 @@ use groove::db::GraphBuilder;
 use groove::records::{RecordDescriptor, Value};
 use groove::schema::ColumnType;
 
-use super::OpenTransactionId;
 #[cfg(test)]
 use crate::ids::RowUuid;
 use crate::ids::{AuthorSubject, SchemaFamilyId, SchemaVersionId};
+use crate::model::transaction::OpenTransactionId;
 use crate::protocol::{BindingViewKey, BranchKey, RegisterShapeOptions, SnapshotRef};
 use crate::query::{BindingId, Query, RecursionBound, RelationQuery, ShapeId};
 use crate::schema::TableSchema;
 use crate::time::GlobalTime;
 use crate::tx::{DurabilityTier, Snapshot, TxId};
 
+mod binding_values;
 mod fields;
 mod input;
 mod lowering;
 mod output;
 mod policy;
+mod publication;
 mod read;
+pub(crate) use binding_values::coerce_prepared_binding_value;
+pub use publication::{
+    CurrentRowBindingRole, CurrentRowPublicationField, CurrentRowResultVisibility,
+};
 mod resolver;
 mod schemas;
 

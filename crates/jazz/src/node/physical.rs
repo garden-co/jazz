@@ -4,6 +4,9 @@ use super::*;
 use crate::ids::{PhysicalColumnId, PhysicalTableId};
 use crate::protocol::PhysicalIdentityManifest;
 use crate::schema::ColumnSchema;
+pub(crate) use crate::schema::{
+    physical_column_epoch_is_compatible, physical_value_epoch_is_compatible,
+};
 use groove::schema::{
     ColumnSchema as GrooveColumnSchema, IndexSchema as GrooveIndexSchema,
     TableSchema as GrooveTableSchema, TableVariantField as GrooveTableVariantField,

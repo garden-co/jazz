@@ -21,21 +21,6 @@ pub(super) fn output_is_structured_collect_by(
     ))
 }
 
-pub(super) fn extend_root_window_positions(
-    descriptor: RecordDescriptor,
-    window: &[WindowedRecord],
-    key_fields: &[usize],
-    positions: &mut BTreeMap<Vec<u8>, usize>,
-) -> Result<(), IvmRuntimeError> {
-    let mut index = 0usize;
-    for (record, copies) in window {
-        let key = encoded_record_key_part(descriptor, record, key_fields)?;
-        positions.entry(key).or_insert(index);
-        index = index.saturating_add(usize::try_from(*copies).unwrap_or(usize::MAX));
-    }
-    Ok(())
-}
-
 /// Row identity of a TopBy's output: its group fields plus its tie fields,
 /// which are declared to identify a row within its group. A row whose order
 /// value changes keeps its identity, so it is an update plus a move. Without
@@ -77,6 +62,21 @@ pub(super) struct RootIdentity {
     /// `fields` are the group fields plus every other output field and a
     /// window row is keyed by its projection through `chain`.
     pub(super) projected: bool,
+}
+
+/// Whether a plain output can apply generic root positions: its chain from the
+/// ordering TopBy must carry the TopBy's row identity, the key space of the
+/// positions. Structured collectors own their positional edits, and an output
+/// without a proven identity keys its edits by its own fields, which no
+/// position can address. Only consuming outputs ask a TopBy for its windows,
+/// so every other ordered output keeps the delta-only unbounded path.
+pub(super) fn output_consumes_root_positions(
+    graph: &IvmGraph,
+    output: NodeId,
+    ordering: NodeId,
+) -> Result<bool, IvmRuntimeError> {
+    Ok(!output_is_structured_collect_by(graph, output)?
+        && root_identity_fields(graph, output, ordering)?.is_some())
 }
 
 /// Terminal key fields of a plain output ordered by `ordering` (#3290).
@@ -475,67 +475,6 @@ pub(super) fn apply_group_window_ordering(
         });
     }
     Ok(())
-}
-
-pub(super) fn apply_root_ordering_operations(
-    before: &BTreeMap<Vec<u8>, usize>,
-    after: &BTreeMap<Vec<u8>, usize>,
-    root_descriptor: RecordDescriptor,
-    terminal: &mut TerminalDeltas,
-) {
-    let mut current = before
-        .iter()
-        .map(|(key, index)| (*index, key.clone()))
-        .collect::<Vec<_>>();
-    current.sort_by_key(|(index, _)| *index);
-    let mut current = current.into_iter().map(|(_, key)| key).collect::<Vec<_>>();
-    for operation in &mut terminal.operations {
-        if !operation.path.is_empty() {
-            continue;
-        }
-        match &mut operation.edit {
-            TerminalEdit::Insert { index, key, .. } => {
-                if let Some(actual) = after.get(key) {
-                    *index = *actual;
-                }
-                if let Some(existing) = current.iter().position(|candidate| candidate == key) {
-                    current.remove(existing);
-                }
-                current.insert((*index).min(current.len()), key.clone());
-            }
-            TerminalEdit::Remove { key } => {
-                if let Some(existing) = current.iter().position(|candidate| candidate == key) {
-                    current.remove(existing);
-                }
-            }
-            TerminalEdit::Update { .. } | TerminalEdit::Move { .. } => {}
-        }
-    }
-
-    // Payload/nested edits are applied first. Positional edits follow, so a
-    // consumer never observes a move targeting a root that is not present.
-    let mut desired = after
-        .iter()
-        .map(|(key, index)| (*index, key.clone()))
-        .collect::<Vec<_>>();
-    desired.sort_by_key(|(index, _)| *index);
-    for (after_index, key) in desired {
-        if current.get(after_index) != Some(&key)
-            && let Some(existing) = current.iter().position(|candidate| candidate == &key)
-        {
-            current.remove(existing);
-            current.insert(after_index.min(current.len()), key.clone());
-            terminal.operations.push(TerminalOperation {
-                root_descriptor,
-                root_key: key.clone(),
-                path: Vec::new(),
-                edit: TerminalEdit::Move {
-                    key,
-                    index: after_index,
-                },
-            });
-        }
-    }
 }
 
 pub(super) fn project_descriptor(

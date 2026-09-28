@@ -1,7 +1,7 @@
 #[doc(hidden)]
 pub mod doctest_support {
     use crate::schema::JazzSchema;
-    use crate::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+    use crate::model::public_schema::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
     /// Example schema used by query-builder doctests.
     pub fn schema() -> JazzSchema {

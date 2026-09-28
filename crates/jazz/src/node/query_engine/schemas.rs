@@ -20,7 +20,8 @@ pub(crate) enum OutputTerminalSchema {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AppRowSchema {
     /// Single source-owned publication binding for each named terminal field.
-    pub(crate) publication_fields: BTreeMap<String, crate::node::CurrentRowPublicationField>,
+    pub(crate) publication_fields:
+        BTreeMap<String, crate::node::query_engine::CurrentRowPublicationField>,
     /// Descriptor for app-visible row records.
     pub(crate) descriptor: RecordDescriptor,
     /// Hidden fields retained by the graph and stripped before app delivery.
@@ -171,7 +172,7 @@ pub(crate) struct ResultMembershipSchema {
     pub(crate) payload_fields: Vec<TypedOutputField>,
     /// Explicit source/result/provenance identities for durable payload cells.
     pub(crate) payload_publication_fields:
-        BTreeMap<String, crate::node::CurrentRowPublicationField>,
+        BTreeMap<String, crate::node::query_engine::CurrentRowPublicationField>,
     /// Branch/prefix field, when branch/prefix participates in result
     /// identity.
     pub(crate) branch_or_prefix_field: Option<String>,

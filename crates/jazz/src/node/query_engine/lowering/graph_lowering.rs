@@ -4025,11 +4025,11 @@ pub(super) fn claim_value(
         }
     };
     if let Some(name) = crate::query::author_claim_path_key(&path.0) {
-        return crate::tools::policy_claims::author_policy_claims(*permission_subject)
+        return crate::model::policy_claims::author_policy_claims(*permission_subject)
             .remove(&name)
             .ok_or_else(|| UnsupportedReason::UnboundClaim(path.clone()));
     }
-    if let Some(value) = crate::tools::policy_claims::policy_claim_at_path(claims, &path.0) {
+    if let Some(value) = crate::model::policy_claims::policy_claim_at_path(claims, &path.0) {
         return Ok(value);
     }
     match path.0.as_slice() {

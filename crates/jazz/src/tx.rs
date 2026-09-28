@@ -6,7 +6,7 @@
 //! are grounded in `jazz/README.md`.
 
 use crate::ids::{AuthorSubject, NodeUuid, PhysicalTableId, RowAuthor, RowUuid, SchemaVersionId};
-use crate::protocol::{BranchKey, SnapshotRef};
+use crate::model::branch::{BranchKey, SnapshotRef};
 use crate::query::{BindingId, Query, ShapeId};
 use crate::schema::TableSchema;
 use crate::time::{GlobalTime, TxTime};
@@ -514,13 +514,18 @@ pub enum DurabilityTier {
 // Pin the established Postcard tags. Legacy Edge is accepted only while
 // decoding; new messages always encode Local as 1 and Global as 3.
 #[derive(serde::Deserialize, serde::Serialize)]
+#[allow(deprecated)]
 enum DurabilityEncoding {
     None,
     Local,
+    #[deprecated(
+        note = "the edge tier was removed in alpha.57; decode-only so old peers' edge acks still decode, as Local. Never encode it"
+    )]
     Edge,
     Global,
 }
 
+#[allow(deprecated)]
 impl From<DurabilityEncoding> for DurabilityTier {
     fn from(value: DurabilityEncoding) -> Self {
         match value {
@@ -1383,3 +1388,81 @@ mod contribution_tests {
         );
     }
 }
+
+// Durable record-field encodings for these types. They live beside the types
+// so the impls stay coherent once this layer is its own crate.
+groove::impl_record_field_enum!(TxKind {
+    TxKind::Mergeable = 0,
+    TxKind::Exclusive = 1,
+});
+// Storage tags are independent of the public enum: 2 is a decode-only legacy
+// alias for Local, while Global remains 3.
+impl DurabilityTier {
+    #[doc(hidden)]
+    pub fn from_discriminant(tag: u8) -> Result<Self, groove::records::Error> {
+        match tag {
+            0 => Ok(Self::None),
+            1 | 2 => Ok(Self::Local),
+            3 => Ok(Self::Global),
+            tag => Err(groove::records::Error::InvalidEnumDiscriminant {
+                enum_name: "DurabilityTier".to_owned(),
+                discriminant: tag,
+            }),
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn discriminant(self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::Local => 1,
+            Self::Global => 3,
+        }
+    }
+}
+
+impl groove::records::RecordField for DurabilityTier {
+    fn read(
+        record: &groove::records::BorrowedRecord<'_>,
+        idx: usize,
+    ) -> Result<Self, groove::records::Error> {
+        Self::from_discriminant(record.get_enum(idx)?)
+    }
+    fn to_value(&self) -> groove::records::Value {
+        groove::records::Value::EnumTag(self.discriminant())
+    }
+    const COLUMN_KIND: groove::records::FieldKind = groove::records::FieldKind::Enum;
+    fn read_raw(
+        bytes: &[u8],
+        value_type: &groove::records::ValueType,
+    ) -> Result<Self, groove::records::Error> {
+        match value_type {
+            groove::records::ValueType::EnumTag(schema) => {
+                let tag = <u8 as groove::records::RecordField>::read_raw(
+                    bytes,
+                    &groove::records::ValueType::U8,
+                )?;
+                schema.variant(tag)?;
+                Self::from_discriminant(tag)
+            }
+            _ => Err(groove::records::Error::TypeMismatch {
+                expected: groove::records::ValueType::U8,
+            }),
+        }
+    }
+    fn read_tuple_raw(
+        bytes: &[u8],
+        value_type: &groove::records::ValueType,
+    ) -> Result<Self, groove::records::Error> {
+        Self::read_raw(bytes, value_type)
+    }
+}
+
+groove::impl_record_field_enum!(DeletionEvent {
+    DeletionEvent::Deleted = 0,
+    DeletionEvent::Restored = 1,
+});
+groove::impl_record_field_enum!(MergeAspect {
+    MergeAspect::Content = 0,
+    MergeAspect::Deletion = 1,
+});

@@ -621,7 +621,7 @@ fn native_corpus_large_value_metadata_entries<S>(node: &NodeState<S>) -> Vec<(Ve
 where
     S: OrderedKvStorage,
 {
-    let entries = crate::db::block_on(
+    let entries = crate::local_executor::block_on(
         node.database
             .large_value_metadata_entries_for_compatibility(),
     )
@@ -941,7 +941,7 @@ where
     let mut stores = tables
         .into_iter()
         .map(|table| {
-            let rows = crate::db::block_on(node.database.primary_key_scan_raw(&table, &[]))
+            let rows = crate::local_executor::block_on(node.database.primary_key_scan_raw(&table, &[]))
                 .unwrap_or_else(|error| panic!("scan corpus store {table}: {error}"));
             (
                 table,
@@ -956,7 +956,7 @@ where
             .database
             .direct_record_store(&store_name)
             .unwrap_or_else(|error| panic!("open corpus direct store {store_name}: {error}"));
-        let entries = crate::db::block_on(store.prefix_entries(&[]))
+        let entries = crate::local_executor::block_on(store.prefix_entries(&[]))
             .unwrap_or_else(|error| panic!("scan corpus direct store {store_name}: {error}"));
         let rows = entries
             .into_iter()
@@ -1008,7 +1008,7 @@ where
     // corpus that scans only `lower_to_groove()` therefore misses the bytes it
     // exists to freeze.
     for storage_table in native_corpus_required_application_stores(node) {
-        let rows = crate::db::block_on(node.database.primary_key_scan_raw(&storage_table, &[]))
+        let rows = crate::local_executor::block_on(node.database.primary_key_scan_raw(&storage_table, &[]))
             .unwrap_or_else(|error| panic!("scan physical corpus store {storage_table}: {error}"));
         assert!(
             stores
@@ -1147,19 +1147,19 @@ where
     )
     .expect("fixture large value prepares");
     let upload_id = groove::large_values::StagedLargeValueId([0xc5; 16]);
-    crate::db::block_on(node.begin_streaming_large_value_upload(
+    crate::local_executor::block_on(node.begin_streaming_large_value_upload(
         upload_id,
         groove::large_values::LargeValueKind::Bytes,
     ))
     .expect("fixture upload establishes its normal pending journal");
-    crate::db::block_on(node.stage_large_value_chunk_batch(
+    crate::local_executor::block_on(node.stage_large_value_chunk_batch(
         upload_id,
         groove::large_values::LargeValueKind::Bytes,
         prepared.staged_chunks,
     ))
     .expect("fixture chunks stage through the normal node admission path");
     let staged =
-        crate::db::block_on(node.finalize_large_value_upload(upload_id, prepared.value_ref))
+        crate::local_executor::block_on(node.finalize_large_value_upload(upload_id, prepared.value_ref))
             .expect("fixture root finalizes through the normal node admission path");
     first_commit.cells.insert(
         "attachment".to_owned(),
@@ -1350,7 +1350,7 @@ where
         panic!("first history attachment must retain its large-value descriptor");
     };
     assert_eq!(
-        crate::db::block_on(node.read_large_value_range(&value_ref, 0..value_ref.byte_length))
+        crate::local_executor::block_on(node.read_large_value_range(&value_ref, 0..value_ref.byte_length))
             .expect("reopened large tree materializes"),
         native_corpus_large_attachment(),
         "the indirect byte tree survives the native reopen"
@@ -1374,7 +1374,7 @@ where
     // their logical packs comparable without pretending local integer aliases
     // or freshly minted UUIDs are an interchange format.
     let mut producer =
-        crate::db::block_on(NodeState::new_catalogue_uninitialized(node(0xc0), open()))
+        crate::local_executor::block_on(NodeState::new_catalogue_uninitialized(node(0xc0), open()))
             .expect("open uninitialized settlement-baseline producer");
     producer
         .apply_trusted_catalogue_snapshot_settled(snapshot.clone())
@@ -1403,7 +1403,7 @@ where
         "a native store must reject an incomplete codec profile before opening Jazz data"
     );
     let unchanged_after_rejection =
-        crate::db::block_on(NodeState::new(node(0xc0), schema.clone(), open()))
+        crate::local_executor::block_on(NodeState::new(node(0xc0), schema.clone(), open()))
             .expect("correct profile reopens after rejected admission");
     assert_eq!(
         native_corpus_receipt(&unchanged_after_rejection, &schema),
@@ -1415,7 +1415,7 @@ where
     // This open performs no application writes.  It proves that the current
     // runtime reads a separately constructed durable root before the mixed
     // current-format write below changes any physical family.
-    let mut reopened = crate::db::block_on(NodeState::new(node(0xc0), schema.clone(), open()))
+    let mut reopened = crate::local_executor::block_on(NodeState::new(node(0xc0), schema.clone(), open()))
         .expect("open historical native corpus without mutation");
     assert_eq!(native_corpus_receipt(&reopened, &schema), before_close);
     assert_native_corpus_semantics(&mut reopened, row_uuid);
@@ -1429,7 +1429,7 @@ where
     drop(reopened);
 
     let mut after_mixed_write =
-        crate::db::block_on(NodeState::new(node(0xc0), schema.clone(), open()))
+        crate::local_executor::block_on(NodeState::new(node(0xc0), schema.clone(), open()))
             .expect("reopen mixed store");
     assert_native_corpus_semantics(&mut after_mixed_write, row_uuid);
     assert!(
@@ -1460,7 +1460,7 @@ fn verify_historical_native_corpus<S>(
 ) where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    let mut reader = crate::db::block_on(NodeState::new(node(0xc0), schema.clone(), open()))
+    let mut reader = crate::local_executor::block_on(NodeState::new(node(0xc0), schema.clone(), open()))
         .expect("current Jazz opens committed native corpus");
     let before_write = native_corpus_receipt(&reader, &schema);
     assert_native_corpus_has_required_families(&mut reader, &before_write);
@@ -1510,7 +1510,7 @@ fn verify_historical_native_corpus<S>(
         .expect("current Jazz writes alongside committed history");
     drop(reader);
 
-    let mut reopened = crate::db::block_on(NodeState::new(node(0xc0), schema, open()))
+    let mut reopened = crate::local_executor::block_on(NodeState::new(node(0xc0), schema, open()))
         .expect("current Jazz reopens mixed native corpus");
     assert_native_corpus_semantics(&mut reopened, row(0xc1));
     assert!(
@@ -1528,7 +1528,7 @@ fn in_memory_native_corpus_receipt(first_title: &str, note_body: &str) -> Native
     let families = schema.column_families();
     let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = MemoryStorage::new(&refs).expect("open in-memory sensitivity store");
-    let mut node = crate::db::block_on(NodeState::new(node(0xc0), schema.clone(), storage))
+    let mut node = crate::local_executor::block_on(NodeState::new(node(0xc0), schema.clone(), storage))
         .expect("open in-memory sensitivity node");
     seed_native_corpus(&mut node, first_title, note_body);
     native_corpus_receipt(&node, &schema)
@@ -2339,7 +2339,7 @@ fn native_jazz_corpus_rejects_a_receipt_omitting_all_physical_application_famili
     let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = MemoryStorage::new(&refs).expect("open omission-sensitivity store");
     let snapshot = native_corpus_authority_snapshot(&schema);
-    let mut node = crate::db::block_on(NodeState::new_catalogue_uninitialized(node(0xc0), storage))
+    let mut node = crate::local_executor::block_on(NodeState::new_catalogue_uninitialized(node(0xc0), storage))
         .expect("open omission-sensitivity node");
     node.apply_trusted_catalogue_snapshot_settled(snapshot.clone())
         .expect("install omission-sensitivity authority snapshot");
@@ -2394,13 +2394,13 @@ fn published_alpha54_native_corpus_reopens_and_accepts_current_writes() {
                 "published history missing {body}");
         }
     };
-    let mut reopened = crate::db::block_on(NodeState::new(node(42), schema.clone(), open())).unwrap();
+    let mut reopened = crate::local_executor::block_on(NodeState::new(node(42), schema.clone(), open())).unwrap();
     check(&mut reopened);
     reopened.commit_mergeable_settled(MergeableCommit::new("notes", row(44), 102)
         .cells(BTreeMap::from([("body".to_owned(), v("current main writer"))])))
         .unwrap();
     drop(reopened);
-    let mut reopened = crate::db::block_on(NodeState::new(node(42), schema.clone(), open())).unwrap();
+    let mut reopened = crate::local_executor::block_on(NodeState::new(node(42), schema.clone(), open())).unwrap();
     check(&mut reopened);
     assert!(reopened.query_table_versions("notes").unwrap().iter().any(|version|
         version.row_uuid() == row(44)
@@ -2484,10 +2484,10 @@ fn published_alpha56_legacy_edge_receipt_reopens_as_pending_local_and_is_resent(
     let core_row = RowUuid(text("/receipt/confirmed/rowId").parse().unwrap());
     {
         let mut state =
-            crate::db::block_on(NodeState::new(node(0x56), schema.clone(), storage)).unwrap();
+            crate::local_executor::block_on(NodeState::new(node(0x56), schema.clone(), storage)).unwrap();
         // The stored fields really are the legacy shape: Accepted, tag 2, no
         // global time. Decoding, not a migration, turns that into Pending.
-        let unsettled = crate::db::block_on(state.database.index_scan_raw(
+        let unsettled = crate::local_executor::block_on(state.database.index_scan_raw(
             "jazz_transactions",
             "by_global_time",
             &[Value::Nullable(None)],
@@ -2499,7 +2499,7 @@ fn published_alpha56_legacy_edge_receipt_reopens_as_pending_local_and_is_resent(
         assert_eq!(record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX).unwrap(), 2);
         drop(unsettled);
 
-        let audit = crate::db::block_on(state.transaction_record(edge_tx)).unwrap();
+        let audit = crate::local_executor::block_on(state.transaction_record(edge_tx)).unwrap();
         assert_eq!(audit.tx_id, edge_tx);
         assert_eq!(audit.made_by, author);
         assert_eq!(audit.kind, TxKind::Mergeable);
@@ -2508,10 +2508,10 @@ fn published_alpha56_legacy_edge_receipt_reopens_as_pending_local_and_is_resent(
         assert_eq!(audit.global_time, None);
         assert_eq!(audit.durability, DurabilityTier::Local);
         assert_eq!(
-            crate::db::block_on(state.transaction_state(edge_tx)),
+            crate::local_executor::block_on(state.transaction_state(edge_tx)),
             Some((Fate::Pending, None, DurabilityTier::Local))
         );
-        let versions = crate::db::block_on(state.query_versions_for_tx(edge_tx)).unwrap();
+        let versions = crate::local_executor::block_on(state.query_versions_for_tx(edge_tx)).unwrap();
         assert_eq!(versions.len(), 1);
         assert_eq!(versions[0].row_uuid(), edge_row);
         assert_eq!(
@@ -2522,21 +2522,21 @@ fn published_alpha56_legacy_edge_receipt_reopens_as_pending_local_and_is_resent(
         // Replay is author-scoped: the author's resend scan recovers exactly
         // the edge-accepted write, and nobody else's scan sees it.
         assert_eq!(
-            crate::db::block_on(state.pending_transaction_ids_for_author(author)).unwrap(),
+            crate::local_executor::block_on(state.pending_transaction_ids_for_author(author)).unwrap(),
             vec![edge_tx]
         );
         assert!(
-            crate::db::block_on(state.pending_transaction_ids_for_author(AuthorSubject::SYSTEM))
+            crate::local_executor::block_on(state.pending_transaction_ids_for_author(AuthorSubject::SYSTEM))
                 .unwrap()
                 .is_empty()
         );
 
         // The Core-confirmed control keeps its Accepted/Global outcome.
         let (fate, global_time, durability) =
-            crate::db::block_on(state.transaction_state(core_tx)).unwrap();
+            crate::local_executor::block_on(state.transaction_state(core_tx)).unwrap();
         assert_eq!((fate, durability), (Fate::Accepted, DurabilityTier::Global));
         assert!(global_time.is_some());
-        let core_versions = crate::db::block_on(state.query_versions_for_tx(core_tx)).unwrap();
+        let core_versions = crate::local_executor::block_on(state.query_versions_for_tx(core_tx)).unwrap();
         assert_eq!(core_versions.len(), 1);
         assert_eq!(core_versions[0].row_uuid(), core_row);
     }
