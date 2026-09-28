@@ -47,15 +47,17 @@ zero-config local sync.
 
 ### Hosting
 
-The picker also asks where the app syncs. You can set this with
-`--hosting <value>`:
+The picker asks where the app syncs. When you skip the picker (with
+`--starter`, or when output is not a terminal), set this with
+`--hosting <value>` instead; the interactive picker ignores the flag:
 
 | Value        | Behaviour                                                    |
 | ------------ | ------------------------------------------------------------ |
 | `hosted`     | Provision a Jazz Cloud app at scaffold time                  |
 | `selfhosted` | Skip provisioning; the dev plugin starts a local Jazz server |
 
-With `--starter`, hosting defaults to `selfhosted` unless `--hosting` is given.
+Without `--hosting`, `--starter` defaults to `selfhosted`, and a
+non-interactive run without `--starter` defaults to `hosted`.
 
 ## Requirements
 
