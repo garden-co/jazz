@@ -2506,7 +2506,7 @@ where
 
     #[cfg(not(feature = "testing"))]
     #[allow(dead_code)]
-    pub fn accept_relay_subscriber(
+    pub(crate) fn accept_relay_subscriber(
         &self,
         transport: Box<dyn Transport>,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
