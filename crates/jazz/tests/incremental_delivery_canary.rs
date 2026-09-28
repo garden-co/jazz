@@ -380,7 +380,7 @@ fn maintained_relation_include_single_row_changes_are_scale_independent() {
     );
 }
 
-fn insert_ordered_item(db: &Db<TestStorage>, id: u64, ordinal: i32) {
+fn insert_ordered_item(db: &Db, id: u64, ordinal: i32) {
     block_on(db.insert(
         "items",
         BTreeMap::from([
