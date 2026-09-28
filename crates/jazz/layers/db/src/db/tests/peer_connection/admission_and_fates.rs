@@ -2002,8 +2002,8 @@ fn advice_after_a_write_reads_only_the_target_row() {
 /// `docs` rows inherit read, update and delete from their `group`, and a
 /// group is readable by its member.
 fn group_docs_schema() -> JazzSchema {
-    let inherits = || crate::tools::PolicyExpr::Inherits {
-        operation: crate::tools::public_schema::Operation::Select,
+    let inherits = || crate::model::public_schema::PolicyExpr::Inherits {
+        operation: crate::model::public_schema::Operation::Select,
         via_column: "group".into(),
         max_depth: None,
     };
