@@ -78,7 +78,9 @@ pub use state::{ExecutionLayoutStats, RuntimeStats, TickMetrics};
 pub use terminal::{
     TerminalDeltas, TerminalEdit, TerminalOperation, TerminalPathSegment, terminal_occurrence_key,
 };
-use terminal::{order_terminal_snapshot, terminal_deltas_from_record_deltas};
+use terminal::{
+    order_terminal_snapshot, terminal_deltas_from_record_deltas, terminal_deltas_keyed_by_identity,
+};
 
 const DEFAULT_SINK: &str = "__default";
 const EVAL_MEMO_MAX_ENTRIES: usize = 8192;
@@ -188,14 +190,22 @@ pub struct IvmRuntime {
     /// A lifecycle operation released retainers while queued work may still
     /// reference the released graph slice.
     ephemeral_graph_gc_pending: bool,
+    /// Nodes whose reachability may have changed since the last graph GC:
+    /// released retainer roots and roots blocked by queued evaluations. New
+    /// nodes are drained from the graph. Every unretained node is an ancestor
+    /// of one of these, so GC never scans the whole graph.
+    gc_candidates: HashSet<NodeId>,
     prepared_shapes: HashMap<PreparedShapeId, RoutedMultisinkShapeState>,
     auto_direct_families: HashMap<AutoDirectFamilyKey, PreparedShapeId>,
-    binding_sources: HashMap<BindingSourceKey, BindingSourceState>,
+    shared_prepared_shapes: HashMap<subscriptions::SharedShapeKey, PreparedShapeId>,
+    binding_sources: subscriptions::BindingSources,
     input_source_runtime_namespace: u64,
     next_input_source_id: u64,
     /// Binding retractions discovered while routing notifications cannot tick
     /// recursively; the next public tick drains them before user deltas run.
     pending_binding_retractions: Vec<BindingDelta>,
+    /// Bindings admitted onto a live prepared shape without full hydration.
+    live_attaches: u64,
     deferred_notifications: HashMap<PublicationId, Vec<(SubscriptionId, QueuedMultisinkDeltas)>>,
     durable_notification_publications: HashSet<PublicationId>,
     completed_deferred_publications: HashSet<PublicationId>,
@@ -230,6 +240,10 @@ pub struct IvmRuntime {
     next_shape_id: u64,
     logical_nodes_requested: u64,
     auto_direct_family_enabled: bool,
+    /// Whether plain ordered outputs receive generic root positions (insert
+    /// indices and moves). A consumer that never reads them turns this off,
+    /// so an unbounded TopBy keeps its delta-only path.
+    plain_output_root_positions: bool,
     collect_tick_runtime_stats: bool,
 }
 
@@ -278,6 +292,7 @@ impl IvmRuntime {
             pending_incremental: runtime_tick::PendingIncrementalEvaluation::default(),
             pending_incremental_polling: false,
             ephemeral_graph_gc_pending: false,
+            gc_candidates: HashSet::default(),
             operator_states: HashMap::default(),
             arrangement_states: HashMap::default(),
             arrangement_keys_by_input: HashMap::default(),
@@ -295,14 +310,17 @@ impl IvmRuntime {
             next_shape_id: 1,
             logical_nodes_requested: 0,
             auto_direct_family_enabled: true,
+            plain_output_root_positions: true,
             collect_tick_runtime_stats: false,
             prepared_shapes: HashMap::default(),
             auto_direct_families: HashMap::default(),
-            binding_sources: HashMap::default(),
+            shared_prepared_shapes: HashMap::default(),
+            binding_sources: subscriptions::BindingSources::default(),
             input_source_runtime_namespace: NEXT_INPUT_SOURCE_RUNTIME_NAMESPACE
                 .fetch_add(1, Ordering::Relaxed),
             next_input_source_id: 1,
             pending_binding_retractions: Vec::new(),
+            live_attaches: 0,
             deferred_notifications: HashMap::default(),
             durable_notification_publications: HashSet::default(),
             completed_deferred_publications: HashSet::default(),
@@ -378,6 +396,16 @@ impl IvmRuntime {
 
     pub fn set_auto_direct_family_enabled(&mut self, enabled: bool) {
         self.auto_direct_family_enabled = enabled;
+    }
+
+    /// Enable or disable generic root positions for plain ordered outputs.
+    /// Structured collectors are unaffected: they own their positional edits.
+    pub fn set_plain_output_root_positions_enabled(&mut self, enabled: bool) {
+        self.plain_output_root_positions = enabled;
+    }
+
+    pub fn plain_output_root_positions_enabled(&self) -> bool {
+        self.plain_output_root_positions
     }
 
     pub fn schema(&self) -> &DatabaseSchema {
@@ -469,6 +497,8 @@ pub enum IvmRuntimeError {
     InvalidPersistedIndex(String),
     #[error("intersected index sources currently require prefix scans")]
     UnsupportedIndexIntersectionScan,
+    #[error("candidate-filtered index sources require snapshot row projection and prefix scans")]
+    UnsupportedIndexCandidateFilter,
     #[error("join key arity mismatch: left={left}, right={right}")]
     JoinKeyArityMismatch { left: usize, right: usize },
     #[error("shape key field not found: {0}")]
@@ -485,6 +515,8 @@ pub enum IvmRuntimeError {
     PersistRecordMismatch,
     #[error("binding sources can only be evaluated through prepared shapes")]
     BindingSourceRequiresPrepare,
+    #[error("physical root values are only supported for first-result subscriptions")]
+    PhysicalRootValuesRequireFirstResult,
     #[error("multisink subscription must have at least one sink")]
     EmptyMultisinkSubscription,
     #[error("multisink sink already exists: {0}")]

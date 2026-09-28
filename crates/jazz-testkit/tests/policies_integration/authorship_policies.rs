@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use jazz::query::Query;
 
-use super::support::wait_for_edge_txs;
+use super::support::wait_for_global_txs;
 use super::support::{connect_ready_client, wait_for_rows};
 use super::{pe, permissions};
 use jazz::tools::{
@@ -155,7 +155,7 @@ async fn backend_session_transaction_preserves_raw_claims_and_logical_author_inn
         "staged provenance must not use the backend SYSTEM author"
     );
     let transaction_id = transaction.commit().expect("commit session transaction");
-    wait_for_edge_txs(&backend, &[transaction_id]).await;
+    wait_for_global_txs(&backend, &[transaction_id]).await;
 
     let rows = wait_for_rows(
         &backend,
@@ -191,7 +191,7 @@ async fn create_note_with_backend_attribution(
         .with_write_context(write_context)
         .insert("notes", note_input(title))
         .expect("create note with backend attribution");
-    wait_for_edge_txs(
+    wait_for_global_txs(
         backend,
         &[transaction_id.expect("backend attributed insert should commit immediately")],
     )
@@ -715,7 +715,7 @@ async fn backend_attribution_survives_transactions_and_later_mutations() {
                 staged[0].1,
                 vec!["staged".into(), author.clone(), author.clone()]
             );
-            wait_for_edge_txs(
+            wait_for_global_txs(
                 &backend,
                 &[transaction.commit().expect("commit attribution")],
             )
@@ -724,7 +724,7 @@ async fn backend_attribution_survives_transactions_and_later_mutations() {
                 .update("notes", id, vec![("title".into(), "updated".into())])
                 .expect("attributed update")
                 .unwrap();
-            wait_for_edge_txs(&backend, &[update]).await;
+            wait_for_global_txs(&backend, &[update]).await;
             let updated = wait_for_rows(
                 &alice,
                 query.clone(),
@@ -742,13 +742,13 @@ async fn backend_attribution_survives_transactions_and_later_mutations() {
             let upsert = attributed
                 .upsert("notes", *id.uuid(), note_input("upserted"))
                 .expect("attributed upsert");
-            wait_for_edge_txs(&backend, &[upsert.expect("upsert transaction")]).await;
+            wait_for_global_txs(&backend, &[upsert.expect("upsert transaction")]).await;
             let rows = wait_for_rows(&alice, query, "Alice sees attributed mutations", |rows| {
                 (rows.len() == 1 && rows[0].1[0] == Value::Text("upserted".into())).then_some(rows)
             })
             .await;
             assert_eq!(rows[0].1, vec!["upserted".into(), author.clone(), author]);
-            wait_for_edge_txs(
+            wait_for_global_txs(
                 &backend,
                 &[attributed
                     .delete("notes", id)
@@ -871,7 +871,7 @@ async fn updated_by_select_policy_moves_visibility_to_last_editor_inner() {
         )
         .expect("bob becomes latest updater")
         .expect("ordinary Bob update commits immediately");
-    wait_for_edge_txs(&bob, &[bob_update]).await;
+    wait_for_global_txs(&bob, &[bob_update]).await;
 
     let alice_rows = tokio::time::timeout(
         READY_TIMEOUT,
@@ -883,7 +883,7 @@ async fn updated_by_select_policy_moves_visibility_to_last_editor_inner() {
         ),
     )
     .await
-    .expect("Alice's removal query must not stall after Bob's update reaches edge");
+    .expect("Alice's removal query must not stall after Bob's update reaches Core");
     assert!(alice_rows.is_empty());
 
     let bob_rows = wait_for_rows(

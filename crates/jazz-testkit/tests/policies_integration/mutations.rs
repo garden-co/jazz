@@ -1,6 +1,6 @@
 use crate::JazzClient;
 use jazz_server::JazzServer;
-use jazz_testkit::{connect_ready_client, connect_ready_user, wait_for_edge_txs, wait_for_query};
+use jazz_testkit::{connect_ready_client, connect_ready_user, wait_for_global_txs, wait_for_query};
 
 use super::*;
 
@@ -91,7 +91,7 @@ async fn rebac_update_denied_by_using_policy_inner() {
             crate::row_input!("owner_id" => super::ALICE_ID, "content" => "Alice's document"),
         )
         .expect("seed alice document");
-    wait_for_edge_txs(
+    wait_for_global_txs(
         &admin,
         &[transaction_id.expect("seed insert should commit immediately")],
     )

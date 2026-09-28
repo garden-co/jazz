@@ -32,7 +32,7 @@ fn todo_cells(title: String, done: bool) -> RowCells {
     ])
 }
 
-fn open_db(seed: u64) -> Result<Db<MemoryStorage>, Box<dyn std::error::Error>> {
+fn open_db(seed: u64) -> Result<Db, Box<dyn std::error::Error>> {
     let schema = todo_schema();
     let column_families = schema.column_families();
     let column_family_refs = column_families

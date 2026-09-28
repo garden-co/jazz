@@ -1,5 +1,11 @@
 # BandChat benchmark variant
 
+[metadata.ts](metadata.ts) owns the wall-clock descriptions, timing boundaries
+and work denominators used by the examples page. CodSpeed measures the
+`walltime` suite on its macro runner through the native workload matrix in
+`.github/workflows/codspeed.yml`; benchmark names carry a `band_chat_` prefix
+because the page matches results by exact name.
+
 This self-contained Rust package duplicates only the BandChat schema and query
 shapes needed for measurement. It does not import the application runtime or its
 fixture helpers.
@@ -26,6 +32,5 @@ cardinality, pagination, filtering, and order.
 
 ```sh
 cargo test -p jazz-example-band-chat-benchmark
-cargo bench -p jazz-example-band-chat-benchmark --bench loads
-cargo bench -p jazz-example-band-chat-benchmark --bench fast_resume
+cargo bench -p jazz-example-band-chat-benchmark --bench walltime
 ```

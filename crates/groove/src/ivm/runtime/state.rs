@@ -58,6 +58,10 @@ pub struct TickMetrics {
     pub tick: u64,
     pub table_delta_records: usize,
     pub records_processed: usize,
+    /// Graph node results computed by this tick, including empty ones.
+    pub nodes_evaluated: usize,
+    /// Subscriptions whose outputs this tick considered for publication.
+    pub subscriptions_considered: usize,
     /// Selected-window records visited to build generic root position maps.
     pub root_ordering_position_records: usize,
     /// Selected-window records whose generic maps had no plain output consumer.

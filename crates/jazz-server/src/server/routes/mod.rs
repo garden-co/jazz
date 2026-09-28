@@ -1933,4 +1933,158 @@ mod tests {
             .expect("oversized ingress response");
         assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
+
+    fn persistent_dynamic_builder(dir: &std::path::Path, name: &str) -> ServerBuilder {
+        ServerBuilder::new(AppId::from_name(name))
+            .with_auth_config(test_auth_config())
+            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+            .with_storage(StorageBackend::Persistent {
+                path: dir.to_path_buf(),
+            })
+    }
+
+    fn named_route(name: &str, path: &str) -> String {
+        format!(
+            "/apps/{}/{}",
+            AppId::from_name(name),
+            path.trim_start_matches('/')
+        )
+    }
+
+    async fn admin_post(app: &axum::Router, route: String, request: Value) -> StatusCode {
+        app.clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(route)
+                    .header("Content-Type", "application/json")
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(axum::body::Body::from(request.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+
+    async fn publish_schema_via_admin(app: &axum::Router, name: &str, schema: &Schema) {
+        let request = serde_json::json!({ "schema": serde_json::to_value(schema).unwrap() });
+        assert_eq!(
+            admin_post(app, named_route(name, "/admin/schemas"), request).await,
+            StatusCode::CREATED
+        );
+        // Startup picks the newest schema by its millisecond publish time.
+        // Keep consecutive publications strictly ordered.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    fn restart_fixture_schemas() -> (Schema, Schema) {
+        let first = SchemaBuilder::new()
+            .table(TableSchema::builder("notes").column("title", ColumnType::Text))
+            .build();
+        let unbridged = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("notes")
+                    .column("title", ColumnType::Text)
+                    .column("body", ColumnType::Text),
+            )
+            .build();
+        (first, unbridged)
+    }
+
+    /// A schema published without a lens is recorded by the admin catalogue
+    /// but never reaches the Core runtime store. The next restart must still
+    /// start, and keep serving the active schema.
+    #[tokio::test]
+    async fn dynamic_core_restarts_after_unbridged_schema_publish_over_active_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = "restart-unbridged-active";
+        let (first, unbridged) = restart_fixture_schemas();
+        let first_runtime = jazz::schema::JazzSchema::new(&first).unwrap();
+
+        let built = persistent_dynamic_builder(dir.path(), name)
+            .build()
+            .await
+            .unwrap();
+        publish_schema_via_admin(&built.app, name, &first).await;
+        let permissions = serde_json::json!({
+            "schemaHash": SchemaHash::compute(&first).to_string(),
+            "permissions": { "notes": { "select": { "using": { "type": "True" } } } },
+        });
+        assert_eq!(
+            admin_post(
+                &built.app,
+                named_route(name, "/admin/permissions"),
+                permissions
+            )
+            .await,
+            StatusCode::CREATED
+        );
+        publish_schema_via_admin(&built.app, name, &unbridged).await;
+        built.shutdown().await;
+
+        let restarted = persistent_dynamic_builder(dir.path(), name)
+            .build()
+            .await
+            .expect("restart after publishing a schema without a lens");
+        let snapshot = restarted
+            .state
+            .runtime()
+            .expect("restarted core runtime")
+            .trusted_catalogue_snapshot_for_test()
+            .await
+            .unwrap();
+        assert_eq!(
+            snapshot.current_write_schema.schema,
+            first_runtime.version_id()
+        );
+        restarted.shutdown().await;
+
+        let restarted_again = persistent_dynamic_builder(dir.path(), name)
+            .build()
+            .await
+            .expect("second restart stays healthy");
+        restarted_again.shutdown().await;
+    }
+
+    /// Same as above for an app that never published permissions, so startup
+    /// has no active schema to fall back on.
+    #[tokio::test]
+    async fn dynamic_core_restarts_after_unbridged_schema_publish_without_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = "restart-unbridged-no-permissions";
+        let (first, unbridged) = restart_fixture_schemas();
+        let first_runtime = jazz::schema::JazzSchema::new(&first).unwrap();
+
+        let built = persistent_dynamic_builder(dir.path(), name)
+            .build()
+            .await
+            .unwrap();
+        publish_schema_via_admin(&built.app, name, &first).await;
+        publish_schema_via_admin(&built.app, name, &unbridged).await;
+        built.shutdown().await;
+
+        let restarted = persistent_dynamic_builder(dir.path(), name)
+            .build()
+            .await
+            .expect("restart after publishing a schema without a lens");
+        let runtime = restarted.state.runtime().expect("restarted core runtime");
+        let snapshot = runtime.trusted_catalogue_snapshot_for_test().await.unwrap();
+        assert_eq!(
+            snapshot.current_write_schema.schema,
+            first_runtime.version_id()
+        );
+        assert!(
+            !runtime
+                .runtime_catalogue_contains_schema(
+                    jazz::schema::JazzSchema::new(&unbridged)
+                        .unwrap()
+                        .version_id()
+                )
+                .await
+                .unwrap(),
+            "reopening must not admit the unbridged schema as a side effect"
+        );
+        restarted.shutdown().await;
+    }
 }

@@ -867,6 +867,21 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
+        self.query_snapshot_with_root_values(graph, storage, RootIndirectValues::Materialize)
+            .await
+    }
+
+    /// Like [`Self::query_snapshot`], choosing how the result presents
+    /// indirect root values; see [`RootIndirectValues`].
+    pub async fn query_snapshot_with_root_values<S>(
+        &mut self,
+        graph: GraphBuilder,
+        storage: &S,
+        root_indirect_values: RootIndirectValues,
+    ) -> Result<RecordDeltas, IvmRuntimeError>
+    where
+        S: OrderedKvStorage,
+    {
         self.flush_pending_binding_retractions(storage).await?;
         if builder_contains_binding_source(&graph) {
             return Err(IvmRuntimeError::BindingSourceRequiresPrepare);
@@ -880,7 +895,12 @@ impl IvmRuntime {
             ..
         } = runtime.add_dedup_graph(&graph)?;
         let records = runtime
-            .hydration_snapshot(output_node, storage, HydrationMode::Ordinary)
+            .hydration_snapshot_with_root_values(
+                output_node,
+                storage,
+                HydrationMode::Ordinary,
+                root_indirect_values,
+            )
             .await?;
         if !records.descriptor.registry_compatible_with(&output) {
             return Err(IvmRuntimeError::GraphOutputMismatch);

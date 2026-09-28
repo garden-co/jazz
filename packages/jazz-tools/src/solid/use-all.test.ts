@@ -189,7 +189,7 @@ describe("solid/useAll", () => {
     const unsubscribeA = vi.fn();
     const unsubscribeB = vi.fn();
 
-    mocks.makeQueryKey.mockReturnValueOnce("key-local").mockReturnValueOnce("key-edge");
+    mocks.makeQueryKey.mockReturnValueOnce("key-local").mockReturnValueOnce("key-global");
     mocks.getCacheEntry
       .mockReturnValueOnce({
         state: { status: "fulfilled" as const, data: [] },
