@@ -55,7 +55,7 @@ pub struct Fixture<S: OrderedKvStorage> {
     activity_transition_matching: bool,
     activity_update_identity: WriteIdentity,
     /// Which storage backend the fixture was built over; Db itself erases it.
-    storage: std::marker::PhantomData<S>,
+    storage: std::marker::PhantomData<fn() -> S>,
 }
 
 pub struct MaintainedActivityFixture<S: OrderedKvStorage> {

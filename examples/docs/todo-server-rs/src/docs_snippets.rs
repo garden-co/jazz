@@ -14,7 +14,6 @@ use jazz::query::{
 use jazz::tools::{
     DurabilityTier, JazzClient, ObjectId, Operation, PolicyExpr, Session, TablePolicies, Value,
 };
-use jazz_storage_rocksdb::RocksDbStorage;
 use serde_json::json;
 
 fn verify_jwt_and_extract_claims(_token: &str) -> (String, String, serde_json::Value) {
