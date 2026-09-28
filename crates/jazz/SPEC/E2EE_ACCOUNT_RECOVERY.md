@@ -69,14 +69,29 @@ accepted root can remain after delivery failure; resumable creation and orphan
 cleanup are not implemented by this slice. Existing device/account keys are not
 replaced.
 
-Account rotation publishes a new delivery for each historically validated
+Every account-key rotation publishes a new delivery for each currently active
 recovery root in the same exclusive transaction as the accepted successor.
+Root retirement is an explicit `retire-recovery-root` successor action: it
+rotates the epoch, leaves exact active-device membership unchanged, and excludes
+the retired root from new-epoch recovery deliveries. Other active roots and all
+active devices receive the new epoch. Roots are immutable audit history; replay
+returns only roots active at the requested cutoff. Their earlier approvals and
+deliveries remain valid only at their historical positions.
+
 The transaction reads the complete account recovery-root predicate and requires
 it to match the validated snapshot, so a concurrent registration cannot be
-silently omitted. Revoking a registering device does not remove its root from
-the recipients. Rotation uses the same delivery context above, with the new
-epoch and a fresh delivery ID. This differs from initial root creation's
-two-step publication: every rotation recipient root already exists.
+silently omitted. A same-position registration and transition are unordered and
+the successor is rejected; row IDs do not define authority ordering. A
+registration accepted before a retry participates in the root set; a
+registration accepted afterward binds to the new epoch. Retired material fails
+status/use as an inactive-root mismatch. A replacement is a separate
+registration. Root retirement does not revoke devices already admitted using
+that root; suspicious enrolled devices require a separate `devices.revoke(id)`.
+It does not erase prior plaintext or epoch keys.
+
+Rotation uses the same delivery context above, with the new epoch and a fresh
+delivery ID. This differs from initial root creation's two-step publication:
+every recipient root already exists.
 
 The public and private approvals must be accepted at the same authority
 position. Recovery permits the private approval's signer to be its recipient
