@@ -25,7 +25,7 @@ fn measure<S: OrderedKvStorage, T>(
     result
 }
 
-fn verify(f: &mut Fixture<RocksDbStorage>, revisions: &[usize]) {
+fn verify(f: &mut Fixture<BoxedStorage>, revisions: &[usize]) {
     f.read_all();
     let table = f.schema.tables.iter().find(|t| t.name == "tasks").unwrap();
     let actual = f
