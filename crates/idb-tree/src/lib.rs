@@ -2075,9 +2075,17 @@ mod tests {
                 (vec![b'b'; 980], Vec::new()),
                 (vec![b'c'], Vec::new()),
             ];
-            for (key, value) in &expected {
-                tree.put(key.clone(), value.clone()).await.unwrap();
-            }
+            tree.write_many(
+                expected
+                    .iter()
+                    .map(|(key, value)| WriteOperation::Set {
+                        key: key.clone(),
+                        value: value.clone(),
+                    })
+                    .collect(),
+            )
+            .await
+            .unwrap();
             tree.flush().await.unwrap();
             drop(tree);
             let reopened = IdbTree::open(store, options).await.unwrap();
