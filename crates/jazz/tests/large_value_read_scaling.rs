@@ -59,7 +59,7 @@ fn files_schema(policies: TablePolicies) -> JazzSchema {
     )
 }
 
-fn open_db(schema: JazzSchema, seed: u8, author: AuthorSubject) -> Db<TestStorage> {
+fn open_db(schema: JazzSchema, seed: u8, author: AuthorSubject) -> Db {
     let families = schema.column_families();
     let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open(DbConfig::new(
@@ -93,7 +93,7 @@ fn large_notes(prefix: &str) -> String {
     format!("{prefix}{}", "n".repeat(LEAF_MAX_BYTES * 2))
 }
 
-fn insert_file(db: &Db<TestStorage>, id: RowUuid, name: &str, notes: &str, bytes: &[u8]) {
+fn insert_file(db: &Db, id: RowUuid, name: &str, notes: &str, bytes: &[u8]) {
     let write = block_on(db.insert(
         FILES,
         BTreeMap::from([

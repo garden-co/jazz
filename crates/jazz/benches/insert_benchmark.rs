@@ -1,6 +1,6 @@
 //! Insert throughput benchmark for permissioned core operations.
 //!
-//! Measures inserts/second with public `jazz::db::Db<MemoryStorage>` APIs.
+//! Measures inserts/second with public `jazz::db::Db` APIs.
 //!
 //! Variants:
 //! - Insert into an owned folder (direct owner write policy)
@@ -23,7 +23,7 @@ use jazz::tools::public_schema::{CmpOp, PolicyValue};
 use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 
-type BenchDb = Db<MemoryStorage>;
+type BenchDb = Db;
 
 fn author() -> AuthorSubject {
     schema_fixture::account_author_uuid(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"))
@@ -147,7 +147,7 @@ struct BenchmarkData {
     team_folders: Vec<RowUuid>,
 }
 
-fn wait_local(write: jazz::db::WriteHandle<MemoryStorage>) -> RowUuid {
+fn wait_local(write: jazz::db::WriteHandle) -> RowUuid {
     block_on(write.wait(DurabilityTier::Local)).expect("write should be local");
     write.row_uuid()
 }

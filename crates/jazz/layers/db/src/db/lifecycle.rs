@@ -121,7 +121,11 @@ where
     pub async fn evict_expired_staged_large_values(&self) -> Result<usize, Error> {
         self.node.evict_expired_staged_large_values().await
     }
+}
 
+/// Constructors erase the concrete storage into [`BoxedStorage`]; the node
+/// below already holds storage as a trait object.
+impl Db {
     /// Open a database over the supplied storage and recover local state.
     ///
     /// If a persistent replica missed a schema publication, recovery uses its
@@ -159,7 +163,10 @@ where
     /// assert!(db.read(&todos)?.is_empty());
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    pub async fn open(config: DbConfig<S>) -> Result<Self, Error> {
+    pub async fn open<T>(config: DbConfig<T>) -> Result<Self, Error>
+    where
+        T: OrderedKvStorage + ReopenableStorage + 'static,
+    {
         let schema_version_id = config.schema.version_id();
         let schema_views = Rc::new(RefCell::new(BTreeMap::from([(
             SchemaViewId::for_schema(&config.schema),
@@ -215,10 +222,13 @@ where
     /// mutable Db method that an application can acquire after attaching
     /// arbitrary storage or peers.
     #[doc(hidden)]
-    pub async unsafe fn open_scope_isolated_client_relay(
-        config: DbConfig<S>,
+    pub async unsafe fn open_scope_isolated_client_relay<T>(
+        config: DbConfig<T>,
         scope: ClientRelayScope,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, Error>
+    where
+        T: OrderedKvStorage + ReopenableStorage + 'static,
+    {
         let db = Self::open(config).await?;
         db.node.configure_scope_isolated_client_relay(scope)?;
         Ok(db)
@@ -243,7 +253,10 @@ where
     /// The caller must authenticate trusted backend authority before calling
     /// this constructor and must not expose it to ordinary application code.
     #[doc(hidden)]
-    pub async unsafe fn open_with_backend_attribution(config: DbConfig<S>) -> Result<Self, Error> {
+    pub async unsafe fn open_with_backend_attribution<T>(config: DbConfig<T>) -> Result<Self, Error>
+    where
+        T: OrderedKvStorage + ReopenableStorage + 'static,
+    {
         let mut db = Self::open(config).await?;
         db.backend_attribution = true;
         db.node
@@ -254,25 +267,34 @@ where
 
     #[cfg(feature = "testing")]
     /// Open a database and return internal node-open phase timings for benchmarks.
-    pub async fn open_with_receipt_for_test(
-        config: DbConfig<S>,
-    ) -> Result<(Self, DbOpenReceipt), Error> {
+    pub async fn open_with_receipt_for_test<T>(
+        config: DbConfig<T>,
+    ) -> Result<(Self, DbOpenReceipt), Error>
+    where
+        T: OrderedKvStorage + ReopenableStorage + 'static,
+    {
         Self::open_with_receipt_inner_for_test(config, false).await
     }
 
     #[cfg(feature = "testing")]
     /// Open a history-complete serving core and return its node-open phase timings.
-    pub async fn open_history_complete_with_receipt_for_test(
-        config: DbConfig<S>,
-    ) -> Result<(Self, DbOpenReceipt), Error> {
+    pub async fn open_history_complete_with_receipt_for_test<T>(
+        config: DbConfig<T>,
+    ) -> Result<(Self, DbOpenReceipt), Error>
+    where
+        T: OrderedKvStorage + ReopenableStorage + 'static,
+    {
         Self::open_with_receipt_inner_for_test(config, true).await
     }
 
     #[cfg(feature = "testing")]
-    async fn open_with_receipt_inner_for_test(
-        config: DbConfig<S>,
+    async fn open_with_receipt_inner_for_test<T>(
+        config: DbConfig<T>,
         history_complete: bool,
-    ) -> Result<(Self, DbOpenReceipt), Error> {
+    ) -> Result<(Self, DbOpenReceipt), Error>
+    where
+        T: OrderedKvStorage + ReopenableStorage + 'static,
+    {
         let schema_version_id = config.schema.version_id();
         let schema_views = Rc::new(RefCell::new(BTreeMap::from([(
             SchemaViewId::for_schema(&config.schema),
@@ -323,14 +345,20 @@ where
     ///
     /// This mode is intended for server shells and tests that own authoritative
     /// in-memory history rather than a partial client replica.
-    pub async fn open_history_complete(config: DbConfig<S>) -> Result<Self, Error> {
+    pub async fn open_history_complete<T>(config: DbConfig<T>) -> Result<Self, Error>
+    where
+        T: OrderedKvStorage + ReopenableStorage + 'static,
+    {
         Self::open_history_complete_inner(config, false).await
     }
 
-    async fn open_history_complete_inner(
-        config: DbConfig<S>,
+    async fn open_history_complete_inner<T>(
+        config: DbConfig<T>,
         recover_client: bool,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, Error>
+    where
+        T: OrderedKvStorage + ReopenableStorage + 'static,
+    {
         let schema_version_id = config.schema.version_id();
         let schema_views = Rc::new(RefCell::new(BTreeMap::from([(
             SchemaViewId::for_schema(&config.schema),
@@ -390,9 +418,12 @@ where
     /// # Safety
     /// The caller must have authenticated trusted backend authority.
     #[doc(hidden)]
-    pub async unsafe fn open_history_complete_with_backend_attribution(
-        config: DbConfig<S>,
-    ) -> Result<Self, Error> {
+    pub async unsafe fn open_history_complete_with_backend_attribution<T>(
+        config: DbConfig<T>,
+    ) -> Result<Self, Error>
+    where
+        T: OrderedKvStorage + ReopenableStorage + 'static,
+    {
         let mut db = Self::open_history_complete_inner(config, true).await?;
         db.backend_attribution = true;
         db.node
@@ -400,7 +431,12 @@ where
             .await?;
         Ok(db)
     }
+}
 
+impl<S> Db<S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
     /// Install a complete catalogue received over the authenticated upstream
     /// bootstrap link.  This is intentionally crate-private: ordinary wire
     /// dispatch must never turn an arbitrary peer's snapshot into authority.

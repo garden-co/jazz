@@ -1381,7 +1381,7 @@ fn public_peer_schema(builder: PublicSchemaBuilder) -> JazzSchema {
 fn open_node_with_schema(
     node_uuid: NodeUuid,
     schema: JazzSchema,
-) -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
+) -> (tempfile::TempDir, NodeState) {
     let temp_dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -1390,12 +1390,12 @@ fn open_node_with_schema(
     (temp_dir, node)
 }
 
-fn open_node_with_uuid(node_uuid: NodeUuid) -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
+fn open_node_with_uuid(node_uuid: NodeUuid) -> (tempfile::TempDir, NodeState) {
     let schema = schema();
     open_node_with_schema(node_uuid, schema)
 }
 
-fn accept_global(core: &mut NodeState<RocksDbStorage>, tx_id: TxId, seq: u64) {
+fn accept_global(core: &mut NodeState, tx_id: TxId, seq: u64) {
     core.apply_fate_update(
         tx_id,
         Fate::Accepted,
@@ -1405,7 +1405,7 @@ fn accept_global(core: &mut NodeState<RocksDbStorage>, tx_id: TxId, seq: u64) {
     .unwrap();
 }
 
-fn accept_confirmed(core: &mut NodeState<RocksDbStorage>, tx_id: TxId) {
+fn accept_confirmed(core: &mut NodeState, tx_id: TxId) {
     core.finalize_local_mergeable_commit_settled(tx_id).unwrap();
 }
 
@@ -1549,7 +1549,7 @@ fn subscription_key_with_opts(
 }
 
 fn register_shape_binding_for_receiver(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     shape: &ValidatedQuery,
     binding: &Binding,
 ) {
@@ -1562,7 +1562,7 @@ fn register_shape_binding_for_receiver(
 }
 
 fn register_shape_binding_for_receiver_with_opts(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     shape: &ValidatedQuery,
     binding: &Binding,
     opts: RegisterShapeOptions,
@@ -1601,7 +1601,7 @@ fn register_shape_binding_for_receiver_with_opts(
 /// Register the canonical source identity used by the direct whole-table peer
 /// fixture before accepting its covered-input update.  This deliberately
 /// preserves the ordinary SYSTEM-scoped admission used by these tests.
-fn register_whole_table_receiver(node: &mut NodeState<RocksDbStorage>, table: &str) {
+fn register_whole_table_receiver(node: &mut NodeState, table: &str) {
     let (shape, binding) = node.whole_table_shape_binding(table).unwrap();
     register_shape_binding_for_receiver(node, &shape, &binding);
 }

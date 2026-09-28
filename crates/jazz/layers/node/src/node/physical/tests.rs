@@ -1304,7 +1304,7 @@ mod variant_case_tests {
         path: &Path,
         node_uuid: NodeUuid,
         genesis: &JazzSchema,
-    ) -> NodeState<RocksDbStorage> {
+    ) -> NodeState {
         let column_families = genesis.column_families();
         let refs = column_families
             .iter()
@@ -1316,13 +1316,13 @@ mod variant_case_tests {
     }
 
     fn overwrite_schema_mapping(
-        node: &mut NodeState<RocksDbStorage>,
+        node: &mut NodeState,
         schema: SchemaVersionId,
         mapping: &SchemaPhysicalMapping,
     ) {
         let alias = node.catalogue.schema_version_aliases[&schema];
         let mut batch = node.database.open_batch();
-        NodeState::<RocksDbStorage>::write_schema_version_mapping_to_batch(
+        NodeState::<BoxedStorage>::write_schema_version_mapping_to_batch(
             &mut batch,
             alias,
             schema,
@@ -1370,7 +1370,7 @@ mod variant_case_tests {
     }
 
     fn assert_wide_payload_receipt(
-        node: &mut NodeState<RocksDbStorage>,
+        node: &mut NodeState,
         schema: &JazzSchema,
         shape: &crate::query::ValidatedQuery,
         binding: &crate::query::Binding,

@@ -221,7 +221,7 @@ pub(super) fn make_query_runtime_waker(
 }
 
 /// Node-owned participant surface for upstream and subscriber connections.
-pub struct Node<S>
+pub struct Node<S = BoxedStorage>
 where
     S: OrderedKvStorage,
 {

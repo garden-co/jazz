@@ -294,8 +294,8 @@ pub struct AbiTransportDiagnostics {
 }
 
 enum ShellDb {
-    Memory(Db<BoxedStorage>),
-    Durable(Db<BoxedStorage>),
+    Memory(Db),
+    Durable(Db),
 }
 
 struct ServerSessionState {
@@ -308,8 +308,8 @@ struct ServerSessionState {
 }
 
 enum ShellPeerConnection {
-    Memory(Rc<LocalMutex<PeerConnection<BoxedStorage>>>),
-    Durable(Rc<LocalMutex<PeerConnection<BoxedStorage>>>),
+    Memory(Rc<LocalMutex<PeerConnection>>),
+    Durable(Rc<LocalMutex<PeerConnection>>),
 }
 
 impl fmt::Debug for ShellPeerConnection {
@@ -864,7 +864,7 @@ impl InMemoryServerShell {
                 .map_err(db_storage_error)?;
                 let (storage, schema) = if config.reopen_with_durable_schema {
                     crate::local_executor::block_on(
-                        crate::node::NodeState::<BoxedStorage>::select_durable_reopen_schema(
+                        crate::node::NodeState::select_durable_reopen_schema(
                             storage,
                             config.schema,
                         ),

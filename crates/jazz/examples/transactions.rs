@@ -37,7 +37,7 @@ fn title_patch(title: &str) -> RowCells {
     BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))])
 }
 
-fn open_db() -> Result<Db<MemoryStorage>, Box<dyn std::error::Error>> {
+fn open_db() -> Result<Db, Box<dyn std::error::Error>> {
     let schema = todo_schema();
     let column_families = schema.column_families();
     let column_family_refs = column_families
@@ -58,7 +58,7 @@ fn open_db() -> Result<Db<MemoryStorage>, Box<dyn std::error::Error>> {
 }
 
 struct CoreDb {
-    server: Node<MemoryStorage>,
+    server: Node,
     schema: JazzSchema,
     author: AuthorSubject,
     next_now_ms: Cell<u64>,

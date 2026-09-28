@@ -14,10 +14,7 @@ fn schema_with_explicit_public_read() -> JazzSchema {
     )
 }
 
-fn open_memory_subscription_db(
-    author: AuthorSubject,
-    schema: &JazzSchema,
-) -> Db<groove::storage::MemoryStorage> {
+fn open_memory_subscription_db(author: AuthorSubject, schema: &JazzSchema) -> Db {
     let families = schema.column_families();
     let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open(DbConfig {

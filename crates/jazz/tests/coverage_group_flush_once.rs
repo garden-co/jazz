@@ -35,7 +35,7 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_client(seed: u8, schema: JazzSchema) -> Db<TestStorage> {
+fn open_client(seed: u8, schema: JazzSchema) -> Db {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -55,7 +55,7 @@ fn open_client(seed: u8, schema: JazzSchema) -> Db<TestStorage> {
     .expect("open client")
 }
 
-fn open_server(schema: JazzSchema) -> Db<TestStorage> {
+fn open_server(schema: JazzSchema) -> Db {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -92,8 +92,8 @@ fn row(seed: u64) -> RowUuid {
 }
 
 struct CoverageGroupFixture {
-    _client: Db<TestStorage>,
-    server: Db<TestStorage>,
+    _client: Db,
+    server: Db,
     _attachments: Vec<QueryAttachment>,
     next_row: u64,
 }

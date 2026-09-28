@@ -124,11 +124,11 @@ fn global_read_opts() -> ReadOpts {
 
 use duplex_transport::duplex;
 
-fn open_db(scale: usize) -> Db<TestStorage> {
+fn open_db(scale: usize) -> Db {
     open_db_with_schema(scale, relation_schema())
 }
 
-fn open_db_with_schema(scale: usize, schema: JazzSchema) -> Db<TestStorage> {
+fn open_db_with_schema(scale: usize, schema: JazzSchema) -> Db {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open(
@@ -145,7 +145,7 @@ fn open_db_with_schema(scale: usize, schema: JazzSchema) -> Db<TestStorage> {
     .expect("open canary db")
 }
 
-fn open_history_complete_db_with_schema(scale: usize, schema: JazzSchema) -> Db<TestStorage> {
+fn open_history_complete_db_with_schema(scale: usize, schema: JazzSchema) -> Db {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open_history_complete(
@@ -162,10 +162,7 @@ fn open_history_complete_db_with_schema(scale: usize, schema: JazzSchema) -> Db<
     .expect("open history-complete canary db")
 }
 
-fn open_rocks_db_with_schema(
-    scale: usize,
-    schema: JazzSchema,
-) -> (tempfile::TempDir, Db<RocksDbStorage>) {
+fn open_rocks_db_with_schema(scale: usize, schema: JazzSchema) -> (tempfile::TempDir, Db) {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let dir = tempfile::tempdir().expect("temp rocks dir");
@@ -198,7 +195,7 @@ fn relation_query() -> Query {
     )
 }
 
-fn seed_relation_fixture(db: &Db<TestStorage>, child_rows: usize) -> RowUuid {
+fn seed_relation_fixture(db: &Db, child_rows: usize) -> RowUuid {
     let parent = row(1);
     block_on(db.insert(
         "parents",
@@ -249,7 +246,7 @@ fn seed_relation_fixture(db: &Db<TestStorage>, child_rows: usize) -> RowUuid {
     parent
 }
 
-fn seed_reset_batch_fixture(db: &Db<TestStorage>, rows: usize) {
+fn seed_reset_batch_fixture(db: &Db, rows: usize) {
     for index in 0..rows {
         db.seed_settled_mergeable_for_bootstrap(
             "items",
@@ -264,11 +261,7 @@ fn seed_reset_batch_fixture(db: &Db<TestStorage>, rows: usize) {
     }
 }
 
-fn drive_until_covered(
-    server: &Db<TestStorage>,
-    client: &Db<TestStorage>,
-    attachment: &jazz::db::QueryAttachment,
-) {
+fn drive_until_covered(server: &Db, client: &Db, attachment: &jazz::db::QueryAttachment) {
     for _ in 0..100 {
         block_on(client.tick()).expect("tick client");
         block_on(server.tick()).expect("tick server");
@@ -280,7 +273,7 @@ fn drive_until_covered(
     panic!("timed out waiting for query coverage");
 }
 
-fn drain_until_idle(server: &Db<TestStorage>, client: &Db<TestStorage>) {
+fn drain_until_idle(server: &Db, client: &Db) {
     for _ in 0..1_000 {
         let client_before = block_on(client.tick_stats()).expect("drain client");
         let server_stats = block_on(server.tick_stats()).expect("drain server");
@@ -479,7 +472,7 @@ fn write_cells(parent: RowUuid, index: usize) -> BTreeMap<String, Value> {
     ])
 }
 
-fn seed_rocks_write_fixture(db: &Db<RocksDbStorage>, child_rows: usize) -> RowUuid {
+fn seed_rocks_write_fixture(db: &Db, child_rows: usize) -> RowUuid {
     let parent = row(50_000_000);
     block_on(db.insert(
         "parents",

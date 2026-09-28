@@ -122,10 +122,7 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_node(
-    node_uuid: NodeUuid,
-    schema: JazzSchema,
-) -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
+fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, NodeState) {
     let temp_dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -144,7 +141,7 @@ fn cells(title: impl Into<String>, owner: AuthorSubject) -> BTreeMap<String, Val
     ])
 }
 
-fn install_session_claims(node: &mut NodeState<RocksDbStorage>, identity: AuthorSubject) {
+fn install_session_claims(node: &mut NodeState, identity: AuthorSubject) {
     if identity != AuthorSubject::SYSTEM {
         node.admit_test_session_claims(identity, BTreeMap::new());
     }
@@ -157,17 +154,14 @@ fn peer_summary(peer: &PeerState) -> LinkSummary {
     }
 }
 
-fn apply_message(node: &mut NodeState<RocksDbStorage>, message: SyncMessage) -> Vec<SyncMessage> {
+fn apply_message(node: &mut NodeState, message: SyncMessage) -> Vec<SyncMessage> {
     block_on(async {
         let outcome = node.apply_sync_message(message).await.unwrap();
         node.persist_and_settle_outcome(outcome).await.unwrap()
     })
 }
 
-fn commit_unit(
-    node: &mut NodeState<RocksDbStorage>,
-    commit: MergeableCommit,
-) -> (TxId, SyncMessage) {
+fn commit_unit(node: &mut NodeState, commit: MergeableCommit) -> (TxId, SyncMessage) {
     block_on(async {
         let (published, unit) = node.commit_mergeable_unit(commit).await.unwrap();
         let tx_id = node
@@ -178,13 +172,13 @@ fn commit_unit(
     })
 }
 
-fn send_view(node: &mut NodeState<RocksDbStorage>, peer: &mut PeerState, tx: &Sender<Wire>) {
+fn send_view(node: &mut NodeState, peer: &mut PeerState, tx: &Sender<Wire>) {
     install_session_claims(node, peer.identity());
     let update = block_on(common::direct_query_update(node, peer, &schema(), TABLE));
     send_sync(tx, update);
 }
 
-fn relay_ingest(node: &mut NodeState<RocksDbStorage>, message: &SyncMessage) {
+fn relay_ingest(node: &mut NodeState, message: &SyncMessage) {
     let SyncMessage::CommitUnit { tx, versions } = message else {
         panic!("expected commit unit");
     };
@@ -195,7 +189,7 @@ fn relay_ingest(node: &mut NodeState<RocksDbStorage>, message: &SyncMessage) {
 }
 
 fn process_downstream(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     message: Wire,
     downstream_tx: &Sender<Wire>,
     downstream_peer: &mut PeerState,
@@ -221,7 +215,7 @@ fn process_downstream(
 }
 
 fn finish_node(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     tx_ids: impl IntoIterator<Item = TxId>,
     downstream_peer: Option<LinkSummary>,
 ) -> ThreadResult {
@@ -344,7 +338,7 @@ fn relay_thread(
     }
 }
 
-fn drain_ui_downstream(node: &mut NodeState<RocksDbStorage>, rx: &Receiver<Wire>) {
+fn drain_ui_downstream(node: &mut NodeState, rx: &Receiver<Wire>) {
     while let Ok(message) = rx.try_recv() {
         match message {
             Wire::Sync(_) | Wire::Frame(_) => {
@@ -450,7 +444,7 @@ fn ui_thread(
     UiResult { tx_ids, receipt }
 }
 
-fn global_rows(node: &mut NodeState<RocksDbStorage>) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
+fn global_rows(node: &mut NodeState) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
     let schema = schema();
     let table = &schema.tables[0];
     block_on(node.current_rows(TABLE, DurabilityTier::Global))
@@ -460,7 +454,7 @@ fn global_rows(node: &mut NodeState<RocksDbStorage>) -> BTreeMap<RowUuid, BTreeM
         .collect()
 }
 
-fn local_rows(node: &mut NodeState<RocksDbStorage>) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
+fn local_rows(node: &mut NodeState) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
     let schema = schema();
     let table = &schema.tables[0];
     block_on(node.current_rows(TABLE, DurabilityTier::Local))
@@ -470,9 +464,7 @@ fn local_rows(node: &mut NodeState<RocksDbStorage>) -> BTreeMap<RowUuid, BTreeMa
         .collect()
 }
 
-fn subscription_rows(
-    node: &mut NodeState<RocksDbStorage>,
-) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
+fn subscription_rows(node: &mut NodeState) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
     let schema = schema();
     let table = &schema.tables[0];
     block_on(node.subscription_current_rows(TABLE, DurabilityTier::Global))

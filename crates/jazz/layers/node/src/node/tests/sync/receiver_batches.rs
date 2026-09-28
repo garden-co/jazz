@@ -104,7 +104,7 @@ fn todos_receiver_reset(subscription: SubscriptionKey) -> ViewUpdateParts {
 }
 struct ResidentInventoryFixture {
     _reader_dir: tempfile::TempDir,
-    reader: NodeState<RocksDbStorage>,
+    reader: NodeState,
     row_uuid: RowUuid,
     tx_id: TxId,
     tx: Transaction,
@@ -602,7 +602,7 @@ fn complete_parent_receiver_update(
 }
 
 fn accepted_view_scoped_child_for_parent(
-    reader: &mut NodeState<RocksDbStorage>,
+    reader: &mut NodeState,
     parent: TxId,
     child: TxId,
     row_uuid: RowUuid,

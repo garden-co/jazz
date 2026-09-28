@@ -94,7 +94,7 @@ fn required_cell_guard_resolves_a_later_projected_column_by_name() {
 #[test]
 fn unordered_array_windows_materialize_per_parent_row_id_order() {
     let windows =
-        NodeState::<RocksDbStorage>::relation_snapshot_no_order_windows(&[ArraySubquery::new(
+        NodeState::<BoxedStorage>::relation_snapshot_no_order_windows(&[ArraySubquery::new(
             "comments", "comments", "todo_id", "id",
         )
         .offset(1)

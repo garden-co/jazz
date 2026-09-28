@@ -82,7 +82,7 @@ fn open<S: OrderedKvStorage + ReopenableStorage + 'static>(
     schema: &JazzSchema,
     storage: S,
     id: u8,
-) -> NodeState<S> {
+) -> NodeState {
     block_on(NodeState::new_with_shared_test_catalogue(
         NodeUuid::from_bytes([id; 16]),
         schema.clone(),
@@ -90,8 +90,8 @@ fn open<S: OrderedKvStorage + ReopenableStorage + 'static>(
     ))
     .unwrap()
 }
-fn publish<S: OrderedKvStorage>(
-    worker: &mut NodeState<S>,
+fn publish(
+    worker: &mut NodeState,
     peer: &mut PeerState,
     schema: &JazzSchema,
     initial: bool,
@@ -115,7 +115,7 @@ fn publish<S: OrderedKvStorage>(
             .expect("updated scope")
     }
 }
-fn receiver(schema: &JazzSchema, peer: &PeerState) -> NodeState<MemoryStorage> {
+fn receiver(schema: &JazzSchema, peer: &PeerState) -> NodeState {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let mut node = open(schema, MemoryStorage::new(&refs).unwrap(), 2);
@@ -154,7 +154,7 @@ fn deliver(
     count: usize,
     name: &str,
     message: SyncMessage,
-    node: &mut NodeState<MemoryStorage>,
+    node: &mut NodeState,
     schema: &JazzSchema,
     peer: &PeerState,
     changed: usize,
@@ -183,7 +183,7 @@ fn deliver(
 fn verify_rows(
     backend: &str,
     count: usize,
-    node: &mut NodeState<MemoryStorage>,
+    node: &mut NodeState,
     schema: &JazzSchema,
     peer: &PeerState,
     changed: usize,
@@ -224,8 +224,8 @@ pub struct Fixture<S: OrderedKvStorage + ReopenableStorage + 'static> {
     count: usize,
     schema: JazzSchema,
     seed: jazz::tx::TxId,
-    worker: Option<NodeState<S>>,
-    foreground: Option<NodeState<MemoryStorage>>,
+    worker: Option<NodeState>,
+    foreground: Option<NodeState>,
     peer: PeerState,
     changed: usize,
     read_result: Vec<jazz::node::CurrentRow>,
@@ -473,12 +473,7 @@ fn run<S: OrderedKvStorage + ReopenableStorage + 'static>(
     fixture.reopen();
     fixture.verify();
 }
-fn emit_node_metrics<S: OrderedKvStorage>(
-    node: &NodeState<S>,
-    backend: &str,
-    count: usize,
-    name: &str,
-) {
+fn emit_node_metrics(node: &NodeState, backend: &str, count: usize, name: &str) {
     if !REPORT.get() {
         return;
     }

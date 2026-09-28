@@ -37,10 +37,16 @@ where
         Ok(self.database.pending_large_value_uploads().await?.len())
     }
 
+}
+
+/// Constructors erase the concrete storage into [`BoxedStorage`] at the
+/// boundary: groove already holds storage as a trait object, so a node
+/// compiled once serves every backend.
+impl NodeState {
     /// Open or create a node over the supplied storage.
-    pub async fn new(node_uuid: NodeUuid, schema: JazzSchema, storage: S) -> Result<Self, Error>
+    pub async fn new<T>(node_uuid: NodeUuid, schema: JazzSchema, storage: T) -> Result<Self, Error>
     where
-        S: ReopenableStorage + 'static,
+        T: ReopenableStorage + 'static,
     {
         Self::new_with_history_complete(node_uuid, schema, storage, false).await
     }
@@ -48,14 +54,14 @@ where
     /// Recover a partial client replica using a schema already admitted by its
     /// durable catalogue. The caller's requested schema remains a Db view only;
     /// this path never publishes it or allocates its physical mapping.
-    pub async fn new_client(
+    pub async fn new_client<T>(
         node_uuid: NodeUuid,
         requested_schema: JazzSchema,
-        storage: S,
+        storage: T,
         history_complete: bool,
     ) -> Result<Self, Error>
     where
-        S: ReopenableStorage + 'static,
+        T: ReopenableStorage + 'static,
     {
         let meta_database = Database::new_with_storage_layout(
             JazzSchema::empty().lower_catalogue_meta_to_groove(),
@@ -136,13 +142,13 @@ where
     /// schema, just as network peers exchange the catalogue before row versions.
     #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
-    pub async fn new_with_shared_test_catalogue(
+    pub async fn new_with_shared_test_catalogue<T>(
         node_uuid: NodeUuid,
         schema: JazzSchema,
-        storage: S,
+        storage: T,
     ) -> Result<Self, Error>
     where
-        S: ReopenableStorage + 'static,
+        T: ReopenableStorage + 'static,
     {
         static CATALOGUES: std::sync::OnceLock<
             std::sync::Mutex<BTreeMap<SchemaVersionId, PhysicalIdentityManifest>>,
@@ -175,12 +181,12 @@ where
     /// durable genesis from `JazzSchema::empty()`.  Its only valid transition
     /// is installation of a trusted catalogue snapshot; application reads,
     /// writes, and current-schema access fail closed beforehand.
-    pub async fn new_catalogue_uninitialized(
+    pub async fn new_catalogue_uninitialized<T>(
         node_uuid: NodeUuid,
-        storage: S,
+        storage: T,
     ) -> Result<Self, Error>
     where
-        S: ReopenableStorage + 'static,
+        T: ReopenableStorage + 'static,
     {
         let (storage, durable_genesis) = Self::discover_durable_catalogue_genesis(storage).await?;
         if let Some(schema) = durable_genesis {
@@ -220,11 +226,11 @@ where
     /// durable authority genesis before choosing an application schema for a
     /// fresh process.  This is the inverse of the uninitialized constructor:
     /// it never uses `JazzSchema::empty()` as a genesis candidate.
-    async fn discover_durable_catalogue_genesis(
-        storage: S,
+    async fn discover_durable_catalogue_genesis<T>(
+        storage: T,
     ) -> Result<(BoxedStorage, Option<JazzSchema>), Error>
     where
-        S: ReopenableStorage + 'static,
+        T: ReopenableStorage + 'static,
     {
         let bootstrap_schema = JazzSchema::empty();
         // Dynamic discovery must inspect the fixed history/branch/fate stores
@@ -475,12 +481,12 @@ where
     /// fresh store. Otherwise reopen with the store's own current schema: its
     /// active selection, else its write pointer, else its genesis.
     #[cfg(feature = "runtime")]
-    pub async fn select_durable_reopen_schema(
-        storage: S,
+    pub async fn select_durable_reopen_schema<T>(
+        storage: T,
         requested: JazzSchema,
     ) -> Result<(BoxedStorage, JazzSchema), Error>
     where
-        S: ReopenableStorage + 'static,
+        T: ReopenableStorage + 'static,
     {
         let meta_schema = JazzSchema::empty().lower_catalogue_meta_to_groove();
         let meta_database =
@@ -548,22 +554,19 @@ where
     /// Ordinary downstream clients should use [`NodeState::new`], which fails
     /// historical handle reads closed until a complete-history subscription
     /// path marks the queried shape complete in a later slice.
-    pub async fn new_history_complete(
+    pub async fn new_history_complete<T>(
         node_uuid: NodeUuid,
         schema: JazzSchema,
-        storage: S,
+        storage: T,
     ) -> Result<Self, Error>
     where
-        S: ReopenableStorage + 'static,
+        T: ReopenableStorage + 'static,
     {
         Self::new_with_history_complete(node_uuid, schema, storage, true).await
     }
 
     /// Rebuild the groove layer over the same storage using the standard open path.
-    pub async fn reopen_in_place(self) -> Result<NodeState<BoxedStorage>, Error>
-    where
-        S: ReopenableStorage + 'static,
-    {
+    pub async fn reopen_in_place(self) -> Result<NodeState, Error> {
         let NodeState {
             node_uuid,
             catalogue,
@@ -578,10 +581,10 @@ where
         let storage = database.into_inner().into_storage();
         let mut reopened = match catalogue_bootstrap_state {
             CatalogueBootstrapState::Uninitialized => {
-                NodeState::<BoxedStorage>::new_catalogue_uninitialized(node_uuid, storage).await?
+                NodeState::new_catalogue_uninitialized(node_uuid, storage).await?
             }
             CatalogueBootstrapState::Ready => {
-                NodeState::<BoxedStorage>::new_with_history_complete(
+                NodeState::new_with_history_complete(
                     node_uuid,
                     catalogue.schema,
                     storage,
@@ -601,26 +604,26 @@ where
         Ok(reopened)
     }
 
-    async fn new_with_history_complete(
+    async fn new_with_history_complete<T>(
         node_uuid: NodeUuid,
         schema: JazzSchema,
-        storage: S,
+        storage: T,
         history_complete: bool,
     ) -> Result<Self, Error>
     where
-        S: ReopenableStorage + 'static,
+        T: ReopenableStorage + 'static,
     {
         Self::new_with_options(node_uuid, schema, storage, history_complete).await
     }
 
-    async fn new_with_options(
+    async fn new_with_options<T>(
         node_uuid: NodeUuid,
         schema: JazzSchema,
-        storage: S,
+        storage: T,
         history_complete: bool,
     ) -> Result<Self, Error>
     where
-        S: ReopenableStorage + 'static,
+        T: ReopenableStorage + 'static,
     {
         Self::new_with_options_inner(
             node_uuid,
@@ -638,14 +641,14 @@ where
 
     #[cfg(feature = "testing")]
     /// Open a node and attribute durable recovery without changing open semantics.
-    pub async fn new_with_open_receipt_for_test(
+    pub async fn new_with_open_receipt_for_test<T>(
         node_uuid: NodeUuid,
         schema: JazzSchema,
-        storage: S,
+        storage: T,
         history_complete: bool,
     ) -> Result<(Self, NodeOpenReceipt), Error>
     where
-        S: ReopenableStorage + 'static,
+        T: ReopenableStorage + 'static,
     {
         let mut receipt = NodeOpenReceipt::default();
         let node = Self::new_with_options_inner(
@@ -673,7 +676,6 @@ where
     ) -> Result<Self, Error>
     where
         T: ReopenableStorage + 'static,
-        S: ReopenableStorage,
     {
         let local_schema_version_id = schema.version_id();
         #[cfg(feature = "testing")]
@@ -1012,6 +1014,12 @@ where
         database.set_plain_output_root_positions_enabled(false);
         Ok(database)
     }
+}
+
+impl<S> NodeState<S>
+where
+    S: OrderedKvStorage,
+{
 
     #[doc(hidden)]
     pub fn committed_global_time(&self) -> GlobalTime {

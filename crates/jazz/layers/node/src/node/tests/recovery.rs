@@ -620,7 +620,7 @@ fn operation_version(schema: &JazzSchema, column: &str, value: Value) -> Version
 }
 
 fn assert_operation_rejection_retains_only_the_terminal_fate(
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     tx: Transaction,
     versions: Vec<VersionRecord>,
     expected_validation_error: &str,
@@ -1893,7 +1893,7 @@ fn pending_replay_fixture_transaction(tx_id: TxId, made_by: AuthorSubject) -> Tr
 }
 
 fn seed_pending_replay_state(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     tx_id: TxId,
     made_by: AuthorSubject,
     fate: Fate,
@@ -1910,7 +1910,7 @@ fn seed_pending_replay_state(
 }
 
 fn legacy_pending_transaction_ids_for(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     local_node: NodeUuid,
     author: AuthorSubject,
 ) -> PendingTransactionScan {

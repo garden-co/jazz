@@ -180,7 +180,7 @@ impl ReopenableStorage for FailWriteManyMemoryStorage {
     }
 }
 
-fn fail_write_many_node() -> (NodeState<FailWriteManyMemoryStorage>, FailWriteManyMemoryStorage) {
+fn fail_write_many_node() -> (NodeState, FailWriteManyMemoryStorage) {
     let node_schema = schema();
     let column_families = node_schema.column_families();
     let refs = column_families
@@ -192,7 +192,7 @@ fn fail_write_many_node() -> (NodeState<FailWriteManyMemoryStorage>, FailWriteMa
     (node, storage)
 }
 
-fn assert_poisoned_node_exposes_nothing(core: &mut NodeState<FailWriteManyMemoryStorage>) {
+fn assert_poisoned_node_exposes_nothing(core: &mut NodeState) {
     assert!(matches!(
         core.subscribe_history("todos").resolve(),
         Err(Error::Groove(groove::db::Error::DatabasePoisoned))

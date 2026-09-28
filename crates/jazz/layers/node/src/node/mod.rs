@@ -524,7 +524,7 @@ enum CompiledLensOp {
 }
 
 /// Storage-backed Jazz node: mergeable history, local reads, and commit-unit sync.
-pub struct NodeState<S> {
+pub struct NodeState<S = BoxedStorage> {
     /// Stable UUID identifying this node across storage reopen.
     node_uuid: NodeUuid,
     /// Compact alias assigned to this node for on-disk transaction keys.
@@ -2518,7 +2518,7 @@ impl PartialEq<(RowUuid, BTreeMap<String, Value>)> for CurrentRow {
 }
 
 /// Cheap read-only handle for historical settled-state reads.
-pub struct HistoricalRead<'node, S>
+pub struct HistoricalRead<'node, S = BoxedStorage>
 where
     S: OrderedKvStorage,
 {

@@ -2752,7 +2752,7 @@ fn branch_column_evolution_accepts_monotone_addition_with_default() {
         }],
     ).expect("valid migration lens");
 
-    NodeState::<RocksDbStorage>::validate_migration_lens_between(&lens, &source, &target)
+    NodeState::<BoxedStorage>::validate_migration_lens_between(&lens, &source, &target)
         .expect("a branch column can be added monotonically with an immutable default");
 }
 

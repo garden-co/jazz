@@ -642,14 +642,14 @@ impl ReopenableStorage for ReopenRefusingMemoryStorage {
 fn open_reopen_refusing_node_with_schema(
     node_uuid: NodeUuid,
     schema: JazzSchema,
-) -> NodeState<ReopenRefusingMemoryStorage> {
+) -> NodeState {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = ReopenRefusingMemoryStorage::new(&refs);
     NodeState::new_with_shared_test_catalogue(node_uuid, schema, storage).unwrap()
 }
 
-fn open_node() -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
+fn open_node() -> (tempfile::TempDir, NodeState) {
     let schema = schema();
     let temp_dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();
@@ -658,7 +658,7 @@ fn open_node() -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
     let node = NodeState::new_with_shared_test_catalogue(node(1), schema, storage).unwrap();
     (temp_dir, node)
 }
-fn open_node_with_uuid(node_uuid: NodeUuid) -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
+fn open_node_with_uuid(node_uuid: NodeUuid) -> (tempfile::TempDir, NodeState) {
     let schema = schema();
     let temp_dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();
@@ -667,7 +667,7 @@ fn open_node_with_uuid(node_uuid: NodeUuid) -> (tempfile::TempDir, NodeState<Roc
     let node = NodeState::new_with_shared_test_catalogue(node_uuid, schema, storage).unwrap();
     (temp_dir, node)
 }
-fn open_node_at(temp_dir: &tempfile::TempDir, schema: JazzSchema) -> NodeState<RocksDbStorage> {
+fn open_node_at(temp_dir: &tempfile::TempDir, schema: JazzSchema) -> NodeState {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
@@ -677,7 +677,7 @@ fn reopen_node_at(
     temp_dir: &tempfile::TempDir,
     node_uuid: NodeUuid,
     schema: JazzSchema,
-) -> NodeState<RocksDbStorage> {
+) -> NodeState {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
@@ -686,7 +686,7 @@ fn reopen_node_at(
 fn open_history_complete_node_at(
     temp_dir: &tempfile::TempDir,
     schema: JazzSchema,
-) -> NodeState<RocksDbStorage> {
+) -> NodeState {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
@@ -697,7 +697,7 @@ fn reopen_history_complete_node_at(
     temp_dir: &tempfile::TempDir,
     node_uuid: NodeUuid,
     schema: JazzSchema,
-) -> NodeState<RocksDbStorage> {
+) -> NodeState {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
@@ -706,7 +706,7 @@ fn reopen_history_complete_node_at(
 fn open_node_with_schema(
     node_uuid: NodeUuid,
     schema: JazzSchema,
-) -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
+) -> (tempfile::TempDir, NodeState) {
     let temp_dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -717,7 +717,7 @@ fn open_node_with_schema(
 fn open_history_complete_node_with_schema(
     node_uuid: NodeUuid,
     schema: JazzSchema,
-) -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
+) -> (tempfile::TempDir, NodeState) {
     let temp_dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -818,7 +818,7 @@ fn counter_schema() -> JazzSchema {
     compile_public_test_schema(&source)
 }
 fn commit_and_oracle(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     oracle: &mut Oracle,
     commit: MergeableCommit,
 ) -> TxId {
@@ -837,8 +837,8 @@ fn commit_and_oracle(
     tx_id
 }
 fn commit_global_and_oracle(
-    writer: &mut NodeState<RocksDbStorage>,
-    core: &mut NodeState<RocksDbStorage>,
+    writer: &mut NodeState,
+    core: &mut NodeState,
     oracle: &mut Oracle,
     commit: MergeableCommit,
 ) -> (TxId, GlobalTime) {
@@ -867,7 +867,7 @@ fn commit_global_and_oracle(
     );
     (tx_id, global_time)
 }
-fn assert_current_rows_match_oracle(node: &mut NodeState<RocksDbStorage>, oracle: &Oracle) {
+fn assert_current_rows_match_oracle(node: &mut NodeState, oracle: &Oracle) {
     let actual = node
         .current_rows("todos", DurabilityTier::Local)
         .unwrap()
@@ -881,7 +881,7 @@ fn assert_current_rows_match_oracle(node: &mut NodeState<RocksDbStorage>, oracle
         .collect::<BTreeMap<_, _>>();
     assert_eq!(actual, expected);
 }
-fn assert_global_current_rows_match_oracle(node: &mut NodeState<RocksDbStorage>, oracle: &Oracle) {
+fn assert_global_current_rows_match_oracle(node: &mut NodeState, oracle: &Oracle) {
     let actual = node
         .current_rows("todos", DurabilityTier::Global)
         .unwrap()
@@ -896,7 +896,7 @@ fn assert_global_current_rows_match_oracle(node: &mut NodeState<RocksDbStorage>,
     assert_eq!(actual, expected);
 }
 fn assert_subscription_rows_match_policy_oracle(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     _subscription_ordinal: u64,
     oracle: &Oracle,
     delivered: &PerNodeKnowledge,
@@ -1043,7 +1043,7 @@ fn global_known_oracle_rows(
         .collect()
 }
 fn assert_global_rows_match_known_oracle(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     oracle: &Oracle,
     known: &PerNodeKnowledge,
 ) {
@@ -1055,7 +1055,7 @@ fn assert_global_rows_match_known_oracle(
         .collect::<BTreeMap<_, _>>();
     assert_eq!(actual, global_known_oracle_rows(oracle, known));
 }
-fn assert_view_update_result_set_matches_current_rows(node: &mut NodeState<RocksDbStorage>) {
+fn assert_view_update_result_set_matches_current_rows(node: &mut NodeState) {
     let update = node.view_update_for_current_rows("todos").unwrap();
     let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         peer_payload_inventory:
@@ -1145,7 +1145,7 @@ fn seeded_author_and_owner(
     }
 }
 fn add_core_versions_to_oracle(
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     oracle: &mut Oracle,
     known_txs: &mut BTreeSet<TxId>,
 ) {
@@ -1281,8 +1281,8 @@ fn assert_exclusive_serialization_matches_oracle(
     }
 }
 fn commit_mergeable_global(
-    writer: &mut NodeState<RocksDbStorage>,
-    core: &mut NodeState<RocksDbStorage>,
+    writer: &mut NodeState,
+    core: &mut NodeState,
     commit: MergeableCommit,
 ) -> TxId {
     let (published, unit) = writer.commit_mergeable_unit(commit).unwrap();
@@ -1294,7 +1294,7 @@ fn commit_mergeable_global(
     tx_id
 }
 fn ingest_relay_version(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     tx_id: TxId,
     made_at: impl Into<TxTime>,
     parents: Vec<TxId>,
@@ -1327,8 +1327,8 @@ fn ingest_relay_version(
     .unwrap();
 }
 fn sync_current_rows_to(
-    core: &mut NodeState<RocksDbStorage>,
-    reader: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
+    reader: &mut NodeState,
     _subscription_ordinal: u64,
 ) {
     let mut peer = PeerState::new();
@@ -1378,8 +1378,8 @@ where
     .unwrap();
 }
 fn commit_owner_policy_global(
-    writer: &mut NodeState<RocksDbStorage>,
-    core: &mut NodeState<RocksDbStorage>,
+    writer: &mut NodeState,
+    core: &mut NodeState,
     row_uuid: RowUuid,
     made_by: AuthorSubject,
     owner: AuthorSubject,
@@ -1414,7 +1414,7 @@ fn commit_owner_policy_global(
     tx_id
 }
 fn commit_core_owner_fixture(
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     row_uuid: RowUuid,
     owner: AuthorSubject,
     title: &str,
@@ -1472,7 +1472,7 @@ fn assert_view_update_only_ships_rows(update: &SyncMessage, expected_rows: BTree
     assert_eq!(shipped_rows, expected_rows);
 }
 fn assert_policy_subscription_rows(
-    reader: &mut NodeState<RocksDbStorage>,
+    reader: &mut NodeState,
     _subscription_ordinal: u64,
     identity: AuthorSubject,
 ) {
@@ -1488,7 +1488,7 @@ fn assert_policy_subscription_rows(
 }
 fn enqueue_rehydrate_with_dedup_assertion(
     peer: &mut PeerState,
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     _subscription_ordinal: u64,
     queue: &mut VecDeque<SyncMessage>,
 ) {
@@ -1546,7 +1546,7 @@ struct M3RunSummary {
     link_b_metrics: PeerMetrics,
     message_counts: M3MessageCounts,
 }
-fn node_summary(node: &mut NodeState<RocksDbStorage>, tx_ids: &BTreeSet<TxId>) -> M3NodeSummary {
+fn node_summary(node: &mut NodeState, tx_ids: &BTreeSet<TxId>) -> M3NodeSummary {
     M3NodeSummary {
         local_rows: node.current_rows("todos", DurabilityTier::Local).unwrap(),
         global_rows: node.current_rows("todos", DurabilityTier::Global).unwrap(),
@@ -2155,7 +2155,7 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
 
 // Rejection tests must observe active authority receipts, not removed binding-view shadows.
 fn authority_hydration_receipts(
-    node: &NodeState<RocksDbStorage>,
+    node: &NodeState,
 ) -> (BTreeSet<AuthorityResultKey>, BTreeSet<AuthorityResultKey>) {
     (
         node.query

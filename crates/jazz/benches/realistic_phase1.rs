@@ -1,6 +1,6 @@
 //! Small active core realistic benchmark slice.
 //!
-//! This intentionally exercises `jazz::db::Db<MemoryStorage>` directly, without
+//! This intentionally exercises `jazz::db::Db` directly, without
 //! the legacy `RuntimeCore`, `SchemaManager`, or `SyncManager` stack.
 
 #![recursion_limit = "256"]
@@ -41,8 +41,8 @@ use jazz::wire::{
 use jazz_storage_rocksdb::RocksDbStorage;
 use tempfile::TempDir;
 
-type BenchDb = Db<MemoryStorage>;
-type RocksBenchDb = Db<RocksDbStorage>;
+type BenchDb = Db;
+type RocksBenchDb = Db;
 
 fn author() -> AuthorSubject {
     schema_fixture::account_author_uuid(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"))
@@ -251,7 +251,7 @@ fn open_db_with_storage<S>(
     schema: JazzSchema,
     storage: impl FnOnce(&[&str]) -> S,
     context: &str,
-) -> Db<S>
+) -> Db
 where
     S: OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
 {

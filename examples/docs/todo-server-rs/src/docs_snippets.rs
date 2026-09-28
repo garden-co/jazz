@@ -269,7 +269,7 @@ pub async fn write_todo_with_default_durability(
 
 // #region writing-transaction-rust
 pub fn group_todo_writes(
-    db: &Db<RocksDbStorage>,
+    db: &Db,
     existing_todo_id: RowUuid,
 ) -> Result<RowUuid, jazz::db::Error> {
     let (created_id, _transaction_id) = db.transaction(|tx| {
@@ -291,7 +291,7 @@ pub fn group_todo_writes(
 
 // #region writing-exclusive-transaction-rust
 pub fn finish_todo_exclusively(
-    db: &Db<RocksDbStorage>,
+    db: &Db,
     todo_id: RowUuid,
 ) -> Result<(), jazz::db::Error> {
     let tx = db.exclusive_tx()?;

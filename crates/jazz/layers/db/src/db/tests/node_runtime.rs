@@ -4621,12 +4621,12 @@ fn assert_legacy_edge_receipt_replays_to_core(known_to_core: bool, permission_re
         )
         .unwrap()
         .mergeable_tx_id();
-    let pump = |client: &Db<RocksDbStorage>| {
+    let pump = |client: &Db| {
         client.tick().unwrap();
         core.tick().unwrap();
         client.tick().unwrap();
     };
-    let settle = |client: &Db<RocksDbStorage>| {
+    let settle = |client: &Db| {
         let result = Rc::new(RefCell::new(None));
         let observed = result.clone();
         client.wait_for_transaction_with(tx_id, DurabilityTier::Global, move |outcome| {

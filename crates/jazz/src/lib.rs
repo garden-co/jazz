@@ -38,7 +38,7 @@
 //!     TableSchemaBuilder,
 //! };
 //!
-//! fn open_node(node: NodeUuid, schema: JazzSchema) -> NodeState<MemoryStorage> {
+//! fn open_node(node: NodeUuid, schema: JazzSchema) -> NodeState {
 //!     let cfs = schema.column_families();
 //!     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
 //!     block_on(NodeState::new(node, schema, MemoryStorage::new(&refs).expect("valid memory storage families"))).unwrap()
