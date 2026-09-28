@@ -84,13 +84,15 @@ export function SiteTopNav() {
           </>
         }
         centerContent={
-          <span className="site-search-field contents max-md:hidden">
+          // The centred 320px field clears the nav links only from ~1120px
+          // wide; narrower bars use the search icon at the end instead.
+          <span className="site-search-field contents max-[1120px]:hidden">
             <SearchField onOpen={openSearch} />
           </span>
         }
         endContent={
           <HStack gap={1} vAlign="center">
-            <span className="contents md:hidden">
+            <span className="contents min-[1120px]:hidden">
               <SearchIconButton onOpen={openSearch} />
             </span>
             {/* Below the drawer breakpoint the bar keeps only search, theme and
