@@ -392,6 +392,17 @@ impl Harness {
         self.live.retain(|live| live.key != key);
     }
 
+    /// Unsubscribe a binding and its literal twins explicitly, which queues
+    /// their retractions without a tick.
+    fn unsubscribe_key(&mut self, key: u64) {
+        for live in self.live.extract_if(.., |live| live.key == key) {
+            assert!(self.database.unsubscribe(live.prepared.id()));
+            for (_, literal) in &live.literals {
+                assert!(self.database.unsubscribe(literal.id()));
+            }
+        }
+    }
+
     async fn churn(&mut self, step: u64) {
         self.kind.churn(&mut self.database, step).await;
     }
@@ -517,6 +528,55 @@ async fn multi_sink_rebind_after_queued_retraction_keeps_receiving_edits() {
 #[futures_test::test]
 async fn recursive_rebind_after_queued_retraction_keeps_receiving_edits() {
     rebind_after_queued_retraction(ShapeKind::Recursive).await;
+}
+
+/// Unsubscribing the only binding of a source queues its retraction, and the
+/// next bind fully hydrates from refcounts that already exclude it. Applying
+/// that retraction to the rebuilt state as well would subtract it twice, and
+/// a later live attach of the same key would build on the result. Internal:
+/// which bind path ran is not observable through the public API.
+async fn rebind_after_unsubscribing_the_only_binding(kind: ShapeKind) {
+    let mut harness = Harness::new(kind, true).await;
+    for key in [2, 4] {
+        harness.bind(key, &format!("after binding {key}")).await;
+        harness.unsubscribe_key(key);
+    }
+    assert!(
+        !harness.bind(6, "after binding 6 alone").await,
+        "{kind:?}: a lone binding has no sibling to attach beside"
+    );
+    for key in [2, 4] {
+        assert!(
+            harness.bind(key, &format!("after re-binding {key}")).await,
+            "{kind:?}: re-binding {key} beside a settled 6 must attach live"
+        );
+    }
+    for step in 0..24 {
+        harness.churn(step).await;
+        harness
+            .drive_and_check(&format!("after write {step}"))
+            .await;
+    }
+}
+
+#[futures_test::test]
+async fn top_by_rebind_after_unsubscribing_the_only_binding_keeps_receiving_edits() {
+    rebind_after_unsubscribing_the_only_binding(ShapeKind::TopBy).await;
+}
+
+#[futures_test::test]
+async fn join_rebind_after_unsubscribing_the_only_binding_keeps_receiving_edits() {
+    rebind_after_unsubscribing_the_only_binding(ShapeKind::Join).await;
+}
+
+#[futures_test::test]
+async fn multi_sink_rebind_after_unsubscribing_the_only_binding_keeps_receiving_edits() {
+    rebind_after_unsubscribing_the_only_binding(ShapeKind::MultiSink).await;
+}
+
+#[futures_test::test]
+async fn recursive_rebind_after_unsubscribing_the_only_binding_keeps_receiving_edits() {
+    rebind_after_unsubscribing_the_only_binding(ShapeKind::Recursive).await;
 }
 
 /// Seeded interleavings of binds, undriven drops and writes that are driven

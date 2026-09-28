@@ -307,8 +307,8 @@ type NapiDbInner = Rc<RefCell<Option<NapiDbInnerStorage>>>;
 
 #[derive(Clone)]
 enum NapiDbInnerStorage {
-    Memory(Rc<CoreDb<CoreMemoryStorage>>),
-    Persistent(Rc<CoreDb<CoreRocksDbStorage>>),
+    Memory(Rc<CoreDb>),
+    Persistent(Rc<CoreDb>),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -712,14 +712,8 @@ impl StreamingOwnerLifecycle {
     }
 }
 enum NapiWrite {
-    Memory {
-        db: Rc<CoreDb<CoreMemoryStorage>>,
-        write: WriteHandle<CoreMemoryStorage>,
-    },
-    Persistent {
-        db: Rc<CoreDb<CoreRocksDbStorage>>,
-        write: WriteHandle<CoreRocksDbStorage>,
-    },
+    Memory { db: Rc<CoreDb>, write: WriteHandle },
+    Persistent { db: Rc<CoreDb>, write: WriteHandle },
 }
 
 #[derive(Clone, Default)]
@@ -797,8 +791,9 @@ impl CoreTickScheduler for NapiTickScheduler {
     }
 
     fn drops_pending_ticks(&self) -> bool {
-        // `tick` polls `Db::tick` once through `core_poll_once` and drops it
-        // if it is still pending.
+        // `tick` drives `Db::tick` through `core_poll_once`, which drops it
+        // while it still waits on outside progress (cooperative yields are
+        // polled again in the same turn).
         true
     }
 
@@ -1332,12 +1327,12 @@ pub type SubscriptionTerminalEdit = Either4<
 
 enum NapiTransportInner {
     Memory {
-        db: Rc<CoreDb<CoreMemoryStorage>>,
-        connection: Option<Rc<LocalMutex<CorePeerConnection<CoreMemoryStorage>>>>,
+        db: Rc<CoreDb>,
+        connection: Option<Rc<LocalMutex<CorePeerConnection>>>,
     },
     Persistent {
-        db: Rc<CoreDb<CoreRocksDbStorage>>,
-        connection: Option<Rc<LocalMutex<CorePeerConnection<CoreRocksDbStorage>>>>,
+        db: Rc<CoreDb>,
+        connection: Option<Rc<LocalMutex<CorePeerConnection>>>,
     },
     Closed,
 }
@@ -1368,13 +1363,13 @@ impl NapiTransportInner {
 
 enum NapiSubscription {
     Memory {
-        db: Rc<CoreDb<CoreMemoryStorage>>,
+        db: Rc<CoreDb>,
         stream: SubscriptionStream,
         pending_events: VecDeque<CoreSubscriptionEvent>,
         pending_batch: Option<PendingNativeSubscriptionBatch>,
     },
     Persistent {
-        db: Rc<CoreDb<CoreRocksDbStorage>>,
+        db: Rc<CoreDb>,
         stream: SubscriptionStream,
         pending_events: VecDeque<CoreSubscriptionEvent>,
         pending_batch: Option<PendingNativeSubscriptionBatch>,
@@ -3675,7 +3670,7 @@ fn open_core_db<S>(
     config: CoreOpenDbConfig,
     identity: CoreDbIdentity,
     backend_attribution: bool,
-) -> napi::Result<CoreDb<S>>
+) -> napi::Result<CoreDb>
 where
     S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
 {
@@ -3813,10 +3808,7 @@ fn core_delegated_session_from_napi(
         .transpose()
 }
 
-fn core_write_memory(
-    db: Rc<CoreDb<CoreMemoryStorage>>,
-    write: WriteHandle<CoreMemoryStorage>,
-) -> napi::Result<Write> {
+fn core_write_memory(db: Rc<CoreDb>, write: WriteHandle) -> napi::Result<Write> {
     let tx_id = write.mergeable_tx_id();
     let result = WriteResult {
         row_id: write.row_uuid(),
@@ -3831,10 +3823,7 @@ fn core_write_memory(
     })
 }
 
-fn core_write_persistent(
-    db: Rc<CoreDb<CoreRocksDbStorage>>,
-    write: WriteHandle<CoreRocksDbStorage>,
-) -> napi::Result<Write> {
+fn core_write_persistent(db: Rc<CoreDb>, write: WriteHandle) -> napi::Result<Write> {
     let tx_id = write.mergeable_tx_id();
     let result = WriteResult {
         row_id: write.row_uuid(),
@@ -3919,13 +3908,35 @@ where
     Ok(stats.subscription_events as u32)
 }
 
+/// Drive `future` for one host turn and drop it if it is still waiting.
+///
+/// A future that yields cooperatively wakes itself before returning
+/// `Pending` (Groove evaluation yields between bounded operator turns). It
+/// expects to be polled again, and dropping it loses the work it holds, such as
+/// a received view update that was mid-apply. Such yields are polled again
+/// here in the same turn. Only a future waiting on outside progress, which
+/// has not woken itself, is dropped as before.
 fn core_poll_once<F: Future>(future: F) -> Option<F::Output> {
     let mut future = Box::pin(future);
-    let waker = futures::task::noop_waker();
+    let yielded = std::sync::Arc::new(SelfWake::default());
+    let waker = waker(yielded.clone());
     let mut context = Context::from_waker(&waker);
-    match future.as_mut().poll(&mut context) {
-        Poll::Ready(output) => Some(output),
-        Poll::Pending => None,
+    loop {
+        match future.as_mut().poll(&mut context) {
+            Poll::Ready(output) => return Some(output),
+            Poll::Pending if yielded.0.swap(false, Ordering::AcqRel) => continue,
+            Poll::Pending => return None,
+        }
+    }
+}
+
+/// Records whether a polled future woke itself.
+#[derive(Default)]
+struct SelfWake(std::sync::atomic::AtomicBool);
+
+impl ArcWake for SelfWake {
+    fn wake_by_ref(arc_self: &std::sync::Arc<Self>) {
+        arc_self.0.store(true, Ordering::Release);
     }
 }
 
@@ -3991,10 +4002,7 @@ fn commit_timestamp_ms() -> napi::Result<u64> {
         .map_err(|_| napi::Error::from_reason("commit clock exceeds u64 milliseconds"))
 }
 
-fn core_commit_tx_memory(
-    db: &Rc<CoreDb<CoreMemoryStorage>>,
-    open_tx: CoreOpenTransactionId,
-) -> napi::Result<Write> {
+fn core_commit_tx_memory(db: &Rc<CoreDb>, open_tx: CoreOpenTransactionId) -> napi::Result<Write> {
     let write = db
         .enqueue_commit_mergeable_handle_at_ms(open_tx, commit_timestamp_ms()?)
         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
@@ -4003,7 +4011,7 @@ fn core_commit_tx_memory(
 }
 
 fn core_commit_tx_persistent(
-    db: &Rc<CoreDb<CoreRocksDbStorage>>,
+    db: &Rc<CoreDb>,
     open_tx: CoreOpenTransactionId,
 ) -> napi::Result<Write> {
     let write = db
@@ -4013,7 +4021,7 @@ fn core_commit_tx_persistent(
 }
 
 fn core_commit_exclusive_tx_memory(
-    db: &Rc<CoreDb<CoreMemoryStorage>>,
+    db: &Rc<CoreDb>,
     open_tx: CoreOpenTransactionId,
 ) -> napi::Result<Write> {
     let write = db
@@ -4024,7 +4032,7 @@ fn core_commit_exclusive_tx_memory(
 }
 
 fn core_commit_exclusive_tx_persistent(
-    db: &Rc<CoreDb<CoreRocksDbStorage>>,
+    db: &Rc<CoreDb>,
     open_tx: CoreOpenTransactionId,
 ) -> napi::Result<Write> {
     let write = db
