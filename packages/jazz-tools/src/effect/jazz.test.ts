@@ -1,6 +1,7 @@
 import { Cause, Data, Effect, Exit, Fiber, Layer, Option, Stream } from "effect";
 import { describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
+import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { Jazz, JazzError } from "./index.js";
 
@@ -22,6 +23,39 @@ function run<A, E>(
   program: Effect.Effect<A, E, Jazz>,
 ): Promise<A> {
   return Effect.runPromise(program.pipe(Effect.provide(layer)));
+}
+
+/**
+ * A layer whose Db counts its open core subscriptions, so tests can observe
+ * that a stream removes its subscription.
+ */
+async function trackedJazzLayer(name: string) {
+  let open = 0;
+  const layer = Layer.effect(
+    Jazz,
+    Effect.acquireRelease(
+      Effect.promise(async () =>
+        createDb({ ...(await localAccountConfig(`effect-${name}`)), driver: { type: "memory" } }),
+      ),
+      (db) => Effect.promise(() => db.shutdown()),
+    ).pipe(
+      Effect.map((db) => {
+        const subscribe = db.subscribe.bind(db);
+        db.subscribe = ((...args: Parameters<typeof subscribe>) => {
+          const unsubscribe = subscribe(...args);
+          open++;
+          let closed = false;
+          return () => {
+            if (!closed) open--;
+            closed = true;
+            unsubscribe();
+          };
+        }) as typeof db.subscribe;
+        return Jazz.fromDb(db);
+      }),
+    ),
+  );
+  return { layer, openSubscriptions: () => open };
 }
 
 const titles = (rows: ReadonlyArray<{ title: string }>) => rows.map((row) => row.title).sort();
@@ -71,8 +105,9 @@ describe("Jazz Effect service", () => {
   });
 
   it("streams the complete result on subscription and after each change", async () => {
+    const { layer, openSubscriptions } = await trackedJazzLayer("stream");
     const result = await run(
-      await jazzLayer("stream"),
+      layer,
       Effect.gen(function* () {
         const jazz = yield* Jazz;
         const snapshots = yield* jazz.stream(app.todos.where({ done: false })).pipe(
@@ -88,7 +123,7 @@ describe("Jazz Effect service", () => {
           Stream.take(1),
           Stream.runCollect,
         );
-        const subscriptionsAfter = jazz.db.getActiveQuerySubscriptions().length;
+        const subscriptionsAfter = openSubscriptions();
         return { snapshots, subscriptionsAfter };
       }),
     );
@@ -99,16 +134,17 @@ describe("Jazz Effect service", () => {
   });
 
   it("removes the subscription when the consuming fiber is interrupted", async () => {
+    const { layer, openSubscriptions } = await trackedJazzLayer("stream-interrupt");
     const counts = await run(
-      await jazzLayer("stream-interrupt"),
+      layer,
       Effect.gen(function* () {
         const jazz = yield* Jazz;
         const fiber = yield* jazz.stream(app.todos).pipe(Stream.runDrain, Effect.forkChild);
         yield* Effect.yieldNow;
         yield* Effect.sleep("20 millis");
-        const during = jazz.db.getActiveQuerySubscriptions().length;
+        const during = openSubscriptions();
         yield* Fiber.interrupt(fiber);
-        return { during, after: jazz.db.getActiveQuerySubscriptions().length };
+        return { during, after: openSubscriptions() };
       }),
     );
 

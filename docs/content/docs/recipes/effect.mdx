@@ -44,7 +44,10 @@ A write Effect completes once the write is applied locally, like the core API. P
 until the write is durable at a tier:
 
 ```ts
-yield * jazz.insert(app.todos, { title: "Ship it", done: false }, { wait: "global" });
+const shipIt = Effect.gen(function* () {
+  const jazz = yield* Jazz;
+  yield* jazz.insert(app.todos, { title: "Ship it", done: false }, { wait: "global" });
+});
 ```
 
 Waiting writes fail with `JazzWriteRejected` if the server rejects them, for example because of
@@ -58,10 +61,12 @@ emission is a full snapshot, so a slow consumer only sees the newest one. The su
 the Stream ends or its fiber is interrupted.
 
 ```ts
-yield *
-  jazz
+const logOpenCount = Effect.gen(function* () {
+  const jazz = yield* Jazz;
+  yield* jazz
     .stream(app.todos.where({ done: false }))
     .pipe(Stream.runForEach((todos) => Effect.log(`${todos.length} open`)));
+});
 ```
 
 ## Transactions
@@ -70,13 +75,15 @@ yield *
 or is interrupted. Its typed errors pass through unchanged.
 
 ```ts
-yield *
-  jazz.transaction((tx) =>
+const addGroceries = Effect.gen(function* () {
+  const jazz = yield* Jazz;
+  yield* jazz.transaction((tx) =>
     Effect.gen(function* () {
       const list = yield* tx.insert(app.lists, { name: "Groceries" });
       yield* tx.insert(app.todos, { title: "Milk", done: false, list: list.id });
     }),
   );
+});
 ```
 
 `jazz.exclusiveTransaction` also waits for the authority's verdict and fails with `JazzWriteRejected` on a
