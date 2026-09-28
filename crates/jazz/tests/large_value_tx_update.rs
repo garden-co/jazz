@@ -45,7 +45,7 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_db() -> Db<TestStorage> {
+fn open_db() -> Db {
     let schema = schema();
     let families = schema.column_families();
     let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
@@ -74,7 +74,7 @@ fn some(value: Value) -> Value {
 }
 
 /// Seed one row with 200 KB text, 200 KB bytes and a 200 KB nullable text.
-fn seed(db: &Db<TestStorage>) -> RowUuid {
+fn seed(db: &Db) -> RowUuid {
     let row = RowUuid::from_bytes([0x07; 16]);
     block_on(db.insert(
         "docs",
@@ -95,7 +95,7 @@ fn seed(db: &Db<TestStorage>) -> RowUuid {
 }
 
 /// Committed row cells as a public query reader sees them.
-fn committed(db: &Db<TestStorage>, row: RowUuid) -> BTreeMap<&'static str, Value> {
+fn committed(db: &Db, row: RowUuid) -> BTreeMap<&'static str, Value> {
     let table = schema().tables()[0].clone();
     let query = db.prepare_query(&db.table("docs")).expect("prepare");
     let rows = db.read(&query).expect("read");
