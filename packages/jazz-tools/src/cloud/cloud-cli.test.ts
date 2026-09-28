@@ -127,7 +127,7 @@ function io(overrides: Partial<CloudCommandIo> = {}) {
   const value: CloudCommandIo = {
     stdout: (text) => stdout.push(text),
     stderr: (text) => stderr.push(text),
-    env: { JAZZ_CONFIG_DIR: configDir, JAZZ_CLOUD_URL: cloud.url },
+    env: { NODE_ENV: "test", JAZZ_CONFIG_DIR: configDir, JAZZ_CLOUD_URL: cloud.url },
     openBrowser: (url) => opened.push(url),
     sleep: async (ms) => {
       sleeps.push(ms);
