@@ -598,7 +598,7 @@ async fn deploy_revert_then_new_branch_reopens_and_rejects_stored_sibling() {
         error["error"]
             .as_str()
             .unwrap()
-            .contains("first deploy a common ancestor")
+            .contains("no forward migration path exists")
     );
     assert_eq!(graph(&router).await, expected);
     server.shutdown().await;

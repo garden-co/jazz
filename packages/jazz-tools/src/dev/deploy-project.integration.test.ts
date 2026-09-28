@@ -74,9 +74,9 @@ it("validates all branches before writing, deploys the converged history, and se
     );
   await writeMigration(0, 1, "a");
   await writeMigration(0, 2, "b");
-  await writeMigration(1, 3, "b");
   await expect(deploy(options)).rejects.toThrow("migrations create");
   expect(await fetchMigrationGraph(options)).toEqual(initial);
+  await writeMigration(1, 3, "b");
   await writeMigration(2, 3, "a");
 
   const requests: DeploymentRequest[] = [];
