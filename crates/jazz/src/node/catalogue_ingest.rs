@@ -476,6 +476,7 @@ where
         })
     }
 
+    #[cfg(feature = "runtime")]
     pub(crate) fn validate_deployment_snapshot(
         &self,
         snapshot: crate::protocol::CatalogueSnapshot,

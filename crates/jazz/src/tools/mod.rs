@@ -10,9 +10,9 @@ pub use crate::model::{metadata, policy_claims, public_schema, transaction};
 pub use crate::{app_id, identity};
 #[doc(hidden)]
 pub mod deployment;
-pub mod schema_lens;
 /// Target-shell factory boundary for native peer transports.
 pub mod native_transport_connector;
+pub mod schema_lens;
 pub mod sync;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_support;
