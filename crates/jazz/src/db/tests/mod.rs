@@ -143,6 +143,7 @@ mod lifecycle;
 mod mutations;
 mod node_runtime;
 mod peer_connection;
+mod read_wakes;
 mod reads;
 mod reference_metadata_migration;
 mod subscriptions;

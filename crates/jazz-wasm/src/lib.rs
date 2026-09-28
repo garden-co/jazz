@@ -304,12 +304,14 @@ type WasmReadFuture = Pin<Box<dyn Future<Output = Result<Vec<u8>, JsValue>> + 's
 #[wasm_bindgen(js_name = PendingNativeRead)]
 pub struct WasmPendingNativeRead {
     future: Rc<RefCell<Option<WasmReadFuture>>>,
+    wake: RefCell<Option<Waker>>,
 }
 
 impl WasmPendingNativeRead {
     fn new(future: WasmReadFuture) -> Self {
         Self {
             future: Rc::new(RefCell::new(Some(future))),
+            wake: RefCell::new(None),
         }
     }
 
@@ -317,8 +319,12 @@ impl WasmPendingNativeRead {
         let Some(mut future) = self.future.borrow_mut().take() else {
             return Err(JsValue::from_str("native pending read is already complete"));
         };
-        let waker = Waker::noop();
-        let mut context = Context::from_waker(waker);
+        let wake = self
+            .wake
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| Waker::noop().clone());
+        let mut context = Context::from_waker(&wake);
         match Pin::new(&mut future).poll(&mut context) {
             Poll::Ready(result) => result.map(Some),
             Poll::Pending => {
@@ -331,6 +337,11 @@ impl WasmPendingNativeRead {
 
 #[wasm_bindgen(js_class = PendingNativeRead)]
 impl WasmPendingNativeRead {
+    #[wasm_bindgen(js_name = setWake)]
+    pub fn set_wake(&self, callback: js_sys::Function) {
+        *self.wake.borrow_mut() = Some(pending_operation_waker(callback));
+    }
+
     pub fn poll(&self) -> Result<JsValue, JsValue> {
         match self.poll_once()? {
             Some(bytes) => bytes_to_js(bytes),
@@ -340,6 +351,7 @@ impl WasmPendingNativeRead {
 
     pub fn cancel(&self) {
         self.future.borrow_mut().take();
+        self.wake.borrow_mut().take();
     }
 }
 
@@ -981,7 +993,7 @@ impl WasmDbInner {
         request_scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
         author: Option<AuthorSubject>,
         require_coverage: bool,
-        coverage_deadline_ms: f64,
+        coverage_expired: Rc<std::cell::Cell<bool>>,
     ) -> Result<SerializedReadResult, Error> {
         macro_rules! read {
             ($db:expr) => {{
@@ -996,7 +1008,7 @@ impl WasmDbInner {
                             request_scope,
                             author,
                             require_coverage,
-                            || js_sys::Date::now() >= coverage_deadline_ms,
+                            || coverage_expired.get(),
                             move |attachment| release_db.detach_query(attachment),
                         )
                         .await
@@ -1829,18 +1841,43 @@ impl WasmDb {
                 && (non_durable_client
                     || (opts.tier >= DurabilityTier::Global
                         && opts.propagation == Propagation::Full));
-            let result = inner
-                .all_serialized_query(
-                    query,
-                    opts,
-                    open_tx,
-                    admission,
-                    author,
-                    requires_coverage,
-                    js_sys::Date::now() + 15_000.0,
-                )
-                .await
-                .map_err(to_js_error)?;
+            let coverage_deadline_ms = js_sys::Date::now() + 15_000.0;
+            let coverage_expired = Rc::new(std::cell::Cell::new(false));
+            let mut read = Box::pin(inner.all_serialized_query(
+                query,
+                opts,
+                open_tx,
+                admission,
+                author,
+                requires_coverage,
+                Rc::clone(&coverage_expired),
+            ));
+            // The deadline is a single real wake, not a reason to keep polling
+            // sleeping reads. Core decides whether coverage is still pending;
+            // an already-covered query may continue hydrating after this time.
+            let mut deadline: Option<SubscriptionRetryTimer> = None;
+            let result = std::future::poll_fn(|cx| {
+                if let Some(deadline) = deadline.as_mut() {
+                    if Pin::new(deadline).poll(cx).is_ready() {
+                        coverage_expired.set(true);
+                    }
+                }
+                match read.as_mut().poll(cx) {
+                    Poll::Ready(result) => Poll::Ready(result.map_err(to_js_error)),
+                    Poll::Pending => {
+                        if deadline.is_none() {
+                            let remaining_ms = (coverage_deadline_ms - js_sys::Date::now())
+                                .clamp(0.0, 15_000.0)
+                                .ceil() as u32;
+                            let mut timer = SubscriptionRetryTimer::new(remaining_ms)?;
+                            let _ = Pin::new(&mut timer).poll(cx);
+                            deadline = Some(timer);
+                        }
+                        Poll::Pending
+                    }
+                }
+            })
+            .await?;
             match result {
                 SerializedReadResult::Rows(rows) => encode_rows(&rows),
                 SerializedReadResult::Relation(snapshot) => encode_relation_snapshot(&snapshot),
@@ -4711,7 +4748,7 @@ mod dynamic_schema_view_tests {
                     None,
                     None,
                     false,
-                    f64::INFINITY,
+                    Rc::new(std::cell::Cell::new(false)),
                 ),
                 owner.tick(),
             )

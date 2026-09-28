@@ -2694,6 +2694,9 @@ struct QueryCoverageRegistration {
     coverage: CoverageKey,
     subscription: PendingUpstreamSubscription,
     ref_count: usize,
+    // Weak ownership: cancelling a read releases its callback even if its
+    // authority never replies. Each committed receipt drains these waiters.
+    read_waiters: Vec<Weak<RefCell<Option<oneshot::Sender<()>>>>>,
 }
 
 #[derive(Clone)]

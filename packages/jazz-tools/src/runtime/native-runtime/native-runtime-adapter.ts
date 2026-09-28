@@ -1,3 +1,4 @@
+import { NativeReadWake } from "./native-read-wake.js";
 import { AuxiliaryReceiveDeadline } from "./auxiliary-receive-deadline.js";
 import { Utf8Decoder } from "../utf8.js";
 import { formatUuidAt } from "../hex.js";
@@ -193,7 +194,11 @@ type NativeWriteOptions = {
   updatedAtMs?: number;
 };
 
-type PendingNativeRead = { poll(): Uint8Array | null; cancel(): void };
+type PendingNativeRead = {
+  poll(): Uint8Array | null;
+  cancel(): void;
+  setWake?(wake: () => void): void;
+};
 type NativeReadResult = Uint8Array | PendingNativeRead;
 type PendingNativeSubscriptionBatch = { retryAfterMs?(): number | null };
 type PendingNativePermissionAdvice = {
@@ -2814,24 +2819,47 @@ export class NativeRuntimeAdapter implements Runtime {
   ): Promise<Uint8Array> {
     const result = await started;
     if (!isPendingNativeRead(result)) return result;
-    const cancel = () => result.cancel();
+    const ready = new NativeReadWake();
+    let cancelled = false;
+    let progressError: { error: unknown } | undefined;
+    const cancel = () => {
+      if (cancelled) return;
+      cancelled = true;
+      result.cancel();
+      ready.wake();
+    };
+    const failed = (error: unknown) => {
+      progressError = { error };
+      ready.wake();
+    };
+    // A schema facade and its owner can close independently. Both must wake
+    // sleeping reads as well as release native ownership immediately.
+    this.pendingNativeReadCancels.add(cancel);
     this.ownerRuntime.pendingNativeReadCancels.add(cancel);
+    const outage = tier ? this.waitForServerTransportError(tier) : null;
+    void outage?.promise.catch(failed);
     try {
+      result.setWake?.(ready.wake);
       for (;;) {
-        if (this.closed || this.ownerRuntime.closed)
+        if (cancelled || this.closed || this.ownerRuntime.closed)
           throw new Error("native read was cancelled by runtime shutdown");
+        if (progressError) throw progressError.error;
         if (tier) this.throwServerTransportErrorForTier(tier);
+        const observed = ready.version;
         const bytes = result.poll();
         if (bytes !== null) return bytes;
-        // Keep polling while a core pass waits for large-value chunks: the
-        // read itself may be what lets that pass resume.
-        this.pumpServerTransport();
-        if (tier) this.throwServerTransportErrorForTier(tier);
-        await sleep(0);
+        // The pump can itself wait for this read to release the native owner.
+        // Run it alongside the read, retaining failures without awaiting it.
+        void this.pumpServerTransport().catch(failed);
+        if (result.setWake) await ready.wait(observed);
+        else await sleep(0); // Compatibility with bindings without wake support.
       }
     } finally {
+      outage?.cancel();
+      this.pendingNativeReadCancels.delete(cancel);
       this.ownerRuntime.pendingNativeReadCancels.delete(cancel);
       cancel();
+      ready.dispose();
       // A suspended read may have held the owner while queued commands
       // yielded. Resume those commands even without a network pump.
       this.ownerRuntime.scheduleCoreTick();

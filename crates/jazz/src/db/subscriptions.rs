@@ -493,6 +493,7 @@ where
                 coverage,
                 subscription,
                 ref_count: 1,
+                read_waiters: Vec::new(),
             });
     }
 
@@ -529,6 +530,39 @@ where
     /// Attach a one-shot usage-site query coverage request at the default tier.
     pub fn attach_query(&self, prepared: &PreparedQuery) -> Result<QueryAttachment, Error> {
         self.attach_query_with_opts(prepared, ReadOpts::default())
+    }
+
+    /// Wait for this exact usage site's receipt, without polling unrelated
+    /// queries. Register before checking: publication can finish while we are
+    /// waiting for the node owner. The retained mutex future also preserves
+    /// the wake when the owner is temporarily held by another operation.
+    pub(super) async fn await_query_attachment_coverage(&self, attachment: &QueryAttachment) {
+        if !attachment.requires_delivery_receipt {
+            return;
+        }
+        loop {
+            let (sender, receiver) = oneshot::channel();
+            let waiter = Rc::new(RefCell::new(Some(sender)));
+            {
+                let mut registrations = self.node.query_coverage_registrations.borrow_mut();
+                for subscription in &attachment.subscriptions {
+                    if let Some(registration) = registrations.get_mut(subscription) {
+                        registration
+                            .read_waiters
+                            .retain(|waiter| waiter.strong_count() > 0);
+                        registration.read_waiters.push(Rc::downgrade(&waiter));
+                    }
+                }
+            }
+            drop(self.node.node.lock().await);
+            if self.query_attachment_is_covered(attachment) {
+                return;
+            }
+            let _ = receiver.await;
+            // Keep the sender alive only as long as this wait. A receipt for
+            // one component may wake us before all components have arrived.
+            drop(waiter);
+        }
     }
 
     /// LocalOnly attachments are immediately ready against this node's data.
