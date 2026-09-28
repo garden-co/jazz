@@ -4327,9 +4327,7 @@ where
                 self.current_query_primary_key_access_paths(shape, binding)?
             }
             HydrationLifetime::FirstResult => {
-                // Preserve bounded current ID reads. The policy-point guard
-                // from #2187 applies to future deletion delivery, not an
-                // initial snapshot whose owner releases it before any writes.
+                // Preserve bounded current ID reads.
                 // Select initial paths below from the executing binding; the
                 // generic cache must not retain binding-specific prefixes.
                 let tier = request
@@ -4559,14 +4557,12 @@ where
         let query = shape.query();
         let mut access_paths = BTreeMap::new();
         let equalities = root_literal_equalities(query, binding)?;
-        let table = self.table_in_schema_ref(&query.table, shape.schema_version())?;
-        // A maintained authorization scope reacts to both the content winner
-        // and its deletion register. The point source is only incrementally
-        // complete for an unscoped row: inside a policy graph, its content cap
-        // can strand the deletion-driven membership transition.
-        if !table.has_any_policy()
-            && let Some(value) = equalities.get("id").cloned()
-        {
+        self.table_in_schema_ref(&query.table, shape.schema_version())?;
+        // Policy-bearing roots take the point path too (#3511). The point
+        // narrows only the content source: the deletion register stays a full
+        // maintained source anti-joined after it, and policy proofs keep their
+        // own sources, so deletion and grant changes still retract the row.
+        if let Some(value) = equalities.get("id").cloned() {
             access_paths.insert(
                 root_source_id(&query.table),
                 CurrentAccessPath::PrimaryKey(vec![value]),

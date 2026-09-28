@@ -418,6 +418,18 @@ edits. An untrusted staged descriptor is replayed from its immutable base before
 publication so forged text coordinates, partial JSON edits, and noncanonical
 tails fail closed.
 
+Peer uploads and fresh preparations are re-read completely before their
+staging receipt is issued. A text or bytes descriptor that Groove itself
+derives from a published base (append, splice, consolidation) inherits the
+base's validity instead: finalization authenticates the base descriptor
+against its root node (the root being active, i.e. holding a staging receipt
+or a durable reference), authenticates the newly staged nodes, proves every other reachable node is an edge of the base tree with the
+same logical hash and metrics, checks the root's tail-free metrics, and
+replays the tail. It falls back to the complete pass when the base root is
+not active or reuse cannot be proven, and JSON always
+takes the complete pass. Either way a published descriptor is fully valid, so
+a local edit costs O(edit + tree depth) rather than O(value).
+
 When adding an edit would exceed a bound, Groove streams the current logical
 value through the edit, rechunks until content boundaries resynchronize, stages
 new immutable chunks, and emits a new root with an empty tail. It does not need

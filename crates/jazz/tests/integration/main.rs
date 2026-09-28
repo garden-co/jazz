@@ -54,10 +54,14 @@ mod fate_regressions;
 mod fate_replay;
 #[path = "../large_json_wire.rs"]
 mod large_json_wire;
+#[path = "../large_value_append.rs"]
+mod large_value_append;
 #[path = "../large_value_read_scaling.rs"]
 mod large_value_read_scaling;
 #[path = "../large_value_streaming_create.rs"]
 mod large_value_streaming_create;
+#[path = "../large_value_tx_update.rs"]
+mod large_value_tx_update;
 #[cfg(feature = "testing")]
 #[path = "../local_first_server_wait.rs"]
 mod local_first_server_wait;
