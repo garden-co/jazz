@@ -43,7 +43,9 @@ function applyEntryState<T extends { id: string }>(
   isLoading: Ref<boolean>,
 ): void {
   if (state.status === "fulfilled") {
-    data.value = state.data;
+    // Own a copy: deltas are applied to this array in place, and the cache
+    // entry's array is shared with every other listener on the same query.
+    data.value = [...state.data];
     error.value = null;
     isLoading.value = false;
   } else if (state.status === "rejected") {
@@ -65,7 +67,7 @@ function subscribeToEntry<T extends { id: string }>(
 
   return entry.subscribe({
     onfulfilled: (nextData) => {
-      data.value = nextData;
+      data.value = [...nextData];
       error.value = null;
       isLoading.value = false;
     },
@@ -73,7 +75,7 @@ function subscribeToEntry<T extends { id: string }>(
       if (data.value) {
         applyDelta(data.value, delta);
       } else if (delta.reset) {
-        data.value = delta.all;
+        data.value = [...delta.all];
       } else {
         data.value = [];
         applyDelta(data.value, delta);

@@ -109,7 +109,7 @@ async fn forwarded_flat_join_reset_keeps_contributor_facts_visible_to_one_shot_r
                     row_input!("title" => "root", "bucket" => "shared", "done" => false),
                 )
                 .expect("insert root");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &client,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -120,7 +120,7 @@ async fn forwarded_flat_join_reset_keeps_contributor_facts_visible_to_one_shot_r
                     row_input!("title" => "first", "bucket" => "shared", "done" => true),
                 )
                 .expect("insert first joined source");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &client,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -199,7 +199,7 @@ async fn forwarded_flat_join_reconciles_joined_source_deletion() {
                     row_input!("title" => "root", "bucket" => "shared", "done" => false),
                 )
                 .expect("insert root");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &client,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -210,7 +210,7 @@ async fn forwarded_flat_join_reconciles_joined_source_deletion() {
                     row_input!("title" => "joined", "bucket" => "shared", "done" => true),
                 )
                 .expect("insert joined source");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &client,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -232,7 +232,7 @@ async fn forwarded_flat_join_reconciles_joined_source_deletion() {
             let tx = client
                 .delete("todos", joined)
                 .expect("delete joined source");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &client,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -280,7 +280,7 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                     row_input!("title" => "draft", "bucket" => "shared", "done" => false),
                 )
                 .expect("insert todo");
-            support::wait_for_edge_txs(&client, &[tx.expect("ordinary mutation commits immediately")]).await;
+            support::wait_for_global_txs(&client, &[tx.expect("ordinary mutation commits immediately")]).await;
 
             let joined_query = joined_todos(&[("joined", "root.bucket", "joined.bucket")]);
             let mut joined_stream = client
@@ -367,7 +367,7 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                     row_input!("title" => "second", "bucket" => "shared", "done" => true),
                 )
                 .expect("insert second matching join row");
-            support::wait_for_edge_txs(&client, &[tx.expect("ordinary mutation commits immediately")]).await;
+            support::wait_for_global_txs(&client, &[tx.expect("ordinary mutation commits immediately")]).await;
             let fan_out = next_delta_with_added(&mut joined_stream).await;
             let current_results = client
                 .query(joined_query.clone(), jazz::tools::ReadTier::LocalFirst)
@@ -440,7 +440,7 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                     vec![("title".to_owned(), Value::Text("revised".to_owned()))],
                 )
                 .expect("replace root source content");
-            support::wait_for_edge_txs(&client, &[tx.expect("ordinary mutation commits immediately")]).await;
+            support::wait_for_global_txs(&client, &[tx.expect("ordinary mutation commits immediately")]).await;
             let replacement = next_delta_with_updated(&mut joined_stream).await;
             let two_hop_root_replacement = next_delta_with_updated(&mut two_hop_stream).await;
             assert!(
@@ -465,7 +465,7 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                     vec![("title".to_owned(), Value::Text("second revised".to_owned()))],
                 )
                 .expect("replace joined source content");
-            support::wait_for_edge_txs(&client, &[tx.expect("ordinary mutation commits immediately")]).await;
+            support::wait_for_global_txs(&client, &[tx.expect("ordinary mutation commits immediately")]).await;
             let joined_replacement = next_delta_with_updated(&mut joined_stream).await;
             let two_hop_joined_replacement = next_delta_with_updated(&mut two_hop_stream).await;
             assert!(
@@ -494,7 +494,7 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
             );
 
             let tx = client.delete("todos", first).expect("remove first joined row");
-            support::wait_for_edge_txs(&client, &[tx.expect("ordinary mutation commits immediately")]).await;
+            support::wait_for_global_txs(&client, &[tx.expect("ordinary mutation commits immediately")]).await;
             let removal = next_delta_with_removed(&mut joined_stream).await;
             let two_hop_removal = next_delta_with_removed(&mut two_hop_stream).await;
             assert!(
@@ -570,7 +570,7 @@ async fn flat_join_payload_netting_drops_add_then_remove_in_one_transaction() {
                     row_input!("title" => "root", "bucket" => "shared", "done" => false),
                 )
                 .expect("insert root");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &client,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -600,7 +600,7 @@ async fn flat_join_payload_netting_drops_add_then_remove_in_one_transaction() {
                     row_input!("title" => "durable", "bucket" => "shared", "done" => true),
                 )
                 .expect("insert durable matching joined row");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &client,
                 &[
                     net_tx,

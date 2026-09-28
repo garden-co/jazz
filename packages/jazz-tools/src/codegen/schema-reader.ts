@@ -305,6 +305,9 @@ export function schemaToWasm(schema: Schema): WasmSchema {
       columns,
       ...(table.relations ? { relations: table.relations } : {}),
       ...(table.indexedColumns ? { indexed_columns: [...table.indexedColumns] } : {}),
+      ...(table.compositeIndexes
+        ? { composite_indexes: table.compositeIndexes.map((columns) => [...columns]) }
+        : {}),
       ...(table.branchBy ? { branchBy: [...table.branchBy] } : {}),
       policies: table.policies ? clonePolicies(table.policies) : undefined,
     };

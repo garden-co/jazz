@@ -177,7 +177,7 @@ async fn cold_client_receives_rows_granted_through_a_dependency_table_inner() {
             ),
         )
         .expect("seed document");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &admin,
         &[
             folder_tx.expect("ordinary mutation commits immediately"),
@@ -261,7 +261,7 @@ async fn cold_client_receives_transitively_required_dependency_rows_inner() {
             row_input!("title" => "Doc in shared folder", "folder_id" => folder_id),
         )
         .expect("seed document");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &admin,
         &[
             folder_tx.expect("ordinary mutation commits immediately"),
@@ -363,7 +363,7 @@ async fn dependency_delivery_does_not_widen_visibility_inner() {
         )
         .expect("seed bob document");
 
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &admin,
         &[
             alice_folder_tx.expect("ordinary mutation commits immediately"),
@@ -378,7 +378,7 @@ async fn dependency_delivery_does_not_widen_visibility_inner() {
 
     let alice = connect_cold_user(&server, &schema, ALICE_ID).await;
 
-    // All seeds were Edge-settled before alice connected, so the settled
+    // All seeds were Global-settled before alice connected, so the settled
     // result set below is exact, not a snapshot of in-flight deliveries.
     let doc_rows = wait_for_rows(
         &alice,
@@ -478,7 +478,7 @@ async fn dependency_row_update_propagates_to_dependent_visibility_inner() {
             row_input!("title" => "Doc in shared folder", "folder_id" => folder_id),
         )
         .expect("seed document");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &admin,
         &[
             folder_tx.expect("ordinary mutation commits immediately"),
@@ -509,7 +509,7 @@ async fn dependency_row_update_propagates_to_dependent_visibility_inner() {
     let revoke_tx = admin
         .delete("memberships", membership_id)
         .expect("admin revokes alice's membership");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &admin,
         &[revoke_tx.expect("ordinary mutation commits immediately")],
     )
@@ -532,7 +532,7 @@ async fn dependency_row_update_propagates_to_dependent_visibility_inner() {
             row_input!("user_id" => ALICE_ID, "folder_id" => folder_id),
         )
         .expect("admin re-grants alice's membership");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &admin,
         &[regrant_tx.expect("ordinary mutation commits immediately")],
     )

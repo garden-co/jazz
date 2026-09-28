@@ -7,7 +7,7 @@ use jazz::tools::test_support::{AllowAll, ordinary_rows};
 use jazz::tools::{ColumnType, ReadTier, SchemaBuilder, TableSchema, Value};
 use jazz::wire::channels::ChannelClass;
 use jazz::wire::{TransportError, WireFrame, WireTransport};
-use jazz_testkit::{connect_ready_client, connect_ready_user, wait_for_edge_txs};
+use jazz_testkit::{connect_ready_client, connect_ready_user, wait_for_global_txs};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -137,7 +137,7 @@ async fn fresh_native_client_reads_indirect_text_and_json() {
             let json = format!("{{\"text\":\"{}\"}}", &text[..size - 11]);
             let label = size.to_string();
             let (_, _, tx) = writer.insert("documents", jazz::row_input!("label" => label.clone(), "text" => text.clone(), "json" => json.clone())).unwrap();
-            wait_for_edge_txs(&writer, &[tx.unwrap()]).await;
+            wait_for_global_txs(&writer, &[tx.unwrap()]).await;
             // Ready against a separate empty table, so no document is prefetched.
             let reader = connect_ready_user(&server, &schema, &format!("pump-reader-{size}"), "ready", Duration::from_secs(30)).await;
             // Poll remote demand once, then cancel it before running another query.
@@ -164,9 +164,9 @@ async fn fresh_native_client_reads_indirect_text_and_json() {
                 jazz_testkit::enroll_test_context(&mut context).await.unwrap();
                 let gate = Arc::new(BulkCreditGate::default());
                 let uploader = jazz::tools::JazzClient::connect_with_native_transport(context, Arc::new(GatedConnector(gate.clone()))).await.unwrap();
-                jazz_testkit::wait_for_edge_query_ready(&uploader, "ready", Duration::from_secs(30)).await;
+                jazz_testkit::wait_for_remote_query_ready(&uploader, "ready", Duration::from_secs(30)).await;
                 let (probe, _, tx) = writer.insert("probe", jazz::row_input!("label" => "fresh server row")).unwrap();
-                wait_for_edge_txs(&writer, &[tx.unwrap()]).await;
+                wait_for_global_txs(&writer, &[tx.unwrap()]).await;
                 let (_, _, upload) = uploader.insert("documents", jazz::row_input!("label" => "upload", "text" => text, "json" => json)).unwrap();
                 let upload = upload.unwrap();
                 tokio::time::timeout(Duration::from_secs(30), gate.received_by_server()).await.expect("server consumed upload frames");
@@ -181,7 +181,7 @@ async fn fresh_native_client_reads_indirect_text_and_json() {
                     }).await;
                 }
                 gate.release();
-                wait_for_edge_txs(&uploader, &[upload]).await;
+                wait_for_global_txs(&uploader, &[upload]).await;
                 uploader.shutdown().await.unwrap();
             }
             reader.shutdown().await.unwrap();

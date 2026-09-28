@@ -439,6 +439,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
       | "onAuthFailure"
       | "onAuthRestored"
       | "onExplicitOfflineChange"
+      | "onRemoteLinkChange"
       | "onFailure"
       | "onStorageReset"
       | "onStorageInvalidated"
@@ -658,6 +659,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
             onAuthFailure: this.callbacks.onAuthFailure,
             onAuthRestored: this.callbacks.onAuthRestored,
             onExplicitOfflineChange: this.callbacks.onExplicitOfflineChange,
+            onRemoteLinkChange: this.callbacks.onRemoteLinkChange,
             onFailure: this.callbacks.onFailure,
             onStorageReset: this.callbacks.onStorageReset,
             onStorageInvalidated: this.callbacks.onStorageInvalidated,

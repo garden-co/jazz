@@ -79,7 +79,7 @@ async fn merge_concurrently(
     let first_tx = first
         .update("docs", doc_id, vec![(column.to_string(), first_value)])
         .expect("first replica writes");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         first,
         &[first_tx.expect("ordinary mutation commits immediately")],
     )
@@ -88,7 +88,7 @@ async fn merge_concurrently(
     let second_tx = second
         .update("docs", doc_id, vec![(column.to_string(), second_value)])
         .expect("second replica writes");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         second,
         &[second_tx.expect("ordinary mutation commits immediately")],
     )
@@ -502,7 +502,7 @@ async fn later_writes_cannot_remove_existing_elements_impl() {
     let remove_tx = alice
         .update("docs", doc_id, vec![("tags".to_string(), tags_value(&[]))])
         .expect("attempted removal writes a version");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         &alice,
         &[remove_tx.expect("ordinary mutation commits immediately")],
     )

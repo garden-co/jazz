@@ -43,18 +43,18 @@ const EVENTS: &str = "events";
 
 struct WorkerHarness {
     _dir: TempDir,
-    db: Db<RocksDbStorage>,
+    db: Db,
     author: AuthorSubject,
-    _edge_dir: TempDir,
-    edge: NodeState<RocksDbStorage>,
-    edge_peer: PeerState,
+    _relay_dir: TempDir,
+    relay: NodeState,
+    relay_peer: PeerState,
     client_peer: PeerState,
     query_server: DirectDbQueryServer,
     attachments: Vec<jazz::db::QueryAttachment>,
     hydrated_tables: BTreeSet<String>,
     outbound: Rc<RefCell<VecDeque<SyncMessage>>>,
     inbound: Rc<RefCell<VecDeque<SyncMessage>>>,
-    _upstream: Rc<futures::lock::Mutex<jazz::db::PeerConnection<RocksDbStorage>>>,
+    _upstream: Rc<futures::lock::Mutex<jazz::db::PeerConnection>>,
 }
 
 struct QueueTransport {
@@ -159,17 +159,17 @@ pub fn smoke() {
         "s9_durable_execution",
         &JsonValue::Object(fields).to_string(),
     );
-    emit_edge_phase_summaries(&config, &profile, &jazz);
+    emit_relay_phase_summaries(&config, &profile, &jazz);
 }
 
-fn emit_edge_phase_summaries(config: &Config, profile: &PeerProfile, jazz: &JazzSummary) {
+fn emit_relay_phase_summaries(config: &Config, profile: &PeerProfile, jazz: &JazzSummary) {
     let mut acceptance = metadata_fields(
         "s9_durable_execution",
         "synchronous",
         config.seed,
         &profile.name,
     );
-    acceptance.insert("phase".to_owned(), json!("edge_mergeable_acceptance"));
+    acceptance.insert("phase".to_owned(), json!("core_mergeable_acceptance"));
     acceptance.insert(
         "acceptance_p50_us".to_owned(),
         json!(jazz.transition_latency.value_at_quantile(0.50)),
@@ -178,7 +178,7 @@ fn emit_edge_phase_summaries(config: &Config, profile: &PeerProfile, jazz: &Jazz
         "acceptance_p95_us".to_owned(),
         json!(jazz.transition_latency.value_at_quantile(0.95)),
     );
-    acceptance.insert("durability_tier".to_owned(), json!("Edge"));
+    acceptance.insert("durability_tier".to_owned(), json!("Global"));
     acceptance.insert("api_surface".to_owned(), json!("db"));
     emit_json_line(
         "s9_durable_execution",
@@ -191,7 +191,7 @@ fn emit_edge_phase_summaries(config: &Config, profile: &PeerProfile, jazz: &Jazz
         config.seed,
         &profile.name,
     );
-    hydration.insert("phase".to_owned(), json!("edge_permission_scope_hydration"));
+    hydration.insert("phase".to_owned(), json!("core_permission_scope_hydration"));
     hydration.insert("scope".to_owned(), json!("workflow_table_surface"));
     hydration.insert("hydration_bytes".to_owned(), json!(jazz.sync_bytes));
     hydration.insert("hydration_floor_bytes".to_owned(), json!(jazz.sync_bytes));
@@ -526,7 +526,7 @@ fn next_runnable_instance(oracle: &[u64], offset: usize, config: &Config) -> Opt
 }
 
 struct AcceptState<'a> {
-    core: &'a mut NodeState<RocksDbStorage>,
+    core: &'a mut NodeState,
     global_time: &'a mut u64,
     accepted_schedule: &'a mut Vec<Transition>,
     oracle: &'a mut [u64],
@@ -557,7 +557,7 @@ fn record_accept(
 
 fn apply_transition(
     client: &mut WorkerHarness,
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     instance: usize,
     expected_step: u64,
     steps_per_instance: usize,
@@ -597,7 +597,7 @@ fn apply_transition(
     let SyncMessage::CommitUnit { tx, versions } = unit.clone() else {
         unreachable!();
     };
-    jazz::db::block_on(client.edge.ingest_relay_commit_unit(tx, versions)).unwrap();
+    jazz::db::block_on(client.relay.ingest_relay_commit_unit(tx, versions)).unwrap();
     let _ = now_ms;
     let outcome = jazz::db::block_on(core.apply_sync_message(unit)).unwrap();
     let updates = settle_outcome(core, outcome).unwrap();
@@ -611,7 +611,7 @@ fn apply_transition(
                 Fate::Pending => {}
             }
         }
-        apply_sync_message_settled(&mut client.edge, update.clone()).unwrap();
+        apply_sync_message_settled(&mut client.relay, update.clone()).unwrap();
         client.inbound.borrow_mut().push_back(update);
         jazz::db::block_on(client.db.tick())?;
     }
@@ -628,7 +628,7 @@ fn apply_transition(
 }
 
 fn append_step_and_event(
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     global_time: &mut u64,
     transition: Transition,
     now_ms: u64,
@@ -680,7 +680,7 @@ fn append_step_and_event(
     accept_global(core, event_tx.0, global_time);
 }
 
-fn seed_fixture(config: &Config, core: &mut NodeState<RocksDbStorage>, global_time: &mut u64) {
+fn seed_fixture(config: &Config, core: &mut NodeState, global_time: &mut u64) {
     let tx = commit_mergeable_unit_settled(
         core,
         MergeableCommit::new(WORKFLOWS, workflow_row(), 1).cells(cells_map([
@@ -956,11 +956,7 @@ fn emit_summary(input: SummaryInputs<'_>) {
     );
 }
 
-fn assert_dashboard_matches(
-    node: &mut NodeState<RocksDbStorage>,
-    oracle: &[u64],
-    steps_per_instance: usize,
-) {
+fn assert_dashboard_matches(node: &mut NodeState, oracle: &[u64], steps_per_instance: usize) {
     let schema = schema();
     let table = table_schema(&schema, INSTANCES);
     let running = jazz::db::block_on(node.current_rows(INSTANCES, DurabilityTier::Local))
@@ -975,7 +971,7 @@ fn assert_dashboard_matches(
     assert_eq!(running, expected);
 }
 
-fn assert_tailers_gap_free(node: &mut NodeState<RocksDbStorage>, oracle: &[u64]) {
+fn assert_tailers_gap_free(node: &mut NodeState, oracle: &[u64]) {
     let schema = schema();
     let table = table_schema(&schema, EVENTS);
     let mut seen = BTreeMap::<usize, BTreeSet<u64>>::new();
@@ -996,7 +992,7 @@ fn assert_tailers_gap_free(node: &mut NodeState<RocksDbStorage>, oracle: &[u64])
     }
 }
 
-fn assert_resume_matches(node: &mut NodeState<RocksDbStorage>, oracle: &[u64]) {
+fn assert_resume_matches(node: &mut NodeState, oracle: &[u64]) {
     let schema = schema();
     let table = table_schema(&schema, INSTANCES);
     let rows = jazz::db::block_on(node.current_rows(INSTANCES, DurabilityTier::Local)).unwrap();
@@ -1009,12 +1005,7 @@ fn assert_resume_matches(node: &mut NodeState<RocksDbStorage>, oracle: &[u64]) {
     }
 }
 
-fn sync_tables(
-    core: &mut NodeState<RocksDbStorage>,
-    node: &mut NodeState<RocksDbStorage>,
-    peer: &mut PeerState,
-    tables: &[&str],
-) {
+fn sync_tables(core: &mut NodeState, node: &mut NodeState, peer: &mut PeerState, tables: &[&str]) {
     for table in tables {
         register_table_receiver(node, table, peer.identity());
         let update = table_query_update(core, peer, table, true);
@@ -1022,11 +1013,7 @@ fn sync_tables(
     }
 }
 
-fn register_table_receiver(
-    node: &mut NodeState<RocksDbStorage>,
-    table: &str,
-    identity: AuthorSubject,
-) {
+fn register_table_receiver(node: &mut NodeState, table: &str, identity: AuthorSubject) {
     let shape = Query::from(table).validate(&schema()).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     register_query_receiver(
@@ -1043,7 +1030,7 @@ fn register_table_receiver(
 }
 
 fn table_query_update(
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     peer: &mut PeerState,
     table: &str,
     reset: bool,
@@ -1057,18 +1044,14 @@ fn table_query_update(
     }
 }
 
-fn sync_worker_tables(
-    core: &mut NodeState<RocksDbStorage>,
-    worker: &mut WorkerHarness,
-    tables: &[&str],
-) {
+fn sync_worker_tables(core: &mut NodeState, worker: &mut WorkerHarness, tables: &[&str]) {
     for table in tables {
         let reset = worker.hydrated_tables.insert((*table).to_owned());
         if reset {
-            register_table_receiver(&mut worker.edge, table, worker.author);
+            register_table_receiver(&mut worker.relay, table, worker.author);
         }
-        let update = table_query_update(core, &mut worker.edge_peer, table, reset);
-        apply_sync_message_settled(&mut worker.edge, update).unwrap();
+        let update = table_query_update(core, &mut worker.relay_peer, table, reset);
+        apply_sync_message_settled(&mut worker.relay, update).unwrap();
     }
     jazz::db::block_on(worker.db.tick()).unwrap();
     let queued = worker.outbound.borrow_mut().drain(..).collect::<Vec<_>>();
@@ -1076,7 +1059,7 @@ fn sync_worker_tables(
         if !worker
             .query_server
             .handle(
-                &mut worker.edge,
+                &mut worker.relay,
                 &mut worker.client_peer,
                 &schema(),
                 &message,
@@ -1088,7 +1071,7 @@ fn sync_worker_tables(
     }
     for update in worker
         .query_server
-        .updates(&mut worker.edge, &mut worker.client_peer)
+        .updates(&mut worker.relay, &mut worker.client_peer)
         .unwrap()
     {
         worker.inbound.borrow_mut().push_back(update);
@@ -1116,7 +1099,7 @@ fn bind_worker_table_query(
     );
 }
 
-fn open_worker(node_uuid: NodeUuid, edge_uuid: NodeUuid, schema: JazzSchema) -> WorkerHarness {
+fn open_worker(node_uuid: NodeUuid, relay_uuid: NodeUuid, schema: JazzSchema) -> WorkerHarness {
     let author = AuthorSubject::for_test_bytes([node_uuid.as_bytes()[0]; 16]);
     let (dir, db) = open_db(node_uuid, schema.clone(), author.clone());
     let outbound = Rc::new(RefCell::new(VecDeque::new()));
@@ -1125,14 +1108,14 @@ fn open_worker(node_uuid: NodeUuid, edge_uuid: NodeUuid, schema: JazzSchema) -> 
         outbound: Rc::clone(&outbound),
         inbound: Rc::clone(&inbound),
     })));
-    let (edge_dir, edge) = open_node(edge_uuid, schema.clone());
+    let (relay_dir, relay) = open_node(relay_uuid, schema.clone());
     let mut worker = WorkerHarness {
         _dir: dir,
         db,
         author: author.clone(),
-        _edge_dir: edge_dir,
-        edge,
-        edge_peer: PeerState::relay(),
+        _relay_dir: relay_dir,
+        relay,
+        relay_peer: PeerState::relay(),
         client_peer: PeerState::client_link(author.clone()),
         query_server: DirectDbQueryServer::new(jazz::protocol::DelegatedSessionBinding {
             identity: author,
@@ -1144,9 +1127,9 @@ fn open_worker(node_uuid: NodeUuid, edge_uuid: NodeUuid, schema: JazzSchema) -> 
         inbound,
         _upstream: upstream,
     };
-    worker.edge_peer.set_ship_complete_exclusive_payloads(true);
+    worker.relay_peer.set_ship_complete_exclusive_payloads(true);
     for table in [WORKFLOWS, INSTANCES, STEPS, EVENTS] {
-        bind_worker_table_query(&mut worker.edge_peer, &schema, table, &worker.author);
+        bind_worker_table_query(&mut worker.relay_peer, &schema, table, &worker.author);
         let prepared = worker.db.prepare_query(&Query::from(table)).unwrap();
         worker
             .attachments
@@ -1155,7 +1138,7 @@ fn open_worker(node_uuid: NodeUuid, edge_uuid: NodeUuid, schema: JazzSchema) -> 
     worker
 }
 
-fn accept_global(core: &mut NodeState<RocksDbStorage>, tx: jazz::tx::TxId, global_time: &mut u64) {
+fn accept_global(core: &mut NodeState, tx: jazz::tx::TxId, global_time: &mut u64) {
     jazz::db::block_on(core.apply_fate_update(
         tx,
         Fate::Accepted,
@@ -1201,7 +1184,7 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (TempDir, NodeState<RocksDbStorage>) {
+fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (TempDir, NodeState) {
     let dir = tempfile::tempdir().unwrap();
     let refs = schema.column_families();
     let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -1214,11 +1197,7 @@ fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (TempDir, NodeState<Roc
     (dir, node)
 }
 
-fn open_db(
-    node_uuid: NodeUuid,
-    schema: JazzSchema,
-    author: AuthorSubject,
-) -> (TempDir, Db<RocksDbStorage>) {
+fn open_db(node_uuid: NodeUuid, schema: JazzSchema, author: AuthorSubject) -> (TempDir, Db) {
     let dir = tempfile::tempdir().unwrap();
     let refs = schema.column_families();
     let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();

@@ -4,9 +4,11 @@ import { readFileSync, existsSync } from "node:fs";
 import { benchmarkMetadata, getBenchmarkMetadata, throughput } from "./index.ts";
 
 const root = new URL("../../../", import.meta.url);
-test("catalogue documents all 72 known current and retired wallclock cases", () => {
-  assert.equal(benchmarkMetadata.length, 72);
-  assert.equal(new Set(benchmarkMetadata.map((m) => m.name)).size, 72);
+// No fixed total: parallel example lanes add suites independently. Coverage of
+// every Divan function is asserted below; names must stay unique.
+test("catalogue documents known current and retired wallclock cases once each", () => {
+  assert.ok(benchmarkMetadata.length > 0);
+  assert.equal(new Set(benchmarkMetadata.map((m) => m.name)).size, benchmarkMetadata.length);
   for (const m of benchmarkMetadata) {
     for (const key of ["name", "title", "description", "fixture", "storage", "source"] as const)
       assert.ok(m[key].length > 0, `${m.name}: ${key}`);

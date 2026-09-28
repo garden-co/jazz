@@ -723,7 +723,7 @@ enum BenchIdentity {
 
 struct Seeded {
     _core_dir: Rc<tempfile::TempDir>,
-    core: Node<BoxedStorage>,
+    core: Node,
     ordinary_user: RowUuid,
     visible_groups: BTreeSet<RowUuid>,
     table_rows: BTreeMap<String, Vec<RowUuid>>,
@@ -926,12 +926,12 @@ struct SubscriptionTimeline {
 
 struct DbNode {
     _dir: Rc<tempfile::TempDir>,
-    db: Db<BoxedStorage>,
+    db: Db,
 }
 
 struct DbClient {
     _dir: Rc<tempfile::TempDir>,
-    db: Db<BoxedStorage>,
+    db: Db,
 }
 
 struct OpenSubscription {
@@ -1733,7 +1733,7 @@ fn export_sql_fixture(config: &Config, path: &std::path::Path) {
     .unwrap();
 }
 
-fn write_seed_plan(core: &Node<BoxedStorage>, plan: &SeedPlan) {
+fn write_seed_plan(core: &Node, plan: &SeedPlan) {
     for write in &plan.writes {
         seed_db(core, &write.table, write.row, write.cells.clone());
     }
@@ -2552,7 +2552,7 @@ fn subscription_tables() -> Vec<String> {
     tables
 }
 
-fn seed_db(core: &Node<BoxedStorage>, table: &str, row: RowUuid, cells: BTreeMap<String, Value>) {
+fn seed_db(core: &Node, table: &str, row: RowUuid, cells: BTreeMap<String, Value>) {
     let node = core.node();
     let mut node = block_on(node.lock());
     let (tx_id, _) = jazz_sim::fixture::commit_mergeable_unit_settled(

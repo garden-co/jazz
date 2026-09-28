@@ -252,8 +252,9 @@ namespace; it does not erase another account's cache under the same logical base
 is neither the foreground replica/node ID nor a credential; those remain separate identities.
 
 Calling `db.disconnect()` in one tab explicitly takes that **whole persistent namespace** offline:
-the worker has one upstream connection, so every attached tab uses local-first fallback for
-`"remote-if-possible"` reads and remote reads wait until any tab calls `db.reconnect()`. This is
+the worker has one upstream connection, so every attached tab stops waiting for the server on
+`"local-first-unless-empty"` reads and remote reads wait until any tab calls `db.reconnect()`.
+The worker also tells attached tabs when its live connection comes up, drops, or fails. This is
 intentional; disconnecting only one tab while continuing to sync its writes through the shared
 worker would give that tab an incoherent offline contract.
 

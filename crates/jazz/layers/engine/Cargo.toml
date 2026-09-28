@@ -1,0 +1,25 @@
+[package]
+name = "jazz-engine"
+version = "0.1.0"
+edition = "2024"
+description = "Jazz's query engine layer: lowering queries and policies into groove IVM programs."
+
+[features]
+default = []
+# Test helpers shared with the crates above this one.
+testing = ["jazz-types/testing", "jazz-model/testing", "jazz-protocol/testing"]
+
+[dependencies]
+groove = { workspace = true, default-features = false }
+jazz-types.workspace = true
+jazz-model.workspace = true
+jazz-protocol.workspace = true
+blake3 = "1"
+postcard = { version = "1.1.3", features = ["alloc"] }
+uuid = { version = "1.18.1", features = ["serde", "v4", "v5", "v7"] }
+
+[dev-dependencies]
+groove = { workspace = true, default-features = false, features = ["test"] }
+jazz-types = { workspace = true, features = ["testing"] }
+jazz-model = { workspace = true, features = ["testing"] }
+jazz-protocol = { workspace = true, features = ["testing"] }

@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import { createNapiNativeRuntimeAdapter } from "../runtime/testing/napi-runtime-test-utils.js";
+import { computeSchemaHash } from "./catalogue.js";
 
 const tempRoots: string[] = [];
 const APP_ID = "test-app";
@@ -133,12 +134,15 @@ describe("dev catalogue push behavior", () => {
     await writeFile(join(root, "schema.ts"), schemaSource());
     await writeFile(join(root, "permissions.ts"), permissionsSource());
 
-    const permissionsHead = {
-      schemaHash: SCHEMA_HASH,
+    // Like a real server, the mock stores the schema it was sent and returns
+    // that schema's structural hash; deploy verifies it against its own.
+    let storedHash = "";
+    const permissionsHead = () => ({
+      schemaHash: storedHash,
       version: 1,
       parentBundleObjectId: null,
       bundleObjectId: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
-    };
+    });
     let schemaPublishBody: any;
     let permissionsPublishBody: any;
 
@@ -150,10 +154,11 @@ describe("dev catalogue push behavior", () => {
         }
         if (input.endsWith(`/apps/${APP_ID}/admin/schemas`)) {
           schemaPublishBody = JSON.parse(String(init?.body));
+          storedHash = await computeSchemaHash(schemaPublishBody.schema.tables);
           return new Response(
             JSON.stringify({
               objectId: SCHEMA_OBJECT_ID,
-              hash: SCHEMA_HASH,
+              hash: storedHash,
             }),
             { status: 201 },
           );
@@ -163,7 +168,7 @@ describe("dev catalogue push behavior", () => {
         }
         if (input.endsWith(`/apps/${APP_ID}/admin/permissions`)) {
           permissionsPublishBody = JSON.parse(String(init?.body));
-          return new Response(JSON.stringify({ head: permissionsHead }), { status: 201 });
+          return new Response(JSON.stringify({ head: permissionsHead() }), { status: 201 });
         }
         throw new Error(`Unexpected fetch: ${input}`);
       }),
@@ -180,16 +185,16 @@ describe("dev catalogue push behavior", () => {
     });
 
     expect(result.schema).toEqual({
-      hash: SCHEMA_HASH,
+      hash: storedHash,
       schemaFile: join(root, "schema.ts"),
       status: "published",
       objectId: SCHEMA_OBJECT_ID,
     });
     expect(result.permissions).toEqual({
-      schemaHash: SCHEMA_HASH,
+      schemaHash: storedHash,
       permissionsFile: join(root, "permissions.ts"),
       previousHead: null,
-      head: permissionsHead,
+      head: permissionsHead(),
     });
     expect(result.migration).toBeUndefined();
     expect(result.warnings).toContain(
@@ -198,13 +203,13 @@ describe("dev catalogue push behavior", () => {
     expect(schemaPublishBody.schema.tables.todos.columns.map((column: any) => column.name)).toEqual(
       ["title", "ownerId"],
     );
-    expect(permissionsPublishBody.schemaHash).toBe(SCHEMA_HASH);
+    expect(permissionsPublishBody.schemaHash).toBe(storedHash);
     expect(permissionsPublishBody.expectedParentBundleObjectId).toBeNull();
     expect(Object.keys(permissionsPublishBody.permissions)).toContain("todos");
     expect(events).toContainEqual({ type: "schema-loaded", schemaFile: join(root, "schema.ts") });
     expect(events).toContainEqual({
       type: "schema-published",
-      hash: SCHEMA_HASH,
+      hash: storedHash,
       objectId: SCHEMA_OBJECT_ID,
     });
     expect(events).toContainEqual({
@@ -218,7 +223,7 @@ describe("dev catalogue push behavior", () => {
     });
     expect(events).toContainEqual({
       type: "permissions-published",
-      schemaHash: SCHEMA_HASH,
+      schemaHash: storedHash,
       version: 1,
     });
   });
@@ -833,15 +838,17 @@ export default s.defineMigration({
     await writeFile(join(root, "schema.ts"), schemaSource());
 
     let publishBody: any;
+    let storedHash = "";
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: string, init?: RequestInit) => {
         if (input.endsWith(`/apps/${APP_ID}/admin/schemas`)) {
           publishBody = JSON.parse(String(init?.body));
+          storedHash = await computeSchemaHash(publishBody.schema.tables);
           return new Response(
             JSON.stringify({
               objectId: SCHEMA_OBJECT_ID,
-              hash: SCHEMA_HASH,
+              hash: storedHash,
             }),
             { status: 201 },
           );
@@ -861,7 +868,7 @@ export default s.defineMigration({
     });
 
     expect(result).toEqual({
-      hash: SCHEMA_HASH,
+      hash: storedHash,
       schemaFile: join(root, "schema.ts"),
       status: "published",
       objectId: SCHEMA_OBJECT_ID,
@@ -872,7 +879,7 @@ export default s.defineMigration({
     ]);
     expect(events).toEqual([
       { type: "schema-loaded", schemaFile: join(root, "schema.ts") },
-      { type: "schema-published", hash: SCHEMA_HASH, objectId: SCHEMA_OBJECT_ID },
+      { type: "schema-published", hash: storedHash, objectId: SCHEMA_OBJECT_ID },
     ]);
   });
 
