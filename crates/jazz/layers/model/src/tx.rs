@@ -1,8 +1,8 @@
 //! Transaction, fate, durability, snapshot, and read-set vocabulary shared by
 //! the facade, node, and protocol layers. This module owns the semantic data
 //! structures for mergeable/exclusive transactions and authority outcomes; the
-//! code that validates, stores, and syncs them lives in [`crate::node::ingest`],
-//! [`crate::node::open_tx`], and [`crate::protocol`]. Merge and currency rules
+//! code that validates, stores, and syncs them lives in `jazz::node::ingest`,
+//! `jazz::node::open_tx`, and `jazz::protocol`. Merge and currency rules
 //! are grounded in `jazz/README.md`.
 
 use crate::ids::{AuthorSubject, NodeUuid, PhysicalTableId, RowAuthor, RowUuid, SchemaVersionId};
@@ -591,7 +591,7 @@ pub struct HistoryEntry {
 
 impl HistoryEntry {
     /// Construct a history entry from encoded storage rows and transaction state.
-    pub(crate) fn new(
+    pub fn new(
         table: impl Into<String>,
         version: OwnedRecord,
         transaction: TransactionRecord,
@@ -743,7 +743,7 @@ pub struct RejectedTransaction {
 
 impl RejectedTransaction {
     /// Construct a rejected transaction wrapper from an encoded storage row.
-    pub(crate) fn new(tx_id: TxId, record: OwnedRecord, versions: Vec<RejectedVersion>) -> Self {
+    pub fn new(tx_id: TxId, record: OwnedRecord, versions: Vec<RejectedVersion>) -> Self {
         Self {
             tx_id,
             record,
@@ -821,7 +821,7 @@ pub struct RejectedVersion {
 
 impl RejectedVersion {
     /// Construct a rejected version wrapper from an encoded storage row.
-    pub(crate) fn new(table: impl Into<String>, record: OwnedRecord) -> Self {
+    pub fn new(table: impl Into<String>, record: OwnedRecord) -> Self {
         Self {
             table: table.into(),
             record,
@@ -884,8 +884,9 @@ impl RejectedVersion {
         .expect("valid rejected deletion")
     }
 
-    #[cfg(test)]
-    pub(crate) fn test_cells(&self, table: &TableSchema) -> BTreeMap<String, Value> {
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn test_cells(&self, table: &TableSchema) -> BTreeMap<String, Value> {
         table
             .columns
             .iter()
@@ -1201,9 +1202,9 @@ mod contribution_tests {
             head: BranchKey {
                 values: vec![(
                     "branch".to_owned(),
-                    crate::protocol::BranchColumnValue::from(Value::Uuid(uuid::Uuid::from_bytes(
-                        [2; 16],
-                    ))),
+                    crate::model::branch::BranchColumnValue::from(Value::Uuid(
+                        uuid::Uuid::from_bytes([2; 16]),
+                    )),
                 )],
             },
             operation: BranchWriteOperation::ExactHeadInsert,
@@ -1301,11 +1302,11 @@ mod contribution_tests {
             values: vec![
                 (
                     "z".to_owned(),
-                    crate::protocol::BranchColumnValue(vec![1, u8::MAX]),
+                    crate::model::branch::BranchColumnValue(vec![1, u8::MAX]),
                 ),
                 (
                     "a".to_owned(),
-                    crate::protocol::BranchColumnValue(vec![1, u8::MAX]),
+                    crate::model::branch::BranchColumnValue(vec![1, u8::MAX]),
                 ),
             ],
         };

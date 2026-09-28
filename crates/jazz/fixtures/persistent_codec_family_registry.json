@@ -557,12 +557,12 @@
         "anchor": "jazz-relation-query-postcard-v1"
       },
       "rejection_receipt": {
-        "path": "crates/jazz/src/query/relation_codec.rs",
+        "path": "crates/jazz/layers/model/src/query/relation_codec.rs",
         "anchor": "fn typed_postcard_rejects_trailing_or_noncanonical_payloads()"
       },
       "evidence": [
         {
-          "path": "crates/jazz/src/query/relation_codec.rs",
+          "path": "crates/jazz/layers/model/src/query/relation_codec.rs",
           "anchor": "fn typed_postcard_corpus_is_current()"
         },
         {

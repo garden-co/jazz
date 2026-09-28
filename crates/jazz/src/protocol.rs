@@ -7286,6 +7286,75 @@ mod tests {
 
         assert_ne!(lens.content_id(), changed.content_id());
     }
+
+    // Moved from query::relation_codec's tests: a shape carries the same
+    // typed relation Postcard as a query, with the same depth guard.
+    #[test]
+    fn shape_carries_relation_postcard_with_the_query_depth_guard() {
+        use crate::query::{
+            MAX_RELATION_DEPTH, RelationCmpOp, RelationColumnRef, RelationExpr, RelationPredicate,
+            RelationQuery, RelationValueRef,
+        };
+
+        let table_scan = [0, 1, b't', 0];
+        let mut relation = vec![1; MAX_RELATION_DEPTH + 1];
+        relation.extend([0, 1, b't', 0]);
+        relation.extend(std::iter::repeat_n(9, MAX_RELATION_DEPTH + 1));
+        let shape = crate::protocol::ShapeAst::new_relation(
+            RelationQuery {
+                rel: RelationExpr::TableScan {
+                    table: "t".into(),
+                    alias: None,
+                },
+            },
+            crate::ids::SchemaVersionId(uuid::Uuid::nil()),
+        );
+        let mut shape_bytes = postcard::to_allocvec(&shape).unwrap();
+        assert!(shape_bytes.ends_with(&table_scan));
+        shape_bytes.truncate(shape_bytes.len() - table_scan.len());
+        shape_bytes.extend(&relation);
+        assert!(
+            std::panic::catch_unwind(|| postcard::from_bytes::<crate::protocol::ShapeAst>(
+                &shape_bytes
+            ))
+            .is_ok()
+        );
+        assert!(postcard::from_bytes::<crate::protocol::ShapeAst>(&shape_bytes).is_err());
+        let valid_shape_bytes = postcard::to_allocvec(&shape).unwrap();
+        assert_eq!(
+            crate::postcard_exact::decode_postcard_exact::<crate::protocol::ShapeAst>(
+                &valid_shape_bytes
+            )
+            .unwrap(),
+            shape
+        );
+
+        let relation = RelationQuery {
+            rel: RelationExpr::Filter {
+                input: Box::new(RelationExpr::TableScan {
+                    table: "rows".into(),
+                    alias: None,
+                }),
+                predicate: RelationPredicate::Cmp {
+                    left: RelationColumnRef {
+                        scope: None,
+                        column: "value".into(),
+                    },
+                    op: RelationCmpOp::Eq,
+                    right: RelationValueRef::Literal(serde_json::json!(1.5)),
+                },
+            },
+        };
+        let shape = crate::protocol::ShapeAst::new_relation(
+            relation,
+            crate::ids::SchemaVersionId(uuid::Uuid::nil()),
+        );
+        let shape_bytes = postcard::to_allocvec(&shape).unwrap();
+        assert_eq!(
+            postcard::from_bytes::<crate::protocol::ShapeAst>(&shape_bytes).unwrap(),
+            shape
+        );
+    }
 }
 #[cfg(test)]
 pub(crate) mod supporting_set_test_oracle;

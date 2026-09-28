@@ -181,10 +181,7 @@ pub fn json_value_to_policy_claim(
 }
 
 /// Resolve literal path segments, never splitting provider keys on dots.
-pub(crate) fn policy_claim_at_path(
-    claims: &BTreeMap<String, Value>,
-    path: &[String],
-) -> Option<Value> {
+pub fn policy_claim_at_path(claims: &BTreeMap<String, Value>, path: &[String]) -> Option<Value> {
     if let Some(name) = crate::query::author_claim_path_key(path) {
         return claims.get(&name).cloned();
     }

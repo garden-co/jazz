@@ -10,8 +10,10 @@ pub mod admin_catalogue_row_format;
 pub mod branch;
 pub mod metadata;
 pub mod policy_claims;
-pub(crate) mod policy_directory;
-pub(crate) mod public_api;
+#[doc(hidden)]
+pub mod policy_directory;
+#[doc(hidden)]
+pub mod public_api;
 pub mod public_schema;
 #[doc(hidden)]
 pub mod public_schema_convert;

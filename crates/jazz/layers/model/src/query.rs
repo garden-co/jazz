@@ -1,8 +1,8 @@
 //! Pure Jazz query AST, validation, canonical form, bindings, and
 //! content-addressed shape ids for the `jazz/SPEC/6_queries.md` contract. This module
 //! owns syntax and schema-level validation only; execution, read-set recording,
-//! and groove plan preparation live in [`crate::node::query_eval`], with emitted
-//! view payloads assembled by [`crate::node::views`]. It sits above groove query
+//! and groove plan preparation live in `jazz::node::query_eval`, with emitted
+//! view payloads assembled by `jazz::node::views`. It sits above groove query
 //! planning as Jazz's stable query vocabulary.
 
 use std::collections::{BTreeMap, BTreeSet};

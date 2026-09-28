@@ -338,7 +338,7 @@ fn schema_hash_matches_portable_column_types_cross_runtime_fixture() {
     }
 
     let fixture: ColumnTypeHashFixture = serde_json::from_str(include_str!(
-        "../../../../../../packages/jazz-tools/src/testing/fixtures/structural-schema-hashes.json"
+        "../../../../../../../../packages/jazz-tools/src/testing/fixtures/structural-schema-hashes.json"
     ))
     .expect("portable column-type hash fixture is valid JSON");
 
@@ -552,7 +552,7 @@ fn schema_hash_matches_default_values_cross_runtime_fixture() {
         case
     }).collect();
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../../../packages/jazz-tools/src/testing/fixtures/structural-schema-hashes.json"
+        "../../../../../../../../packages/jazz-tools/src/testing/fixtures/structural-schema-hashes.json"
     ))
     .unwrap();
     assert_eq!(serde_json::Value::Array(actual), fixture["defaultCases"]);
@@ -917,7 +917,7 @@ fn schema_hash_matches_composite_index_cross_runtime_fixture() {
     }
 
     let fixture: CompositeIndexHashFixture = serde_json::from_str(include_str!(
-        "../../../../../../packages/jazz-tools/src/testing/fixtures/structural-schema-hashes.json"
+        "../../../../../../../../packages/jazz-tools/src/testing/fixtures/structural-schema-hashes.json"
     ))
     .expect("composite-index hash fixture is valid JSON");
 

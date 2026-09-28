@@ -12,7 +12,7 @@ macro_rules! transaction_id {
     ($name:ident, $kind:literal, $doc:literal) => {
         #[doc = $doc]
         #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-        pub struct $name(pub(crate) [u8; 16]);
+        pub struct $name(pub [u8; 16]);
 
         impl $name {
             pub fn as_bytes(&self) -> &[u8; 16] {

@@ -6,6 +6,22 @@ import test from "node:test";
 
 import { analyze, layerOf } from "../jazz-module-layers.mjs";
 
+// Fixtures name their own files' layers, so they stay valid as real files move
+// out into layer crates.
+const fixtureLayers = {
+  "schema.rs": "model",
+  "tx.rs": "model",
+  "protocol.rs": "protocol",
+  "db.rs": "db",
+};
+function fixtureLayerOf(rel) {
+  if (fixtureLayers[rel]) return fixtureLayers[rel];
+  if (rel.startsWith("node/")) return "node";
+  if (rel.startsWith("db/")) return "db";
+  return "facade";
+}
+const analyzeFixture = (options) => analyze({ layerOf: fixtureLayerOf, ...options });
+
 function crateFixture(files) {
   const src = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-layers-"));
   for (const [rel, body] of Object.entries(files)) {
@@ -23,8 +39,6 @@ test("the jazz crate has no production upward references", () => {
 });
 
 test("files map to the layers that will become crates", () => {
-  assert.equal(layerOf("query/validation.rs"), "model");
-  assert.equal(layerOf("model/public_schema.rs"), "model");
   assert.equal(layerOf("protocol.rs"), "protocol");
   assert.equal(layerOf("node/query_engine/lowering/terminals.rs"), "engine");
   assert.equal(layerOf("node/query_eval.rs"), "node");
@@ -39,7 +53,7 @@ test("an upward reference is reported with its file and line", () => {
       '// crate::db::Ignored in a comment\nconst S: &str = "crate::db::Ignored";\nuse crate::db::Handle;\n',
     "db.rs": "pub struct Handle;\n",
   });
-  const violations = analyze({ src });
+  const violations = analyzeFixture({ src });
   assert.deepEqual(
     violations.map((v) => [v.from, v.line, v.to, v.fromLayer, v.toLayer, v.test]),
     [["schema.rs", 3, "db.rs", "model", "db", false]],
@@ -54,7 +68,7 @@ test("a re-export counts against the module that re-exports it", () => {
     "protocol.rs": "use crate::tools::TxId;\nuse crate::tx::TxId as Direct;\n",
   });
   assert.deepEqual(
-    analyze({ src }).map((v) => [v.from, v.to]),
+    analyzeFixture({ src }).map((v) => [v.from, v.to]),
     [["protocol.rs", "tools/mod.rs"]],
   );
 });
@@ -67,12 +81,12 @@ test("super paths resolve through inline modules and test code is separated", ()
       "mod inner {\n    use super::super::db::Handle;\n}\n#[cfg(test)]\nmod tests;\n#[cfg(test)]\nfn helper() { let _ = crate::db::Handle; }\n",
     "node/tests.rs": "use crate::db::Handle;\n",
   });
-  const production = analyze({ src });
+  const production = analyzeFixture({ src });
   assert.deepEqual(
     production.map((v) => [v.from, v.line]),
     [["node/mod.rs", 2]],
   );
-  const all = analyze({ src, includeTests: true });
+  const all = analyzeFixture({ src, includeTests: true });
   assert.deepEqual(
     all
       .filter((v) => v.test)
@@ -93,7 +107,7 @@ test("super paths in an included file resolve from the includer's module", () =>
     "node/state/commit.rs": "fn probe() { let _ = super::db::Handle; }\n",
   });
   assert.deepEqual(
-    analyze({ src }).map((v) => [v.from, v.line, v.to, v.path]),
+    analyzeFixture({ src }).map((v) => [v.from, v.line, v.to, v.path]),
     [["node/state/commit.rs", 1, "db.rs", "super::db::Handle"]],
   );
 });
@@ -116,7 +130,7 @@ test("impls a split crate could not hold are reported", () => {
     ].join("\n"),
   });
   assert.deepEqual(
-    analyze({ src })
+    analyzeFixture({ src })
       .map((v) => [v.line, v.to, v.path])
       .sort((a, b) => a[0] - b[0]),
     [
@@ -133,5 +147,5 @@ test("modules re-exported from an extracted crate are not layer references", () 
     "schema.rs": "use crate::ids::RowUuid;\n",
     "node/mod.rs": "mod inner {\n    use super::super::ids::RowUuid;\n}\n",
   });
-  assert.deepEqual(analyze({ src }), []);
+  assert.deepEqual(analyzeFixture({ src }), []);
 });

@@ -95,6 +95,7 @@ impl Query {
     /// Construct a query rooted at `table`.
     ///
     /// ```rust
+    /// # extern crate jazz_model as jazz;
     /// # use jazz::query::{doctest_support, Query};
     /// let query = Query::from("issues");
     ///
@@ -136,6 +137,7 @@ impl Query {
     /// Add a filter.
     ///
     /// ```rust
+    /// # extern crate jazz_model as jazz;
     /// # use jazz::query::{col, doctest_support, eq, param, Query};
     /// let query = Query::from("issues").filter(eq(col("assignee"), param("user")));
     ///
@@ -219,6 +221,7 @@ impl Query {
     /// Add a junction traversal.
     ///
     /// ```rust
+    /// # extern crate jazz_model as jazz;
     /// # use jazz::query::{col, doctest_support, eq, param, Query};
     /// let query = Query::from("issues")
     ///     .join_via("issue_tags", "issue", [eq(col("tag"), param("tag"))]);
@@ -545,6 +548,7 @@ impl Query {
     /// Add an include path such as `project.org`.
     ///
     /// ```rust
+    /// # extern crate jazz_model as jazz;
     /// # use jazz::query::{doctest_support, Query};
     /// let query = Query::from("issues").include("project.org");
     ///
@@ -571,6 +575,7 @@ impl Query {
     /// Select application columns. The row id is always included.
     ///
     /// ```rust
+    /// # extern crate jazz_model as jazz;
     /// # use jazz::query::{doctest_support, Query};
     /// let query = Query::from("issues").select(["title", "state"]);
     ///
@@ -641,6 +646,7 @@ impl Query {
     /// Limit result rows after filtering.
     ///
     /// ```rust
+    /// # extern crate jazz_model as jazz;
     /// # use jazz::query::{doctest_support, Query};
     /// let query = Query::from("issues").limit(25);
     ///
@@ -655,6 +661,7 @@ impl Query {
     /// Skip result rows after filtering.
     ///
     /// ```rust
+    /// # extern crate jazz_model as jazz;
     /// # use jazz::query::{doctest_support, Query};
     /// let query = Query::from("issues").offset(50);
     ///
@@ -671,14 +678,16 @@ impl Query {
         self.validate_runtime(schema.runtime())
     }
 
-    pub(crate) fn validate_runtime(
+    #[doc(hidden)]
+    pub fn validate_runtime(
         &self,
         schema: &RuntimeSchema,
     ) -> Result<ValidatedQuery, QueryError> {
         validate_query(self, schema)
     }
 
-    pub(crate) fn validate_with_schema_version(
+    #[doc(hidden)]
+    pub fn validate_with_schema_version(
         &self,
         schema: &RuntimeSchema,
         schema_version: SchemaVersionId,

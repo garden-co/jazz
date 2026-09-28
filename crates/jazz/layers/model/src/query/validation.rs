@@ -88,7 +88,8 @@ impl Binding {
     }
 }
 
-pub(crate) fn binding_id_for_values(
+#[doc(hidden)]
+pub fn binding_id_for_values(
     values: &BTreeMap<String, Value>,
 ) -> Result<BindingId, QueryError> {
     Ok(BindingId(uuid::Uuid::new_v5(
@@ -228,7 +229,7 @@ fn validate_query_with_schema_version(
 /// Validate one arm of a retained relation UNION. An arm always keeps its
 /// explicit projection: the UNION terminal selects each member's arm-local
 /// projection, so an identity arm must not fall back to the ordinary shape.
-pub(crate) fn validate_union_arm_with_schema_version(
+pub fn validate_union_arm_with_schema_version(
     query: &Query,
     schema: &RuntimeSchema,
     schema_version: SchemaVersionId,
@@ -778,7 +779,8 @@ fn rewrite_flat_join_predicate_columns(
     }
 }
 
-pub(crate) fn flat_join_predicate_sources(
+#[doc(hidden)]
+pub fn flat_join_predicate_sources(
     predicate: &Predicate,
 ) -> Result<BTreeSet<String>, QueryError> {
     let mut predicate = predicate.clone();
@@ -791,7 +793,8 @@ pub(crate) fn flat_join_predicate_sources(
     Ok(sources)
 }
 
-pub(crate) fn unqualify_flat_join_predicate(
+#[doc(hidden)]
+pub fn unqualify_flat_join_predicate(
     predicate: &Predicate,
     expected_scope: &str,
 ) -> Result<Predicate, QueryError> {
@@ -808,7 +811,8 @@ pub(crate) fn unqualify_flat_join_predicate(
     Ok(predicate)
 }
 
-pub(crate) fn qualify_flat_join_source_predicate(
+#[doc(hidden)]
+pub fn qualify_flat_join_source_predicate(
     mut predicate: Predicate,
     scope: &str,
 ) -> Result<Predicate, QueryError> {

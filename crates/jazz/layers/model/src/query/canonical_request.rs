@@ -158,7 +158,8 @@ fn canonical_policy_branch_key_for_schema(
     Ok(bytes)
 }
 
-pub(crate) fn canonical_aggregate_key(aggregate: &Aggregate) -> Vec<u8> {
+#[doc(hidden)]
+pub fn canonical_aggregate_key(aggregate: &Aggregate) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.push(match aggregate.function {
         AggregateFunction::Count => b'c',

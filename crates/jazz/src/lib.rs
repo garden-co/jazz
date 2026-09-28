@@ -472,13 +472,11 @@ use jazz_types::debug_env;
 pub mod foreground_node_lease;
 /// Poll ready-immediate database futures without an async runtime.
 pub use db::block_on;
+pub use jazz_model::model;
+pub use jazz_model::row_input;
 pub use jazz_types::identity;
 pub use jazz_types::ids;
 pub use jazz_types::local_executor;
-/// Public data model: schema builders, values, policies and lenses.
-// Moved out of `tools`, which keeps its existing documentation policy.
-#[allow(missing_docs)]
-pub mod model;
 /// Storage-backed node implementation and local API.
 pub mod node;
 pub use jazz_types::object;
@@ -492,12 +490,10 @@ pub use jazz_types::postcard_exact;
 pub mod protocol;
 /// Protocol admission and semantic size limits.
 pub mod protocol_limits;
-/// Pure query AST, validation, canonicalization, and ids.
-pub mod query;
+pub use jazz_model::query;
 /// Canonical recursive structured query-result boundary types.
 pub mod result_tree;
-/// Jazz schema and storage lowering.
-pub mod schema;
+pub use jazz_model::schema;
 /// Platform-neutral client and server runtime APIs used by target shells.
 #[cfg(feature = "runtime")]
 pub mod serving;
@@ -510,8 +506,7 @@ pub use jazz_types::time;
 // retains its existing documentation policy.
 #[allow(missing_docs)]
 pub mod tools;
-/// Transaction, fate, and history vocabulary.
-pub mod tx;
+pub use jazz_model::tx;
 /// Versioned transport frames around the semantic sync protocol.
 pub mod wire;
 

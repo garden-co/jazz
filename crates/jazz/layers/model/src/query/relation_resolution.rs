@@ -43,7 +43,7 @@ fn fold_relation_output_step(
 
 /// Normalize the currently-supported relation facade subset into the ordinary
 /// query shape used by one-shot and maintained execution.
-pub(crate) fn relation_query_to_query(query: &RelationQuery) -> Result<Query, QueryError> {
+pub fn relation_query_to_query(query: &RelationQuery) -> Result<Query, QueryError> {
     if let Some(parts) = relation_union_parts(&query.rel) {
         let inputs = parts.inputs;
         if inputs.is_empty() {
@@ -133,7 +133,7 @@ pub(crate) fn relation_query_to_query(query: &RelationQuery) -> Result<Query, Qu
 ///
 /// Relation projections are deliberately kept separate from `Query::select`:
 /// their aliases and source expressions are part of the relation row-set
-pub(crate) fn relation_output_projection(
+pub fn relation_output_projection(
     relation: &RelationQuery,
 ) -> Result<(String, Vec<RelationProjectColumn>), QueryError> {
     if relation_union_parts(&relation.rel).is_some() {
@@ -159,7 +159,7 @@ pub(crate) fn relation_output_projection(
 ///
 /// A supported `Gather` is normalized into the ordinary recursive query shape
 /// and therefore keeps the source table's normal materialization contract.
-pub(crate) fn relation_output_projection_if_present(
+pub fn relation_output_projection_if_present(
     relation: &RelationQuery,
 ) -> Result<Option<Vec<RelationProjectColumn>>, QueryError> {
     let (base, _, _, _, _) = peel_relation_output_steps(&relation.rel)?;
@@ -172,7 +172,7 @@ pub(crate) fn relation_output_projection_if_present(
 ///
 /// Labels use the same length-prefixed path encoding as executable UNION
 /// lowering, so a maintained member can select its exact arm projection.
-pub(crate) fn relation_union_leaf_projections(
+pub fn relation_union_leaf_projections(
     relation: &RelationQuery,
 ) -> Result<BTreeMap<String, Vec<RelationProjectColumn>>, QueryError> {
     let mut projections = BTreeMap::new();
@@ -271,7 +271,7 @@ fn relation_expr_contains_union(expr: &RelationExpr) -> bool {
 
 /// Encode a nested semantic UNION arm path without relying on a user label
 /// separator.
-pub(crate) fn compose_union_arm_path(prefix: &str, label: &str) -> String {
+pub fn compose_union_arm_path(prefix: &str, label: &str) -> String {
     format!("{}:{prefix}{}:{label}", prefix.len(), label.len())
 }
 
@@ -325,7 +325,7 @@ const RESERVED_RELATION_ALIAS_PREFIXES: &[&str] = &[
 ];
 
 /// Structural alias rules shared by every relation projection.
-pub(crate) fn validate_relation_projection_aliases(
+pub fn validate_relation_projection_aliases(
     columns: &[RelationProjectColumn],
 ) -> Result<(), QueryError> {
     let mut aliases = BTreeSet::new();
@@ -342,7 +342,7 @@ pub(crate) fn validate_relation_projection_aliases(
 
 /// Reject aliases of a retained projection that would replace an engine
 /// carrier.
-pub(crate) fn reject_reserved_relation_aliases(
+pub fn reject_reserved_relation_aliases(
     columns: &[RelationProjectColumn],
 ) -> Result<(), QueryError> {
     for column in columns {
@@ -365,7 +365,7 @@ pub(crate) fn reject_reserved_relation_aliases(
 /// The order used when materializing a retained public UNION ALL result set.
 /// The row-set compiler owns terminal pagination; callers use this only to
 /// restore the ordered Vec after identity-keyed result storage.
-pub(crate) fn relation_union_presentation_order(relation: &RelationQuery) -> Option<Vec<OrderBy>> {
+pub fn relation_union_presentation_order(relation: &RelationQuery) -> Option<Vec<OrderBy>> {
     relation_union_parts(&relation.rel).and_then(|parts| {
         parts.order_by.map(|terms| {
             terms
@@ -384,11 +384,15 @@ pub(crate) fn relation_union_presentation_order(relation: &RelationQuery) -> Opt
 /// output-preserving, while order and window operators deliberately remain
 /// above the union to retain UNION ALL multiplicity and global page semantics.
 #[derive(Clone, Debug)]
-pub(crate) struct RelationUnionParts {
-    pub(crate) inputs: Vec<RelationUnionArm>,
-    pub(crate) order_by: Option<Vec<RelationOrderBy>>,
-    pub(crate) offset: Option<usize>,
-    pub(crate) limit: Option<usize>,
+pub struct RelationUnionParts {
+    #[doc(hidden)]
+    pub inputs: Vec<RelationUnionArm>,
+    #[doc(hidden)]
+    pub order_by: Option<Vec<RelationOrderBy>>,
+    #[doc(hidden)]
+    pub offset: Option<usize>,
+    #[doc(hidden)]
+    pub limit: Option<usize>,
 }
 
 impl RelationUnionParts {
@@ -402,7 +406,7 @@ impl RelationUnionParts {
 /// `OrderBy` then optional `Offset` then optional `Limit`; other wrapper
 /// arrangements are rejected instead of changing their meaning by pushing
 /// them into every arm.
-pub(crate) fn relation_union_parts(expr: &RelationExpr) -> Option<RelationUnionParts> {
+pub fn relation_union_parts(expr: &RelationExpr) -> Option<RelationUnionParts> {
     match expr {
         RelationExpr::Union { inputs } => Some(RelationUnionParts {
             inputs: inputs.clone(),
@@ -1068,7 +1072,8 @@ fn collect_relation_facade(
     }
 }
 
-pub(crate) fn relation_scope(column: &RelationColumnRef) -> Result<String, QueryError> {
+#[doc(hidden)]
+pub fn relation_scope(column: &RelationColumnRef) -> Result<String, QueryError> {
     column.scope.clone().ok_or_else(|| {
         relation_unification_error("relation column refs must be scoped for unified lowering")
     })

@@ -554,7 +554,7 @@ impl RecursionBound {
     /// conservative loop cap used by evaluator paths that are not true
     /// fixpoint. `MaxDepth(0)` remains zero: callers that request no recursive
     /// steps must never be widened to one.
-    pub(crate) fn depth_steps(self) -> usize {
+    pub fn depth_steps(self) -> usize {
         match self {
             Self::Fixpoint => 128,
             Self::MaxDepth(max_depth) => max_depth,
@@ -989,7 +989,7 @@ pub enum Operand {
 
 /// Collision-proof internal namespace for raw identity-provider claims.
 /// Public policy paths remain `session.claims[<name>]`.
-pub(crate) const PROVIDER_CLAIM_PREFIX: &str = "\0claims:";
+pub const PROVIDER_CLAIM_PREFIX: &str = "\0claims:";
 
 /// Collision-proof storage key for a raw provider claim exposed as
 /// `session.claims[name]` in public policies.
@@ -997,7 +997,8 @@ pub fn provider_claim_key(name: &str) -> String {
     provider_claim_operand_key(name)
 }
 
-pub(crate) fn provider_claim_operand_key(name: &str) -> String {
+#[doc(hidden)]
+pub fn provider_claim_operand_key(name: &str) -> String {
     format!("{PROVIDER_CLAIM_PREFIX}{name}")
 }
 
@@ -1005,7 +1006,8 @@ pub(crate) fn provider_claim_operand_key(name: &str) -> String {
 // disjoint from raw provider names. Existing single-key operands are unchanged.
 const PROVIDER_CLAIM_PATH_V1: &str = "\0claim-path-v1:";
 
-pub(crate) fn provider_claim_path_operand_key(segments: &[String]) -> String {
+#[doc(hidden)]
+pub fn provider_claim_path_operand_key(segments: &[String]) -> String {
     if let [name] = segments {
         return provider_claim_operand_key(name);
     }
@@ -1016,7 +1018,8 @@ pub(crate) fn provider_claim_path_operand_key(segments: &[String]) -> String {
     key
 }
 
-pub(crate) fn operand_claim_path(name: &str) -> Vec<String> {
+#[doc(hidden)]
+pub fn operand_claim_path(name: &str) -> Vec<String> {
     if let Some(mut rest) = name.strip_prefix(PROVIDER_CLAIM_PATH_V1) {
         let mut segments = vec!["claims".to_owned()];
         while !rest.is_empty() {

@@ -57,7 +57,7 @@ impl fmt::Display for SchemaConversionError {
 
 impl std::error::Error for SchemaConversionError {}
 
-pub(crate) fn convert_public_schema(schema: &Schema) -> Result<JazzSchema, SchemaConversionError> {
+pub fn convert_public_schema(schema: &Schema) -> Result<JazzSchema, SchemaConversionError> {
     let mut converted = schema
         .iter()
         .map(|(name, table)| convert_table(schema, name, table))
@@ -3703,7 +3703,7 @@ mod tests {
 
     fn policy_graph_perf_fixture_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../packages/jazz-tools/src/testing/fixtures/policy-graph-perf")
+            .join("../../../../packages/jazz-tools/src/testing/fixtures/policy-graph-perf")
     }
 
     fn policy_graph_perf_fixture_schema() -> Schema {

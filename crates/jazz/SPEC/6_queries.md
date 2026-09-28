@@ -611,19 +611,19 @@ stable, and a descriptor does not depend on runtime data.
 
 The existing public `JoinSpec { table, alias, on }` advertises aliases and an
 arbitrary equality from the accumulated left result to the newly joined table
-(`crates/jazz/src/model/public_api/query.rs:196-213`). The core `JoinVia` AST is
+(`crates/jazz/layers/model/src/model/public_api/query.rs:196-213`). The core `JoinVia` AST is
 not that form: it has no alias or accumulated-left scope, and only represents a
 root- or immediately-nested reference/junction traversal with a target column,
 optional source column/lookup, correlations, filters, and nested joins
-(`crates/jazz/src/query.rs:2045-2071`; validation at
-`crates/jazz/src/query.rs:2713-2822`). **Recommendation:** extend the core with
+(`crates/jazz/layers/model/src/query.rs:2045-2071`; validation at
+`crates/jazz/layers/model/src/query.rs:2713-2822`). **Recommendation:** extend the core with
 a separately named flat-join AST and lower the public `JoinSpec` into it; do not
 try to encode aliases or arbitrary accumulated joins in `JoinVia`, and do not
 leave the public builder advertising a shape that the client rejects. This is a
 small, explicit surface addition rather than a policy-model change.
 
 `result_element_index` is not part of core `Query`
-(`crates/jazz/src/query.rs:24-61`), and MUST be removed from the
+(`crates/jazz/layers/model/src/query.rs:24-61`), and MUST be removed from the
 public flat-join surface. It is fully expressible as a qualified projection:
 select the desired source's qualified columns (including its explicit row-id
 field where needed), or make that table the query root when its `ObjectId` is the

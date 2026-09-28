@@ -9,13 +9,11 @@ db/tests/reads.rs -> binding_codec.rs
 db/tests/reads.rs -> tools/test_support.rs
 db/tests/reference_metadata_migration.rs -> lib.rs
 db/tests/reference_metadata_migration.rs -> tools/mod.rs
-db/tests/subscriptions/coverage/settlement/local_and_branch.rs -> lib.rs
 db/tests/subscriptions/coverage/settlement/local_and_branch.rs -> tools/mod.rs
 db/tests/subscriptions/materialization.rs -> tools/test_support.rs
 db/tests/subscriptions/structured.rs -> binding_codec.rs
 db/tests/support.rs -> tools/test_support.rs
 db/tests/transactions.rs -> binding_codec.rs
-db/tests/transactions.rs -> lib.rs
 db/tests/transactions.rs -> tools/test_support.rs
 node/codec.rs -> tools/mod.rs
 node/physical/tests.rs -> lib.rs
@@ -50,6 +48,4 @@ peer/tests.rs -> lib.rs
 peer/tests.rs -> test_public_schema.rs
 peer/tests.rs -> tools/mod.rs
 peer/tests.rs -> tools/test_support.rs
-query/relation_codec.rs -> protocol.rs
-tx.rs -> protocol.rs
 wire.rs -> db/channel_endpoint.rs

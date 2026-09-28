@@ -479,7 +479,7 @@ impl PartialEq for TableSchema {
 /// Canonical order of a table's composite indexes: lexicographic over each
 /// index's column names compared as UTF-8 bytes (equivalently, Unicode code
 /// points). TypeScript's `structuralSchemaHash` must use the same comparator.
-pub(crate) fn canonical_composite_index_order(indexes: &[Vec<ColumnName>]) -> Vec<Vec<&str>> {
+pub fn canonical_composite_index_order(indexes: &[Vec<ColumnName>]) -> Vec<Vec<&str>> {
     let mut sorted = indexes
         .iter()
         .map(|columns| {
