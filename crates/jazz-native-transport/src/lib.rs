@@ -987,20 +987,39 @@ mod tests {
         ));
         assert!(native_transport_error(refused).is_retryable());
         assert!(native_transport_error(WebSocketClientError::HandshakeTimeout).is_retryable());
-        for (status, retryable) in [(503, true), (401, false), (403, false), (429, false)] {
-            let response = tokio_tungstenite::tungstenite::http::Response::builder()
-                .status(status)
-                .body(None::<Vec<u8>>)
-                .unwrap();
-            assert_eq!(
-                native_transport_error(WebSocketClientError::Connect(
-                    tokio_tungstenite::tungstenite::Error::Http(Box::new(response))
+        let retry_statuses = [
+            (408, true),
+            (425, true),
+            (429, true),
+            (500, true),
+            (502, true),
+            (503, true),
+            (504, true),
+            (401, false),
+            (403, false),
+            (404, false),
+            (501, false),
+            (505, false),
+            (511, false),
+        ];
+        let mismatches: Vec<_> = retry_statuses
+            .into_iter()
+            .filter_map(|(status, expected)| {
+                let response = tokio_tungstenite::tungstenite::http::Response::builder()
+                    .status(status)
+                    .body(None::<Vec<u8>>)
+                    .unwrap();
+                let actual = native_transport_error(WebSocketClientError::Connect(
+                    tokio_tungstenite::tungstenite::Error::Http(Box::new(response)),
                 ))
-                .is_retryable(),
-                retryable,
-                "HTTP {status} must use its typed availability category"
-            );
-        }
+                .is_retryable();
+                (actual != expected).then_some((status, actual, expected))
+            })
+            .collect();
+        assert!(
+            mismatches.is_empty(),
+            "unexpected HTTP retry classification (status, actual, expected): {mismatches:?}"
+        );
         for (code, retry, expected) in [
             (WireErrorCode::NotReady, WireRetry::Later, true),
             (WireErrorCode::NotReady, WireRetry::AfterAuth, false),
@@ -1028,6 +1047,21 @@ mod tests {
             !native_transport_error(WebSocketClientError::UnexpectedHandshakeMessage)
                 .is_retryable()
         );
+    }
+
+    #[test]
+    fn broken_pipe_on_established_socket_is_retryable() {
+        use tokio_tungstenite::tungstenite::Error;
+
+        for error in [
+            WebSocketClientError::Send(Error::Io(std::io::ErrorKind::BrokenPipe.into())),
+            WebSocketClientError::Receive(Error::Io(std::io::ErrorKind::BrokenPipe.into())),
+        ] {
+            assert!(
+                native_transport_error(error).is_retryable(),
+                "a broken peer pipe must not poison foreground ticks"
+            );
+        }
     }
 
     // The resolver outcome, not its platform-specific I/O kind, identifies
