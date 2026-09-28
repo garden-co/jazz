@@ -3145,6 +3145,169 @@ describe("NativeRuntimeAdapter server transport", () => {
     ]);
   });
 
+  it("decodes nested terminal payload fields by descriptor identity", async () => {
+    let controller: ReadableStreamDefaultController<unknown> | undefined;
+    const textColumn = (name: string): ColumnDescriptor => ({
+      name,
+      column_type: { type: "Text" },
+      nullable: false,
+    });
+    const relationSchema = {
+      users: { columns: [textColumn("name")] },
+      todos: { columns: [textColumn("first"), textColumn("second")] },
+      comments: { columns: [textColumn("first"), textColumn("second")] },
+    } satisfies WasmSchema;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            subscribe: () =>
+              new ReadableStream({
+                start(streamController) {
+                  controller = streamController;
+                },
+              }),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      relationSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const handle = runtime.createSubscription(
+      JSON.stringify({
+        table: "users",
+        array_subqueries: [
+          {
+            column_name: "todos",
+            table: "todos",
+            inner_column: "user_id",
+            outer_column: "id",
+            select_columns: ["first", "second"],
+            nested_arrays: [
+              {
+                column_name: "comments",
+                table: "comments",
+                inner_column: "todo_id",
+                outer_column: "id",
+                select_columns: ["first", "second"],
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    const deltas: unknown[] = [];
+    runtime.executeSubscription(handle, (delta: unknown) => {
+      deltas.push(delta);
+    });
+
+    const todoId = "00000000-0000-0000-0000-000000000021";
+    const commentId = "00000000-0000-0000-0000-000000000022";
+    const todoKey = Uint8Array.from([10, ...uuidBytes(todoId)]);
+    const commentKey = Uint8Array.from([10, ...uuidBytes(commentId)]);
+    const childDescriptor: DescriptorField[] = [
+      { name: "row_uuid", valueType: { tag: 11 } },
+      { name: "second", valueType: { tag: 8 } },
+      { name: "first", valueType: { tag: 8 } },
+    ];
+    const terminalLayouts = [
+      {
+        carrier: "Logical",
+        key_slot: 0,
+        fields: [
+          {
+            identity: { kind: "Name", name: "row_uuid" },
+            role: "RowKey",
+            value_type: { tag: 11 },
+          },
+          {
+            identity: { kind: "Name", name: "second" },
+            role: "Value",
+            value_type: { tag: 8 },
+          },
+          {
+            identity: { kind: "Name", name: "first" },
+            role: "Value",
+            value_type: { tag: 8 },
+          },
+        ],
+      },
+    ];
+    const terminalOperations = [
+      {
+        root_key: Uint8Array.of(3),
+        path: [{ Collection: "todos" }, { Key: todoKey }, { Collection: "comments" }],
+        edit: {
+          Insert: {
+            index: 0,
+            key: commentKey,
+            value: createRecord(childDescriptor, [
+              uuidBytes(commentId),
+              inlineScalar("insert-second"),
+              inlineScalar("insert-first"),
+            ]),
+          },
+        },
+        payload_layout: 0,
+      },
+      {
+        root_key: Uint8Array.of(3),
+        path: [
+          { Collection: "todos" },
+          { Key: todoKey },
+          { Collection: "comments" },
+          { Key: commentKey },
+        ],
+        edit: {
+          Update: {
+            key: commentKey,
+            value: createRecord(childDescriptor, [
+              uuidBytes(commentId),
+              inlineScalar("update-second"),
+              inlineScalar("update-first"),
+            ]),
+          },
+        },
+        payload_layout: 0,
+      },
+    ];
+
+    controller!.enqueue({
+      type: "delta",
+      reset: false,
+      delta: encodeSubscriptionDelta({ added: [], updated: [], removed: [] }),
+      terminalOperations,
+      terminalLayouts,
+    });
+    await vi.waitFor(() => expect(deltas).toHaveLength(1));
+    if (deltas[0] instanceof Error) throw deltas[0];
+
+    const decoded = (deltas[0] as RuntimeSubscriptionDelta).terminalOperations ?? [];
+    expect(
+      decoded.map((operation) =>
+        "Insert" in operation.edit
+          ? operation.edit.Insert.row.values
+          : "Update" in operation.edit
+            ? operation.edit.Update.row.values
+            : [],
+      ),
+    ).toEqual([
+      [
+        { type: "Text", value: "insert-first" },
+        { type: "Text", value: "insert-second" },
+      ],
+      [
+        { type: "Text", value: "update-first" },
+        { type: "Text", value: "update-second" },
+      ],
+    ]);
+  });
   it("materializes array subquery relation snapshots for reads", async () => {
     const calls: string[] = [];
     const relationSchema = {
