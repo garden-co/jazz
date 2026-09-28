@@ -54,6 +54,8 @@ mod fate_regressions;
 mod fate_replay;
 #[path = "../large_json_wire.rs"]
 mod large_json_wire;
+#[path = "../large_value_append.rs"]
+mod large_value_append;
 #[path = "../large_value_read_scaling.rs"]
 mod large_value_read_scaling;
 #[path = "../large_value_streaming_create.rs"]
