@@ -1428,14 +1428,30 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
       permissions: compiled.permissions,
     });
   } catch (error) {
-    if (error instanceof DeploymentError && error.code === "non_convergent_graph") {
-      const tips = error.details?.tips?.filter((hash) => hash !== toHash) ?? [];
-      const suggestions = tips.map(
-        (hash) =>
-          `jazz-tools migrations create ${options.appId} --fromHash ${shortSchemaHash(hash)}`,
-      );
+    if (
+      error instanceof DeploymentError &&
+      error.code === "unreachable_deployment_target" &&
+      error.details?.active
+    ) {
+      const active = shortSchemaHash(error.details.active);
+      const target = shortSchemaHash(toHash);
       throw new Error(
-        `${error.message} All migration branches must converge to the current schema.ts. ${suggestions.length ? `Create the missing migrations with ${suggestions.map((command) => `\`${command}\``).join(" and ")}, review them, then run deploy again.` : "Add the missing migrations and run deploy again."}`,
+        [
+          `Cannot deploy local schema ${target} from server schema ${active}: no forward migration path connects them.`,
+          "",
+          "Choose one:",
+          "",
+          "1. Revert to the common schema.",
+          "   Restore the shared ancestor in schema.ts (and its permissions), then deploy it.",
+          "   After that, restore your branch and deploy again. No reverse migration is needed.",
+          "",
+          "2. Merge both changes.",
+          "   Update schema.ts to include both branches' changes and update permissions.ts.",
+          "   Create a migration from each branch to that merged schema:",
+          `     jazz-tools migrations create ${options.appId} --fromHash ${active}`,
+          `     jazz-tools migrations create ${options.appId} --fromHash ${target}`,
+          "   Review both migrations, then deploy.",
+        ].join("\n"),
         { cause: error },
       );
     }

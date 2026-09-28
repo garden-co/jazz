@@ -51,7 +51,10 @@ it("surfaces server validation failures without retrying or publishing individua
       return reply({ activeSchemaHash: hash, schemas: [hash], migrations: [] });
     expect(input.endsWith("/admin/deploy")).toBe(true);
     return reply(
-      { code: "non_convergent_graph", error: "a concurrent deployment added another branch" },
+      {
+        code: "unreachable_deployment_target",
+        error: "a concurrent deployment added another branch",
+      },
       422,
     );
   });

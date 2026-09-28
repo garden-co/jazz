@@ -88,9 +88,13 @@ impl From<DeploymentError> for DeployError {
                 "migration_cycle",
                 serde_json::json!({"schemas":schemas.iter().map(ToString::to_string).collect::<Vec<_>>()}),
             ),
-            NonConvergent { target, tips } => (
-                "non_convergent_graph",
-                serde_json::json!({"target":target.to_string(),"tips":tips.iter().map(ToString::to_string).collect::<Vec<_>>()}),
+            UnreachableTarget { active, target } => (
+                "unreachable_deployment_target",
+                serde_json::json!({"active":active.to_string(),"target":target.to_string()}),
+            ),
+            DisconnectedGraph { roots } => (
+                "disconnected_migration_graph",
+                serde_json::json!({"roots":roots.iter().map(ToString::to_string).collect::<Vec<_>>()}),
             ),
             ConflictingPaths { first, second } => (
                 "conflicting_paths",

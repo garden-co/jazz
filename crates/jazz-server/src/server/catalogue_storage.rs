@@ -38,6 +38,7 @@ impl std::error::Error for CatalogueStorageError {}
 
 pub(crate) trait CatalogueStorage {
     fn scan_catalogue_entries(&self) -> CatalogueStorageResult<Vec<CatalogueEntry>>;
+    #[cfg(any(test, feature = "embedded-server"))]
     fn upsert_catalogue_entry(&mut self, entry: &CatalogueEntry) -> CatalogueStorageResult<()>;
     /// Validate all encodings before atomically writing any of the entries.
     /// Durability is established separately by `flush` / `flush_wal`.
@@ -66,6 +67,7 @@ impl CatalogueStorage for CatalogueMemoryStorage {
         Ok(self.entries.values().cloned().collect())
     }
 
+    #[cfg(any(test, feature = "embedded-server"))]
     fn upsert_catalogue_entry(&mut self, entry: &CatalogueEntry) -> CatalogueStorageResult<()> {
         self.entries.insert(entry.object_id, entry.clone());
         Ok(())
@@ -102,6 +104,7 @@ pub(crate) struct CatalogueKvStorage {
 
 enum CatalogueStorageCommand {
     Scan(mpsc::Sender<CatalogueStorageResult<Vec<CatalogueEntry>>>),
+    #[cfg(any(test, feature = "embedded-server"))]
     Upsert(CatalogueEntry, mpsc::Sender<CatalogueStorageResult<()>>),
     UpsertBatch(
         Vec<OwnedWriteOperation>,
@@ -194,6 +197,7 @@ impl CatalogueStorage for CatalogueKvStorage {
         self.request(CatalogueStorageCommand::Scan)
     }
 
+    #[cfg(any(test, feature = "embedded-server"))]
     fn upsert_catalogue_entry(&mut self, entry: &CatalogueEntry) -> CatalogueStorageResult<()> {
         self.request(|reply| CatalogueStorageCommand::Upsert(entry.clone(), reply))
     }
@@ -252,6 +256,7 @@ fn run_catalogue_storage(storage: BoxedStorage, commands: mpsc::Receiver<Catalog
             CatalogueStorageCommand::Scan(reply) => {
                 let _ = reply.send(scan_entries(active_storage));
             }
+            #[cfg(any(test, feature = "embedded-server"))]
             CatalogueStorageCommand::Upsert(entry, reply) => {
                 let result = entry
                     .encode_storage_row()

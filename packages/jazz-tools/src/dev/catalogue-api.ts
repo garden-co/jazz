@@ -296,7 +296,7 @@ export class DeploymentError extends Error {
     message: string,
     readonly status: number,
     readonly code?: string,
-    readonly details?: { target?: string; tips?: string[] },
+    readonly details?: { target?: string; active?: string; roots?: string[] },
   ) {
     super(message);
   }

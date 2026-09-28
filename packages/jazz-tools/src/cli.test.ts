@@ -2121,43 +2121,63 @@ describe("cli deploy", () => {
     },
   );
 
-  it("suggests migrations from every unconverged branch to the unpublished schema.ts", async () => {
-    const { root } = await createWorkspace();
-    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
-    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
-    const branches = ["a".repeat(64), "b".repeat(64)];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string, init?: RequestInit) => {
-        if (input.endsWith("/migrations/graph"))
+  it.each([false, true])(
+    "explains revert and merge options (target already published: %s)",
+    async (published) => {
+      const { root } = await createWorkspace();
+      await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+      await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
+      const branches = ["a".repeat(64), "b".repeat(64)];
+      const { loadCompiledSchema } = await import("./schema-loader.js");
+      const target = await computeTestSchemaHash((await loadCompiledSchema(root)).wasmSchema);
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: string, init?: RequestInit) => {
+          if (input.endsWith("/migrations/graph"))
+            return new Response(
+              JSON.stringify({
+                schemas: published ? [...branches, target] : branches,
+                activeSchemaHash: branches[0],
+                migrations: [],
+              }),
+            );
+          expect(input.endsWith("/admin/deploy")).toBe(true);
+          const body = JSON.parse(String(init?.body));
           return new Response(
-            JSON.stringify({ schemas: branches, activeSchemaHash: branches[0], migrations: [] }),
+            JSON.stringify({
+              code: "unreachable_deployment_target",
+              error: "no forward migration path exists",
+              details: { target: body.targetSchemaHash, active: branches[0] },
+            }),
+            { status: 422 },
           );
-        expect(input.endsWith("/admin/deploy")).toBe(true);
-        const body = JSON.parse(String(init?.body));
-        return new Response(
-          JSON.stringify({
-            code: "non_convergent_graph",
-            error: "multiple terminal schemas",
-            details: { target: body.targetSchemaHash, tips: [...branches, body.targetSchemaHash] },
-          }),
-          { status: 422 },
-        );
-      }),
-    );
-    const result = deploy({
-      serverUrl: "http://localhost:1625",
-      adminSecret: "admin-secret",
-      schemaDir: root,
-    });
-    await expect(result).rejects.toThrow(
-      `jazz-tools migrations create ${APP_ID} --fromHash ${branches[0]!.slice(0, 12)}`,
-    );
-    await expect(result).rejects.toThrow(
-      `jazz-tools migrations create ${APP_ID} --fromHash ${branches[1]!.slice(0, 12)}`,
-    );
-    await expect(result).rejects.not.toThrow("--toHash");
-  });
+        }),
+      );
+      const result = deploy({
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+        schemaDir: root,
+      });
+      await expect(result).rejects.toThrow(
+        [
+          `Cannot deploy local schema ${target.slice(0, 12)} from server schema aaaaaaaaaaaa: no forward migration path connects them.`,
+          "",
+          "Choose one:",
+          "",
+          "1. Revert to the common schema.",
+          "   Restore the shared ancestor in schema.ts (and its permissions), then deploy it.",
+          "   After that, restore your branch and deploy again. No reverse migration is needed.",
+          "",
+          "2. Merge both changes.",
+          "   Update schema.ts to include both branches' changes and update permissions.ts.",
+          "   Create a migration from each branch to that merged schema:",
+          `     jazz-tools migrations create ${APP_ID} --fromHash aaaaaaaaaaaa`,
+          `     jazz-tools migrations create ${APP_ID} --fromHash ${target.slice(0, 12)}`,
+          "   Review both migrations, then deploy.",
+        ].join("\n"),
+      );
+    },
+  );
   it("publishes a complete local migration chain in one request and skips it on the next deploy", async () => {
     const { root } = await createWorkspace();
     const migrationsDir = join(root, "migrations");

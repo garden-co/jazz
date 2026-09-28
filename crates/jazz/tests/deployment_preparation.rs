@@ -168,9 +168,9 @@ fn sibling_path_cannot_deploy_without_forward_convergence_from_the_authored_bran
     .unwrap_err();
     assert_eq!(
         error,
-        DeploymentError::NonConvergent {
+        DeploymentError::UnreachableTarget {
             target: SchemaHash::compute(&merged),
-            tips: vec![SchemaHash::compute(&left)],
+            active: SchemaHash::compute(&left),
         }
     );
 }
@@ -255,7 +255,7 @@ fn parallel_paths_must_preserve_column_identity_and_defaults() {
 }
 
 #[test]
-fn rejects_cycles_backward_activation_and_disconnected_stored_schemas() {
+fn allows_backward_activation_but_rejects_cycles_and_disconnected_stored_schemas() {
     let base = schema(&[]);
     let next = schema(&["a"]);
     let edge = migration(&base, &next, vec![add("a")]);
@@ -264,10 +264,7 @@ fn rejects_cycles_backward_activation_and_disconnected_stored_schemas() {
         migrations: vec![edge.clone()],
         active_schema_hash: Some(SchemaHash::compute(&next)),
     };
-    assert!(matches!(
-        prepare_deployment(&stored, request(&base, &[], vec![])),
-        Err(DeploymentError::NonConvergent { .. })
-    ));
+    prepare_deployment(&stored, request(&base, &[], vec![])).unwrap();
     let reverse = Lens::new(edge.target_hash, edge.source_hash, edge.backward.clone());
     assert!(matches!(
         prepare_deployment(&stored, request(&next, &[], vec![reverse])),
@@ -276,7 +273,7 @@ fn rejects_cycles_backward_activation_and_disconnected_stored_schemas() {
     let isolated = schema(&["isolated"]);
     assert!(matches!(
         prepare_deployment(&stored, request(&next, &[isolated], vec![])),
-        Err(DeploymentError::NonConvergent { .. })
+        Err(DeploymentError::DisconnectedGraph { .. })
     ));
     assert!(matches!(
         prepare_deployment(

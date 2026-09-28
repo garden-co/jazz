@@ -129,6 +129,7 @@ pub(crate) trait CatalogueStore {
     fn known_schema(&self, schema_hash: &SchemaHash) -> Result<Option<Schema>, CatalogueError>;
     fn known_lenses(&self) -> Result<Vec<Lens>, CatalogueError>;
     fn schema_published_at(&self, schema_hash: &SchemaHash) -> Result<Option<u64>, CatalogueError>;
+    #[cfg(any(test, feature = "embedded-server"))]
     fn publish_schema(&self, schema: Schema) -> Result<ObjectId, CatalogueError>;
     fn active_schema_summary(&self) -> Result<Option<ActiveSchemaSummary>, CatalogueError>;
     fn active_schema(&self) -> Result<Option<ActiveSchema>, CatalogueError>;
@@ -139,6 +140,7 @@ pub(crate) trait CatalogueStore {
         permissions: HashMap<TableName, TablePolicies>,
         expected_parent_bundle_object_id: Option<ObjectId>,
     ) -> Result<Option<ObjectId>, CatalogueError>;
+    #[cfg(any(test, feature = "embedded-server"))]
     fn publish_lens(&self, lens: &Lens) -> Result<ObjectId, CatalogueError>;
     fn flush(&self) -> Result<(), CatalogueError>;
     fn close(&self) -> Result<(), CatalogueError>;
@@ -667,6 +669,7 @@ impl CatalogueStore for StoredCatalogue {
         Ok(index.schema_published_at.get(schema_hash).copied())
     }
 
+    #[cfg(any(test, feature = "embedded-server"))]
     fn publish_schema(&self, schema: Schema) -> Result<ObjectId, CatalogueError> {
         let published_at = unix_timestamp_millis();
         let (schema_hash, entry) = schema_entry(self.app_id, schema, published_at);
@@ -765,6 +768,7 @@ impl CatalogueStore for StoredCatalogue {
         Ok(Some(head_entry.object_id))
     }
 
+    #[cfg(any(test, feature = "embedded-server"))]
     fn publish_lens(&self, lens: &Lens) -> Result<ObjectId, CatalogueError> {
         if lens.is_draft() {
             return Err(CatalogueError::WriteError(
@@ -833,6 +837,7 @@ impl ServerCatalogue {
         store.schema_published_at(schema_hash)
     }
 
+    #[cfg(any(test, feature = "embedded-server"))]
     pub(crate) fn publish_schema(
         &self,
         store: &impl CatalogueStore,
@@ -866,6 +871,7 @@ impl ServerCatalogue {
         store.publish_permissions_bundle(schema_hash, permissions, expected_parent_bundle_object_id)
     }
 
+    #[cfg(any(test, feature = "embedded-server"))]
     pub(crate) fn publish_lens(
         &self,
         store: &impl CatalogueStore,

@@ -85,12 +85,14 @@ pub enum DeploymentError {
     #[error("migration graph contains a cycle; blocked schemas: {}", display_hashes(.schemas, ", "))]
     Cycle { schemas: Vec<SchemaHash> },
     #[error(
-        "every schema must reach target {target} through forward migrations; connect terminal schemas {} to the target", display_hashes(.tips, ", ")
+        "cannot deploy schema {target} from active schema {active}: no forward migration path exists. Create a new target schema with a forward migration from the active schema, review it, then deploy again."
     )]
-    NonConvergent {
+    UnreachableTarget {
+        active: SchemaHash,
         target: SchemaHash,
-        tips: Vec<SchemaHash>,
     },
+    #[error("migration history has disconnected roots: {}. Add migrations connecting these histories to one common root before deploying", display_hashes(.roots, ", "))]
+    DisconnectedGraph { roots: Vec<SchemaHash> },
     #[error("migration paths disagree: {} and {}", display_hashes(.first, " -> "), display_hashes(.second, " -> "))]
     ConflictingPaths {
         first: Vec<SchemaHash>,
@@ -183,6 +185,7 @@ pub fn prepare_deployment(
         &schemas,
         &migrations,
         &representatives,
+        stored,
         request.target_schema_hash,
     )?;
     for ((from, to), lens) in &migrations {

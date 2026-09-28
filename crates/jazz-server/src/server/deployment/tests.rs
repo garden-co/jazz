@@ -158,7 +158,7 @@ async fn deploy_complete_diamond_reopens_and_rejects_incomplete_history() {
     );
     let (status, error) = http(&router, "POST", "/deploy", incomplete.clone()).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
-    assert_eq!(error["code"], "non_convergent_graph");
+    assert_eq!(error["code"], "unreachable_deployment_target");
     assert_eq!(graph(&router).await, before);
     let mut complete = incomplete;
     complete["migrations"]
@@ -199,12 +199,12 @@ async fn deploy_complete_diamond_reopens_and_rejects_incomplete_history() {
             .len(),
         2
     );
+    deploy_ok(&router, request(&b, &[], vec![])).await;
     assert_eq!(
-        http(&router, "POST", "/deploy", request(&b, &[], vec![]))
-            .await
-            .0,
-        StatusCode::UNPROCESSABLE_ENTITY
+        graph(&router).await["activeSchemaHash"],
+        SchemaHash::compute(&b).to_string()
     );
+    deploy_ok(&router, request(&d, &[], vec![])).await;
     server.shutdown().await;
     drop(router);
     drop(server);
@@ -250,7 +250,10 @@ async fn deploy_validation_failure_leaves_no_durable_partial_catalogue() {
             request(&b, &[&a, &b], vec![migration(&a, &b, &[])]),
             "invalid_migration",
         ),
-        (request(&b, &[&a, &b], vec![]), "non_convergent_graph"),
+        (
+            request(&b, &[&a, &b], vec![]),
+            "disconnected_migration_graph",
+        ),
     ] {
         let (status, error) = http(&router, "POST", "/deploy", body).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
@@ -299,7 +302,7 @@ async fn deploy_concurrent_branches_revalidate_against_the_committed_graph() {
         "{}",
         rejected.1
     );
-    assert_eq!(rejected.1["code"], "non_convergent_graph");
+    assert_eq!(rejected.1["code"], "unreachable_deployment_target");
     let graph = graph(&router).await;
     assert_eq!(
         graph["activeSchemaHash"],
@@ -557,4 +560,54 @@ async fn compatible_connections_preserve_branch_and_convergence_validation() {
     assert_eq!(error["code"], "conflicting_paths");
     assert_eq!(graph(&router).await["schemas"], json!([]));
     server.shutdown().await;
+}
+
+/// Alice reverts B to A, then deploys C; Bob cannot directly switch C to sibling B.
+/// A -> B; B -> A (activation only); A -> C; reopen -> C.
+#[tokio::test]
+async fn deploy_revert_then_new_branch_reopens_and_rejects_stored_sibling() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = builder(Some(dir.path())).build().await.unwrap();
+    let router = create_router(server.state.clone());
+    let (a, b, c) = (schema(&[]), schema(&["a"]), schema(&["b"]));
+    deploy_ok(&router, request(&a, &[&a], vec![])).await;
+    deploy_ok(&router, request(&b, &[&b], vec![migration(&a, &b, &["a"])])).await;
+    let reverted = deploy_ok(&router, request(&a, &[], vec![])).await;
+    assert_eq!(
+        reverted["published"],
+        json!({"schemas":[], "migrations":[]})
+    );
+    deploy_ok(&router, request(&c, &[&c], vec![migration(&a, &c, &["b"])])).await;
+    let expected = graph(&router).await;
+    assert_eq!(
+        expected["activeSchemaHash"],
+        SchemaHash::compute(&c).to_string()
+    );
+    let (status, error) = http(&router, "POST", "/deploy", request(&b, &[], vec![])).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(error["code"], "unreachable_deployment_target");
+    assert_eq!(
+        error["details"]["active"],
+        SchemaHash::compute(&c).to_string()
+    );
+    assert_eq!(
+        error["details"]["target"],
+        SchemaHash::compute(&b).to_string()
+    );
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("first deploy a common ancestor")
+    );
+    assert_eq!(graph(&router).await, expected);
+    server.shutdown().await;
+    drop(router);
+    drop(server);
+    let reopened = builder(Some(dir.path())).build().await.unwrap();
+    let router = create_router(reopened.state.clone());
+    assert_eq!(graph(&router).await, expected);
+    deploy_ok(&router, request(&a, &[], vec![])).await;
+    deploy_ok(&router, request(&b, &[], vec![])).await;
+    reopened.shutdown().await;
 }
