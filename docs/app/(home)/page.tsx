@@ -3,7 +3,6 @@ import { Card } from "@astryxdesign/core/Card";
 import { Heading } from "@astryxdesign/core/Heading";
 import { Link as AstryxLink } from "@astryxdesign/core/Link";
 import { Text } from "@astryxdesign/core/Text";
-import { Eyebrow } from "@garden-co/design/react";
 import { AppLink } from "@/components/design/app-link";
 import { PricingCalculator } from "@/components/home/pricing-calculator";
 import { pricingMeters } from "@/lib/home-pricing";
@@ -170,7 +169,6 @@ export default function HomePage() {
         <div className="mx-auto w-full max-w-(--fd-layout-width) px-4">
           <div className="grid gap-14 lg:grid-cols-[minmax(0,0.86fr)_minmax(0,1.14fr)] lg:items-end">
             <div className="max-w-[34rem] space-y-4">
-              <Eyebrow>Jazz Cloud</Eyebrow>
               <Heading
                 level={2}
                 className="text-3xl font-black leading-[0.9] tracking-[-0.04em] sm:text-[2.6rem]"
@@ -213,7 +211,6 @@ export default function HomePage() {
         <div className="mx-auto w-full max-w-(--fd-layout-width) px-4">
           <div className="grid gap-14 lg:grid-cols-[minmax(0,0.86fr)_minmax(0,1.14fr)]">
             <div className="max-w-[34rem] space-y-4">
-              <Eyebrow>Usage-based pricing</Eyebrow>
               <Heading
                 level={2}
                 className="text-3xl font-black leading-[0.9] tracking-[-0.04em] sm:text-[2.6rem]"
@@ -254,7 +251,9 @@ export default function HomePage() {
             <div className="grid gap-x-8 gap-y-10 sm:grid-cols-3">
               {pricingMeters.map((meter) => (
                 <div key={meter.name} className="border-t pt-4">
-                  <Eyebrow>{meter.name}</Eyebrow>
+                  <Text as="p" display="block" type="label" color="secondary">
+                    {meter.name}
+                  </Text>
                   <Heading level={3} type="display-3" className="mt-2">
                     {meter.price}
                   </Heading>
