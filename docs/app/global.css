@@ -63,3 +63,72 @@ h6 {
   --diagram-fg: var(--color-fd-foreground);
   --diagram-muted: var(--color-fd-muted-foreground);
 }
+
+/* Docs pages (Astryx). Astryx components carry no outer margins, so the
+   article sets the vertical rhythm between MDX blocks here. */
+.docs-body {
+  max-width: 46rem;
+}
+
+.docs-body .docs-heading {
+  scroll-margin-top: 5rem;
+}
+
+.docs-body h2.docs-heading {
+  margin-top: 2.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.docs-body :is(h3, h4, h5, h6).docs-heading {
+  margin-top: 2rem;
+  margin-bottom: 0.5rem;
+}
+
+.docs-body .docs-block {
+  margin-block: 1rem;
+}
+
+.docs-body :is(ul, ol) {
+  margin-block: 1rem;
+  padding-inline-start: 1.5rem;
+  line-height: 1.6;
+}
+
+.docs-body ul {
+  list-style: disc;
+}
+
+.docs-body ol {
+  list-style: decimal;
+}
+
+.docs-body li + li,
+.docs-body li > :is(ul, ol) {
+  margin-top: 0.375rem;
+}
+
+.docs-body .docs-callout > :first-child {
+  margin-top: 0;
+}
+
+.docs-body .docs-callout > :last-child {
+  margin-bottom: 0;
+}
+
+.docs-body img {
+  border-radius: 0.5rem;
+}
+
+/* The outline follows the reader; it needs the width of a wide screen. */
+.docs-toc-panel {
+  position: sticky;
+  top: 5rem;
+  align-self: start;
+  padding-top: 2rem;
+}
+
+@media (max-width: 1279px) {
+  .docs-toc-panel {
+    display: none;
+  }
+}

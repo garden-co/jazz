@@ -1,39 +1,111 @@
-import { getPageImage, source } from "@/lib/source";
-import { DocsBody, DocsDescription, DocsPage, DocsTitle } from "fumadocs-ui/layouts/docs/page";
-import { notFound } from "next/navigation";
-import { getMDXComponents } from "@/mdx-components";
+import type { ReactNode } from "react";
 import type { Metadata } from "next";
-import { createRelativeLink } from "fumadocs-ui/mdx";
+import { notFound } from "next/navigation";
+import { findNeighbour } from "fumadocs-core/page-tree";
+import { ClickableCard } from "@astryxdesign/core/ClickableCard";
+import { Divider } from "@astryxdesign/core/Divider";
+import { Layout, LayoutContent, LayoutPanel } from "@astryxdesign/core/Layout";
+import { HStack, VStack } from "@astryxdesign/core/Stack";
+import { Heading, Text } from "@astryxdesign/core/Text";
+import { getPageImage, source } from "@/lib/source";
+import { textOf } from "@/lib/docs-nav";
+import { getDocsMDXComponents } from "@/components/docs/mdx";
+import { DocsLink } from "@/components/docs/mdx-client";
+import { DocsToc } from "@/components/docs/docs-toc";
 import { LLMCopyButton, ViewOptions } from "@/components/ai/page-actions";
 import { gitConfig } from "@/lib/layout.shared";
+
+function NeighbourCard({
+  direction,
+  item,
+}: {
+  direction: "Previous" | "Next";
+  item?: { name: ReactNode; url: string };
+}) {
+  if (!item) return <div />;
+  const name = textOf(item.name);
+  return (
+    <ClickableCard label={`${direction}: ${name}`} href={item.url} padding={3}>
+      <VStack gap={0.5}>
+        <Text type="supporting" color="secondary" display="block">
+          {direction}
+        </Text>
+        <Text weight="medium" display="block">
+          {name}
+        </Text>
+      </VStack>
+    </ClickableCard>
+  );
+}
 
 export default async function Page(props: PageProps<"/docs/[[...slug]]">) {
   const params = await props.params;
   const page = source.getPage(params.slug);
   if (!page) notFound();
 
+  const current = page;
   const MDX = page.data.body;
+  const neighbours = findNeighbour(source.getPageTree(), page.url);
+  const toc = page.data.toc.map((item) => ({
+    id: item.url.replace(/^#/, ""),
+    label: textOf(item.title),
+    level: item.depth,
+  }));
+
+  // Resolve relative `.mdx` links against this page, then render them as
+  // Astryx links.
+  async function RelativeLink({ href, children }: { href?: string; children?: ReactNode }) {
+    return <DocsLink href={href ? source.resolveHref(href, current) : href}>{children}</DocsLink>;
+  }
 
   return (
-    <DocsPage toc={page.data.toc} full={page.data.full}>
-      <DocsTitle>{page.data.title}</DocsTitle>
-      <DocsDescription className="mb-0">{page.data.description}</DocsDescription>
-      <div className="flex flex-row gap-2 items-center border-b pb-6">
-        <LLMCopyButton markdownUrl={`${page.url}.mdx`} />
-        <ViewOptions
-          markdownUrl={`${page.url}.mdx`}
-          githubUrl={`https://github.com/${gitConfig.user}/${gitConfig.repo}/blob/${gitConfig.branch}/content/docs/${page.path}`}
-        />
-      </div>
-      <DocsBody>
-        <MDX
-          components={getMDXComponents({
-            // this allows you to link to other pages with relative file paths
-            a: createRelativeLink(source, page),
-          })}
-        />
-      </DocsBody>
-    </DocsPage>
+    <Layout
+      height="auto"
+      contentWidth={1120}
+      end={
+        page.data.full ? undefined : (
+          <LayoutPanel
+            isScrollable={false}
+            label="On this page"
+            role="complementary"
+            width={240}
+            className="docs-toc-panel"
+          >
+            <DocsToc items={toc} />
+          </LayoutPanel>
+        )
+      }
+      content={
+        <LayoutContent isScrollable={false} padding={8}>
+          <article className="docs-body">
+            <VStack gap={2}>
+              <Heading level={1}>{page.data.title}</Heading>
+              {page.data.description && (
+                <Text type="large" color="secondary" display="block">
+                  {page.data.description}
+                </Text>
+              )}
+              <HStack gap={2} vAlign="center">
+                <LLMCopyButton markdownUrl={`${page.url}.mdx`} />
+                <ViewOptions
+                  markdownUrl={`${page.url}.mdx`}
+                  githubUrl={`https://github.com/${gitConfig.user}/${gitConfig.repo}/blob/${gitConfig.branch}/content/docs/${page.path}`}
+                />
+              </HStack>
+            </VStack>
+            <Divider className="my-8" />
+            <MDX components={getDocsMDXComponents({ a: RelativeLink })} />
+            <Divider className="my-10" />
+            <nav aria-label="Pagination" className="grid gap-3 sm:grid-cols-2">
+              <NeighbourCard direction="Previous" item={neighbours.previous} />
+              <div className="sm:text-end">
+                <NeighbourCard direction="Next" item={neighbours.next} />
+              </div>
+            </nav>
+          </article>
+        </LayoutContent>
+      }
+    />
   );
 }
 

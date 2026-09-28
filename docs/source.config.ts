@@ -1,7 +1,8 @@
-import { defineCollections, defineConfig, defineDocs } from "fumadocs-mdx/config";
+import { applyMdxPreset, defineCollections, defineConfig, defineDocs } from "fumadocs-mdx/config";
 import { metaSchema, pageSchema } from "fumadocs-core/source/schema";
 import { z } from "zod";
 import { parseCodeBlockAttributes, rehypeCodeDefaultOptions } from "fumadocs-core/mdx-plugins";
+import { rehypeCodeMeta } from "./lib/rehype-code-meta";
 
 type ParseMetaString = NonNullable<typeof rehypeCodeDefaultOptions.parseMetaString>;
 
@@ -30,6 +31,12 @@ export const docs = defineDocs({
     postprocess: {
       includeProcessedMarkdown: true,
     },
+    // Docs pages render code with Astryx CodeBlock (client-side highlighting
+    // from the raw source), so Shiki is off here; blog and slides keep it.
+    mdxOptions: applyMdxPreset({
+      rehypeCodeOptions: false,
+      rehypePlugins: (plugins) => [...plugins, rehypeCodeMeta],
+    }),
   },
   meta: {
     schema: metaSchema,
