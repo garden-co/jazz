@@ -2156,7 +2156,7 @@ fn query_subscription_ships_provenance_closure_for_local_evaluation() {
 // Global-tier server whose receiver rows a test can read after each batch.
 
 fn restore_global(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     table: &str,
     row_uuid: RowUuid,
     now_ms: u64,
@@ -2188,9 +2188,9 @@ fn served_issue(title: &str, owner: AuthorSubject) -> BTreeMap<String, Value> {
 
 struct ServedPointSubscription {
     _server_dir: tempfile::TempDir,
-    server: NodeState<RocksDbStorage>,
+    server: NodeState,
     _reader_dir: tempfile::TempDir,
-    reader: NodeState<RocksDbStorage>,
+    reader: NodeState,
     shape: ValidatedQuery,
     binding: Binding,
     peer: PeerState,
@@ -2390,7 +2390,7 @@ fn self_inheriting_folders_schema() -> JazzSchema {
                             vec!["claims".to_owned(), "sub".to_owned()],
                         ),
                         PublicPolicyExpr::Inherits {
-                            operation: crate::tools::public_schema::Operation::Select,
+                            operation: crate::model::public_schema::Operation::Select,
                             via_column: "parent".into(),
                             max_depth: None,
                         },

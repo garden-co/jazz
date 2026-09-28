@@ -514,7 +514,7 @@ fn first_result_intersects_index_keys_before_loading_rows() {
     block_on(db.close()).unwrap();
 }
 
-fn point(db: &Db<TestStorage>, n: u8) -> PreparedQuery {
+fn point(db: &Db, n: u8) -> PreparedQuery {
     db.prepare_query(
         &Query::from("documents").filter(eq(col("id"), jazz::query::lit(Value::Uuid(row(n).0)))),
     )
