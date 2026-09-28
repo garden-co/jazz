@@ -1,11 +1,35 @@
 import type { CryptoMechanism } from "./envelope.js";
 
+/** Chunk boundaries are transport details, not cryptographic record boundaries.
+ * Implementations must bound memory, respect pull backpressure and cancellation,
+ * return owned output chunks, and throw on corruption or missing final authentication.
+ * Successfully consuming a prefix does not establish whole-stream success.
+ * Early return requests upstream cleanup without awaiting it or propagating cleanup
+ * failures. Use AbortSignal to interrupt a pending read; return() alone cannot.
+ */
+export interface LargeValueCipher {
+  readonly mechanism: CryptoMechanism;
+  encrypt(
+    key: Uint8Array,
+    context: Uint8Array,
+    source: AsyncIterable<Uint8Array>,
+    options?: { signal?: AbortSignal },
+  ): AsyncIterable<Uint8Array>;
+  decrypt(
+    key: Uint8Array,
+    context: Uint8Array,
+    source: AsyncIterable<Uint8Array>,
+    options?: { signal?: AbortSignal },
+  ): AsyncIterable<Uint8Array>;
+}
+
 /** Independent adapter overrides; omitted adapters use available platform defaults. */
 export interface JazzCrypto {
   equalityIndex?: EqualityIndex;
   deviceSigner?: DeviceSigner;
   cellCipher?: CellCipher;
   keyEnvelope?: KeyEnvelope;
+  largeValueCipher?: LargeValueCipher;
 }
 
 /** Resolved platform defaults and independently supplied adapter overrides. */
@@ -14,6 +38,7 @@ export interface CryptoAdapters {
   deviceSigner: DeviceSigner;
   cellCipher: CellCipher;
   keyEnvelope: KeyEnvelope;
+  largeValueCipher?: LargeValueCipher;
 }
 
 export type DeviceKeyPair = Readonly<{ publicKey: Uint8Array; privateKey: Uint8Array }>;

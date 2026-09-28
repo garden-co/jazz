@@ -2,8 +2,9 @@
 
 This companion specifies the standalone context/envelope codecs and browser/native
 cryptographic adapters. Byte-level fixtures pin the encoding independently of
-the implementation's serializer. Table writes, lifecycle records and stream
-ciphers are not part of this layer. Test descriptions below identify carried
+the implementation's serializer. Table writes and lifecycle records are not
+part of this layer. The [stream format](E2EE_LARGE_VALUE_FORMAT.md) specifies
+the bounded large-value cipher. Test descriptions below identify carried
 coverage, not a validation receipt for this extraction.
 
 ## Common envelope, version 1
@@ -130,9 +131,9 @@ This receipt is not a protocol audit or a completed revocation implementation.
 
 ## Adapter selection
 
-`JazzCrypto` independently overrides `cellCipher`, `keyEnvelope`, `deviceSigner`
-and `equalityIndex`. Browser and native factories initialise only omitted
-platform defaults. The browser dependency is loaded lazily. Selection validates
+`JazzCrypto` independently overrides `cellCipher`, `keyEnvelope`, `deviceSigner`,
+`equalityIndex` and `largeValueCipher`. Browser and native factories initialise
+only omitted platform defaults. The browser dependency is loaded lazily. Selection validates
 mechanism IDs and versions; this does not validate an adapter's cryptographic
 strength. Import interfaces and context/envelope codecs from `jazz-tools/e2ee`.
 Platform factories are explicit: `jazz-tools/e2ee/browser` and
@@ -141,6 +142,16 @@ browser/native exchange have executable coverage; Chromium also reads fixtures
 through the built browser bundle. After building correctness artifacts, run
 `pnpm --filter jazz-tools build:runtime` then
 `pnpm --filter jazz-tools test:crypto-package`.
+
+`LargeValueCipher.encrypt/decrypt` transform `AsyncIterable<Uint8Array>` with key
+bytes, canonical context and an optional abort signal. Pulling respects
+backpressure; implementations bound memory, return owned output chunks and
+propagate cancellation and errors. Successful iteration to the end requires
+final authentication; consumed prefixes alone do not establish whole-stream
+success. Both platform factories supply the built-in
+[version-one stream mechanism](E2EE_LARGE_VALUE_FORMAT.md) by default.
+An explicitly supplied adapter bypasses that platform default; there is no
+plaintext or whole-buffer fallback.
 
 ## Dependency qualification and limits
 

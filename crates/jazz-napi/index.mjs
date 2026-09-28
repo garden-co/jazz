@@ -8,6 +8,7 @@ const nativeBinding = require("./index.cjs");
 
 export default nativeBinding;
 export const {
+  E2EeSodiumStream,
   e2eeSodiumDecrypt,
   e2eeSodiumEncrypt,
   e2eeSodiumHash,
