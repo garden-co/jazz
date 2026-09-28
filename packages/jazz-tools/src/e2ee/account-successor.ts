@@ -1,14 +1,16 @@
 import { encodeCryptoContext } from "./context.js";
 import type { DeviceSigner } from "./types.js";
 
-/** Independently identified immutable proposal; predecessor is signed explicitly. */
+/** Independently identified immutable proposal; predecessor and action are signed explicitly. */
 export type AccountSuccessor = {
   id: string;
   predecessor: string;
   accountId: string;
   epochId: string;
   signerId: string;
-  removedDeviceId: string;
+  action: "remove-device" | "retire-recovery-root";
+  removedDeviceId?: string | null;
+  retiredRecoveryRootId?: string | null;
   membership: Uint8Array;
   revision: Uint8Array;
   verification: Uint8Array;
@@ -16,6 +18,21 @@ export type AccountSuccessor = {
   deliveries: Uint8Array;
   signature: Uint8Array;
 };
+
+export function successorTargetId(
+  row: Pick<AccountSuccessor, "action" | "removedDeviceId" | "retiredRecoveryRootId">,
+): string {
+  const targetId = row.action === "remove-device" ? row.removedDeviceId : row.retiredRecoveryRootId;
+  if (
+    typeof targetId !== "string" ||
+    !uuid.test(targetId) ||
+    (row.action !== "remove-device" && row.action !== "retire-recovery-root") ||
+    (row.action === "remove-device" && row.retiredRecoveryRootId != null) ||
+    (row.action === "retire-recovery-root" && row.removedDeviceId != null)
+  )
+    throw new Error("Invalid E2EE successor action target");
+  return targetId;
+}
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
@@ -123,25 +140,26 @@ export function successorSigningBytes(
   row: Omit<AccountSuccessor, "signature">,
 ): Uint8Array {
   if (
-    ![row.id, row.predecessor, row.epochId, row.signerId, row.removedDeviceId].every((id) =>
-      uuid.test(id),
-    ) ||
-    row.predecessor === row.epochId
+    ![row.id, row.predecessor, row.epochId, row.signerId].every((id) => uuid.test(id)) ||
+    row.predecessor === row.epochId ||
+    !["remove-device", "retire-recovery-root"].includes(row.action)
   )
-    throw new Error("Invalid E2EE successor identifiers");
+    throw new Error("Invalid E2EE successor identifiers or action");
+  const targetId = successorTargetId(row);
   const members = decodeEpochIds(row.membership);
   decodeEpochIds(row.revision);
   const deliveries = decodeEpochDeliveries(row.deliveries);
   if (
-    members.includes(row.removedDeviceId) ||
+    (row.action === "remove-device" && members.includes(targetId)) ||
     members.length !== deliveries.size ||
     members.some((id) => !deliveries.has(id))
   )
-    throw new Error("E2EE successor recipients do not match membership");
+    throw new Error("E2EE successor recipients do not match action and membership");
   const prefix = successorContext(application, row, "signature", row.signerId);
   const fields = [
     encoder.encode(row.predecessor),
-    encoder.encode(row.removedDeviceId),
+    encoder.encode(row.action),
+    encoder.encode(targetId),
     row.membership,
     row.revision,
     row.verification,
@@ -158,7 +176,9 @@ export type PublicAccountSuccessor = Pick<
   | "epochId"
   | "predecessor"
   | "signerId"
+  | "action"
   | "removedDeviceId"
+  | "retiredRecoveryRootId"
   | "membership"
   | "revision"
 >;
@@ -169,13 +189,16 @@ export function publicSuccessorSigningBytes(
   row: PublicAccountSuccessor,
 ): Uint8Array {
   if (
-    ![row.id, row.predecessor, row.epochId, row.signerId, row.removedDeviceId].every(
+    ![row.id, row.predecessor, row.epochId, row.signerId].every(
       (id) => typeof id === "string" && uuid.test(id),
     ) ||
-    row.predecessor === row.epochId
+    row.predecessor === row.epochId ||
+    !["remove-device", "retire-recovery-root"].includes(row.action)
   )
-    throw new Error("Invalid E2EE public successor identifiers");
-  if (decodeEpochIds(row.membership).includes(row.removedDeviceId))
+    throw new Error("Invalid E2EE public successor identifiers or action");
+  const targetId = successorTargetId(row);
+  const members = decodeEpochIds(row.membership);
+  if (row.action === "remove-device" && members.includes(targetId))
     throw new Error("Removed E2EE device remains in successor membership");
   checkIds(parse(row.revision), false);
   const prefix = encodeCryptoContext({
@@ -191,7 +214,8 @@ export function publicSuccessorSigningBytes(
   });
   return appendFields(prefix, [
     encoder.encode(row.predecessor),
-    encoder.encode(row.removedDeviceId),
+    encoder.encode(row.action),
+    encoder.encode(targetId),
     row.membership,
     row.revision,
   ]);
