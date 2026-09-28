@@ -1,4 +1,4 @@
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
@@ -101,3 +101,88 @@ it("creates independent recovery material with an accepted account-private key d
     await server.stop();
   }
 }, 60000);
+
+it.each(["root", "delivery", "protector"] as const)(
+  "does not return recovery material when its %s setup stage fails",
+  async (stage) => {
+    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    const clients: Awaited<ReturnType<typeof createDb>>[] = [];
+    const store = () => {
+      let saved: string | null = null;
+      return {
+        async read() {
+          return saved;
+        },
+        async update(transform: (current: string | null) => string) {
+          saved = transform(saved);
+        },
+      };
+    };
+    try {
+      await deploy({
+        serverUrl: server.url,
+        appId: server.appId,
+        adminSecret: server.adminSecret,
+        schema: app,
+        permissions: deviceRequestPermissions,
+      });
+      const account = await localAccountConfig(server.appId, server.url);
+      let injected = 0;
+      let failRootSigning = false;
+      const adapters = await createNativeCrypto();
+      const owner = await createDb({
+        ...account,
+        e2ee: {
+          store: store(),
+          crypto: {
+            ...adapters,
+            deviceSigner: {
+              ...adapters.deviceSigner,
+              async sign(key, record) {
+                if (failRootSigning) {
+                  injected++;
+                  throw new Error("injected recovery-root signing failure");
+                }
+                return adapters.deviceSigner.sign(key, record);
+              },
+            },
+          },
+        },
+      });
+      clients.push(owner);
+      if (stage === "root") {
+        await owner.e2ee.devices.list();
+        failRootSigning = true;
+      } else {
+        const failedTable =
+          stage === "delivery" ? app.__e2ee_recovery_deliveries : app.__e2ee_recovery_protectors;
+        const insert = owner.insert.bind(owner);
+        vi.spyOn(owner, "insert").mockImplementation((table, data, options) => {
+          if (table === failedTable) {
+            injected++;
+            return insert(
+              table,
+              { ...(data as Record<string, unknown>), rootId: crypto.randomUUID() },
+              options,
+            );
+          }
+          return insert(table, data, options);
+        });
+      }
+
+      await expect(owner.e2ee.recovery.create().wait()).rejects.toThrow();
+      expect(injected).toBe(1);
+      expect(await owner.all(app.__e2ee_recovery_roots, { tier: "edge" })).toHaveLength(
+        stage === "root" ? 0 : 1,
+      );
+      expect(await owner.all(app.__e2ee_recovery_deliveries, { tier: "edge" })).toHaveLength(
+        stage === "protector" ? 1 : 0,
+      );
+      expect(await owner.all(app.__e2ee_recovery_protectors, { tier: "edge" })).toEqual([]);
+    } finally {
+      await Promise.all(clients.map((client) => client.shutdown()));
+      await server.stop();
+    }
+  },
+  60_000,
+);
