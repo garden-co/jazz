@@ -158,7 +158,7 @@ universal `_id` contract from support in an individual query form.
 **Implementation status (2026-07-27).** Parameterized `!=` predicates are
 accepted for maintained subscriptions; the behavior is covered by
 `maintained_subscription_view_ne_param_stays_maintained` in
-`crates/jazz/src/peer.rs`.
+`crates/jazz/layers/node/src/peer.rs`.
 
 An `array_subquery` names an output relation (`column_name`), an inner table,
 and a correlation from a parent-scope column to an inner-table column. It may
@@ -479,7 +479,7 @@ join sees the accumulated wide left row, and the final terminal input carries
 every source needed for the tuple and its identity. The contribution lowerer
 used for include closure intentionally does something narrower: it projects a
 join to `RIGHT_JOIN_PREFIX` only
-(`crates/jazz/src/node/query_engine/lowering.rs:5199-5251`). That projection is
+(`crates/jazz/layers/engine/src/query_engine/lowering.rs:5199-5251`). That projection is
 correct for a source-membership fact, but MUST NOT be reused for flat output.
 
 This is achievable with the existing Groove join representation. An inner join
@@ -493,7 +493,7 @@ create an arrangement-key arity obstacle. They do increase arrangement value and
 terminal-payload bytes, which are ordinary descriptor/payload costs, not a
 reason to introduce a second terminal. The source resolver already supplies the
 policy-filtered projected source boundary before query composition
-(`crates/jazz/src/node/query_eval.rs:537-1066`, `2036-2184`); wide lowering
+(`crates/jazz/layers/node/src/node/query_eval.rs:537-1066`, `2036-2184`); wide lowering
 preserves that ordering.
 
 The one-shot public Rust facade currently returns `Vec<(ObjectId, Vec<Value>)>`
@@ -611,19 +611,19 @@ stable, and a descriptor does not depend on runtime data.
 
 The existing public `JoinSpec { table, alias, on }` advertises aliases and an
 arbitrary equality from the accumulated left result to the newly joined table
-(`crates/jazz/src/tools/public_api/query.rs:196-213`). The core `JoinVia` AST is
+(`crates/jazz/layers/model/src/model/public_api/query.rs:196-213`). The core `JoinVia` AST is
 not that form: it has no alias or accumulated-left scope, and only represents a
 root- or immediately-nested reference/junction traversal with a target column,
 optional source column/lookup, correlations, filters, and nested joins
-(`crates/jazz/src/query.rs:2045-2071`; validation at
-`crates/jazz/src/query.rs:2713-2822`). **Recommendation:** extend the core with
+(`crates/jazz/layers/model/src/query.rs:2045-2071`; validation at
+`crates/jazz/layers/model/src/query.rs:2713-2822`). **Recommendation:** extend the core with
 a separately named flat-join AST and lower the public `JoinSpec` into it; do not
 try to encode aliases or arbitrary accumulated joins in `JoinVia`, and do not
 leave the public builder advertising a shape that the client rejects. This is a
 small, explicit surface addition rather than a policy-model change.
 
 `result_element_index` is not part of core `Query`
-(`crates/jazz/src/query.rs:24-61`), and MUST be removed from the
+(`crates/jazz/layers/model/src/query.rs:24-61`), and MUST be removed from the
 public flat-join surface. It is fully expressible as a qualified projection:
 select the desired source's qualified columns (including its explicit row-id
 field where needed), or make that table the query root when its `ObjectId` is the
@@ -657,7 +657,7 @@ materialize root `CurrentRow`s`, and expand-mode occurrence-addressed public
 delivery is not complete. Collect-mode structured output already uses the sole
 Groove terminal and typed terminal operations. The ordinary current
 source resolver already applies source authorization and schema projection
-before lowered query composition (`crates/jazz/src/node/query_eval.rs:537-1066`,
+before lowered query composition (`crates/jazz/layers/node/src/node/query_eval.rs:537-1066`,
 `2036-2184`); this target relies on that existing source boundary.
 
 ### 6.4.2 Uncorrelated policy existence

@@ -110,7 +110,7 @@ describe("RecordPlayer scenario receipt", () => {
       ),
     ).resolves.toEqual([]);
 
-    expect(capturedOptions).toEqual({ tier: "remote-if-possible" });
+    expect(capturedOptions).toEqual({ tier: "local-first-unless-empty" });
     const runtimeQuery = JSON.parse(translateQuery(capturedQuery!._build(), app.wasmSchema));
     expect(runtimeQuery.table).toBe("playlist_entries");
     expect(runtimeQuery.conditions).toEqual([

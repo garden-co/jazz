@@ -1138,6 +1138,10 @@ async function initialize(context: RuntimeContext): Promise<void> {
         post(peer.port, { type: "mutation-error", event: received }),
       );
     });
+    runtime.onRemoteLinkStateChange((state) => {
+      // Only the current runtime speaks for this namespace's upstream.
+      if (context.runtime === runtime) broadcast(context, { type: "remote-link", state });
+    }, new AbortController().signal);
     context.runtime.onServerTransportError((error) => {
       // Transport failures are foreground events, not authority fates or
       // durable notifications. Only peers that have completed admission own a
@@ -1631,6 +1635,7 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
           } else {
             ensureServerConnection(peer.context);
           }
+          post(peer.port, { type: "remote-link", state: activeRuntime.remoteLinkState() });
           result(peer, message.id, undefined, {
             peerAuthority,
             ...(peer.inspectorAttachment
@@ -1681,7 +1686,7 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
           await activeRuntime.disconnect({ rejectWaiters: false });
         } catch (error) {
           // Match the public Db contract: a failed explicit disconnect must
-          // not silently change RemoteIfPossible behavior for any tab. The
+          // not silently change explicit-offline read behavior for any tab. The
           // adapter may already have detached the old carrier before reporting
           // a retirement error, so restore normal connection ownership.
           peer.context.explicitlyDisconnected = wasExplicitlyDisconnected;

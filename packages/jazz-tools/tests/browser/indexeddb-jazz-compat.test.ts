@@ -332,7 +332,7 @@ describe("browser Jazz storage compatibility corpus", () => {
       rawRecords(physicalDbName),
     );
     // Reopen must materialize the durable local replica without depending on
-    // a fresh remote-coverage round trip. The earlier edge read proves the
+    // a fresh remote-coverage round trip. The earlier global read proves the
     // synced fixture; this is specifically the offline persistence boundary.
     const reopenedMain = await pinnedPhase("readonly-main-query", () =>
       db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "main" }),

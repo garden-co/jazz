@@ -250,9 +250,9 @@ impl ServerBuilder {
             ));
         }
 
-        let schema = match &self.schema_mode {
-            ServerSchemaMode::Fixed(schema) => Some(schema.clone()),
-            ServerSchemaMode::Dynamic => latest_catalogue_schema,
+        let (schema, dynamic) = match &self.schema_mode {
+            ServerSchemaMode::Fixed(schema) => (Some(schema.clone()), false),
+            ServerSchemaMode::Dynamic => (latest_catalogue_schema, true),
         };
         let Some(schema) = schema else {
             return Ok(None);
@@ -260,14 +260,21 @@ impl ServerBuilder {
         let storage_config = storage_config?;
         let schema = jazz::schema::JazzSchema::new(&schema)
             .map_err(|error| format!("failed to build server shell schema: {error}"))?;
-        Ok(Some(
-            crate::server::ServerRuntimeHandle::start_with_storage_config(
-                schema,
-                storage_config,
-                self.storage_factory.clone(),
-                role,
-            )?,
-        ))
+        // The newest published schema may never have reached the shell store
+        // (published without a lens, or its lens bridge failed). A dynamic
+        // server then reopens with the store's own current schema; startup
+        // re-applies the durable permissions head right after.
+        let start = if dynamic {
+            crate::server::ServerRuntimeHandle::start_with_catalogue_schema
+        } else {
+            crate::server::ServerRuntimeHandle::start_with_storage_config
+        };
+        Ok(Some(start(
+            schema,
+            storage_config,
+            self.storage_factory.clone(),
+            role,
+        )?))
     }
 
     fn build_core_server_shell_storage_config(&self) -> Result<StorageConfig, String> {

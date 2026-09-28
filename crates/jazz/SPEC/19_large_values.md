@@ -266,7 +266,7 @@ already match local storage; a conflicting or unauthenticated node yields the
 descriptor-scoped `Rejected` result without poisoning the peer connection.
 Download remains locator-driven pull with `ChunkRequestBatch` and
 `ChunkResponseBatch`; download bytes are not upload ingress and do not consume
-the upload rate limit. Edges terminate or forward push uploads before forwarding
+the upload rate limit. Relays terminate or forward push uploads before forwarding
 the referencing row, just as missing pull requests may be relayed independently.
 
 Groove persists each retainer claim's creation time and incoming byte/node

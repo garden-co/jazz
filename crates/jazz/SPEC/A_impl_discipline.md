@@ -129,10 +129,10 @@ results. Metrics are _not_ one unified struct: they are split across
 
 ### A.8 Host-shell wiring canaries
 
-Harness topologies are necessary but not sufficient for role semantics. The
-edge-fate authority bug showed why: hand-wired four-tier tests exercised the
-correct edge ingest path, while the production server shell routed the same
-client upload through the core authority path. Convention: for every
+Harness topologies are necessary but not sufficient for role semantics. A
+fate-authority bug in the since-removed Edge tier showed why: hand-wired
+four-tier tests exercised the correct Edge ingest path, while the production
+server shell routed the same client upload through the core authority path. Convention: for every
 host-shell role x ingest/dispatch path combination, at least one black-box test
 must flow through the production shell and assert the semantics that role must
 produce, including a paired discriminator when another role intentionally keeps

@@ -78,7 +78,7 @@ type RichTodo = RowOf<typeof richApp.todos>;
 
 const ctx = new TestCleanup();
 
-// These flows can perform two independent edge/local convergence stages, each
+// These flows can perform two independent global/local convergence stages, each
 // with its own 45-second diagnostic timeout. The enclosing test leaves room
 // for both bounded observations plus setup and durability/reopen work.
 const MULTI_STAGE_REMOTE_FLOW_TIMEOUT_MS = 120_000;
@@ -726,7 +726,7 @@ describe("alpha public package flow", () => {
       }),
     ).toBeNull();
 
-    // Edge settlement proves the committed read frontier, not that the
+    // Global settlement proves the committed read frontier, not that the
     // independently scheduled application subscription callback has already
     // consumed that frontier. Before releasing the subscription, wait for its
     // required delivery of the post-delete view.
@@ -833,7 +833,7 @@ describe("alpha public package flow", () => {
     expect(rowsOnB).toEqual([restored]);
   });
 
-  it("exposes edge-confirmed browser deletes through includeDeleted over websocket", async () => {
+  it("exposes globally confirmed browser deletes through includeDeleted over websocket", async () => {
     const requestedAppId = uniqueDbName("alpha-public-include-deleted");
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
     await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);

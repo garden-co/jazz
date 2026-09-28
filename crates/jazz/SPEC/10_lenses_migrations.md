@@ -84,12 +84,45 @@ versioned binary layouts; they are not authoritative JSON. In this epoch,
 public_schema_json]`, `bootstrap_ready` is `[v1, genesis_uuid,
 pointer_revision:u64-le, pointer_schema_uuid, active_catalogue_seq:u64-le]`,
 and the pending write-pointer and active-lineage receipts are likewise fixed
-`v1` UUID/integer tuples. A decoder accepts exactly one known version and
-must consume the entire payload before it returns a value to catalogue
-recovery; it does not fall back to the former JSON bytes. The public-schema
+`v1` UUID/integer tuples. The `schema` envelope has one further version:
+`v2` has the identical layout and is used exactly when some table's public
+schema declares `composite_indexes`; every other schema keeps its frozen `v1`
+bytes. A reader that predates composite indexes therefore rejects such a
+schema by version instead of silently dropping the unknown JSON field, and a
+decoder rejects a `v1` label on a composite schema and a `v2` label on a
+schema without one. Composite indexes serialize in canonical order
+(lexicographic over UTF-8 column-name bytes), the order the schema hash uses,
+so declaration order never changes the payload. A decoder accepts exactly the
+known versions and must consume the entire payload before it returns a value
+to catalogue recovery; it does not fall back to the former JSON bytes. The public-schema
 body is decoded and re-encoded with the canonical public-schema serializer,
 and those bytes must match exactly, so insignificant whitespace, field
 reordering, or alternate JSON spellings are corruption rather than aliases.
+
+Composite indexes and peers that predate them. The `v2` label protects durable
+storage only. On the sync wire a `SchemaVersion` is `(id, public_schema_json)`
+with no envelope version, and a pre-composite peer (alpha.56 and earlier)
+parses that JSON with serde defaults, silently dropping `composite_indexes`.
+It is still rejected loudly, because composite indexes are part of the schema
+id (ch. 2, §2.4): the peer recomputes the id from the schema it parsed, gets
+the plain schema's id, and refuses the payload at catalogue admission as a
+content-id mismatch (the lineage-publication id, which hashes the CATS bytes,
+mismatches likewise). So once any schema that declares a composite index is
+published, a pre-composite peer rejects the catalogue rather than serving a
+schema without the index. The HTTP admin route is different: a
+pre-composite server stores and hashes the plain schema it parsed and returns
+that hash. `deploy` and `pushSchema` therefore compare the structural hash the
+server returns with the locally computed one and stop with
+`SchemaHashMismatchError` before publishing any migration or permissions
+against the wrong hash; the plain schema the server already stored is inert
+until something targets it.
+
+Rollback: an app cannot roll back to a pre-composite release once it has
+published a composite-index schema. Stores then hold `v2` schema records and
+v2-domain schema ids, which older binaries reject on reopen by version and
+on sync by id. Removing a composite index later is an ordinary forward schema
+change (a new plain schema version published through a lens), not a return to
+the older runtime.
 Each pending write-pointer row id is UUIDv5 under its schema UUID over the
 little-endian revision bytes; recovery verifies that join and rejects two rows
 claiming the same revision before building resident pointer state.

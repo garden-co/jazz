@@ -18,7 +18,11 @@ const canonicalQueryExecutionOptions: QueryExecutionOptions = {
   base: "main",
 };
 const remoteQueryExecutionOptions: QueryExecutionOptions = { tier: "remote" };
-const remoteIfPossibleQueryExecutionOptions: QueryExecutionOptions = {
+const localFirstUnlessEmptyQueryExecutionOptions: QueryExecutionOptions = {
+  tier: "local-first-unless-empty",
+};
+const removedRemoteIfPossibleTier: QueryExecutionOptions = {
+  // @ts-expect-error remote-if-possible was removed; use local-first-unless-empty.
   tier: "remote-if-possible",
 };
 const removedQueryExecutionOptions: QueryExecutionOptions = {
@@ -44,7 +48,8 @@ const internalLocalOnlyTier: QueryExecutionOptions = {
 
 void canonicalQueryExecutionOptions;
 void remoteQueryExecutionOptions;
-void remoteIfPossibleQueryExecutionOptions;
+void localFirstUnlessEmptyQueryExecutionOptions;
+void removedRemoteIfPossibleTier;
 void removedQueryExecutionOptions;
 void removedLocalUpdatesOption;
 void removedPropagationOption;

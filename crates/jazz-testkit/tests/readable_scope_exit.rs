@@ -81,7 +81,7 @@ async fn run_readable_exit() {
             row_input!("owner" => "alice", "done" => false, "title" => "sibling before"),
         )
         .unwrap();
-    jazz_testkit::wait_for_edge_txs(&bob, &[tx.unwrap(), sibling_tx.unwrap()]).await;
+    jazz_testkit::wait_for_global_txs(&bob, &[tx.unwrap(), sibling_tx.unwrap()]).await;
     let alice = TestingClient::builder()
         .with_server(server)
         .with_schema(schema)
@@ -143,7 +143,7 @@ async fn run_readable_exit() {
         )
         .unwrap();
     let tx = bob.commit_transaction(tx).unwrap();
-    jazz_testkit::wait_for_edge_txs(&bob, &[tx]).await;
+    jazz_testkit::wait_for_global_txs(&bob, &[tx]).await;
     wait_for_subscription_update(
         &mut remote,
         &mut remote_log,
@@ -194,7 +194,7 @@ async fn run_readable_exit() {
         .update("tasks", task, vec![("done".into(), Value::Boolean(false))])
         .unwrap()
         .unwrap();
-    jazz_testkit::wait_for_edge_txs(&bob, &[tx]).await;
+    jazz_testkit::wait_for_global_txs(&bob, &[tx]).await;
     wait_for_subscription_update(
         &mut local,
         &mut local_log,
@@ -205,7 +205,7 @@ async fn run_readable_exit() {
     .await;
     let start = local_log.len();
     let tx = bob.delete("tasks", task).unwrap().unwrap();
-    jazz_testkit::wait_for_edge_txs(&bob, &[tx]).await;
+    jazz_testkit::wait_for_global_txs(&bob, &[tx]).await;
     wait_for_subscription_update(
         &mut local,
         &mut local_log,
@@ -295,7 +295,7 @@ async fn run_revoked_exit_shared_case(dependency: bool, changes_filter: bool, sh
         let (grant, _, tx) = bob
             .insert("grants", row_input!("owner" => "alice"))
             .unwrap();
-        jazz_testkit::wait_for_edge_txs(&bob, &[tx.unwrap()]).await;
+        jazz_testkit::wait_for_global_txs(&bob, &[tx.unwrap()]).await;
         Some(grant)
     } else {
         None
@@ -306,7 +306,7 @@ async fn run_revoked_exit_shared_case(dependency: bool, changes_filter: bool, sh
         input.insert("grant".into(), grant.into());
     }
     let (task, _, tx) = bob.insert("tasks", input).unwrap();
-    jazz_testkit::wait_for_edge_txs(&bob, &[tx.unwrap()]).await;
+    jazz_testkit::wait_for_global_txs(&bob, &[tx.unwrap()]).await;
     // Another reader is allowed the successor. Its concurrent subscription
     // must not widen Alice's independently authorized scope.
     let shared_reader = if shared_cache {
@@ -383,7 +383,7 @@ async fn run_revoked_exit_shared_case(dependency: bool, changes_filter: bool, sh
         changes.push(("owner".into(), Value::Text("bob".into())));
     }
     staged.update("tasks", task, changes).unwrap();
-    jazz_testkit::wait_for_edge_txs(&bob, &[bob.commit_transaction(tx).unwrap()]).await;
+    jazz_testkit::wait_for_global_txs(&bob, &[bob.commit_transaction(tx).unwrap()]).await;
     wait_for_subscription_update(
         &mut remote,
         &mut log,
@@ -429,7 +429,7 @@ async fn run_revoked_exit_shared_case(dependency: bool, changes_filter: bool, sh
             )
             .unwrap();
     }
-    jazz_testkit::wait_for_edge_txs(&bob, &[bob.commit_transaction(tx).unwrap()]).await;
+    jazz_testkit::wait_for_global_txs(&bob, &[bob.commit_transaction(tx).unwrap()]).await;
     wait_for_subscription_update(
         &mut remote,
         &mut log,
@@ -493,7 +493,7 @@ async fn run_reconnect_scalar_query(count: usize) {
                 tasks.push(task);
                 txs.push(tx.unwrap());
             }
-            jazz_testkit::wait_for_edge_txs(&bob, &txs).await;
+            jazz_testkit::wait_for_global_txs(&bob, &txs).await;
             let alice = TestingClient::builder()
                 .with_server(&authority)
                 .with_schema(schema)
@@ -530,7 +530,7 @@ async fn run_reconnect_scalar_query(count: usize) {
                     )
                     .unwrap();
             }
-            jazz_testkit::wait_for_edge_txs(&bob, &[bob.commit_transaction(tx).unwrap()]).await;
+            jazz_testkit::wait_for_global_txs(&bob, &[bob.commit_transaction(tx).unwrap()]).await;
             assert_eq!(local_rows(&alice, filtered()).await.len(), count);
             let mut local = alice
                 .subscribe_with_read_tier(filtered(), ReadTier::LocalFirst)
@@ -618,12 +618,12 @@ async fn run_reconnect_revoked_input(dependency: bool, persistent: bool) {
                     let (grant, _, tx) = trusted_reader
                         .insert("grants", row_input!("owner" => "alice"))
                         .unwrap();
-                    jazz_testkit::wait_for_edge_txs(&trusted_reader, &[tx.unwrap()]).await;
+                    jazz_testkit::wait_for_global_txs(&trusted_reader, &[tx.unwrap()]).await;
                     grants.push(grant);
                     input.insert("grant".into(), grant.into());
                 }
                 let (task, _, tx) = bob.insert("tasks", input).unwrap();
-                jazz_testkit::wait_for_edge_txs(&bob, &[tx.unwrap()]).await;
+                jazz_testkit::wait_for_global_txs(&bob, &[tx.unwrap()]).await;
                 tasks.push(task);
             }
             // Close the separate seed writer before changing its grants
@@ -721,7 +721,7 @@ async fn run_reconnect_revoked_input(dependency: bool, persistent: bool) {
                     ],
                 )
                 .unwrap();
-            jazz_testkit::wait_for_edge_txs(&bob, &[bob.commit_transaction(tx).unwrap()]).await;
+            jazz_testkit::wait_for_global_txs(&bob, &[bob.commit_transaction(tx).unwrap()]).await;
             system_log.clear();
             wait_for_subscription_update(
                 &mut system_scope,
@@ -831,7 +831,7 @@ async fn run_reconnect_revoked_input(dependency: bool, persistent: bool) {
                     ],
                 )
                 .unwrap();
-            jazz_testkit::wait_for_edge_txs(&bob, &[bob.commit_transaction(tx).unwrap()]).await;
+            jazz_testkit::wait_for_global_txs(&bob, &[bob.commit_transaction(tx).unwrap()]).await;
             wait_for_subscription_update(
                 &mut local,
                 &mut local_log,
@@ -902,7 +902,7 @@ async fn scalar_input_policy_rule_change_revokes_and_readmits() {
                     row_input!("owner" => "alice", "done" => false, "title" => "unchanged"),
                 )
                 .unwrap();
-            jazz_testkit::wait_for_edge_txs(&writer, &[tx.unwrap()]).await;
+            jazz_testkit::wait_for_global_txs(&writer, &[tx.unwrap()]).await;
             let alice = TestingClient::builder()
                 .with_server(&authority)
                 .with_schema(schema.clone())

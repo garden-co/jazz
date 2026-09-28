@@ -53,7 +53,7 @@ async fn wait_for_todos(
     .await
 }
 
-async fn wait_for_edge_ready(client: &JazzClient) {
+async fn wait_for_remote_ready(client: &JazzClient) {
     let _ = wait_for_todos(
         client,
         jazz::tools::ReadTier::Remote,
@@ -67,7 +67,7 @@ async fn connect_user(server: &JazzServer, schema: Schema, user_id: &str) -> Jaz
     let client = jazz_testkit::connect(server.make_client_context_for_user(schema, user_id))
         .await
         .expect("connect user");
-    wait_for_edge_ready(&client).await;
+    wait_for_remote_ready(&client).await;
     client
 }
 
@@ -105,7 +105,7 @@ async fn insert_visible_todo(client: &JazzClient, title: &str, completed: bool) 
             row_input!("title" => title, "completed" => completed),
         )
         .expect("insert visible todo");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         client,
         &[transaction_id.expect("ordinary mutation commits immediately")],
     )
@@ -383,13 +383,13 @@ async fn transaction_insert_is_visible_only_after_commit_settles() {
         bob.query(todo_query(), jazz::tools::ReadTier::Remote)
             .await
             .map(jazz::tools::test_support::ordinary_rows)
-            .expect("bob edge query before commit")
+            .expect("bob remote query before commit")
             .is_empty(),
-        "peer edge reads should not see an uncommitted transaction"
+        "a peer's remote reads should not see an uncommitted transaction"
     );
 
     let committed_tx_id = tx.commit().expect("commit transaction");
-    support::wait_for_edge_txs(&alice, &[committed_tx_id]).await;
+    support::wait_for_global_txs(&alice, &[committed_tx_id]).await;
 
     let rows = wait_for_todos(
         &bob,
@@ -654,7 +654,7 @@ async fn transaction_staged_before_receiving_concurrent_commit_is_rejected() {
     assert!(alice_staged.is_none(), "transaction update remains staged");
     assert!(bob_staged.is_none(), "transaction update remains staged");
     let alice_tx_id = alice_tx.commit().expect("commit alice transaction");
-    support::wait_for_edge_txs(&alice, &[alice_tx_id]).await;
+    support::wait_for_global_txs(&alice, &[alice_tx_id]).await;
     wait_for_todos(
         &bob,
         jazz::tools::ReadTier::Remote,
@@ -712,7 +712,7 @@ async fn transaction_staged_after_receiving_concurrent_commit_is_accepted() {
         .expect("alice stages update");
     assert!(alice_staged.is_none(), "transaction update remains staged");
     let alice_tx_id = alice_tx.commit().expect("commit alice transaction");
-    support::wait_for_edge_txs(&alice, &[alice_tx_id]).await;
+    support::wait_for_global_txs(&alice, &[alice_tx_id]).await;
     wait_for_todos(
         &bob,
         jazz::tools::ReadTier::Remote,
@@ -731,7 +731,7 @@ async fn transaction_staged_after_receiving_concurrent_commit_is_accepted() {
         .expect("bob stages update from latest visible row");
     assert!(bob_staged.is_none(), "transaction update remains staged");
     let bob_tx_id = bob_tx.commit().expect("commit bob transaction");
-    support::wait_for_edge_txs(&bob, &[bob_tx_id]).await;
+    support::wait_for_global_txs(&bob, &[bob_tx_id]).await;
 
     let rows = wait_for_todos(
         &alice,

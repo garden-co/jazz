@@ -5,7 +5,7 @@ use jazz::query::Query;
 
 use super::support::{
     TestingClient, collect_stream_deltas, connect_ready_client, connect_ready_user, has_added_id,
-    has_any_change, has_removed, has_row, lacks_row, wait_for_edge_txs, wait_for_query,
+    has_any_change, has_removed, has_row, lacks_row, wait_for_global_txs, wait_for_query,
     wait_for_rows, wait_for_subscription_update,
 };
 use super::{assert_client_policy_denied, pe, permissions};
@@ -2819,7 +2819,7 @@ async fn update_with_check_inherits_denies_when_parent_is_not_updateable_inner()
             crate::row_input!("owner_id" => super::BOB_ID, "name" => "Child", "parent_id" => root_id),
         )
         .expect("create child");
-    wait_for_edge_txs(
+    wait_for_global_txs(
         &admin,
         &[
             root_tx.expect("root insert should commit immediately"),

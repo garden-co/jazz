@@ -4,6 +4,7 @@ import type { DurabilityTier, JazzClient, AuthUpdate } from "../client.js";
 import { resolveClientInternalSessionSync } from "../client-session.js";
 import { getTrustedReservedSession, setTrustedReservedSession } from "../db-internal-session.js";
 import type { BrowserForegroundNodeLease, BrowserWorkerConnection } from "../runtime-source.js";
+import type { RemoteLinkState } from "../remote-link-state.js";
 import { reloadAfterStorageInvalidation } from "../browser-storage-invalidation.js";
 import { runCleanupSteps } from "../run-cleanup-steps.js";
 import { NativeRuntimeAdapter } from "../native-runtime/native-runtime-adapter.js";
@@ -36,6 +37,9 @@ export class BrowserConnectionManager extends ConnectionManager {
   private initialExplicitOfflineStateKnown = false;
   private connectionError: Error | null = null;
   private disconnected = false;
+  /** Reported by the worker that owns the upstream socket. */
+  private workerRemoteLink: RemoteLinkState = "connecting";
+  private readonly workerRemoteLinkListeners = new Set<() => void>();
   private readonly reconnectWaiters = new Set<(error?: Error) => void>();
   private transportTransition: Promise<void> = Promise.resolve();
   private storageReset: Promise<void> | null = null;
@@ -101,6 +105,7 @@ export class BrowserConnectionManager extends ConnectionManager {
       onAuthFailure: (reason) => this.host.markUnauthenticated(reason),
       onAuthRestored: () => this.host.clearAuthError(),
       onExplicitOfflineChange: (offline) => this.setExplicitOffline(connection, offline),
+      onRemoteLinkChange: (state) => this.setWorkerRemoteLink(connection, state),
       onFailure: (error) => this.observeConnectionFailure(connection, asError(error)),
       onStorageReset: (resetId) => this.beginStorageReset(scope, resetId),
       onStorageInvalidated: () => this.reloadAfterStorageInvalidation(connection),
@@ -113,6 +118,7 @@ export class BrowserConnectionManager extends ConnectionManager {
     };
     this.connectionScope = scope;
     this.connection = connection;
+    this.setWorkerRemoteLink(connection, "connecting");
     this.observedConfigurationAdmissionFailure = null;
     this.unregisterInspectorControl?.();
     this.unregisterInspectorControl = registerBrowserInspectorControl(
@@ -165,6 +171,7 @@ export class BrowserConnectionManager extends ConnectionManager {
     this.connectionError = error;
     this.recoverableConnectionFailure = true;
     this.rejectReconnectWaiters(error);
+    this.notifyWorkerRemoteLink();
   }
 
   async ensureReady(tier?: DurabilityTier, signal?: AbortSignal): Promise<void> {
@@ -270,7 +277,7 @@ export class BrowserConnectionManager extends ConnectionManager {
     await this.enqueueTransportTransition(async () => {
       await this.connectionReady;
       await this.connection?.disconnect();
-      // Keep RemoteIfPossible strict until the worker confirms disconnect.
+      // Report explicit offline only after the worker confirms disconnect.
       this.disconnected = true;
       this.publishExplicitOfflineState();
     });
@@ -551,13 +558,36 @@ export class BrowserConnectionManager extends ConnectionManager {
   /**
    * A persistent browser namespace has one worker-owned upstream connection.
    * The initiating tab receives the RPC result too, but every attached tab
-   * must make the same explicit-offline choice for RemoteIfPossible reads.
+   * must make the same explicit-offline choice for its reads.
    */
   private setExplicitOffline(connection: BrowserWorkerConnection, offline: boolean): void {
     if (this.connection !== connection) return;
     this.disconnected = offline;
     this.publishExplicitOfflineState();
     if (!offline) this.resolveReconnectWaiters();
+  }
+
+  protected override transportLinkState(): RemoteLinkState {
+    // A failed follower cannot receive the worker's answer.
+    return this.connectionError ? "unavailable" : this.workerRemoteLink;
+  }
+
+  protected override onTransportLinkStateChange(listener: () => void, signal: AbortSignal): void {
+    if (signal.aborted) return;
+    this.workerRemoteLinkListeners.add(listener);
+    signal.addEventListener("abort", () => this.workerRemoteLinkListeners.delete(listener), {
+      once: true,
+    });
+  }
+
+  private setWorkerRemoteLink(connection: BrowserWorkerConnection, state: RemoteLinkState): void {
+    if (this.connection !== connection) return;
+    this.workerRemoteLink = state;
+    this.notifyWorkerRemoteLink();
+  }
+
+  private notifyWorkerRemoteLink(): void {
+    for (const listener of [...this.workerRemoteLinkListeners]) listener();
   }
 
   private enqueueTransportTransition(run: () => void | Promise<void>): Promise<void> {
