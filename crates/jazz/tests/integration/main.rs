@@ -58,6 +58,8 @@ mod large_json_wire;
 mod large_value_read_scaling;
 #[path = "../large_value_streaming_create.rs"]
 mod large_value_streaming_create;
+#[path = "../large_value_tx_update.rs"]
+mod large_value_tx_update;
 #[cfg(feature = "testing")]
 #[path = "../local_first_unless_empty.rs"]
 mod local_first_unless_empty;
