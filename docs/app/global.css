@@ -140,3 +140,13 @@ h6 {
 .site-search-field > button > span > span:last-child {
   flex: 1;
 }
+
+/* Homepage and blog: the site's page background (not Astryx's surface) and
+   the 1400px layout width their sections centre within. */
+.site-page-shell {
+  --fd-layout-width: 1400px;
+}
+.site-page-shell .astryx-app-shell,
+.site-page-shell .astryx-app-shell-header {
+  background-color: var(--color-background-body);
+}
