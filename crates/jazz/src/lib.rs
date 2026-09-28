@@ -457,12 +457,8 @@ pub(crate) mod legacy_test_future {
 /// Re-export of the underlying groove crate used for storage setup.
 pub use groove;
 
-/// Shared, fail-closed state for authority-issued authorization-scope receipts.
-pub mod account_registry;
-/// Application identifiers.
-// Moved out of `tools`, which keeps its existing documentation policy.
-#[allow(missing_docs)]
-pub mod app_id;
+pub use jazz_types::account_registry;
+pub use jazz_types::app_id;
 pub mod authorization_scope;
 /// Shared binary row payload contract for the NAPI and WASM bindings.
 pub mod binding_codec;
@@ -471,37 +467,27 @@ pub mod binding_codec;
 pub mod cold_settle_attribution;
 /// High-level thread-affine database facade.
 pub mod db;
-/// Diagnostic environment switches, read once per process.
-mod debug_env;
+use jazz_types::debug_env;
 /// Host-facing exclusive lifecycle for foreground transaction-node identities.
 pub mod foreground_node_lease;
 /// Poll ready-immediate database futures without an async runtime.
 pub use db::block_on;
-/// Authenticated principal identity helpers.
-// Moved out of `tools`, which keeps its existing documentation policy.
-#[allow(missing_docs)]
-pub mod identity;
-/// Wire-stable identifiers.
-pub mod ids;
-/// Driver for ready-immediate thread-affine futures.
-pub mod local_executor;
+pub use jazz_types::identity;
+pub use jazz_types::ids;
+pub use jazz_types::local_executor;
 /// Public data model: schema builders, values, policies and lenses.
 // Moved out of `tools`, which keeps its existing documentation policy.
 #[allow(missing_docs)]
 pub mod model;
 /// Storage-backed node implementation and local API.
 pub mod node;
-/// Object, branch and query-result identifiers.
-// Moved out of `tools`, which keeps its existing documentation policy.
-#[allow(missing_docs)]
-pub mod object;
+pub use jazz_types::object;
 /// Independent semantic oracle used by tests and harnesses.
 #[cfg(any(test, feature = "testing"))]
 pub mod oracle;
 /// Per-peer sync state and metrics.
 pub mod peer;
-/// Canonical, whole-input postcard decoding.
-pub mod postcard_exact;
+pub use jazz_types::postcard_exact;
 /// Simulation-first sync and local event messages.
 pub mod protocol;
 /// Protocol admission and semantic size limits.
@@ -518,8 +504,7 @@ pub mod serving;
 pub mod storage_codec_profile;
 #[cfg(test)]
 mod test_public_schema;
-/// Logical time and sequence counters.
-pub mod time;
+pub use jazz_types::time;
 /// Public runtime and data-model support APIs formerly provided by jazz-tools.
 // The tools API was a separate crate before consolidation and intentionally
 // retains its existing documentation policy.
@@ -533,4 +518,4 @@ pub mod wire;
 /// Bounded metadata-only delivery diagnostics for native acceptance failures.
 #[doc(hidden)]
 #[cfg(any(test, feature = "testing"))]
-pub mod delivery_diagnostics;
+pub use jazz_types::delivery_diagnostics;

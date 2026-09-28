@@ -1,8 +1,8 @@
 //! Distinct monotone ordering values used by Jazz. This module owns transaction
 //! HLC packing (`TxTime`) and authority serialization positions (`GlobalTime`);
-//! clock mutation and skew checks live in [`crate::node::ingest`] and
-//! [`crate::node::open_tx`], while merge/currency interpretation lives in
-//! [`crate::node::currency`]. The types flow from facade writes through protocol
+//! clock mutation and skew checks live in `jazz::node::ingest` and
+//! `jazz::node::open_tx`, while merge/currency interpretation lives in
+//! `jazz::node::currency`. The types flow from facade writes through protocol
 //! records down into groove storage keys.
 
 use crate::ids::NodeUuid;
@@ -89,7 +89,9 @@ impl GlobalTime {
         )
     }
 
-    pub(crate) fn authority_now_ms(now_ms: u64, fallback_ms: u64) -> u64 {
+    /// The authority clock reading: `now_ms`, or `fallback_ms` when `now_ms`
+    /// is past the largest representable physical time.
+    pub fn authority_now_ms(now_ms: u64, fallback_ms: u64) -> u64 {
         if now_ms <= HLC_MAX_PHYSICAL_MS {
             now_ms
         } else {

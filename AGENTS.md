@@ -89,15 +89,21 @@ targets. Jazz's own tests share `jazz-testkit/src/duplex_transport.rs` by
 `#[path]`, not through a testkit dev-dependency, so a Jazz edit no longer
 rebuilds Jazz a second time for the testkit.
 
-**Jazz module layers.** `crates/jazz/src` is being split into crates bottom-up.
-`dev/gates/jazz-module-layers.mjs` assigns each file to a layer (types → model
-→ protocol → engine → node → peer → db → facade) and fails CI lint on any
-production `crate::`/`super::` reference to a higher layer, and on an inherent
-or foreign-trait `impl` whose type lives in a lower layer (it would break
-coherence once the layers are crates). Basic types
-(`object`, `app_id`, `identity`) sit at the crate root and the public data model
-lives in `model/`; `tools` only re-exports them. Put new code in the lowest layer
-that its dependencies allow. Test-only upward references are ratcheted in
+**Jazz module layers.** `crates/jazz/src` is being split into crates bottom-up
+(types → model → protocol → engine → node → peer → db → facade). Extracted
+layers live in `crates/jazz/layers/<layer>` as their own crates (`jazz-types`
+so far), so CI path filters on `crates/jazz/**` still cover them; `jazz`
+re-exports each of their modules under its old path (`jazz::ids`,
+`crate::ids`). An item a higher layer uses must be `pub` in the lower crate
+(`#[doc(hidden)]` when it is internal); test helpers other layers need are
+gated `#[cfg(any(test, feature = "testing"))]`. Run a layer crate's tests with
+`dev/t -p jazz-types <test>`. For the layers still inside `crates/jazz/src`,
+`dev/gates/jazz-module-layers.mjs` fails CI lint on any production
+`crate::`/`super::` reference to a higher layer, and on an inherent or
+foreign-trait `impl` whose type lives in a lower layer (it would break
+coherence once the layers are crates). The public data model lives in
+`model/`; `tools` only re-exports it. Put new code in the lowest layer that
+its dependencies allow. Test-only upward references are ratcheted in
 `dev/gates/jazz-module-layers.allow`: remove a pair when you fix it, never add
 one by hand (`--write-allow` refreshes the list and refuses while production
 is unclean; `--report [--tests]` lists references).
@@ -159,7 +165,8 @@ boundary. Ordinary small package builds may use Turbo normally, but must never
 add `.native-artifacts/**`, WASM `pkg/**`, or the correctness-artifact store as
 cacheable outputs.
 
-- `cargo test -p jazz`
+- `cargo test -p jazz -p jazz-types` (the layer crates carry the moved unit
+  tests; `-p jazz` alone skips them)
 - `cargo test -p groove`
 - `cargo test -p jazz --no-default-features --features testing,transport-compression-zstd` (matches `crates/jazz/TESTING_GUIDELINES.md`).
 - `cargo test -p jazz-cli --features test` covers the `jazz-tools` and
