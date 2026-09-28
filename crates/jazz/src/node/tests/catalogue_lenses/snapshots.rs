@@ -257,6 +257,66 @@ fn trusted_catalogue_snapshot_persistence_failure_keeps_runtime_poisoned() {
 }
 
 #[test]
+fn catalogue_snapshot_fingerprint_changes_exactly_when_the_snapshot_does() {
+    // Peers announce a snapshot whenever this fingerprint changes. It is
+    // computed from catalogue identities rather than the serialized payloads,
+    // so check that it tracks the full snapshot through lineage publication
+    // and activation.
+    let base = schema();
+    let evolved = SchemaVersion::new(catalogue_evolved_schema());
+    let (_authority_dir, mut authority) = open_node_with_schema(node(0x70), base.clone());
+    let observe = |node: &NodeState<_>| {
+        (
+            node.catalogue_snapshot_fingerprint().expect("fingerprint"),
+            serde_json::to_vec(&node.catalogue_snapshot().expect("snapshot"))
+                .expect("serialize snapshot"),
+        )
+    };
+    let mut states = vec![observe(&authority), observe(&authority)];
+    publish_schema_lineage(
+        &mut authority,
+        evolved.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            evolved.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: v(""),
+                }],
+            }],
+        )
+        .expect("valid migration lens"),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    states.push(observe(&authority));
+    authority
+        .activate_catalogue_schema_settled(CurrentWriteSchema {
+            revision: 1,
+            schema: evolved.id,
+        })
+        .unwrap();
+    states.push(observe(&authority));
+    states.push(observe(&authority));
+
+    for (left, (left_fingerprint, left_snapshot)) in states.iter().enumerate() {
+        for (right, (right_fingerprint, right_snapshot)) in states.iter().enumerate() {
+            assert_eq!(
+                left_fingerprint == right_fingerprint,
+                left_snapshot == right_snapshot,
+                "states {left} and {right}: fingerprint equality must match snapshot equality"
+            );
+        }
+    }
+    assert_ne!(states[0].0, states[2].0, "publishing a lineage changes the snapshot");
+    assert_ne!(states[2].0, states[3].0, "activating it changes the snapshot");
+}
+
+#[test]
 fn catalogue_snapshot_preserves_active_schema_storage_identity() {
     // Internal because schema aliases are node-local storage identities; the
     // public behavior is that writes remain valid after catalogue bootstrap.

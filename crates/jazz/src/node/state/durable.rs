@@ -304,25 +304,41 @@ where
         self.try_current_write_schema()
     }
 
-    pub(crate) fn catalogue_snapshot(&self) -> Result<crate::protocol::CatalogueSnapshot, Error> {
+    /// Fingerprint of exactly the inputs of [`Self::catalogue_snapshot`], computed without
+    /// cloning or serializing schema payloads. Catalogue schemas and lineage publications are
+    /// content-addressed by their ids, and an active-schema revision pins its compiled schema
+    /// (a different activation at the same revision is rejected), so the identities stand for
+    /// the payloads. A snapshot is announced whenever this fingerprint changes.
+    pub(crate) fn catalogue_snapshot_fingerprint(&self) -> Result<[u8; 32], Error> {
         self.require_catalogue_ready()?;
-        let mut schemas = self
-            .catalogue
-            .catalogue_schemas
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        if let Some(schema) = schemas.iter_mut().find(|schema| schema.id == self.catalogue.active_schema.schema) {
-            schema.schema = self.catalogue.active_schema.compiled.clone();
-        }
-        schemas.sort_by_key(|schema| schema.id);
+        let genesis = self.catalogue_genesis_schema()?;
         let mut lineages = self
             .catalogue
             .active_lineages_by_target
             .values()
-            .map(|lineage| (lineage.catalogue_seq, lineage.publication.clone()))
+            .map(|lineage| (lineage.catalogue_seq, lineage.publication.id))
             .collect::<Vec<_>>();
         lineages.sort_by_key(|(catalogue_seq, _)| *catalogue_seq);
+        let genesis_physical_identities = &self
+            .catalogue
+            .physical_mappings
+            .get(&genesis)
+            .ok_or(Error::InvalidStoredValue(
+                "genesis physical mapping missing",
+            ))?
+            .identities;
+        let bytes = postcard::to_allocvec(&(
+            self.catalogue.catalogue_schemas.keys().collect::<Vec<_>>(),
+            lineages,
+            genesis_physical_identities,
+            self.catalogue.active_schema.wire_pointer(),
+        ))
+        .map_err(|_| Error::InvalidStoredValue("catalogue fingerprint serialization failed"))?;
+        Ok(*blake3::hash(&bytes).as_bytes())
+    }
+
+    /// The unique catalogue schema that no active lineage targets.
+    fn catalogue_genesis_schema(&self) -> Result<SchemaVersionId, Error> {
         // The write pointer is deliberately independent of the authority's
         // unique genesis.  Once a lineage is active it normally points at a
         // descendant, whose manifest must never be re-labelled as genesis in
@@ -355,6 +371,29 @@ where
                 "catalogue has multiple genesis schemas",
             ));
         }
+        Ok(genesis)
+    }
+
+    pub(crate) fn catalogue_snapshot(&self) -> Result<crate::protocol::CatalogueSnapshot, Error> {
+        self.require_catalogue_ready()?;
+        let mut schemas = self
+            .catalogue
+            .catalogue_schemas
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        if let Some(schema) = schemas.iter_mut().find(|schema| schema.id == self.catalogue.active_schema.schema) {
+            schema.schema = self.catalogue.active_schema.compiled.clone();
+        }
+        schemas.sort_by_key(|schema| schema.id);
+        let mut lineages = self
+            .catalogue
+            .active_lineages_by_target
+            .values()
+            .map(|lineage| (lineage.catalogue_seq, lineage.publication.clone()))
+            .collect::<Vec<_>>();
+        lineages.sort_by_key(|(catalogue_seq, _)| *catalogue_seq);
+        let genesis = self.catalogue_genesis_schema()?;
         let genesis_physical_identities = self
             .catalogue
             .physical_mappings

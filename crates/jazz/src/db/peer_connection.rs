@@ -7732,12 +7732,10 @@ fn send_catalogue_snapshot_if_needed<S>(
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    let snapshot = node.borrow().catalogue_snapshot()?;
-    let catalogue_fingerprint = *blake3::hash(
-        &serde_json::to_vec(&snapshot).expect("catalogue snapshot serialization is infallible"),
-    )
-    .as_bytes();
+    // Every outgoing message checks this; build the snapshot only when it changed.
+    let catalogue_fingerprint = node.borrow().catalogue_snapshot_fingerprint()?;
     if peer.needs_catalogue_snapshot(catalogue_fingerprint) {
+        let snapshot = node.borrow().catalogue_snapshot()?;
         transport
             .send(SyncMessage::CatalogueSnapshot(Box::new(snapshot)))
             .map_err(transport_error)?;
