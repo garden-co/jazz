@@ -150,3 +150,14 @@ h6 {
 .site-page-shell .astryx-app-shell-header {
   background-color: var(--color-background-body);
 }
+
+/* Callout bodies written in MDX use the Banner's own description style
+   (size, leading, colour), like callouts built in components. */
+.docs-callout .astryx-text {
+  font-size: inherit;
+  line-height: inherit;
+  color: inherit;
+}
+.docs-callout .astryx-code {
+  font-size: inherit;
+}
