@@ -40,7 +40,8 @@ jobs:
     # always allowed (handy for testing a starter in isolation).
     if: ${{ github.event_name == 'workflow_dispatch' || github.head_ref == 'changeset-release/release' }}
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 25
+    # A cold `build:core` alone takes ~23 minutes on this runner.
+    timeout-minutes: 40
     steps:
       - name: Validate workflow_dispatch starter
         if: ${{ github.event_name == 'workflow_dispatch' }}
