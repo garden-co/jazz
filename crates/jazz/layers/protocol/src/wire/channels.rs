@@ -82,7 +82,8 @@ pub struct ChannelFrame {
 }
 
 impl ChannelFrame {
-    pub(crate) fn validate(&self) -> Result<(), String> {
+    #[doc(hidden)]
+    pub fn validate(&self) -> Result<(), String> {
         if usize::from(self.channel) >= MAX_CHANNELS {
             return Err("channel slot exceeds connection limit".into());
         }

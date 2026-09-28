@@ -48,4 +48,3 @@ peer/tests.rs -> lib.rs
 peer/tests.rs -> test_public_schema.rs
 peer/tests.rs -> tools/mod.rs
 peer/tests.rs -> tools/test_support.rs
-wire.rs -> db/channel_endpoint.rs

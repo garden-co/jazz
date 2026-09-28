@@ -169,16 +169,18 @@ impl ChannelCredits {
                 || costs[2].bytes + costs[4].bytes + bytes <= MAX_LOGICAL_MESSAGE_BYTES)
     }
     /// Check before semantic enqueue mutates routing, generation or codec state.
-    pub(crate) fn can_reserve_message(&self, class: ChannelClass, bytes: usize) -> bool {
+    pub fn can_reserve_message(&self, class: ChannelClass, bytes: usize) -> bool {
         !self.closed && Self::buffer_can_add(&self.sent_buffers, buffer_bucket(class, bytes), bytes)
     }
-    pub(crate) fn reserve_message(&mut self, class: ChannelClass, bytes: usize) {
+    #[doc(hidden)]
+    pub fn reserve_message(&mut self, class: ChannelClass, bytes: usize) {
         assert!(self.can_reserve_message(class, bytes));
         let cost = &mut self.sent_buffers[buffer_bucket(class, bytes)];
         cost.bytes += bytes;
         cost.count += 1;
     }
-    pub(crate) fn receive_message(
+    #[doc(hidden)]
+    pub fn receive_message(
         owner: &SharedChannelCredits,
         class: ChannelClass,
         bytes: usize,

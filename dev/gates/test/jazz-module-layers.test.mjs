@@ -39,7 +39,7 @@ test("the jazz crate has no production upward references", () => {
 });
 
 test("files map to the layers that will become crates", () => {
-  assert.equal(layerOf("protocol.rs"), "protocol");
+  assert.equal(layerOf("peer/mod.rs"), "peer");
   assert.equal(layerOf("node/query_engine/lowering/terminals.rs"), "engine");
   assert.equal(layerOf("node/query_eval.rs"), "node");
   assert.equal(layerOf("db/config.rs"), "db");

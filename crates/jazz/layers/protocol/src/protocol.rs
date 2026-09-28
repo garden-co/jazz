@@ -1,13 +1,13 @@
 //! Simulation-first wire vocabulary for sync messages, commit payloads, view
 //! updates, catalogue messages, and migration lens publication. This module owns
 //! serializable shapes that cross node or facade boundaries; storage encoders
-//! live in [`crate::node::codec`], transaction semantics in [`crate::tx`], and
+//! live in `jazz::node::codec`, transaction semantics in [`crate::tx`], and
 //! query AST semantics in [`crate::query`]. It connects the node layer to peers,
 //! tests, and the `Db` facade without owning validation or persistence.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 use groove::large_values::Locator;
@@ -849,14 +849,14 @@ fn validate_version_bundles(bundles: &[VersionBundle]) -> Result<(), VersionBund
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 thread_local! {
-    pub(crate) static RECEIPT_VALIDATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    #[doc(hidden)]
+    pub static RECEIPT_VALIDATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-pub(crate) fn validate_version_records(
-    versions: &[VersionRecord],
-) -> Result<(), VersionBundleRunError> {
+#[doc(hidden)]
+pub fn validate_version_records(versions: &[VersionRecord]) -> Result<(), VersionBundleRunError> {
     for version in versions {
         version.validate_receipt()?;
     }
@@ -1459,8 +1459,8 @@ impl VersionRecord {
     /// This is the shared inbound/outbound codec boundary. `OwnedRecord`
     /// deliberately permits deferred decoding, so callers must pass through
     /// here before treating a deserialized record as trusted.
-    pub(crate) fn validate_receipt(&self) -> Result<(), VersionBundleRunError> {
-        #[cfg(test)]
+    pub fn validate_receipt(&self) -> Result<(), VersionBundleRunError> {
+        #[cfg(any(test, feature = "testing"))]
         RECEIPT_VALIDATIONS.with(|count| count.set(count.get() + 1));
         let malformed = || VersionBundleRunError::MalformedVersionRecord {
             table: self.table().to_owned(),
@@ -1566,7 +1566,8 @@ impl VersionRecord {
         }
     }
 
-    pub(crate) fn with_branch_key(mut self, branch_key: BranchKey) -> Self {
+    #[doc(hidden)]
+    pub fn with_branch_key(mut self, branch_key: BranchKey) -> Self {
         self.branch_key = branch_key;
         self
     }
@@ -1576,15 +1577,14 @@ impl VersionRecord {
         &self.branch_key
     }
 
-    pub(crate) fn with_authored_columns(
-        mut self,
-        authored_columns: Option<BTreeSet<String>>,
-    ) -> Self {
+    #[doc(hidden)]
+    pub fn with_authored_columns(mut self, authored_columns: Option<BTreeSet<String>>) -> Self {
         self.authored_columns = authored_columns;
         self
     }
 
-    pub(crate) fn authored_columns(&self) -> Option<&BTreeSet<String>> {
+    #[doc(hidden)]
+    pub fn authored_columns(&self) -> Option<&BTreeSet<String>> {
         self.authored_columns.as_ref()
     }
 
@@ -1774,7 +1774,7 @@ impl VersionRecord {
 
     /// Cell value by application-schema column position, treating columns not
     /// present in the wire payload as absent.
-    pub(crate) fn optional_cell_at(&self, column_position: usize) -> Option<Value> {
+    pub fn optional_cell_at(&self, column_position: usize) -> Option<Value> {
         let field = WireRowRecord::USER_CELLS + column_position;
         if field >= self.record.descriptor().fields().len() {
             return None;
@@ -1788,7 +1788,8 @@ impl VersionRecord {
             .flatten()
     }
 
-    pub(crate) fn application_cell_count(&self) -> usize {
+    #[doc(hidden)]
+    pub fn application_cell_count(&self) -> usize {
         self.record
             .descriptor()
             .fields()
@@ -2340,18 +2341,19 @@ pub fn build_version_carriers_from_singletons(
 }
 
 fn force_singleton_version_carriers() -> bool {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     if FORCE_SINGLETON_VERSION_CARRIERS_FOR_TESTS.load(AtomicOrdering::Relaxed) {
         return true;
     }
     crate::debug_env::force_singleton_version_carriers()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 static FORCE_SINGLETON_VERSION_CARRIERS_FOR_TESTS: AtomicBool = AtomicBool::new(false);
 
-#[cfg(test)]
-pub(crate) fn set_force_singleton_version_carriers_for_tests(enabled: bool) {
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+pub fn set_force_singleton_version_carriers_for_tests(enabled: bool) {
     FORCE_SINGLETON_VERSION_CARRIERS_FOR_TESTS.store(enabled, AtomicOrdering::Relaxed);
 }
 
@@ -2573,10 +2575,7 @@ impl PolicyBindingKey {
     }
 
     /// Rebuild an exact policy key from ordinary durable components.
-    pub(crate) fn from_canonical_parts(
-        identity: AuthorSubject,
-        claims: BTreeMap<String, Value>,
-    ) -> Self {
+    pub fn from_canonical_parts(identity: AuthorSubject, claims: BTreeMap<String, Value>) -> Self {
         Self {
             identity,
             canonical_claims: CanonicalPolicyClaims::new(claims),
@@ -2584,14 +2583,14 @@ impl PolicyBindingKey {
     }
 
     /// Named claims in their durable canonical ordering.
-    pub(crate) fn claims(&self) -> &BTreeMap<String, Value> {
+    pub fn claims(&self) -> &BTreeMap<String, Value> {
         self.canonical_claims.claims()
     }
 
     /// Store provider claims once; reserved author bindings are reconstructed
     /// from the separately stored exact identity when they match it. Other
     /// scalar bindings remain exact; authorization validation lives at admission.
-    pub(crate) fn directory_value(&self) -> Result<Value, String> {
+    pub fn directory_value(&self) -> Result<Value, String> {
         let derived = crate::model::policy_claims::canonical_policy_binding_claims(
             &self.identity,
             BTreeMap::new(),
@@ -2609,10 +2608,8 @@ impl PolicyBindingKey {
         policy_directory_payload(presence, policy_binding_directory_claims_value(&claims)?)
     }
 
-    pub(crate) fn from_directory_value(
-        identity: AuthorSubject,
-        value: Value,
-    ) -> Result<Self, String> {
+    #[doc(hidden)]
+    pub fn from_directory_value(identity: AuthorSubject, value: Value) -> Result<Self, String> {
         let Value::Record(record) = value else {
             return Err("policy directory payload must be record".into());
         };
@@ -2636,7 +2633,8 @@ impl PolicyBindingKey {
         Ok(Self::from_canonical_parts(identity, claims))
     }
 
-    pub(crate) fn directory_digest(&self) -> [u8; 32] {
+    #[doc(hidden)]
+    pub fn directory_digest(&self) -> [u8; 32] {
         let mut exact = Vec::new();
         put_str(&mut exact, self.identity.canonical());
         exact.extend_from_slice(&self.canonical_claims.comparison_key);
@@ -2644,7 +2642,7 @@ impl PolicyBindingKey {
     }
 }
 
-pub(crate) use crate::model::policy_directory::{
+pub use crate::model::policy_directory::{
     policy_binding_directory_claims_from_value, policy_binding_directory_claims_value,
     policy_directory_descriptor, policy_directory_payload,
 };
@@ -2732,7 +2730,8 @@ pub struct RegisterShapeOptions {
     /// relay code creates `RelayAuthoritySession` only for its own upstream
     /// coverage handle.
     #[serde(default)]
-    pub(crate) binding_source: BindingSource,
+    #[doc(hidden)]
+    pub binding_source: BindingSource,
 }
 
 impl Default for RegisterShapeOptions {
@@ -2763,9 +2762,11 @@ impl Default for RegisterShapeOptions {
     serde::Deserialize,
     serde::Serialize,
 )]
-pub(crate) enum BindingSource {
+pub enum BindingSource {
     #[default]
+    #[doc(hidden)]
     Ordinary,
+    #[doc(hidden)]
     RelayAuthoritySession,
 }
 
@@ -3119,11 +3120,13 @@ impl std::fmt::Debug for SyntheticReplacementToken {
 }
 
 impl SyntheticReplacementToken {
-    pub(crate) fn from_encoded_record(value: Vec<u8>) -> Self {
+    #[doc(hidden)]
+    pub fn from_encoded_record(value: Vec<u8>) -> Self {
         Self(value)
     }
 
-    pub(crate) fn encoded_record(&self) -> &[u8] {
+    #[doc(hidden)]
+    pub fn encoded_record(&self) -> &[u8] {
         &self.0
     }
 }
@@ -4051,19 +4054,19 @@ fn durable_public_schema_json(schema: &JazzSchema) -> Result<Vec<u8>, String> {
 }
 
 /// Frozen CATS schema envelope for schemas without composite indexes.
-pub(crate) const CATALOGUE_SCHEMA_V1: u8 = 1;
+pub const CATALOGUE_SCHEMA_V1: u8 = 1;
 /// CATS schema envelope for schemas that declare at least one composite
 /// index. The layout is identical to v1; the version byte exists so a reader
 /// that predates `composite_indexes` rejects the payload by version instead of
 /// silently dropping the unknown public-schema JSON field.
-pub(crate) const CATALOGUE_SCHEMA_V2_COMPOSITE_INDEXES: u8 = 2;
+pub const CATALOGUE_SCHEMA_V2_COMPOSITE_INDEXES: u8 = 2;
 
 /// The only CATS schema envelope version that may carry `schema`.
 ///
 /// v1 bytes of every schema without composite indexes are unchanged; v2 is
 /// used exactly when some table declares one, so each schema has one
 /// canonical payload.
-pub(crate) fn catalogue_schema_payload_version(schema: &JazzSchema) -> u8 {
+pub fn catalogue_schema_payload_version(schema: &JazzSchema) -> u8 {
     if schema
         .public_schema()
         .values()
@@ -4081,7 +4084,7 @@ pub(crate) fn catalogue_schema_payload_version(schema: &JazzSchema) -> u8 {
 /// of `SchemaVersion`: version (see [`catalogue_schema_payload_version`]), raw
 /// schema UUID, little-endian JSON length, and the canonical public-schema
 /// JSON bytes.
-pub(crate) fn canonical_catalogue_schema_bytes(schema: &SchemaVersion) -> Result<Vec<u8>, String> {
+pub fn canonical_catalogue_schema_bytes(schema: &SchemaVersion) -> Result<Vec<u8>, String> {
     let public_schema = durable_public_schema_json(&schema.schema)?;
     let length = u32::try_from(public_schema.len())
         .map_err(|_| "catalogue public schema payload too large".to_owned())?;
@@ -4962,13 +4965,13 @@ impl SchemaVersion {
 #[derive(Clone, Debug, PartialEq)]
 pub struct MigrationLens {
     /// Content-addressed lens id.
-    pub(crate) id: MigrationLensId,
+    pub id: MigrationLensId,
     /// Source schema version.
-    pub(crate) source: SchemaVersionId,
+    pub source: SchemaVersionId,
     /// Target schema version.
-    pub(crate) target: SchemaVersionId,
+    pub target: SchemaVersionId,
     /// Per-table lens definitions.
-    pub(crate) table_lenses: Vec<TableLens>,
+    pub table_lenses: Vec<TableLens>,
 }
 
 impl serde::Serialize for MigrationLens {
@@ -5103,7 +5106,8 @@ fn validate_protocol_lens_defaults(table_lenses: &[TableLens]) -> Result<(), &'s
     Ok(())
 }
 
-pub(crate) fn canonical_lens_bytes(lens: &MigrationLens) -> Vec<u8> {
+#[doc(hidden)]
+pub fn canonical_lens_bytes(lens: &MigrationLens) -> Vec<u8> {
     let mut bytes = Vec::new();
     put_str(&mut bytes, "jazz-migration-lens-v1");
     bytes.extend_from_slice(lens.source.as_bytes());
@@ -5128,7 +5132,7 @@ pub(crate) fn canonical_lens_bytes(lens: &MigrationLens) -> Vec<u8> {
 /// catalogue publications. This is intentionally distinct from the server's
 /// schema-editor `LensTransform`: the two carry different operations and must
 /// never be lossily converted into one another.
-pub(crate) fn decode_canonical_lens_bytes(bytes: &[u8]) -> Result<MigrationLens, &'static str> {
+pub fn decode_canonical_lens_bytes(bytes: &[u8]) -> Result<MigrationLens, &'static str> {
     let mut c = ProtocolCodecCursor {
         bytes,
         offset: 0,
@@ -7356,8 +7360,9 @@ mod tests {
         );
     }
 }
-#[cfg(test)]
-pub(crate) mod supporting_set_test_oracle;
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+pub mod supporting_set_test_oracle;
 
 // Durable record-field encodings for these types. They live beside the types
 // so the impls stay coherent once this layer is its own crate.

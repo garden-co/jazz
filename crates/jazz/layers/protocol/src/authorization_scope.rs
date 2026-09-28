@@ -15,14 +15,17 @@ pub const MAX_AUTHORIZATION_SCOPES: usize = 256;
 /// canonical (shape/binding); transport subscription keys are allocated by the
 /// authority and merely name one registered clause instance.
 #[derive(Clone, Debug)]
-pub(crate) struct AuthorityScopeAggregate {
-    pub(crate) expected_support: BTreeSet<(ShapeId, BindingId)>,
-    pub(crate) members: BTreeMap<SubscriptionKey, (ShapeId, BindingId)>,
-    pub(crate) applied: BTreeMap<SubscriptionKey, (GlobalTime, u64)>,
+pub struct AuthorityScopeAggregate {
+    #[doc(hidden)]
+    pub expected_support: BTreeSet<(ShapeId, BindingId)>,
+    #[doc(hidden)]
+    pub members: BTreeMap<SubscriptionKey, (ShapeId, BindingId)>,
+    #[doc(hidden)]
+    pub applied: BTreeMap<SubscriptionKey, (GlobalTime, u64)>,
 }
 
 impl AuthorityScopeAggregate {
-    pub(crate) fn new(expected_support: BTreeSet<(ShapeId, BindingId)>) -> Self {
+    pub fn new(expected_support: BTreeSet<(ShapeId, BindingId)>) -> Self {
         Self {
             expected_support,
             members: BTreeMap::new(),
@@ -30,13 +33,13 @@ impl AuthorityScopeAggregate {
         }
     }
 
-    pub(crate) fn expected_support(&self) -> &BTreeSet<(ShapeId, BindingId)> {
+    pub fn expected_support(&self) -> &BTreeSet<(ShapeId, BindingId)> {
         &self.expected_support
     }
 
     /// Register exactly one server-owned subscription for a canonical support
     /// clause.  A duplicate or an out-of-scope clause invalidates completion.
-    pub(crate) fn register(
+    pub fn register(
         &mut self,
         subscription: SubscriptionKey,
         clause: (ShapeId, BindingId),
@@ -51,18 +54,18 @@ impl AuthorityScopeAggregate {
         true
     }
 
-    pub(crate) fn forget(&mut self, subscription: SubscriptionKey) {
+    pub fn forget(&mut self, subscription: SubscriptionKey) {
         self.members.remove(&subscription);
         self.applied.remove(&subscription);
     }
 
-    pub(crate) fn has_no_members(&self) -> bool {
+    pub fn has_no_members(&self) -> bool {
         self.members.is_empty()
     }
 
     /// Records a locally applied clause and returns the aggregate lower bounds
     /// only when every canonical clause has an applied current view.
-    pub(crate) fn apply(
+    pub fn apply(
         &mut self,
         subscription: SubscriptionKey,
         settled_through: GlobalTime,
@@ -76,7 +79,7 @@ impl AuthorityScopeAggregate {
         self.bounds()
     }
 
-    pub(crate) fn bounds(&self) -> Option<(GlobalTime, u64)> {
+    pub fn bounds(&self) -> Option<(GlobalTime, u64)> {
         if self.members.len() != self.expected_support.len()
             || self
                 .expected_support
@@ -119,7 +122,7 @@ impl AuthorityContext {
     /// connection. Scope receipts legitimately advance the remaining fields
     /// while that connection stays live; those receipt bounds must not make an
     /// already parked relay fate route look as if it belonged to a stale link.
-    pub(crate) fn same_admitted_link(self, other: Self) -> bool {
+    pub fn same_admitted_link(self, other: Self) -> bool {
         self.authority == other.authority
             && self.link == other.link
             && self.connection_id == other.connection_id
@@ -129,24 +132,24 @@ impl AuthorityContext {
 
 /// Capability to send exactly one hydration request for a lease generation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct AuthorizationScopeOwnerToken(u64);
+pub struct AuthorizationScopeOwnerToken(u64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum AuthorizationScopeAcquisition {
+pub enum AuthorizationScopeAcquisition {
     Owner(AuthorizationScopeOwnerToken),
     Waiting,
     Proven,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum AuthorizationScopeReadiness {
+pub enum AuthorizationScopeReadiness {
     Proven(AuthorizationScopeReceipt),
     Owner(AuthorizationScopeOwnerToken),
     Waiting,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum AuthorizationScopeInstall {
+pub enum AuthorizationScopeInstall {
     Installed,
     /// The same lone owner must retry with this new generation.
     Retry(AuthorizationScopeOwnerToken),
@@ -199,7 +202,7 @@ pub struct AuthorizationScopeLease {
 
 impl AuthorizationScopeRegistry {
     /// Acquire a retained scope lease and its immediately actionable state.
-    pub(crate) fn acquire(
+    pub fn acquire(
         &self,
         key: AuthorizationSupportScopeKey,
     ) -> Option<(AuthorizationScopeLease, AuthorizationScopeAcquisition)> {
@@ -234,7 +237,7 @@ impl AuthorizationScopeRegistry {
     }
 
     /// Consume the deterministic promotion token; only the next retained waiter can own it.
-    pub(crate) fn take_promotion(
+    pub fn take_promotion(
         &self,
         lease: &AuthorizationScopeLease,
     ) -> Option<AuthorizationScopeOwnerToken> {
@@ -252,7 +255,7 @@ impl AuthorizationScopeRegistry {
         Some(token)
     }
 
-    pub(crate) fn install(
+    pub fn install(
         &self,
         lease: &AuthorizationScopeLease,
         token: AuthorizationScopeOwnerToken,
@@ -289,7 +292,7 @@ impl AuthorizationScopeRegistry {
 
     /// Read only a proof current for this authority connection and support-view cut.
     /// An obsolete proof transitions retained leases back into deterministic hydration.
-    pub(crate) fn receipt(
+    pub fn receipt(
         &self,
         lease: &AuthorizationScopeLease,
         ctx: AuthorityContext,

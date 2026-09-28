@@ -8,7 +8,7 @@
 
 pub mod channel_credit;
 pub mod channels;
-pub(crate) mod stream_backend;
+pub mod stream_backend;
 
 use postcard::{take_from_bytes, to_allocvec};
 use serde::{Deserialize, Serialize};
@@ -32,7 +32,7 @@ pub const WIRE_PROTOCOL_VERSION: u16 = 3;
 /// rejection cases, through this module's production decoders. This is
 /// test-only input, not a second wire format.
 pub const WIRE_FRAME_ARTIFACT_CORPUS: &str =
-    include_str!("../fixtures/wire_frame_artifact_corpus.json");
+    include_str!("../../../fixtures/wire_frame_artifact_corpus.json");
 
 /// No optional features.
 pub const FEATURE_NONE: WireFeatures = 0;
@@ -406,7 +406,7 @@ pub struct WireInboundContext {
 }
 
 impl WireInboundContext {
-    pub(crate) fn new(
+    pub fn new(
         expected_protocol_version: u16,
         negotiated_features: WireFeatures,
         expected_session: Option<WireSession>,
@@ -419,17 +419,17 @@ impl WireInboundContext {
         }
     }
 
-    pub(crate) fn set_trusted_encoder(&mut self, trusted: bool) {
+    pub fn set_trusted_encoder(&mut self, trusted: bool) {
         self.trusted_encoder = trusted;
     }
 
     /// Whether semantic payloads admitted through this context pass the
     /// checked decoder, which validates every carried version receipt.
-    pub(crate) fn validates_receipts(&self) -> bool {
+    pub fn validates_receipts(&self) -> bool {
         !self.trusted_encoder
     }
 
-    pub(crate) fn decode_semantic_payload(&self, bytes: &[u8]) -> Result<SyncMessage, WireError> {
+    pub fn decode_semantic_payload(&self, bytes: &[u8]) -> Result<SyncMessage, WireError> {
         if self.trusted_encoder {
             let message = decode_sync_message_trusted(bytes).map_err(|error| {
                 WireError::new(
@@ -445,10 +445,7 @@ impl WireInboundContext {
         }
     }
 
-    pub(crate) fn validate_channel_metadata(
-        &self,
-        frame: &WireChannelEnvelope,
-    ) -> Result<(), WireError> {
+    pub fn validate_channel_metadata(&self, frame: &WireChannelEnvelope) -> Result<(), WireError> {
         self.validate_envelope_metadata(&WireEnvelope {
             protocol_version: frame.protocol_version,
             features: frame.features,
@@ -457,7 +454,7 @@ impl WireInboundContext {
         })
     }
 
-    pub(crate) fn decode_frame(&self, bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
+    pub fn decode_frame(&self, bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
         if self.trusted_encoder {
             postcard::from_bytes(bytes)
         } else {
@@ -465,22 +462,19 @@ impl WireInboundContext {
         }
     }
 
-    pub(crate) fn expected_protocol_version(&self) -> u16 {
+    pub fn expected_protocol_version(&self) -> u16 {
         self.expected_protocol_version
     }
 
-    pub(crate) fn negotiated_features(&self) -> WireFeatures {
+    pub fn negotiated_features(&self) -> WireFeatures {
         self.negotiated_features
     }
 
-    pub(crate) fn expected_session(&self) -> Option<&WireSession> {
+    pub fn expected_session(&self) -> Option<&WireSession> {
         self.expected_session.as_ref()
     }
 
-    pub(crate) fn validate_envelope_metadata(
-        &self,
-        envelope: &WireEnvelope,
-    ) -> Result<(), WireError> {
+    pub fn validate_envelope_metadata(&self, envelope: &WireEnvelope) -> Result<(), WireError> {
         self.validate_metadata(
             envelope.protocol_version,
             envelope.features,
@@ -611,7 +605,7 @@ impl WireError {
 }
 
 /// Admit one decoded complete envelope through the canonical wire checks.
-pub(crate) fn admit_complete_envelope(
+pub fn admit_complete_envelope(
     context: &WireInboundContext,
     decoder: &mut WireStreamDecoder,
     envelope: WireEnvelope,
@@ -730,7 +724,7 @@ pub fn encode_sync_message(message: &SyncMessage) -> Result<Vec<u8>, postcard::E
 
 /// Exact byte length `encode_sync_message` would produce, without allocating
 /// or copying the encoding. For diagnostics that only need the size.
-pub(crate) fn encoded_sync_message_len(message: &SyncMessage) -> Result<usize, postcard::Error> {
+pub fn encoded_sync_message_len(message: &SyncMessage) -> Result<usize, postcard::Error> {
     postcard::serialize_with_flavor(message, postcard::ser_flavors::Size::default())
 }
 
@@ -778,7 +772,7 @@ pub fn decode_sync_message_trusted(bytes: &[u8]) -> Result<SyncMessage, postcard
 }
 
 pub use crate::postcard_exact::decode_postcard_exact;
-pub(crate) use crate::postcard_exact::encodes_exactly;
+pub use crate::postcard_exact::encodes_exactly;
 
 /// Decode one canonical WebSocket carrier of raw wire frames without first
 /// allocating an attacker-declared outer `Vec`.
@@ -1092,7 +1086,8 @@ impl WireStreamDecoder {
             .map(Cow::into_owned)
     }
 
-    pub(crate) fn decode_message_borrowed<'a>(
+    #[doc(hidden)]
+    pub fn decode_message_borrowed<'a>(
         &mut self,
         payload: &'a [u8],
         envelope_features: WireFeatures,
@@ -2248,64 +2243,6 @@ mod tests {
             let decoded = decoder.decode_message(&chunk, FEATURE_PAYLOAD_LZ4).unwrap();
             assert_eq!(decoded, message);
         }
-    }
-
-    #[cfg(feature = "transport-compression-zstd")]
-    #[test]
-    fn synthetic_small_delta_streaming_compression_receipt() {
-        jazz_benchmark_guard::refuse_contaminated_measurement();
-        let shape_id = ShapeId(uuid::Uuid::from_bytes([0x22; 16]));
-        let binding_id = BindingId(uuid::Uuid::from_bytes([0x33; 16]));
-        let subscription = crate::protocol::SubscriptionKey {
-            shape_id,
-            binding_id,
-            read_view: Default::default(),
-        };
-        let messages = (1..301_u64)
-            .map(|i| {
-                SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-                    subscription,
-                    settled_through: GlobalTime(10_000 + i),
-                    version_carriers: Vec::new(),
-                    peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-                    // Use current wire-v3 empty supporting-set successors as
-                    // independently delivered control-plane messages. This is
-                    // a compression roundtrip receipt, not a historical size baseline.
-                    supporting_rows: crate::protocol::SupportingRowsUpdate::Delta {
-                        predecessor: u128::from(i).to_le_bytes(),
-                        revision: u128::from(i + 1).to_le_bytes(),
-                        adds: Vec::new(),
-                        removes: Vec::new(),
-                    },
-                })
-            })
-            .collect::<Vec<_>>();
-        let mut raw = 0_u64;
-        let mut per_message_zstd = 0_u64;
-        let streaming_zstd = crate::db::channel_endpoint::tests::compression_receipt(
-            &messages,
-            (current_wire_features() & !FEATURE_PAYLOAD_LZ4) | FEATURE_PAYLOAD_ZSTD,
-        );
-        #[cfg(feature = "transport-compression-lz4")]
-        let streaming_lz4 = crate::db::channel_endpoint::tests::compression_receipt(
-            &messages,
-            current_wire_features() | FEATURE_PAYLOAD_LZ4,
-        );
-        #[cfg(not(feature = "transport-compression-lz4"))]
-        let streaming_lz4 = 0_u64;
-        for message in &messages {
-            let payload = encode_sync_message(message).unwrap();
-            raw += payload.len() as u64;
-            let (compressed, active) =
-                compress_sync_payload(payload.clone(), FEATURE_PAYLOAD_ZSTD).unwrap();
-            let decompressed = decompress_sync_payload(&compressed, active).unwrap();
-            assert_eq!(decompressed, payload);
-            per_message_zstd += compressed.len() as u64;
-        }
-        eprintln!(
-            "SYNTHETIC_SMALL_DELTA_COMPRESSION raw={raw} per_message_zstd={per_message_zstd} streaming_zstd={streaming_zstd} streaming_lz4={streaming_lz4}"
-        );
-        assert!(streaming_zstd < per_message_zstd);
     }
 
     /// `last_resume_bytes` reports this length for diagnostics and receipts,

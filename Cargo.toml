@@ -6,6 +6,7 @@ members = [
   "crates/groove",
   "crates/jazz",
   "crates/jazz/layers/model",
+  "crates/jazz/layers/protocol",
   "crates/jazz/layers/types",
   "crates/jazz-compression",
   "crates/jazz-native-transport",
@@ -49,6 +50,7 @@ exclude = ["examples/todo-server-rs", "examples/docs/todo-server-rs", "vendor/ru
 groove = { path = "crates/groove", default-features = false }
 jazz = { path = "crates/jazz", default-features = false }
 jazz-model = { path = "crates/jazz/layers/model", default-features = false }
+jazz-protocol = { path = "crates/jazz/layers/protocol", default-features = false }
 jazz-types = { path = "crates/jazz/layers/types", default-features = false }
 jazz-compression = { path = "crates/jazz-compression", default-features = false }
 jazz-otel = { path = "crates/jazz-otel" }

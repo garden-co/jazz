@@ -97,8 +97,10 @@ fn publish<S: OrderedKvStorage>(
     initial: bool,
 ) -> SyncMessage {
     let (shape, binding, mut key) = support::table_subscription(schema, "tasks", peer.identity());
-    let mut opts = RegisterShapeOptions::default();
-    opts.tier = DurabilityTier::Local;
+    let opts = RegisterShapeOptions {
+        tier: DurabilityTier::Local,
+        ..RegisterShapeOptions::default()
+    };
     key.read_view = opts.read_view_key();
     peer.set_subscription_policy_binding(key, (peer.identity(), BTreeMap::new()));
     if initial {
@@ -118,8 +120,10 @@ fn receiver(schema: &JazzSchema, peer: &PeerState) -> NodeState<MemoryStorage> {
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let mut node = open(schema, MemoryStorage::new(&refs).unwrap(), 2);
     let (shape, _, mut key) = support::table_subscription(schema, "tasks", peer.identity());
-    let mut opts = RegisterShapeOptions::default();
-    opts.tier = DurabilityTier::Local;
+    let opts = RegisterShapeOptions {
+        tier: DurabilityTier::Local,
+        ..RegisterShapeOptions::default()
+    };
     key.read_view = opts.read_view_key();
     support::apply_and_settle(
         &mut node,

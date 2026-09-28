@@ -457,9 +457,9 @@ pub(crate) mod legacy_test_future {
 /// Re-export of the underlying groove crate used for storage setup.
 pub use groove;
 
+pub use jazz_protocol::authorization_scope;
 pub use jazz_types::account_registry;
 pub use jazz_types::app_id;
-pub mod authorization_scope;
 /// Shared binary row payload contract for the NAPI and WASM bindings.
 pub mod binding_codec;
 /// Disabled-by-default counters used by the native cold-settle attribution bench.
@@ -485,19 +485,17 @@ pub use jazz_types::object;
 pub mod oracle;
 /// Per-peer sync state and metrics.
 pub mod peer;
-pub use jazz_types::postcard_exact;
-/// Simulation-first sync and local event messages.
-pub mod protocol;
-/// Protocol admission and semantic size limits.
-pub mod protocol_limits;
 pub use jazz_model::query;
+pub use jazz_protocol::protocol;
+pub use jazz_protocol::protocol_limits;
+pub use jazz_types::postcard_exact;
 /// Canonical recursive structured query-result boundary types.
 pub mod result_tree;
 pub use jazz_model::schema;
 /// Platform-neutral client and server runtime APIs used by target shells.
 #[cfg(feature = "runtime")]
 pub mod serving;
-pub mod storage_codec_profile;
+pub use jazz_protocol::storage_codec_profile;
 #[cfg(test)]
 mod test_public_schema;
 pub use jazz_types::time;
@@ -507,8 +505,7 @@ pub use jazz_types::time;
 #[allow(missing_docs)]
 pub mod tools;
 pub use jazz_model::tx;
-/// Versioned transport frames around the semantic sync protocol.
-pub mod wire;
+pub use jazz_protocol::wire;
 
 /// Bounded metadata-only delivery diagnostics for native acceptance failures.
 #[doc(hidden)]

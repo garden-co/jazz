@@ -2043,6 +2043,7 @@ dependencies = [
  "jazz-benchmark-guard",
  "jazz-compression",
  "jazz-model",
+ "jazz-protocol",
  "jazz-storage-rocksdb",
  "jazz-storage-sqlite",
  "jazz-types",
@@ -2394,6 +2395,27 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "jazz-protocol"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "groove",
+ "hex",
+ "jazz-compression",
+ "jazz-model",
+ "jazz-types",
+ "postcard",
+ "rand 0.8.5",
+ "rustc-hash",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "thiserror",
+ "uuid",
+ "web-time",
 ]
 
 [[package]]
