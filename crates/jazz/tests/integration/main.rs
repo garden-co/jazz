@@ -59,6 +59,9 @@ mod large_value_read_scaling;
 #[path = "../large_value_streaming_create.rs"]
 mod large_value_streaming_create;
 #[cfg(feature = "testing")]
+#[path = "../local_first_server_wait.rs"]
+mod local_first_server_wait;
+#[cfg(feature = "testing")]
 #[path = "../local_first_unless_empty.rs"]
 mod local_first_unless_empty;
 #[path = "../order_by_unselected_column.rs"]

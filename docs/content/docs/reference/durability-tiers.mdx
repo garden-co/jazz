@@ -33,30 +33,45 @@ Transactions use `.wait(...)` and report errors in the same way as individual mu
 Read choices control which data a query uses and when its **first result** is delivered.
 They are intentionally separate from write durability.
 
-New applications should use the product read choices `"local-first"`,
-`"remote"`, and `"local-first-unless-empty"`:
+New applications should use the two product read choices `"local-first"` and `"remote"`:
 
 - `"local-first"` uses cached local knowledge and shows pending local writes immediately, while still syncing.
 - `"remote"` uses the server's current query scope, without pending local writes. It waits while offline.
-- `"local-first-unless-empty"` is `"local-first"` with one exception: when the local result is
-  empty and the server is reachable (or its first connection is still being set up), the first
-  result waits for the server's first answer. If local data exists, it is shown immediately and
-  catches up with the server as it syncs.
 
-`"local-first-unless-empty"` never waits on a server it cannot reach. The first result is local,
-and immediate, when no server is configured, after `db.disconnect()`, while the connection is down
-or retrying, or when the connection attempt fails. While a connection attempt is in progress, an
-empty result waits at most until five seconds after that attempt started, however late the read
-begins. Once connected, it waits for the server's first answer without a time limit. If the
-connection drops while an empty result is waiting, the empty result is delivered at that moment.
-After the first result, a subscription behaves exactly like `"local-first"`, and remote rows
-appear as they sync.
+### Waiting for the server (`waitForServerMs`)
+
+A local-first read accepts an optional `waitForServerMs` (provisional name) that bounds how long
+its first result may wait for the server. The default, `0`, is plain `"local-first"`. It applies to
+`"local-first"`, the `"local"` alias and the browser default; `"remote"` ignores it. In Rust, use
+`client.query_local_first(query, timeout)` and `client.subscribe_local_first(query, timeout)`.
+
+Only the initial load waits: a one-shot read, or a subscription's first callback. While the client
+looks online (its connection is live, or its connection attempt started less than five seconds
+ago), the first result waits up to `waitForServerMs` for the server's answer and then shows that
+server-confirmed result, together with the client's own pending writes. If the server has not
+answered by then, the local result is shown. The read waits even when local data exists, but never
+longer than the timeout.
+
+It never waits on a server it cannot reach. The first result is local, and immediate, when no
+server is configured, after `db.disconnect()`, while the connection is down or retrying, or when the
+connection attempt fails. If the connection drops during the wait, the local result is delivered at
+that moment. After the first result, a subscription behaves exactly like `"local-first"`: local
+writes show immediately and remote rows appear as they sync.
 
 Queries with an `offset` are the exception. A partly synced local cache would apply the offset to
-the wrong rows, so under `"local-first-unless-empty"` an offset window reads the server's page
-whenever the server can answer, and the local page only when it cannot. A window showing the local
-page switches to the server's page as soon as the server answers, so rows can shift at that moment
-(for example after a local insert).
+the wrong rows, so while waiting an offset window reads the server's page. If the timeout passes
+first, it shows the cached page; a subscription then switches to the server's page when it
+arrives, so rows can shift at that moment.
+
+### Deprecated: `"local-first-unless-empty"`
+
+`"local-first-unless-empty"` (`ReadTier.LocalFirstUnlessEmpty`) is deprecated. It still works as
+before and warns once at runtime; it will be removed in the next breaking release. It behaves like
+`"local-first"`, except that an **empty** local result waits for the server's first answer while
+the server is reachable, without a time limit once connected; a non-empty local result is shown
+immediately. Replace it with `"local-first"` plus a `waitForServerMs` of, for example, a few
+seconds. Note the difference: the new option also waits when the cache has data, but is always
+bounded by the timeout. `"remote-if-possible"` was removed in alpha.57 and throws.
 
 Losing remote access does not erase cached data: local-first reads may still show it. An actual
 synced deletion, however, hides the row from local reads too.

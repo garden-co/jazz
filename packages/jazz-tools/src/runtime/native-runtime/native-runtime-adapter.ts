@@ -1190,8 +1190,9 @@ export class NativeRuntimeAdapter implements Runtime {
   /**
    * A native host owns its socket and exposes status only by request; each
    * request also lets the relay report the link to the core read gate. Poll
-   * only while someone listens and this runtime has issued a
-   * local-first-unless-empty read, so apps that never use the tier pay
+   * only while someone listens and this runtime has issued a read that may
+   * wait for the server (local first with `waitForServerMs`, or the
+   * deprecated local-first-unless-empty tier), so apps that never wait pay
    * nothing.
    */
   private startNativeLinkPoll(): void {
@@ -1210,8 +1211,8 @@ export class NativeRuntimeAdapter implements Runtime {
     }, NATIVE_LINK_POLL_MS);
   }
 
-  private noteReadTier(tier?: string | null): void {
-    if (tier !== LOCAL_FIRST_UNLESS_EMPTY) return;
+  private noteReadTier(tier?: string | null, optionsJson?: string | null): void {
+    if (tier !== LOCAL_FIRST_UNLESS_EMPTY && !readWaitsForServer(optionsJson)) return;
     const owner = this.ownerRuntime;
     if (owner.unlessEmptyReadSeen) return;
     owner.unlessEmptyReadSeen = true;
@@ -2019,7 +2020,7 @@ export class NativeRuntimeAdapter implements Runtime {
   ): Promise<unknown> {
     if (this.closed || this.ownerRuntime.closed) throw new Error("Native runtime is closed");
     assertSupportedReadOptions(tier, optionsJson);
-    this.noteReadTier(tier);
+    this.noteReadTier(tier, optionsJson);
     assertTransactionReadOpen(optionsJson, this.pendingTxs, this.completedTxs);
     const session = readSession(sessionJson);
     assertNoUnsupportedPermissionIntrospection(queryJson);
@@ -2073,7 +2074,7 @@ export class NativeRuntimeAdapter implements Runtime {
     optionsJson?: string | null,
   ): number {
     assertSupportedReadOptions(tier, optionsJson);
-    this.noteReadTier(tier);
+    this.noteReadTier(tier, optionsJson);
     if (queryIncludesDeleted(queryJson)) {
       throw new Error("Native runtime does not support include_deleted subscriptions yet");
     }
@@ -4350,11 +4351,25 @@ function readOptions(
   if (tier != null) readOptions.tier = tier;
   if (includeDeleted) readOptions.include_deleted = true;
   if (options.local_updates != null) readOptions.local_updates = options.local_updates;
+  if (typeof options.server_wait_ms === "number" && options.server_wait_ms > 0) {
+    readOptions.server_wait_ms = options.server_wait_ms;
+  }
   if (options.propagation === "local-only") readOptions.propagation = "local_only";
   if (options.propagation === "full") readOptions.propagation = "full";
   const readView = options.read_view ?? options.readView;
   if (readView != null) readOptions.read_view = readView;
   return readOptions;
+}
+
+/** A read whose initial load may wait for the server (`waitForServerMs`). */
+function readWaitsForServer(optionsJson?: string | null): boolean {
+  if (optionsJson == null) return false;
+  try {
+    const options = JSON.parse(optionsJson) as { server_wait_ms?: unknown };
+    return typeof options.server_wait_ms === "number" && options.server_wait_ms > 0;
+  } catch {
+    return false;
+  }
 }
 
 function readPropagationIsFull(optionsJson?: string | null): boolean {

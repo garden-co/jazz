@@ -38,6 +38,7 @@ import {
   type QueryVisibility,
   isPublicQueryReadTier,
   rejectRemovedReadTier,
+  normalizeWaitForServerMs,
   resolveEffectiveQueryExecutionOptions,
   resolveReadTier,
   isLocalFirstUnlessEmptyTier,
@@ -261,6 +262,10 @@ function lowerPublicDbQueryOptions(options?: QueryOptions): InternalDbQueryOptio
   rejectRemovedReadTier(candidate.tier);
   const lowered: InternalDbQueryOptions = {};
   if (isPublicQueryReadTier(candidate.tier)) lowered.tier = candidate.tier;
+  const waitForServerMs = normalizeWaitForServerMs(
+    (candidate as { waitForServerMs?: unknown }).waitForServerMs,
+  );
+  if (waitForServerMs !== undefined) lowered.waitForServerMs = waitForServerMs;
   if (candidate.branch !== undefined) lowered.branch = candidate.branch as Branch;
   if (candidate.base !== undefined) lowered.base = candidate.base as BranchBase;
   if (isInspectorLocalQueryOptions(options)) lowered.tier = "local-only";
@@ -2561,7 +2566,9 @@ export class Db {
     // A newly attached browser-worker follower learns the namespace-wide
     // connection state during its init handshake. The core read gate needs
     // that state before it decides whether an empty result may wait.
-    const initialOfflineState = isLocalFirstUnlessEmptyTier(options?.tier)
+    const mayWaitForServer =
+      isLocalFirstUnlessEmptyTier(options?.tier) || (options?.waitForServerMs ?? 0) > 0;
+    const initialOfflineState = mayWaitForServer
       ? this.connection.initialExplicitOfflineState()
       : null;
     if (initialOfflineState) await initialOfflineState;

@@ -244,8 +244,10 @@ where
     /// release callback lets a host defer attachment cleanup when dropping a
     /// pending operation while its runtime owner is already borrowed.
     ///
-    /// An [`EmptyOpening::AwaitRemote`] request from a client-local read
+    /// An [`EmptyOpening::WaitForRemote`] request from a client-local read
     /// outside a transaction applies the shared one-shot rule of
+    /// [`Db::read_local_first_within`], and a deprecated
+    /// [`EmptyOpening::AwaitRemote`] request the rule of
     /// [`Db::read_local_first_unless_empty`]: the local-first read runs with
     /// the caller's coverage requirement, and the strict remote read (Global
     /// tier, immediate local updates) always requires coverage. Each phase
@@ -267,11 +269,55 @@ where
         F: Fn(QueryAttachment),
         E: Fn() -> bool,
     {
-        let await_remote = std::mem::take(&mut opts.empty_opening) == EmptyOpening::AwaitRemote
-            && open_tx.is_none()
+        let empty_opening = std::mem::take(&mut opts.empty_opening);
+        let gated = open_tx.is_none()
             && author.is_none()
             && opts.propagation == Propagation::Full
             && effective_read_tier(&opts) == DurabilityTier::Local;
+        let wait_timeout = match empty_opening {
+            EmptyOpening::WaitForRemote { timeout_ms } if gated && timeout_ms > 0 => {
+                Some(std::time::Duration::from_millis(timeout_ms))
+            }
+            _ => None,
+        };
+        let await_remote = gated && empty_opening == EmptyOpening::AwaitRemote;
+        if let Some(timeout) = wait_timeout {
+            let remote_opts = ReadOpts {
+                tier: DurabilityTier::Global,
+                local_updates: LocalUpdates::Immediate,
+                ..opts.clone()
+            };
+            let remote_scope = request_scope.clone();
+            // Boxed for the same reason as the unless-empty read below.
+            return Box::pin(self.read_local_first_within(
+                timeout,
+                || {
+                    self.all_serialized_query_once(
+                        query,
+                        opts,
+                        None,
+                        request_scope,
+                        None,
+                        require_coverage,
+                        &coverage_expired,
+                        &release_coverage,
+                    )
+                },
+                || {
+                    self.all_serialized_query_once(
+                        query,
+                        remote_opts,
+                        None,
+                        remote_scope,
+                        None,
+                        true,
+                        &coverage_expired,
+                        &release_coverage,
+                    )
+                },
+            ))
+            .await;
+        }
         if !await_remote {
             return self
                 .all_serialized_query_once(

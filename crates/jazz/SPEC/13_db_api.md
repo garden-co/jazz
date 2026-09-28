@@ -257,11 +257,20 @@ events, rather than facade-side diffs of full result sets (`INV-API-7`, and
 `DurabilityTier` remains the protocol/core lattice and the write-settlement API.
 Bindings expose the separate, read-only `ReadTier` vocabulary:
 
-| `ReadTier`              | binding behavior                                                                                                                     | own local writes | core lowering                            |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ---------------- | ---------------------------------------- |
-| `LocalFirst`            | evaluate cached local knowledge, online or offline                                                                                   | immediate        | local current state plus pending changes |
-| `Remote`                | wait for the current authority scope; wait while offline                                                                             | excluded         | remote accepted inputs only              |
-| `LocalFirstUnlessEmpty` | as `LocalFirst`, but an empty opening waits for the first remote view while a remote can serve; `offset > 0` reads the remote window | immediate        | as `LocalFirst`, plus the opening gate   |
+| `ReadTier`              | binding behavior                                                                                                                                 | own local writes | core lowering                            |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------- | ---------------------------------------- |
+| `LocalFirst`            | evaluate cached local knowledge, online or offline; with a server wait, the opening waits up to the timeout for the remote view                  | immediate        | local current state plus pending changes |
+| `Remote`                | wait for the current authority scope; wait while offline                                                                                         | excluded         | remote accepted inputs only              |
+| `LocalFirstUnlessEmpty` | deprecated; as `LocalFirst`, but an empty opening waits for the first remote view while a remote can serve; `offset > 0` reads the remote window | immediate        | as `LocalFirst`, plus the opening gate   |
+
+Product reads have two tiers, `LocalFirst` and `Remote`. `LocalFirst` takes an
+optional server-wait timeout (TypeScript `waitForServerMs`, a provisional name;
+Rust `JazzClient::query_local_first` / `subscribe_local_first` with a
+`Duration`; host JSON read-option field `server_wait_ms`). Zero means plain
+`LocalFirst`; `Remote` ignores the timeout. `LocalFirstUnlessEmpty` is
+deprecated (`#[deprecated]` in Rust, a one-time runtime warning in
+TypeScript) and will be removed in the next breaking release; callers migrate
+to `LocalFirst` with a server wait. It keeps its old behaviour until then.
 
 `LocalFirstUnlessEmpty` keeps postcard index 2 in the Rust enum; the removed
 `RemoteIfPossible` name is rejected by every binding and by serde. The
@@ -271,7 +280,7 @@ broader expansion of that overlay is an open question in
 [#2501](https://github.com/garden-co/jazz/issues/2501).
 
 Remote scope withdrawal is not a deletion or a persistent client permission
-filter. LocalFirst and LocalFirstUnlessEmpty may still show downloaded rows. An actual authorized deletion version updates
+filter. LocalFirst (with or without a server wait) and LocalFirstUnlessEmpty may still show downloaded rows. An actual authorized deletion version updates
 local knowledge and must suppress ordinary local reads too. Clients do not
 reevaluate read permissions. See ch. 16 §16.1.1 for source and deletion rules.
 
@@ -296,13 +305,27 @@ Only a worker-minted attachment for the exact account/storage scope admits these
 commands; callers cannot supply an alternate author, claims, or backend
 attribution. A write wait must name a transaction created by that attachment.
 
-`LocalFirstUnlessEmpty` is implemented once, in the core `Db`, so every host
-(Rust facade, WASM, NAPI, native relay) shares one definition. Bindings lower
-it to `ReadOpts { tier: Local, local_updates: Immediate, empty_opening:
-EmptyOpening::AwaitRemote }` and pass it through; they run no probe query and
-no catch-up timer. The gate applies only to product reads (client-local
-serving, `Propagation::Full`, effective tier `Local`); any other read ignores
-the flag.
+The server wait and `LocalFirstUnlessEmpty` are implemented once, in the core
+`Db`, so every host (Rust facade, WASM, NAPI, native relay) shares one
+definition. Bindings lower a local-first read with a non-zero server wait to
+`ReadOpts { tier: Local, local_updates: Immediate, empty_opening:
+EmptyOpening::WaitForRemote { timeout_ms } }`, and the deprecated tier to
+the same options with `EmptyOpening::AwaitRemote`; they pass them through and
+run no probe query and no catch-up timer. Host bindings accept the timeout as
+the `server_wait_ms` read-option field. Both variants use one _opening gate_;
+a `WaitForRemote` gate additionally carries a deadline. The gate applies only
+to product reads (client-local serving, `Propagation::Full`, effective tier
+`Local`); any other read ignores the option. `EmptyOpening` is a host read
+option only: it is never persisted or sent to a peer, so no wire or on-disk
+bytes change.
+
+The two variants differ only in which openings they withhold and for how
+long. `AwaitRemote` withholds only an _empty_ unsettled opening, with no
+deadline beyond the link rules below. `WaitForRemote` withholds _any_
+unsettled opening, empty or not, and every wait also ends at its deadline.
+Everything else below (link state, offset windows, the authority witness)
+is shared; where a rule says "empty opening", it applies to every unsettled
+opening under `WaitForRemote`.
 
 _Can a remote answer?_ The gate consults the host link state, set with
 `Db::set_remote_link_hint` (`setRemoteLinkHint(state)` in WASM and NAPI):
@@ -313,9 +336,10 @@ _Can a remote answer?_ The gate consults the host link state, set with
   until `REMOTE_LINK_ATTEMPT_WINDOW` (5 s) after the _attempt_ started, not
   after the read started: a read issued 60 s into a stalled attempt does not
   wait at all;
-- `live` — admitted upstream: wait, with **no time bound**. A slow but live
-  server holds an empty opening until it answers, the link is lost, or the
-  host reports another state;
+- `live` — admitted upstream: wait, with **no time bound** other than a
+  `WaitForRemote` deadline. A slow but live server holds a gated opening
+  until it answers, the link is lost, the deadline passes, or the host
+  reports another state;
 - `failed` — offline, failed, or backing off between retries: never wait.
 
 While no hint was ever set, the state is derived from the node's own
@@ -342,6 +366,16 @@ state; later deltas are relative to it. With no server, a failed link, or an
 expired attempt, the opening is delivered immediately. After the opening the
 stream is exactly a `LocalFirst` stream.
 
+Under `WaitForRemote`, an unsettled opening (empty or not) is withheld until
+the stream settles, the subscription is rejected, the link leaves `live` or
+`attempting` (or the attempt window expires), or the deadline passes,
+whichever comes first; a withheld opening is then published as one `reset`
+of the current state. A rejection publishes the withheld local opening before
+the rejection, as for any local-first read. Example: cached rows `[a]`,
+server rows `[a, b]`, 500 ms wait on a live link: an authority answer after
+100 ms yields a first delivery `[a, b]`; a server silent for 500 ms yields
+`[a]` at the deadline, and `b` arrives later as an ordinary delta.
+
 _One-shot reads._ The local result is read first and returned if non-empty.
 Otherwise, while a remote can answer, a strict remote read (`Global`,
 immediate local updates) is raced against link loss and attempt expiry. Its
@@ -349,10 +383,17 @@ result is returned if it succeeds. On any failure or loss, the empty local
 result is returned and the pending remote read is dropped, so an outage does
 not accumulate pending remote queries.
 
+Under `WaitForRemote` the one-shot rule is `Db::read_local_first_within`:
+while a remote can answer, the remote read (`Global`, immediate local updates,
+so own pending writes are included) is raced against link loss, attempt
+expiry, and the deadline. Its result is returned if it arrives in time;
+otherwise the pending remote read is dropped and the local-first result is
+returned. A zero timeout or an unreachable remote reads local-first at once.
+
 _Offset windows._ Local pagination is literal (ch. 16): on a partly synced
 client, `offset > 0` applies the offset to whatever subset is cached, which
 can produce an empty page or a wrong one. Under `LocalFirstUnlessEmpty`, a
-query with `offset > 0` therefore reads the strict remote view (`Global`,
+query with `offset > 0` (and likewise under `WaitForRemote`) therefore reads the strict remote view (`Global`,
 immediate local updates) for both one-shots and subscriptions, whenever a
 remote can answer when the read opens. A subscription's opening waits as
 above for its first authority page. If the link is lost or the attempt
@@ -362,7 +403,11 @@ when the authority answers. A one-shot then falls back to the local-first
 window. Otherwise, with no server or a failed link when the read opens, the
 query is an ordinary local-first read. Example: server rows a..j,
 query ordered by label with offset 4 and limit 2, on a fresh client: the
-subscription's first delivery and the one-shot both yield `[e, f]`.
+subscription's first delivery and the one-shot both yield `[e, f]`. Under
+`WaitForRemote`, reaching the deadline first releases the window like a link
+loss: the one-shot returns the cached local-first page, and an unopened
+subscription serves the local-first read of the same window, switching to
+the server's page with one `reset` when it arrives.
 
 _Non-durable foregrounds._ A foreground marked `set_non_durable_client` (a
 browser tab over a worker, or an RN foreground over the relay) registers
@@ -385,8 +430,10 @@ would stop the owner's cache from reaching the stream while the owner cannot
 reach the server. One-shot reads need no witness, because their remote phase
 is already a `Global` read through the owner.
 
-Binding read-tier strings: `local-first-unless-empty` /
-`LocalFirstUnlessEmpty` select this gate. The removed `remote-if-possible` /
+Binding read-tier strings: `local-first` / `LocalFirst` (or the `local`
+alias) with a non-zero server wait select the `WaitForRemote` gate;
+`local-first-unless-empty` / `LocalFirstUnlessEmpty` (deprecated) select the
+`AwaitRemote` gate. The removed `remote-if-possible` /
 `RemoteIfPossible` names are rejected with an error. `remote` / `Remote` are
 strict remote. Low-level `ReadOpts` and the legacy binding entrypoints still
 accept `DurabilityTier` unchanged during the migration.

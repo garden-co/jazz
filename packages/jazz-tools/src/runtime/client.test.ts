@@ -631,6 +631,54 @@ describe("public read tiers", () => {
     );
   });
 
+  it("passes a local-first server wait to the runtime and ignores it elsewhere", async () => {
+    const runtime = makeFakeRuntime();
+    runtime.query.mockResolvedValue([]);
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const reads = [
+      [{ tier: ReadTier.LocalFirst, waitForServerMs: 500 }, "local", '{"server_wait_ms":500}'],
+      [{ tier: "local", waitForServerMs: 250.9 }, "local", '{"server_wait_ms":250}'],
+      [{ tier: ReadTier.LocalFirst, waitForServerMs: 0 }, "local", undefined],
+      [
+        { tier: ReadTier.Remote, waitForServerMs: 500 },
+        "global",
+        JSON.stringify({ local_updates: "deferred" }),
+      ],
+    ] as const;
+    for (const [options, nativeTier, optionsJson] of reads) {
+      runtime.query.mockClear();
+      await client.query('{"relation_ir":{"table":"todos"}}', options);
+      expect(runtime.query.mock.calls[0]?.[2]).toBe(nativeTier);
+      expect(runtime.query.mock.calls[0]?.[3]).toBe(optionsJson);
+    }
+    expect(publicQueryExecutionOptions({ waitForServerMs: 300 })).toEqual({
+      waitForServerMs: 300,
+    });
+    expect(() => publicQueryExecutionOptions({ waitForServerMs: -1 })).toThrow(
+      "waitForServerMs must be a non-negative number of milliseconds",
+    );
+  });
+
+  it("warns once that the local-first-unless-empty tier is deprecated", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      // A fresh module instance, so earlier tests cannot have spent the warning.
+      vi.resetModules();
+      const fresh = await import("./client.js");
+      expect(fresh.resolveReadTier(fresh.ReadTier.LocalFirstUnlessEmpty)).toBe(
+        "local-first-unless-empty",
+      );
+      fresh.resolveReadTier(fresh.ReadTier.LocalFirstUnlessEmpty);
+      fresh.resolveReadTier(fresh.ReadTier.LocalFirst);
+      const deprecations = warn.mock.calls.filter(([message]) =>
+        String(message).includes('"local-first-unless-empty" tier is deprecated'),
+      );
+      expect(deprecations).toHaveLength(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("keeps legacy read durability controls byte-for-byte compatible", () => {
     for (const tier of ["local", "global"] as const) {
       expect(resolveReadTier(tier)).toBe(tier);

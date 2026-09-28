@@ -6681,8 +6681,23 @@ fn foreground_read_opts_from_json(json: &str) -> Result<ReadOpts, RelayError> {
     let object = supplied
         .as_object()
         .ok_or_else(|| failure("expected object".to_owned()))?;
+    let mut server_wait_ms = None;
     for (key, item) in object {
         if item.is_null() {
+            continue;
+        }
+        if key == "server_wait_ms" {
+            server_wait_ms = Some(
+                item.as_f64()
+                    .filter(|ms| ms.is_finite() && *ms >= 0.0)
+                    .map(|ms| ms.floor() as u64)
+                    .ok_or_else(|| {
+                        failure(
+                            "server_wait_ms must be a non-negative number of milliseconds"
+                                .to_owned(),
+                        )
+                    })?,
+            );
             continue;
         }
         let key = if key == "readView" {
@@ -6731,7 +6746,17 @@ fn foreground_read_opts_from_json(json: &str) -> Result<ReadOpts, RelayError> {
             .map(|s| serde_json::Value::String(s.to_owned()))
             .unwrap_or_else(|| item.clone());
     }
-    serde_json::from_value(value).map_err(|e| failure(e.to_string()))
+    let mut opts: ReadOpts = serde_json::from_value(value).map_err(|e| failure(e.to_string()))?;
+    // A local-first read's server-wait timeout. It applies only to a
+    // local-first read without another opening gate; `Remote` reads and the
+    // deprecated local-first-unless-empty tier ignore it.
+    if let Some(timeout_ms) = server_wait_ms
+        && opts.tier == CoreDurabilityTier::Local
+        && opts.empty_opening == jazz::db::EmptyOpening::Deliver
+    {
+        opts.empty_opening = jazz::db::EmptyOpening::WaitForRemote { timeout_ms };
+    }
+    Ok(opts)
 }
 
 #[derive(serde::Deserialize)]

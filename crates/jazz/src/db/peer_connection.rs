@@ -62,7 +62,7 @@ pub(super) fn route_subscription_refresh_failure(
                 code: SubscribeServerFailureCode::Internal,
             },
         };
-        if state.sender.unbounded_send(event).is_ok() {
+        if state.send_rejection(event).is_ok() {
             delivered += 1;
         }
     }
@@ -99,8 +99,7 @@ fn route_invalid_authority_source_closure(
             continue;
         }
         if state
-            .sender
-            .unbounded_send(SubscriptionEvent::Rejected {
+            .send_rejection(SubscriptionEvent::Rejected {
                 reason: reason.clone(),
             })
             .is_ok()

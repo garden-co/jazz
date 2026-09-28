@@ -62,7 +62,10 @@ export class JazzRecordPlayerStore {
     }));
   }
 
-  /** Authority-relative while the server can answer; offsets use cached rows offline. */
+  /**
+   * The server's page when it answers within `waitForServerMs`; the cached
+   * page offline or after the timeout.
+   */
   async playlistWindow(
     playlistId: string,
     offset = PLAYLIST_WINDOW_OFFSET,
@@ -74,7 +77,7 @@ export class JazzRecordPlayerStore {
         .orderBy("position", "asc")
         .offset(offset)
         .limit(limit),
-      { tier: "local-first-unless-empty" },
+      { tier: "local-first", waitForServerMs: 5_000 },
     );
     return rows.map((row) => ({
       id: row.id,

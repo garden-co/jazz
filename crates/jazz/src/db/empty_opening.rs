@@ -1,8 +1,10 @@
-//! The local-first-unless-empty opening gate and the host remote-link hint.
+//! The local-first opening gates and the host remote-link hint.
 //!
-//! A read that asks for [`EmptyOpening::AwaitRemote`] evaluates exactly like a
-//! local-first read, except that an *empty, unsettled* opening is withheld
-//! while the authoritative server could still answer. "Could answer" is one
+//! A read that asks for [`EmptyOpening::WaitForRemote`] evaluates exactly like
+//! a local-first read, except that its unsettled opening is withheld for at
+//! most a caller-chosen timeout while the authoritative server could still
+//! answer. The deprecated [`EmptyOpening::AwaitRemote`] withholds only an
+//! *empty* unsettled opening, without a timeout. "Could answer" is one
 //! definition shared by subscriptions and one-shot reads: see
 //! [`RemoteLinkHint`]. Everything here is host-API state; none of it is
 //! persisted or sent on the wire.
@@ -22,18 +24,46 @@ use super::*;
 /// or the link is lost.
 pub const REMOTE_LINK_ATTEMPT_WINDOW: Duration = Duration::from_secs(5);
 
-/// What a read does with an empty, unsettled opening.
+/// What a local-first read does with its unsettled opening.
 ///
 /// This is a host read option, not a durable encoding: it is never persisted
 /// or sent to a peer. Its serde form exists only for the host JSON read-option
 /// ABI, where an absent field means [`EmptyOpening::Deliver`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize,
+)]
 pub enum EmptyOpening {
     /// Deliver the opening as evaluated (ordinary local-first behaviour).
     #[default]
     Deliver,
-    /// Withhold an empty, unsettled local opening while the remote could
-    /// answer ("local-first unless empty").
+    /// Local first with a server-wait timeout: withhold the unsettled local
+    /// opening, empty or not, for at most `timeout_ms` while the remote could
+    /// answer.
+    ///
+    /// It applies to the same reads as [`EmptyOpening::AwaitRemote`] and
+    /// shares its link rules, its authority witness and its strict remote
+    /// offset window; the only differences are that a non-empty opening waits
+    /// too and that every wait ends at the deadline. While the remote could
+    /// answer:
+    /// - a subscription publishes nothing until its own stream settles, is
+    ///   rejected, the remote can no longer answer, or `timeout_ms` elapses,
+    ///   whichever comes first, and then behaves exactly like local-first
+    ///   (local writes and remote changes show as they arrive);
+    /// - a one-shot read returns the remote result (Global tier, immediate
+    ///   local updates) if it arrives in time, and otherwise the local-first
+    ///   result, dropping the pending remote read.
+    ///
+    /// A zero timeout is [`EmptyOpening::Deliver`]. When the remote cannot
+    /// answer, the read is plain local-first at once.
+    WaitForRemote {
+        /// The longest the opening may wait, in milliseconds.
+        timeout_ms: u64,
+    },
+    /// Deprecated "local-first unless empty": withhold an empty, unsettled
+    /// local opening while the remote could answer, without a timeout.
+    ///
+    /// Kept only for the deprecated `LocalFirstUnlessEmpty` read tier; new
+    /// callers use [`EmptyOpening::WaitForRemote`].
     ///
     /// Applies to client-local reads at the local tier with full
     /// propagation; other reads ignore it. While the remote could answer:
@@ -54,6 +84,18 @@ pub enum EmptyOpening {
     ///
     /// When the remote cannot answer, every read is plain local-first.
     AwaitRemote,
+}
+
+impl EmptyOpening {
+    /// The gate this option asks for, if any: `Some(None)` for the unbounded
+    /// empty-only gate, `Some(Some(timeout))` for a server-wait timeout.
+    fn requested_wait(self) -> Option<Option<Duration>> {
+        match self {
+            Self::Deliver | Self::WaitForRemote { timeout_ms: 0 } => None,
+            Self::WaitForRemote { timeout_ms } => Some(Some(Duration::from_millis(timeout_ms))),
+            Self::AwaitRemote => Some(None),
+        }
+    }
 }
 
 /// What the host knows about the path to the authoritative server.
@@ -122,6 +164,10 @@ pub(super) enum OpeningRoute {
 pub(super) struct OpeningGate {
     /// Link-loss epoch observed when the gate armed.
     epoch: u64,
+    /// When a server-wait timeout releases the gate. `None` is the deprecated
+    /// empty-only gate, which withholds only an empty opening and has no
+    /// deadline of its own.
+    pub(super) deadline: Option<Instant>,
     pub(super) route: OpeningRoute,
     /// An otherwise publishable opening was withheld by this gate.
     pub(super) withheld: bool,
@@ -141,6 +187,8 @@ pub(super) struct RemoteLinkTracker {
     /// before the loss releases even if a new attempt starts immediately.
     loss_epoch: Cell<u64>,
     attempt_expiry_observed: Cell<bool>,
+    /// Server-wait deadlines not yet observed by a host tick.
+    deadlines: RefCell<Vec<Instant>>,
     scheduler: SharedTickScheduler,
     gated: RefCell<Vec<Weak<RefCell<SubscriptionState>>>>,
     /// Streams still owning authority witness coverage.
@@ -155,6 +203,7 @@ impl RemoteLinkTracker {
             live_upstreams: Cell::new(0),
             loss_epoch: Cell::new(0),
             attempt_expiry_observed: Cell::new(false),
+            deadlines: RefCell::new(Vec::new()),
             scheduler,
             gated: RefCell::new(Vec::new()),
             witnessed: RefCell::new(Vec::new()),
@@ -172,8 +221,9 @@ impl RemoteLinkTracker {
         }
     }
 
-    fn may_wait(&self, epoch: u64) -> bool {
+    fn may_wait(&self, epoch: u64, deadline: Option<Instant>) -> bool {
         epoch == self.loss_epoch.get()
+            && deadline.is_none_or(|deadline| Instant::now() < deadline)
             && match self.reach() {
                 RemoteReach::Live => true,
                 RemoteReach::Attempting { since } => {
@@ -183,16 +233,26 @@ impl RemoteLinkTracker {
             }
     }
 
-    /// Arm a gate if the remote could answer now, returning its loss epoch.
-    pub(super) fn arm(&self) -> Option<u64> {
+    /// Arm a gate if the remote could answer now, returning its loss epoch
+    /// and, for a server-wait `timeout`, its deadline.
+    pub(super) fn arm(&self, timeout: Option<Duration>) -> Option<(u64, Option<Instant>)> {
         let epoch = self.loss_epoch.get();
-        if !self.may_wait(epoch) {
+        if !self.may_wait(epoch, None) {
             return None;
         }
         if let RemoteReach::Attempting { since } = self.reach() {
             self.schedule_attempt_expiry(since);
         }
-        Some(epoch)
+        let deadline = timeout.map(|timeout| {
+            let deadline = Instant::now() + timeout;
+            self.deadlines.borrow_mut().push(deadline);
+            if let Some(scheduler) = self.scheduler.borrow().as_ref() {
+                // Round up so the tick observes an elapsed deadline.
+                scheduler.schedule_tick_after(timeout.as_millis() as u64 + 1);
+            }
+            deadline
+        });
+        Some((epoch, deadline))
     }
 
     fn schedule_attempt_expiry(&self, since: Instant) {
@@ -237,15 +297,24 @@ impl RemoteLinkTracker {
         self.notify();
     }
 
-    /// Observe an elapsed attempt window on the host tick it scheduled.
+    /// Observe an elapsed attempt window or server-wait deadline on the host
+    /// tick it scheduled.
     pub(super) fn on_tick(&self) {
-        let RemoteReach::Attempting { since } = self.reach() else {
-            return;
+        let now = Instant::now();
+        let mut elapsed = {
+            let mut deadlines = self.deadlines.borrow_mut();
+            let before = deadlines.len();
+            deadlines.retain(|deadline| now < *deadline);
+            deadlines.len() != before
         };
-        if !self.attempt_expiry_observed.get()
-            && Instant::now() >= since + REMOTE_LINK_ATTEMPT_WINDOW
+        if let RemoteReach::Attempting { since } = self.reach()
+            && !self.attempt_expiry_observed.get()
+            && now >= since + REMOTE_LINK_ATTEMPT_WINDOW
         {
             self.attempt_expiry_observed.set(true);
+            elapsed = true;
+        }
+        if elapsed {
             self.notify();
         }
     }
@@ -276,7 +345,7 @@ impl RemoteLinkTracker {
             let Some(gate) = state_ref.sender.opening_gate() else {
                 continue;
             };
-            if self.may_wait(gate.epoch) {
+            if self.may_wait(gate.epoch, gate.deadline) {
                 retained.push(weak);
             } else {
                 state_ref.release_opening_gate();
@@ -355,17 +424,19 @@ impl RemoteLinkTracker {
     }
 }
 
-/// Resolves once the remote can no longer answer a read armed at `epoch`.
+/// Resolves once the remote can no longer answer a read armed at `epoch`, or
+/// its server-wait `deadline` has passed.
 struct RemoteAnswerLoss {
     tracker: Rc<RemoteLinkTracker>,
     epoch: u64,
+    deadline: Option<Instant>,
 }
 
 impl Future for RemoteAnswerLoss {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        if !self.tracker.may_wait(self.epoch) {
+        if !self.tracker.may_wait(self.epoch, self.deadline) {
             return Poll::Ready(());
         }
         self.tracker.register_waker(cx.waker());
@@ -374,9 +445,10 @@ impl Future for RemoteAnswerLoss {
 }
 
 impl OpeningGate {
-    pub(super) fn armed(epoch: u64, route: OpeningRoute) -> Self {
+    pub(super) fn armed(epoch: u64, deadline: Option<Instant>, route: OpeningRoute) -> Self {
         Self {
             epoch,
+            deadline,
             route,
             withheld: false,
             witnessed: false,
@@ -384,7 +456,14 @@ impl OpeningGate {
         }
     }
 
-    /// Still waiting for the answer that may release an empty opening.
+    /// Whether this gate withholds an opening with `root_count` roots: a
+    /// server-wait gate withholds any opening, the deprecated empty-only gate
+    /// only an empty one.
+    pub(super) fn withholds(&self, root_count: usize) -> bool {
+        self.deadline.is_some() || root_count == 0
+    }
+
+    /// Still waiting for the answer that may release a withheld opening.
     pub(super) fn awaits_answer(&self, settled: bool) -> bool {
         if self.witnessed {
             !self.witness_answered
@@ -407,6 +486,25 @@ impl SubscriptionSender {
 }
 
 impl SubscriptionState {
+    /// Deliver a subscription rejection. A server-wait opening withheld by
+    /// this stream's gate is published first, so the caller sees the local
+    /// result and then the rejection, as for any local-first read. (The
+    /// deprecated empty-only gate publishes its empty opening on the
+    /// rejection path of the sender itself.)
+    pub(super) fn send_rejection(
+        &self,
+        event: SubscriptionEvent,
+    ) -> Result<(), futures_channel::mpsc::TrySendError<SubscriptionEvent>> {
+        if self
+            .sender
+            .opening_gate()
+            .is_some_and(|gate| gate.deadline.is_some() && gate.route == OpeningRoute::LocalFirst)
+        {
+            self.release_opening_gate();
+        }
+        self.sender.unbounded_send(event)
+    }
+
     /// Release an armed opening gate from outside the publication path (link
     /// loss, host hint, elapsed attempt window). A withheld opening is
     /// published now as one reset of the current maintained result, still
@@ -479,7 +577,8 @@ where
 {
     /// Report what the host knows about the path to the authoritative server.
     ///
-    /// This drives [`EmptyOpening::AwaitRemote`] reads only; it never changes
+    /// This drives [`EmptyOpening::WaitForRemote`] and
+    /// [`EmptyOpening::AwaitRemote`] reads only; it never changes
     /// write durability or turns a strict remote read into a local one.
     /// `NoServer` and `Failed` release every held empty opening; `Attempting`
     /// lets empty openings wait until [`REMOTE_LINK_ATTEMPT_WINDOW`] after
@@ -491,23 +590,25 @@ where
         self.node.remote_link.set_hint(hint);
     }
 
-    /// Resolve an [`EmptyOpening::AwaitRemote`] subscription request: the
-    /// effective read options and the gate to install, if any.
+    /// Resolve an [`EmptyOpening::WaitForRemote`] or
+    /// [`EmptyOpening::AwaitRemote`] subscription request: the effective read
+    /// options and the gate to install, if any.
     pub(super) fn resolve_empty_opening(
         &self,
         prepared: &PreparedQuery,
         mut opts: ReadOpts,
         authorization_mode: QueryAuthorizationMode,
     ) -> (ReadOpts, Option<OpeningGate>) {
-        let requested = std::mem::take(&mut opts.empty_opening) == EmptyOpening::AwaitRemote;
-        if !requested
-            || authorization_mode != QueryAuthorizationMode::ClientLocal
+        let Some(timeout) = std::mem::take(&mut opts.empty_opening).requested_wait() else {
+            return (opts, None);
+        };
+        if authorization_mode != QueryAuthorizationMode::ClientLocal
             || opts.propagation != Propagation::Full
             || effective_read_tier(&opts) != DurabilityTier::Local
         {
             return (opts, None);
         }
-        let Some(epoch) = self.node.remote_link.arm() else {
+        let Some((epoch, deadline)) = self.node.remote_link.arm(timeout) else {
             return (opts, None);
         };
         if prepared.shape().query().offset > 0 {
@@ -515,12 +616,20 @@ where
             opts.local_updates = LocalUpdates::Immediate;
             return (
                 opts,
-                Some(OpeningGate::armed(epoch, OpeningRoute::RemoteWindow)),
+                Some(OpeningGate::armed(
+                    epoch,
+                    deadline,
+                    OpeningRoute::RemoteWindow,
+                )),
             );
         }
         (
             opts,
-            Some(OpeningGate::armed(epoch, OpeningRoute::LocalFirst)),
+            Some(OpeningGate::armed(
+                epoch,
+                deadline,
+                OpeningRoute::LocalFirst,
+            )),
         )
     }
 
@@ -557,8 +666,10 @@ where
         // Each phase is boxed so this future holds one phase at a time on the
         // heap rather than both inline (and in every poll frame).
         if windowed {
-            if let Some(epoch) = self.node.remote_link.arm()
-                && let Some(Ok(result)) = self.race_remote_answer(epoch, Box::pin(remote())).await
+            if let Some((epoch, _)) = self.node.remote_link.arm(None)
+                && let Some(Ok(result)) = self
+                    .race_remote_answer(epoch, None, Box::pin(remote()))
+                    .await
             {
                 return Ok(result);
             }
@@ -568,26 +679,63 @@ where
         if !is_empty(&local) {
             return Ok(local);
         }
-        let Some(epoch) = self.node.remote_link.arm() else {
+        let Some((epoch, _)) = self.node.remote_link.arm(None) else {
             return Ok(local);
         };
-        match self.race_remote_answer(epoch, Box::pin(remote())).await {
+        match self
+            .race_remote_answer(epoch, None, Box::pin(remote()))
+            .await
+        {
             Some(Ok(remote)) => Ok(remote),
             Some(Err(_)) | None => Ok(local),
         }
     }
 
-    /// Poll `remote` until it completes or the remote can no longer answer.
-    /// Returning `None` drops the pending remote read.
+    /// One-shot [`EmptyOpening::WaitForRemote`] read shared by host bindings
+    /// and the native facade: local first with a server-wait timeout.
+    ///
+    /// `local` and `remote` produce the local-first and remote (Global tier,
+    /// immediate local updates) results for the same query. While the remote
+    /// could answer, the remote result is returned if it arrives within
+    /// `timeout`; if it fails, the remote can no longer answer, or the timeout
+    /// elapses first, the pending remote read is dropped (cancelling its
+    /// coverage) and the local-first result is returned. A zero timeout, or a
+    /// remote that cannot answer, reads local-first at once.
+    #[doc(hidden)]
+    pub async fn read_local_first_within<T, E, L, R>(
+        &self,
+        timeout: Duration,
+        local: impl FnOnce() -> L,
+        remote: impl FnOnce() -> R,
+    ) -> Result<T, E>
+    where
+        L: Future<Output = Result<T, E>>,
+        R: Future<Output = Result<T, E>>,
+    {
+        if !timeout.is_zero()
+            && let Some((epoch, deadline)) = self.node.remote_link.arm(Some(timeout))
+            && let Some(Ok(result)) = self
+                .race_remote_answer(epoch, deadline, Box::pin(remote()))
+                .await
+        {
+            return Ok(result);
+        }
+        Box::pin(local()).await
+    }
+
+    /// Poll `remote` until it completes, the remote can no longer answer, or
+    /// `deadline` passes. Returning `None` drops the pending remote read.
     async fn race_remote_answer<T>(
         &self,
         epoch: u64,
+        deadline: Option<Instant>,
         remote: impl Future<Output = T>,
     ) -> Option<T> {
         let mut remote = pin!(remote);
         let mut loss = RemoteAnswerLoss {
             tracker: Rc::clone(&self.node.remote_link),
             epoch,
+            deadline,
         };
         std::future::poll_fn(|cx| {
             if let Poll::Ready(result) = remote.as_mut().poll(cx) {

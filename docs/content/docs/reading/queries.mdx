@@ -75,7 +75,6 @@ stale local snapshot would mislead them.
 
 - `"local-first"` uses cached local data and pending local writes immediately, while continuing to sync.
 - `"remote"` waits for Core-authorized query results and excludes pending local edits.
-- `"local-first-unless-empty"` behaves like `"local-first"`, except that an empty local result waits for the first remote answer while the server is reachable. Use it to avoid a flash of empty UI on a fresh device. Offline, never-connected, and failed connections get the local result right away. Queries with an `offset` read the server's page whenever the server can answer.
 
 See [Read tiers](/docs/reference/durability-tiers#read-tiers) for pending-write
 behavior and how subscriptions change between offline and online operation.
@@ -101,12 +100,49 @@ The aliases `"local"` and `"global"` remain accepted for reads; write waits use
   separate subscription's read choice.
 </Callout>
 
+### Waiting briefly for the server
+
+A local-first read can wait a bounded time for the server before its first result. Pass
+`waitForServerMs` (the option name is provisional and may change before it is stable):
+
+```ts
+const todos = await db.all(app.todos, { tier: "local-first", waitForServerMs: 500 });
+db.subscribe(app.todos, onChange, { tier: "local-first", waitForServerMs: 500 });
+const rows = useAll(app.todos, { tier: "local-first", waitForServerMs: 500 });
+```
+
+In Rust, use `client.query_local_first(query, Duration::from_millis(500))` and
+`client.subscribe_local_first(query, Duration::from_millis(500))`.
+
+- Only the initial load waits: a one-shot read, or a subscription's first callback. While the
+  client looks online (its connection is live, or its connection attempt started less than 5 s
+  ago), Jazz waits up to `waitForServerMs` for the server's answer and shows that result, together
+  with your own pending writes. If the server has not answered in time, it shows the local result.
+- It waits even when the local cache already has data, but never longer than the timeout. Use it
+  to avoid showing a stale or empty snapshot on a fresh device.
+- It never waits offline, without a configured server, after `db.disconnect()`, while the
+  connection is retrying, or when the connection drops during the wait: local data shows at once.
+- After the first result it behaves exactly like `"local-first"`: your writes show immediately and
+  remote changes show when they arrive.
+- Queries with an `offset` read the server's page while waiting, because a partly synced cache
+  would apply the offset to the wrong rows. On timeout they show the cached page.
+- The default, `0`, is plain `"local-first"`. The option applies to local-first reads (including
+  the `"local"` alias and the browser default); `"remote"` ignores it.
+
+<Callout type="warn" title="local-first-unless-empty is deprecated">
+  `"local-first-unless-empty"` (`ReadTier.LocalFirstUnlessEmpty`) still works as before but warns
+  once and will be removed in the next breaking release. Replace it with `"local-first"` plus a
+  `waitForServerMs` of, for example, a few seconds. The old tier waited without a timeout, but only
+  when the local result was empty; `waitForServerMs` also waits when the cache has data, bounded by
+  the timeout.
+</Callout>
+
 ### Own writes
 
 The read tier also determines how a subscription treats your own local writes:
 
 - `"local-first"` shows pending local writes using locally known data.
-- `"local-first-unless-empty"` shows pending local writes exactly like `"local-first"`.
+- `"local-first"` with `waitForServerMs` shows pending local writes exactly like `"local-first"`, including in a first result that came from the server.
 - `"remote"` has no pending overlay: writes appear when reflected in the server's query scope.
 
 See [Durability Tiers](/docs/reference/durability-tiers) for the full reference, including which APIs accept these options and how they compose.

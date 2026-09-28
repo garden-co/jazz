@@ -42,6 +42,8 @@ mod large_json_permissions;
 mod large_value_subscriptions;
 #[path = "../local_first_auth_integration.rs"]
 mod local_first_auth_integration;
+#[path = "../local_first_server_wait.rs"]
+mod local_first_server_wait;
 #[path = "../local_first_unless_empty.rs"]
 mod local_first_unless_empty;
 #[path = "../merged_redelivery.rs"]

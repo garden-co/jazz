@@ -3428,6 +3428,7 @@ impl JazzClient {
         }
     }
 
+    #[allow(deprecated)]
     fn core_read_opts_for_read_tier(tier: ReadTier) -> CoreReadOpts {
         let mut opts = Self::core_read_opts(Some(tier.legacy_durability_tier()));
         opts.local_updates = match tier {
@@ -3437,6 +3438,14 @@ impl JazzClient {
         if tier == ReadTier::LocalFirstUnlessEmpty {
             opts.empty_opening = CoreEmptyOpening::AwaitRemote;
         }
+        opts
+    }
+
+    fn core_read_opts_local_first(wait_for_server: Duration) -> CoreReadOpts {
+        let mut opts = Self::core_read_opts_for_read_tier(ReadTier::LocalFirst);
+        opts.empty_opening = CoreEmptyOpening::WaitForRemote {
+            timeout_ms: u64::try_from(wait_for_server.as_millis()).unwrap_or(u64::MAX),
+        };
         opts
     }
 }
@@ -3930,9 +3939,69 @@ impl JazzClient {
         self.subscribe_with_read_tier(query, ReadTier::Remote).await
     }
 
+    /// Subscribe local first, waiting up to `wait_for_server` for the
+    /// server's answer before the first delivery.
+    ///
+    /// While the server could answer (a link is live, or its first connection
+    /// attempt is still young), the core stream withholds its opening, empty
+    /// or not, until the server has answered, the link is lost, or
+    /// `wait_for_server` elapses, whichever comes first. Offline, without a
+    /// server, or with a zero wait it opens on local data at once. Afterwards
+    /// it behaves exactly like [`ReadTier::LocalFirst`]: local writes show
+    /// immediately and remote changes as they arrive. An offset window is
+    /// read as the server's page while it waits.
+    pub async fn subscribe_local_first(
+        &self,
+        query: Query,
+        wait_for_server: Duration,
+    ) -> Result<SubscriptionStream> {
+        self.subscribe_with_opts(query, Self::core_read_opts_local_first(wait_for_server))
+            .await
+    }
+
+    /// One-shot local-first query that waits up to `wait_for_server` for the
+    /// server's answer.
+    ///
+    /// While the server could answer, returns the server's result (with this
+    /// client's pending writes) if it arrives in time, and otherwise the
+    /// local result, dropping the pending remote read. Offline, without a
+    /// server, with a zero wait, or inside a transaction it is a plain
+    /// [`ReadTier::LocalFirst`] query.
+    pub async fn query_local_first(
+        &self,
+        query: Query,
+        wait_for_server: Duration,
+    ) -> Result<Vec<QueryResult>> {
+        let in_transaction = self
+            .write_context
+            .as_ref()
+            .is_some_and(|ctx| ctx.transaction_id.is_some());
+        if wait_for_server.is_zero() || in_transaction {
+            return self
+                .query_with_opts(
+                    query,
+                    Self::core_read_opts_for_read_tier(ReadTier::LocalFirst),
+                )
+                .await;
+        }
+        let backend = self.db.backend()?;
+        let local_opts = Self::core_read_opts_for_read_tier(ReadTier::LocalFirst);
+        let mut remote_opts = Self::core_read_opts_for_read_tier(ReadTier::Remote);
+        remote_opts.local_updates = CoreLocalUpdates::Immediate;
+        let remote_query = query.clone();
+        backend
+            .0
+            .read_local_first_within(
+                wait_for_server,
+                || self.query_with_opts(query, local_opts),
+                || self.query_with_opts(remote_query, remote_opts),
+            )
+            .await
+    }
+
     /// Subscribe using a product-level read tier.
     ///
-    /// `LocalFirstUnlessEmpty` passes the core `EmptyOpening::AwaitRemote`
+    /// `LocalFirstUnlessEmpty` (deprecated) passes the core `EmptyOpening::AwaitRemote`
     /// option through: the core stream withholds only an empty, unsettled
     /// local opening while the server could answer, and then behaves exactly
     /// like `LocalFirst`. An offset window is read as a strict remote view
@@ -3967,6 +4036,7 @@ impl JazzClient {
     /// result while the server could answer, falling back to the empty local
     /// result (and dropping the pending remote read) if it cannot. An offset
     /// window reads remote first while the server could answer.
+    #[allow(deprecated)]
     pub async fn query(&self, query: Query, tier: ReadTier) -> Result<Vec<QueryResult>> {
         let in_transaction = self
             .write_context
@@ -4891,6 +4961,7 @@ mod tests {
     /// overlay bit is not independently observable without conflating it with
     /// remote transport timing. Write durability remains independent.
     #[test]
+    #[allow(deprecated)]
     fn read_tier_lowers_without_changing_write_durability() {
         assert_eq!(
             ReadTier::LocalFirst.legacy_durability_tier(),

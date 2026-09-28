@@ -4092,6 +4092,15 @@ fn core_read_opts_from_json(value: Option<JsonValue>) -> napi::Result<CoreReadOp
     if let Some(include_deleted) = optional_json_bool_prop(&value, "include_deleted")? {
         opts.include_deleted = include_deleted;
     }
+    // A local-first read's server-wait timeout. It applies only to a
+    // local-first read without another opening gate; `Remote` reads and the
+    // deprecated local-first-unless-empty tier ignore it.
+    if let Some(timeout_ms) = optional_json_wait_ms_prop(&value, "server_wait_ms")?
+        && opts.tier == CoreDurabilityTier::Local
+        && opts.empty_opening == CoreEmptyOpening::Deliver
+    {
+        opts.empty_opening = CoreEmptyOpening::WaitForRemote { timeout_ms };
+    }
     if let Some(read_view) = value
         .get("read_view")
         .or_else(|| value.get("readView"))
@@ -4377,6 +4386,21 @@ fn optional_json_string_prop(value: &JsonValue, name: &str) -> napi::Result<Opti
         Some(JsonValue::String(value)) => Ok(Some(value.clone())),
         Some(JsonValue::Null) | None => Ok(None),
         Some(_) => Err(napi::Error::from_reason(format!("{name} must be a string"))),
+    }
+}
+
+fn optional_json_wait_ms_prop(value: &JsonValue, name: &str) -> napi::Result<Option<u64>> {
+    match value.get(name) {
+        Some(JsonValue::Null) | None => Ok(None),
+        Some(JsonValue::Number(ms)) => match ms.as_f64() {
+            Some(ms) if ms.is_finite() && ms >= 0.0 => Ok(Some(ms.floor() as u64)),
+            _ => Err(napi::Error::from_reason(format!(
+                "{name} must be a non-negative number of milliseconds"
+            ))),
+        },
+        Some(_) => Err(napi::Error::from_reason(format!(
+            "{name} must be a non-negative number of milliseconds"
+        ))),
     }
 }
 

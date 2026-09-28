@@ -3,6 +3,11 @@
 //! A non-empty local result opens immediately, exactly like `LocalFirst`. An
 //! empty local opening waits for the first remote view only while an upstream
 //! link is live, and never waits without one.
+//!
+//! The tier is deprecated in favour of a local-first read with a server-wait
+//! timeout (`local_first_server_wait.rs`); these tests pin its behaviour
+//! until it is removed.
+#![allow(deprecated)]
 
 use std::collections::BTreeSet;
 use std::time::Duration;

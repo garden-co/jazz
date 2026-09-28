@@ -3247,7 +3247,34 @@ fn read_opts_from_js(value: JsValue) -> Result<ReadOpts, JsValue> {
     if let Some(include_deleted) = optional_bool_prop(&value, "include_deleted")? {
         opts.include_deleted = include_deleted;
     }
+    if let Some(timeout_ms) = optional_wait_ms_prop(&value, "server_wait_ms")? {
+        opts.empty_opening = local_first_server_wait(&opts, timeout_ms);
+    }
     Ok(opts)
+}
+
+/// A local-first read's server-wait timeout. It applies only to a
+/// local-first read without another opening gate; `Remote` reads and the
+/// deprecated local-first-unless-empty tier ignore it.
+fn local_first_server_wait(opts: &ReadOpts, timeout_ms: u64) -> EmptyOpening {
+    if opts.tier == DurabilityTier::Local && opts.empty_opening == EmptyOpening::Deliver {
+        EmptyOpening::WaitForRemote { timeout_ms }
+    } else {
+        opts.empty_opening
+    }
+}
+
+fn optional_wait_ms_prop(value: &JsValue, name: &str) -> Result<Option<u64>, JsValue> {
+    let prop = js_sys::Reflect::get(value, &JsValue::from_str(name))?;
+    if prop.is_undefined() || prop.is_null() {
+        return Ok(None);
+    }
+    match prop.as_f64() {
+        Some(ms) if ms.is_finite() && ms >= 0.0 => Ok(Some(ms.floor() as u64)),
+        _ => Err(JsValue::from_str(&format!(
+            "{name} must be a non-negative number of milliseconds"
+        ))),
+    }
 }
 
 fn durability_tier_from_str(tier: &str) -> Result<DurabilityTier, JsValue> {
