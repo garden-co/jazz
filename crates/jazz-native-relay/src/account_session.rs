@@ -541,6 +541,46 @@ mod tests {
         }
     }
 
+    // This C-ABI admission test inspects host state because a status/output
+    // assertion alone cannot prove the rejected bearer was not retained.
+    #[test]
+    fn remote_plaintext_transport_fails_before_account_admission() {
+        let root = tempfile::tempdir().unwrap();
+        let root_bytes = root.path().to_str().unwrap().as_bytes();
+        let mut request = external("alice");
+        request.server_url = Some("http://edge.example".into());
+        let request = serde_json::to_vec(&request).unwrap();
+
+        unsafe {
+            let host = jazz_native_relay_host_new();
+            let lease = jazz_native_relay_host_retain(host, 1);
+            let mut out = JazzNativeRelayBytes::EMPTY;
+            let status = jazz_native_relay_host_lease_begin_account_session_json(
+                lease,
+                request.as_ptr(),
+                request.len(),
+                root_bytes.as_ptr(),
+                root_bytes.len(),
+                &mut out,
+            );
+
+            assert_eq!(status as i32, 9, "remote HTTP has a stable policy status");
+            assert!(out.data.is_null());
+            assert_eq!(out.len, 0);
+            let state = match (*lease).inner.lock() {
+                Ok(state) => state,
+                Err(_) => panic!("relay host mutex poisoned"),
+            };
+            assert!(state.pending_private_sessions.is_empty());
+            assert!(state.account_session_owners.is_empty());
+            assert!(state.admitted_scopes.is_empty());
+            assert!(state.private_socket_sessions.is_empty());
+            drop(state);
+            jazz_native_relay_host_lease_free(lease);
+            jazz_native_relay_host_free(host);
+        }
+    }
+
     #[test]
     fn account_setup_separates_durable_account_from_live_identity_and_transport() {
         // Pre-schema private admission has no public Db to inspect; verify
