@@ -5,8 +5,21 @@
 
 int main(void) {
   const uint16_t abi = jazz_native_relay_abi_version();
-  if (abi != 1) {
+  if (abi != JAZZ_NATIVE_RELAY_ABI_V2) {
     fprintf(stderr, "unexpected Jazz native relay ABI: %u\n", abi);
+    return 1;
+  }
+
+  uint32_t diagnostic = UINT32_MAX;
+  if (jazz_native_relay_host_lease_tick_attached_foreground(NULL, 1) !=
+      JAZZ_NATIVE_RELAY_INVALID_ARGUMENT) {
+    fprintf(stderr, "V1 lease tick symbol no longer accepts its original signature\n");
+    return 1;
+  }
+  if (jazz_native_relay_host_lease_tick_attached_foreground_v2(NULL, 1, &diagnostic) !=
+          JAZZ_NATIVE_RELAY_INVALID_ARGUMENT ||
+      diagnostic != JAZZ_NATIVE_RELAY_TICK_DIAGNOSTIC_NONE) {
+    fprintf(stderr, "V2 lease tick did not initialize its diagnostic on early return\n");
     return 1;
   }
   jazz_native_relay_bytes secret = {0};

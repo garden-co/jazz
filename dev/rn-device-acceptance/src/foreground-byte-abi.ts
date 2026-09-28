@@ -5,7 +5,7 @@ import type {
   NativeForegroundRuntime,
   NativeForegroundRuntimeFactory,
 } from "jazz-rn";
-import { NATIVE_RELAY_ABI_V1 } from "jazz-rn/native-relay-abi";
+import { NATIVE_RELAY_ABI_V1, NATIVE_RELAY_ABI_V2 } from "jazz-rn/native-relay-abi";
 import type { DeviceDiagnosticCode } from "./device-diagnostics";
 import {
   nativeSubscriptionDeltaHasFieldBytes,
@@ -51,7 +51,7 @@ export function proveForegroundByteAbi(
   ) => void,
 ): NativeForegroundRuntime {
   markFailure?.("foreground-abi-version-failed");
-  if (factory.abiVersion !== NATIVE_RELAY_ABI_V1)
+  if (factory.abiVersion !== NATIVE_RELAY_ABI_V2)
     throw new Error(`installed foreground factory has unexpected ABI ${factory.abiVersion}`);
   markFailure?.("foreground-open-failed");
   const foreground = factory.openAttached(capability);

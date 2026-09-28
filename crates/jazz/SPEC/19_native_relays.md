@@ -550,6 +550,13 @@ local-first query lifecycle `All`, `Subscribe`, `DrainSubscription`,
 `Unsubscribe`. Query inputs are exactly canonical postcard `Query` bytes; read
 output is the existing `binding_codec::encode_rows` payload and subscription
 deltas are the existing `binding_codec::encode_subscription_delta` payload.
+The current native artifact C ABI is V2; the byte-oriented postcard protocol
+described here remains V1. V2 adds a fixed-width diagnostic category only to
+the lease-scoped direct JSI tick call. The category preserves the existing
+status and exposes neither the retained transport error string nor arbitrary
+server data. The postcard `execute(Tick)` operation remains unchanged and does
+not report this diagnostic.
+
 Subscription identifiers are owner-thread-local opaque u64 handles allocated
 once across every foreground attached to that relay, so a value copied from a
 sibling foreground cannot alias a same-number local resource. JavaScript handle

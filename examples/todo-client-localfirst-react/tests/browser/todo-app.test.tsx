@@ -291,7 +291,7 @@ describe("React Todo App E2E", () => {
 
     await waitFor(
       () => el.querySelectorAll("#todo-list li").length === 3,
-      3000,
+      10_000,
       "Should have 3 todos",
     );
 

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { enrolledAccountConfig } from "../runtime/testing/account-handle-fixtures.js";
 import { accountRegistryUrl, type AccountDbConfig } from "../accounts/context.js";
 import { schema as s } from "../index.js";
-import { NATIVE_RELAY_ABI_V1 } from "jazz-rn";
+import { NATIVE_RELAY_ABI_V2 } from "jazz-rn";
 import {
   PostcardWriter,
   PostcardReader,
@@ -17,7 +17,7 @@ const nativeForegroundTest = vi.hoisted(() => ({
   close: vi.fn(() => true),
   openAttached: vi.fn(),
   turboModule: {
-    getAbiVersion: () => NATIVE_RELAY_ABI_V1,
+    getAbiVersion: () => NATIVE_RELAY_ABI_V2,
     execute: async () => {
       throw new Error("the read-only foreground path must not use TurboModule execute");
     },
@@ -63,7 +63,7 @@ async function accountConfig(appId: string, subject = "reader") {
 
 function installJsiForegroundFactory() {
   (globalThis as Record<string, unknown>).__jazzNativeForegroundRuntimeV1 = {
-    abiVersion: NATIVE_RELAY_ABI_V1,
+    abiVersion: NATIVE_RELAY_ABI_V2,
     openAttached: (capability: Uint8Array) => {
       nativeForegroundTest.openAttached(capability);
       return {
