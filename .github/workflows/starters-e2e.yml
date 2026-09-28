@@ -11,9 +11,14 @@ name: Starters E2E
 # workspace tarballs (jazz-tools, jazz-napi, jazz-wasm) plus the runtime
 # artifacts the harness needs (jazz-tools/dist, jazz-napi index + .node).
 # The `e2e` matrix then downloads those and runs the harness per starter,
-# skipping the ~10-minute `build:core` step entirely. Playwright browsers
-# and the pnpm store are cached between jobs so the matrix doesn't repeat
-# the 280 MB chromium download or the lockfile resolution per runner.
+# so only `prepare` compiles Rust. That compile is the whole critical path
+# (each starter takes about a minute), so `prepare` runs on 16 vCPUs, restores
+# third-party Rust build outputs saved by default-branch runs, and skips the
+# debug `jazz-tools` CLI binary that `build:core` also builds but no starter
+# uses. The WASM and NAPI artifacts are the same release builds as before.
+# Playwright browsers and the pnpm store are cached between jobs so the matrix
+# doesn't repeat the 280 MB chromium download or the lockfile resolution per
+# runner.
 
 on:
   pull_request:
@@ -39,9 +44,8 @@ jobs:
     # On PR events, only fire on the changesets release PR. Manual dispatch is
     # always allowed (handy for testing a starter in isolation).
     if: ${{ github.event_name == 'workflow_dispatch' || github.head_ref == 'changeset-release/release' }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    # A cold `build:core` alone takes ~23 minutes on this runner.
-    timeout-minutes: 40
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 30
     steps:
       - name: Validate workflow_dispatch starter
         if: ${{ github.event_name == 'workflow_dispatch' }}
@@ -84,11 +88,22 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      - name: Cache Rust build artifacts
+        # Restores third-party crates (including the RocksDB C++ build) and the
+        # cargo-installed wasm-pack. Workspace crates are always rebuilt, so the
+        # packed artifacts still come from this tree. Only default-branch runs
+        # (the nightly dispatch) save; release PRs and branch dispatches read.
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          prefix-key: starters-e2e-v1
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
       - name: Install Rust prerequisites
         run: pnpm run ensure:rust-toolchain
 
-      - name: Build core workspace
-        run: pnpm run build:core
+      - name: Build release artifacts and packages
+        run: pnpm run build:starters-e2e
 
       - name: Verify starter package artifact hand-off
         run: node dev/artifacts/verify-starter-e2e-artifacts.mjs

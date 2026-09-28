@@ -89,7 +89,7 @@ test("manual starter filters reject unknown dispatch values before preparation",
   );
   assert.ok(
     prepare.indexOf("- name: Validate workflow_dispatch starter") <
-      prepare.indexOf("pnpm run build:core"),
+      prepare.indexOf("pnpm run build:starters-e2e"),
     "validate the dispatch filter before building the workspace",
   );
 });
@@ -108,7 +108,7 @@ test("release starter gate rejects prefix and unconditional trigger broadening",
 test("release starter gate exercises packaged artifacts through create-jazz-e2e", () => {
   const prepare = job("prepare", "e2e");
   const e2e = job("e2e");
-  assert.match(prepare, /pnpm run build:core/);
+  assert.match(prepare, /pnpm run build:starters-e2e/);
   assert.match(prepare, /node dev\/artifacts\/verify-starter-e2e-artifacts\.mjs/);
   assert.match(prepare, /for pkg in jazz-tools jazz-napi jazz-wasm;/);
   assert.match(prepare, /name: starters-e2e-build-state/);
