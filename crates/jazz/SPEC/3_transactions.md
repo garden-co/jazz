@@ -519,6 +519,10 @@ an empty capture. Shared schema views do not race to drain it.
 The host retains drained bytes until durable cache publication succeeds,
 and must surface publication failure as not-ready/error. Replacing an undrained
 capture or a host-retained capture requires compatible monotone lineage.
+For persistent browsers, the worker owns host-cache publication. Non-durable
+foreground and inspector peers may install validated cached identities and
+delegate durable readiness, but do not publish their relay-local captures into
+the shared host cache.
 
 Only a host-admitted constructor may install a cached snapshot. It first checks
 that a new root has no durable residue, opens it catalogue-uninitialized, then
