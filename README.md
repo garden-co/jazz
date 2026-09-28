@@ -119,6 +119,4 @@ with prerelease mode active.
 
 # License
 
-Jazz is MIT licensed. The webfont files bundled with the homepage under
-`docs/public/fonts/` are expressly excluded from the repo MIT license and
-remain subject to their own upstream license terms.
+Jazz is MIT licensed.
