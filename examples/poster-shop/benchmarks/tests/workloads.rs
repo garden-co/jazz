@@ -14,3 +14,23 @@ fn canvas_queries_preserve_shape_z_order_and_cursor_fanout() {
         ["canvas", "layer", "z_index"]
     );
 }
+
+#[test]
+fn opening_the_canvas_delivers_every_surface() {
+    // 64 shapes + 4 layers + 8 cursors + 4 assets + 3 checkpoints.
+    assert_eq!(Fixture::new(64).open_canvas(), 83);
+}
+
+#[test]
+fn live_canvas_shows_added_shapes_and_cursor_moves_leave_it_alone() {
+    let fixture = Fixture::new(64);
+    let mut live = fixture.live_canvas();
+    assert_eq!(fixture.add_shape(&mut live), 1);
+    assert_eq!(fixture.add_shape(&mut live), 1);
+    assert_eq!(fixture.move_cursor(&mut live), 1);
+    assert_eq!(fixture.move_cursor(&mut live), 1);
+    assert!(!Fixture::canvas_has_pending_event(&mut live));
+    assert_eq!(fixture.ordered_shape_count(), 66);
+    // Reopening after edits still sees the whole canvas.
+    assert_eq!(fixture.open_canvas(), 85);
+}

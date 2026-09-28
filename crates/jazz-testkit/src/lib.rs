@@ -27,12 +27,6 @@ pub async fn connect(
     .await
 }
 
-#[cfg(feature = "scenarios")]
-pub fn native_connector()
--> std::sync::Arc<dyn jazz::tools::native_transport_connector::NativeTransportConnector> {
-    std::sync::Arc::new(jazz_native_transport::NativeWebSocketConnector)
-}
-
 #[cfg(feature = "rocksdb")]
 pub fn persistent_storage_factory() -> std::sync::Arc<dyn groove::storage::StorageFactory> {
     std::sync::Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory)

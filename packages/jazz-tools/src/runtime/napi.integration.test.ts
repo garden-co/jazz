@@ -1768,7 +1768,7 @@ describe("NAPI integration", () => {
     }
   }, 60_000);
 
-  it("syncs edge create/update/delete flows between real backend NAPI contexts", async () => {
+  it("syncs global create/update/delete flows between real backend NAPI contexts", async () => {
     const appId = randomUUID();
     const backendSecret = "napi-e2e-backend-secret";
     const adminSecret = "napi-e2e-admin-secret";

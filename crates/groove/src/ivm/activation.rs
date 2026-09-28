@@ -17,17 +17,32 @@ pub(crate) struct ActivationPlan {
     pub ephemeral: Vec<NodeId>,
     pub tables: Vec<String>,
     pub bindings: Vec<BindingSourceKey>,
+    /// Affected shared terminals whose route barriers were not activated;
+    /// the tick activates only the barriers their delta reaches.
+    pub routed: Vec<NodeId>,
 }
 
 impl ActivationPlan {
     fn compile(graph: &IvmGraph, sources: Vec<NodeId>) -> Result<Self, NodeId> {
         let mut affected = HashSet::new();
         let mut pending = sources.clone();
+        let routes = graph.routes();
         while let Some(id) = pending.pop() {
+            // A route barrier is reached only through its shared terminal; the
+            // tick activates it when that terminal's delta carries its key.
+            if routes.is_barrier(id) && !sources.contains(&id) && !reaches_durable(graph, id)? {
+                continue;
+            }
             if affected.insert(id) {
                 pending.extend(graph.node(id).ok_or(id)?.children.iter().copied());
             }
         }
+        let mut routed = affected
+            .iter()
+            .copied()
+            .filter(|id| routes.has_table(*id))
+            .collect::<Vec<_>>();
+        routed.sort_unstable();
         let layout = graph.execution_layout(affected.iter().copied())?;
         let relevant = Arc::new(layout.nodes.iter().copied().collect());
         let mut durable = Vec::new();
@@ -62,6 +77,7 @@ impl ActivationPlan {
             ephemeral,
             tables: tables.into_iter().collect(),
             bindings: bindings.into_iter().collect(),
+            routed,
         })
     }
 
@@ -74,7 +90,26 @@ impl ActivationPlan {
             + self.ephemeral.len()
             + self.tables.len()
             + self.bindings.len()
+            + self.routed.len()
     }
+}
+
+/// Durable nodes are ticked before the routed frame, so a barrier above one
+/// keeps ordinary activation.
+fn reaches_durable(graph: &IvmGraph, barrier: NodeId) -> Result<bool, NodeId> {
+    let mut seen = HashSet::new();
+    let mut pending = vec![barrier];
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        let node = graph.node(id).ok_or(id)?;
+        if node.is_durable() {
+            return Ok(true);
+        }
+        pending.extend(node.children.iter().copied());
+    }
+    Ok(false)
 }
 
 #[derive(Debug, Default)]
@@ -112,7 +147,10 @@ impl ActivationCache {
         let plan = Arc::new(ActivationPlan::compile(graph, sources)?);
         cache.builds += 1;
         const MAX_PLANS: usize = 16;
-        const MAX_WEIGHT: usize = 65_536;
+        // A repeated activation over roughly a thousand routed subscriptions
+        // exceeds the former 65K-weight cap. Rebuilding it on every write is
+        // more expensive than retaining a bounded plan for the live graph.
+        const MAX_WEIGHT: usize = 1_000_000;
         let weight = plan.weight();
         if weight <= MAX_WEIGHT {
             while cache.plans.len() >= MAX_PLANS || cache.weight + weight > MAX_WEIGHT {
@@ -217,6 +255,39 @@ mod tests {
             &plan(&graph, &["a"]),
             &plan(&graph.clone(), &["a"])
         ));
+    }
+
+    #[test]
+    fn durable_node_below_a_route_barrier_invalidates_plans_that_stopped_there() {
+        let mut graph = IvmGraph::new();
+        let a = source(&mut graph, "a");
+        let union = |inputs: Vec<NodeId>| {
+            NodeDescriptor::new(
+                OpType::Union,
+                inputs,
+                RecordDescriptor::new([("id", ValueType::U64)]),
+            )
+        };
+        let barrier = graph.dedup_node(union(vec![a]), NodeDurability::Ephemeral);
+        graph.add_route_barrier(a, barrier, vec![0], vec![ValueType::U64], vec![1], None);
+        let before = plan(&graph, &["a"]);
+        assert_eq!(*before.affected, HashSet::from([a]));
+
+        // The new node's only input is the barrier, which the cached plan
+        // never reached; it must still be rebuilt because the barrier now
+        // reaches a durable node and keeps ordinary activation.
+        let durable = graph.dedup_node(
+            union(vec![barrier]),
+            NodeDurability::Durable {
+                storage: crate::ivm::DurableStorage {
+                    column_family: "durable".into(),
+                    key_prefix: Vec::new(),
+                },
+            },
+        );
+        let after = plan(&graph, &["a"]);
+        assert_eq!(*after.affected, HashSet::from([a, barrier, durable]));
+        assert_eq!(after.durable, vec![durable]);
     }
 
     #[test]

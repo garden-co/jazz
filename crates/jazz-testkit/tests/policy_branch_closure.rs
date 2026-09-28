@@ -240,7 +240,7 @@ async fn seed_policy_branch_closure_rows(admin: &JazzClient) {
             row_input!("resource" => hidden, "team" => seed_team, "grant_role" => "blocked"),
         )
         .expect("insert non-matching hidden resource access edge");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         admin,
         &[
             seed_tx.expect("ordinary mutation commits immediately"),

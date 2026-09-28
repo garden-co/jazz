@@ -6,10 +6,11 @@ publish = false
 
 [dependencies]
 jazz = { workspace = true }
+jazz-benchmark-guard = { path = "../../../crates/benchmark-guard" }
 
 [dev-dependencies]
 divan = { workspace = true }
 
 [[bench]]
-name = "loads"
+name = "walltime"
 harness = false

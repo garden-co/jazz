@@ -88,7 +88,7 @@ export async function combinedQuery(db: Db) {
 // #endregion combining-react
 
 // #region reading-tier-react
-export function subscribeTodosAtEdge(db: Db, onCount: (count: number) => void) {
+export function subscribeTodosAtGlobal(db: Db, onCount: (count: number) => void) {
   return db.subscribe(app.todos.where({ done: false }), (todos) => onCount(todos.length), {
     tier: ReadTier.Remote,
   });

@@ -64,9 +64,12 @@ receipt table exposes exact seconds for keyboard and assistive-technology users.
 ## Sources and caching
 
 `lib/source.ts` uses ordinary unauthenticated GraphQL at
-`https://gql.codspeed.io/`, fetching `repository.runs` with walltime distributions
-and `commit.branch.pullRequest` metadata. The API currently returns available
-repository history without pagination arguments; the UI reports the actual
+`https://gql.codspeed.io/`. It first lists `repository.runs` with
+`commit.branch.pullRequest` metadata but no results, then fetches walltime
+distributions via `repository.run(id:)`, one run per request, only for runs the
+timeline can admit (main, open PRs, exact tags and registered backfills).
+Asking for every run's results at once exceeded CodSpeed's gateway timeout at
+~400 runs. `runs` takes no pagination arguments; the UI reports the actual
 returned count, not a claim of exhaustive retention. This public web API is not
 a pinned SDK contract: API errors fail visibly rather than returning demo data.
 See also `../../../dev/benchmarks/CODSPEED_GQL.md` for profile access.
@@ -85,11 +88,17 @@ budgets visibly warn that remaining main release statuses are unverified. No PR
 trial is reclassified through ancestry, and missing evidence never fabricates a
 release measurement.
 
-Upstream CodSpeed fetch and CDN responses are cached for five minutes; the CDN
-can serve stale responses for another ten minutes while revalidating. GitHub
-tags cache for one hour. Refresh reads that cache; it does not bypass rate
-protection. No credentials, callgraph presigned URLs, or private data reach the
-browser. A failed CodSpeed fetch returns HTTP 502 with a retry UI.
+The run list is cached for five minutes. A run's results are cached for five
+minutes while the run is under two hours old, then for a day: results can still
+be processing right after a run, and re-running a CI job can replace results
+inside an existing run, so even settled runs expire daily. A warm refresh
+therefore asks CodSpeed for the run list plus only new runs. The API response is
+CDN-cached for 30 minutes and may be served stale for up to a day while it
+revalidates. GitHub tags cache for one hour. Refresh reads that cache; it does
+not bypass rate protection. No credentials, callgraph presigned URLs, or private
+data reach the browser. When CodSpeed fails, a server instance that already
+built a timeline returns it with a warning naming when it was retrieved; a
+cold instance returns HTTP 502 with a retry UI.
 
 ## Docs route and deployment
 
@@ -124,3 +133,14 @@ it must not be merged into main. It retains every released engine crate tree,
 released dependency versions and profiles, and imports the five later CodSpeed
 workloads with harness-only API adaptations. The standalone native Groove
 `record_validation` receipt is outside the CodSpeed workload inventory.
+
+One release may have several registry entries, one per harness commit; each
+entry allowlists only its own run/result IDs, and all entries for a release must
+agree on engine SHA and effective date (`backfills.test.ts` audits the registry).
+The alpha.55 policy harness lives on `chore/alpha55-codspeed-new-bench-backfill`.
+The W1 `subscription_fanout_memory` cases added after alpha.56 are backfilled
+from `bench/alpha5{4,5,6}-fanout-backfill`; each branch documents its single
+diagnostic-only adaptation in `dev/benchmarks/ALPHA5x_FANOUT_BACKFILL.md`.
+`first_sync_local_relay_27518_rocksdb` has no release points: its harness needs
+the `Node::accept_scope_isolated_relay_subscriber_for_test` engine hook added
+after alpha.56, and adding it would change pinned engine bytes.

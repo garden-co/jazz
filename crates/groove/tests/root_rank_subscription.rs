@@ -198,3 +198,92 @@ async fn mixed_root_edits_and_shared_subscribers_match_exact_sorted_rows() {
         }
     }
 }
+
+#[futures_test::test]
+async fn new_groups_in_one_batch_interleave_with_existing_groups_in_key_order() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "items",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("grp", ColumnType::U64),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let mut db = Database::new(schema, MemoryStorage::new(&["items"]).unwrap())
+        .await
+        .unwrap();
+    let graph = GraphBuilder::collect_by(
+        GraphBuilder::table("items"),
+        ["grp"],
+        [CollectByField::named("grp")],
+        [CollectByField::named("id")],
+        "items",
+        [TopByOrder::asc("id")],
+        ["id"],
+        0,
+        TopByLimit::Unbounded,
+    );
+    let subscription = db.subscribe([("groups", graph)]).unwrap();
+    subscription.try_recv().unwrap();
+
+    // Visible root groups, by group value, after applying each tick's edits
+    // in order. Child edits inside an existing group carry a non-empty path.
+    let mut visible = Vec::<(Vec<u8>, u64)>::new();
+    let apply_roots = |visible: &mut Vec<(Vec<u8>, u64)>, operations: &[TerminalOperation]| {
+        for operation in operations {
+            if !operation.path.is_empty() {
+                continue;
+            }
+            let group = |bytes: &[u8]| match BorrowedRecord::new(bytes, &operation.root_descriptor)
+                .get_idx(0)
+                .unwrap()
+            {
+                Value::U64(group) => group,
+                other => panic!("unexpected group value {other:?}"),
+            };
+            match &operation.edit {
+                TerminalEdit::Insert { key, index, value } => {
+                    visible.insert(*index, (key.clone(), group(value)));
+                }
+                TerminalEdit::Remove { key } => {
+                    visible.remove(visible.iter().position(|(k, _)| k == key).unwrap());
+                }
+                TerminalEdit::Move { key, index } => {
+                    let row = visible.remove(visible.iter().position(|(k, _)| k == key).unwrap());
+                    visible.insert(*index, row);
+                }
+                TerminalEdit::Update { key, value } => {
+                    visible.iter_mut().find(|(k, _)| k == key).unwrap().1 = group(value);
+                }
+            }
+        }
+    };
+    let groups = |visible: &[(Vec<u8>, u64)]| visible.iter().map(|(_, g)| *g).collect::<Vec<_>>();
+
+    // Existing groups B and D.
+    let mut seed = db.open_batch();
+    for (id, group) in [(1, 2), (2, 4)] {
+        seed.insert("items", vec![Value::U64(id), Value::U64(group)]);
+    }
+    let persistence = db.apply_batch(seed).await.unwrap().persist().await;
+    db.finish_persistence(persistence).unwrap();
+    apply_roots(
+        &mut visible,
+        &subscription.try_recv().unwrap().terminal_sinks["groups"].operations,
+    );
+    assert_eq!(groups(&visible), [2, 4]);
+
+    // One batch adds A, C and E: each new root's index must count the other
+    // new roots before it, not only the groups that existed before the batch.
+    let mut batch = db.open_batch();
+    for (id, group) in [(3, 5), (4, 1), (5, 3)] {
+        batch.insert("items", vec![Value::U64(id), Value::U64(group)]);
+    }
+    let persistence = db.apply_batch(batch).await.unwrap().persist().await;
+    db.finish_persistence(persistence).unwrap();
+    apply_roots(
+        &mut visible,
+        &subscription.try_recv().unwrap().terminal_sinks["groups"].operations,
+    );
+    assert_eq!(groups(&visible), [1, 2, 3, 4, 5]);
+}
