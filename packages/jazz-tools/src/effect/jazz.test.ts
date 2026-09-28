@@ -106,6 +106,16 @@ describe("Jazz Effect service", { timeout: 30_000 }, () => {
     expect(error).toMatchObject({ _tag: "JazzError", operation: "insert" });
   });
 
+  it("describes causes that are not Errors", () => {
+    const bare = Object.assign(Object.create(null), { code: "E_BARE" });
+    expect(new JazzError({ operation: "insert", cause: bare }).message).toBe(
+      'Jazz insert failed: {"code":"E_BARE"}',
+    );
+    expect(new JazzError({ operation: "all", cause: { message: "closed" } }).message).toBe(
+      "Jazz all failed: closed",
+    );
+  });
+
   it("streams the complete result on subscription and after each change", async () => {
     const { layer, openSubscriptions } = await trackedJazzLayer("stream");
     const result = await run(

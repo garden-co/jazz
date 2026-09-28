@@ -80,8 +80,8 @@ const addGroceries = Effect.gen(function* () {
   const jazz = yield* Jazz;
   yield* jazz.transaction((tx) =>
     Effect.gen(function* () {
-      const list = yield* tx.insert(app.lists, { name: "Groceries" });
-      yield* tx.insert(app.todos, { title: "Milk", done: false, list: list.id });
+      const project = yield* tx.insert(app.projects, { name: "Groceries" });
+      yield* tx.insert(app.todos, { title: "Milk", done: false, projectId: project.id });
     }),
   );
 });

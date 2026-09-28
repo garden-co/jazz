@@ -12,9 +12,23 @@ export class JazzError extends Data.TaggedError("JazzError")<{
   readonly cause: unknown;
 }> {
   override get message(): string {
-    const detail = this.cause instanceof Error ? this.cause.message : String(this.cause);
-    return `Jazz ${this.operation} failed: ${detail}`;
+    return `Jazz ${this.operation} failed: ${describeCause(this.cause)}`;
   }
+}
+
+/** Describe a thrown value without assuming it is an Error or has a prototype. */
+function describeCause(cause: unknown): string {
+  if (cause instanceof Error) return cause.message;
+  if (typeof cause === "object" && cause !== null) {
+    const message = (cause as { message?: unknown }).message;
+    if (typeof message === "string") return message;
+    try {
+      return JSON.stringify(cause);
+    } catch {
+      return Object.prototype.toString.call(cause);
+    }
+  }
+  return String(cause);
 }
 
 /**
