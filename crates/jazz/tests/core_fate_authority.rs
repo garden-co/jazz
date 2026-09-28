@@ -12,6 +12,7 @@ use jazz::db::{
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
+use jazz::protocol::{LensOp, MigrationLens, SchemaVersion, TableLens};
 use jazz::query::Query;
 use jazz::schema::JazzSchema;
 use jazz::serving::{InMemoryServerShell, InMemoryServerShellConfig, NodeRole, ServerSession};
@@ -893,4 +894,168 @@ fn many_writer_nodes_resolve_authors_and_merge_heads_at_the_core() {
             "{titles:?}"
         );
     }
+}
+
+/// `schema()` plus one added column, published by the core as a descendant.
+fn schema_with_notes() -> JazzSchema {
+    use jazz::tools::test_support::AllowAll;
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("title", ColumnType::Text)
+                    .column("completed", ColumnType::Boolean)
+                    .column("notes", ColumnType::Text),
+            )
+            .allow_all()
+            .build(),
+    )
+}
+
+/// A client still writing an older schema, after the core published a
+/// descendant that adds a column, keeps a synced change underneath its own
+/// pending edits: a second pending edit of the same row builds on the row it
+/// can see, not on the first edit's stale snapshot.
+///
+/// Actors: alice (old-schema client, edits held offline), bob (old-schema
+/// client, edits synced), core (publishes `notes` as a descendant schema).
+///
+/// ```text
+/// core ──publish v2 (+notes)──► alice, bob     (both keep writing v1)
+/// alice ──insert title=seed──► core
+/// alice ──completed=true──╳ (held: pending)
+/// bob ──title=bob──► core ──synced──► alice     alice sees bob + pending
+/// alice ──completed=false──╳ (held: pending)   alice must still see bob
+/// ```
+///
+/// Once the physical table holds both schema layouts, a v1 row's stored
+/// layout is narrower than the table's widest layout. Reading alice's local
+/// row then went through a history lookup keyed by the newest pending write,
+/// which returns that write as it was committed, before bob's synced title
+/// was rebased under it; the second edit carried that stale title forward.
+#[test]
+fn pending_edit_after_synced_rebase_keeps_synced_cells_across_added_column_lineage() {
+    let schema = schema();
+    let mut core = InMemoryServerShell::start(
+        InMemoryServerShellConfig::new(schema.clone(), identity(0xc5, AuthorSubject::SYSTEM))
+            .with_role(NodeRole::Core),
+    )
+    .unwrap();
+    let lens = MigrationLens::new(
+        schema.version_id(),
+        SchemaVersion::new(schema_with_notes()).id,
+        vec![TableLens {
+            source_table: "todos".to_owned(),
+            target_table: "todos".to_owned(),
+            ops: vec![LensOp::AddColumn {
+                column: "notes".to_owned(),
+                default: Value::String(String::new()),
+            }],
+        }],
+    )
+    .unwrap();
+    core.publish_runtime_schema_with_lens(schema_with_notes(), lens, Vec::new(), Vec::new())
+        .unwrap();
+
+    let alice = open_db(0xa5, author(0xa5), &schema);
+    let bob = open_db(0xb5, author(0xb5), &schema);
+    let alice_wire = QueuedWireTransport::default();
+    let bob_wire = QueuedWireTransport::default();
+    let alice_session = connect_client_to_core(&mut core, &alice, &alice_wire, author(0xa5));
+    let bob_session = connect_client_to_core(&mut core, &bob, &bob_wire, author(0xb5));
+
+    let row = RowUuid::from_bytes([0xd5; 16]);
+    block_on(alice.insert(
+        "todos",
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("seed".to_owned())),
+            ("completed".to_owned(), Value::Bool(false)),
+        ]),
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            updated_at_ms: Some(100),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    pump_client_core(&alice, &alice_wire, &mut core, alice_session);
+    for db in [&alice, &bob] {
+        let prepared = db.prepare_query(&Query::from("todos")).unwrap();
+        std::mem::forget(block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap());
+    }
+    pump_client_core(&bob, &bob_wire, &mut core, bob_session);
+    pump_client_core(&alice, &alice_wire, &mut core, alice_session);
+
+    // Alice's first edit stays pending: its commit never leaves her outbox.
+    block_on(alice.update(
+        "todos",
+        row,
+        BTreeMap::from([("completed".to_owned(), Value::Bool(true))]),
+        jazz::db::UpdateOptions {
+            updated_at_ms: Some(200),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    block_on(alice.tick()).unwrap();
+    let _held = alice_wire.drain_outbound();
+
+    // Bob's title change is accepted and reaches Alice as a synced row.
+    block_on(bob.update(
+        "todos",
+        row,
+        BTreeMap::from([("title".to_owned(), Value::String("bob".to_owned()))]),
+        jazz::db::UpdateOptions {
+            updated_at_ms: Some(300),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    pump_client_core(&bob, &bob_wire, &mut core, bob_session);
+    core.tick().unwrap();
+    for frame in core.take_frames(alice_session).unwrap() {
+        alice_wire.push_inbound(frame);
+    }
+    block_on(alice.tick()).unwrap();
+    let _held = alice_wire.drain_outbound();
+
+    let alice_row = |alice: &Db<TestStorage>| {
+        let prepared = alice.prepare_query(&Query::from("todos")).unwrap();
+        let rows = block_on(alice.all(&prepared, ReadOpts::default())).unwrap();
+        assert_eq!(rows.len(), 1);
+        (
+            rows[0].cell(&schema.tables[0], "title"),
+            rows[0].cell(&schema.tables[0], "completed"),
+        )
+    };
+    assert_eq!(
+        alice_row(&alice),
+        (
+            Some(Value::String("bob".to_owned())),
+            Some(Value::Bool(true))
+        ),
+        "bob's synced title sits under alice's pending edit"
+    );
+
+    // A second pending edit of another column must keep bob's title.
+    block_on(alice.update(
+        "todos",
+        row,
+        BTreeMap::from([("completed".to_owned(), Value::Bool(false))]),
+        jazz::db::UpdateOptions {
+            updated_at_ms: Some(400),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    block_on(alice.tick()).unwrap();
+    let _held = alice_wire.drain_outbound();
+    assert_eq!(
+        alice_row(&alice),
+        (
+            Some(Value::String("bob".to_owned())),
+            Some(Value::Bool(false))
+        ),
+        "alice's second pending edit must not revert bob's synced title"
+    );
 }

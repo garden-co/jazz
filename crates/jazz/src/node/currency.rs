@@ -247,10 +247,14 @@ where
             )
             .await?;
         let Some(raw) = raw else { return Ok(None) };
+        let variant_tag = raw.variant_tag();
         let current = raw.owned_record();
-        if let Some(winner) =
-            self.history_image_from_current_record(schema_version, table, current.borrowed())?
-        {
+        if let Some(winner) = self.history_image_from_current_record(
+            schema_version,
+            table,
+            variant_tag,
+            current.borrowed(),
+        )? {
             return Ok(Some(winner));
         }
         let current = current.borrowed();
@@ -312,10 +316,14 @@ where
         let Some(raw) = raw else {
             return Ok(None);
         };
+        let variant_tag = raw.variant_tag();
         let current = raw.owned_record();
-        if let Some(winner) =
-            self.history_image_from_current_record(schema_version, table, current.borrowed())?
-        {
+        if let Some(winner) = self.history_image_from_current_record(
+            schema_version,
+            table,
+            variant_tag,
+            current.borrowed(),
+        )? {
             return Ok(Some(winner));
         }
         let current = current.borrowed();
@@ -339,15 +347,30 @@ where
     /// provenance timestamps: current stores whole milliseconds, history the
     /// same instant as an HLC. Provenance HLCs are always minted from
     /// milliseconds (logical counter zero), so the conversion is lossless.
+    ///
+    /// The image is built in the history layout of the current row's own
+    /// schema variant (`variant_tag`), not the physical table's widest
+    /// layout: once a lineage adds a column, rows of the older schema are
+    /// stored narrower than the table. An ahead-current row is the synced
+    /// image with pending patches folded on top, so it has no history row
+    /// equal to it; callers must not substitute the history row of its
+    /// newest pending write.
     pub(super) fn history_image_from_current_record(
         &mut self,
         schema_version: SchemaVersionId,
         table: &str,
+        variant_tag: u32,
         current: groove::records::BorrowedRecord<'_>,
     ) -> Result<Option<VersionRow>, Error> {
         let history_table =
             physical_history_table_name(self.physical_table_id_for_schema(schema_version, table)?);
-        let history_descriptor = self.database.table_schema(&history_table)?.record_schema();
+        let Some(history_descriptor) = self
+            .database
+            .table_schema(&history_table)?
+            .record_schema_for_variant(variant_tag)
+        else {
+            return Ok(None);
+        };
         let current_descriptor = current.descriptor();
         let global_time_idx = GlobalCurrentRowRecord::FIELD_GLOBAL_TIME_IDX;
         // Across a schema lineage the current table may be a different

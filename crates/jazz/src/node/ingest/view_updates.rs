@@ -230,13 +230,19 @@ where
         let Some(raw) = raw else {
             return Ok(None);
         };
+        let variant_tag = raw.variant_tag();
         let current = raw.owned_record();
         let seq = current
             .borrowed()
             .get_nullable_u64(GlobalCurrentRowRecord::FIELD_GLOBAL_TIME_IDX)?
             .map(GlobalTime);
         if let Some(winner) =
-            self.history_image_from_current_record(schema_version, table, current.borrowed())?
+            self.history_image_from_current_record(
+                schema_version,
+                table,
+                variant_tag,
+                current.borrowed(),
+            )?
         {
             return Ok(Some((winner, seq)));
         }
