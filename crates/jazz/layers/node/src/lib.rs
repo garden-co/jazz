@@ -12,9 +12,6 @@
     clippy::type_complexity,
     async_fn_in_trait
 )]
-// The `testing` feature compiles test helpers and hooks for the crates above
-// this one; this crate's own non-test build does not call them.
-#![cfg_attr(all(feature = "testing", not(test)), allow(dead_code, unused_imports))]
 
 //! Jazz's node layer: the storage-backed node state machine and the per-peer
 //! sync state that drives it. It sits directly above `jazz-engine`. The
@@ -25,7 +22,7 @@
 pub use groove;
 
 // The layers below, under the paths this crate's code already uses.
-#[cfg(any(test, feature = "testing"))]
+#[cfg(test)]
 use jazz_model::test_public_schema;
 use jazz_model::{model, query, schema, tx};
 use jazz_protocol::{authorization_scope, protocol, protocol_limits};
