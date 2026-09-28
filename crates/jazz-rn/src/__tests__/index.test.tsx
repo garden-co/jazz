@@ -3,9 +3,9 @@ type FixtureNativeRelay = {
   execute(commandBase64: string): Promise<string>;
 };
 
-import { NATIVE_RELAY_ABI_V1 } from "../native-relay-abi";
+import { NATIVE_RELAY_ABI_V2 } from "../native-relay-abi";
 
-const foregroundRuntimeGlobal = "__jazzNativeForegroundRuntimeV1";
+const foregroundRuntimeGlobal = "__jazzNativeForegroundRuntimeV2";
 
 type NativeForegroundCommand =
   | "probe"
@@ -111,20 +111,20 @@ it("tells Expo Go and old development builds that a native artifact is required"
 
 it("rejects an installed native build with an incompatible ABI before executing a command", async () => {
   const nativeRelay: FixtureNativeRelay = {
-    getAbiVersion: () => NATIVE_RELAY_ABI_V1 + 1,
+    getAbiVersion: () => 2,
     execute: jest.fn(),
   };
   const relay = loadRelay(nativeRelay);
 
   await expect(relay.executeNativeRelayCommand("AA==")).rejects.toThrow(
-    `Jazz native relay ABI ${NATIVE_RELAY_ABI_V1 + 1} is incompatible with JavaScript ABI ${NATIVE_RELAY_ABI_V1}..=${NATIVE_RELAY_ABI_V1}; install a matching native development or release build.`,
+    "Jazz native relay ABI 2 is incompatible with JavaScript ABI 3..=3; install a matching native development or release build.",
   );
   expect(nativeRelay.execute).not.toHaveBeenCalled();
 });
 
 it("forwards opaque commands only after the embedded relay ABI matches", async () => {
   const nativeRelay: FixtureNativeRelay = {
-    getAbiVersion: () => NATIVE_RELAY_ABI_V1,
+    getAbiVersion: () => NATIVE_RELAY_ABI_V2,
     execute: jest.fn().mockResolvedValue("AQ=="),
   };
   const relay = loadRelay(nativeRelay);
@@ -135,7 +135,7 @@ it("forwards opaque commands only after the embedded relay ABI matches", async (
 
 it("requires the matching bindings-installed foreground factory instead of attempting browser WASM", () => {
   const nativeRelay: FixtureNativeRelay = {
-    getAbiVersion: () => NATIVE_RELAY_ABI_V1,
+    getAbiVersion: () => NATIVE_RELAY_ABI_V2,
     execute: jest.fn(),
   };
   const relay = loadRelay(nativeRelay);
@@ -150,18 +150,18 @@ it("accepts only the matching capability-only JSI foreground factory", () => {
   const foreground = foregroundFixture();
   const openAttached = jest.fn(() => foreground);
   (globalThis as Record<string, unknown>)[foregroundRuntimeGlobal] = {
-    abiVersion: NATIVE_RELAY_ABI_V1,
+    abiVersion: NATIVE_RELAY_ABI_V2,
     openAttached,
   };
   const nativeRelay: FixtureNativeRelay = {
-    getAbiVersion: () => NATIVE_RELAY_ABI_V1,
+    getAbiVersion: () => NATIVE_RELAY_ABI_V2,
     execute: jest.fn(),
   };
   const relay = loadRelay(nativeRelay);
 
   const factory = relay.installNativeForegroundRuntime();
 
-  expect(factory.abiVersion).toBe(NATIVE_RELAY_ABI_V1);
+  expect(factory.abiVersion).toBe(NATIVE_RELAY_ABI_V2);
   const capability = new Uint8Array(32);
   expect(factory.openAttached(capability)).toMatchObject({
     execute: expect.any(Function),
@@ -176,11 +176,11 @@ it("forwards the private wake trace switch only when the native handle provides 
   const setWakeTrace = jest.fn();
   const foreground = { ...foregroundFixture(), setWakeTrace };
   const nativeRelay: FixtureNativeRelay = {
-    getAbiVersion: () => NATIVE_RELAY_ABI_V1,
+    getAbiVersion: () => NATIVE_RELAY_ABI_V2,
     execute: jest.fn(),
   };
   (globalThis as Record<string, unknown>)[foregroundRuntimeGlobal] = {
-    abiVersion: NATIVE_RELAY_ABI_V1,
+    abiVersion: NATIVE_RELAY_ABI_V2,
     openAttached: jest.fn(() => foreground),
   };
   const runtime = loadRelay(nativeRelay)
@@ -196,11 +196,11 @@ it("forwards the private wake trace switch only when the native handle provides 
 
 it("keeps wake tracing absent for an older private native handle", () => {
   const nativeRelay: FixtureNativeRelay = {
-    getAbiVersion: () => NATIVE_RELAY_ABI_V1,
+    getAbiVersion: () => NATIVE_RELAY_ABI_V2,
     execute: jest.fn(),
   };
   (globalThis as Record<string, unknown>)[foregroundRuntimeGlobal] = {
-    abiVersion: NATIVE_RELAY_ABI_V1,
+    abiVersion: NATIVE_RELAY_ABI_V2,
     openAttached: jest.fn(foregroundFixture),
   };
 
@@ -218,7 +218,7 @@ it("rejects a missing, malformed, or ABI-incompatible bindings-installed JSI for
     { abiVersion: NATIVE_RELAY_ABI_V1 + 1, openAttached: () => foregroundFixture() },
   ]) {
     const nativeRelay: FixtureNativeRelay = {
-      getAbiVersion: () => NATIVE_RELAY_ABI_V1,
+      getAbiVersion: () => NATIVE_RELAY_ABI_V2,
       execute: jest.fn(),
     };
     if (factory !== undefined)
@@ -235,11 +235,11 @@ it("rejects a missing, malformed, or ABI-incompatible bindings-installed JSI for
 it("keeps malformed capability input out of the JSI foreground factory", () => {
   const openAttached = jest.fn(() => foregroundFixture());
   const nativeRelay: FixtureNativeRelay = {
-    getAbiVersion: () => NATIVE_RELAY_ABI_V1,
+    getAbiVersion: () => NATIVE_RELAY_ABI_V2,
     execute: jest.fn(),
   };
   (globalThis as Record<string, unknown>)[foregroundRuntimeGlobal] = {
-    abiVersion: NATIVE_RELAY_ABI_V1,
+    abiVersion: NATIVE_RELAY_ABI_V2,
     openAttached,
   };
   const relay = loadRelay(nativeRelay);
@@ -259,7 +259,7 @@ it("keeps malformed capability input out of the JSI foreground factory", () => {
 
 it("uses the compact canonical byte vocabulary for the foreground NativeDb slice", () => {
   const relay = loadRelay({
-    getAbiVersion: () => NATIVE_RELAY_ABI_V1,
+    getAbiVersion: () => NATIVE_RELAY_ABI_V2,
     execute: jest.fn(),
   });
 
@@ -348,9 +348,9 @@ it("uses the compact canonical byte vocabulary for the foreground NativeDb slice
       kind: "neither",
     } as unknown as NativeForegroundCommand),
   ).toThrow("Jazz native foreground transaction kind must be mergeable or exclusive");
-  expect(relay.decodeNativeForegroundResponse(Uint8Array.of(0, NATIVE_RELAY_ABI_V1))).toEqual({
+  expect(relay.decodeNativeForegroundResponse(Uint8Array.of(0, NATIVE_RELAY_ABI_V2))).toEqual({
     type: "probe",
-    abiVersion: NATIVE_RELAY_ABI_V1,
+    abiVersion: NATIVE_RELAY_ABI_V2,
   });
   expect(relay.decodeNativeForegroundResponse(Uint8Array.of(1))).toEqual({
     type: "ticked",
@@ -474,7 +474,7 @@ it("rejects trailing, nonminimal, truncated, and out-of-range foreground handles
   }
 });
 
-it("decodes terminal-operation JSON exactly on the ASCII fast path and strictly otherwise", () => {
+it("decodes terminal-event envelope JSON exactly on the ASCII fast path and strictly otherwise", () => {
   const relay = loadRelay(null);
   // The RN TS lib does not declare TextEncoder; encode UTF-8 by hand.
   const utf8 = (text: string) =>
@@ -514,19 +514,44 @@ it("decodes terminal-operation JSON exactly on the ASCII fast path and strictly 
   const operations = [
     {
       root_key: [1, 2, 3],
-      path: [{ Collection: "comments" }, { Key: [4, 5] }],
-      edit: { Insert: { index: 0, key: [6, 7], value: payload } },
+      path: [{ Collection: "comments" }],
+      edit: { Insert: { index: 0, key: [10, 6, 7], value: payload } },
+      payload_layout: 0,
     },
   ];
+  const terminalEnvelope = {
+    version: 1,
+    layouts: [
+      {
+        carrier: "Logical",
+        key_slot: 0,
+        fields: [
+          {
+            identity: { kind: "Name", name: "row_uuid" },
+            role: "RowKey",
+            value_type: { tag: 11 },
+          },
+          {
+            identity: { kind: "Name", name: "text" },
+            role: "Value",
+            value_type: { tag: 8 },
+          },
+        ],
+      },
+    ],
+    operations,
+  };
   // Larger than one fast-path chunk, so chunk boundaries are covered.
-  const ascii = utf8(JSON.stringify(operations));
+  const ascii = utf8(JSON.stringify(terminalEnvelope));
   expect(ascii.length).toBeGreaterThan(8192 * 4);
-  const nonAscii = utf8(
-    JSON.stringify([{ ...operations[0], path: [{ Collection: "kommentäre 💬" }] }]),
-  );
+  const nonAsciiEnvelope = {
+    ...terminalEnvelope,
+    operations: [{ ...operations[0], path: [{ Collection: "kommentäre 💬" }] }],
+  };
+  const nonAscii = utf8(JSON.stringify(nonAsciiEnvelope));
   for (const [json, expected] of [
-    [ascii, operations],
-    [nonAscii, [{ ...operations[0], path: [{ Collection: "kommentäre 💬" }] }]],
+    [ascii, terminalEnvelope],
+    [nonAscii, nonAsciiEnvelope],
   ] as const) {
     expect(relay.decodeNativeForegroundResponse(deltaEvent(json))).toEqual({
       type: "subscriptionEvents",
@@ -546,4 +571,31 @@ it("decodes terminal-operation JSON exactly on the ASCII fast path and strictly 
   expect(() => relay.decodeNativeForegroundResponse(deltaEvent(malformed))).toThrow(
     /malformed UTF-8 terminal operations/,
   );
+  expect(() =>
+    relay.decodeNativeForegroundResponse(
+      deltaEvent(utf8('{"version":1,"layouts":[],"operations":null}')),
+    ),
+  ).toThrow(/malformed terminal event envelope/);
+  const validLayout = terminalEnvelope.layouts[0]!;
+  for (const invalidEnvelope of [
+    { ...terminalEnvelope, layouts: [{ ...validLayout, fields: [{}] }] },
+    {
+      ...terminalEnvelope,
+      layouts: [
+        {
+          ...validLayout,
+          fields: [validLayout.fields[0], { ...validLayout.fields[1], value_type: { tag: 99 } }],
+        },
+      ],
+    },
+    {
+      ...terminalEnvelope,
+      operations: [{ ...operations[0], payload_layout: 1 }],
+    },
+    { ...terminalEnvelope, layouts: [validLayout, validLayout] },
+  ]) {
+    expect(() =>
+      relay.decodeNativeForegroundResponse(deltaEvent(utf8(JSON.stringify(invalidEnvelope)))),
+    ).toThrow(/malformed terminal event envelope/);
+  }
 });

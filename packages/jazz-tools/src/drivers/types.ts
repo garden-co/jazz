@@ -62,11 +62,24 @@ export interface NativeTerminalRootLayout {
   carrier: "CurrentRow" | "Logical";
 }
 export interface NativeTerminalOperation {
-  rootLayoutId?: string;
-  rootDescriptor?: number[];
   root_key: NativeTerminalBytes;
   path: NativeTerminalPathSegment[];
   edit: NativeTerminalEdit;
+  payload_layout?: number;
+}
+export interface NativeTerminalPayloadLayout {
+  carrier: "Logical";
+  key_slot: number;
+  fields: Array<{
+    identity: { kind: "Name"; name: string };
+    role: "RowKey" | "Value";
+    value_type: unknown;
+  }>;
+}
+export interface NativeTerminalEventEnvelope {
+  version: 1;
+  layouts: NativeTerminalPayloadLayout[];
+  operations: NativeTerminalOperation[];
 }
 
 /** Logical terminal-tree path consumed by the TypeScript materializer. */

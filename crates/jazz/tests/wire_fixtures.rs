@@ -1634,9 +1634,17 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
     let logical_key = std::iter::once(10)
         .chain(note_id.0.as_bytes().iter().copied())
         .collect::<Vec<_>>();
+    let current_root_descriptor = RecordDescriptor::new([(
+        "children",
+        ValueType::Array(Box::new(ValueType::Record(Box::new(current_descriptor)))),
+    )]);
+    let logical_root_descriptor = RecordDescriptor::new([(
+        "children",
+        ValueType::Array(Box::new(ValueType::Record(Box::new(logical_descriptor)))),
+    )]);
     let child_path = vec![TerminalPathSegment::Collection("children".to_owned())];
     let current_insert = TerminalOperation {
-        root_descriptor: current_descriptor,
+        root_descriptor: current_root_descriptor,
         root_key: current_key.clone(),
         path: child_path.clone(),
         edit: TerminalEdit::Insert {
@@ -1646,7 +1654,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
         },
     };
     let logical_insert = TerminalOperation {
-        root_descriptor: logical_descriptor,
+        root_descriptor: logical_root_descriptor,
         root_key: logical_key.clone(),
         path: child_path.clone(),
         edit: TerminalEdit::Insert {
@@ -1656,16 +1664,19 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
         },
     };
     let current_update = TerminalOperation {
-        root_descriptor: current_descriptor,
+        root_descriptor: current_root_descriptor,
         root_key: current_key.clone(),
-        path: child_path.clone(),
+        path: vec![
+            TerminalPathSegment::Collection("children".to_owned()),
+            TerminalPathSegment::Key(current_key.clone()),
+        ],
         edit: TerminalEdit::Update {
             key: current_key.clone(),
             value: todo_updated,
         },
     };
     let logical_remove = TerminalOperation {
-        root_descriptor: logical_descriptor,
+        root_descriptor: logical_root_descriptor,
         root_key: logical_key.clone(),
         path: child_path.clone(),
         edit: TerminalEdit::Remove {
@@ -1673,7 +1684,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
         },
     };
     let logical_move = TerminalOperation {
-        root_descriptor: logical_descriptor,
+        root_descriptor: logical_root_descriptor,
         root_key: logical_key.clone(),
         path: child_path,
         edit: TerminalEdit::Move {

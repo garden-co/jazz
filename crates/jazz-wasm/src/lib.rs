@@ -3520,14 +3520,6 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
         } => {
             let delta =
                 encode_subscription_delta(&added, &updated, &removed).map_err(to_js_error)?;
-            if terminal_operations
-                .iter()
-                .any(|operation| operation.path.is_empty())
-            {
-                return Err(JsValue::from_str(
-                    "native producer emitted a root terminal operation",
-                ));
-            }
             set_prop(&object, "type", JsValue::from_str("delta"))?;
             set_prop(
                 &object,
@@ -3594,9 +3586,7 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
     Ok(object.into())
 }
 
-/// Build terminal operations in the JavaScript object shape, with every key and
-/// payload as one `Uint8Array` rather than a JSON number per byte (#3369). The
-/// producer-only root descriptor is omitted, as on every binding.
+/// Build the shared terminal event envelope while retaining typed byte arrays.
 fn terminal_operations_to_js(
     operations: &[jazz::groove::ivm::TerminalOperation],
 ) -> Result<JsValue, JsValue> {
@@ -3613,8 +3603,14 @@ fn terminal_operations_to_js(
         Ok(object.into())
     }
 
+    let table = jazz::binding_codec::terminal_event_layouts(operations)
+        .map_err(|error| JsValue::from_str(&error))?;
     let encoded = js_sys::Array::new_with_length(operations.len() as u32);
-    for (index, operation) in operations.iter().enumerate() {
+    for (index, (operation, payload_layout)) in operations
+        .iter()
+        .zip(table.operation_layouts.iter())
+        .enumerate()
+    {
         let path = js_sys::Array::new_with_length(operation.path.len() as u32);
         for (segment_index, segment) in operation.path.iter().enumerate() {
             let segment = match segment {
@@ -3647,16 +3643,34 @@ fn terminal_operations_to_js(
                 ])?,
             )])?,
         };
-        encoded.set(
-            index as u32,
-            object(&[
-                ("root_key", bytes(&operation.root_key)),
-                ("path", path.into()),
-                ("edit", edit),
-            ])?,
-        );
+        let operation_object = js_sys::Object::new();
+        set_prop(&operation_object, "root_key", bytes(&operation.root_key))?;
+        set_prop(&operation_object, "path", path.into())?;
+        set_prop(&operation_object, "edit", edit)?;
+        if let Some(payload_layout) = payload_layout {
+            set_prop(
+                &operation_object,
+                "payload_layout",
+                JsValue::from_f64(f64::from(*payload_layout)),
+            )?;
+        }
+        encoded.set(index as u32, operation_object.into());
     }
-    Ok(encoded.into())
+    let envelope = js_sys::Object::new();
+    set_prop(
+        &envelope,
+        "version",
+        JsValue::from_f64(f64::from(
+            jazz::binding_codec::TERMINAL_EVENT_ENVELOPE_VERSION,
+        )),
+    )?;
+    set_prop(
+        &envelope,
+        "layouts",
+        serde_wasm_bindgen::to_value(&table.layouts).map_err(to_js_error)?,
+    )?;
+    set_prop(&envelope, "operations", encoded.into())?;
+    Ok(envelope.into())
 }
 
 fn set_prop(object: &js_sys::Object, name: &str, value: JsValue) -> Result<(), JsValue> {

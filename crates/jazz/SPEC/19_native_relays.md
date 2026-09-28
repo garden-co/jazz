@@ -486,8 +486,18 @@ canceling a result does not roll back a finish. Canceling a push leaves its
 partial upload available for an explicit abort. Foreground close retires all
 pending operations and uploads. Subscription event ordinal 3 is reserved for
 StructuredDelta: reset bool, settled bool, tier string, delta byte vector,
-terminal_operations_json string. Existing event ordinals 0–2 are unchanged;
-terminal operations use `binding_codec::terminal_operations_to_json`.
+terminal_operations_json string. Existing event ordinals 0–2 are unchanged.
+
+`terminal_operations_json` is a `TerminalEventEnvelopeV1` object whose `version`
+field is `1`, with an event-local deduplicated `layouts` table and an `operations` array.
+Insert and Update refer to their logical row payload layout by `payload_layout`;
+Remove and Move have no payload layout. Each layout records the ordered logical
+descriptor fields, exact named identity, value type, and role. Slot zero must be
+the sole `row_uuid` UUID `RowKey`; remaining fields are `Value`. Paths alternate
+Collection/Key beginning with Collection. Insert, Remove, and Move end at a
+Collection; Update ends at the Key matching its edit key. The shared binding
+codec validates this descriptor walk and path contract before NAPI, WASM, and
+React Native publish an event.
 
 The mutation enum has fixed ordinals Insert=0, Update=1, Upsert=2, Delete=3,
 Restore=4. Response 17 is NativeConnectionStatus with three ordered booleans:
@@ -553,10 +563,9 @@ Objects contain sorted, unique UTF-8 keys; `F64` carries raw IEEE-754 bits, so
 negative zero is preserved. A receiver requires an exact canonical Postcard
 payload with no trailing bytes or overlong alternative spelling.
 
-**V1 vertical slice.** Native relay ABI V1 defines the concrete foreground
-foreground vocabulary: `Probe`, bounded `Tick`, idempotent `Close`, and the
-local-first query lifecycle `All`, `Subscribe`, `DrainSubscription`,
-`Unsubscribe`. Query inputs are exactly canonical postcard `Query` bytes; read
+**V2 vertical slice.** Native relay ABI V2 preserves the concrete foreground
+vocabulary: `Probe`, bounded `Tick`, idempotent `Close`, and the local-first
+query lifecycle `All`, `Subscribe`, `DrainSubscription`, `Unsubscribe`. Query
 output is the existing `binding_codec::encode_rows` payload and subscription
 deltas are the existing `binding_codec::encode_subscription_delta` payload.
 Subscription identifiers are owner-thread-local opaque u64 handles allocated
@@ -594,7 +603,7 @@ cleanup; the next bounded `Tick` performs its finalization, because awaiting
 that acknowledgement while already executing on the core owner thread would
 deadlock. Repeated close or unsubscribe reports `false`.
 
-ABI V1 also includes a deliberately narrow write family: `BeginTransaction` with
+ABI V2 also retains a deliberately narrow write family: `BeginTransaction` with
 the ordinary `mergeable` or `exclusive` core semantics, full-cell
 `Insert`/`Update`/`Upsert`/`Delete`, `CommitTransaction`, and
 `RollbackTransaction`. `WaitForCoreTransaction` accepts only that foreground's
@@ -680,17 +689,17 @@ foreground owns delivery and cancellation even though the request uses the
 scope's shared upstream. Offline/timeouts resolve Unknown; synchronous local
 advice remains Unknown.
 
-The V1 subset otherwise deliberately supports only `ReadOpts::default()`
-local-first reads. It fails closed for remote tiers/read views, relation
-terminal operations and any not-yet-shared mutation
-contract rather than silently receiving a distinct RN meaning. The admitted
-native scope continues to own schema, canonical session/author identity,
-claims, and ordinary peer synchronization; JavaScript only provides canonical
-query or encoded-cell bytes. `tick`/`close` convenience JSI methods may remain
+The V2 subset otherwise supports only `ReadOpts::default()` local-first reads.
+It supports the versioned terminal event envelope for its maintained local
+subscriptions and fails closed for remote tiers/read views, unsupported terminal
+shapes, and any not-yet-shared mutation contract rather than silently receiving
+a distinct RN meaning. The admitted native scope continues to own schema,
+canonical session/author identity, claims, and ordinary peer synchronization;
+JavaScript only provides canonical query or encoded-cell bytes. `tick`/`close`
 internal compatibility shorthands only while they invoke the same foreground
 lifecycle; `jazz-tools` must move to `execute` as each family is implemented.
 
-**Wake registration.** ABI V1 includes the private JSI `setTickScheduler(callback)`
+**Wake registration.** ABI V2 includes the private JSI `setTickScheduler(callback)`
 companion on each foreground handle. The callback receives `"immediate"`,
 `"deferred"`, or `"after:<milliseconds>"`; it schedules the adapter's normal
 JS-side tick and does not synchronously call the native handle. Rust records

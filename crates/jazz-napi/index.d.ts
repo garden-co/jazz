@@ -251,7 +251,7 @@ export interface SubscriptionDeltaEvent {
   type: 'delta'
   reset: boolean
   delta: Uint8Array
-  terminalOperations: Array<SubscriptionTerminalOperation>
+  terminalOperations: SubscriptionTerminalEventEnvelope
   settled: boolean
   tier: 'None' | 'Local' | 'Global'
 }
@@ -288,6 +288,12 @@ export interface SubscriptionTerminalCollectionPathSegment {
 export type SubscriptionTerminalEdit =
   SubscriptionTerminalInsertEdit | SubscriptionTerminalUpdateEdit | SubscriptionTerminalRemoveEdit | SubscriptionTerminalMoveEdit
 
+export interface SubscriptionTerminalEventEnvelope {
+  version: number
+  layouts: Array<JsonValue>
+  operations: Array<SubscriptionTerminalOperation>
+}
+
 export interface SubscriptionTerminalInsert {
   index: number
   key: Uint8Array
@@ -315,6 +321,7 @@ export interface SubscriptionTerminalOperation {
   root_key: Uint8Array
   path: Array<SubscriptionTerminalPathSegment>
   edit: SubscriptionTerminalEdit
+  payload_layout?: number | undefined
 }
 
 export type SubscriptionTerminalPathSegment =

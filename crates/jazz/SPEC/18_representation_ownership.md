@@ -137,13 +137,14 @@ retain their existing encoding and remain subject to the owning schema's
 validation. This input role is independent of the immutable peer-version
 `JVRR` envelope described in chapter 16.
 
-`binding_codec_golden.json` is the frozen cross-language corpus for this v1
-binding layout. Rust creates the hard-coded semantic cases and exact bytes;
-the TypeScript reader independently decodes them, and the generated NAPI and
-WASM artifacts directly return the Rust-owned corpus in the binding
-compatibility matrix. A change needs this corpus, both binding paths, and the
-SPEC decision reviewed together. Terminal operations remain JSON-native
-metadata rather than an alternative row byte layout.
+`binding_codec_golden.json` is the frozen cross-language corpus for the v1
+binding byte layouts plus the versioned terminal event envelope. Rust creates
+the hard-coded semantic cases and exact bytes; the TypeScript reader
+independently decodes them, and the generated NAPI and WASM artifacts directly
+return the Rust-owned corpus in the binding compatibility matrix. A change
+needs this corpus, both binding paths, and the SPEC decision reviewed together.
+Terminal payload layouts remain JSON metadata, not an alternative row byte
+layout.
 
 `wire_frame_artifact_corpus.json` is the companion v1 host-artifact rejection
 receipt. The generated NAPI and WASM artifacts execute **every** exact Hello

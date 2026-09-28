@@ -8,16 +8,16 @@
 // relay export through this package entry point.
 export {
   NATIVE_RELAY_ABI,
-  NATIVE_RELAY_ABI_V1,
+  NATIVE_RELAY_ABI_V2,
   decodeNativeForegroundResponse,
   encodeNativeForegroundCommand,
   executeNativeRelayCommand,
   installNativeForegroundRuntime,
-} from './relay';
+} from "./relay";
 export type {
   NativeForegroundCommand,
   NativeForegroundResponse,
   NativeForegroundRuntime,
   NativeForegroundRuntimeFactory,
   NativeRelayAbiRange,
-} from './relay';
+} from "./relay";

@@ -1,5 +1,6 @@
 import nativeRelay from "./NativeJazzRelay";
-import { NATIVE_RELAY_ABI, NATIVE_RELAY_ABI_V1 } from "./native-relay-abi";
+import { NATIVE_RELAY_ABI, NATIVE_RELAY_ABI_V2 } from "./native-relay-abi";
+import { isRecord } from "./type-guards";
 
 /**
  * Versioned private global installed by the native JSI bridge.
@@ -9,14 +10,14 @@ import { NATIVE_RELAY_ABI, NATIVE_RELAY_ABI_V1 } from "./native-relay-abi";
  * engine directly. A string key lets native C++ install a JSI HostObject in the
  * current JavaScript runtime without a second JavaScript/WASM loader.
  */
-const NATIVE_FOREGROUND_RUNTIME_GLOBAL = "__jazzNativeForegroundRuntimeV1";
+const NATIVE_FOREGROUND_RUNTIME_GLOBAL = "__jazzNativeForegroundRuntimeV2";
 
 export interface NativeRelayAbiRange {
   minimum: number;
   maximum: number;
 }
 
-export { NATIVE_RELAY_ABI, NATIVE_RELAY_ABI_V1 };
+export { NATIVE_RELAY_ABI, NATIVE_RELAY_ABI_V2 };
 
 function requireNativeRelay() {
   if (nativeRelay == null) {
@@ -234,7 +235,7 @@ export type NativeForegroundSubscriptionEvent =
       settled: boolean;
       tier: string;
       delta: Uint8Array;
-      terminalOperations?: unknown[];
+      terminalOperations?: unknown;
     }
   | { type: "rejected"; reason: string }
   | { type: "closed" };
@@ -856,14 +857,15 @@ function decodeForegroundSubscriptionEvents(
       offset += deltaLength;
       if (delta.byteLength !== deltaLength)
         throw new Error("Jazz native foreground returned truncated subscription delta");
-      let terminalOperations: unknown[] | undefined;
+      let terminalOperations: unknown;
       if (tag === 3) {
         const length = readVarint();
         const json = decodeForegroundUtf8(bytes, offset, length, "terminal operations");
         offset += length;
         const parsed: unknown = JSON.parse(json);
-        if (!Array.isArray(parsed))
-          throw new Error("Jazz native foreground returned malformed terminal operations");
+        if (!isTerminalEventEnvelope(parsed)) {
+          throw new Error("Jazz native foreground returned malformed terminal event envelope");
+        }
         terminalOperations = parsed;
       }
       events.push({
@@ -885,6 +887,241 @@ function decodeForegroundSubscriptionEvents(
   if (offset !== bytes.length)
     throw new Error("Jazz native foreground returned trailing subscription bytes");
   return events;
+}
+
+type TerminalPayloadField = {
+  identity: { kind: "Name"; name: string };
+  role: "RowKey" | "Value";
+  value_type: Record<string, unknown> & { tag: number };
+};
+
+function isTerminalEventEnvelope(value: unknown): value is Record<string, unknown> {
+  if (!isRecord(value) || value.version !== 1) return false;
+  const { layouts, operations } = value;
+  if (!Array.isArray(layouts) || !Array.isArray(operations)) return false;
+  if (!layouts.every(isTerminalPayloadLayout)) return false;
+
+  const usedLayouts = new Set<number>();
+  if (!operations.every((operation) => isTerminalOperation(operation, layouts.length, usedLayouts)))
+    return false;
+  return usedLayouts.size === layouts.length;
+}
+
+function isTerminalPayloadLayout(value: unknown): boolean {
+  if (
+    !isRecord(value) ||
+    value.carrier !== "Logical" ||
+    value.key_slot !== 0 ||
+    !Array.isArray(value.fields) ||
+    value.fields.length === 0
+  ) {
+    return false;
+  }
+  const names = new Set<string>();
+  for (let slot = 0; slot < value.fields.length; slot += 1) {
+    const field = value.fields[slot];
+    if (!isTerminalPayloadField(field) || names.has(field.identity.name)) return false;
+    if (slot === 0) {
+      if (
+        field.identity.name !== "row_uuid" ||
+        field.role !== "RowKey" ||
+        field.value_type.tag !== 11
+      ) {
+        return false;
+      }
+    } else if (field.role !== "Value" || field.identity.name === "row_uuid") {
+      return false;
+    }
+    names.add(field.identity.name);
+  }
+  return true;
+}
+
+function isTerminalPayloadField(value: unknown): value is TerminalPayloadField {
+  return (
+    isRecord(value) &&
+    isRecord(value.identity) &&
+    value.identity.kind === "Name" &&
+    typeof value.identity.name === "string" &&
+    value.identity.name.length > 0 &&
+    (value.role === "RowKey" || value.role === "Value") &&
+    isTerminalValueType(value.value_type)
+  );
+}
+
+function isTerminalValueType(value: unknown): value is Record<string, unknown> & { tag: number } {
+  if (!isRecord(value) || typeof value.tag !== "number" || !Number.isSafeInteger(value.tag))
+    return false;
+  switch (value.tag) {
+    case 0:
+    case 1:
+    case 2:
+    case 3:
+    case 4:
+    case 5:
+    case 6:
+    case 7:
+    case 8:
+    case 9:
+    case 11:
+      return true;
+    case 12:
+      return (
+        isRecord(value.enumSchema) &&
+        typeof value.enumSchema.name === "string" &&
+        Array.isArray(value.enumSchema.variants) &&
+        value.enumSchema.variants.every((variant) => typeof variant === "string")
+      );
+    case 13:
+      return Array.isArray(value.members) && value.members.every(isTerminalValueType);
+    case 14:
+    case 15:
+      return isTerminalValueType(value.inner);
+    case 16:
+      return Array.isArray(value.record) && value.record.every(isTerminalDescriptorField);
+    case 17:
+      return (
+        isRecord(value.enumSchema) &&
+        typeof value.enumSchema.name === "string" &&
+        Array.isArray(value.enumSchema.cases) &&
+        value.enumSchema.cases.every(
+          (enumCase) =>
+            isRecord(enumCase) &&
+            typeof enumCase.name === "string" &&
+            Array.isArray(enumCase.payload) &&
+            enumCase.payload.every(isTerminalDescriptorField),
+        )
+      );
+    default:
+      return false;
+  }
+}
+
+function isTerminalDescriptorField(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    (typeof value.name === "string" || value.name === null) &&
+    isTerminalValueType(value.valueType)
+  );
+}
+
+function isTerminalOperation(
+  value: unknown,
+  layoutCount: number,
+  usedLayouts: Set<number>,
+): boolean {
+  if (
+    !isRecord(value) ||
+    !isTerminalByteArray(value.root_key) ||
+    !Array.isArray(value.path) ||
+    !isRecord(value.edit) ||
+    Object.keys(value.edit).length !== 1
+  ) {
+    return false;
+  }
+
+  let expectsCollection = true;
+  let lastPathKey: number[] | undefined;
+  for (const segment of value.path) {
+    if (!isRecord(segment) || Object.keys(segment).length !== 1) return false;
+    if ("Collection" in segment) {
+      if (!expectsCollection || typeof segment.Collection !== "string" || !segment.Collection)
+        return false;
+      expectsCollection = false;
+      lastPathKey = undefined;
+    } else if ("Key" in segment) {
+      if (expectsCollection || !isTerminalByteArray(segment.Key)) return false;
+      expectsCollection = true;
+      lastPathKey = segment.Key;
+    } else {
+      return false;
+    }
+  }
+  if (value.path.length === 0) return false;
+
+  const editKind = Object.keys(value.edit)[0];
+  if (editKind === "Insert") {
+    const insert = value.edit.Insert;
+    return (
+      !expectsCollection &&
+      isRecord(insert) &&
+      typeof insert.index === "number" &&
+      Number.isSafeInteger(insert.index) &&
+      insert.index >= 0 &&
+      isTerminalByteArray(insert.key) &&
+      isTerminalByteArray(insert.value) &&
+      referenceTerminalPayloadLayout(value, layoutCount, usedLayouts)
+    );
+  }
+  if (editKind === "Update") {
+    const update = value.edit.Update;
+    return (
+      expectsCollection &&
+      isRecord(update) &&
+      isTerminalByteArray(update.key) &&
+      isTerminalByteArray(update.value) &&
+      lastPathKey !== undefined &&
+      terminalBytesEqual(lastPathKey, update.key) &&
+      referenceTerminalPayloadLayout(value, layoutCount, usedLayouts)
+    );
+  }
+  if (editKind === "Remove") {
+    const remove = value.edit.Remove;
+    return (
+      !expectsCollection &&
+      isRecord(remove) &&
+      isTerminalByteArray(remove.key) &&
+      !("payload_layout" in value)
+    );
+  }
+  if (editKind === "Move") {
+    const move = value.edit.Move;
+    return (
+      !expectsCollection &&
+      isRecord(move) &&
+      isTerminalByteArray(move.key) &&
+      typeof move.index === "number" &&
+      Number.isSafeInteger(move.index) &&
+      move.index >= 0 &&
+      !("payload_layout" in value)
+    );
+  }
+  return false;
+}
+
+function referenceTerminalPayloadLayout(
+  operation: Record<string, unknown>,
+  layoutCount: number,
+  usedLayouts: Set<number>,
+): boolean {
+  const index = operation.payload_layout;
+  if (
+    typeof index !== "number" ||
+    !Number.isSafeInteger(index) ||
+    index < 0 ||
+    index >= layoutCount
+  ) {
+    return false;
+  }
+  usedLayouts.add(index);
+  return true;
+}
+
+function isTerminalByteArray(value: unknown): value is number[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (byte) => typeof byte === "number" && Number.isInteger(byte) && byte >= 0 && byte <= 255,
+    )
+  );
+}
+
+function terminalBytesEqual(left: readonly number[], right: unknown): boolean {
+  return (
+    isTerminalByteArray(right) &&
+    left.length === right.length &&
+    left.every((byte, index) => byte === right[index])
+  );
 }
 
 // Bounded so `fromCharCode.apply` stays well under engine argument limits.

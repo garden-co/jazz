@@ -99,7 +99,7 @@ export function createPlatformHost(storageRoot?: string) {
   };
 }
 export function installPlatformHost(host: ReturnType<typeof createPlatformHost>) {
-  Object.defineProperty(globalThis, "__jazzNativeForegroundRuntimeV1", {
+  Object.defineProperty(globalThis, "__jazzNativeForegroundRuntimeV2", {
     configurable: true,
     value: {
       abiVersion: host.abiVersion,

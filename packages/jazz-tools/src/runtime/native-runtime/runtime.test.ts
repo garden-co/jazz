@@ -3145,7 +3145,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     ]);
   });
 
-  it("decodes nested terminal payload fields by descriptor identity", async () => {
+  function openNestedTerminalSubscription() {
     let controller: ReadableStreamDefaultController<unknown> | undefined;
     const textColumn = (name: string): ColumnDescriptor => ({
       name,
@@ -3206,6 +3206,22 @@ describe("NativeRuntimeAdapter server transport", () => {
     runtime.executeSubscription(handle, (delta: unknown) => {
       deltas.push(delta);
     });
+    if (!controller) throw new Error("nested terminal subscription did not open its stream");
+    return {
+      deltas,
+      enqueue(terminalOperations: unknown) {
+        controller!.enqueue({
+          type: "delta",
+          reset: false,
+          delta: encodeSubscriptionDelta({ added: [], updated: [], removed: [] }),
+          terminalOperations,
+        });
+      },
+    };
+  }
+
+  it("decodes nested terminal payload fields by descriptor identity", async () => {
+    const { deltas, enqueue } = openNestedTerminalSubscription();
 
     const todoId = "00000000-0000-0000-0000-000000000021";
     const commentId = "00000000-0000-0000-0000-000000000022";
@@ -3216,75 +3232,72 @@ describe("NativeRuntimeAdapter server transport", () => {
       { name: "second", valueType: { tag: 8 } },
       { name: "first", valueType: { tag: 8 } },
     ];
-    const terminalLayouts = [
-      {
-        carrier: "Logical",
-        key_slot: 0,
-        fields: [
-          {
-            identity: { kind: "Name", name: "row_uuid" },
-            role: "RowKey",
-            value_type: { tag: 11 },
-          },
-          {
-            identity: { kind: "Name", name: "second" },
-            role: "Value",
-            value_type: { tag: 8 },
-          },
-          {
-            identity: { kind: "Name", name: "first" },
-            role: "Value",
-            value_type: { tag: 8 },
-          },
-        ],
-      },
-    ];
-    const terminalOperations = [
-      {
-        root_key: Uint8Array.of(3),
-        path: [{ Collection: "todos" }, { Key: todoKey }, { Collection: "comments" }],
-        edit: {
-          Insert: {
-            index: 0,
-            key: commentKey,
-            value: createRecord(childDescriptor, [
-              uuidBytes(commentId),
-              inlineScalar("insert-second"),
-              inlineScalar("insert-first"),
-            ]),
-          },
+    const terminalEnvelope = {
+      version: 1 as const,
+      layouts: [
+        {
+          carrier: "Logical" as const,
+          key_slot: 0,
+          fields: [
+            {
+              identity: { kind: "Name" as const, name: "row_uuid" },
+              role: "RowKey" as const,
+              value_type: { tag: 11 },
+            },
+            {
+              identity: { kind: "Name" as const, name: "second" },
+              role: "Value" as const,
+              value_type: { tag: 8 },
+            },
+            {
+              identity: { kind: "Name" as const, name: "first" },
+              role: "Value" as const,
+              value_type: { tag: 8 },
+            },
+          ],
         },
-        payload_layout: 0,
-      },
-      {
-        root_key: Uint8Array.of(3),
-        path: [
-          { Collection: "todos" },
-          { Key: todoKey },
-          { Collection: "comments" },
-          { Key: commentKey },
-        ],
-        edit: {
-          Update: {
-            key: commentKey,
-            value: createRecord(childDescriptor, [
-              uuidBytes(commentId),
-              inlineScalar("update-second"),
-              inlineScalar("update-first"),
-            ]),
+      ],
+      operations: [
+        {
+          root_key: Uint8Array.of(3),
+          path: [{ Collection: "todos" }, { Key: todoKey }, { Collection: "comments" }],
+          edit: {
+            Insert: {
+              index: 0,
+              key: commentKey,
+              value: createRecord(childDescriptor, [
+                uuidBytes(commentId),
+                inlineScalar("insert-second"),
+                inlineScalar("insert-first"),
+              ]),
+            },
           },
+          payload_layout: 0,
         },
-        payload_layout: 0,
-      },
-    ];
+        {
+          root_key: Uint8Array.of(3),
+          path: [
+            { Collection: "todos" },
+            { Key: todoKey },
+            { Collection: "comments" },
+            { Key: commentKey },
+          ],
+          edit: {
+            Update: {
+              key: commentKey,
+              value: createRecord(childDescriptor, [
+                uuidBytes(commentId),
+                inlineScalar("update-second"),
+                inlineScalar("update-first"),
+              ]),
+            },
+          },
+          payload_layout: 0,
+        },
+      ],
+    };
 
-    controller!.enqueue({
-      type: "delta",
-      reset: false,
-      delta: encodeSubscriptionDelta({ added: [], updated: [], removed: [] }),
-      terminalOperations,
-      terminalLayouts,
-    });
+    enqueue(terminalEnvelope);
     await vi.waitFor(() => expect(deltas).toHaveLength(1));
     if (deltas[0] instanceof Error) throw deltas[0];
 
@@ -3307,6 +3320,55 @@ describe("NativeRuntimeAdapter server transport", () => {
         { type: "Text", value: "update-second" },
       ],
     ]);
+
+    const firstOperation = terminalEnvelope.operations[0]!;
+    const firstLayout = terminalEnvelope.layouts[0]!;
+    const invalidEnvelopes: unknown[] = [
+      { ...terminalEnvelope, version: 2 },
+      { layouts: terminalEnvelope.layouts, operations: terminalEnvelope.operations },
+      { version: 1, layouts: terminalEnvelope.layouts },
+      {
+        ...terminalEnvelope,
+        operations: [{ ...firstOperation, payload_layout: 1 }],
+      },
+      {
+        ...terminalEnvelope,
+        operations: [{ ...firstOperation, payload_layout: undefined }],
+      },
+      {
+        ...terminalEnvelope,
+        operations: [{ ...firstOperation, path: [] }],
+      },
+      {
+        ...terminalEnvelope,
+        layouts: [
+          {
+            ...firstLayout,
+            fields: [firstLayout.fields[1]!, firstLayout.fields[0]!, firstLayout.fields[2]!],
+          },
+        ],
+      },
+      {
+        ...terminalEnvelope,
+        operations: [
+          {
+            ...terminalEnvelope.operations[1]!,
+            path: [
+              { Collection: "todos" },
+              { Key: todoKey },
+              { Collection: "comments" },
+              { Key: todoKey },
+            ],
+          },
+        ],
+      },
+    ];
+    for (const invalidEnvelope of invalidEnvelopes) {
+      const invalidSubscription = openNestedTerminalSubscription();
+      invalidSubscription.enqueue(invalidEnvelope);
+      await vi.waitFor(() => expect(invalidSubscription.deltas).toHaveLength(1));
+      expect(invalidSubscription.deltas[0]).toBeInstanceOf(Error);
+    }
   });
   it("materializes array subquery relation snapshots for reads", async () => {
     const calls: string[] = [];
