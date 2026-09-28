@@ -133,6 +133,11 @@ h6 {
   }
 }
 
+/* Nested docs pages indent by half of Astryx's 24px, so long titles fit. */
+.astryx-side-nav [role="group"][id$="-children"] > div {
+  padding-inline-start: var(--spacing-3) !important;
+}
+
 /* The top nav's search trigger reads as a field: label left, shortcut right. */
 .site-search-field > button {
   justify-content: flex-start;

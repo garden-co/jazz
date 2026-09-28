@@ -69,7 +69,7 @@ export function SearchField({ onOpen }: { onOpen: () => void }) {
     <Button
       label="Search the docs"
       variant="secondary"
-      size="sm"
+      size="lg"
       width={320}
       icon={<Icon icon={Search} size="sm" />}
       onClick={onOpen}
