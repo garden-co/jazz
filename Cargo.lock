@@ -2039,6 +2039,7 @@ dependencies = [
  "hex",
  "insta",
  "internment",
+ "jazz",
  "jazz-benchmark-guard",
  "jazz-compression",
  "jazz-storage-rocksdb",
