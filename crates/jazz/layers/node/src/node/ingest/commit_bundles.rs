@@ -651,7 +651,6 @@ where
         Ok(outcome)
     }
 
-
     pub(super) async fn ingest_known_transaction(
         &mut self,
         tx: Transaction,

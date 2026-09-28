@@ -480,6 +480,7 @@ Encryption, lifecycle authoring and automatic managed schemas are unchanged
 by this substrate.
 
 
+
 ### 3.8 Rejection and cascade
 
 Rejection records the authority's decision without keeping rejected foreign
