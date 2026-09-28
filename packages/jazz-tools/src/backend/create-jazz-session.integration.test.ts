@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
 import { deploy, startLocalJazzServer, startTestJwtIssuer } from "../testing/index.js";
@@ -337,4 +340,78 @@ describe("Node shared backend session", () => {
       await server.stop();
     }
   }, 30_000);
+  it("reconnects and syncs queued writes after a sync-server outage longer than ten seconds", async () => {
+    const appId = randomUUID();
+    const backendSecret = "outage-service-secret";
+    const dataDir = await mkdtemp(join(tmpdir(), "jazz-outage-"));
+    let server = await startLocalJazzServer({ appId, backendSecret, dataDir });
+    const open = () =>
+      createJazzSession({
+        appId,
+        serverUrl: server.url,
+        app,
+        permissions,
+        driver: { type: "memory" },
+        initial: { backendSecret },
+      });
+    const writer = await open();
+    let observer: Awaited<ReturnType<typeof open>> | undefined;
+    try {
+      await deploy({
+        serverUrl: server.url,
+        appId,
+        adminSecret: server.adminSecret,
+        schema: resolveSchemaSource(app),
+        permissions,
+      });
+      const db = writer.getSnapshot().client!.db;
+      await db.insert(app.posts, { text: "before outage" }).wait({ tier: "global" });
+
+      const port = server.port;
+      await server.stop();
+      const during = db.insert(app.posts, { text: "during outage" });
+      await during.wait({ tier: "local" });
+      const globalRead = db.all(app.posts, { tier: "global" }).then(
+        () => "resolved",
+        (error: unknown) => error,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 12_000));
+      // The outage is reported to Global readers (a rejection, never an
+      // uncaught error), while the session stays usable for local work.
+      expect(await globalRead).toBeInstanceOf(Error);
+      expect(writer.getSnapshot().status).toBe("ready");
+      await db.insert(app.posts, { text: "late in outage" }).wait({ tier: "local" });
+
+      server = await startLocalJazzServer({ appId, port, backendSecret, dataDir });
+      // The client reconnects by itself within one capped backoff interval;
+      // until then Global reads keep reporting the outage.
+      await vi.waitFor(() => db.all(app.posts, { tier: "global" }), {
+        timeout: 15_000,
+        interval: 250,
+      });
+      await db.insert(app.posts, { text: "after outage" }).wait({ tier: "global" });
+      observer = await open();
+      await vi.waitFor(
+        async () => {
+          const texts = (
+            await observer!.getSnapshot().client!.db.all(app.posts, { tier: "global" })
+          )
+            .map((row) => row.text)
+            .sort();
+          expect(texts).toEqual([
+            "after outage",
+            "before outage",
+            "during outage",
+            "late in outage",
+          ]);
+        },
+        { timeout: 15_000, interval: 250 },
+      );
+    } finally {
+      await observer?.close();
+      await writer.close();
+      await server.stop();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  }, 60_000);
 });
