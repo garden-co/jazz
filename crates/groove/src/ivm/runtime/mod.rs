@@ -256,6 +256,10 @@ impl IvmRuntime {
     fn insert_retained_eval_memo(&mut self, key: EvalMemoKey, entry: EvalMemoEntry) {
         debug_assert!(key.tick_epoch.is_none());
         let payload_bytes = entry.payload_bytes;
+        self.eval_memo_keys_by_node
+            .entry(key.node)
+            .or_default()
+            .insert(key.clone());
         if let Some(previous) = self.eval_memo.insert(key, entry) {
             self.eval_memo_bytes = self.eval_memo_bytes.saturating_sub(previous.payload_bytes);
         }
