@@ -59,7 +59,7 @@ export function getDocsMDXComponents(components?: MDXComponents): MDXComponents 
     ),
     hr: () => <Divider className="docs-block" />,
     table: ({ children }: { children?: ReactNode }) => (
-      <div className="docs-block overflow-x-auto">
+      <div className="docs-block docs-table">
         <Table density="compact" verticalAlign="top">
           {children}
         </Table>

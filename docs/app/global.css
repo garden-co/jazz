@@ -133,9 +133,15 @@ h6 {
   }
 }
 
-/* Nested docs pages indent by half of Astryx's 24px, so long titles fit. */
-.astryx-side-nav [role="group"][id$="-children"] > div {
-  padding-inline-start: var(--spacing-3) !important;
+/* Astryx tables bleed into their container's padding (for tables flush with
+   a card edge). Docs tables sit in the article text column, so they keep to
+   it; otherwise every table overflows by the layout's 32px padding on each
+   side and scrolls in both directions. */
+.docs-table {
+  --container-padding-inline-start: 0px;
+  --container-padding-inline-end: 0px;
+  --container-padding-block-start: 0px;
+  --container-padding-block-end: 0px;
 }
 
 /* The top nav's search trigger reads as a field: label left, shortcut right. */
