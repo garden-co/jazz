@@ -186,8 +186,8 @@ fn result_digest(result: &BTreeSet<TxId>) -> String {
 }
 
 struct Fixture {
-    writer: NodeState<RocksDbStorage>,
-    core: NodeState<RocksDbStorage>,
+    writer: NodeState,
+    core: NodeState,
     _dirs: Vec<tempfile::TempDir>,
 }
 
@@ -249,11 +249,7 @@ impl Fixture {
     }
 }
 
-fn core_ingest(
-    core: &mut NodeState<RocksDbStorage>,
-    message: &SyncMessage,
-    now_ms: u64,
-) -> SyncMessage {
+fn core_ingest(core: &mut NodeState, message: &SyncMessage, now_ms: u64) -> SyncMessage {
     let SyncMessage::CommitUnit { tx, versions } = message else {
         panic!("expected commit unit");
     };
@@ -276,10 +272,7 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_node(
-    node_uuid: NodeUuid,
-    schema: JazzSchema,
-) -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
+fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, NodeState) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let column_families = schema.column_families();
     let refs = column_families

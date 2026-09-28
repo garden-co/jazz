@@ -74,7 +74,7 @@ it("disconnects before any query and reconnects using only native credentials", 
         const global = write.wait({ tier: "global" }).then(() => {
           globallyAccepted = true;
         });
-        expect(await db.all(app.notes, { tier: ReadTier.RemoteIfPossible })).toEqual([row]);
+        expect(await db.all(app.notes, { tier: ReadTier.LocalFirstUnlessEmpty })).toEqual([row]);
         let settled = false;
         const remote = db.all(app.notes, { tier: ReadTier.Remote }).then((rows) => {
           settled = true;
@@ -89,7 +89,7 @@ it("disconnects before any query and reconnects using only native credentials", 
         await global;
         expect(await db.all(app.notes, { tier: ReadTier.Remote })).toEqual([row]);
         await Promise.all([db.disconnect(), db.reconnect(), db.disconnect()]);
-        expect(await db.all(app.notes, { tier: ReadTier.RemoteIfPossible })).toEqual([row]);
+        expect(await db.all(app.notes, { tier: ReadTier.LocalFirstUnlessEmpty })).toEqual([row]);
         await db.reconnect();
         expect(await db.all(app.notes, { tier: ReadTier.Remote })).toEqual([row]);
         await db.disconnect();

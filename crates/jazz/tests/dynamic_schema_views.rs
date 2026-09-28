@@ -80,6 +80,7 @@ fn metadata_schema(
             columns: RowDescriptor::new(vec![column]),
             indexed_columns: indexed_columns
                 .map(|columns| columns.into_iter().map(Into::into).collect()),
+            composite_indexes: Vec::new(),
             policies: allow_all_policies(),
             branch_by: Vec::new(),
         },
@@ -128,7 +129,7 @@ fn empty_schema() -> JazzSchema {
     compile_schema(&SchemaBuilder::new().build())
 }
 
-async fn open_owner(schema: JazzSchema) -> Db<TestStorage> {
+async fn open_owner(schema: JazzSchema) -> Db {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     Db::open(

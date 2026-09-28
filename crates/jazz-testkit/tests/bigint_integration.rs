@@ -7,7 +7,7 @@ use jazz::row_input;
 use jazz::tools::{ColumnType, Schema, SchemaBuilder, TableSchema, Value};
 use jazz_server::JazzServer;
 use support::{
-    TestingClient, has_added_id, wait_for_edge_query_ready, wait_for_query,
+    TestingClient, has_added_id, wait_for_query, wait_for_remote_query_ready,
     wait_for_subscription_update,
 };
 
@@ -54,7 +54,7 @@ async fn bigint_insert_query_order_predicate_and_subscribe_are_lossless() {
                     .expect("insert bigint row");
                 txs.push(transaction_id.expect("ordinary mutation commits immediately"));
             }
-            support::wait_for_edge_txs(&client, &txs).await;
+            support::wait_for_global_txs(&client, &txs).await;
 
             let ordered_query = jazz::query::Query::from("metrics")
                 .select(["label", "amount"])
@@ -130,7 +130,7 @@ async fn bigint_insert_query_order_predicate_and_subscribe_are_lossless() {
                     row_input!("label" => "later", "amount" => BIG_SAFE_PLUS_ONE + 1),
                 )
                 .expect("insert subscribed bigint row");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &client,
                 &[transaction_id.expect("ordinary mutation commits immediately")],
             )
@@ -145,7 +145,7 @@ async fn bigint_insert_query_order_predicate_and_subscribe_are_lossless() {
             )
             .await;
 
-            wait_for_edge_query_ready(&client, "metrics", QUERY_TIMEOUT).await;
+            wait_for_remote_query_ready(&client, "metrics", QUERY_TIMEOUT).await;
             server.shutdown().await;
         })
         .await;

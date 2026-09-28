@@ -52,6 +52,24 @@ export const stages: Record<Stage, { label: string; color: string; dash: string 
   open: { label: "Open PR", color: "#7761b8", dash: "7 5" },
 };
 
+/**
+ * Whether `buildTimeline` could place any result of this run. Every run it
+ * admits passes this check, so results only need fetching for these runs.
+ */
+export function mayBeAdmitted(
+  run: Pick<RawRun, "id" | "commit">,
+  releases: readonly Release[],
+  backfills: readonly HistoricalBackfill[] = [],
+): boolean {
+  const branch = run.commit.branch;
+  return (
+    branch?.name === "main" ||
+    branch?.pullRequest?.status === "OPEN" ||
+    releases.some((r) => r.sha === run.commit.hash) ||
+    backfills.some((b) => b.receipts.some((r) => r.runId === run.id))
+  );
+}
+
 export function buildTimeline(
   runs: RawRun[],
   releases: Release[],

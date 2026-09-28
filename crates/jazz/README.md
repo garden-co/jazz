@@ -9,8 +9,8 @@ RLS-authorized sync, and two transaction kinds — eventually-consistent
 
 Start at [`SPEC/1_intro.md`](SPEC/1_intro.md) — it has the chapter map and reading
 order. The normative chapters (ch. 1–17) cover the data model, transactions,
-history & merging, reads, queries, authorization, the sync protocol, topology &
-the edge tier, lenses/migrations, branches, the `Db` API, lowering
+history & merging, reads, queries, authorization, the sync protocol, Core-only
+topology, lenses/migrations, branches, the `Db` API, lowering
 to groove, sharding, maintained subscription views, and integrability. Guidance
 appendices (A–E) cover implementation
 discipline, benchmarks, performance, testing, and the glossary. Invariant →

@@ -33,6 +33,9 @@ extern "C" {
     #[wasm_bindgen(method, js_name = readPage)]
     fn read_page_js(this: &IndexedDbPageStoreHandle, page_id: f64) -> Promise;
 
+    #[wasm_bindgen(method, js_name = readPages)]
+    fn read_pages_js(this: &IndexedDbPageStoreHandle, page_ids: &Array) -> Promise;
+
     #[wasm_bindgen(method, js_name = commitPages)]
     fn commit_pages_js(
         this: &IndexedDbPageStoreHandle,
@@ -75,10 +78,11 @@ impl IndexedDbPageStore {
             "isTreeOwnershipActive",
         ]
         .into_iter()
-        .all(|name| {
-            Reflect::get(&self.handle, &JsValue::from_str(name))
-                .is_ok_and(|value| value.is_function())
-        })
+        .all(|name| self.has_method(name))
+    }
+
+    fn has_method(&self, name: &str) -> bool {
+        Reflect::get(&self.handle, &JsValue::from_str(name)).is_ok_and(|value| value.is_function())
     }
 }
 
@@ -125,6 +129,42 @@ impl PageStore for IndexedDbPageStore {
                 return Ok(None);
             }
             Ok(Some(Uint8Array::new(&value).to_vec()))
+        })
+    }
+
+    // Custom JS stores without `readPages` keep one `readPage` per page.
+    fn read_pages<'a>(
+        &'a self,
+        page_ids: &'a [u64],
+    ) -> BoxFuture<'a, Result<Vec<Option<Vec<u8>>>, String>> {
+        Box::pin(async move {
+            if !self.has_method("readPages") {
+                let mut pages = Vec::with_capacity(page_ids.len());
+                for &page_id in page_ids {
+                    pages.push(self.read_page(page_id).await?);
+                }
+                return Ok(pages);
+            }
+            let ids = Array::new();
+            for &page_id in page_ids {
+                ids.push(&JsValue::from_f64(page_id_to_f64(page_id)?));
+            }
+            let value = JsFuture::from(self.handle.read_pages_js(&ids))
+                .await
+                .map_err(js_error)?;
+            let pages: Array = value
+                .dyn_into()
+                .map_err(|_| "readPages did not return an array".to_owned())?;
+            pages
+                .iter()
+                .map(|page| {
+                    if page.is_null() || page.is_undefined() {
+                        Ok(None)
+                    } else {
+                        Ok(Some(Uint8Array::new(&page).to_vec()))
+                    }
+                })
+                .collect()
         })
     }
 

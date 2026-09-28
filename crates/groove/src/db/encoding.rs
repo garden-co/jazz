@@ -293,6 +293,45 @@ pub(crate) fn persisted_index_primary_key(
     Ok(primary_key.clone())
 }
 
+/// Decode one covered index or primary-key column without loading its table row.
+/// Used by snapshot-only key filtering before full-row hydration.
+pub(crate) fn persisted_index_column_value(
+    table: &TableSchema,
+    index_name: &str,
+    index: &IndexSchema,
+    storage_key: &[u8],
+    stored_value: &Value,
+    column_name: &str,
+) -> Result<Value, Error> {
+    let logical_key = persisted_index_logical_key(table, index_name, storage_key)?;
+    let mut remaining = logical_key.as_slice();
+    for indexed_column in &index.columns {
+        let column = table
+            .columns
+            .iter()
+            .find(|column| column.name == *indexed_column)
+            .ok_or_else(|| Error::InvalidPersistedIndex(index_name.to_owned()))?;
+        let value = decode_index_key_part(&mut remaining, &column.column_type, index_name)?;
+        if indexed_column == column_name {
+            return Ok(value);
+        }
+    }
+    let primary_key = table
+        .primary_key
+        .as_ref()
+        .ok_or_else(|| Error::MissingPrimaryKey(table.name.clone()))?;
+    let primary_bytes =
+        persisted_index_primary_key(table, index_name, index, storage_key, stored_value)?;
+    let mut remaining = primary_bytes.as_slice();
+    for column in &primary_key.columns {
+        let value = decode_primary_key_part(&mut remaining, &column.key_type.column_type())?;
+        if column.column == column_name {
+            return Ok(value);
+        }
+    }
+    Err(Error::InvalidPersistedIndex(index_name.to_owned()))
+}
+
 pub(super) fn persisted_index_logical_key(
     table: &TableSchema,
     index_name: &str,

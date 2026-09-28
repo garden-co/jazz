@@ -868,6 +868,9 @@ function decodeForegroundSubscriptionEvents(
   return events;
 }
 
+// Bounded so `fromCharCode.apply` stays well under engine argument limits.
+const ASCII_DECODE_CHUNK = 8192;
+
 function decodeForegroundUtf8(
   bytes: Uint8Array,
   start: number,
@@ -877,6 +880,26 @@ function decodeForegroundUtf8(
   const slice = bytes.subarray(start, start + length);
   if (slice.byteLength !== length)
     throw new Error(`Jazz native foreground returned truncated ${label}`);
+  // Terminal operations arrive as JSON number arrays, so these payloads are
+  // almost always ASCII. ASCII is valid UTF-8 and maps byte-for-code-unit, so
+  // skip the per-byte `%xx` round trip below (#3369).
+  let ascii = true;
+  for (let index = 0; index < slice.length; index += 1) {
+    if (slice[index]! >= 0x80) {
+      ascii = false;
+      break;
+    }
+  }
+  if (ascii) {
+    let text = "";
+    for (let offset = 0; offset < slice.length; offset += ASCII_DECODE_CHUNK) {
+      text += String.fromCharCode.apply(
+        null,
+        slice.subarray(offset, offset + ASCII_DECODE_CHUNK) as unknown as number[],
+      );
+    }
+    return text;
+  }
   // React Native's configured TS lib deliberately does not promise
   // `TextDecoder`; `decodeURIComponent` is available in Hermes and gives us a
   // strict UTF-8 decode without adding a platform polyfill to this tiny ABI.

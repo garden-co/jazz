@@ -81,7 +81,7 @@ describe("vue/useAll", () => {
     const query = makeQuery();
     const options = ref<any>({ tier: "local" });
 
-    mocks.makeQueryKey.mockReturnValueOnce("key-worker").mockReturnValueOnce("key-edge");
+    mocks.makeQueryKey.mockReturnValueOnce("key-worker").mockReturnValueOnce("key-global");
     mocks.getCacheEntry.mockReturnValue({
       state: { status: "fulfilled", data: [] },
       subscribe: mocks.subscribe,

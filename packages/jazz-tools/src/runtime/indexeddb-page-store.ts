@@ -541,21 +541,30 @@ export class IndexedDbPageStore {
   }
 
   async readPage(pageId: number): Promise<Uint8Array | null> {
+    return (await this.readPages([pageId]))[0]!;
+  }
+
+  /**
+   * Read several pages in one readonly transaction, one slot per requested id
+   * in request order. A cold B-tree scan asks for a whole tree level at once,
+   * so this replaces one transaction per page with one per level.
+   */
+  async readPages(pageIds: readonly number[]): Promise<(Uint8Array | null)[]> {
     this.assertValid();
-    assertPageId(pageId);
+    for (const pageId of pageIds) assertPageId(pageId);
+    if (pageIds.length === 0) return [];
     const tx = this.db.transaction(INDEXEDDB_BTREE_PAGES_STORE, "readonly");
     const done = transactionDone(tx);
-    const value = await requestResult(tx.objectStore(INDEXEDDB_BTREE_PAGES_STORE).get(pageId));
-    await done;
-    if (value === undefined) return null;
-    if (!(value instanceof ArrayBuffer) && !ArrayBuffer.isView(value)) {
-      throw new Error(`IndexedDB B-tree page ${pageId} is not binary data`);
+    const store = tx.objectStore(INDEXEDDB_BTREE_PAGES_STORE);
+    let values: unknown[];
+    try {
+      values = await Promise.all(pageIds.map((pageId) => requestResult(store.get(pageId))));
+    } catch (error) {
+      await done.catch(() => undefined);
+      throw error;
     }
-    const bytes =
-      value instanceof ArrayBuffer
-        ? new Uint8Array(value)
-        : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-    return bytes.slice();
+    await done;
+    return values.map((value, index) => pageBytes(pageIds[index]!, value));
   }
 
   async commit(commit: IndexedDbPageCommit, treeToken?: number): Promise<IndexedDbBtreeMetadata> {
@@ -869,6 +878,18 @@ function isTxTime(value: bigint): boolean {
 
 function bytesKey(bytes: ArrayBuffer): string {
   return Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function pageBytes(pageId: number, value: unknown): Uint8Array | null {
+  if (value === undefined) return null;
+  if (!(value instanceof ArrayBuffer) && !ArrayBuffer.isView(value)) {
+    throw new Error(`IndexedDB B-tree page ${pageId} is not binary data`);
+  }
+  const bytes =
+    value instanceof ArrayBuffer
+      ? new Uint8Array(value)
+      : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  return bytes.slice();
 }
 
 function requestResult<T>(request: IDBRequest<T>): Promise<T> {

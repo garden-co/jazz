@@ -836,7 +836,7 @@ async fn run_w3_offline_reconnect(
         if Instant::now() >= timeout_at {
             online_client.shutdown().await?;
             return Err(format!(
-                "Timed out waiting for edge settlement: observed={}, expected_at_least={}",
+                "Timed out waiting for remote settlement: observed={}, expected_at_least={}",
                 observed_count, target_count
             )
             .into());

@@ -294,30 +294,23 @@ impl RocksDbStorage {
         write_options.set_sync(matches!(durability, Durability::FullSync));
 
         let listed_column_families = inspect_existing_column_families(&path)?;
-        let initialize_format = match &listed_column_families {
-            Some(existing) => {
-                validate_physical_storage_names(existing)?;
-                validate_raw_v1_store(
-                    &path,
-                    existing,
-                    &block_cache,
-                    &write_buffer_manager,
-                    codec_profile,
-                )?
-            }
-            None => true,
-        };
+        if let Some(existing) = &listed_column_families {
+            validate_physical_storage_names(existing)?;
+        }
 
         let mut opened_column_families = requested_column_families;
         opened_column_families.insert("default".to_owned());
-        if let Some(existing) = listed_column_families {
-            opened_column_families.extend(existing);
+        if let Some(existing) = &listed_column_families {
+            opened_column_families.extend(existing.iter().cloned());
         }
         opened_column_families.insert(ROCKSDB_INTERNAL_CF.to_owned());
 
         let mut final_options = rocksdb_options(&block_cache, &write_buffer_manager);
         final_options.create_if_missing(true);
-        final_options.create_missing_column_families(true);
+        // An existing store must pass its epoch check before we add any
+        // requested families. Open it once with exactly its existing layout,
+        // validate on that handle, then create the admitted missing families.
+        final_options.create_missing_column_families(listed_column_families.is_none());
         if matches!(durability, Durability::FullSync) {
             final_options.set_use_fsync(true);
         }
@@ -326,9 +319,13 @@ impl RocksDbStorage {
             // It is not a persistence boundary; `flush_wal(true)` below is.
             final_options.set_wal_bytes_per_sync(1 << 20);
         }
-        let descriptors = opened_column_families
+        let families_to_open = listed_column_families
+            .as_ref()
+            .map(|existing| existing.iter().collect::<BTreeSet<_>>())
+            .unwrap_or_else(|| opened_column_families.iter().collect());
+        let descriptors = families_to_open
             .iter()
-            .map(String::as_str)
+            .map(|name| name.as_str())
             .filter(|name| *name != "default")
             .map(|name| {
                 ColumnFamilyDescriptor::new(
@@ -336,7 +333,25 @@ impl RocksDbStorage {
                     rocksdb_options_for_cf(name, &block_cache, &write_buffer_manager),
                 )
             });
-        let db = DB::open_cf_descriptors(&final_options, &path, descriptors).storage()?;
+        let mut db = DB::open_cf_descriptors(&final_options, &path, descriptors).storage()?;
+        let initialize_format = if let Some(existing) = &listed_column_families {
+            validate_raw_v1_store(&db, existing, codec_profile)?
+        } else {
+            true
+        };
+        if let Some(existing) = &listed_column_families {
+            let existing = existing.iter().collect::<BTreeSet<_>>();
+            for family in opened_column_families
+                .iter()
+                .filter(|name| !existing.contains(name))
+            {
+                db.create_cf(
+                    family,
+                    &rocksdb_options_for_cf(family, &block_cache, &write_buffer_manager),
+                )
+                .storage()?;
+            }
+        }
         let internal_cf = db
             .cf_handle(ROCKSDB_INTERNAL_CF)
             .expect("internal RocksDB column family was opened");
@@ -578,26 +593,10 @@ fn inspect_existing_column_families(path: &Path) -> Result<Option<Vec<String>>, 
 }
 
 fn validate_raw_v1_store(
-    path: &Path,
+    db: &DB,
     column_families: &[String],
-    block_cache: &Cache,
-    write_buffer_manager: &WriteBufferManager,
     codec_profile: &StorageCodecProfile,
 ) -> Result<bool, Error> {
-    let mut options = rocksdb_options(block_cache, write_buffer_manager);
-    options.create_if_missing(false);
-    options.create_missing_column_families(false);
-    let descriptors = column_families
-        .iter()
-        .map(String::as_str)
-        .filter(|name| *name != "default")
-        .map(|name| {
-            ColumnFamilyDescriptor::new(
-                name,
-                rocksdb_options_for_cf(name, block_cache, write_buffer_manager),
-            )
-        });
-    let db = DB::open_cf_descriptors(&options, path, descriptors).storage()?;
     if let Some(internal) = db.cf_handle(ROCKSDB_INTERNAL_CF) {
         match db
             .get_cf(internal, ROCKSDB_VALUE_FORMAT_KEY)

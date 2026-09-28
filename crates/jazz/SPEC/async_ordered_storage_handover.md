@@ -31,7 +31,7 @@ loading or compatibility path during the Groove phase.
 4. Jazz owns Jazz synchronization, authority, policy/read-view selection,
    optimistic publication, and durable/external publication.
 5. A local write is visible to the appropriate local current-state view before
-   its durability tier advances. `None`, `Local`, `Edge`, and `Global` remain
+   its durability tier advances. `None`, `Local`, and `Global` remain
    provenance/durability facts, not storage-completion modes.
 6. Preparation may suspend and must be mutation-free. Publication is one
    non-suspending state transition. Persistence and external release are later,

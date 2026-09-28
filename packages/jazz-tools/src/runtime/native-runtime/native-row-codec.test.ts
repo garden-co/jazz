@@ -6,6 +6,10 @@ import { PostcardReader, PostcardWriter } from "./native-codec.js";
 import { encodeCellsForPatch, encodeCellsForRow } from "./native-runtime-adapter.js";
 import {
   createRecord,
+  createRecordValueDecoder,
+  decodeNativeRow,
+  decodeNativeRowObject,
+  decodeNativeRowValuesByColumn,
   decodeNativeTerminalRow,
   decodeNativeTerminalRowWithDescriptor,
   decodeNativeRowValues,
@@ -691,6 +695,67 @@ describe("native row codec", () => {
     expect(sparseAbsence[0]).toBe(0);
     expect(decodeNativeRowValues(columns, explicitNull)).toEqual([{ type: "Null" }]);
     expect(decodeNativeRowValues(columns, sparseAbsence)).toEqual([{ type: "Null" }]);
+  });
+
+  it("decodes a packed row once and names the same values positionally and by column", () => {
+    const rowId = "00000000-0000-4000-8000-00000000000a";
+    const columns: ColumnDescriptor[] = [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "count", column_type: { type: "Integer" }, nullable: false },
+      { name: "score", column_type: { type: "Double" }, nullable: true },
+      { name: "missing", column_type: { type: "Integer" }, nullable: true },
+      { name: "owner", column_type: { type: "Uuid" }, nullable: false },
+      { name: "tags", column_type: { type: "Array", element: { type: "Text" } }, nullable: false },
+      { name: "done", column_type: { type: "Boolean" }, nullable: false },
+      { name: "note", column_type: { type: "Text" }, nullable: true },
+    ];
+    const values: Value[] = [
+      { type: "Text", value: "hello" },
+      { type: "Integer", value: -7 },
+      { type: "Double", value: 2.5 },
+      { type: "Null" },
+      { type: "Uuid", value: "0123abcd-ef01-4234-9567-89abcdef0123" },
+      {
+        type: "Array",
+        value: [
+          { type: "Text", value: "a" },
+          { type: "Text", value: "bc" },
+        ],
+      },
+      { type: "Boolean", value: true },
+      { type: "Text", value: "" },
+    ];
+    const raw = encodeNativeRowValues(columns, values);
+
+    const row = decodeNativeRow(rowId, columns, raw);
+    expect(row).toEqual({ id: rowId, values });
+    const byColumn = (row as typeof row & { valuesByColumn: Map<string, Value> }).valuesByColumn;
+    expect([...byColumn.keys()]).toEqual(columns.map((column) => column.name));
+    columns.forEach((column, index) => {
+      expect(byColumn.get(column.name)).toBe(row.values[index]);
+    });
+    expect(byColumn).toEqual(decodeNativeRowValuesByColumn(columns, raw));
+    expect(decodeNativeRowValues(columns, raw)).toEqual(values);
+    expect(decodeNativeRowObject(rowId, columns, raw)).toEqual({
+      id: rowId,
+      title: "hello",
+      count: -7,
+      score: 2.5,
+      missing: null,
+      owner: "0123abcd-ef01-4234-9567-89abcdef0123",
+      tags: ["a", "bc"],
+      done: true,
+      note: "",
+    });
+
+    const descriptor = columns.map((column) => ({
+      name: column.name,
+      valueType: storageColumnValueType(column),
+    }));
+    const decodeField = createRecordValueDecoder(descriptor);
+    columns.forEach((_, index) => {
+      expect(decodeField(raw, index)).toEqual(decodeRecordValue(descriptor, raw, index));
+    });
   });
 
   it("decodes terminal arrays as physical nested records rather than packed row envelopes", () => {

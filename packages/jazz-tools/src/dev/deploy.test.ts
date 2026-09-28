@@ -1,6 +1,12 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { schema as s } from "../schema-namespace.js";
-import { computeSchemaHash, deploy, MissingMigrationError } from "./catalogue.js";
+import {
+  computeSchemaHash,
+  deploy,
+  MissingMigrationError,
+  pushSchema,
+  SchemaHashMismatchError,
+} from "./catalogue.js";
 
 const server = { appId: "deploy-test", serverUrl: "http://localhost:1625", adminSecret: "test" };
 const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) });
@@ -120,4 +126,43 @@ it("rejects a concurrent deployment instead of replacing its permissions head", 
   await expect(deploy({ ...server, schema: app, permissions: {} })).rejects.toThrow(
     "permissions head changed",
   );
+});
+
+// An alpha.56 server parses published schemas with serde defaults and drops the
+// unknown `composite_indexes` field, storing (and hashing) the plain schema.
+it("fails deploy and pushSchema when the server stores a different schema than was sent", async () => {
+  const plain = s.defineApp({
+    notes: s.table({ owner: s.string(), rank: s.int() }, {}),
+  });
+  const composite = s.defineApp({
+    notes: s.table({ owner: s.string(), rank: s.int() }, {}).compositeIndex(["owner", "rank"]),
+  });
+  const plainHash = await computeSchemaHash(plain.wasmSchema);
+  const compositeHash = await computeSchemaHash(composite.wasmSchema);
+  expect(compositeHash).not.toBe(plainHash);
+  const writes: string[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: string, init?: RequestInit) => {
+      if (input.endsWith(`/apps/${server.appId}/schemas`)) return reply({ hashes: [] });
+      if (input.endsWith("/permissions/head")) return reply({ head: null });
+      if (input.endsWith("/admin/schemas")) {
+        writes.push("schema");
+        expect(JSON.parse(String(init?.body)).schema.tables.notes.composite_indexes).toEqual([
+          ["owner", "rank"],
+        ]);
+        return reply({ hash: plainHash, objectId: "schema-object" }, 201);
+      }
+      writes.push(input);
+      throw new Error(`Unexpected request: ${input}`);
+    }),
+  );
+
+  const deployed = deploy({ ...server, schema: composite, permissions: {} });
+  await expect(deployed).rejects.toBeInstanceOf(SchemaHashMismatchError);
+  await expect(deployed).rejects.toMatchObject({ localHash: compositeHash, serverHash: plainHash });
+  await expect(pushSchema({ ...server, schema: composite })).rejects.toThrow(
+    /did not store the schema as sent/,
+  );
+  expect(writes).toEqual(["schema", "schema"]);
 });

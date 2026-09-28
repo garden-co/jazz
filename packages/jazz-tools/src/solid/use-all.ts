@@ -41,8 +41,10 @@ export function useAll<T extends { id: string }>(
       const key = store.makeQueryKey(query, options);
       const entry = store.getCacheEntry<T>(key);
 
+      // Own a copy: deltas are applied to the store's array in place, and the
+      // cache entry's array is shared with every listener on the query.
       setState({
-        data: entry.state.data,
+        data: entry.state.data && [...entry.state.data],
         isLoading: entry.state.status === "pending",
         error: entry.state.error ? normalizeError(entry.state.error) : null,
       });
@@ -62,7 +64,7 @@ export function useAll<T extends { id: string }>(
           }),
         onfulfilled: (nextData) =>
           setState({
-            data: nextData,
+            data: [...nextData],
             isLoading: false,
             error: null,
           }),
@@ -77,7 +79,7 @@ export function useAll<T extends { id: string }>(
                 }),
               );
             } else if (delta.reset) {
-              setState("data", reconcile(delta.all));
+              setState("data", reconcile([...delta.all]));
             } else {
               const current: T[] = [];
               applyDelta(current, delta);

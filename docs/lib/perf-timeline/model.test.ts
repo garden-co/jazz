@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   buildTimeline,
+  mayBeAdmitted,
   formatTime,
   calendarDay,
   checkpoint,
@@ -54,6 +55,48 @@ test("only exact releases, main and open PRs are retained throughout the dataset
   assert.equal(points.has("4"), false);
   assert.equal(data.excludedRuns, 3);
   assert.equal(points.size, 3);
+});
+
+test("results are only needed for runs mayBeAdmitted accepts", () => {
+  // The loader fetches results only for runs mayBeAdmitted accepts, so every
+  // run buildTimeline admits must pass it, and dropping the others' results
+  // must not change the timeline.
+  const releases = [{ name: "v2.0.0", sha: "tagged", url: "https://example.com/tag" }];
+  const harness = { ...run("harness", "bench/backfill"), date: "2026-09-14T12:00:00Z" };
+  const backfills = [
+    {
+      releaseTag: "v2.0.0",
+      engineSha: "tagged",
+      harnessSha: "harness",
+      harnessSourceSha: "source",
+      effectiveDate: "2026-09-10T00:00:00Z",
+      dateSource: "npm jazz-tools time[2.0.0]",
+      workflowUrl: "https://example.com/workflow",
+      receipts: [{ runId: "harness", resultId: "result-harness", benchmarkName: "read" }],
+    },
+  ];
+  const runs = [
+    run("main"),
+    { ...run("tagged", "release"), date: "2026-09-12T12:00:00Z" },
+    run("1", "feature", "OPEN"),
+    run("2", "old", "MERGED"),
+    run("3", "abandoned", "CLOSED"),
+    run("4", "unknown"),
+    harness,
+  ];
+  const full = buildTimeline(runs, releases, "now", new Map(), backfills);
+  for (const r of runs) {
+    const alone = buildTimeline([r], releases, "now", new Map(), backfills);
+    if (alone.excludedRuns === 0) assert.ok(mayBeAdmitted(r, releases, backfills), r.id);
+  }
+  const trimmed = runs.map((r) =>
+    mayBeAdmitted(r, releases, backfills) ? r : { ...r, results: [] },
+  );
+  assert.deepEqual(buildTimeline(trimmed, releases, "now", new Map(), backfills), full);
+  assert.deepEqual(
+    runs.filter((r) => mayBeAdmitted(r, releases, backfills)).map((r) => r.id),
+    ["main", "tagged", "1", "harness"],
+  );
 });
 
 test("benchmarks with only excluded runs disappear from navigation data", () => {
