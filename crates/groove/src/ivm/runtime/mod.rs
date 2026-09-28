@@ -221,6 +221,9 @@ pub struct IvmRuntime {
     /// expensive context-independent arrangements.
     arrangement_states: HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
     arrangement_keys_by_input: HashMap<NodeId, HashSet<ArrangementKey>>,
+    /// Keys of retained hydration entries grouped by producer node. Staged
+    /// tick frames are deliberately not represented here.
+    eval_memo_keys_by_node: HashMap<NodeId, HashSet<EvalMemoKey>>,
     /// Input-owned memoization for pure node evaluation results. Entries are
     /// keyed by node/scope/context inputs and validated against per-input
     /// frontier counters before reuse; operator state remains owned separately.
@@ -248,6 +251,48 @@ pub struct IvmRuntime {
 }
 
 impl IvmRuntime {
+    /// Insert one retained hydration memo while keeping its node index and
+    /// byte budget synchronized. Tick-keyed deltas remain in staged frames.
+    fn insert_retained_eval_memo(&mut self, key: EvalMemoKey, entry: EvalMemoEntry) {
+        debug_assert!(key.tick_epoch.is_none());
+        let payload_bytes = entry.payload_bytes;
+        self.eval_memo_keys_by_node
+            .entry(key.node)
+            .or_default()
+            .insert(key.clone());
+        if let Some(previous) = self.eval_memo.insert(key, entry) {
+            self.eval_memo_bytes = self.eval_memo_bytes.saturating_sub(previous.payload_bytes);
+        }
+        self.eval_memo_bytes = self.eval_memo_bytes.saturating_add(payload_bytes);
+    }
+
+    fn remove_retained_eval_memo(&mut self, key: &EvalMemoKey) {
+        debug_assert!(key.tick_epoch.is_none());
+        if let Some(entry) = self.eval_memo.remove(key) {
+            self.eval_memo_bytes = self.eval_memo_bytes.saturating_sub(entry.payload_bytes);
+        }
+        if let Some(keys) = self.eval_memo_keys_by_node.get_mut(&key.node) {
+            keys.remove(key);
+            if keys.is_empty() {
+                self.eval_memo_keys_by_node.remove(&key.node);
+            }
+        }
+    }
+
+    fn remove_retained_eval_memos_for_nodes(&mut self, nodes: &HashSet<NodeId>) {
+        for node in nodes {
+            if let Some(keys) = self.eval_memo_keys_by_node.remove(node) {
+                for key in keys {
+                    debug_assert!(key.tick_epoch.is_none());
+                    if let Some(entry) = self.eval_memo.remove(&key) {
+                        self.eval_memo_bytes =
+                            self.eval_memo_bytes.saturating_sub(entry.payload_bytes);
+                    }
+                }
+            }
+        }
+    }
+
     pub fn new(schema: DatabaseSchema) -> Result<Self, IvmRuntimeError> {
         let table_storage_descriptors = schema
             .tables
@@ -297,6 +342,7 @@ impl IvmRuntime {
             arrangement_states: HashMap::default(),
             arrangement_keys_by_input: HashMap::default(),
             eval_memo: EvaluationMemo::default(),
+            eval_memo_keys_by_node: HashMap::default(),
             table_frontiers: HashMap::default(),
             binding_frontiers: HashMap::default(),
             memo_use_clock: 0,
