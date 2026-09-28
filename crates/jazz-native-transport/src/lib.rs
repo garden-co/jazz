@@ -418,69 +418,11 @@ impl WebSocketTransport {
     ) -> Result<Self, NativeConnectFailure> {
         let deadline = tokio::time::Instant::now() + WS_CLIENT_HANDSHAKE_TIMEOUT;
         let url = ws_url(base_url.as_ref(), app_id);
-        let (mut ws, _) = tokio::time::timeout_at(deadline, async {
-            let request = url
-                .into_client_request()
-                .map_err(WebSocketClientError::Connect)?;
-            let host = request.uri().host().ok_or_else(|| {
-                WebSocketClientError::Connect(tokio_tungstenite::tungstenite::Error::Url(
-                    tokio_tungstenite::tungstenite::error::UrlError::NoHostName,
-                ))
-            })?;
-            let port = request
-                .uri()
-                .port_u16()
-                .or_else(|| match request.uri().scheme_str() {
-                    Some("wss") => Some(443),
-                    Some("ws") => Some(80),
-                    _ => None,
-                })
-                .ok_or_else(|| {
-                    WebSocketClientError::Connect(tokio_tungstenite::tungstenite::Error::Url(
-                        tokio_tungstenite::tungstenite::error::UrlError::UnsupportedUrlScheme,
-                    ))
-                })?;
-            let addresses = tokio::net::lookup_host(format!("{host}:{port}"))
-                .await
-                .map_err(NativeConnectFailure::Resolution)?;
-            let mut stream = None;
-            let mut last_error = None;
-            for address in addresses {
-                match tokio::net::TcpStream::connect(address).await {
-                    Ok(connected) => {
-                        stream = Some(connected);
-                        break;
-                    }
-                    Err(error) => last_error = Some(error),
-                }
-            }
-            let stream = match (stream, last_error) {
-                (Some(stream), _) => stream,
-                (None, Some(error)) => {
-                    return Err(WebSocketClientError::Connect(
-                        tokio_tungstenite::tungstenite::Error::Io(error),
-                    )
-                    .into());
-                }
-                (None, None) => {
-                    return Err(NativeConnectFailure::Resolution(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "could not resolve to any address",
-                    )));
-                }
-            };
-            let connection = tokio_tungstenite::client_async_tls_with_config(
-                request,
-                stream,
-                Some(client_websocket_config()),
-                None,
-            )
+        let (mut ws, _) = tokio::time::timeout_at(deadline, open_client_websocket(url))
             .await
-            .map_err(WebSocketClientError::Connect)?;
-            Ok(connection)
-        })
-        .await
-        .map_err(|_| NativeConnectFailure::WebSocket(WebSocketClientError::HandshakeTimeout))??;
+            .map_err(|_| {
+                NativeConnectFailure::WebSocket(WebSocketClientError::HandshakeTimeout)
+            })??;
 
         let prelude = encode_prelude(peer_identity, auth, requested_link)?;
         tokio::time::timeout_at(deadline, ws.send(Message::Binary(prelude.into())))
@@ -671,6 +613,87 @@ fn ws_url(base_url: &str, app_id: AppId) -> String {
         .trim_end_matches('/')
         .to_owned();
     format!("{base}/apps/{app_id}/ws")
+}
+
+/// Open the client socket with Nagle disabled. The client sends small
+/// multiplexed frames in pairs (a header then its payload, a mutation then a
+/// read), which otherwise wait on the server's delayed ACK. Mirrors the
+/// server-side accept policy in `jazz-server`'s `tcp` module (#3268).
+/// The socket is dialed by hand (to keep resolver errors typed), so
+/// `set_nodelay` is applied here rather than via `connect_async`'s flag.
+async fn open_client_websocket(
+    url: String,
+) -> Result<
+    (
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        tokio_tungstenite::tungstenite::handshake::client::Response,
+    ),
+    NativeConnectFailure,
+> {
+    let request = url
+        .into_client_request()
+        .map_err(WebSocketClientError::Connect)?;
+    let host = request.uri().host().ok_or_else(|| {
+        WebSocketClientError::Connect(tokio_tungstenite::tungstenite::Error::Url(
+            tokio_tungstenite::tungstenite::error::UrlError::NoHostName,
+        ))
+    })?;
+    let port = request
+        .uri()
+        .port_u16()
+        .or_else(|| match request.uri().scheme_str() {
+            Some("wss") => Some(443),
+            Some("ws") => Some(80),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            WebSocketClientError::Connect(tokio_tungstenite::tungstenite::Error::Url(
+                tokio_tungstenite::tungstenite::error::UrlError::UnsupportedUrlScheme,
+            ))
+        })?;
+    let addresses = tokio::net::lookup_host(format!("{host}:{port}"))
+        .await
+        .map_err(NativeConnectFailure::Resolution)?;
+    let mut stream = None;
+    let mut last_error = None;
+    for address in addresses {
+        match tokio::net::TcpStream::connect(address).await {
+            Ok(connected) => {
+                connected.set_nodelay(true).map_err(|error| {
+                    WebSocketClientError::Connect(tokio_tungstenite::tungstenite::Error::Io(error))
+                })?;
+                stream = Some(connected);
+                break;
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    let stream = match (stream, last_error) {
+        (Some(stream), _) => stream,
+        (None, Some(error)) => {
+            return Err(
+                WebSocketClientError::Connect(tokio_tungstenite::tungstenite::Error::Io(error))
+                    .into(),
+            );
+        }
+        (None, None) => {
+            return Err(NativeConnectFailure::Resolution(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "could not resolve to any address",
+            )));
+        }
+    };
+    let connection = tokio_tungstenite::client_async_tls_with_config(
+        request,
+        stream,
+        Some(client_websocket_config()),
+        None,
+    )
+    .await
+    .map_err(WebSocketClientError::Connect)?;
+    Ok(connection)
 }
 
 fn client_websocket_config() -> WebSocketConfig {
@@ -950,6 +973,33 @@ mod tests {
             "abrupt EOF must reconnect: {classified:?}"
         );
         server.await.unwrap();
+    }
+
+    // Logical sync results cannot detect this socket policy. Check the real
+    // connected client socket directly instead of a timing threshold.
+    #[tokio::test]
+    async fn client_websocket_disables_nagle() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            tokio_tungstenite::accept_async(stream).await.unwrap()
+        });
+        let ws = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            open_client_websocket(format!("ws://{address}")),
+        )
+        .await
+        .expect("bounded client connect")
+        .expect("client websocket connects")
+        .0;
+        match ws.get_ref() {
+            tokio_tungstenite::MaybeTlsStream::Plain(stream) => {
+                assert!(stream.nodelay().unwrap(), "client socket keeps Nagle on");
+            }
+            _ => panic!("ws:// URL must open a plain TCP stream"),
+        }
+        drop(server.await.unwrap());
     }
 
     // Keep the exception typed and narrow: other protocol failures must still
