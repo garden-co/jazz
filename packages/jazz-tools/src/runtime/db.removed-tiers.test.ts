@@ -68,6 +68,7 @@ it("waits for global instead of rejecting an already committed write at the remo
     expect(await reader.all(app.notes, { tier: "global" })).toEqual([
       { id: inserted.id, title: "Final" },
     ]);
+    expect(await reader.all(app.notes)).toEqual([{ id: inserted.id, title: "Final" }]);
   } finally {
     await reader?.shutdown();
     await db?.shutdown();
