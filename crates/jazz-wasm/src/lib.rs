@@ -29,7 +29,7 @@ use jazz::db::{
 use jazz::groove::records::Value;
 #[cfg(target_arch = "wasm32")]
 use jazz::groove::storage::IdbStorage;
-use jazz::groove::storage::{MemoryStorage, OrderedKvStorage, ReopenableStorage};
+use jazz::groove::storage::{BoxedStorage, MemoryStorage, OrderedKvStorage, ReopenableStorage};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::{BranchSelector, BranchViewBase, PermissionAdviceAction, ReadViewSpec};
 use jazz::schema::JazzSchema;
@@ -602,13 +602,13 @@ impl WasmStreamingMutation {
 
 enum WasmWriteInner {
     MemoryTx {
-        db: Rc<Db<MemoryStorage>>,
-        write: WriteHandle<MemoryStorage>,
+        db: Rc<Db<BoxedStorage>>,
+        write: WriteHandle<BoxedStorage>,
     },
     #[cfg(target_arch = "wasm32")]
     BrowserTx {
-        db: Rc<Db<BrowserStorage>>,
-        write: WriteHandle<BrowserStorage>,
+        db: Rc<Db<BoxedStorage>>,
+        write: WriteHandle<BoxedStorage>,
     },
 }
 
@@ -686,10 +686,14 @@ pub struct WasmDb {
     trusted_backend: bool,
 }
 
+// The storage adapter is already erased inside NodeState. Use one engine
+// instantiation here too, so the browser module does not contain a second copy
+// of the query/sync engine for the foreground memory database. Keep the enum
+// variants: they select distinct scheduling and persistence behavior.
 enum WasmDbInner {
-    Memory(Rc<Db<MemoryStorage>>),
+    Memory(Rc<Db<BoxedStorage>>),
     #[cfg(target_arch = "wasm32")]
-    Browser(Rc<Db<BrowserStorage>>),
+    Browser(Rc<Db<BoxedStorage>>),
     Closed,
 }
 
@@ -734,13 +738,13 @@ pub struct WasmTransport {
 
 enum WasmTransportInner {
     Memory {
-        db: Rc<Db<MemoryStorage>>,
-        connection: Option<Rc<LocalMutex<PeerConnection<MemoryStorage>>>>,
+        db: Rc<Db<BoxedStorage>>,
+        connection: Option<Rc<LocalMutex<PeerConnection<BoxedStorage>>>>,
     },
     #[cfg(target_arch = "wasm32")]
     Browser {
-        db: Rc<Db<BrowserStorage>>,
-        connection: Option<Rc<LocalMutex<PeerConnection<BrowserStorage>>>>,
+        db: Rc<Db<BoxedStorage>>,
+        connection: Option<Rc<LocalMutex<PeerConnection<BoxedStorage>>>>,
     },
 }
 
@@ -2917,11 +2921,11 @@ async fn open_db<S>(
     schema: JazzSchema,
     storage: S,
     config: WasmOpenDbConfig,
-) -> Result<Db<S>, jazz::db::Error>
+) -> Result<Db<BoxedStorage>, jazz::db::Error>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    let mut db_config = DbConfig::new(schema, storage, config.identity.into());
+    let mut db_config = DbConfig::new(schema, BoxedStorage::new(storage), config.identity.into());
     if let Some(seed) = config.row_id_seed {
         db_config = db_config.with_id_source(SeededRowIdSource::new(seed));
     }
@@ -2947,8 +2951,8 @@ async fn open_scope_isolated_relay_db(
     storage: BrowserStorage,
     config: WasmOpenDbConfig,
     storage_owner: String,
-) -> Result<Db<BrowserStorage>, jazz::db::Error> {
-    let mut db_config = DbConfig::new(schema, storage, config.identity.into());
+) -> Result<Db<BoxedStorage>, jazz::db::Error> {
+    let mut db_config = DbConfig::new(schema, BoxedStorage::new(storage), config.identity.into());
     if let Some(seed) = config.row_id_seed {
         db_config = db_config.with_id_source(SeededRowIdSource::new(seed));
     }
@@ -2973,11 +2977,11 @@ async fn open_backend_db<S>(
     storage: S,
     config: WasmOpenDbConfig,
     identity: DbIdentity,
-) -> Result<Db<S>, jazz::db::Error>
+) -> Result<Db<BoxedStorage>, jazz::db::Error>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    let mut db_config = DbConfig::new(schema, storage, identity);
+    let mut db_config = DbConfig::new(schema, BoxedStorage::new(storage), identity);
     if let Some(seed) = config.row_id_seed {
         db_config = db_config.with_id_source(SeededRowIdSource::new(seed));
     }
@@ -3180,8 +3184,8 @@ fn claim_value_from_json(value: serde_json::Value) -> Result<Option<Value>, JsVa
 }
 
 fn wasm_write_memory(
-    db: Rc<Db<MemoryStorage>>,
-    write: WriteHandle<MemoryStorage>,
+    db: Rc<Db<BoxedStorage>>,
+    write: WriteHandle<BoxedStorage>,
 ) -> Result<WasmWrite, JsValue> {
     let tx_id = write.mergeable_tx_id();
     let result = WasmWriteResult {
@@ -3198,8 +3202,8 @@ fn wasm_write_memory(
 
 #[cfg(target_arch = "wasm32")]
 fn wasm_write_browser(
-    db: Rc<Db<BrowserStorage>>,
-    write: WriteHandle<BrowserStorage>,
+    db: Rc<Db<BoxedStorage>>,
+    write: WriteHandle<BoxedStorage>,
 ) -> Result<WasmWrite, JsValue> {
     let tx_id = write.mergeable_tx_id();
     let result = WasmWriteResult {
@@ -3833,7 +3837,9 @@ mod dynamic_schema_view_tests {
         let db = Rc::new(
             block_on(Db::open(DbConfig::new(
                 schema,
-                MemoryStorage::new(&families).expect("valid memory storage families"),
+                BoxedStorage::new(
+                    MemoryStorage::new(&families).expect("valid memory storage families"),
+                ),
                 DbIdentity {
                     node: NodeUuid::from_bytes([0x55; 16]),
                     author,
@@ -4218,7 +4224,9 @@ mod dynamic_schema_view_tests {
         let db = Rc::new(
             Db::open(DbConfig::new(
                 schema,
-                MemoryStorage::new(&refs).expect("valid memory storage families"),
+                BoxedStorage::new(
+                    MemoryStorage::new(&refs).expect("valid memory storage families"),
+                ),
                 DbIdentity {
                     node: jazz::ids::NodeUuid::from_bytes([0x63; 16]),
                     author: AuthorSubject::for_test_bytes([0xc3; 16]),
@@ -4679,7 +4687,9 @@ mod dynamic_schema_view_tests {
         let owner = Rc::new(
             block_on(Db::open(DbConfig::new(
                 schema.clone(),
-                MemoryStorage::new(&refs).expect("valid memory storage families"),
+                BoxedStorage::new(
+                    MemoryStorage::new(&refs).expect("valid memory storage families"),
+                ),
                 DbIdentity {
                     node: jazz::ids::NodeUuid::from_bytes([0x45; 16]),
                     author: AuthorSubject::for_test_bytes([0xa5; 16]),
@@ -4770,7 +4780,9 @@ mod dynamic_schema_view_tests {
         let owner = Rc::new(
             Db::open(DbConfig::new(
                 schema.clone(),
-                MemoryStorage::new(&refs).expect("valid memory storage families"),
+                BoxedStorage::new(
+                    MemoryStorage::new(&refs).expect("valid memory storage families"),
+                ),
                 DbIdentity {
                     node: jazz::ids::NodeUuid::from_bytes([0x45; 16]),
                     author: alice,

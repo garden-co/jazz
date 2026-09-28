@@ -1,0 +1,277 @@
+{
+  "date": "2026-09-25",
+  "base_commit": "7a113ff8b673c702ceb75dead96bd7a985965c81",
+  "change": "Use BoxedStorage at all WASM engine entrypoints; release build settings unchanged.",
+  "rows": 2000,
+  "workload_sha256": "e7a09ff74f4a3343781569c0afeb0a95b0ec4f7e7abda07413c5073f11e58e52",
+  "artifacts": {
+    "baseline": {
+      "size": {
+        "sha256": "703b9e1015ebe8793d0968cb6f8d75e2bdecb97d77544f392dcfe9e0cd862711",
+        "bytes": 32968262,
+        "gzip9": 9450614,
+        "brotli11": 5522937,
+        "imports": 106,
+        "function_count": 19244
+      },
+      "manifest": {
+        "schema": 1,
+        "kind": "wasm",
+        "profile": "release",
+        "git": {
+          "head": "7a113ff8b673c702ceb75dead96bd7a985965c81",
+          "tree": "b5f8baf038bf75ed5cf3c2aca4aba78e0e632a38",
+          "dirtyDiff": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+        },
+        "cargoLock": "d0082646aa017c7257c1ebf449b2e1bed09aea9941b0df6d8fd848bb63c4b55b",
+        "rustToolchain": "94829243c47c76917df64fb0a88044d05004e390b67b02544cb702823445eec9",
+        "tools": {
+          "rustc": "rustc 1.93.1 (01f6ddf75 2026-02-11)\nbinary: rustc\ncommit-hash: 01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf\ncommit-date: 2026-02-11\nhost: aarch64-apple-darwin\nrelease: 1.93.1\nLLVM version: 21.1.8",
+          "wasmPack": "wasm-pack 0.14.0",
+          "wasmBindgen": "wasm-bindgen 0.2.117",
+          "wasmOpt": "wasm-opt version 117 (version_117)",
+          "napi": "not-applicable"
+        },
+        "toolchainInputs": "58f10b6cd0fd90936ca8b6d30515d50d71ec67fde5998d2f1b8dec71e10bffe4",
+        "target": "wasm32-unknown-unknown",
+        "features": "default",
+        "packageInputs": "d36cfd092df9d2ab5acb6171479c30b6a52ac7c9df7db93c0f2a88351049936b",
+        "artifacts": [
+          {
+            "file": "jazz_wasm.d.ts",
+            "sha256": "6f5d7199d064c22b97439270148d597552846c9f2f0098bad5994e26d726ffd6"
+          },
+          {
+            "file": "jazz_wasm.js",
+            "sha256": "5667745eaed051e4e27951a1e1e88e24af356f5cae5b99e3e77a0555f44c3dd8"
+          },
+          {
+            "file": "jazz_wasm_bg.wasm",
+            "sha256": "703b9e1015ebe8793d0968cb6f8d75e2bdecb97d77544f392dcfe9e0cd862711"
+          },
+          {
+            "file": "jazz_wasm_bg.wasm.d.ts",
+            "sha256": "f7e833cf7a05c524c007608cf3840bcaf2050a37f0bc21ffd8834ee483681a38"
+          }
+        ],
+        "nativeArtifactFingerprint": "f22f98236dc00864a36ef9b5c0517b31403c6cd259ed273d3076bf85cb0441fd"
+      }
+    },
+    "boxed": {
+      "size": {
+        "sha256": "74980b387e883866564d2c172e961e70af2c6e4660cc73cb01d9560114348915",
+        "bytes": 27470536,
+        "gzip9": 8657377,
+        "brotli11": 5398696,
+        "imports": 106,
+        "function_count": 17431
+      },
+      "manifest": {
+        "schema": 1,
+        "kind": "wasm",
+        "profile": "release",
+        "git": {
+          "head": "7a113ff8b673c702ceb75dead96bd7a985965c81",
+          "tree": "b5f8baf038bf75ed5cf3c2aca4aba78e0e632a38",
+          "dirtyDiff": "ff7bd17f426db83aa79e2c54e578deaba978829717aceb6d8deba03edb680edf"
+        },
+        "cargoLock": "d0082646aa017c7257c1ebf449b2e1bed09aea9941b0df6d8fd848bb63c4b55b",
+        "rustToolchain": "94829243c47c76917df64fb0a88044d05004e390b67b02544cb702823445eec9",
+        "tools": {
+          "rustc": "rustc 1.93.1 (01f6ddf75 2026-02-11)\nbinary: rustc\ncommit-hash: 01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf\ncommit-date: 2026-02-11\nhost: aarch64-apple-darwin\nrelease: 1.93.1\nLLVM version: 21.1.8",
+          "wasmPack": "wasm-pack 0.14.0",
+          "wasmBindgen": "wasm-bindgen 0.2.117",
+          "wasmOpt": "wasm-opt version 117 (version_117)",
+          "napi": "not-applicable"
+        },
+        "toolchainInputs": "58f10b6cd0fd90936ca8b6d30515d50d71ec67fde5998d2f1b8dec71e10bffe4",
+        "target": "wasm32-unknown-unknown",
+        "features": "default",
+        "packageInputs": "e3cf0e7ff70f20b42727a7a657741be596a827993c21610768a872169a854a7a",
+        "artifacts": [
+          {
+            "file": "jazz_wasm.d.ts",
+            "sha256": "6f5d7199d064c22b97439270148d597552846c9f2f0098bad5994e26d726ffd6"
+          },
+          {
+            "file": "jazz_wasm.js",
+            "sha256": "579bef4513834a15ac471d90716a747de106c27ea7b0960a3e846e7c9a648b6b"
+          },
+          {
+            "file": "jazz_wasm_bg.wasm",
+            "sha256": "74980b387e883866564d2c172e961e70af2c6e4660cc73cb01d9560114348915"
+          },
+          {
+            "file": "jazz_wasm_bg.wasm.d.ts",
+            "sha256": "f7e833cf7a05c524c007608cf3840bcaf2050a37f0bc21ffd8834ee483681a38"
+          }
+        ],
+        "nativeArtifactFingerprint": "24f690c25bd986be4ab33aac430869552b5c879260dee9776694dddaee40ac91"
+      }
+    }
+  },
+  "order": ["baseline", "boxed", "hybrid_engine", "hybrid_engine", "boxed", "baseline"],
+  "samples": [
+    {
+      "label": "baseline",
+      "browser": "145.0.7632.6",
+      "phases": {
+        "js_import": 3.399999998509884,
+        "compile": 27.600000001490116,
+        "instantiate": 2.7000000029802322
+      },
+      "scenarios": [
+        {
+          "storage": "memory",
+          "timing": {
+            "open": 57.5,
+            "seed": 200.30000000447035,
+            "first_all": 113.19999999552965,
+            "first_page": 20.200000002980232,
+            "repeat_all_10": 462.30000000447035
+          },
+          "rowCount": 2000,
+          "signature_sha256": "8da8f4c3f779b9f9f6c768eff17ede2ec3d865a94493f2336717097abcc50b57"
+        },
+        {
+          "storage": "indexeddb",
+          "timing": {
+            "open": 29.100000001490116,
+            "seed": 2839.6999999955297,
+            "first_all": 48.5,
+            "first_page": 12.099999994039536,
+            "repeat_all_10": 437.30000000447035,
+            "close": 3.0999999940395355,
+            "reopen": 12.399999998509884,
+            "reopen_all": 41.100000001490116
+          },
+          "rowCount": 2000,
+          "signature_sha256": "8da8f4c3f779b9f9f6c768eff17ede2ec3d865a94493f2336717097abcc50b57"
+        }
+      ],
+      "wasm_bytes": 32968262,
+      "artifact_fingerprint": "f22f98236dc00864a36ef9b5c0517b31403c6cd259ed273d3076bf85cb0441fd"
+    },
+    {
+      "label": "boxed",
+      "browser": "145.0.7632.6",
+      "phases": {
+        "js_import": 2.3000000044703484,
+        "compile": 18.399999998509884,
+        "instantiate": 1
+      },
+      "scenarios": [
+        {
+          "storage": "memory",
+          "timing": {
+            "open": 56.20000000298023,
+            "seed": 187.10000000149012,
+            "first_all": 108,
+            "first_page": 19.799999997019768,
+            "repeat_all_10": 466.5
+          },
+          "rowCount": 2000,
+          "signature_sha256": "8da8f4c3f779b9f9f6c768eff17ede2ec3d865a94493f2336717097abcc50b57"
+        },
+        {
+          "storage": "indexeddb",
+          "timing": {
+            "open": 20.299999997019768,
+            "seed": 2826.3000000044703,
+            "first_all": 45.79999999701977,
+            "first_page": 11.5,
+            "repeat_all_10": 438.8999999985099,
+            "close": 2.100000001490116,
+            "reopen": 11.600000001490116,
+            "reopen_all": 41.20000000298023
+          },
+          "rowCount": 2000,
+          "signature_sha256": "8da8f4c3f779b9f9f6c768eff17ede2ec3d865a94493f2336717097abcc50b57"
+        }
+      ],
+      "wasm_bytes": 27470536,
+      "artifact_fingerprint": "24f690c25bd986be4ab33aac430869552b5c879260dee9776694dddaee40ac91"
+    },
+    {
+      "label": "boxed",
+      "browser": "145.0.7632.6",
+      "phases": {
+        "js_import": 2.5,
+        "compile": 16.899999998509884,
+        "instantiate": 0.9000000059604645
+      },
+      "scenarios": [
+        {
+          "storage": "memory",
+          "timing": {
+            "open": 55.20000000298023,
+            "seed": 186.39999999850988,
+            "first_all": 105.89999999850988,
+            "first_page": 20.80000000447035,
+            "repeat_all_10": 461.69999999552965
+          },
+          "rowCount": 2000,
+          "signature_sha256": "8da8f4c3f779b9f9f6c768eff17ede2ec3d865a94493f2336717097abcc50b57"
+        },
+        {
+          "storage": "indexeddb",
+          "timing": {
+            "open": 20.399999998509884,
+            "seed": 2846,
+            "first_all": 43.29999999701977,
+            "first_page": 11.5,
+            "repeat_all_10": 434,
+            "close": 2.1999999955296516,
+            "reopen": 12.100000001490116,
+            "reopen_all": 40.600000001490116
+          },
+          "rowCount": 2000,
+          "signature_sha256": "8da8f4c3f779b9f9f6c768eff17ede2ec3d865a94493f2336717097abcc50b57"
+        }
+      ],
+      "wasm_bytes": 27470536,
+      "artifact_fingerprint": "24f690c25bd986be4ab33aac430869552b5c879260dee9776694dddaee40ac91"
+    },
+    {
+      "label": "baseline",
+      "browser": "145.0.7632.6",
+      "phases": {
+        "js_import": 2.2999999970197678,
+        "compile": 19.799999997019768,
+        "instantiate": 1.2000000029802322
+      },
+      "scenarios": [
+        {
+          "storage": "memory",
+          "timing": {
+            "open": 54.599999994039536,
+            "seed": 189,
+            "first_all": 105.70000000298023,
+            "first_page": 19.399999998509884,
+            "repeat_all_10": 462.79999999701977
+          },
+          "rowCount": 2000,
+          "signature_sha256": "8da8f4c3f779b9f9f6c768eff17ede2ec3d865a94493f2336717097abcc50b57"
+        },
+        {
+          "storage": "indexeddb",
+          "timing": {
+            "open": 22,
+            "seed": 2831.8000000044703,
+            "first_all": 46.099999994039536,
+            "first_page": 11.200000002980232,
+            "repeat_all_10": 431.19999999552965,
+            "close": 2.899999998509884,
+            "reopen": 12.900000005960464,
+            "reopen_all": 41.80000000447035
+          },
+          "rowCount": 2000,
+          "signature_sha256": "8da8f4c3f779b9f9f6c768eff17ede2ec3d865a94493f2336717097abcc50b57"
+        }
+      ],
+      "wasm_bytes": 32968262,
+      "artifact_fingerprint": "f22f98236dc00864a36ef9b5c0517b31403c6cd259ed273d3076bf85cb0441fd"
+    }
+  ],
+  "note": "Retained main and shared-engine samples from a six-process interleaved run. hybrid_engine samples are a separate profile experiment; their positions remain visible in order. Each process runs memory then IndexedDB."
+}
