@@ -4,49 +4,14 @@ type FixtureNativeRelay = {
 };
 
 import { NATIVE_RELAY_ABI_V1 } from "../native-relay-abi";
-import type { NativeInitializationAction } from "../relay";
+import type { NativeForegroundCommand } from "../relay";
 
 const foregroundRuntimeGlobal = "__jazzNativeForegroundRuntimeV1";
 
-type NativeForegroundCommand =
-  | { type: "initializationV1"; version: 1; action: NativeInitializationAction }
-  | "probe"
-  | "tick"
-  | "close"
-  | {
-      type: "all";
-      query: Uint8Array;
-      optionsJson: string;
-      transaction?: number;
-    }
-  | { type: "poll"; operation: number }
-  | { type: "cancel"; operation: number }
-  | { type: "waitForTransaction"; txId: Uint8Array; tier: string; observeOnly?: boolean }
-  | { type: "beginTransaction"; kind: "mergeable" | "exclusive" }
-  | {
-      type: "insert";
-      transaction: number;
-      table: string;
-      cells: Uint8Array;
-      rowId?: Uint8Array;
-    }
-  | {
-      type: "update";
-      transaction: number;
-      table: string;
-      rowId: Uint8Array;
-      patch: Uint8Array;
-    }
-  | {
-      type: "upsert";
-      transaction: number;
-      table: string;
-      rowId: Uint8Array;
-      cells: Uint8Array;
-    }
-  | { type: "delete"; transaction: number; table: string; rowId: Uint8Array }
-  | { type: "commitTransaction"; transaction: number }
-  | { type: "rollbackTransaction"; transaction: number };
+type NativeInitializationAction = Extract<
+  NativeForegroundCommand,
+  { type: "initializationV1" }
+>["action"];
 
 type RelayExports = {
   executeNativeRelayCommand(command: string): Promise<string>;
