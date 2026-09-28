@@ -81,7 +81,8 @@ where
     }
 
     #[cfg(feature = "runtime")]
-    pub(crate) fn validate_schema_activation(
+    #[doc(hidden)]
+    pub fn validate_schema_activation(
         &self,
         revision: u64,
         schema: JazzSchema,

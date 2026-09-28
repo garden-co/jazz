@@ -43,6 +43,13 @@ where
     /// Subscribe to a query and return a stream of materialized subscription events.
     ///
     /// ```rust
+    /// # extern crate jazz_db;
+    /// # #[allow(unused_imports)]
+    /// # mod jazz {
+    /// #     pub use jazz_db::{db, row};
+    /// #     pub use jazz_model::{query, tx};
+    /// #     pub use jazz_types::ids;
+    /// # }
     /// # use jazz::db::{LocalUpdates, Propagation, ReadOpts, SubscriptionEvent};
     /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
     /// # use jazz::tx::DurabilityTier;

@@ -4432,7 +4432,7 @@ fn silent_partial_canonical_receive_schedules_its_own_expiry() {
 /// A opens (cold) -> storage resumes -> B opens/drives A -> owner tick -> A reset
 #[test]
 fn independent_query_progress_publishes_a_ready_cold_initial_subscription() {
-    use crate::tools::test_support::AllowAll;
+    use crate::model::test_support::AllowAll;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     struct HostWake(AtomicBool);

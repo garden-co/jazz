@@ -3,8 +3,8 @@
 //! independently. They use public Db/schema/query APIs and real Memory/RocksDB
 //! storage; server-facing end-to-end migration is covered by the TS server suite.
 
-fn allow_all_policies() -> crate::tools::TablePolicies {
-    use crate::tools::{PolicyExpr, TablePolicies};
+fn allow_all_policies() -> crate::model::public_schema::TablePolicies {
+    use crate::model::public_schema::{PolicyExpr, TablePolicies};
     TablePolicies::new()
         .with_select(PolicyExpr::True)
         .with_insert(PolicyExpr::True)
@@ -12,18 +12,19 @@ fn allow_all_policies() -> crate::tools::TablePolicies {
         .with_delete(PolicyExpr::True)
 }
 
-use crate::block_on;
+use crate::db::block_on;
 use crate::db::{Db, DbConfig, DbIdentity, InsertOptions, MergeableTxOps};
 use crate::groove::records::Value;
 use crate::groove::storage::{MemoryStorage, OrderedKvStorage, ReopenableStorage};
 use crate::ids::{AuthorSubject, NodeUuid, RowUuid};
+use crate::model::public_schema::{
+    ColumnType, SchemaBuilder, TableSchemaBuilder, Value as PublicValue,
+};
+use crate::model::transaction::OpenTransactionId;
+use crate::object::ObjectId;
 use crate::protocol::{CurrentWriteSchema, MigrationLens, SchemaVersion, TableLens};
 use crate::query::{Query, col, eq, lit};
 use crate::schema::JazzSchema;
-use crate::tools::{
-    ColumnType, ObjectId, OpenTransactionId, SchemaBuilder, TableSchemaBuilder,
-    Value as PublicValue,
-};
 use jazz_storage_rocksdb::RocksDbStorage;
 use std::collections::BTreeMap;
 

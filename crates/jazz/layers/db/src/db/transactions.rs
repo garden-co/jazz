@@ -119,7 +119,8 @@ where
             .await
     }
 
-    pub(crate) async fn begin_mergeable_with_identity(
+    #[doc(hidden)]
+    pub async fn begin_mergeable_with_identity(
         &self,
         id: OpenTransactionId,
         identity: WriteIdentity,
@@ -845,7 +846,8 @@ where
             .await
     }
 
-    pub(crate) async fn begin_exclusive_with_identity(
+    #[doc(hidden)]
+    pub async fn begin_exclusive_with_identity(
         &self,
         id: OpenTransactionId,
         identity: WriteIdentity,
@@ -1118,7 +1120,8 @@ where
         .await
     }
 
-    pub(crate) async fn transaction_all_for_identity(
+    #[doc(hidden)]
+    pub async fn transaction_all_for_identity(
         &self,
         tx_id: OpenTransactionId,
         prepared: &PreparedQuery,
@@ -1171,7 +1174,8 @@ where
         .await
     }
 
-    pub(crate) async fn transaction_relation_snapshot_for_identity(
+    #[doc(hidden)]
+    pub async fn transaction_relation_snapshot_for_identity(
         &self,
         tx_id: OpenTransactionId,
         prepared: &PreparedQuery,
@@ -1562,7 +1566,7 @@ where
     /// the connection's default identity so a trusted backend cannot silently
     /// turn a `for_session` transaction into a system-authored commit.
     #[cfg_attr(not(feature = "testing"), allow(dead_code))]
-    pub(crate) async fn commit_exclusive_handle_for_identity(
+    pub async fn commit_exclusive_handle_for_identity(
         &self,
         open_tx_id: OpenTransactionId,
         author: AuthorSubject,
@@ -1597,7 +1601,8 @@ where
         self.abandon_transaction_handle(open_tx_id)
     }
 
-    pub(crate) async fn open_exclusive_handle(&self, id: OpenTransactionId) -> Result<(), Error> {
+    #[doc(hidden)]
+    pub async fn open_exclusive_handle(&self, id: OpenTransactionId) -> Result<(), Error> {
         self.open_exclusive_handle_for_identity(id, self.identity.author)
             .await
     }

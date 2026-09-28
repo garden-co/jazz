@@ -92,8 +92,10 @@ rebuilds Jazz a second time for the testkit.
 **Jazz module layers.** `crates/jazz/src` is being split into crates bottom-up
 (types → model → protocol → engine → node → peer → db → facade). Extracted
 layers live in `crates/jazz/layers/<layer>` as their own crates (`jazz-types`,
-`jazz-model`, `jazz-protocol`, `jazz-engine`, and `jazz-node`, which holds both
-`node` and `peer` because node tests drive `PeerState`), so CI path filters on `crates/jazz/**` still cover them; `jazz`
+`jazz-model`, `jazz-protocol`, `jazz-engine`, `jazz-node`, which holds both
+`node` and `peer` because node tests drive `PeerState`, and `jazz-db`, which
+holds `db`, `binding_codec`, `result_tree` and `foreground_node_lease`; only the
+`tools` and `serving` facade remains in `crates/jazz/src`), so CI path filters on `crates/jazz/**` still cover them; `jazz`
 re-exports each of their modules under its old path (`jazz::ids`,
 `crate::ids`). An item a higher layer uses must be `pub` in the lower crate
 (`#[doc(hidden)]` when it is internal); test helpers other layers need are
@@ -103,7 +105,7 @@ crate while Jazz's own tests run, so a `cfg(test)` hook silently stops firing. A
 keep their `jazz::` paths through a hidden `# extern crate jazz_model as jazz;`
 line, since a layer crate cannot depend on `jazz`. Run a layer crate's tests with
 `dev/t -p jazz-types <test>`; a `dev/t` filter starting with `node::` or `peer::`
-selects `jazz-node` without `-p`. For the layers still inside `crates/jazz/src`,
+selects `jazz-node` without `-p`, and one starting with `db::` selects `jazz-db`. For the layers still inside `crates/jazz/src`,
 `dev/gates/jazz-module-layers.mjs` fails CI lint on any production
 `crate::`/`super::` reference to a higher layer, and on an inherent or
 foreign-trait `impl` whose type lives in a lower layer (it would break
@@ -171,7 +173,7 @@ boundary. Ordinary small package builds may use Turbo normally, but must never
 add `.native-artifacts/**`, WASM `pkg/**`, or the correctness-artifact store as
 cacheable outputs.
 
-- `cargo test -p jazz -p jazz-types -p jazz-model -p jazz-protocol -p jazz-engine -p jazz-node` (the layer crates carry the moved unit
+- `cargo test -p jazz -p jazz-types -p jazz-model -p jazz-protocol -p jazz-engine -p jazz-node -p jazz-db` (the layer crates carry the moved unit
   tests; `-p jazz` alone skips them)
 - `cargo test -p groove`
 - `cargo test -p jazz --no-default-features --features testing,transport-compression-zstd` (matches `crates/jazz/TESTING_GUIDELINES.md`).

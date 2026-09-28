@@ -10,7 +10,7 @@ const MAX_PENDING: usize = 64;
 pub(super) type SharedCurrentRows = Rc<RefCell<CurrentRowsRouter>>;
 
 #[allow(dead_code)] // Internal hook remains dormant until source-filter integration.
-pub(crate) enum CurrentRowsResult {
+pub enum CurrentRowsResult {
     /// Carriers have passed normal ingestion before this outcome is exposed.
     Applied(CurrentRowsReceipt),
     Unknown,
@@ -163,7 +163,7 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Node<S> {
     /// Internal pilot hook. Caller must provide the immutable owner policy key;
     /// no unavailable-source filter is changed by this exchange.
     #[allow(dead_code)] // Internal pilot entry point, exercised by transport tests.
-    pub(crate) fn request_current_rows(
+    pub fn request_current_rows(
         &self,
         rows: Vec<crate::protocol::CurrentRowCoordinate>,
         context: PolicyBindingKey,

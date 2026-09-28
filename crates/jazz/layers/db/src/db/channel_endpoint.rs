@@ -310,7 +310,7 @@ impl AuxiliaryChannelEndpoint {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+pub mod tests {
     use super::*;
     use crate::db::{Transport, WireTransportAdapter};
     use crate::protocol::{
@@ -379,7 +379,7 @@ pub(crate) mod tests {
         assert_eq!(completed, Some(bulk));
     }
 
-    pub(crate) fn compression_receipt(messages: &[SyncMessage], features: u64) -> u64 {
+    pub fn compression_receipt(messages: &[SyncMessage], features: u64) -> u64 {
         let (left, right) = pair();
         let outgoing = Arc::clone(&left.outgoing);
         let mut sender = WireTransportAdapter::new(left, WIRE_PROTOCOL_VERSION, features, None);

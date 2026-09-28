@@ -164,7 +164,7 @@ fn subscription_executes_its_selected_authorization_mode() {
         let input = crate::row_input!("body" => body, "owner_id" => owner_id)
             .into_iter()
             .map(|(name, value)| {
-                let crate::tools::Value::Text(value) = value else {
+                let crate::model::public_schema::Value::Text(value) = value else {
                     panic!("text fixture")
                 };
                 (name, Value::String(value))
