@@ -7396,13 +7396,8 @@ mod tests {
 
     #[test]
     fn subscription_payload_preserves_descendant_terminal_operations() {
-        let child_descriptor = RecordDescriptor::new([
-            ("row_uuid", ValueType::Uuid),
-            (
-                "user_title",
-                ValueType::Nullable(Box::new(ValueType::String)),
-            ),
-        ]);
+        let child_descriptor =
+            RecordDescriptor::new([("row_uuid", ValueType::Uuid), ("title", ValueType::String)]);
         let descriptor = RecordDescriptor::new([(
             "children",
             ValueType::Array(Box::new(ValueType::Record(Box::new(child_descriptor)))),
@@ -7467,8 +7462,16 @@ mod tests {
         assert_eq!(payload.terminal_operations.layouts.len(), 1);
         assert_eq!(payload.terminal_operations.operations.len(), 4);
         assert_eq!(
+            payload.terminal_operations.layouts[0]["fields"][0]["identity"]["name"],
+            "row_uuid"
+        );
+        assert_eq!(
+            payload.terminal_operations.layouts[0]["fields"][1]["identity"]["name"],
+            "title"
+        );
+        assert_eq!(
             payload.terminal_operations.layouts[0]["fields"][1]["value_type"],
-            json!({ "tag": 15, "inner": { "tag": 8 } })
+            json!({ "tag": 8 })
         );
         let insert = &payload.terminal_operations.operations[0];
         assert_eq!(insert.root_key.as_ref(), [0, 255]);

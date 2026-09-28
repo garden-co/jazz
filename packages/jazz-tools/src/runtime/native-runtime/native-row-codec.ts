@@ -602,14 +602,7 @@ export function compileNativeTerminalRootDecoder(
         ? ({ type: "Null" } satisfies Value)
         : decodeTerminalColumnBytes(column, bytes, descriptor[slot]?.valueType);
     });
-    const valuesByColumn = new Map(columns.map((column, index) => [column.name, values[index]!]));
-    const row = { id, values };
-    Object.defineProperty(row, "valuesByColumn", {
-      value: valuesByColumn,
-      enumerable: false,
-      configurable: true,
-    });
-    return row;
+    return materializeWasmRow(id, columns, values);
   };
 }
 
@@ -693,6 +686,14 @@ export function decodeNativeTerminalRowByLayout(
       ? ({ type: "Null" } satisfies Value)
       : decodeTerminalColumnBytes(column, bytes, descriptor[slot]?.valueType);
   });
+  return materializeWasmRow(id, columns, values);
+}
+
+function materializeWasmRow(
+  id: string,
+  columns: readonly ColumnDescriptor[],
+  values: Value[],
+): WasmRow {
   const valuesByColumn = new Map(columns.map((column, index) => [column.name, values[index]!]));
   const row = { id, values };
   Object.defineProperty(row, "valuesByColumn", {

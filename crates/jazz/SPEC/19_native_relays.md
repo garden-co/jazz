@@ -493,7 +493,9 @@ field is `1`, with an event-local deduplicated `layouts` table and an `operation
 Insert and Update refer to their logical row payload layout by `payload_layout`;
 Remove and Move have no payload layout. Each layout records the ordered logical
 descriptor fields, exact named identity, value type, and role. Slot zero must be
-the sole `row_uuid` UUID `RowKey`; remaining fields are `Value`. Paths alternate
+the sole `row_uuid` UUID `RowKey`; remaining fields are `Value`. Descendant
+payloads use the logical child projection emitted by CollectBy, not the
+CurrentRow carrier used for relation snapshots and root rows. Paths alternate
 Collection/Key beginning with Collection. Insert, Remove, and Move end at a
 Collection; Update ends at the Key matching its edit key. The shared binding
 codec validates this descriptor walk and path contract before NAPI, WASM, and

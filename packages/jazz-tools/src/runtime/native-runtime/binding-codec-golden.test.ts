@@ -137,17 +137,13 @@ describe("binding codec golden contract", () => {
     expect(operationKinds).toEqual(["Insert", "Insert", "Update", "Move", "Remove"]);
     expect(envelope.operations.map((operation) => operation.payload_layout)).toEqual([
       0,
-      1,
+      0,
       0,
       undefined,
       undefined,
     ]);
-    expect(envelope.layouts).toHaveLength(2);
+    expect(envelope.layouts).toHaveLength(1);
     expect(envelope.layouts[0]!.fields.map((field) => [field.identity.name, field.role])).toEqual([
-      ["row_uuid", "RowKey"],
-      ["_app_title", "Value"],
-    ]);
-    expect(envelope.layouts[1]!.fields.map((field) => [field.identity.name, field.role])).toEqual([
       ["row_uuid", "RowKey"],
       ["title", "Value"],
     ]);
@@ -183,6 +179,16 @@ describe("binding codec golden contract", () => {
       Uint8Array.from(insert.edit.Insert.value),
     );
     expect(row.values).toEqual([{ type: "Text", value: "first" }]);
+
+    const update = envelope.operations[2]!;
+    if (!("Update" in update.edit)) throw new Error("golden operation 2 is not an update");
+    const updatedRow = decodeNativeTerminalRowByLayout(
+      "11111111-1111-1111-1111-111111111111",
+      envelope.layouts[update.payload_layout!]!,
+      [titleColumn],
+      Uint8Array.from(update.edit.Update.value),
+    );
+    expect(updatedRow.values).toEqual([{ type: "Text", value: "updated" }]);
   });
 
   it("rejects trailing bytes after a complete binding payload", () => {

@@ -1037,6 +1037,9 @@ mod tests {
             RowDescriptorFieldName::ResultField { name: "title" }
         ));
     }
+    // Internal because malformed descriptor/path validation fails before any
+    // binding can expose a public row; public subscription tests cover
+    // producer-visible Insert/Update layouts.
     #[test]
     fn terminal_event_layouts_deduplicate_payloads_and_validate_update_paths() {
         use groove::ivm::{TerminalEdit, TerminalOperation, TerminalPathSegment};
