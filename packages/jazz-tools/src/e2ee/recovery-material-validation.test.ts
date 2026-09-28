@@ -1,4 +1,4 @@
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { createNativeCrypto } from "./native.js";
 import { encodeRecoveryMaterial, decodeRecoveryMaterial } from "./recovery-format.js";
 
@@ -27,6 +27,25 @@ it("validates recovery material against the account scope and both cryptographic
     );
     const decode = (value: string, scope = "account-scope") =>
       decodeRecoveryMaterial(value, scope, crypto.keyEnvelope, crypto.deviceSigner);
+    const atLimit = material.padEnd(2_000_000, " ");
+    expect(atLimit).toHaveLength(2_000_000);
+    const exact = await decode(atLimit);
+    try {
+      expect(exact.rootId).toBe(root.id);
+    } finally {
+      exact.recipient.privateKey.fill(0);
+      exact.signing.privateKey.fill(0);
+    }
+    const parse = vi.spyOn(JSON, "parse");
+    try {
+      await expect(decode(`${atLimit} `)).rejects.toMatchObject({
+        code: "recovery-material-unusable",
+      });
+      expect(parse).not.toHaveBeenCalled();
+    } finally {
+      parse.mockRestore();
+    }
+
     const restored = await decode(material);
     try {
       expect(restored.rootId).toBe(root.id);
