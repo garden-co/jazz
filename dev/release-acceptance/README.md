@@ -228,14 +228,32 @@ Checks that only make sense for some version pairs are opt-in:
   first snapshot exceeds the routed payload limit (#3520). These take a long time;
   raise `deadlineMinutes` (150 was enough for the alpha.57 run).
 
-The alpha.56 -> alpha.57 check used all three. Each cell uses a fresh server store, deploys schema (mixed cells
-deploy with the other version's CLI), and drives two client processes through
+The alpha.56 -> alpha.57 check used all three.
+
+Every other cell runs by default. That includes the `rolling-upgrade-*` cells,
+which restart the old server as the new version on the same store and port;
+in-place upgrade applies to any version pair.
+
+Each cell uses a fresh server store and deploys schema (mixed cells deploy with
+the other version's CLI). It then drives two client processes through
 global-tier insert/update/delete, remote point reads, subscriptions in both
-directions, 800KB chunked values, the legacy `"edge"` tier from old clients,
-disconnect/offline write/reconnect, a server restart or in-place server
-upgrade on the same store with a write made while it was down, and fresh
-clients. The `large-values-*` cells probe fresh subscribers against tables
-holding large rows; the `edge` cells check that retired server edges fail
-explicitly. Results are written to `<output>/results.json`; set
-`JAZZ_MIXED_TRACE=1` for per-command client traces and `RUST_LOG` for server
-logs.
+directions, 800KB chunked values, disconnect/offline write/reconnect, a server
+restart or in-place server upgrade on the same store with a write made while it
+was down, and fresh clients. The `large-values-*` cells probe fresh subscribers
+against tables holding large rows.
+
+Unknown config keys and unknown cell names in `only` are rejected, a run where
+no cell ran fails, and every skipped cell gets a `skip` entry with its reason.
+To keep a known, tracked failure from turning the run red, list it in
+`knownFailures` as `{"<cell>:<check>": "#NNNN"}`; it is recorded as
+`known-fail` and does not affect the exit code. If the whole-run deadline
+fires, a `deadline` failure and `results.json` are written before exit.
+
+Results are written to `<output>/results.json`; set `JAZZ_MIXED_TRACE=1` for
+per-command client traces and `RUST_LOG` for server logs.
+
+The client driver and CLI calls assume the current API: `createJazzSession`
+with a persistent driver, the `"global"` durability tier,
+`jazz-tools server --bound-port-file --allow-local-first-auth` and
+`jazz-tools deploy --schema-dir`. A release that renames any of these needs
+matching edits to `mixed-version.mjs` and `mixed-version-client.mjs`.

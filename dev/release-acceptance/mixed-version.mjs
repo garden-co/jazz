@@ -16,6 +16,7 @@
 //     "legacyEdgeTier": false,     // old clients still accept the "edge" tier
 //     "serverEdges": false,        // run the retired server-edge cells
 //     "oversized": null,           // {count,size,batch,readerMinutes}: oversized first sync
+//     "knownFailures": {},         // {"cell:check": "#NNNN"}: recorded as known-fail
 //     "deadlineMinutes": 30        // whole-run watchdog
 //   }
 //
@@ -35,6 +36,7 @@ import {
   closeSync,
   unlinkSync,
   realpathSync,
+  rmSync,
 } from "node:fs";
 import { createRequire } from "node:module";
 import { createInterface } from "node:readline";
@@ -45,6 +47,22 @@ import { createProcessOwner } from "./process-owner.mjs";
 
 const ownDir = dirname(fileURLToPath(import.meta.url));
 const input = JSON.parse(readFileSync(process.argv[2], "utf8"));
+// A misspelled key must fail loudly rather than silently skip its cells.
+const CONFIG_KEYS = new Set([
+  "output",
+  "versions",
+  "only",
+  "skipLarge",
+  "largeSizes",
+  "legacyEdgeTier",
+  "serverEdges",
+  "oversized",
+  "knownFailures",
+  "deadlineMinutes",
+]);
+for (const key of Object.keys(input))
+  assert(CONFIG_KEYS.has(key), `unknown config key ${JSON.stringify(key)}`);
+const knownFailures = input.knownFailures ?? {};
 const output = resolve(input.output);
 assert(!existsSync(output), "output must be a new directory");
 mkdirSync(output, { recursive: true, mode: 0o700 });
@@ -222,8 +240,10 @@ async function check(cell, name, fn, { fatal = false } = {}) {
     record(cell, name, "pass", { ms: Date.now() - started, ...detail });
     return true;
   } catch (error) {
-    record(cell, name, "fail", {
+    const issue = knownFailures[`${cell}:${name}`];
+    record(cell, name, issue ? "known-fail" : "fail", {
       ms: Date.now() - started,
+      ...(issue ? { issue } : {}),
       error: String(error?.message ?? error).slice(0, 4000),
     });
     if (fatal) throw error;
@@ -251,7 +271,7 @@ async function deploy(cell, dir, server, deployer) {
     `deploy-${deployer.key}.log`,
     { JAZZ_ADMIN_SECRET: server.ctx.adminSecret },
     deployer.project,
-  );
+  ).finally(() => rmSync(fixture, { recursive: true, force: true }));
   if (r.code !== 0)
     throw new Error(`deploy with ${deployer.key} CLI failed: ${r.log.slice(-2000)}`);
 }
@@ -691,6 +711,10 @@ async function edgeCells() {
         assert(rejection, "no explicit rejection in the edge log");
         return { rejection: rejection.slice(0, 400) };
       });
+    } catch (error) {
+      record(name, "cell-aborted", "fail", {
+        error: String(error?.message ?? error).slice(0, 4000),
+      });
     } finally {
       for (const c of clients) await c.close();
       await edge.stop();
@@ -769,32 +793,62 @@ const CELLS = {
     oversizedCell("oversized-first-sync-new-server-new-only", V.new, V.new, [V.new]),
 };
 
+function writeResults() {
+  writeFileSync(join(output, "results.json"), JSON.stringify(results, null, 2));
+  const count = (status) => results.filter((r) => r.status === status).length;
+  const summary = {
+    checks: results.length,
+    failed: count("fail"),
+    knownFailed: count("known-fail"),
+  };
+  console.log(JSON.stringify({ summary }));
+  return summary;
+}
+
+let currentCell = "run";
 const watchdog = setTimeout(
   () => {
-    console.error("whole-run deadline exceeded");
+    // terminate() exits the process, so record the hang and write results first.
+    record(currentCell, "deadline", "fail", {
+      error: `whole-run deadline of ${input.deadlineMinutes ?? 30} minutes exceeded`,
+    });
+    writeResults();
     void processes.terminate(1);
   },
   (input.deadlineMinutes ?? 30) * 60_000,
 );
+let summary;
 try {
   record("run", "versions", "info", {
     old: { version: V.old.version, cli: V.old.cli },
     new: { version: V.new.version, cli: V.new.cli },
   });
+  for (const name of input.only ?? []) {
+    if (!(name in CELLS)) {
+      record("run", "config", "fail", { error: `unknown cell in only: ${JSON.stringify(name)}` });
+      throw new Error(`unknown cell in only: ${name}`);
+    }
+  }
+  let ran = 0;
   for (const [name, cell] of Object.entries(CELLS)) {
-    if (input.only ? !input.only.includes(name) : OPTIONAL[name] === false) continue;
+    if (input.only && !input.only.includes(name)) {
+      record(name, "cell", "skip", { reason: "not in only" });
+      continue;
+    }
+    if (!input.only && OPTIONAL[name] === false) {
+      record(name, "cell", "skip", { reason: "opt-in cell not enabled" });
+      continue;
+    }
+    currentCell = name;
+    ran++;
     await cell();
   }
+  currentCell = "run";
+  if (ran === 0) record("run", "cells", "fail", { error: "no cells ran" });
 } finally {
   clearTimeout(watchdog);
-  writeFileSync(join(output, "results.json"), JSON.stringify(results, null, 2));
-  const failed = results.filter((r) => r.status === "fail");
-  console.log(
-    JSON.stringify({
-      summary: { checks: results.length, failed: failed.length },
-    }),
-  );
+  summary = writeResults();
   await processes.cleanup();
   processes.dispose();
-  process.exitCode = failed.length ? 1 : 0;
+  process.exitCode = summary.failed ? 1 : 0;
 }
