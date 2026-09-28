@@ -6,6 +6,9 @@
 //! "the server has not answered yet" is a deterministic state rather than a
 //! race.
 
+// Shared with jazz-testkit by path so Jazz needs no testkit dev-dependency.
+#[path = "../../jazz-testkit/src/duplex_transport.rs"]
+mod duplex_transport;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -16,6 +19,7 @@ use std::time::Duration;
 
 mod common;
 
+use duplex_transport::duplex;
 use jazz::block_on;
 use jazz::db::{
     Db, DbConfig, DbIdentity, EmptyOpening, LocalUpdates, REMOTE_LINK_ATTEMPT_WINDOW, ReadOpts,
@@ -29,7 +33,6 @@ use jazz::query::{OrderDirection, Query};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
-use jazz_testkit::duplex_transport::duplex;
 
 use common::{allow_all_policies, compile_schema};
 
@@ -71,7 +74,7 @@ fn row(index: usize) -> RowUuid {
 }
 
 /// A server holding rows `a..j` (`row(0)..row(9)`).
-fn seeded_server() -> Db<TestStorage> {
+fn seeded_server() -> Db {
     let server = block_on(Db::open_history_complete(config(
         0x51,
         AuthorSubject::SYSTEM,
@@ -91,7 +94,7 @@ fn seeded_server() -> Db<TestStorage> {
 }
 
 /// A fresh client whose local store holds none of the server's rows.
-fn fresh_client(node: u8) -> Db<TestStorage> {
+fn fresh_client(node: u8) -> Db {
     block_on(Db::open(config(
         node,
         AuthorSubject::for_test_bytes([node; 16]),
@@ -99,13 +102,13 @@ fn fresh_client(node: u8) -> Db<TestStorage> {
     .expect("open client")
 }
 
-fn connect(client: &Db<TestStorage>, server: &Db<TestStorage>) {
+fn connect(client: &Db, server: &Db) {
     let (client_transport, server_transport) = duplex();
     let _upstream = block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, AuthorSubject::SYSTEM);
 }
 
-fn turn(client: &Db<TestStorage>, server: Option<&Db<TestStorage>>) {
+fn turn(client: &Db, server: Option<&Db>) {
     block_on(client.tick()).expect("tick client");
     if let Some(server) = server {
         block_on(server.tick()).expect("tick server");
@@ -132,7 +135,7 @@ fn window() -> Query {
         .limit(2)
 }
 
-fn subscribe(client: &Db<TestStorage>, query: &Query, opts: ReadOpts) -> SubscriptionStream {
+fn subscribe(client: &Db, query: &Query, opts: ReadOpts) -> SubscriptionStream {
     let prepared = client.prepare_query(query).expect("prepare query");
     block_on(client.subscribe(&prepared, opts)).expect("subscribe")
 }
@@ -140,8 +143,8 @@ fn subscribe(client: &Db<TestStorage>, query: &Query, opts: ReadOpts) -> Subscri
 /// The first event, driving owner turns until one is published.
 fn first_event(
     stream: &mut SubscriptionStream,
-    client: &Db<TestStorage>,
-    server: Option<&Db<TestStorage>>,
+    client: &Db,
+    server: Option<&Db>,
 ) -> SubscriptionEvent {
     for _ in 0..MAX_TURNS {
         if let Some(event) = stream.try_next_event() {
@@ -155,8 +158,8 @@ fn first_event(
 /// Drive owner turns and assert the stream publishes nothing.
 fn assert_withheld(
     stream: &mut SubscriptionStream,
-    client: &Db<TestStorage>,
-    server: Option<&Db<TestStorage>>,
+    client: &Db,
+    server: Option<&Db>,
     turns: usize,
 ) {
     for _ in 0..turns {
@@ -187,8 +190,8 @@ fn opening(event: SubscriptionEvent) -> (bool, Vec<RowUuid>, bool) {
 /// Run a host one-shot read to completion, driving owner turns between polls
 /// the way bindings re-poll a pending native read.
 fn one_shot(
-    client: &Db<TestStorage>,
-    server: Option<&Db<TestStorage>>,
+    client: &Db,
+    server: Option<&Db>,
     query: &Query,
     opts: ReadOpts,
     max_turns: usize,
@@ -554,17 +557,17 @@ fn a_fallen_back_window_switches_to_the_servers_page_once_it_answers() {
 /// A non-durable foreground (a browser tab or an RN foreground) over a
 /// durable storage owner (its worker or relay) that is connected to `server`.
 struct Foreground {
-    tab: Db<TestStorage>,
-    worker: Db<TestStorage>,
+    tab: Db,
+    worker: Db,
 }
 
-fn worker_connected_to(node: u8, server: &Db<TestStorage>) -> Db<TestStorage> {
+fn worker_connected_to(node: u8, server: &Db) -> Db {
     let worker = fresh_client(node);
     connect(&worker, server);
     worker
 }
 
-fn foreground_over(node: u8, worker: Db<TestStorage>) -> Foreground {
+fn foreground_over(node: u8, worker: Db) -> Foreground {
     let tab = fresh_client(node);
     tab.set_non_durable_client();
     let (tab_transport, worker_transport) = duplex();
@@ -577,7 +580,7 @@ fn foreground_over(node: u8, worker: Db<TestStorage>) -> Foreground {
 impl Foreground {
     /// One owner turn of the tab and its worker; the server takes part only
     /// when given.
-    fn turn(&self, server: Option<&Db<TestStorage>>) {
+    fn turn(&self, server: Option<&Db>) {
         block_on(self.tab.tick()).expect("tick tab");
         block_on(self.worker.tick()).expect("tick worker");
         if let Some(server) = server {
@@ -590,7 +593,7 @@ impl Foreground {
     fn first_event(
         &self,
         stream: &mut SubscriptionStream,
-        server: Option<&Db<TestStorage>>,
+        server: Option<&Db>,
     ) -> SubscriptionEvent {
         for _ in 0..MAX_TURNS {
             if let Some(event) = stream.try_next_event() {
@@ -601,7 +604,7 @@ impl Foreground {
         panic!("no foreground subscription event within {MAX_TURNS} owner turns");
     }
 
-    fn one_shot(&self, server: Option<&Db<TestStorage>>, query: &Query) -> Vec<RowUuid> {
+    fn one_shot(&self, server: Option<&Db>, query: &Query) -> Vec<RowUuid> {
         let bytes = postcard::to_allocvec(query).expect("encode query");
         let read = self.tab.all_serialized_query(
             &bytes,

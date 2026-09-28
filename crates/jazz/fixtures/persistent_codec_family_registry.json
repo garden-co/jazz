@@ -146,16 +146,16 @@
         "anchor": "#### Canonical branch-coordinate codec"
       },
       "semantic_fixture": {
-        "path": "crates/jazz/src/node/tests/branch_views.rs",
+        "path": "crates/jazz/layers/node/src/node/tests/branch_views.rs",
         "anchor": "branch_coordinates_use_one_canonical_prefix_in_memory_and_after_rocks_reopen"
       },
       "rejection_receipt": {
-        "path": "crates/jazz/src/node/tests/branch_views.rs",
+        "path": "crates/jazz/layers/node/src/node/tests/branch_views.rs",
         "anchor": "malformed_branch_key_rejects_multi_key_commit_without_residue"
       },
       "evidence": [
         {
-          "path": "crates/jazz/src/node/tests/branch_views.rs",
+          "path": "crates/jazz/layers/node/src/node/tests/branch_views.rs",
           "anchor": "branch_coordinates_use_one_canonical_prefix_in_memory_and_after_rocks_reopen"
         }
       ]
@@ -169,16 +169,16 @@
         "anchor": "#### Epoch-pinned catalogue kernel"
       },
       "semantic_fixture": {
-        "path": "crates/jazz/src/node/tests/catalogue_lenses/snapshots.rs",
+        "path": "crates/jazz/layers/node/src/node/tests/catalogue_lenses/snapshots.rs",
         "anchor": "dynamic_catalogue_bootstrap_adopts_authority_genesis_atomically_and_reopens_ready"
       },
       "rejection_receipt": {
-        "path": "crates/jazz/src/node/tests/catalogue_lenses/snapshots.rs",
+        "path": "crates/jazz/layers/node/src/node/tests/catalogue_lenses/snapshots.rs",
         "anchor": "reopen_rejects_active_catalogue_marker_without_canonical_payload"
       },
       "evidence": [
         {
-          "path": "crates/jazz/src/node/tests/catalogue_lenses/snapshots.rs",
+          "path": "crates/jazz/layers/node/src/node/tests/catalogue_lenses/snapshots.rs",
           "anchor": "dynamic_catalogue_bootstrap_adopts_authority_genesis_atomically_and_reopens_ready"
         }
       ]
@@ -192,16 +192,16 @@
         "anchor": "#### Epoch-pinned catalogue kernel"
       },
       "semantic_fixture": {
-        "path": "crates/jazz/src/node/tests/catalogue_lenses/snapshots.rs",
+        "path": "crates/jazz/layers/node/src/node/tests/catalogue_lenses/snapshots.rs",
         "anchor": "dynamic_catalogue_bootstrap_adopts_authority_genesis_atomically_and_reopens_ready"
       },
       "rejection_receipt": {
-        "path": "crates/jazz/src/node/tests/catalogue_lenses/snapshots.rs",
+        "path": "crates/jazz/layers/node/src/node/tests/catalogue_lenses/snapshots.rs",
         "anchor": "dynamic_catalogue_reopen_rejects_catalogue_prefix_without_bootstrap_marker"
       },
       "evidence": [
         {
-          "path": "crates/jazz/src/node/tests/catalogue_lenses/snapshots.rs",
+          "path": "crates/jazz/layers/node/src/node/tests/catalogue_lenses/snapshots.rs",
           "anchor": "dynamic_catalogue_bootstrap_adopts_authority_genesis_atomically_and_reopens_ready"
         }
       ]
@@ -215,16 +215,16 @@
         "anchor": "#### Epoch-pinned catalogue kernel"
       },
       "semantic_fixture": {
-        "path": "crates/jazz/src/node/tests/catalogue_lenses/runtime_catalogue.rs",
+        "path": "crates/jazz/layers/node/src/node/tests/catalogue_lenses/runtime_catalogue.rs",
         "anchor": "durable_catalogue_values_pointer_and_physical_mappings_survive_restart"
       },
       "rejection_receipt": {
-        "path": "crates/jazz/src/node/tests/catalogue_lenses/snapshots.rs",
+        "path": "crates/jazz/layers/node/src/node/tests/catalogue_lenses/snapshots.rs",
         "anchor": "reopen_rejects_standalone_lens_semantic_tamper"
       },
       "evidence": [
         {
-          "path": "crates/jazz/src/node/tests/catalogue_lenses/runtime_catalogue.rs",
+          "path": "crates/jazz/layers/node/src/node/tests/catalogue_lenses/runtime_catalogue.rs",
           "anchor": "durable_catalogue_values_pointer_and_physical_mappings_survive_restart"
         }
       ]
@@ -238,16 +238,16 @@
         "anchor": "#### Epoch-pinned catalogue kernel"
       },
       "semantic_fixture": {
-        "path": "crates/jazz/src/node/tests/catalogue_lenses/lineage.rs",
+        "path": "crates/jazz/layers/node/src/node/tests/catalogue_lenses/lineage.rs",
         "anchor": "physical_identity_mapping_and_live_id_recovery_are_durable_catalogue_metadata"
       },
       "rejection_receipt": {
-        "path": "crates/jazz/src/node/tests/catalogue_lenses/snapshots.rs",
+        "path": "crates/jazz/layers/node/src/node/tests/catalogue_lenses/snapshots.rs",
         "anchor": "reopen_rejects_zero_sequence_staged_lineage"
       },
       "evidence": [
         {
-          "path": "crates/jazz/src/node/tests/catalogue_lenses/lineage.rs",
+          "path": "crates/jazz/layers/node/src/node/tests/catalogue_lenses/lineage.rs",
           "anchor": "physical_identity_mapping_and_live_id_recovery_are_durable_catalogue_metadata"
         }
       ]
@@ -261,16 +261,16 @@
         "anchor": "### 2.7 Reference implementation: identity encoding & storage lowering"
       },
       "semantic_fixture": {
-        "path": "crates/jazz/src/node/tests/catalogue_lenses/physical_storage.rs",
+        "path": "crates/jazz/layers/node/src/node/tests/catalogue_lenses/physical_storage.rs",
         "anchor": "table_and_column_rename_reuses_the_existing_physical_identities"
       },
       "rejection_receipt": {
-        "path": "crates/jazz/src/node/tests/recovery.rs",
+        "path": "crates/jazz/layers/node/src/node/tests/recovery.rs",
         "anchor": "reopen_rejects_unknown_contribution_physical_column_id_before_residency"
       },
       "evidence": [
         {
-          "path": "crates/jazz/src/node/tests/catalogue_lenses/physical_storage.rs",
+          "path": "crates/jazz/layers/node/src/node/tests/catalogue_lenses/physical_storage.rs",
           "anchor": "rejected_versions_share_physical_storage_across_renamed_schemas_and_reopen"
         }
       ]
@@ -284,16 +284,16 @@
         "anchor": "#### Epoch-pinned catalogue kernel"
       },
       "semantic_fixture": {
-        "path": "crates/jazz/src/node/tests/catalogue_lenses/snapshots.rs",
+        "path": "crates/jazz/layers/node/src/node/tests/catalogue_lenses/snapshots.rs",
         "anchor": "schema_version_id_round_trips_through_wire_ingest_and_recovery"
       },
       "rejection_receipt": {
-        "path": "crates/jazz/src/node/tests/catalogue_lenses/snapshots.rs",
+        "path": "crates/jazz/layers/node/src/node/tests/catalogue_lenses/snapshots.rs",
         "anchor": "noncanonical_catalogue_public_schema_rejects_reopen_before_resident_mutation"
       },
       "evidence": [
         {
-          "path": "crates/jazz/src/node/tests/catalogue_lenses/snapshots.rs",
+          "path": "crates/jazz/layers/node/src/node/tests/catalogue_lenses/snapshots.rs",
           "anchor": "schema_version_id_round_trips_through_wire_ingest_and_recovery"
         }
       ]
@@ -307,16 +307,16 @@
         "anchor": "#### Epoch-pinned catalogue kernel"
       },
       "semantic_fixture": {
-        "path": "crates/jazz/src/node/tests/catalogue_lenses/runtime_catalogue.rs",
+        "path": "crates/jazz/layers/node/src/node/tests/catalogue_lenses/runtime_catalogue.rs",
         "anchor": "catalogue_current_write_schema_revision_is_core_ordered"
       },
       "rejection_receipt": {
-        "path": "crates/jazz/src/node/tests/catalogue_lenses/snapshots.rs",
+        "path": "crates/jazz/layers/node/src/node/tests/catalogue_lenses/snapshots.rs",
         "anchor": "pending_catalogue_write_pointer_reopen_rejects_duplicate_revision"
       },
       "evidence": [
         {
-          "path": "crates/jazz/src/node/tests/catalogue_lenses/runtime_catalogue.rs",
+          "path": "crates/jazz/layers/node/src/node/tests/catalogue_lenses/runtime_catalogue.rs",
           "anchor": "durable_catalogue_values_pointer"
         }
       ]
@@ -330,16 +330,16 @@
         "anchor": "#### Volatile subscription scope and retired cache stores"
       },
       "semantic_fixture": {
-        "path": "crates/jazz/src/node/tests/sync/known_state.rs",
+        "path": "crates/jazz/layers/node/src/node/tests/sync/known_state.rs",
         "anchor": "legacy_scope_caches_are_discarded_without_losing_native_or_pending_rows"
       },
       "rejection_receipt": {
-        "path": "crates/jazz/src/node/tests/sync/known_state.rs",
+        "path": "crates/jazz/layers/node/src/node/tests/sync/known_state.rs",
         "anchor": "retired_scope_payloads_never_restore_authority"
       },
       "evidence": [
         {
-          "path": "crates/jazz/src/node/tests/sync/known_state.rs",
+          "path": "crates/jazz/layers/node/src/node/tests/sync/known_state.rs",
           "anchor": "scope_updates_are_volatile_while_native_rows_survive_reopen"
         }
       ]
@@ -379,16 +379,16 @@
         "anchor": "### 2.7.1 Settled history layout and canonical receipts"
       },
       "semantic_fixture": {
-        "path": "crates/jazz/src/node/tests/general.rs",
+        "path": "crates/jazz/layers/node/src/node/tests/general.rs",
         "anchor": "policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records"
       },
       "rejection_receipt": {
-        "path": "crates/jazz/src/node/tests/general.rs",
+        "path": "crates/jazz/layers/node/src/node/tests/general.rs",
         "anchor": "local_history_rejects_noncanonical_parent_order_before_persistence"
       },
       "evidence": [
         {
-          "path": "crates/jazz/src/node/tests/recovery.rs",
+          "path": "crates/jazz/layers/node/src/node/tests/recovery.rs",
           "anchor": "row_history_reports_versions_flags_and_audit_records_across_restart"
         }
       ]
@@ -401,16 +401,16 @@
         "anchor": "## Non-negotiable representation rules"
       },
       "semantic_fixture": {
-        "path": "crates/jazz/src/node/tests/recovery.rs",
+        "path": "crates/jazz/layers/node/src/node/tests/recovery.rs",
         "anchor": "contribution_operation_payloads_use_physical_columns_and_canonical_groove_bytes"
       },
       "rejection_receipt": {
-        "path": "crates/jazz/src/node/tests/recovery.rs",
+        "path": "crates/jazz/layers/node/src/node/tests/recovery.rs",
         "anchor": "reopen_rejects_noncanonical_contribution_source_dots"
       },
       "evidence": [
         {
-          "path": "crates/jazz/src/node/tests/recovery.rs",
+          "path": "crates/jazz/layers/node/src/node/tests/recovery.rs",
           "anchor": "contribution_merge_provenance_survives_reopen"
         }
       ]
@@ -423,16 +423,16 @@
         "anchor": "#### Durable content-frontier helper"
       },
       "semantic_fixture": {
-        "path": "crates/jazz/src/node/tests/merge_heads.rs",
+        "path": "crates/jazz/layers/node/src/node/tests/merge_heads.rs",
         "anchor": "merge_heads_match_history_across_restart_between_concurrent_units"
       },
       "rejection_receipt": {
-        "path": "crates/jazz/src/node/tests/general.rs",
+        "path": "crates/jazz/layers/node/src/node/tests/general.rs",
         "anchor": "stored_merge_heads_require_a_canonical_transaction_id_array"
       },
       "evidence": [
         {
-          "path": "crates/jazz/src/node/tests/merge_heads.rs",
+          "path": "crates/jazz/layers/node/src/node/tests/merge_heads.rs",
           "anchor": "across_reopen"
         }
       ]
@@ -467,16 +467,16 @@
         "anchor": "The native whole-root compatibility receipt is"
       },
       "semantic_fixture": {
-        "path": "crates/jazz/src/node/tests/native_storage_corpus.rs",
+        "path": "crates/jazz/layers/node/src/node/tests/native_storage_corpus.rs",
         "anchor": "settlement_baseline_native_jazz_corpus_reopens_and_accepts_mixed_writes"
       },
       "rejection_receipt": {
-        "path": "crates/jazz/src/node/tests/native_storage_corpus.rs",
+        "path": "crates/jazz/layers/node/src/node/tests/native_storage_corpus.rs",
         "anchor": "committed_native_jazz_physical_corpus_rejects_corruption_before_materialization"
       },
       "evidence": [
         {
-          "path": "crates/jazz/src/node/tests/native_storage_corpus.rs",
+          "path": "crates/jazz/layers/node/src/node/tests/native_storage_corpus.rs",
           "anchor": "committed_native_jazz_physical_corpus_reopens_and_accepts_current_writes"
         },
         {
@@ -557,12 +557,12 @@
         "anchor": "jazz-relation-query-postcard-v1"
       },
       "rejection_receipt": {
-        "path": "crates/jazz/src/query/relation_codec.rs",
+        "path": "crates/jazz/layers/model/src/query/relation_codec.rs",
         "anchor": "fn typed_postcard_rejects_trailing_or_noncanonical_payloads()"
       },
       "evidence": [
         {
-          "path": "crates/jazz/src/query/relation_codec.rs",
+          "path": "crates/jazz/layers/model/src/query/relation_codec.rs",
           "anchor": "fn typed_postcard_corpus_is_current()"
         },
         {
@@ -601,16 +601,16 @@
         "anchor": "### Local current-row availability record v1"
       },
       "semantic_fixture": {
-        "path": "crates/jazz/src/node/query_eval/local_availability_receipts.rs",
+        "path": "crates/jazz/layers/node/src/node/query_eval/local_availability_receipts.rs",
         "anchor": "fn local_availability_v1_native_bytes_and_rejection_are_pinned"
       },
       "rejection_receipt": {
-        "path": "crates/jazz/src/node/query_eval/local_availability_receipts.rs",
+        "path": "crates/jazz/layers/node/src/node/query_eval/local_availability_receipts.rs",
         "anchor": "fn local_availability_v1_native_bytes_and_rejection_are_pinned"
       },
       "evidence": [
         {
-          "path": "crates/jazz/src/node/query_eval/tests/unavailable_inputs.rs",
+          "path": "crates/jazz/layers/node/src/node/query_eval/tests/unavailable_inputs.rs",
           "anchor": "fn local_availability_receipts_survive_reopen_and_retain_readmission_watermarks"
         }
       ]

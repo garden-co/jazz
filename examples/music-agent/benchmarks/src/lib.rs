@@ -14,7 +14,7 @@ use jazz::tools::test_support::AllowAll;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 
-type BenchDb = Db<TestStorage>;
+type BenchDb = Db;
 
 const SEEK_BYTES: u64 = 64 * 1024;
 const SHORT_REPLY: &str = "try a late-night quartet with brushed drums, upright bass and a tenor \

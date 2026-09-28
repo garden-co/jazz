@@ -36,11 +36,11 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_db() -> Db<TestStorage> {
+fn open_db() -> Db {
     open_db_as(AuthorSubject::SYSTEM)
 }
 
-fn open_db_as(author: AuthorSubject) -> Db<TestStorage> {
+fn open_db_as(author: AuthorSubject) -> Db {
     let schema = schema();
     let column_families = schema.column_families();
     let column_family_refs = column_families
@@ -68,7 +68,7 @@ fn row(seed: u64) -> RowUuid {
     RowUuid::from_bytes(bytes)
 }
 
-fn insert_document(db: &Db<TestStorage>, document: RowUuid, team: RowUuid, updated_at: u64) {
+fn insert_document(db: &Db, document: RowUuid, team: RowUuid, updated_at: u64) {
     block_on(db.insert(
         "documents",
         BTreeMap::from([
@@ -210,12 +210,7 @@ fn apply_pending_events(
     applied
 }
 
-fn assert_ordered_rows(
-    db: &Db<TestStorage>,
-    prepared: &PreparedQuery,
-    expected: &[RowUuid],
-    label: &str,
-) {
+fn assert_ordered_rows(db: &Db, prepared: &PreparedQuery, expected: &[RowUuid], label: &str) {
     let actual = block_on(db.all(prepared, local_read_opts()))
         .unwrap_or_else(|error| panic!("{label} one-shot read failed: {error}"))
         .into_iter()
@@ -384,7 +379,7 @@ fn local_author_bindings_of_one_shape_match_one_shot_reads_under_churn() {
     ))));
 }
 
-fn churn_differential(db: Db<TestStorage>) {
+fn churn_differential(db: Db) {
     const TEAMS: u64 = 5;
     const STEPS: u64 = 160;
 
@@ -514,7 +509,7 @@ fn churn_differential(db: Db<TestStorage>) {
     block_on(db.close()).expect("close churn fixture");
 }
 
-fn team_binding(db: &Db<TestStorage>, query: &Query, team: RowUuid) -> PreparedQuery {
+fn team_binding(db: &Db, query: &Query, team: RowUuid) -> PreparedQuery {
     db.prepare_query_bound(
         query,
         BTreeMap::from([("team".to_owned(), Value::Uuid(team.0))]),
