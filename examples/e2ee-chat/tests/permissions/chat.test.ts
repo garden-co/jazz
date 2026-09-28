@@ -7,7 +7,7 @@ import {
   type Db,
 } from "jazz-tools";
 import { deviceRequestSchema, groupSchema, spaceSchema } from "jazz-tools/e2ee";
-import { deploy, startLocalJazzServer } from "jazz-tools/testing";
+import { deploy, startLocalJazzServer, type LocalJazzServerHandle } from "jazz-tools/testing";
 import { app } from "../../schema.js";
 import permissions from "../../permissions.js";
 import { createChat, shareChat, membershipId } from "../../src/chat.js";
@@ -52,39 +52,55 @@ function store(): AccountStore {
   };
 }
 
-it("keeps room administration with its immutable owner while recipients can send and sharing can be retried", async () => {
+async function setupChat(server: LocalJazzServerHandle, clients: Db[]) {
+  await deploy({
+    serverUrl: server.url,
+    appId: server.appId,
+    adminSecret: server.adminSecret,
+    schema: app,
+    permissions,
+  });
+  const configs = await Promise.all(
+    Array.from({ length: 3 }, async () => {
+      const manager = await createAccountManager({
+        appId: server.appId,
+        serverUrl: server.url,
+        store: store(),
+      });
+      return {
+        appId: server.appId,
+        serverUrl: server.url,
+        account: manager.createLocalFirst(),
+        driver: { type: "memory" as const },
+        e2ee: { app, store: store() },
+      };
+    }),
+  );
+  const owner = await createDb(configs[0]!);
+  clients.push(owner);
+  const { chat, completion } = await createChat(owner, configs[0]!.account.id).catch((cause) => {
+    throw new Error("Room creation was rejected", { cause });
+  });
+  await completion.wait({ tier: "global" });
+  return { server, clients, configs, owner, chat };
+}
+
+async function withChat(run: (fixture: Awaited<ReturnType<typeof setupChat>>) => Promise<void>) {
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Db[] = [];
   try {
-    await deploy({
-      serverUrl: server.url,
-      appId: server.appId,
-      adminSecret: server.adminSecret,
-      schema: app,
-      permissions,
-    });
-    const configs = await Promise.all(
-      Array.from({ length: 3 }, async () => {
-        const manager = await createAccountManager({
-          appId: server.appId,
-          serverUrl: server.url,
-          store: store(),
-        });
-        return {
-          appId: server.appId,
-          serverUrl: server.url,
-          account: manager.createLocalFirst(),
-          driver: { type: "memory" as const },
-          e2ee: { app, store: store() },
-        };
-      }),
-    );
-    const owner = await createDb(configs[0]!);
-    clients.push(owner);
-    const { chat, completion } = await createChat(owner, configs[0]!.account.id).catch((cause) => {
-      throw new Error("Room creation was rejected", { cause });
-    });
-    await completion.wait({ tier: "global" });
+    await run(await setupChat(server, clients));
+  } finally {
+    try {
+      await Promise.all(clients.map((db) => db.shutdown()));
+    } finally {
+      await server.stop();
+    }
+  }
+}
+
+it("retries sharing after membership acceptance and lets the enrolled recipient send", async () => {
+  await withChat(async ({ owner, chat, configs, clients }) => {
     // Membership is accepted but this recipient has not enrolled an E2EE device yet.
     await expect(shareChat(owner, chat.id, configs[1]!.account.id)).rejects.toThrow();
     expect(
@@ -101,37 +117,7 @@ it("keeps room administration with its immutable owner while recipients can send
     ]);
     const recipient = await createDb(configs[1]!);
     clients.push(recipient);
-    const outsider = await createDb(configs[2]!);
-    clients.push(outsider);
     await recipient.e2ee.devices.list();
-    await outsider.e2ee.devices.list();
-    // An unauthorized candidate must not authorize descendants or partially
-    // publish an otherwise legitimate room in the same exclusive transaction.
-    const forged = outsider.beginExclusiveTransaction();
-    const forgedChat = forged.insert(app.chats, { ownerId: configs[2]!.account.id });
-    const forgedBindingId = crypto.randomUUID();
-    forged.upsert(app.chatOwners, forgedBindingId, {
-      chatId: forgedChat.id,
-      accountId: configs[0]!.account.id,
-    });
-    const forgedMembershipId = membershipId(forgedChat.id, configs[2]!.account.id);
-    forged.upsert(app.chatMembers, forgedMembershipId, {
-      chatId: forgedChat.id,
-      accountId: configs[2]!.account.id,
-    });
-    await expect(forged.commit().wait({ tier: "global" })).rejects.toThrow();
-    expect(await outsider.all(app.chats.where({ id: forgedChat.id }), { tier: "global" })).toEqual(
-      [],
-    );
-    expect(
-      await owner.all(app.chatOwners.where({ id: forgedBindingId }), { tier: "global" }),
-    ).toEqual([]);
-    expect(
-      await outsider.all(app.chatMembers.where({ id: forgedMembershipId }), { tier: "global" }),
-    ).toEqual([]);
-    expect(
-      await owner.all(app.__e2ee_spaces.where({ identifier: forgedChat.id }), { tier: "global" }),
-    ).toEqual([]);
     await shareChat(owner, chat.id, configs[1]!.account.id);
     await shareChat(owner, chat.id, configs[1]!.account.id);
     expect(
@@ -159,6 +145,61 @@ it("keeps room administration with its immutable owner while recipients can send
     expect(
       await owner.all(app.messages.where({ chatId: chat.id }), { tier: "global" }),
     ).toContainEqual(expect.objectContaining({ text: "A recipient can send" }));
+  });
+}, 60_000);
+
+it("keeps administration with the immutable owner and rejects forged descendants atomically", async () => {
+  await withChat(async ({ owner, chat, configs, clients }) => {
+    const recipient = await createDb(configs[1]!);
+    clients.push(recipient);
+    const outsider = await createDb(configs[2]!);
+    clients.push(outsider);
+    await recipient.e2ee.devices.list();
+    await outsider.e2ee.devices.list();
+    await shareChat(owner, chat.id, configs[1]!.account.id);
+    // Establish usable recipient key state before testing administration denials.
+    await recipient
+      .insert(app.messages, {
+        chatId: chat.id,
+        senderId: configs[1]!.account.id,
+        text: "An enrolled member can send but cannot administer",
+        filename: null,
+        mimeType: null,
+        payload: null,
+      })
+      .wait({ tier: "global" });
+    expect(
+      await owner.all(app.messages.where({ chatId: chat.id }), { tier: "global" }),
+    ).toContainEqual(
+      expect.objectContaining({ text: "An enrolled member can send but cannot administer" }),
+    );
+    // An unauthorized candidate must not authorize descendants or partially
+    // publish an otherwise legitimate room in the same exclusive transaction.
+    const forged = outsider.beginExclusiveTransaction();
+    const forgedChat = forged.insert(app.chats, { ownerId: configs[2]!.account.id });
+    const forgedBindingId = crypto.randomUUID();
+    forged.upsert(app.chatOwners, forgedBindingId, {
+      chatId: forgedChat.id,
+      accountId: configs[0]!.account.id,
+    });
+    const forgedMembershipId = membershipId(forgedChat.id, configs[2]!.account.id);
+    forged.upsert(app.chatMembers, forgedMembershipId, {
+      chatId: forgedChat.id,
+      accountId: configs[2]!.account.id,
+    });
+    await expect(forged.commit().wait({ tier: "global" })).rejects.toThrow();
+    expect(await outsider.all(app.chats.where({ id: forgedChat.id }), { tier: "global" })).toEqual(
+      [],
+    );
+    expect(
+      await owner.all(app.chatOwners.where({ id: forgedBindingId }), { tier: "global" }),
+    ).toEqual([]);
+    expect(
+      await outsider.all(app.chatMembers.where({ id: forgedMembershipId }), { tier: "global" }),
+    ).toEqual([]);
+    expect(
+      await owner.all(app.__e2ee_spaces.where({ identifier: forgedChat.id }), { tier: "global" }),
+    ).toEqual([]);
     await expect(
       recipient.e2ee.spaces.grant(app.chats, chat.id, configs[2]!.account.id).wait(),
     ).rejects.toThrow();
@@ -222,16 +263,20 @@ it("keeps room administration with its immutable owner while recipients can send
     await expect(
       outsider.insert(app.chats, { ownerId: configs[0]!.account.id }).wait({ tier: "global" }),
     ).rejects.toThrow();
-    expect(await outsider.all(app.messages.where({ chatId: chat.id }), { tier: "global" })).toEqual(
-      [],
-    );
-    expect(await outsider.all(app.chats.where({ id: chat.id }), { tier: "global" })).toEqual([]);
     expect(await owner.all(app.__e2ee_space_successors, { tier: "global" })).toEqual([]);
     expect(
       await owner.all(app.__e2ee_space_grants.where({ recipientId: configs[2]!.account.id }), {
         tier: "global",
       }),
     ).toEqual([]);
+  });
+}, 60_000);
+
+it("keeps image ciphertext separate from ordinary membership and decryption authority", async () => {
+  await withChat(async ({ owner, chat, configs, clients, server }) => {
+    const outsider = await createDb(configs[2]!);
+    clients.push(outsider);
+    await outsider.e2ee.devices.list();
     const imageBytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 91, 42]);
     const image = await owner.insertStreaming(app.messages, {
       chatId: chat.id,
@@ -242,6 +287,11 @@ it("keeps room administration with its immutable owner while recipients can send
       payload: new File([imageBytes], "secret-image.png", { type: "image/png" }).stream(),
     });
     await image.wait({ tier: "global" });
+    // The accepted image exists before these pre-membership isolation checks.
+    expect(await outsider.all(app.messages.where({ chatId: chat.id }), { tier: "global" })).toEqual(
+      [],
+    );
+    expect(await outsider.all(app.chats.where({ id: chat.id }), { tier: "global" })).toEqual([]);
     // Grant only ordinary row visibility to the observer, not an encryption key.
     await owner
       .upsert(app.chatMembers, membershipId(chat.id, configs[2]!.account.id), {
@@ -268,8 +318,5 @@ it("keeps room administration with its immutable owner while recipients can send
     await expect(
       outsider.one(app.messages.where({ id: image.value.id }), { tier: "global" }),
     ).rejects.toThrow();
-  } finally {
-    await Promise.all(clients.map((db) => db.shutdown()));
-    await server.stop();
-  }
+  });
 }, 60_000);
