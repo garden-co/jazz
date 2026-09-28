@@ -17,7 +17,7 @@ use jazz::tx::DurabilityTier;
 
 const SOURCE_READ_BYTES: usize = 32 * 1024;
 const RANGE_BYTES: u64 = 64 * 1024;
-type BenchDb = Db<TestStorage>;
+type BenchDb = Db;
 
 fn folder_id() -> RowUuid {
     RowUuid::from_bytes([0x41; 16])

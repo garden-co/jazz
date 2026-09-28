@@ -75,7 +75,7 @@ check_layer \
   "pnpm --filter jazz-tools build" \
   packages/jazz-tools/dist
 
-source_roots=(crates/jazz-cli/src crates/jazz-cli/Cargo.toml crates/jazz/src crates/groove/src crates/jazz/Cargo.toml crates/groove/Cargo.toml Cargo.toml Cargo.lock)
+source_roots=(crates/jazz-cli/src crates/jazz-cli/Cargo.toml crates/jazz/src crates/jazz/layers crates/groove/src crates/jazz/Cargo.toml crates/groove/Cargo.toml Cargo.toml Cargo.lock)
 check_layer \
   "target/debug/jazz-tools" \
   "cargo build -p jazz-cli --bin jazz-tools" \
@@ -83,7 +83,7 @@ check_layer \
 
 # napi-rs's generated loader/declarations live in an immutable staged
 # generation; the tracked CJS/ESM wrappers are ABI inputs.
-source_roots=(crates/jazz-napi/src crates/jazz-napi/build.rs crates/jazz-napi/Cargo.toml crates/jazz-napi/package.json crates/jazz-napi/index.cjs crates/jazz-napi/index.mjs crates/jazz-napi/index.d.ts crates/jazz-napi/scripts crates/jazz-otel/src crates/jazz-otel/Cargo.toml crates/jazz/src crates/groove/src crates/jazz/Cargo.toml crates/groove/Cargo.toml Cargo.toml Cargo.lock)
+source_roots=(crates/jazz-napi/src crates/jazz-napi/build.rs crates/jazz-napi/Cargo.toml crates/jazz-napi/package.json crates/jazz-napi/index.cjs crates/jazz-napi/index.mjs crates/jazz-napi/index.d.ts crates/jazz-napi/scripts crates/jazz-otel/src crates/jazz-otel/Cargo.toml crates/jazz/src crates/jazz/layers crates/groove/src crates/jazz/Cargo.toml crates/groove/Cargo.toml Cargo.toml Cargo.lock)
 shopt -s nullglob
 napi_artifacts=(crates/jazz-napi/.native-artifacts/*/*.node)
 shopt -u nullglob

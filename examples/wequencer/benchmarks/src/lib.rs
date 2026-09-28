@@ -21,7 +21,7 @@ use jazz::tx::DurabilityTier;
 pub const TRACKS: usize = 16;
 pub const STEPS: usize = 64;
 
-type BenchDb = Db<MemoryStorage>;
+type BenchDb = Db;
 
 pub struct Fixture {
     db: BenchDb,

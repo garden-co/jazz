@@ -113,8 +113,12 @@ function dependencyInputs(definition) {
 function configuredCargoInputs(definition) {
   const { config, rootManifest, localRoot } = definition;
   const rootCrate = rootManifest.slice(0, -"/Cargo.toml".length);
-  const expected = dependencyInputs(definition)
+  const closure = dependencyInputs(definition);
+  const expected = closure
     .filter((path) => !localRoot || path !== rootCrate)
+    // Jazz's layer crates live under crates/jazz/layers/, which the
+    // `crates/jazz/**` input already covers.
+    .filter((path) => !closure.some((other) => path.startsWith(`${other}/`)))
     .map((path) => `$TURBO_ROOT$/${path}/**`)
     .sort();
   const actual = turbo.tasks[config].inputs

@@ -44,7 +44,7 @@ fn opts() -> ReadOpts {
         ..ReadOpts::default()
     }
 }
-fn open(history_complete: bool) -> Db<TestStorage> {
+fn open(history_complete: bool) -> Db {
     let account = |field| PolicyExpr::eq_session(field, vec!["user".into(), "account".into()]);
     let source = SchemaBuilder::new()
         .table(
@@ -86,7 +86,7 @@ fn open(history_complete: bool) -> Db<TestStorage> {
         block_on(Db::open(config)).unwrap()
     }
 }
-fn insert(db: &Db<TestStorage>, n: u8, owner: u8, bucket: &str) {
+fn insert(db: &Db, n: u8, owner: u8, bucket: &str) {
     block_on(db.insert(
         "documents",
         cells(jazz::row_input!(
@@ -101,7 +101,7 @@ fn insert(db: &Db<TestStorage>, n: u8, owner: u8, bucket: &str) {
     ))
     .unwrap();
 }
-fn page(db: &Db<TestStorage>, bucket: &str) -> PreparedQuery {
+fn page(db: &Db, bucket: &str) -> PreparedQuery {
     db.prepare_query_bound(
         &Query::from("documents").filter(eq(col("bucket"), param("bucket"))),
         BTreeMap::from([("bucket".into(), Value::String(bucket.into()))]),
@@ -109,7 +109,7 @@ fn page(db: &Db<TestStorage>, bucket: &str) -> PreparedQuery {
     .unwrap()
 }
 fn assert_state(
-    db: &Db<TestStorage>,
+    db: &Db,
     query: &PreparedQuery,
     identity: u8,
     stream: &mut SubscriptionStream,
