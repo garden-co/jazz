@@ -108,9 +108,6 @@
 //! assert!(!block_on(core.row_history("todos", row)).unwrap().is_empty());
 //! ```
 
-#[cfg(test)]
-pub(crate) use node::legacy_test_future;
-
 /// Re-export of the underlying groove crate used for storage setup.
 pub use groove;
 
