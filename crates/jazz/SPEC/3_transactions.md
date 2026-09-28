@@ -172,8 +172,14 @@ Missing and foreign-author records are indistinguishable (`NotObserved`). Partia
 owned units are `Incomplete`; complete units expose their actual fate and owner
 durability, including `None` while local persistence is pending. Rejected audits
 remain terminal evidence after payload pruning. Storage and codec failures are
-errors, not absence. A journal that recorded Local acknowledgement and then finds
-`NotObserved` is corrupt; it must not replay callbacks or publish a replacement.
+errors, not absence. Until accepted initialization has been cryptographically
+verified and promoted, a journal that recorded Local acknowledgement and then
+finds `NotObserved` is corrupt; it must not replay callbacks or publish a replacement.
+After verified promotion, retained journal linkage is historical evidence rather
+than pending recovery work. The SDK may reopen accepted keys on another physical
+Db without looking up the original reservation, but ordinary accepted-history and
+revocation checks remain mandatory. This does not permit pending initialization
+to recover from an unrelated owner.
 The binding-only JSON envelope is `{version:1,statuses:[...]}`, with each entry
 containing `reservedTxId` and `kind` (`not-observed`, `incomplete`, `complete`).
 Complete entries additionally carry `fate.kind` (`pending`, `accepted`, `rejected`),

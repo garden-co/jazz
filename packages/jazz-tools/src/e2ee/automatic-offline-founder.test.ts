@@ -8,6 +8,7 @@ import { deploy, startLocalJazzServer } from "../testing/index.js";
 import type { Db } from "../runtime/db.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import { accountGeneratedHere, exportLocalFirstSecret } from "../accounts/enrollment.js";
+import { deviceRequestApp } from "./device-requests.js";
 
 const app = s.defineApp({
   plaintext: s.table({ title: s.string(), done: s.boolean() }, {}),
@@ -77,6 +78,9 @@ it.each([
   "rejected-founder",
   "plaintext-transaction",
   "imported-root-resumes-exact-founder-journal",
+  "missing-pending-owner",
+  "device-only-missing-owner",
+  "device-only-unpromoted-owner",
 ] as const)(
   "keeps automatic offline initialization fail-closed across %s",
   async (scenario) => {
@@ -118,12 +122,81 @@ it.each([
       await warm.shutdown();
       clients.pop();
       gate.block();
-      const founderStore = privateStore();
-      let founder = await createDb({
-        ...founderAccount,
-        e2ee: { app, store: founderStore },
-      });
+      let blockPromotion = scenario === "device-only-unpromoted-owner";
+      const backingStore = privateStore();
+      const store: AccountStore = {
+        read: () => backingStore.read(),
+        update: (transform) =>
+          backingStore.update((current) => {
+            const next = transform(current);
+            if (
+              blockPromotion &&
+              JSON.parse(next).initializationJournalV1?.some(
+                (entry: { promoted: boolean }) => entry.promoted,
+              )
+            )
+              throw new Error("Test storage refuses promotion acknowledgement");
+            return next;
+          }),
+      };
+      let founder = await createDb({ ...founderAccount, e2ee: { app, store } });
       clients.push(founder);
+
+      if (
+        scenario === "missing-pending-owner" ||
+        scenario === "device-only-missing-owner" ||
+        scenario === "device-only-unpromoted-owner"
+      ) {
+        const entry = async () => JSON.parse((await store.read())!).initializationJournalV1[0];
+        const original = await entry();
+        expect(original).toMatchObject({
+          reservation: expect.any(String),
+          local: true,
+          outcome: "pending",
+        });
+        await founder.disconnect();
+        if (blockPromotion) {
+          gate.unblock();
+          await founder.reconnect();
+          await expect.poll(async () => (await entry()).outcome).toBe("accepted");
+        }
+        await expect(
+          (async () => {
+            const other = await createDb({
+              ...founderAccount,
+              e2ee: {
+                app: scenario === "missing-pending-owner" ? app : deviceRequestApp,
+                store,
+              },
+            });
+            clients.push(other);
+            await other.e2ee.devices.list();
+          })(),
+        ).rejects.toThrow();
+        expect(await entry()).toMatchObject({
+          reservation: original.reservation,
+          local: true,
+        });
+        expect((await entry()).promoted).not.toBe(true);
+        blockPromotion = false;
+        gate.unblock();
+        await founder.reconnect();
+        await founder.e2ee.devices.list();
+        await expect.poll(async () => (await entry()).promoted).toBe(true);
+        expect((await entry()).reservation).toBe(original.reservation);
+        expect(
+          await founder.all(
+            app.__e2ee_account_roots.where({ accountId: founderAccount.account.id }),
+            { tier: "global" },
+          ),
+        ).toEqual([
+          expect.objectContaining({
+            id: JSON.parse(original.proposal).rootId,
+            accountId: founderAccount.account.id,
+          }),
+        ]);
+        return;
+      }
 
       if (scenario === "plaintext-transaction") {
         await expect(
@@ -141,11 +214,28 @@ it.each([
           await expect(tx.commit().wait({ tier: "local" })).rejects.toThrow();
           expect(await founder.all(app.plaintext, { tier: "local" })).toEqual([]);
         }
+        const callbackWrite = await founder.exclusiveTransaction((tx) => {
+          const row = tx.insert(app.plaintext, { title: "Mapped callback", done: false });
+          tx.upsert(app.plaintext, crypto.randomUUID(), { done: true });
+          return row;
+        });
+        await expect(
+          callbackWrite.mapValue((row) => row.id).wait({ tier: "local" }),
+        ).rejects.toThrow();
+        expect(await founder.all(app.plaintext, { tier: "local" })).toEqual([]);
         const valid = await founder
           .insert(app.plaintext, { title: "Ordinary local write", done: false })
           .wait({ tier: "local" });
         expect(await founder.all(app.plaintext, { tier: "local" })).toEqual([valid]);
         expect(onError).not.toHaveBeenCalled();
+        const unwaited = founder.beginExclusiveTransaction();
+        unwaited.insert(app.plaintext, { title: "Unwaited rejection", done: false });
+        unwaited.upsert(app.plaintext, crypto.randomUUID(), { done: true });
+        const rejected = unwaited.commit();
+        await expect.poll(() => onError.mock.calls.length).toBe(1);
+        await expect(rejected.wait({ tier: "local" })).rejects.toThrow();
+        expect(await founder.all(app.plaintext, { tier: "local" })).toEqual([valid]);
+        expect(onError).toHaveBeenCalledTimes(1);
         return;
       }
 
@@ -197,7 +287,7 @@ it.each([
         expect(await accountGeneratedHere(founderAccount.account)).toBe(false);
         founder = await createDb({
           ...founderAccount,
-          e2ee: { app, store: founderStore },
+          e2ee: { app, store },
         });
         clients.push(founder);
         expect(await founder.one(app.notes.where({ id: note.id }), { tier: "local" })).toEqual(
