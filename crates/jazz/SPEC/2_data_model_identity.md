@@ -127,8 +127,9 @@ provenance, or sent across a node boundary. Missing, malformed, or colliding
 mappings fail closed before decode or mutation. Different replicas may assign
 different local aliases to the same global identity.
 
-Row authors follow the same discipline. Physical history tables
-(`jazz_physical_{id}_history`) do not repeat the full structured `RowAuthor`
+Row authors follow the same discipline. Physical content row tables
+(`jazz_physical_{id}_history`, `_global_current`, `_ahead_current` and
+`_ahead_shadow`) do not repeat the full structured `RowAuthor`
 record (§2.7) in every `created_by` / `updated_by` cell: each node interns the exact author record bytes to a local
 `AuthorAlias` and stores that alias instead. The mapping lives in the
 `jazz_authors` metadata table:
@@ -449,7 +450,7 @@ created_by, created_at, updated_by, updated_at)`, followed by declared
 `user_{column}` cells in application declaration order. `created_by` and
 `updated_by` are `RowAuthor` records in the logical row image and `U64`
 `AuthorAlias` values in the physical `jazz_physical_{id}_history` table
-(§2.2). The deletion relation
+(§2.2); deletion-layer records keep full authors. The deletion relation
 adds `physical_table_id` at position 1 and ends with `_deletion` at position 11;
 it has no user cells. The replicated `WireRowRecord` positions are
 `(row_uuid, parents, created_by, created_at_ms, updated_by, updated_at_ms,
@@ -477,7 +478,10 @@ field origin only; they add neither causal parents nor exclusive dependencies.
 Derived global-current content positions `0..=10` are `(branch_key, row_uuid,
 tx_time, tx_node_alias, schema_version_alias, parents, created_by,
 created_at_ms, updated_by, updated_at_ms, nullable global_time)`, followed by
-the declared user cells. The deletion-current record appends `_deletion` at
+the declared user cells. As in history, `created_by` / `updated_by` are
+`RowAuthor` records logically and `U64` `AuthorAlias` values in the physical
+`jazz_physical_{id}_global_current`, `_ahead_current` and `_ahead_shadow`
+tables (§2.2). The deletion-current record appends `_deletion` at
 position 11 and has no user cells. `jazz_global_changes` positions `0..=7` are
 `(physical_table_id, branch_key, row_uuid, layer bytes, global_time, tx_time,
 tx_node_alias, nullable deletion event)`. These current/change records are

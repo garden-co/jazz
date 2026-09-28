@@ -385,7 +385,13 @@ where
                 ],
             )
             .await?;
-        let actual = rows.first().map(|row| row.record().raw().to_vec());
+        // Compare in the logical author representation: the physical row
+        // stores author aliases.
+        let actual = rows.into_iter().next().map(|row| row.owned_record());
+        let actual = actual
+            .map(|row| self.expand_physical_row_authors(row))
+            .transpose()?
+            .map(|row| row.raw().to_vec());
         let expected = owned_record_from_storage_values(&current_schema, expected_values)?
             .raw()
             .to_vec();

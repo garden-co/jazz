@@ -24,8 +24,7 @@ const _: () = assert!(
 /// Whether physical tables of `shape` store author aliases.
 fn physical_row_authors_aliased(shape: ContentProjectionShape) -> bool {
     match shape {
-        ContentProjectionShape::History => true,
-        ContentProjectionShape::Current => false,
+        ContentProjectionShape::History | ContentProjectionShape::Current => true,
     }
 }
 
