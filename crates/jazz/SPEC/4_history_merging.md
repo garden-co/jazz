@@ -265,6 +265,72 @@ version rows in a different order is idempotent and conflict-free. `INV-HIST-14`
 rejected transactions never appear as accepted history and never participate in
 currentness or domination.
 
+### 4.6 Column stamps (linear-history per-column LWW)
+
+On the linear-history line Core merges each accepted write into the row's
+post-image one column at a time. Every settled row state therefore records,
+for each plain (`MergeStrategy::Lww`) user column and for `_deletion`, the
+**stamp** of the write that last set it. Merge-strategy columns (counters,
+sets) carry no stamp: their ops apply in seq order.
+
+**Stamp of a write.** `stamp = min(tx_time physical ms, seq physical ms)`.
+Core mints the accepted write's seq (`GlobalTime`) from its own wall clock when
+it receives the write (monotonic: `max(now, previous seq ms)`), so this is a
+zero-tolerance clamp to Core's receive time. A client whose clock runs ahead is
+pulled back to Core's receive time; a client whose clock runs behind keeps its
+low stamps and can only lose. Only the node that mints the seq computes stamps
+authoritatively; relays and clients take Core's row states as they come.
+Transaction times come from the writer's HLC, whose physical milliseconds are
+non-decreasing per node, so a node's later write never has a lower stamp than
+its earlier one (equal-millisecond writes tie and resolve by seq). Every node
+also merges the highest stamp of each settled row state it stores into its HLC,
+so a write made after observing a value is stamped at least as high as that
+value and wins the tie by its later seq. The row's identity alone is not enough
+for this: it is the write at the row's seq, not necessarily its newest stamp.
+
+A node that settled its own write locally (merging it when its fate arrived,
+possibly over a base that misses seqs it has not received) replaces that
+provisional image with the authority's post-image at the same seq when it
+arrives; only a newer seq keeps a stored row.
+
+**Apply rule.** A write sets a plain column (or `_deletion`) it authored iff
+its stamp is `>=` the column's stored stamp, and then stores its stamp for that
+column. On a tie the later seq wins: a write applied in seq order wins ties
+against the stored row, while a node that applies an older seq after a newer
+one (a late fate) lets the stored row keep ties. The rule is a per-column max
+with a seq tie-break, so replaying the same accepted writes in seq order yields
+the same post-image and stamps on every node. The first
+image of a row stamps the columns its write authored and stores `0` for the
+rest. The row keeps the identity of the write at its seq; `updated_by` and
+`updated_at` follow the write whose stamp is `>=` the row's highest stored
+stamp (a merge-only write compares against, but does not raise, the stored
+stamps). Two images of different authored schema layouts keep whole-row
+last-writer-wins by the same comparison, and the winner's stamp covers every
+slot. The pending local overlay is not stamped and always wins locally.
+
+**Durable layout.** The carrier is one field named `_col_stamps`, appended
+after `authored_columns` to the history, global-current and ahead-current
+records (groove `Bytes`, so one variable-width field with the usual `u32`
+offset-table entry, §2.7 of the groove storage model), and one trailing field
+`col_stamps` of the wire `VersionRecord` (a postcard byte sequence: varint
+length, then the raw bytes). Its contents are exactly one of:
+
+- empty — an **unstamped** image: an uploaded or pending local patch, a query
+  witness, or a payload whose stamps are unknown. A merge treats every slot of
+  an unstamped previous image as stamp `0`.
+- `6 * (L + 1)` bytes, where `L` is the number of `Lww` user columns of the
+  image's authored table schema: slot `i < L` is the `i`-th `Lww` column in
+  schema column order (merge-strategy columns are skipped, not zero-filled),
+  and slot `L` is `_deletion`. Each slot is an **unsigned 48-bit
+  little-endian** integer of Unix milliseconds (`byte[0]` is least
+  significant). HLC physical milliseconds are 46 bits wide, so every stamp
+  fits; the two high bits are zero.
+
+Any other length is invalid and rejected on decode and on wire ingest. The
+layout is a fixed stride per slot so a later columnar in-memory form can index
+slot `k` at byte `6k` without parsing. Byte-level corpus fixtures for this
+field are deferred (see the linear-history experiment PR).
+
 ### 4.8 Subsumed merge-strategy backlog
 
 The former TODO notes on complex merge strategies are treated as future surface

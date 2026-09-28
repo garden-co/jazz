@@ -318,6 +318,7 @@ fn hydrate_nested_payload_enum_cases(
 
 mod catalogue_ingest;
 mod codec;
+mod col_stamps;
 mod currency;
 mod database_slot;
 mod descriptor_roles;

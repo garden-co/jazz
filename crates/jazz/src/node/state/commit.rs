@@ -454,6 +454,9 @@ where
                         cells,
                         authored_columns: authored_column_ids.clone(),
                         deletion,
+                        // A local patch is unstamped: Core stamps the
+                        // columns it authors when it merges the write.
+                        col_stamps: Vec::new(),
                     },
                     (write_schema_version != self.catalogue.local_schema_version_id)
                         .then_some(write_schema_version),

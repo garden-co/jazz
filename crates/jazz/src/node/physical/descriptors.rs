@@ -1273,7 +1273,7 @@ fn physical_history_field_names_for_case(
         mapping,
         present,
         HistoryRowRecord::PREFIX_FIELD_NAMES,
-        &["authored_columns"],
+        &["authored_columns", crate::schema::COLUMN_STAMPS_FIELD],
         "physical history column mapping missing",
     )
 }
@@ -1295,7 +1295,7 @@ fn physical_current_field_names_for_case(
         mapping,
         present,
         GlobalCurrentRowRecord::PREFIX_FIELD_NAMES,
-        &["authored_columns"],
+        &["authored_columns", crate::schema::COLUMN_STAMPS_FIELD],
         "physical current column mapping missing",
     )
 }

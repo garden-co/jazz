@@ -1059,6 +1059,7 @@ impl TableSchema {
             "authored_columns",
             GrooveColumnType::U64.array_of().nullable(),
         ));
+        columns.push(column_stamps_column());
 
         GrooveTableSchema::new(name, columns)
             .with_primary_key(PrimaryKey::composite([
@@ -1104,6 +1105,7 @@ impl TableSchema {
             "authored_columns",
             GrooveColumnType::U64.array_of().nullable(),
         ));
+        content_columns.push(column_stamps_column());
         let mut content_table = GrooveTableSchema::new(
             format!("jazz_{}_global_current", self.name),
             content_columns,
@@ -1159,6 +1161,7 @@ impl TableSchema {
             "authored_columns",
             GrooveColumnType::U64.array_of().nullable(),
         ));
+        content_columns.push(column_stamps_column());
         GrooveTableSchema::new(format!("jazz_{}_ahead_current", self.name), content_columns)
             // One overlay row per row: the newest pending local image.
             .with_primary_key(PrimaryKey::composite([
@@ -1322,6 +1325,18 @@ fn durability_column() -> GrooveColumnType {
 
 fn tx_id_column() -> GrooveColumnType {
     GrooveColumnType::Tuple(vec![GrooveColumnType::U64, GrooveColumnType::Uuid])
+}
+
+/// Name of the row-state field holding per-column last-writer-wins stamps.
+/// See `crates/jazz/SPEC/4_history_merging.md` ("Column stamps").
+pub(crate) const COLUMN_STAMPS_FIELD: &str = "_col_stamps";
+
+/// `_col_stamps` is one opaque byte string: empty for an unstamped image, or
+/// one fixed-width 6-byte little-endian stamp per stamped slot. A plain
+/// `Bytes` field keeps the physical carrier independent of the column count,
+/// so every schema variant of a physical lineage shares one field type.
+fn column_stamps_column() -> groove::schema::ColumnSchema {
+    column(COLUMN_STAMPS_FIELD, GrooveColumnType::Bytes)
 }
 
 fn column(name: impl Into<String>, column_type: GrooveColumnType) -> groove::schema::ColumnSchema {

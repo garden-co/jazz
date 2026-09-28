@@ -2596,9 +2596,14 @@ where
         if is_tx_complete {
             let mut complete_versions = Vec::with_capacity(complete_len);
             let mut complete_keys = BTreeSet::new();
-            for version in stored_versions
-                .drain(..)
-                .chain(bundle.versions.iter().cloned())
+            // The delivered versions come first: for an accepted transaction
+            // they are the authority's post-images, which replace this node's
+            // own copy (for the originator, its patch or its local merge).
+            for version in bundle
+                .versions
+                .iter()
+                .cloned()
+                .chain(stored_versions.drain(..))
             {
                 if complete_keys.insert(view_version_key(&version)) {
                     complete_versions.push(version);

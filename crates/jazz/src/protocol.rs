@@ -943,6 +943,13 @@ pub struct VersionRecord {
     /// presence is unavailable; consumers must conservatively treat every
     /// present payload cell as authored.
     authored_columns: Option<BTreeSet<String>>,
+    /// Per-column last-writer-wins stamps of this row image: empty when
+    /// unstamped (an uploaded patch), otherwise one unsigned 48-bit
+    /// little-endian Unix-millisecond stamp per plain column of the authored
+    /// table in schema order, then one for `_deletion`. Encoded as a postcard
+    /// byte sequence (varint length, raw bytes). See SPEC ch. 4, "Column
+    /// stamps".
+    col_stamps: Vec<u8>,
 }
 
 /// Explicit immutable-version row encoding. Outer sync framing owns lengths
@@ -1450,6 +1457,7 @@ impl VersionRecord {
             branch_key: BranchKey::default(),
             record,
             authored_columns: None,
+            col_stamps: Vec::new(),
         }
     }
 
@@ -1473,6 +1481,16 @@ impl VersionRecord {
 
     pub(crate) fn authored_columns(&self) -> Option<&BTreeSet<String>> {
         self.authored_columns.as_ref()
+    }
+
+    pub(crate) fn with_col_stamps(mut self, col_stamps: Vec<u8>) -> Self {
+        self.col_stamps = col_stamps;
+        self
+    }
+
+    /// Per-column stamp carrier (see the `col_stamps` field).
+    pub(crate) fn col_stamps(&self) -> &[u8] {
+        &self.col_stamps
     }
 
     /// Encode a wire record directly from typed row payload parts.
@@ -1706,6 +1724,7 @@ impl Ord for VersionRecord {
             .then_with(|| self.branch_key.cmp(&other.branch_key))
             .then_with(|| self.record.raw().cmp(other.record.raw()))
             .then_with(|| self.authored_columns.cmp(&other.authored_columns))
+            .then_with(|| self.col_stamps.cmp(&other.col_stamps))
     }
 }
 

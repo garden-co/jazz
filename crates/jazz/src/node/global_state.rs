@@ -291,6 +291,7 @@ where
         &mut self,
         batch: &DatabaseBatch,
         tx_id: TxId,
+        global_time: GlobalTime,
         versions: &[VersionRow],
     ) -> Result<Vec<VersionRow>, Error> {
         let mut updates = BTreeMap::<(String, BranchKey, RowUuid), VersionRow>::new();
@@ -302,7 +303,14 @@ where
                 ))?;
             let table_schema = self.table_in_schema(version.table(), authored_schema)?;
             if let Some(merged) = self
-                .merged_global_post_image(batch, authored_schema, &table_schema, version, tx_id)
+                .merged_global_post_image(
+                    batch,
+                    authored_schema,
+                    &table_schema,
+                    version,
+                    tx_id,
+                    global_time,
+                )
                 .await?
             {
                 updates.insert(

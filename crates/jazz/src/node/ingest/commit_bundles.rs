@@ -925,7 +925,9 @@ where
                         &batch, schema, stored.table(), stored.branch_key(), stored.row_uuid(),
                     )
                     .await?;
-                if current_seq.is_some_and(|current| current >= global_time) {
+                // The authority's image replaces a locally merged image at
+                // the same seq; only a newer seq keeps the row.
+                if current_seq.is_some_and(|current| current > global_time) {
                     continue;
                 }
             }

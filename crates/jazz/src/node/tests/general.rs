@@ -1416,6 +1416,7 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
                         .collect()
                 }),
             deletion,
+            col_stamps: Vec::new(),
         }
     }
 
@@ -1626,6 +1627,7 @@ fn malformed_persisted_authored_column_ids_never_reenter_derived_current_state()
                     cells: version.cells(&table).unwrap(),
                     authored_columns: Some(BTreeSet::from([PhysicalColumnId(invalid_id)])),
                     deletion: None,
+                    col_stamps: Vec::new(),
                 },
                 None,
                 None,

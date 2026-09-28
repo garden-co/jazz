@@ -64,9 +64,12 @@ where
         let mut global_current_updates = Vec::new();
         let cleanup_rejected_versions = matches!(stored.fate, Fate::Rejected(_));
         let tx_versions = self.query_versions_for_tx(tx_id).await?;
-        if matches!(stored.fate, Fate::Accepted) && stored.global_time.is_some() {
-            global_current_updates =
-                self.global_current_updates_for_versions(&batch, tx_id, &tx_versions).await?;
+        if matches!(stored.fate, Fate::Accepted)
+            && let Some(global_time) = stored.global_time
+        {
+            global_current_updates = self
+                .global_current_updates_for_versions(&batch, tx_id, global_time, &tx_versions)
+                .await?;
         }
         let contribution_merge = self.contribution_merge_storage_value(
             stored.tx.contribution_merge.as_ref(),

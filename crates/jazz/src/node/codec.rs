@@ -1992,7 +1992,8 @@ impl VersionRecord {
             OwnedRecord::new(raw, descriptor),
         )
         .with_branch_key(stored.branch_key().clone())
-        .with_authored_columns(authored_columns))
+        .with_authored_columns(authored_columns)
+        .with_col_stamps(stored.col_stamps_bytes()?.to_vec()))
     }
 }
 
@@ -2126,6 +2127,8 @@ pub(super) struct VersionRowParts {
     pub(super) cells: BTreeMap<String, Value>,
     pub(super) authored_columns: Option<BTreeSet<PhysicalColumnId>>,
     pub(super) deletion: Option<DeletionEvent>,
+    /// `_col_stamps` carrier: empty for an unstamped image.
+    pub(super) col_stamps: Vec<u8>,
 }
 
 // Record layout depends on the table name (enum registry binding) and ordered
@@ -2257,6 +2260,7 @@ impl VersionRow {
             ));
         }
         let deletion = version.deletion();
+        super::col_stamps::validate_stamps(version.col_stamps(), table)?;
         let descriptor = history_record_descriptor(table);
         let source = version.record().borrowed();
         let source_descriptor = source.descriptor();
@@ -2319,7 +2323,10 @@ impl VersionRow {
                         }
                         Value::Nullable(value.map(Box::new))
                     }
-                    _ => authored_column_ids_value(authored_columns.as_ref()),
+                    i if i == HistoryRowRecord::USER_CELLS + table.columns.len() => {
+                        authored_column_ids_value(authored_columns.as_ref())
+                    }
+                    _ => Value::Bytes(version.col_stamps().to_vec()),
                 };
                 descriptor.encode_field_into(index, &value, output)?;
                 Ok(())
@@ -2489,6 +2496,30 @@ impl VersionRow {
         };
         let value = nullable_value(self.record.borrowed().get_idx(field)?)?;
         value.map(authored_column_ids_from_value).transpose()
+    }
+
+    /// The `_col_stamps` carrier of this row image: empty when unstamped
+    /// (a pending patch, or a layout without the field).
+    pub(super) fn col_stamps_bytes(&self) -> Result<&[u8], Error> {
+        let Some(field) = self
+            .record
+            .descriptor()
+            .field_index(crate::schema::COLUMN_STAMPS_FIELD)
+        else {
+            return Ok(&[]);
+        };
+        Ok(self.record.borrowed().get_bytes(field)?)
+    }
+
+    /// Decode this image's stamps for its own table layout.
+    pub(super) fn col_stamps(
+        &self,
+        table: &TableSchema,
+    ) -> Result<Option<super::col_stamps::ColumnStamps>, Error> {
+        super::col_stamps::ColumnStamps::decode(
+            self.col_stamps_bytes()?,
+            &super::col_stamps::StampSlots::for_table(table),
+        )
     }
 
     pub(super) fn to_history_entry(
@@ -3649,6 +3680,7 @@ pub(super) fn history_values_from_parts(
         ));
     }
     values.push(authored_column_ids_value(version.authored_columns.as_ref()));
+    values.push(Value::Bytes(version.col_stamps.clone()));
     Ok(values)
 }
 
@@ -3690,6 +3722,7 @@ fn history_values_from_wire(
         values.push(Value::Nullable(value.map(Box::new)));
     }
     values.push(authored_column_ids_value(authored_columns.as_ref()));
+    values.push(Value::Bytes(version.col_stamps().to_vec()));
     Ok(values)
 }
 
@@ -3764,6 +3797,7 @@ pub(super) fn global_current_values(
     values.push(authored_column_ids_value(
         version.authored_column_ids()?.as_ref(),
     ));
+    values.push(Value::Bytes(version.col_stamps_bytes()?.to_vec()));
     Ok(values)
 }
 

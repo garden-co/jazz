@@ -292,14 +292,23 @@ where
             )?;
             let mut stored = stored;
             if update_current_indexes && matches!(fate, Fate::Accepted) {
-                if global_time.is_some() && self.minting_global_time {
+                if let Some(global_time) = global_time
+                    && self.minting_global_time
+                {
                     let key = (
                         stored.table().to_owned(),
                         stored.branch_key().clone(),
                         stored.row_uuid(),
                     );
                     if let Some(merged) = self
-                        .merged_global_post_image(batch, author_schema, &table_schema, &stored, tx.tx_id)
+                        .merged_global_post_image(
+                            batch,
+                            author_schema,
+                            &table_schema,
+                            &stored,
+                            tx.tx_id,
+                            global_time,
+                        )
                         .await?
                     {
                         // History holds the post-image at this seq; peers
@@ -314,7 +323,12 @@ where
                         stored.row_uuid(),
                     );
                     // Accepted rows from upstream are post-images at their
-                    // seq: a newer seq replaces the row whole.
+                    // seq: a newer seq replaces the row whole. So does the
+                    // authority's image at the seq this node already holds:
+                    // an originator merges its own write when its fate
+                    // arrives, possibly over a base that misses earlier seqs
+                    // it has not received yet, and that local merge is only
+                    // a prediction of Core's post-image.
                     let current_seq = self
                         .global_current_seq_in_batch(
                             batch,
@@ -324,7 +338,7 @@ where
                             stored.row_uuid(),
                         )
                         .await?;
-                    if current_seq.is_none_or(|current| Some(current) < global_time) {
+                    if current_seq.is_none_or(|current| Some(current) <= global_time) {
                         pending_global_updates.insert(key, stored.clone());
                     }
                 }

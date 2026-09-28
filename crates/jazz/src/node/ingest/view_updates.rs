@@ -4,11 +4,18 @@ where
 {
     /// Apply an accepted write to the row's post-image, one column at a time.
     ///
-    /// Plain columns are last-writer-wins per column: a write sets each column
-    /// it authored unless a later write (by `(tx_time, node)`) already set that
-    /// column. `_deletion` is one more column. The row carries the identity
-    /// and update provenance of its newest write. Returns `None` when the
-    /// post-image does not change.
+    /// Plain columns are last-writer-wins per column by stamp. The write's
+    /// stamp is its transaction time clamped to the seq it was accepted at:
+    /// `min(tx physical ms, seq physical ms)`. Core mints the seq from its own
+    /// clock when it receives the write, so this is Core's zero-tolerance
+    /// clamp; every node replaying the same seq computes the same stamp. A
+    /// write sets each plain column it authored iff its stamp is at least the
+    /// column's stored stamp; ties go to the higher seq (writes apply in seq
+    /// order, so normally the incoming write). `_deletion` is one more stamped
+    /// column. Merge columns apply their op whatever the stamps. The row
+    /// keeps this write's identity (it is the row as of this seq); its
+    /// `updated_by`/`updated_at` follow the write with the highest stamp.
+    /// Returns `None` when the post-image does not change.
     pub(super) async fn merged_global_post_image(
         &mut self,
         batch: &DatabaseBatch,
@@ -16,9 +23,26 @@ where
         table_schema: &TableSchema,
         incoming: &VersionRow,
         incoming_tx: TxId,
+        global_time: GlobalTime,
     ) -> Result<Option<VersionRow>, Error> {
-        let Some(previous) = self
-            .query_global_winner_in_batch(
+        use crate::node::col_stamps::{ColumnStamps, StampSlots, max_stamp};
+
+        let stamp = incoming
+            .tx_time()
+            .physical_ms()
+            .min(global_time.physical_ms());
+        let slots = StampSlots::for_table(table_schema);
+        let authored = self.authored_columns_for_version(incoming)?;
+        let authors = |name: &str| authored.as_ref().is_none_or(|columns| columns.contains(name));
+        let stamps_index = incoming
+            .record
+            .descriptor()
+            .field_index(crate::schema::COLUMN_STAMPS_FIELD)
+            .ok_or(Error::InvalidStoredValue(
+                "row image layout has no column stamps field",
+            ))?;
+        let Some((previous, previous_seq)) = self
+            .query_global_winner_with_seq_in_batch(
                 batch,
                 schema_version,
                 &table_schema.name,
@@ -27,75 +51,96 @@ where
             )
             .await?
         else {
-            return Ok(Some(incoming.clone()));
+            // The first image of a row: the columns this write authored
+            // carry its stamp; columns nobody has set yet carry 0.
+            let mut stamps = ColumnStamps::uniform(&slots, 0);
+            for (index, column) in table_schema.columns.iter().enumerate() {
+                if let Some(slot) = slots.column(index)
+                    && authors(&column.name)
+                {
+                    stamps.set(slot, stamp);
+                }
+            }
+            if authors(DELETION_COLUMN_NAME) {
+                stamps.set(slots.deletion(), stamp);
+            }
+            let mut values = incoming.record.to_values()?;
+            values[stamps_index] = Value::Bytes(stamps.encode());
+            return incoming.with_record_values(values).map(Some);
         };
         let previous_tx = self.version_tx_id(&previous)?;
         if previous_tx == incoming_tx {
             return Ok(None);
         }
-        let incoming_is_newest = incoming_tx > previous_tx;
+        // Ties go to the later seq. Writes apply in seq order, so this write
+        // is normally later than every write already in the row; a node that
+        // applies an older seq late (an out-of-order fate) lets it lose ties.
+        let applies_later = previous_seq.is_none_or(|previous_seq| global_time > previous_seq);
+        let beats = |stored: u64| stamp > stored || (stamp == stored && applies_later);
+        // An unstamped previous image (legacy, or a lens-translated payload)
+        // counts as stamp 0 everywhere: any stamped write may replace it.
+        let previous_row_stamp = max_stamp(previous.col_stamps_bytes()?)?;
+        let incoming_is_newest = beats(previous_row_stamp);
         if previous.schema_version_alias() != incoming.schema_version_alias() {
             // Different authored layouts: keep whole-row last-writer-wins
-            // until post-images are stored in physical form.
-            return Ok(incoming_is_newest.then(|| incoming.clone()));
-        }
-        let authored = self.authored_columns_for_version(incoming)?;
-        let authors = |name: &str| authored.as_ref().is_none_or(|columns| columns.contains(name));
-        // Columns set by writes newer than this one keep their value. Only a
-        // late write needs this history scan.
-        let mut newer_sets = BTreeSet::<String>::new();
-        let mut newer_sets_everything = false;
-        if !incoming_is_newest {
-            for version in self
-                .query_row_versions_in_branch(
-                    &table_schema.name,
-                    incoming.branch_key(),
-                    incoming.row_uuid(),
-                )
-                .await?
-            {
-                if self.version_tx_id(&version)? <= incoming_tx {
-                    continue;
-                }
-                match self.authored_columns_for_version(&version)? {
-                    Some(columns) => newer_sets.extend(columns),
-                    None => newer_sets_everything = true,
-                }
+            // until post-images are stored in physical form. The winner's
+            // stamp covers every column of its image.
+            if !incoming_is_newest {
+                return Ok(None);
             }
+            let mut values = incoming.record.to_values()?;
+            values[stamps_index] = Value::Bytes(ColumnStamps::uniform(&slots, stamp).encode());
+            return incoming.with_record_values(values).map(Some);
         }
-        let wins = |name: &str| {
-            authors(name) && !newer_sets_everything && !newer_sets.contains(name)
+        let mut stamps = previous
+            .col_stamps(table_schema)?
+            .unwrap_or_else(|| ColumnStamps::uniform(&slots, 0));
+        // A plain column takes this write's value iff the write authored it
+        // and its stamp is at least the column's stamp.
+        let mut wins = |name: &str, slot: usize| {
+            let wins = authors(name) && beats(stamps.get(slot));
+            if wins {
+                stamps.set(slot, stamp);
+            }
+            wins
         };
         // The post-image keeps the incoming write's identity: it is the row
-        // as of this write's seq. Only cells that a newer write set keep
-        // their value from the previous image.
+        // as of this write's seq. Cells this write did not win keep their
+        // value from the previous image.
         let mut merged = incoming.record.to_values()?;
         let previous_values = previous.record.to_values()?;
         let keep = |merged: &mut Vec<Value>, index: usize| {
             merged[index] = previous_values[index].clone();
         };
-        if !wins(DELETION_COLUMN_NAME) {
+        if !wins(DELETION_COLUMN_NAME, slots.deletion()) {
             keep(&mut merged, HistoryRowRecord::FIELD__DELETION_IDX);
         }
         for (index, column) in table_schema.columns.iter().enumerate() {
-            let index = HistoryRowRecord::USER_CELLS + index;
-            let strategy = table_schema.merge_strategy(&column.name);
-            if strategy != crate::schema::MergeStrategy::Lww {
-                // Merge columns are ops: they apply in seq order whatever
-                // their stamps.
-                merged[index] = if authors(&column.name) {
-                    // History cells are stored nullable.
-                    Value::Nullable(Some(Box::new(crate::node::merge_ops::apply_merge_op(
-                        strategy,
-                        &column.column_type,
-                        &previous_values[index],
-                        &merged[index],
-                    )?)))
-                } else {
-                    previous_values[index].clone()
-                };
-            } else if !wins(&column.name) {
-                keep(&mut merged, index);
+            let field = HistoryRowRecord::USER_CELLS + index;
+            match slots.column(index) {
+                Some(slot) => {
+                    if !wins(&column.name, slot) {
+                        keep(&mut merged, field);
+                    }
+                }
+                None => {
+                    // Merge columns are ops: they apply in seq order
+                    // whatever their stamps.
+                    let strategy = table_schema.merge_strategy(&column.name);
+                    merged[field] = if authors(&column.name) {
+                        // History cells are stored nullable.
+                        Value::Nullable(Some(Box::new(
+                            crate::node::merge_ops::apply_merge_op(
+                                strategy,
+                                &column.column_type,
+                                &previous_values[field],
+                                &merged[field],
+                            )?,
+                        )))
+                    } else {
+                        previous_values[field].clone()
+                    };
+                }
             }
         }
         if !incoming_is_newest {
@@ -108,6 +153,7 @@ where
         ] {
             keep(&mut merged, index);
         }
+        merged[stamps_index] = Value::Bytes(stamps.encode());
         incoming.with_record_values(merged).map(Some)
     }
 
@@ -138,12 +184,11 @@ where
         else {
             return Ok(None);
         };
-        Ok(
-            match raw.record().get_idx(GlobalCurrentRowRecord::FIELD_GLOBAL_TIME_IDX)? {
-                Value::U64(seq) => Some(GlobalTime(seq)),
-                _ => None,
-            },
-        )
+        // `global_time` is a nullable field: read it as one.
+        Ok(raw
+            .record()
+            .get_nullable_u64(GlobalCurrentRowRecord::FIELD_GLOBAL_TIME_IDX)?
+            .map(GlobalTime))
     }
 
     async fn query_global_winner_in_batch(
@@ -152,7 +197,23 @@ where
         schema_version: SchemaVersionId,
         table: &str,
         branch_key: &BranchKey,
-        row_uuid: RowUuid,) -> Result<Option<VersionRow>, Error> {
+        row_uuid: RowUuid,
+    ) -> Result<Option<VersionRow>, Error> {
+        Ok(self
+            .query_global_winner_with_seq_in_batch(batch, schema_version, table, branch_key, row_uuid)
+            .await?
+            .map(|(winner, _)| winner))
+    }
+
+    /// The row's global post-image together with the seq it is the row at.
+    async fn query_global_winner_with_seq_in_batch(
+        &mut self,
+        batch: &DatabaseBatch,
+        schema_version: SchemaVersionId,
+        table: &str,
+        branch_key: &BranchKey,
+        row_uuid: RowUuid,
+    ) -> Result<Option<(VersionRow, Option<GlobalTime>)>, Error> {
         let current_table = self.physical_current_table_for_schema(
             schema_version,
             table,
@@ -170,10 +231,14 @@ where
             return Ok(None);
         };
         let current = raw.owned_record();
+        let seq = current
+            .borrowed()
+            .get_nullable_u64(GlobalCurrentRowRecord::FIELD_GLOBAL_TIME_IDX)?
+            .map(GlobalTime);
         if let Some(winner) =
             self.history_image_from_current_record(schema_version, table, current.borrowed())?
         {
-            return Ok(Some(winner));
+            return Ok(Some((winner, seq)));
         }
         let record = current.borrowed();
         let tx_time = TxTime(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?);
@@ -188,6 +253,7 @@ where
             tx_time,
             tx_node_alias,)
         .await
+        .map(|winner| winner.map(|winner| (winner, seq)))
     }
 
     async fn query_version_by_alias_in_batch(
@@ -366,6 +432,14 @@ where
             global_current_primary_key(version.branch_key(), version.row_uuid()),
             physical,
         );
+        // A node that has seen a column stamp must stamp its own later
+        // writes at least as high, so an edit made after observing a value
+        // is never older than that value. The row's identity is the write at
+        // its seq, which need not carry the row's highest stamp.
+        let observed = crate::node::col_stamps::max_stamp(version.col_stamps_bytes()?)?;
+        self.merge_tx_time(TxTime::from_physical_ms(observed).map_err(|_| {
+            Error::InvalidStoredValue("column stamp exceeds the packed HLC range")
+        })?);
         let overlay_key = self.ahead_overlay_key(version)?;
         if self.ahead_current_keys.contains_key(&overlay_key) {
             self.mark_ahead_shadow_dirty(schema_version, version);
