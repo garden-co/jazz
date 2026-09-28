@@ -240,6 +240,11 @@ provide the server URL and secret through `--server-url` and `--admin-secret` or
 
 ## Compiling the schema
 
+Use `schema compile` when working on a non-TypeScript Jazz application that needs to consume the schema written in TypeScript (e.g. when using our Rust bindings).
+
+You don't need to run it as part of the normal migration workflow: `migrations create` saves
+the required snapshots, and `deploy` compiles the schema before publishing.
+
 `pnpm dlx jazz-tools@alpha schema compile` prints the compiled schema as JSON to stdout. It
 also saves a snapshot of the schema in the local snapshot directory.
 
