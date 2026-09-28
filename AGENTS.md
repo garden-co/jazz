@@ -169,7 +169,8 @@ boundary. Ordinary small package builds may use Turbo normally, but must never
 add `.native-artifacts/**`, WASM `pkg/**`, or the correctness-artifact store as
 cacheable outputs.
 
-- `cargo test -p jazz`
+- `cargo test -p jazz -p jazz-types -p jazz-model` (the layer crates carry the moved unit
+  tests; `-p jazz` alone skips them)
 - `cargo test -p groove`
 - `cargo test -p jazz --no-default-features --features testing,transport-compression-zstd` (matches `crates/jazz/TESTING_GUIDELINES.md`).
 - `cargo test -p jazz-cli --features test` covers the `jazz-tools` and
