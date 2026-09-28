@@ -23,6 +23,8 @@ mod large_value_query;
 mod multisink_subscription;
 #[path = "../operator_pipeline.rs"]
 mod operator_pipeline;
+#[path = "../plain_output_positions_unbounded.rs"]
+mod plain_output_positions_unbounded;
 #[path = "../plain_output_root_positions.rs"]
 mod plain_output_root_positions;
 #[path = "../prepared_batches.rs"]

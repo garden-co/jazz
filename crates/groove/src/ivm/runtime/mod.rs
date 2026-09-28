@@ -48,6 +48,7 @@ use thiserror::Error;
 
 mod aggregate;
 mod compilation_cache;
+mod counted_map;
 mod evaluation_memo;
 pub(crate) mod evaluation_session;
 mod join;
@@ -60,6 +61,7 @@ mod terminal;
 mod typed_template;
 
 use aggregate::{aggregate_row_from_records, records_before_from_deltas, resolve_aggregate_expr};
+use counted_map::CountedMap;
 use evaluation_memo::EvaluationMemo;
 use join::{
     AntiJoinState, ArrangementState, JoinInput, JoinState, SemiJoinState, touched_join_keys,
