@@ -35,6 +35,7 @@ export async function authJazzClient(): Promise<JazzClient> {
     // JWTs against this app's own JWKS before resolving the Jazz account.
     jwksUrl: `${configuredIssuer}/api/auth/jwks`,
     jwtIssuer: configuredIssuer,
+    jwtAudience: configuredIssuer,
     tier: "global",
   }));
   try {
