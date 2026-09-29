@@ -3,7 +3,6 @@ import { createRequire as createRequireFromModule } from "node:module";
 import { app } from "@/schema";
 import permissions from "@/permissions";
 import { serverConfig } from "./config";
-import { serverSecret } from "@/src/lib/server-secret";
 
 // Load the native backend at runtime rather than through the Next bundler.
 const createRequire =
@@ -32,7 +31,7 @@ export async function backend(): Promise<JazzClient> {
     driver: { type: "memory" },
     serverUrl: serverConfig.serverUrl,
     initial: {
-      backendSecret: serverSecret("BACKEND_SECRET"),
+      backendSecret: serverConfig.backendSecret,
     },
     env: serverConfig.isLocal ? "dev" : "prod",
     tier: "global",

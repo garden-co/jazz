@@ -8,7 +8,10 @@ import { Spinner } from "@astryxdesign/core/Spinner";
 import { VStack } from "@astryxdesign/core/Stack";
 import { Heading, Text } from "@astryxdesign/core/Text";
 import { Elements, PaymentElement, useElements, useStripe } from "@stripe/react-stripe-js";
-import { loadStripe, type Stripe } from "@stripe/stripe-js";
+// The pure entry loads Stripe.js only when a Stripe payment is shown, not on
+// every page that imports this module (sandbox runs never contact Stripe).
+import type { Stripe } from "@stripe/stripe-js";
+import { loadStripe } from "@stripe/stripe-js/pure";
 import { useState } from "react";
 import type { Order, Payment as PaymentRow } from "@/schema";
 import { requireBetterAuthToken } from "@/src/lib/auth-client";

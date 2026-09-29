@@ -5,12 +5,11 @@ import { jazzAdapter } from "jazz-tools/better-auth-adapter";
 import { app } from "@/schema";
 import { backend } from "./backend";
 import { serverConfig } from "./config";
-import { serverSecret } from "@/src/lib/server-secret";
 
 export const auth = betterAuth({
   baseURL: serverConfig.origin,
   trustedOrigins: [serverConfig.origin],
-  secret: serverSecret("BETTER_AUTH_SECRET"),
+  secret: serverConfig.betterAuthSecret,
   database: jazzAdapter({ db: async () => (await backend()).db, schema: app.wasmSchema }),
   emailAndPassword: {
     enabled: true,
