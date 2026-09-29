@@ -21,6 +21,10 @@ export default withJazz(
     server: {
       backendSecret: config.backendSecret,
       jwksUrl: `${config.origin}/api/auth/jwks`,
+      // Without an issuer and audience the server rejects every Better Auth
+      // JWT, and sign-up fails with "account_request_failed" (garden-co/jazz#3766).
+      jwtIssuer: config.origin,
+      jwtAudience: config.origin,
     },
   },
 );

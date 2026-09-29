@@ -2,7 +2,6 @@ import {
   assertBuildConfiguration,
   paymentProvider,
   readBuildConfig,
-  usesLocalDefaults,
 } from "@/src/lib/build-config.mjs";
 
 // Next inlines NEXT_PUBLIC_* values (including the app id and server URL that
@@ -26,7 +25,6 @@ export const serverConfig = {
   origin: build.origin,
   appId: build.appId,
   serverUrl: build.serverUrl,
-  isLocal: usesLocalDefaults(build),
   paymentProvider: paymentProvider(build),
   stripeSecretKey: build.stripeSecretKey,
   backendSecret: build.backendSecret!,

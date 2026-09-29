@@ -11,6 +11,7 @@ import { JazzProvider, useDb, useJazzAuth, useSession } from "jazz-tools/react";
 import { createContext, useContext, useEffect, useMemo, useRef, type ReactNode } from "react";
 import { authClient, requireBetterAuthToken } from "@/src/lib/auth-client";
 import { LOCAL_DEFAULTS } from "@/src/lib/build-config.mjs";
+import { jazzEnv } from "@/src/lib/jazz-env";
 import { claimGuestCart, readGuestCart, type GuestCartLine } from "@/src/store/cart";
 import { StoreShell } from "./StoreShell";
 
@@ -53,6 +54,7 @@ export function StoreProviders({ children }: { children: ReactNode }) {
       <JazzProvider
         appId={appId}
         serverUrl={serverUrl}
+        env={jazzEnv}
         initial="local-first"
         loading={<Opening />}
         error={(state) => <OpenFailed error={state.error} retry={state.retry} />}

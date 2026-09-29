@@ -18,6 +18,7 @@ export async function requireShopper(request: Request): Promise<{ account: strin
     accountRegistry: accountRegistryUrl(serverConfig.serverUrl, serverConfig.appId),
     jwksUrl: `${serverConfig.origin}/api/auth/jwks`,
     jwtIssuer: serverConfig.origin,
+    jwtAudience: serverConfig.origin,
     allowLocalFirstAuth: false,
   }).catch(() => {
     throw new CheckoutError("Your session could not be verified. Sign in again.", 401);

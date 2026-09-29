@@ -2,6 +2,7 @@ import type { JazzClient } from "jazz-tools/backend";
 import { createRequire as createRequireFromModule } from "node:module";
 import { app } from "@/schema";
 import permissions from "@/permissions";
+import { jazzEnv } from "@/src/lib/jazz-env";
 import { serverConfig } from "./config";
 
 // Load the native backend at runtime rather than through the Next bundler.
@@ -33,7 +34,8 @@ export async function backend(): Promise<JazzClient> {
     initial: {
       backendSecret: serverConfig.backendSecret,
     },
-    env: serverConfig.isLocal ? "dev" : "prod",
+    env: jazzEnv,
+    jwtAudience: serverConfig.origin,
     tier: "global",
   }));
   try {
