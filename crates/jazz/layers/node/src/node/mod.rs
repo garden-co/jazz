@@ -2688,7 +2688,24 @@ pub struct MergeableCommit {
     known_fresh_row: bool,
 }
 
+// Match scalar lowering. Existing descriptors are validated/promoted rather
+// than staged again; inline edits to rows containing them need no barrier.
+fn value_needs_large_value_staging(value: &Value) -> bool {
+    match value {
+        Value::String(text) => text.len() > groove::large_values::INLINE_VALUE_MAX_BYTES,
+        Value::Bytes(bytes) => bytes.len() > groove::large_values::INLINE_VALUE_MAX_BYTES,
+        Value::Nullable(Some(value)) => value_needs_large_value_staging(value),
+        _ => false,
+    }
+}
+
 impl MergeableCommit {
+    /// Whether publication can enter the independently persisted chunk lifecycle.
+    #[doc(hidden)]
+    pub fn needs_large_value_staging(&self) -> bool {
+        self.cells.values().any(value_needs_large_value_staging)
+    }
+
     /// Construct an empty mergeable commit builder.
     pub fn new(table: impl Into<String>, row_uuid: RowUuid, now_ms: u64) -> Self {
         Self {
@@ -3174,6 +3191,24 @@ fn validate_mergeable_write_shape(cells_empty: bool, deletion_present: bool) -> 
             "mergeable commits must carry content cells or a deletion-register event",
         )),
     }
+}
+
+#[cfg(test)]
+#[test]
+fn mergeable_write_shape_requires_exactly_one_register() {
+    // Content-only and deletion-only writes are well formed.
+    assert!(validate_mergeable_write_shape(false, false).is_ok());
+    assert!(validate_mergeable_write_shape(true, true).is_ok());
+    // A write carrying neither stays invalid: inserts with every column
+    // omitted author explicit null cells instead of relaxing this check.
+    assert!(matches!(
+        validate_mergeable_write_shape(true, false),
+        Err(Error::InvalidMergeableCommit(message)) if message.contains("must carry content cells")
+    ));
+    assert!(matches!(
+        validate_mergeable_write_shape(false, true),
+        Err(Error::InvalidMergeableCommit(message)) if message.contains("cannot also carry deletion")
+    ));
 }
 
 #[cfg(test)]
