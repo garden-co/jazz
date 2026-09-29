@@ -2,6 +2,7 @@ import { createPolicyTestApp, type PolicyTestApp } from "jazz-tools/testing";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { app } from "../../schema.js";
 import permissions from "../../permissions.js";
+import { seedDemoShow } from "../../src/model/seed.js";
 
 /**
  * Three people: Chiara runs the show (crew chief), Cole is on her crew,
@@ -116,6 +117,25 @@ describe("StagePlan permissions", () => {
     await expect(outsider.all(app.activity.where({ showId: ctx.show.id }))).resolves.toEqual([]);
     await expect(outsider.all(app.showCrew.where({ showId: ctx.show.id }))).resolves.toEqual([]);
     await expect(outsider.all(app.showInvites.where({ showId: ctx.show.id }))).resolves.toEqual([]);
+  });
+
+  it("accepts a new account's demo show, created in one transaction as the app does", async () => {
+    const chief = testApp.as(session("chiara", chiefAccount));
+    const profile = await chief
+      .insert(app.crew, { account: chiefAccount, name: "Chiara" })
+      .wait({ tier: "global" });
+
+    const { show, writes } = await seedDemoShow(chief, { account: chiefAccount, profile });
+    await Promise.all(writes.map((write) => write.wait({ tier: "global" })));
+
+    const tasks = await chief.all(app.tasks.where({ showId: show.id }), { tier: "global" });
+    expect(tasks).toHaveLength(8);
+    const [membership] = await chief.all(app.showCrew.where({ showId: show.id }), {
+      tier: "global",
+    });
+    expect(membership).toMatchObject({ account: chiefAccount, role: "chief" });
+    const comments = await chief.all(app.comments, { tier: "global" });
+    expect(comments).toHaveLength(1);
   });
 
   it("stops outsiders from writing to a show they are not on", async () => {

@@ -42,10 +42,17 @@ export function newInviteCode() {
 
 export type ShowInput = Pick<Show, "name" | "venue" | "date" | "doors">;
 
-/** Creates a show with the creator as crew chief and a first invite code. */
+/**
+ * Creates a show with the creator as crew chief and a first invite code.
+ *
+ * The show is its own write. The membership and invite policies check the
+ * show row, and the server checks a transaction's rows against data from
+ * before that transaction, so they can't share one with the show.
+ */
 export async function createShow(db: Db, me: Me, input: ShowInput) {
-  const result = await db.transaction((tx) => {
-    const show = tx.insert(app.shows, { ...input, chiefAccount: me.account });
+  const showWrite = db.insert(app.shows, { ...input, chiefAccount: me.account });
+  const show = showWrite.value;
+  const membership = await db.transaction((tx) => {
     tx.insert(app.showCrew, {
       showId: show.id,
       crewId: me.profile.id,
@@ -53,9 +60,9 @@ export async function createShow(db: Db, me: Me, input: ShowInput) {
       role: "chief",
     });
     tx.insert(app.showInvites, { showId: show.id, code: newInviteCode() });
-    return show;
   });
-  return result.value;
+  // The writes let callers wait for the server to accept the new show.
+  return { show, writes: [showWrite, membership] };
 }
 
 export function updateShow(db: Db, showId: string, input: ShowInput) {

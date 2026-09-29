@@ -31,7 +31,7 @@ function useMe(route: Route): Me | undefined {
     if (!bootstrap) {
       bootstrap = ensureProfile(db, account).then(async ({ profile, isNew }) => {
         // Someone opening an invite link starts with that show, not the demo.
-        if (isNew && !arrivedByInvite) await seedDemoShow(db, account, profile);
+        if (isNew && !arrivedByInvite) await seedDemoShow(db, { account, profile });
       });
       bootstraps.set(account, bootstrap);
       bootstrap.catch((error) => {

@@ -74,7 +74,7 @@ export function ShowList() {
         isOpen={isCreating}
         onOpenChange={setCreating}
         onSubmit={async (input) => {
-          const show = await createShow(db, me, input);
+          const { show } = await createShow(db, me, input);
           navigate(href.show(show.id));
         }}
       />

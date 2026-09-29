@@ -1,5 +1,6 @@
 import type { Db } from "jazz-tools";
 import { app, type Crew, type TaskStatus } from "../../schema.js";
+import { addComment, createShow, type Me } from "./actions.js";
 
 /**
  * The demo show every new account starts with. The content is fixed, so every
@@ -46,41 +47,43 @@ export async function ensureProfile(
   return { profile: profile.value, isNew: true };
 }
 
-/** Creates the demo show for a new account, with its board, a comment and activity. */
-export async function seedDemoShow(db: Db, account: string, profile: Crew) {
-  await db.transaction((tx) => {
-    const show = tx.insert(app.shows, { ...DEMO_SHOW, chiefAccount: account });
-    tx.insert(app.showCrew, { showId: show.id, crewId: profile.id, account, role: "chief" });
-    tx.insert(app.showInvites, { showId: show.id, code: crypto.randomUUID() });
+/**
+ * Creates the demo show for a new account: the show, its crew chief and
+ * invite, the board with its activity, and a first comment.
+ *
+ * Each write only depends on earlier writes, never on rows in its own
+ * transaction: the server checks a transaction's rows against data from
+ * before it, so a task can't share a transaction with the show it belongs to.
+ */
+export async function seedDemoShow(db: Db, me: Me) {
+  const { show, writes } = await createShow(db, me, DEMO_SHOW);
 
-    DEMO_TASKS.forEach((demo, index) => {
+  const board = await db.transaction((tx) =>
+    DEMO_TASKS.map((demo, index) => {
       const task = tx.insert(app.tasks, {
         showId: show.id,
         title: demo.title,
         status: demo.status,
-        assigneeId: demo.mine ? profile.id : null,
+        assigneeId: demo.mine ? me.profile.id : null,
         notes: demo.notes ?? null,
         rank: index + 1,
       });
       tx.insert(app.activity, {
         showId: show.id,
         taskId: task.id,
-        actorId: profile.id,
+        actorId: me.profile.id,
         kind: "created",
       });
-      if (demo.title === "Line check") {
-        tx.insert(app.comments, {
-          taskId: task.id,
-          authorId: profile.id,
-          body: "Channel 7 crackles. Swapping the DI box before soundcheck.",
-        });
-        tx.insert(app.activity, {
-          showId: show.id,
-          taskId: task.id,
-          actorId: profile.id,
-          kind: "commented",
-        });
-      }
-    });
-  });
+      return task;
+    }),
+  );
+
+  const lineCheck = board.value.find((task) => task.title === "Line check")!;
+  const comment = await addComment(
+    db,
+    me,
+    lineCheck,
+    "Channel 7 crackles. Swapping the DI box before soundcheck.",
+  );
+  return { show, writes: [...writes, board, comment] };
 }
