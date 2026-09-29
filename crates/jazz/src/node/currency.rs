@@ -157,6 +157,25 @@ where
         .await
     }
 
+    /// The row as this node sees it locally: the pending overlay when the row
+    /// has one, and the synced (global current) image otherwise. A settled
+    /// row has no overlay, so an overlay-only read would miss it entirely.
+    pub(super) async fn query_local_view_winner_in_branch(
+        &mut self,
+        table: &str,
+        branch_key: &BranchKey,
+        row_uuid: RowUuid,
+    ) -> Result<Option<VersionRow>, Error> {
+        if let Some(overlay) = self
+            .query_local_winner_in_branch(table, branch_key, row_uuid)
+            .await?
+        {
+            return Ok(Some(overlay));
+        }
+        self.query_global_winner_in_branch(table, branch_key, row_uuid)
+            .await
+    }
+
     /// Return the newest locally known version for a row/layer except one
     /// candidate transaction.  Authority finalization persists its candidate
     /// before assigning fate, so policy classification must be able to find
