@@ -2764,8 +2764,13 @@ where
                                     && (pending_view_updates.iter().any(|pending| pending.parts.subscription == subscription)
                                         || !self.node.lock().await.holds_supporting_revision(subscription, *predecessor))
                                 {
-                                    let request = sent_subscriptions.get(&subscription).ok_or(
-                                        crate::node::Error::InvalidStoredValue("catch-up has no admitted subscription"))?;
+                                    // A late catch-up for a view this link no longer
+                                    // serves (unsubscribed or replaced after a reopen)
+                                    // has nothing to re-request.
+                                    let Some(request) = sent_subscriptions.get(&subscription) else {
+                                        self.node.lock().await.remember_discarded_pending_view_transactions(&view.version_carriers).await?;
+                                        continue;
+                                    };
                                     self.node.lock().await.forget_supporting_revision(subscription);
                                     awaiting_support_snapshots.insert(subscription, settled_through);
                                     pending.push(PendingUpstreamCommand::Subscribe(request.clone()));
