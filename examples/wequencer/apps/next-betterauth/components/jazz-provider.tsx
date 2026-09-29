@@ -10,6 +10,7 @@ import {
   type JWTAuth,
 } from "jazz-tools/react";
 import { authClient } from "@/lib/auth-client";
+import { JAZZ_ENV } from "@/lib/jazz-env";
 import { JazzLifecycle } from "@/lib/jazz-lifecycle";
 import { ErrorScreen, LoadingScreen } from "@/components/status-screen";
 
@@ -135,40 +136,51 @@ function EnrolledProvider({
   if (!lifecycleRef.current)
     lifecycleRef.current = new JazzLifecycle(
       accounts,
-      (account) => createJazzClient({ appId: APP_ID, serverUrl: SERVER_URL, account }),
+      (account) =>
+        createJazzClient({ appId: APP_ID, serverUrl: SERVER_URL, env: JAZZ_ENV, account }),
       setClient,
     );
   const lifecycle = lifecycleRef.current;
 
-  const enrollAndBootstrap = useCallback(async () => {
-    const registering = claimsSignupIntent(email, identityId);
-    setError(undefined);
-    setReady(false);
-    await lifecycle.transition(
-      (manager) =>
-        registering
-          ? manager.registerJWT({ getToken: getJazzToken })
-          : manager.loginJWT({ getToken: getJazzToken }),
-      () => active.current,
-    );
-    if (registering) clearSignupIntent();
-    const token = await getJazzToken();
-    const response = await fetch("/api/bootstrap", {
-      method: "POST",
-      headers: { authorization: `Bearer ${token}` },
-    });
-    if (!response.ok) throw new Error(`Profile bootstrap failed (${response.status})`);
-    if (active.current) setReady(true);
-  }, [email, identityId, lifecycle]);
+  const enrollAndBootstrap = useCallback(
+    async (isCurrent: () => boolean) => {
+      const registering = claimsSignupIntent(email, identityId);
+      setError(undefined);
+      setReady(false);
+      await lifecycle.transition(
+        (manager) =>
+          registering
+            ? manager.registerJWT({ getToken: getJazzToken })
+            : manager.loginJWT({ getToken: getJazzToken }),
+        isCurrent,
+      );
+      if (!isCurrent()) return;
+      if (registering) clearSignupIntent();
+      const token = await getJazzToken();
+      const response = await fetch("/api/bootstrap", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}` },
+      });
+      if (!response.ok) throw new Error(`Profile bootstrap failed (${response.status})`);
+      if (isCurrent()) setReady(true);
+    },
+    [email, identityId, lifecycle],
+  );
 
   useEffect(() => {
+    // Each run gets its own token. React may start this effect, clean it up and
+    // start it again before the first run's queued transition executes; the
+    // abandoned run must then skip registration rather than register twice.
+    let current = true;
+    const isCurrent = () => current;
     active.current = true;
-    void enrollAndBootstrap().catch((cause) => {
-      if (active.current) setError(toError(cause));
+    void enrollAndBootstrap(isCurrent).catch((cause) => {
+      if (isCurrent()) setError(toError(cause));
     });
     return () => {
+      current = false;
       active.current = false;
-      // A late open sees active=false and retires itself instead of publishing
+      // A late open sees a stale token and retires itself instead of publishing
       // into a replacement session. The cleanup rejection is observed here.
       void lifecycle.close().catch((cause) => console.error("Jazz shutdown failed", cause));
     };
