@@ -52,10 +52,26 @@ where
         }
     }
 
-    async fn transaction_is_exclusive(&self, id: OpenTransactionId) -> Result<bool, Error> {
+    pub(super) async fn transaction_is_exclusive(
+        &self,
+        id: OpenTransactionId,
+    ) -> Result<bool, Error> {
         self.lock_for_transaction_operation(id)
             .await?
             .transaction_is_exclusive(id)
+            .map_err(Into::into)
+    }
+
+    /// Tables `prepared` reads beyond its root, which an exclusive read in
+    /// `id` records as whole-table reads.
+    pub(super) async fn query_non_root_source_tables(
+        &self,
+        id: OpenTransactionId,
+        prepared: &PreparedQuery,
+    ) -> Result<BTreeSet<String>, Error> {
+        self.lock_for_transaction_operation(id)
+            .await?
+            .query_non_root_source_tables(prepared.shape(), prepared.binding())
             .map_err(Into::into)
     }
 

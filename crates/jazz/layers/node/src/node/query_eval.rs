@@ -3541,7 +3541,6 @@ where
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<RelationSnapshot, Error> {
         let identity = self.transaction_query_identity(tx_id, identity, authorization_mode)?;
-        let predicate_len = self.open_tx(tx_id)?.predicate_reads.len();
         let program = self
             .compile_open_tx_query_program(
                 tx_id,
@@ -3574,8 +3573,32 @@ where
             binding_values: binding.values().clone(),
         };
         let open_tx = self.open_tx_mut(tx_id)?;
-        open_tx.predicate_reads.truncate(predicate_len);
         open_tx.predicate_reads.push(predicate_read);
+        if shape.query().aggregate.is_none() {
+            // Prove every row the relation returns, root and included alike.
+            let mut returned = BTreeMap::<String, Vec<RowUuid>>::new();
+            for row in &snapshot.rows {
+                returned
+                    .entry(row.table().to_owned())
+                    .or_default()
+                    .push(row.row_uuid());
+            }
+            for (table, rows) in returned {
+                self.record_tx_query_row_reads(tx_id, shape.schema_version(), &table, rows)
+                    .await?;
+            }
+        } else {
+            self.record_tx_aggregate_input_reads(
+                tx_id,
+                shape,
+                binding,
+                identity,
+                authorization_mode,
+            )
+            .await?;
+        }
+        self.record_tx_visible_table_reads(tx_id, identity, authorization_mode)
+            .await?;
         Ok(snapshot)
     }
 
@@ -3590,7 +3613,6 @@ where
     ) -> Result<Vec<CurrentRow>, Error> {
         let identity = self.transaction_query_identity(tx_id, identity, authorization_mode)?;
         let query = shape.query();
-        let predicate_len = self.open_tx(tx_id)?.predicate_reads.len();
         let table = self.table_in_schema(&query.table, shape.schema_version())?;
         let program = self
             .compile_open_tx_query_program(
@@ -3625,13 +3647,140 @@ where
             binding_values: binding.values().clone(),
         };
         let open_tx = self.open_tx_mut(tx_id)?;
-        open_tx.predicate_reads.truncate(predicate_len);
         open_tx.predicate_reads.push(predicate_read);
+        if query.aggregate.is_none() {
+            let root_rows = rows
+                .iter()
+                .filter(|row| row.table() == query.table)
+                .map(CurrentRow::row_uuid)
+                .collect::<Vec<_>>();
+            self.record_tx_query_row_reads(tx_id, shape.schema_version(), &query.table, root_rows)
+                .await?;
+        } else {
+            self.record_tx_aggregate_input_reads(
+                tx_id,
+                shape,
+                binding,
+                identity,
+                authorization_mode,
+            )
+            .await?;
+        }
+        self.record_tx_visible_table_reads(tx_id, identity, authorization_mode)
+            .await?;
         self.finish_engine_query_rows_in_schema(query, shape.schema_version(), &mut rows)?;
         if query.array_subqueries.is_empty() {
             self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
         }
         Ok(rows)
+    }
+
+    /// Prove the rows an exclusive aggregate read consumed. An aggregate
+    /// returns no rows to prove, so the transaction also reads the aggregate's
+    /// input rows; the authority validates the aggregate against them
+    /// (garden-co/jazz#3694).
+    async fn record_tx_aggregate_input_reads(
+        &mut self,
+        tx_id: OpenTransactionId,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorSubject,
+        authorization_mode: QueryAuthorizationMode,
+    ) -> Result<(), Error> {
+        let Some(input) = shape.query().aggregate_input() else {
+            return Ok(());
+        };
+        if !self.transaction_is_exclusive(tx_id)? {
+            return Ok(());
+        }
+        let schema = &self
+            .catalogue
+            .catalogue_schemas
+            .get(&shape.schema_version())
+            .ok_or(Error::InvalidStoredValue("transaction schema is unknown"))?
+            .schema;
+        let input = input.validate(schema)?;
+        let input_binding = input.bind(binding.values().clone())?;
+        Box::pin(self.tx_query_in_authorization_mode(
+            tx_id,
+            &input,
+            &input_binding,
+            identity,
+            false,
+            authorization_mode,
+        ))
+        .await?;
+        Ok(())
+    }
+
+    /// Tables `shape` reads beyond its root: joined, included, correlated
+    /// and relation tables. An exclusive read records each as a read of the
+    /// whole table (garden-co/jazz#3694), so a partial node hydrates them
+    /// before reading.
+    #[doc(hidden)]
+    pub fn query_non_root_source_tables(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+    ) -> Result<BTreeSet<String>, Error> {
+        use crate::node::query_engine::{RowSetExpr, SourceRole};
+        let normalized = self.normalized_row_set_shape(shape, binding)?;
+        let is_non_root = |source: &crate::node::query_engine::SourceId| {
+            source.path.components != [SourceRole::Root]
+        };
+        Ok(normalized
+            .nodes
+            .values()
+            .filter_map(|node| match node {
+                RowSetExpr::Source { source, .. } if is_non_root(source) => {
+                    Some(source.table.clone())
+                }
+                _ => None,
+            })
+            .chain(
+                normalized
+                    .auxiliary_sources
+                    .iter()
+                    .filter(|source| is_non_root(source))
+                    .map(|source| source.table.clone()),
+            )
+            .collect())
+    }
+
+    /// Prove the rows of the policy-filtered tables a query read beyond its
+    /// root, as the rows the reader can see. Each becomes a whole-table read
+    /// run as the reader, so the authority's re-run under the same policies
+    /// compares like with like (garden-co/jazz#3694).
+    async fn record_tx_visible_table_reads(
+        &mut self,
+        tx_id: OpenTransactionId,
+        identity: AuthorSubject,
+        authorization_mode: QueryAuthorizationMode,
+    ) -> Result<(), Error> {
+        let tables = std::mem::take(&mut self.open_tx_mut(tx_id)?.visible_table_reads);
+        if !self.transaction_is_exclusive(tx_id)? {
+            return Ok(());
+        }
+        for (schema_version, table) in tables {
+            let schema = &self
+                .catalogue
+                .catalogue_schemas
+                .get(&schema_version)
+                .ok_or(Error::InvalidStoredValue("transaction schema is unknown"))?
+                .schema;
+            let shape = crate::query::Query::from(table.as_str()).validate(schema)?;
+            let binding = shape.bind(BTreeMap::new())?;
+            Box::pin(self.tx_query_in_authorization_mode(
+                tx_id,
+                &shape,
+                &binding,
+                identity,
+                false,
+                authorization_mode,
+            ))
+            .await?;
+        }
+        Ok(())
     }
 
     fn transaction_query_identity(

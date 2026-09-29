@@ -161,6 +161,7 @@ where
                 row_reads: Vec::new(),
                 absent_reads: Vec::new(),
                 predicate_reads: Vec::new(),
+                visible_table_reads: BTreeSet::new(),
                 writes: Vec::new(),
                 user_metadata_json: None,
             },
@@ -242,6 +243,37 @@ where
         Ok(result)
     }
 
+    /// Pin the snapshot version of each root row a transaction query returned.
+    ///
+    /// A predicate read alone is validated by rebuilding the query at the base
+    /// snapshot. A partial node's base cut is only a coordinate in the
+    /// authority's history (any receipt advances it), so a row this node still
+    /// holds may already be deleted or replaced at that cut. Recording the
+    /// version actually observed lets the authority reject that stale read
+    /// row by row (garden-co/jazz#3694). Rows staged by this transaction have
+    /// no snapshot version and need no proof.
+    pub(super) async fn record_tx_query_row_reads(
+        &mut self,
+        tx_id: OpenTransactionId,
+        schema_version: SchemaVersionId,
+        table: &str,
+        rows: impl IntoIterator<Item = RowUuid>,
+    ) -> Result<(), Error> {
+        let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
+        let mut proofs = Vec::new();
+        for row_uuid in rows {
+            if let Some(version) = self
+                .snapshot_row_in_schema(schema_version, table, row_uuid, &snapshot)
+                .await?
+                .read_version
+            {
+                proofs.push((row_uuid, version));
+            }
+        }
+        self.open_tx_mut(tx_id)?.record_row_reads(table, proofs);
+        Ok(())
+    }
+
     /// Classify an explicit exclusive insert target that the transaction's
     /// overlaid point read reports as absent: a committed or staged deletion
     /// still occupies the id. The staged overlay is keyed by `(table, row)`,
@@ -288,7 +320,9 @@ where
     ) -> Result<Vec<CurrentRow>, Error> {
         let schema_version = self.catalogue.active_schema.schema;
         let table_schema = self.table(table)?.clone();
-        self.tx_current_rows_with_table(tx_id, schema_version, table, table_schema, false)
+        // A direct table read proves each row it returns; see
+        // `record_tx_query_row_reads` (garden-co/jazz#3694).
+        self.tx_current_rows_with_table(tx_id, schema_version, table, table_schema, false, true)
             .await
     }
 
@@ -300,22 +334,52 @@ where
         table: &str,
     ) -> Result<Vec<CurrentRow>, Error> {
         let table_schema = self.table_in_schema(table, schema_version)?;
-        self.tx_current_rows_with_table(tx_id, schema_version, table, table_schema, false)
+        // A direct table read proves each row it returns; see
+        // `record_tx_query_row_reads` (garden-co/jazz#3694).
+        self.tx_current_rows_with_table(tx_id, schema_version, table, table_schema, false, true)
             .await
+    }
+
+    /// Note that a query read `table` beyond its root through the reader's
+    /// read policy. Its rows are proven once the query finishes, as the rows
+    /// the reader can see, so rows the reader cannot see never enter the
+    /// read set.
+    pub(super) fn defer_tx_visible_table_read(
+        &mut self,
+        tx_id: OpenTransactionId,
+        schema_version: SchemaVersionId,
+        table: &str,
+    ) -> Result<(), Error> {
+        self.open_tx_mut(tx_id)?
+            .visible_table_reads
+            .insert((schema_version, table.to_owned()));
+        Ok(())
     }
 
     /// Read transaction rows through a registered schema view, optionally
     /// retaining root rows whose deletion register wins.
+    ///
+    /// `record_table_read` records the scan as a read of the whole table,
+    /// proving every row it returned (garden-co/jazz#3694); query source
+    /// resolution decides which sources need it.
     pub async fn tx_current_rows_in_schema_with_options(
         &mut self,
         tx_id: OpenTransactionId,
         schema_version: SchemaVersionId,
         table: &str,
         include_deleted: bool,
+        record_table_read: bool,
     ) -> Result<Vec<CurrentRow>, Error> {
         let table_schema = self.table_in_schema(table, schema_version)?;
-        self.tx_current_rows_with_table(tx_id, schema_version, table, table_schema, include_deleted)
-            .await
+        self.tx_current_rows_with_table(
+            tx_id,
+            schema_version,
+            table,
+            table_schema,
+            include_deleted,
+            record_table_read,
+        )
+        .await
     }
 
     async fn tx_current_rows_with_table(
@@ -325,8 +389,10 @@ where
         table: &str,
         table_schema: TableSchema,
         include_deleted: bool,
+        record_table_read: bool,
     ) -> Result<Vec<CurrentRow>, Error> {
         let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
+        let mut proofs = Vec::new();
         let mut snapshot_rows = self
             .snapshot_rows_in_schema(schema_version, table, &snapshot)
             .await?;
@@ -346,6 +412,7 @@ where
                 None => self.snapshot_row_from_winners(schema_version, table, None, None)?,
             };
             let snapshot_provenance = snapshot_row.provenance.clone();
+            let read_version = snapshot_row.read_version;
             let open_tx = self.open_tx(tx_id)?;
             let provisional_author = open_tx.provisional_author;
             let pending_writes = open_tx
@@ -408,9 +475,16 @@ where
                     current_row_from_positional_cells(&table_schema, row_uuid, &cells)?
                 };
                 current.push(if deleted { row.into_deleted() } else { row });
+                if record_table_read && let Some(version) = read_version {
+                    proofs.push((row_uuid, version));
+                }
             }
         }
+        self.open_tx_mut(tx_id)?.record_row_reads(table, proofs);
         sort_current_rows(&mut current);
+        if !record_table_read {
+            return Ok(current);
+        }
         let schema = self
             .catalogue
             .catalogue_schemas
@@ -2013,10 +2087,34 @@ pub(super) struct OpenTransaction {
     pub(super) absent_reads: Vec<AbsentRead>,
     /// Predicate reads recorded by the transaction.
     pub(super) predicate_reads: Vec<PredicateRead>,
+    /// Policy-filtered tables a query read beyond its root, still to be
+    /// recorded as reads of the rows the reader can see (garden-co/jazz#3694).
+    pub(super) visible_table_reads: BTreeSet<(SchemaVersionId, String)>,
     /// Pending writes staged by the transaction.
     pub(super) writes: Vec<PendingWrite>,
     /// Optional application metadata.
     pub(super) user_metadata_json: Option<String>,
+}
+
+impl OpenTransaction {
+    /// Record row proofs for `table`, skipping ones already recorded.
+    fn record_row_reads(&mut self, table: &str, proofs: impl IntoIterator<Item = (RowUuid, TxId)>) {
+        let mut recorded = self
+            .row_reads
+            .iter()
+            .filter(|read| read.table == table)
+            .map(|read| (read.row_uuid, read.version))
+            .collect::<BTreeSet<_>>();
+        for (row_uuid, version) in proofs {
+            if recorded.insert((row_uuid, version)) {
+                self.row_reads.push(RowRead {
+                    table: table.to_owned(),
+                    row_uuid,
+                    version,
+                });
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

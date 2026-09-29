@@ -33,7 +33,7 @@ Invariant digest:
 - `INV-TX-15`: Reads inside an exclusive transaction MUST observe that transaction's own pending writes.
 - `INV-TX-16`: Exclusive authority validation MUST reject when any recorded row read is no longer the globally current content/deletion read version.
 - `INV-TX-17`: Exclusive authority validation MUST reject when an absent row read has become globally present.
-- `INV-TX-18`: Exclusive authority validation MUST reject predicate phantoms by comparing source-row predicate output as real `(RowUuid, TxId)` identities, while aggregate predicate output MUST be compared as stable synthetic group identities plus canonical public aggregate payloads, at `base_snapshot.global_base` against current global output for the same shape and binding.
+- `INV-TX-18`: Exclusive authority validation MUST reject predicate phantoms against the rows the transaction proved it read: every row the predicate returns now, evaluated as the transaction's permission subject, MUST carry a current row proof in the commit, and a proved row the predicate returned at `base_snapshot.global_base` but no longer returns MUST conflict. Aggregate predicate reads MUST be validated through the rows the aggregate consumes, which the transaction proves as it reads them. Every non-root source a query reads (joined, included or correlated table) MUST be recorded as a whole-table predicate read with a proof for each row the reader can see; tables consulted only by read policies are not recorded.
 - `INV-TX-19`: Exclusive predicate validation MUST be sensitive to `binding_id`/`binding_values` and MUST use the inline query shape without requiring prior shape registration.
 - `INV-TX-20`: Exclusive write validation MUST be first-committer-wins: each written version's current global winner in that version's own content/deletion layer MUST equal the single recorded parent, or absence when no parent is recorded. Row and predicate read validation remains against the observed visible content/deletion state (`INV-TX-16/17/18`); a version parent is not that read precondition.
 - `INV-TX-21`: Accepted global transactions MUST maintain per-layer global-current tables/change stream.
@@ -309,12 +309,32 @@ recorded reads against current global state:
   separate from a write's own-layer CAS below and is covered by
   `exclusive_row_read_conflicts_when_a_later_delete_hides_the_content`;
 - an **absent read** must still be absent (`INV-TX-17`);
-- a **predicate read** must not have gained or lost rows — for source-row
-  predicates, authority compares the `(RowUuid, TxId)` output set for that
-  shape+binding at the complete dotted `base_snapshot` against current global
-  output (`INV-TX-18`). Aggregate predicates are the exception: authority
-  compares stable synthetic group identities together with canonical public
-  aggregate payloads at the same two frontiers.
+- a **predicate read** must not have gained or lost rows relative to what the
+  transaction actually read (`INV-TX-18`). A transaction proves each row a
+  predicate read returns with a row read. The authority re-runs the shape and
+  binding now, as the transaction's permission subject, and rejects when it
+  returns a row without a proof (a phantom, or a row that changed into the
+  result). A proved row the shape returned at `base_snapshot` but no longer
+  returns left the result through another row and also conflicts. The base
+  snapshot is not trusted for anything else: a partial client may have read
+  offline or from a replica that never held every row below its base, so it
+  can prepare an exclusive transaction offline and commit it later while its
+  reads still hold. An aggregate read proves the rows it consumes (the same
+  shape without aggregate, projection, ordering or pagination) and is
+  validated through them. Rows a query reads from any source other than its
+  root (joined, included or correlated tables) are recorded as a predicate
+  read of that whole table with a proof for each row, so a row added there
+  conflicts even when a proof from another read covers the root. When the
+  reader's read policy filters that source, the whole-table read runs as the
+  reader and proves only the rows it can see. A partial node's online
+  exclusive read hydrates each such table whole at its snapshot, so rows it
+  never received do not make the read conflict; offline, such a read
+  conflicts if the replica lacks a row the reader can see there. The tables a read policy
+  consults are not recorded: the authority re-runs every predicate read under
+  the reader's policies, so a change there conflicts exactly when it changes
+  what the reader sees.
+  A client that records no proofs for its predicate
+  reads conflicts whenever such a read returned rows.
 - each **write** is first-committer-wins in its **written history layer**: a
   content version compares its parent to the row's current global content
   `TxId`, while a deletion or restore version compares its parent to the

@@ -929,7 +929,7 @@ fn commit_metric_global_to_authority(
 }
 
 #[test]
-fn grouped_aggregate_authority_validation_compares_public_payloads() {
+fn grouped_aggregate_authority_validation_checks_consumed_row_versions() {
     let schema = signed_metric_schema();
     let (_writer_dir, mut writer) =
         open_node_with_uuid(NodeUuid::from_bytes([0xa4; 16]), schema.clone());
@@ -975,15 +975,6 @@ fn grouped_aggregate_authority_validation_compares_public_payloads() {
             .len(),
         2
     );
-    commit_metric_global_to_authority(&mut other, &mut authority, row(1), "a", 1, 1_004);
-    assert_eq!(
-        signature(
-            &authority
-                .query_rows(&shape, &binding, DurabilityTier::Global)
-                .unwrap(),
-        ),
-        expected_signature
-    );
     let (_tx_id, unchanged_unit) = writer
         .commit_exclusive_settled(unchanged_tx, AuthorSubject::SYSTEM, 1_005)
         .unwrap();
@@ -1009,7 +1000,9 @@ fn grouped_aggregate_authority_validation_compares_public_payloads() {
         writer.tx_query(changed_tx, &shape, &binding).unwrap().len(),
         2
     );
-    commit_metric_global_to_authority(&mut other, &mut authority, row(2), "a", 20, 1_006);
+    // A rewrite that leaves every group's payload unchanged still conflicts:
+    // the aggregate is validated through the row versions it consumed.
+    commit_metric_global_to_authority(&mut other, &mut authority, row(2), "a", 2, 1_006);
     let (_tx_id, changed_unit) = writer
         .commit_exclusive_settled(changed_tx, AuthorSubject::SYSTEM, 1_007)
         .unwrap();
