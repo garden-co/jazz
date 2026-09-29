@@ -152,9 +152,9 @@ pub(super) fn lowered_app_rows_graph(program: &QueryProgram) -> Result<GraphBuil
     lowered_terminal_graph(program, JAZZ_APP_ROWS_SINK)
 }
 
-pub(super) fn lowered_materialization_app_rows_graph(
-    program: &QueryProgram,
-) -> Result<GraphBuilder, Error> {
+/// Whether one-shot materialization substitutes the program's storage-shaped
+/// internal graph for its public app-row terminal.
+fn materializes_internal_app_rows_graph(program: &QueryProgram) -> bool {
     let publishes_structured_tree = matches!(
         program.request.output.app_rows.as_ref().map(|rows| &rows.projection),
         Some(PayloadProjection::Tree(tree)) if !tree.paths.is_empty()
@@ -181,15 +181,17 @@ pub(super) fn lowered_materialization_app_rows_graph(
         .app_rows
         .as_ref()
         .is_some_and(|rows| !rows.public_terminal);
-    if existence_only || publishes_structured_tree || public_root_owns_membership {
-        return lowered_app_rows_graph(program);
+    !(existence_only || publishes_structured_tree || public_root_owns_membership)
+        && program.lowered.internal_app_rows_graph.is_some()
+}
+
+pub(super) fn lowered_materialization_app_rows_graph(
+    program: &QueryProgram,
+) -> Result<GraphBuilder, Error> {
+    match &program.lowered.internal_app_rows_graph {
+        Some(graph) if materializes_internal_app_rows_graph(program) => Ok(graph.clone()),
+        _ => lowered_app_rows_graph(program),
     }
-    program
-        .lowered
-        .internal_app_rows_graph
-        .clone()
-        .map(Ok)
-        .unwrap_or_else(|| lowered_app_rows_graph(program))
 }
 
 pub(super) fn lowered_program_sinks(program: &QueryProgram) -> Vec<(String, GraphBuilder)> {
@@ -1259,8 +1261,8 @@ where
         _binding: &Binding,
     ) -> Result<PreparedQueryPlan, Error> {
         let output = app_row_terminal_schema(&program.lowered.output)?.clone();
-        let app_row_fields = app_row_terminal_fields(&program.lowered.output)?;
         let graph = lowered_materialization_app_rows_graph(&program)?;
+        let app_row_fields = self.materialization_app_row_fields(program, &graph)?;
         let params = prepared_params_from_domain(&program.lowered.parameters);
         let route_eligible_fields =
             app_row_terminal_route_eligible_fields(&program.lowered.output)?;
@@ -1318,6 +1320,32 @@ where
         }
     }
 
+    /// Fields a routed install publishes from the materialization graph.
+    ///
+    /// One-shot materialization may substitute the storage-shaped internal
+    /// graph for the public app-row terminal (see
+    /// [`lowered_materialization_app_rows_graph`]). That graph carries the
+    /// complete current-row tuple: every provenance field and the transaction
+    /// alias, which `CurrentRow` needs before it applies the query's public
+    /// projection. An install without parameters subscribes to the graph as
+    /// is. A routed install (a prepared binding, for example the claim of a
+    /// session-dependent read policy) projects each terminal to the fields it
+    /// publishes. Those must be the substituted graph's own fields, not the
+    /// public collector descriptor, which lists only the magic columns the
+    /// query selected. Otherwise the row reaches materialization with a
+    /// partial provenance tuple and the selected magic columns are dropped.
+    fn materialization_app_row_fields(
+        &self,
+        program: &QueryProgram,
+        graph: &GraphBuilder,
+    ) -> Result<Vec<String>, Error> {
+        if materializes_internal_app_rows_graph(program) {
+            descriptor_field_names(&self.database.graph_output_descriptor(graph)?)
+        } else {
+            app_row_terminal_fields(&program.lowered.output)
+        }
+    }
+
     pub(super) async fn subscribe_lowered_program(
         &mut self,
         program: QueryProgram,
@@ -1334,6 +1362,7 @@ where
             progress_waker,
             SubscriptionLifetime::Retained,
             RootIndirectValues::Materialize,
+            None,
         )
         .await
         .map(|(subscription, _)| subscription)
@@ -1350,6 +1379,7 @@ where
         progress_waker: Option<&std::task::Waker>,
         lifetime: SubscriptionLifetime,
         root_indirect_values: RootIndirectValues,
+        app_row_public_fields: Option<Vec<String>>,
     ) -> Result<(MultisinkSubscription, Option<PreparedShapeId>), Error> {
         // Subscription opening performs one bounded IVM poll.  When that poll
         // finds cold storage, retain the node owner's wake route so the
@@ -1396,7 +1426,10 @@ where
             .lowered
             .execution_terminals()
             .map(|terminal| {
-                let public_fields = terminal_public_fields(&terminal.output)?;
+                let public_fields = match &app_row_public_fields {
+                    Some(fields) if terminal.sink == JAZZ_APP_ROWS_SINK => fields.clone(),
+                    _ => terminal_public_fields(&terminal.output)?,
+                };
                 let route_fields = terminal_route_fields(
                     &route_params,
                     &terminal_route_eligible_fields(&terminal.output)?,
@@ -1474,6 +1507,11 @@ where
         // materialization layout (including physical provenance), whereas a
         // retained stream publishes its terminal layout directly.
         let graph = lowered_materialization_app_rows_graph(&program)?;
+        let app_row_public_fields = if materializes_internal_app_rows_graph(&program) {
+            Some(self.materialization_app_row_fields(&program, &graph)?)
+        } else {
+            None
+        };
         program
             .lowered
             .terminals
@@ -1499,6 +1537,7 @@ where
                 None,
                 SubscriptionLifetime::FirstResult,
                 root_indirect_values,
+                app_row_public_fields,
             )
             .await?;
         let mut owner = HydrationSubscription {

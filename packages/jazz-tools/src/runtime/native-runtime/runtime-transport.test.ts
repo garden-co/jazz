@@ -489,6 +489,63 @@ describe("NativeRuntimeAdapter server transport", () => {
     },
   );
 
+  it("turns a pump failure during a parked read into a transport error, not an unhandled rejection", async () => {
+    globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+    const pumpFailure = new Error("core tick failed");
+    let failTicks = false;
+    let polls = 0;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => new FakeTransport([]),
+            tick: () => {
+              if (!failTicks) return;
+              // Fail only the tick the read's pump drives.
+              failTicks = false;
+              throw pumpFailure;
+            },
+            all: () => ({
+              poll: () => {
+                polls += 1;
+                failTicks = true;
+                return null;
+              },
+              cancel: () => undefined,
+            }),
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    try {
+      const terminal = vi.fn();
+      runtime.onServerTransportError(terminal);
+      runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+      await runtime.waitForUpstreamServerConnection();
+
+      await expect(
+        runtime.query(JSON.stringify({ table: "todos" }), null, "global"),
+      ).rejects.toThrow("core tick failed");
+      await waitForServerPumpTimer();
+
+      expect(polls).toBeGreaterThan(0);
+      expect(terminal).toHaveBeenCalledWith(pumpFailure);
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off("unhandledRejection", unhandled);
+      await runtime.close().catch(() => undefined);
+    }
+  });
+
   it("reconnects after a negotiated Core reports its account registry temporarily unavailable", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
