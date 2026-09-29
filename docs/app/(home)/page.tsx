@@ -337,7 +337,7 @@ export default function HomePage() {
           <Figure
             className="home-figure-wide mt-6"
             number={1}
-            caption="Jazz uses the same Rust database engine core everywhere: as WebAssembly in the browser, as a native module in React Native and Node, and as the sync server in Jazz Cloud."
+            caption="Jazz uses the same Rust database engine core everywhere: as WebAssembly in the browser, as a native module in React Native and Node, and as the database server in Jazz Cloud and the jazz-tools CLI."
           >
             <StackDiagram />
           </Figure>
