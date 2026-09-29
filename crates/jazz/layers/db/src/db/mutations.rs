@@ -3192,6 +3192,22 @@ where
                 }
             }
         }
+        if cells.is_empty() {
+            // A content version must carry at least one cell: the model reads
+            // an empty cell set as "no content", and node validation rejects
+            // it so an empty update can never masquerade as a write. A row
+            // created with every column omitted still has content (all
+            // null), so author that null explicitly. Updates never reach
+            // this path.
+            for column in &table_schema.columns {
+                if matches!(
+                    crate::schema::storage_column_type(column),
+                    GrooveColumnType::Nullable(_)
+                ) {
+                    cells.insert(column.name.clone(), Value::Nullable(None));
+                }
+            }
+        }
         Ok(cells)
     }
 

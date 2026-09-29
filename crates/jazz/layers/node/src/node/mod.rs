@@ -3177,6 +3177,24 @@ fn validate_mergeable_write_shape(cells_empty: bool, deletion_present: bool) -> 
 }
 
 #[cfg(test)]
+#[test]
+fn mergeable_write_shape_requires_exactly_one_register() {
+    // Content-only and deletion-only writes are well formed.
+    assert!(validate_mergeable_write_shape(false, false).is_ok());
+    assert!(validate_mergeable_write_shape(true, true).is_ok());
+    // A write carrying neither stays invalid: inserts with every column
+    // omitted author explicit null cells instead of relaxing this check.
+    assert!(matches!(
+        validate_mergeable_write_shape(true, false),
+        Err(Error::InvalidMergeableCommit(message)) if message.contains("must carry content cells")
+    ));
+    assert!(matches!(
+        validate_mergeable_write_shape(false, true),
+        Err(Error::InvalidMergeableCommit(message)) if message.contains("cannot also carry deletion")
+    ));
+}
+
+#[cfg(test)]
 fn select_all(table: &str) -> Query {
     Query::Select(Box::new(
         Select::new([SelectItem::Wildcard]).from([TableRef::named(table)]),
