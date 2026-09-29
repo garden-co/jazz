@@ -335,7 +335,7 @@ export default function HomePage() {
           <Figure
             className="home-figure-wide mt-12"
             number={1}
-            caption="Where Jazz runs. Every client and server module keeps a partial local copy of the data it uses; Jazz Cloud authorizes every write and holds all data."
+            caption="Every box runs the same Rust database engine: as WebAssembly in the browser, as a native module in React Native and Node, and as the sync server in Jazz Cloud. A query behaves the same wherever it runs."
           >
             <StackDiagram />
           </Figure>
