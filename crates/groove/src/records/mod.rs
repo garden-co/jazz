@@ -653,6 +653,15 @@ pub(crate) enum RawProjectionField {
     Error(Error),
     /// Only this field needs semantic evaluation by the caller.
     Evaluate,
+    /// Expand a little-endian `U32` (`code_width == 4`) or `U64` (`8`) code
+    /// by copying its canonical dictionary encoding. Anything else (absent
+    /// code, non-canonical entry, malformed code bytes) falls back to
+    /// Evaluate, so errors and outputs match semantic expansion exactly.
+    Dictionary {
+        source_idx: usize,
+        code_width: usize,
+        dictionary: crate::ivm::ValueDictionary,
+    },
     Encoded {
         bytes: Vec<u8>,
     },
@@ -954,6 +963,16 @@ impl RecordDescriptor {
         })
     }
 
+    /// Target field indices in the order [`Self::write_projected_fields_into`]
+    /// appends them: fixed fields, then variable fields, each in physical order.
+    pub(crate) fn projected_field_order(&self) -> Vec<usize> {
+        let (fixed, variable): (Vec<usize>, Vec<usize>) =
+            self.layout.logical_by_physical.iter().partition(|index| {
+                matches!(self.layout.fields[**index], FieldLayout::Static { .. })
+            });
+        fixed.into_iter().chain(variable).collect()
+    }
+
     /// The same record framing for ordinary and composed field projections.
     /// This is an execution interface, not a new record encoding.
     pub(crate) fn write_projected_fields_into<E: From<Error>>(
@@ -1166,6 +1185,28 @@ fn append_projected_field<E: From<Error>>(
         }
         RawProjectionField::Encoded { bytes } => output.extend_from_slice(bytes),
         RawProjectionField::Evaluate => evaluate(target_idx, output)?,
+        RawProjectionField::Dictionary {
+            source_idx,
+            code_width,
+            dictionary,
+        } => {
+            let code = &record[source.field_span(record, *source_idx)?];
+            let code = match (*code_width, code.len()) {
+                (4, 4) => read_exact_array::<4>(code)
+                    .map(u32::from_le_bytes)
+                    .map(u64::from)
+                    .ok(),
+                (8, 8) => read_exact_array::<8>(code).map(u64::from_le_bytes).ok(),
+                _ => None,
+            };
+            let copied = code.and_then(|code| {
+                dictionary
+                    .with_canonical_encoding(code, |encoded| output.extend_from_slice(encoded))
+            });
+            if copied.is_none() {
+                evaluate(target_idx, output)?;
+            }
+        }
         RawProjectionField::Error(error) => return Err(error.clone().into()),
     }
     Ok(())

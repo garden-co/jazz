@@ -2,14 +2,24 @@
 //! bytes. Fallible semantic expressions remain materialization boundaries.
 
 use super::*;
+use crate::ivm::ValueDictionary;
 use crate::ivm::runtime::key_encoding::{
     FieldLiteralOrdering, PredicateRecord, record_field_literal_ordering,
 };
+use crate::ivm::runtime::record_projection::expand_dictionary_code;
 
 #[derive(Clone, Debug)]
 enum Origin {
     Source(Vec<(RecordDescriptor, usize)>),
     Constant(Arc<[u8]>),
+    /// A `U32`/`U64` code at `code` expanded through `dictionary`. Canonical
+    /// entries are copied; anything else takes the semantic expansion, so the
+    /// bytes and errors match an unfused `ProjectExpr::Dictionary`.
+    Dictionary {
+        code: Vec<(RecordDescriptor, usize)>,
+        code_type: ValueType,
+        dictionary: ValueDictionary,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -18,16 +28,49 @@ struct Field {
     present_wrappers: usize,
 }
 
+fn source_bytes<'a>(
+    path: &[(RecordDescriptor, usize)],
+    raw: &'a [u8],
+) -> Result<&'a [u8], IvmRuntimeError> {
+    let mut bytes = raw;
+    for (descriptor, index) in path {
+        bytes = &bytes[descriptor.field_span(bytes, *index)?];
+    }
+    Ok(bytes)
+}
+
 impl Field {
-    fn bytes<'a>(&'a self, raw: &'a [u8]) -> Result<&'a [u8], IvmRuntimeError> {
+    /// Run `f` over this field's encoded bytes in the routed record `raw`.
+    fn with_bytes<R>(&self, raw: &[u8], f: impl FnOnce(&[u8]) -> R) -> Result<R, IvmRuntimeError> {
         match &self.origin {
-            Origin::Constant(bytes) => Ok(bytes),
-            Origin::Source(path) => {
-                let mut bytes = raw;
-                for (descriptor, index) in path {
-                    bytes = &bytes[descriptor.field_span(bytes, *index)?];
+            Origin::Constant(bytes) => Ok(f(bytes)),
+            Origin::Source(path) => Ok(f(source_bytes(path, raw)?)),
+            Origin::Dictionary {
+                code,
+                code_type,
+                dictionary,
+            } => {
+                let code = source_bytes(code, raw)?;
+                let index = match (code_type, code.len()) {
+                    (ValueType::U32, 4) => code
+                        .try_into()
+                        .ok()
+                        .map(|code| u64::from(u32::from_le_bytes(code))),
+                    (ValueType::U64, 8) => code.try_into().ok().map(u64::from_le_bytes),
+                    _ => None,
+                };
+                let mut f = Some(f);
+                if let Some(result) = index.and_then(|index| {
+                    dictionary.with_canonical_encoding(index, |bytes| {
+                        (f.take().expect("called once"))(bytes)
+                    })
+                }) {
+                    return Ok(result);
                 }
-                Ok(bytes)
+                let code = records::decode_single_field_value(code, code_type)?;
+                let value = expand_dictionary_code(code, dictionary)?;
+                let encoded = records::encode_single_field_value(&value, dictionary.value_type())?;
+                Ok((f.take().expect("called once"))(&encoded))
             }
         }
     }
@@ -38,6 +81,11 @@ pub(super) struct FieldRoutes {
     source: RecordDescriptor,
     descriptor: RecordDescriptor,
     fields: Arc<[Field]>,
+    /// Fallible fields introduced by the latest composed projection, in the
+    /// order that projection would have evaluated them. They are resolved at
+    /// the projection's own stage so a later filter or projection that drops
+    /// them can never elide their errors.
+    checks: Arc<[usize]>,
     pub(super) reuses_input: bool,
 }
 
@@ -52,8 +100,21 @@ impl FieldRoutes {
                     present_wrappers: 0,
                 })
                 .collect(),
+            checks: Arc::from([]),
             reuses_input: true,
         }
+    }
+
+    /// Resolve the fallible fields introduced by the latest composition.
+    pub(super) fn check(&self, raw: &[u8]) -> Result<(), IvmRuntimeError> {
+        for index in self.checks.iter() {
+            self.fields[*index].with_bytes(raw, |_| ())?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn has_checks(&self) -> bool {
+        !self.checks.is_empty()
     }
 
     pub(super) fn compose(
@@ -82,6 +143,8 @@ impl FieldRoutes {
                             return None;
                         }
                         match &mut field.origin {
+                            // Reading into an expanded value stays unfused.
+                            Origin::Dictionary { .. } => return None,
                             Origin::Source(source) => source.extend_from_slice(rest),
                             Origin::Constant(bytes) => {
                                 let mut value: &[u8] = bytes;
@@ -97,12 +160,46 @@ impl FieldRoutes {
                         origin: Origin::Constant(Arc::from(bytes.as_slice())),
                         present_wrappers: 0,
                     },
+                    RawProjectionField::Dictionary {
+                        source_idx,
+                        code_width: _,
+                        dictionary,
+                    } => {
+                        let code = self.fields.get(*source_idx)?;
+                        let Origin::Source(path) = &code.origin else {
+                            return None;
+                        };
+                        if code.present_wrappers != 0 {
+                            return None;
+                        }
+                        let (descriptor, index) = path.last()?;
+                        Field {
+                            origin: Origin::Dictionary {
+                                code: path.clone(),
+                                code_type: descriptor.fields().get(*index)?.value_type.clone(),
+                                dictionary: dictionary.clone(),
+                            },
+                            present_wrappers: 0,
+                        }
+                    }
                     // Never elide an expression which can fail or omit a row,
                     // even if no downstream output refers to that expression.
                     RawProjectionField::Error(_) | RawProjectionField::Evaluate => return None,
                 })
             })
             .collect::<Option<Arc<[_]>>>()?;
+        // Dictionary expansion can fail (an absent code): resolve it at this
+        // projection's stage, in this projection's evaluation order.
+        let checks = descriptor
+            .projected_field_order()
+            .into_iter()
+            .filter(|index| {
+                matches!(
+                    projection.fields.get(*index),
+                    Some(RawProjectionField::Dictionary { .. })
+                )
+            })
+            .collect::<Arc<[_]>>();
         let copies = fields
             .iter()
             .map(|field| {
@@ -124,6 +221,7 @@ impl FieldRoutes {
             source: self.source,
             descriptor,
             fields,
+            checks,
             reuses_input,
         })
     }
@@ -137,8 +235,7 @@ impl FieldRoutes {
             .write_projected_fields_into(output, |index, output| {
                 let field = &self.fields[index];
                 output.resize(output.len() + field.present_wrappers, 1);
-                output.extend_from_slice(field.bytes(raw)?);
-                Ok(())
+                field.with_bytes(raw, |bytes| output.extend_from_slice(bytes))
             })
     }
 
@@ -165,7 +262,9 @@ impl PredicateRecord for RoutedRecord<'_> {
             };
             ty = inner;
         }
-        let mut value = records::decode_single_field_value(field.bytes(self.raw)?, ty)?;
+        let mut value = field.with_bytes(self.raw, |bytes| {
+            records::decode_single_field_value(bytes, ty)
+        })??;
         for _ in 0..field.present_wrappers {
             value = Value::Nullable(Some(Box::new(value)));
         }

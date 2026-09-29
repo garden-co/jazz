@@ -40,6 +40,9 @@ enum Stage {
     /// A total projection was composed into subsequent field routes. Keep its
     /// budget slot so arbitrarily deep chains still yield within a row.
     VirtualProject,
+    /// A composed projection whose fallible fields (dictionary expansions)
+    /// must still be resolved at its own stage.
+    CheckedVirtualProject(FieldRoutes),
     RoutedFilter(FilterOp, FieldRoutes),
     Materialize(FieldRoutes),
     Filter(FilterOp, RecordDescriptor),
@@ -109,6 +112,7 @@ impl PendingPipeline {
             };
             let result = match stage {
                 Stage::VirtualProject => continue,
+                Stage::CheckedVirtualProject(routes) => routes.check(raw).map(|()| true),
                 Stage::RoutedFilter(filter, routes) => filter
                     .predicate
                     .matches(routes.record(raw), filter.comparison),
@@ -280,10 +284,14 @@ impl TickEvaluator<'_> {
                         .as_ref()
                         .and_then(|plan| routes.compose(output, plan))
                     {
+                        stages.push(if composed.has_checks() {
+                            Stage::CheckedVirtualProject(composed.clone())
+                        } else {
+                            Stage::VirtualProject
+                        });
                         routes = composed;
                         virtual_rows = true;
                         descriptor = output;
-                        stages.push(Stage::VirtualProject);
                         continue;
                     }
                     if virtual_rows {

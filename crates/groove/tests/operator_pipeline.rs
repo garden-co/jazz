@@ -5,7 +5,7 @@ use std::task::{Context, Poll};
 use futures::executor::block_on;
 use futures::task::noop_waker;
 use groove::db::{Database, GraphBuilder, PredicateExpr};
-use groove::ivm::ProjectField;
+use groove::ivm::{ProjectField, ValueDictionary};
 use groove::records::{RecordDescriptor, Value, ValueType};
 use groove::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema,
@@ -479,4 +479,98 @@ fn adding_an_observer_to_a_previously_private_prefix_preserves_both_outputs() {
             .map(|id| (vec![Value::U64(id)], 1))
             .collect::<Vec<_>>()
     );
+}
+
+fn dictionary_author_rows(code_for: fn(u64) -> u32) -> (GraphBuilder, ValueDictionary) {
+    let author = RecordDescriptor::new([("name", ValueType::String)]);
+    let dictionary = ValueDictionary::new("authors", ValueType::Record(Box::new(author)));
+    for code in 1..=3u32 {
+        let encoded = author
+            .create(&[Value::String(format!("author-{code}"))])
+            .unwrap();
+        dictionary.install(u64::from(code), &encoded).unwrap();
+    }
+    let rows = GraphBuilder::values(
+        RecordDescriptor::new([("id", ValueType::U64), ("author", ValueType::U32)]),
+        (0..700).map(|id| vec![Value::U64(id), Value::U32(code_for(id))]),
+    )
+    .unwrap();
+    (rows, dictionary)
+}
+
+fn dictionary_author_graph(rows: GraphBuilder, dictionary: &ValueDictionary) -> GraphBuilder {
+    rows.project_fields([
+        ProjectField::named("id"),
+        ProjectField::dictionary("author", "author", dictionary.clone()),
+    ])
+    .filter(PredicateExpr::gt("id", Value::U64(100)))
+}
+
+#[test]
+fn dictionary_expansion_matches_across_fused_materialized_and_nested_reads() {
+    let mut db = block_on(Database::new(
+        DatabaseSchema::new([]),
+        MemoryStorage::new(&[]).unwrap(),
+    ))
+    .unwrap();
+    let (rows, dictionary) = dictionary_author_rows(|id| (id % 3) as u32 + 1);
+    let expanded = dictionary_author_graph(rows, &dictionary);
+    let names =
+        expanded
+            .clone()
+            .project_fields([ProjectField::record_field("author", ["name"], "name")]);
+    let subscription = db
+        .subscribe([("expanded", expanded.clone()), ("names", names.clone())])
+        .unwrap();
+    let result = block_on(db.next_multisink_subscription(&subscription)).unwrap();
+    let one_shot = block_on(db.query_graph(names)).unwrap();
+
+    let author = |id: u64| format!("author-{}", id % 3 + 1);
+    let mut actual = result.get("expanded").unwrap().to_values().unwrap();
+    actual.sort_by_key(|(row, _)| match row[0] {
+        Value::U64(id) => id,
+        _ => panic!("id"),
+    });
+    assert_eq!(actual.len(), 599);
+    for ((row, weight), id) in actual.iter().zip(101..) {
+        assert_eq!(*weight, 1);
+        assert_eq!(row[0], Value::U64(id));
+        let Value::Record(record) = &row[1] else {
+            panic!("expanded author is a record: {:?}", row[1]);
+        };
+        assert_eq!(record.get_idx(0).unwrap(), Value::String(author(id)));
+    }
+    for names in [result.get("names").unwrap(), &one_shot] {
+        let mut actual = names
+            .to_values()
+            .unwrap()
+            .into_iter()
+            .map(|(row, weight)| match row.as_slice() {
+                [Value::String(name)] => (name.clone(), weight),
+                other => panic!("name row: {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        actual.sort();
+        let mut expected = (101..700).map(|id| (author(id), 1)).collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(actual, expected);
+    }
+}
+
+#[test]
+fn absent_dictionary_code_is_not_hidden_by_a_virtual_filter_or_projection() {
+    let mut db = block_on(Database::new(
+        DatabaseSchema::new([]),
+        MemoryStorage::new(&[]).unwrap(),
+    ))
+    .unwrap();
+    // Only row 0 carries an uninstalled code; the filter drops that row and
+    // the final projection drops the expanded field.
+    let (rows, dictionary) = dictionary_author_rows(|id| if id == 0 { 9 } else { 1 });
+    let graph = dictionary_author_graph(rows, &dictionary).project(["id"]);
+    let subscription = db.subscribe([("result", graph.clone())]).unwrap();
+    let error = block_on(db.next_multisink_subscription(&subscription)).unwrap_err();
+    assert!(error.to_string().contains("no value for code 9"), "{error}");
+    let error = block_on(db.query_graph(graph)).unwrap_err();
+    assert!(error.to_string().contains("no value for code 9"), "{error}");
 }

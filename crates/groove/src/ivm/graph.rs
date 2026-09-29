@@ -1634,7 +1634,16 @@ pub struct ValueDictionary {
 struct ValueDictionaryInner {
     name: String,
     value_type: ValueType,
-    entries: std::sync::RwLock<Vec<Option<Arc<[u8]>>>>,
+    entries: std::sync::RwLock<Vec<Option<ValueDictionaryEntry>>>,
+}
+
+struct ValueDictionaryEntry {
+    encoded: Arc<[u8]>,
+    /// Whether `encoded` is exactly the canonical encoding of its value under
+    /// the dictionary's type: decoding and re-encoding reproduces it. Only
+    /// such entries may be copied byte-for-byte into a projected record; the
+    /// result is then identical to semantic expansion. Checked once at install.
+    canonical: bool,
 }
 
 /// An attempt to rebind an installed dictionary code to a different value.
@@ -1678,13 +1687,25 @@ impl ValueDictionary {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if entries.len() <= index {
-            entries.resize(index + 1, None);
+            entries.resize_with(index + 1, || None);
         }
         match &entries[index] {
-            Some(existing) if existing.as_ref() == encoded => Ok(()),
+            Some(existing) if existing.encoded.as_ref() == encoded => Ok(()),
             Some(_) => Err(conflict()),
             None => {
-                entries[index] = Some(Arc::from(encoded));
+                let canonical =
+                    crate::records::decode_single_field_value(encoded, &self.inner.value_type)
+                        .and_then(|value| {
+                            crate::records::encode_single_field_value(
+                                &value,
+                                &self.inner.value_type,
+                            )
+                        })
+                        .is_ok_and(|reencoded| reencoded == encoded);
+                entries[index] = Some(ValueDictionaryEntry {
+                    encoded: Arc::from(encoded),
+                    canonical,
+                });
                 Ok(())
             }
         }
@@ -1698,7 +1719,27 @@ impl ValueDictionary {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(index)
-            .and_then(Clone::clone)
+            .and_then(Option::as_ref)
+            .map(|entry| Arc::clone(&entry.encoded))
+    }
+
+    /// Run `f` over the encoding bound to `code` when it is installed and
+    /// canonical, i.e. byte-identical to what semantic expansion would encode.
+    /// `None` sends the caller to the semantic path, which reports absent
+    /// codes and re-encodes non-canonical entries exactly as before.
+    pub(crate) fn with_canonical_encoding<R>(
+        &self,
+        code: u64,
+        f: impl FnOnce(&[u8]) -> R,
+    ) -> Option<R> {
+        let index = usize::try_from(code).ok()?;
+        let entries = self
+            .inner
+            .entries
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = entries.get(index)?.as_ref()?;
+        entry.canonical.then(|| f(&entry.encoded))
     }
 }
 

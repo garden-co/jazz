@@ -1624,10 +1624,30 @@ pub(super) fn raw_projection_fields(
                 ProjectExpr::Literal(value) | ProjectExpr::TypedLiteral { value, .. } => {
                     prepared_constant_field(output_desc, output_idx, value.to_value())
                 }
+                ProjectExpr::Dictionary { source, dictionary } => {
+                    let source_idx = resolve_field_ref(input_desc, source)?;
+                    let code_width = match input_desc.fields()[source_idx].value_type {
+                        ValueType::U32 => Some(4),
+                        ValueType::U64 => Some(8),
+                        _ => None,
+                    };
+                    match code_width {
+                        Some(code_width)
+                            if &output_desc.fields()[output_idx].value_type
+                                == dictionary.value_type() =>
+                        {
+                            RawProjectionField::Dictionary {
+                                source_idx,
+                                code_width,
+                                dictionary: dictionary.clone(),
+                            }
+                        }
+                        _ => RawProjectionField::Evaluate,
+                    }
+                }
                 ProjectExpr::EnumTagRemap { .. }
                 | ProjectExpr::EnumRemap { .. }
-                | ProjectExpr::RecursiveEnumRemap { .. }
-                | ProjectExpr::Dictionary { .. } => RawProjectionField::Evaluate,
+                | ProjectExpr::RecursiveEnumRemap { .. } => RawProjectionField::Evaluate,
             })
         })
         .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
