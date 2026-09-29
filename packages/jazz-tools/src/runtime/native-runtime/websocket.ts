@@ -79,7 +79,7 @@ export type BrowserWebSocket = {
  * The sole Jazz wire-protocol version. This is distinct from independently
  * versioned v1 storage, catalogue, and binding formats.
  */
-export const WIRE_PROTOCOL_VERSION = 3;
+export const WIRE_PROTOCOL_VERSION = 4;
 export const MIN_WIRE_PROTOCOL_VERSION = WIRE_PROTOCOL_VERSION;
 export const MAX_WIRE_PROTOCOL_VERSION = WIRE_PROTOCOL_VERSION;
 export const FEATURE_SYNC_MESSAGE_PAYLOAD = 1 << 0;

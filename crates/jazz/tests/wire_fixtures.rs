@@ -934,6 +934,107 @@ fn retired_wire_tag_12_rejects_decoding() {
     }
 }
 
+/// Wire protocol v4 (linear row-state history) refuses every pre-v4 peer at
+/// the Hello handshake with the typed `UnsupportedProtocolVersion`/`Never`
+/// error, before any payload is decoded.
+///
+/// Actors: `alice` runs a v4 Core; `bob` still runs a v3 build (alpha.54 to
+/// alpha.57) whose frozen Hello and Subscribe frames are replayed verbatim.
+///
+/// ```text
+/// bob(v3) ──Hello 3..=3──► alice(v4) ──✗ UnsupportedProtocolVersion, retry Never
+/// bob(v3) ──Message v3──► alice(v4) ──✗ envelope version mismatch (never decoded)
+/// bob(v3) ──ExactVersionSet (tag 2) in a v4 envelope──► ✗ reserved tag, not a Watermark
+/// ```
+///
+/// Exact frames are not a public database API, so this is a codec-level
+/// receipt: the inputs are the bytes the v3 fixture set froze.
+#[test]
+fn pre_v4_peers_are_refused_at_hello_with_a_typed_version_mismatch() {
+    assert_eq!(WIRE_PROTOCOL_VERSION, 4);
+    let bob_v3_hellos = [
+        // `wire_hello_frames.json` (jazz-wire-hello-frames-v1) at wire v3.
+        "000303000000",
+        "000303010001105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02",
+        "000303f5030101105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02",
+        "00030388020301105e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5eac02",
+    ];
+    for hex_frame in bob_v3_hellos {
+        let WireFrame::Hello(hello) =
+            jazz::wire::decode_frame(&parse_hex(hex_frame)).expect("v3 Hello is a canonical frame")
+        else {
+            panic!("expected a Hello frame");
+        };
+        assert_eq!(
+            (hello.min_protocol_version, hello.max_protocol_version),
+            (3, 3)
+        );
+        let error = jazz::wire::negotiate_wire(&hello, jazz::wire::current_wire_features())
+            .expect_err("alice's v4 Core must refuse bob's v3 Hello");
+        assert_eq!(
+            error.code,
+            jazz::wire::WireErrorCode::UnsupportedProtocolVersion
+        );
+        assert_eq!(error.retry, jazz::wire::WireRetry::Never);
+        assert!(
+            error.message.contains("remote 3..=3, expected 4..=4"),
+            "{}",
+            error.message
+        );
+    }
+
+    // bob's frozen v3 Subscribe frame never reaches the semantic decoder.
+    let bob_v3_subscribe = parse_hex(
+        "0103010048061022222222222222222222222222222222102222222222222222222222222222222210333333333333333333333333333333331000000000000000000000000000000000000000",
+    );
+    let rejection = jazz::wire::validate_frame_for_artifact_corpus(
+        &bob_v3_subscribe,
+        jazz::wire::current_wire_features(),
+    )
+    .expect_err("a v3 envelope must not be admitted on a v4 link");
+    assert!(
+        rejection.contains("protocol version 3 does not match negotiated 4"),
+        "{rejection}"
+    );
+
+    // Even re-wrapped in a v4 envelope, bob's pre-v4 `ExactVersionSet`
+    // declaration (tag 2) is a reserved tag rather than a `Watermark` prefix.
+    let WireFrame::Message(envelope) = jazz::wire::decode_frame(&bob_v3_subscribe).unwrap() else {
+        panic!("expected a message frame");
+    };
+    let mut exact_version_set = envelope.payload;
+    assert_eq!(
+        exact_version_set.split_off(exact_version_set.len() - 2),
+        [0, 0]
+    );
+    exact_version_set.extend_from_slice(&[1, 2, 0, 0]);
+    assert!(decode_sync_message(&exact_version_set).is_err());
+    assert!(jazz::wire::decode_sync_message_trusted(&exact_version_set).is_err());
+    let rewrapped = encode_frame(&WireFrame::Message(WireEnvelope::new(
+        WIRE_PROTOCOL_VERSION,
+        FEATURE_SYNC_MESSAGE_PAYLOAD,
+        exact_version_set,
+    )))
+    .unwrap();
+    assert!(
+        jazz::wire::validate_frame_for_artifact_corpus(
+            &rewrapped,
+            jazz::wire::current_wire_features()
+        )
+        .is_err()
+    );
+    let watermark = jazz::protocol::KnownStateDeclaration::Watermark {
+        position: GlobalTime(7),
+        authorization_progress: None,
+        supporting_revision: [0x51; 16],
+    };
+    assert_eq!(
+        postcard::to_allocvec(&watermark).unwrap(),
+        [&[3, 7, 0][..], &[0x51; 16][..]].concat(),
+        "Watermark is frozen at tag 3"
+    );
+}
+
 #[test]
 fn wire_message_frame_fixtures_are_current() {
     let actual = serde_json::to_string_pretty(&fixture_manifest())

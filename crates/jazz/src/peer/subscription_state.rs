@@ -42,6 +42,7 @@ pub(super) fn fast_current_membership_position(
             ..
         })
         | Some(KnownStateDeclaration::Watermark { position, .. }) => Some(*position),
+        Some(KnownStateDeclaration::Reserved2(retired)) => match *retired {},
         None => None,
     }
 }
@@ -59,6 +60,7 @@ pub(super) fn fast_authorization_progress(
             authorization_progress,
             ..
         }) => *authorization_progress,
+        Some(KnownStateDeclaration::Reserved2(retired)) => match *retired {},
         Some(KnownStateDeclaration::Fast { .. }) | None => None,
     }
 }

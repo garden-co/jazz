@@ -25,7 +25,7 @@ Invariant digest:
 - `INV-DATA-12`: A table read or write policy, when present, MUST name the table it is attached to and MUST validate against the complete `JazzSchema`.
 - `INV-DATA-14`: History storage MUST preserve each content version's row identity, transaction identity, schema identity, parent set, and user cells.
 - `INV-DATA-15`: Deletion-register storage MUST preserve each deletion version's row identity, transaction identity, schema identity, parent set, and deletion event.
-- `INV-DATA-16`: The wire row descriptor for replicated row payloads MUST include only `row_uuid`, `parents`, nullable `_deletion`, and nullable `user_{col}` cells; receiver-local currentness and authority-state columns MUST be excluded.
+- `INV-DATA-16`: The wire row descriptor for replicated row payloads MUST include only `row_uuid`, the row provenance cells, nullable `_deletion`, and nullable `user_{col}` cells, inside the `JVRR` version-2 envelope; it MUST NOT carry `parents`, and receiver-local currentness and authority-state columns MUST be excluded.
 - `INV-DATA-17`: A stored row version MUST belong to exactly one physical layer: content with user cells or deletion-register state with `_deletion` and no user cells.
 - `INV-DATA-18`: Derived global-current storage MUST identify the per-layer winner by row and preserve the content fields needed for global current reads.
 - `INV-DATA-19`: The global change stream MUST retain enough table, row, layer, and sequence information to reconstruct global as-of reads.
@@ -230,8 +230,10 @@ one sparse immutable deletion history across the database without cross-table or
 cross-branch-key row-UUID collisions (`INV-DATA-21`).
 
 The replicated wire payload for a version (`VersionRecord`) is exactly the
-replicated-immutable fields (§2.1): `row_uuid`, `parents`, a nullable
-`_deletion`, and nullable `user_{col}` cells. Receiver-local currency and
+replicated-immutable fields (§2.1): `row_uuid`, the provenance cells, a nullable
+`_deletion`, and nullable `user_{col}` cells, carried in the `JVRR` version-2
+row blob (SPEC 16) and followed by the record's `col_stamps` (SPEC 4 §4.6).
+Wire protocol v4 removed `parents`; a version-1 blob is rejected. Receiver-local currency and
 authority-state columns are excluded (`INV-DATA-16`). Mixed-version _sync_ is
 owned by ch. 8 / ch. 10.
 
@@ -420,8 +422,9 @@ created_by, created_at, updated_by, updated_at)`, followed by declared
 `user_{column}` cells in application declaration order. The deletion relation
 adds `physical_table_id` at position 1 and ends with `_deletion` at position 11;
 it has no user cells. The replicated `WireRowRecord` positions are
-`(row_uuid, parents, created_by, created_at_ms, updated_by, updated_at_ms,
-nullable _deletion, user cells...)`. A version is content iff `_deletion` is
+`(row_uuid, created_by, created_at_ms, updated_by, updated_at_ms,
+nullable _deletion, user cells...)` (`JVRR` version 2; version 1 also had
+`parents` at position 1). A version is content iff `_deletion` is
 null, otherwise it is the deletion/register layer. Parent references are the
 strictly increasing lexicographic sequence of `(TxTime, NodeUuid)` pairs;
 duplicates and insertion-order spellings are rejected on receipt. This makes a

@@ -878,6 +878,7 @@ where
                 | KnownStateDeclaration::FastWithAuthorizationProgress { position, .. }
                 | KnownStateDeclaration::Watermark { position, .. },
             ) => Some(*position),
+            Some(KnownStateDeclaration::Reserved2(retired)) => match *retired {},
             None => None,
         };
         let skipped_known_state_rows = result_member_adds
