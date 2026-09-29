@@ -531,6 +531,19 @@ describe("policies that correlate optional and required columns", () => {
       await carol.expectDenied((db) =>
         db.insert(inviteApp.members, { showId: show.id, parentId: show.id, account }),
       );
+      // An invite whose optional parentId is NULL must not match a member whose
+      // parentId is set, even though every other correlated column matches.
+      await policyTestApp.seed((db) =>
+        db.insert(inviteApp.invites, { showId: show.id, code: "orphan", parentId: null }),
+      );
+      await carol.expectDenied((db) =>
+        db.insert(inviteApp.members, {
+          showId: show.id,
+          parentId: show.id,
+          account,
+          inviteCode: "orphan",
+        }),
+      );
       await carol
         .insert(inviteApp.members, {
           showId: show.id,

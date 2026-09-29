@@ -1209,6 +1209,7 @@ mod tests {
                     ColumnSchema::new("show", ColumnType::Uuid),
                     ColumnSchema::new("parent", ColumnType::Uuid),
                     ColumnSchema::new("invite_code", ColumnType::String.nullable()),
+                    ColumnSchema::new("venue", ColumnType::String),
                 ],
             )
             .with_reference("show", "shows")
@@ -1219,6 +1220,7 @@ mod tests {
                     ColumnSchema::new("show", ColumnType::Uuid),
                     ColumnSchema::new("parent", ColumnType::Uuid.nullable()),
                     ColumnSchema::new("code", ColumnType::String),
+                    ColumnSchema::new("venue", ColumnType::String),
                 ],
             )
             .with_reference("show", "shows")
@@ -1259,6 +1261,43 @@ mod tests {
         optional_ref
             .validate_runtime(&schema)
             .expect("a required reference correlates with an optional reference");
+    }
+
+    // `exists invites where invites.venue = members.venue and invites.code = members.invite_code`:
+    // the join key is a plain text column, not a reference, so validation takes
+    // the explicit column-equality path. Its correlations must accept an
+    // optional/required pair of one type too.
+    #[test]
+    fn plain_column_joins_accept_optional_and_required_correlations() {
+        let schema = nullable_correlation_schema();
+        Query::from("members")
+            .join_via_column_with_correlations(
+                "invites",
+                "venue",
+                "venue",
+                [JoinCorrelation {
+                    join_column: "code".to_owned(),
+                    source_column: "invite_code".to_owned(),
+                }],
+                [],
+            )
+            .validate_runtime(&schema)
+            .expect("optional text correlates with required text on a plain column join");
+
+        let error = Query::from("members")
+            .join_via_column_with_correlations(
+                "invites",
+                "venue",
+                "venue",
+                [JoinCorrelation {
+                    join_column: "code".to_owned(),
+                    source_column: "show".to_owned(),
+                }],
+                [],
+            )
+            .validate_runtime(&schema)
+            .expect_err("text never correlates with a UUID on a plain column join");
+        assert_eq!(error, QueryError::OperandTypeMismatch);
     }
 
     #[test]
