@@ -20,7 +20,7 @@ import { MovePageDialog } from "./MovePageDialog";
 import { DeletePageDialog } from "./DeletePageDialog";
 import { WorkspaceDialog } from "./WorkspaceDialog";
 import { useCan } from "./use-can";
-import { ROLE_LABELS, useWorkspace } from "./workspace-context";
+import { pageAdviceKey, ROLE_LABELS, useWorkspace } from "./workspace-context";
 
 /** Workspace switcher and the nested page tree. */
 export function Sidebar({
@@ -127,9 +127,13 @@ function PageNavItem({
   onDelete: (pageId: string) => void;
 }) {
   const { tree, selectedPageId, openPage } = useWorkspace();
-  const canEdit = useCan((db) => db.canUpdate(app.pages, page.id, { title: page.title }), page.id);
+  const adviceKey = pageAdviceKey(tree, page.id);
+  const canEdit = useCan(
+    (db) => db.canUpdate(app.pages, page.id, { title: page.title }),
+    adviceKey,
+  );
   // Deleting and moving both need edit access from above the page.
-  const canRestructure = useCan((db) => db.canDelete(app.pages, page.id), page.id);
+  const canRestructure = useCan((db) => db.canDelete(app.pages, page.id), adviceKey);
   // Issues live in their database view, not in the sidebar.
   const children = page.kind === "issues" ? [] : tree.children(page.id);
   const canNest = tree.depth(page.id) + 1 < PAGE_TREE_MAX_DEPTH;

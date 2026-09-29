@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { useAll, useDb } from "jazz-tools/react";
 import {
+  Banner,
   Blockquote,
   CheckboxInput,
   Divider,
@@ -61,6 +62,7 @@ export function BlockEditor({ pageId, editable }: { pageId: string; editable: bo
   const { workspace } = useWorkspace();
   const { data: blocks } = useAll(app.blocks.where({ pageId }).select("*", "$createdAt"));
   const [uploading, setUploading] = useState(false);
+  const [writeError, setWriteError] = useState<string | null>(null);
   const inputs = useRef(new Map<string, HTMLTextAreaElement>());
   const [focusRequest, setFocusRequest] = useState<{ id: string; at: "start" | "end" } | null>(
     null,
@@ -144,10 +146,13 @@ export function BlockEditor({ pageId, editable }: { pageId: string; editable: bo
     collect(block.id);
     doomed.push(block);
     // One transaction, so a block never loses its children without also going.
-    void db.transaction((tx) => {
+    setWriteError(null);
+    db.transaction((tx) => {
       for (const row of doomed) tx.delete(app.blocks, row.id);
       if (block.attachmentId) tx.delete(app.attachments, block.attachmentId);
-    });
+    }).catch((cause: unknown) =>
+      setWriteError(cause instanceof Error ? cause.message : String(cause)),
+    );
   };
 
   const indent = (block: Row) => {
@@ -233,66 +238,99 @@ export function BlockEditor({ pageId, editable }: { pageId: string; editable: bo
     }
   };
 
-  const renderBlocks = (parentId: string | null) =>
-    childrenOf(parentId).map((block) => {
-      const nested = childrenOf(block.id);
-      const menu: DropdownMenuOption[] = [
-        {
-          type: "section",
-          title: "Turn into",
-          items: TEXT_KINDS.filter(({ kind }) => kind !== block.kind).map(({ kind, label }) => ({
-            label,
-            onClick: () => db.update(app.blocks, block.id, { kind }),
-          })),
-        },
-        { type: "divider" },
-        { label: "Indent", onClick: () => indent(block) },
-        { label: "Outdent", onClick: () => outdent(block), isDisabled: !block.parentBlockId },
-        { type: "divider" },
-        { label: "Delete", variant: "destructive", onClick: () => deleteBlock(block) },
-      ];
-      return (
-        <VStack key={block.id} gap={1}>
-          <HStack gap={1} align="start" className="bb-block" data-block-kind={block.kind}>
-            <VStack width="100%" minHeight={0}>
-              <BlockContent
-                block={block}
-                editable={editable}
-                registerInput={(node) => {
-                  if (node) inputs.current.set(block.id, node);
-                  else inputs.current.delete(block.id);
-                }}
-                onText={(next, base) => changeText(block, next, base)}
-                onKey={(event) => handleKey(block, event)}
-                onToggle={(checked) => db.update(app.blocks, block.id, { checked })}
-              />
-            </VStack>
-            {editable && (
-              <span className="bb-block-menu">
-                <MoreMenu
-                  label="Block actions"
-                  size="sm"
-                  alignment="end"
-                  items={
-                    block.kind === "image" || block.kind === "file" || block.kind === "divider"
-                      ? menu.slice(2)
-                      : menu
-                  }
-                />
-              </span>
-            )}
-          </HStack>
-          {nested.length > 0 && (
-            <VStack gap={1} paddingInlineStart={6}>
-              {renderBlocks(block.id)}
-            </VStack>
-          )}
-        </VStack>
+  // Consecutive bullets share one list, so they read as a single list.
+  const renderBlocks = (parentId: string | null) => {
+    const out: ReactNode[] = [];
+    let bullets: Row[] = [];
+    const flushBullets = () => {
+      if (bullets.length === 0) return;
+      out.push(
+        <List key={`list-${bullets[0].id}`} listStyle="disc" density="compact">
+          {bullets.map((block) => (
+            <ListItem key={block.id} label={renderBlock(block)} />
+          ))}
+        </List>,
       );
-    });
+      bullets = [];
+    };
+    for (const block of childrenOf(parentId)) {
+      if (block.kind === "bullet") bullets.push(block);
+      else {
+        flushBullets();
+        out.push(renderBlock(block));
+      }
+    }
+    flushBullets();
+    return out;
+  };
+
+  const renderBlock = (block: Row): ReactNode => {
+    const nested = childrenOf(block.id);
+    const menu: DropdownMenuOption[] = [
+      {
+        type: "section",
+        title: "Turn into",
+        items: TEXT_KINDS.filter(({ kind }) => kind !== block.kind).map(({ kind, label }) => ({
+          label,
+          onClick: () => db.update(app.blocks, block.id, { kind }),
+        })),
+      },
+      { type: "divider" },
+      { label: "Indent", onClick: () => indent(block) },
+      { label: "Outdent", onClick: () => outdent(block), isDisabled: !block.parentBlockId },
+      { type: "divider" },
+      { label: "Delete", variant: "destructive", onClick: () => deleteBlock(block) },
+    ];
+    return (
+      <VStack key={block.id} gap={1}>
+        <HStack gap={1} align="start" className="bb-block" data-block-kind={block.kind}>
+          <VStack width="100%" minHeight={0}>
+            <BlockContent
+              block={block}
+              editable={editable}
+              registerInput={(node) => {
+                if (node) inputs.current.set(block.id, node);
+                else inputs.current.delete(block.id);
+              }}
+              onText={(next, base) => changeText(block, next, base)}
+              onKey={(event) => handleKey(block, event)}
+              onToggle={(checked) => db.update(app.blocks, block.id, { checked })}
+            />
+          </VStack>
+          {editable && (
+            <span className="bb-block-menu">
+              <MoreMenu
+                label="Block actions"
+                size="sm"
+                alignment="end"
+                items={
+                  block.kind === "image" || block.kind === "file" || block.kind === "divider"
+                    ? menu.slice(2)
+                    : menu
+                }
+              />
+            </span>
+          )}
+        </HStack>
+        {nested.length > 0 && (
+          <VStack gap={1} paddingInlineStart={6}>
+            {renderBlocks(block.id)}
+          </VStack>
+        )}
+      </VStack>
+    );
+  };
 
   return (
     <VStack gap={2}>
+      {writeError && (
+        <Banner
+          status="error"
+          title="Could not delete the block"
+          description={writeError}
+          collapsible={false}
+        />
+      )}
       <VStack gap={1}>{renderBlocks(null)}</VStack>
       {editable && (
         <HStack gap={2} wrap="wrap">
@@ -370,11 +408,8 @@ function BlockContent({
         </HStack>
       );
     case "bullet":
-      return (
-        <List listStyle="disc" density="compact">
-          <ListItem label={text("List item")} />
-        </List>
-      );
+      // The surrounding list draws the marker.
+      return text("List item");
     case "quote":
       return <Blockquote>{text("Quote")}</Blockquote>;
     case "divider":

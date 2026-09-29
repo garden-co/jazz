@@ -58,14 +58,15 @@ export function BandBookApp({ homeWorkspaceId }: { homeWorkspaceId: string }) {
 
   const tree = useMemo(() => buildPageTree(pages ?? []), [pages]);
   const role = myMemberships?.find((member) => member.workspaceId === workspaceId)?.role;
+  // Only what every piece of advice depends on: the viewer's role and grants.
+  // Where a page sits in the tree is part of each page's own advice key.
   const accessVersion = useMemo(
     () =>
       [
         role ?? "none",
         ...(myGrants ?? []).map((grant) => `${grant.pageId}:${grant.role}`).sort(),
-        ...(pages ?? []).map((page) => `${page.id}<${page.parentId ?? ""}`),
       ].join(","),
-    [role, myGrants, pages],
+    [role, myGrants],
   );
 
   const selectedPageId = params.get("p");

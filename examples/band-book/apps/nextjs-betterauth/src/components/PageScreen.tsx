@@ -26,7 +26,7 @@ import { IssuesDatabase } from "./IssuesDatabase";
 import { MovePageDialog } from "./MovePageDialog";
 import { ShareDialog } from "./ShareDialog";
 import { useCan } from "./use-can";
-import { useWorkspace } from "./workspace-context";
+import { pageAdviceKey, useWorkspace } from "./workspace-context";
 
 /** The selected page: breadcrumbs, title, actions and its body. */
 export function PageScreen() {
@@ -50,10 +50,11 @@ function PageBody({ pageId }: { pageId: string }) {
   const db = useDb();
   const { me, workspace, tree, openPage } = useWorkspace();
   const page = tree.byId.get(pageId)!;
-  const canEdit = useCan((db) => db.canUpdate(app.pages, pageId, { title: page.title }), pageId);
+  const adviceKey = pageAdviceKey(tree, pageId);
+  const canEdit = useCan((db) => db.canUpdate(app.pages, pageId, { title: page.title }), adviceKey);
   const editable = canEdit === true;
   // Deleting and moving both need edit access from above the page.
-  const canRestructure = useCan((db) => db.canDelete(app.pages, pageId), pageId);
+  const canRestructure = useCan((db) => db.canDelete(app.pages, pageId), adviceKey);
   const canShare = useCan(
     (db) =>
       db.canInsert(app.pageGrants, {

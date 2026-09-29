@@ -2,7 +2,7 @@ import { app } from "@/schema";
 import permissions from "@/permissions";
 import type { JazzClient } from "jazz-tools/backend";
 import { createRequire as createRequireFromModule } from "node:module";
-import { appOrigin, jazzAppId, jazzEnv, jazzServerUrl } from "./config";
+import { jazzAppId, jazzEnv, jazzServerUrl } from "./config";
 import { serverSecret } from "./server-secret";
 
 const createRequire =
@@ -25,9 +25,6 @@ export async function authJazzClient(): Promise<JazzClient> {
     appId: jazzAppId,
     driver: { type: "memory" },
     serverUrl: jazzServerUrl,
-    // `forRequest` verifies browser bearers against Better Auth's JWKS.
-    jwksUrl: `${appOrigin}/api/auth/jwks`,
-    jwtIssuer: appOrigin,
     initial: {
       backendSecret: serverSecret("BACKEND_SECRET", "band-book-development-backend-secret"),
     },

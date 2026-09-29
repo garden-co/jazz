@@ -12,8 +12,8 @@ export type WorkspaceState = {
   pages: Page[];
   tree: PageTree<Page>;
   /**
-   * Changes whenever something that permission advice depends on changes:
-   * the viewer's role, their page grants, or the shape of the page tree.
+   * Changes when the viewer's role or page grants change, which can change
+   * any permission advice. Page placement is keyed per page (`pageAdviceKey`).
    */
   accessVersion: string;
   selectedPageId: string | null;
@@ -44,4 +44,13 @@ export const GRANT_LABELS: Record<GrantRole, string> = {
 export function memberName(members: Member[], account: string | null | undefined): string {
   if (!account) return "Unassigned";
   return members.find((member) => member.account === account)?.displayName ?? "Former member";
+}
+
+/**
+ * The part of a page's permission advice that depends on the tree: the page
+ * and its chain of parents. It changes when the page or an ancestor moves,
+ * not when unrelated pages are added or moved.
+ */
+export function pageAdviceKey(tree: PageTree<Page>, pageId: string): string {
+  return [...tree.ancestors(pageId).map((page) => page.id), pageId].join("/");
 }

@@ -15,7 +15,7 @@ import { useWorkspace } from "./workspace-context";
  * without claiming it is denied. It is offered unless the advice is
  * `"denied"`: `"unknown"` means Jazz could not tell (for example while
  * offline), so the action is offered and the authority decides. Advice is
- * asked again whenever `key` or the viewer's access in the workspace changes.
+ * asked again when `key` changes or the viewer's role or grants change.
  */
 export function useCan(
   check: (db: Db) => Promise<PermissionAdvice>,
