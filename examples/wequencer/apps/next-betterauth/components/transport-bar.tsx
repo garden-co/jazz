@@ -8,6 +8,7 @@ import { Text } from "@astryxdesign/core/Text";
 import { ToggleButton } from "@astryxdesign/core/ToggleButton";
 import { app } from "@/schema";
 import { MAX_TEMPO, MIN_TEMPO } from "@/lib/instruments";
+import type { ReportWrite } from "@/lib/report-write";
 import {
   retime,
   startPlayback,
@@ -27,6 +28,7 @@ export function TransportBar({
   length,
   playhead,
   canEdit,
+  reportWrite,
   isSoundOn,
   onSoundChange,
 }: {
@@ -36,6 +38,7 @@ export function TransportBar({
   length: number;
   playhead: number | null;
   canEdit: boolean;
+  reportWrite: ReportWrite;
   isSoundOn: boolean;
   onSoundChange: (on: boolean) => void;
 }) {
@@ -43,7 +46,12 @@ export function TransportBar({
   const current = { ...transport, patternId };
 
   function write(observation: TransportWrite) {
-    db.insert(app.transport_observations, { session_id: sessionId, ...observation });
+    void reportWrite(
+      db
+        .insert(app.transport_observations, { session_id: sessionId, ...observation })
+        .wait({ tier: "global" }),
+      "Transport change",
+    );
   }
 
   function togglePlay() {

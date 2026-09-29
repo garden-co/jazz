@@ -1,5 +1,5 @@
 import type { Db } from "jazz-tools";
-import { app, type Instrument } from "@/schema";
+import { app } from "../schema";
 import {
   INSTRUMENTS,
   MAX_STEPS,
@@ -7,100 +7,111 @@ import {
   starterStep,
   trackColor,
 } from "./instruments";
+import { stepId } from "./step-id";
 
-type TrackSeed = { id: string; instrument: Instrument };
-
-/**
- * Inserts one step row per position for a track in a pattern. Rows exist for
- * all 64 positions up front, so lengthening a pattern later never has two
- * bandmates racing to create the same pad.
- */
-function insertSteps(db: Db, track: TrackSeed, patternId: string, seeded: boolean) {
-  for (let position = 0; position < MAX_STEPS; position += 1) {
-    db.insert(app.steps, {
-      track_id: track.id,
-      pattern_id: patternId,
-      position,
-      enabled: seeded && starterStep(track.instrument, position),
-      velocity: 100,
-      probability: 100,
-    });
-  }
+function instrumentName(position: number) {
+  const instrument = instrumentForPosition(position);
+  return { instrument, name: INSTRUMENTS.find((option) => option.value === instrument)!.label };
 }
 
-export function createSession(
+type StepAddress = { sessionId: string; trackId: string; patternId: string; position: number };
+
+/** The derived row id and full row for one pad, ready to upsert. */
+export async function stepRow(step: StepAddress, enabled: boolean) {
+  return {
+    id: await stepId(step.trackId, step.patternId, step.position),
+    data: {
+      session_id: step.sessionId,
+      track_id: step.trackId,
+      pattern_id: step.patternId,
+      position: step.position,
+      enabled,
+      velocity: 100,
+      probability: 100,
+    },
+  };
+}
+
+/**
+ * Creates a session, its first pattern and a starter groove in one mergeable
+ * transaction, so bandmates never see a half-built session.
+ */
+export async function createSession(
   db: Db,
   author: string,
   options: { title: string; tempo: number; trackCount: number; length: number },
 ) {
-  // An explicit user action, not account bootstrap on a read path.
-  const session = db.insert(app.sessions, {
-    title: options.title,
-    tempo_bpm: options.tempo,
-    loop_steps: options.length,
-  });
-  const sessionId = session.value.id;
-  db.insert(app.session_members, { session_id: sessionId, member_author: author, role: "owner" });
-  const pattern = db.insert(app.patterns, {
-    session_id: sessionId,
-    position: 0,
-    name: "Pattern 1",
-    length: options.length,
-  });
-  for (let position = 0; position < options.trackCount; position += 1) {
-    const instrument = instrumentForPosition(position);
-    const track = db.insert(app.tracks, {
-      session_id: sessionId,
-      position,
-      name: INSTRUMENTS.find((option) => option.value === instrument)!.label,
-      color: trackColor(position),
-      instrument,
+  const result = await db.transaction(async (tx) => {
+    const session = tx.insert(app.sessions, { title: options.title, tempo_bpm: options.tempo });
+    tx.insert(app.session_members, {
+      session_id: session.id,
+      member_author: author,
+      role: "owner",
     });
-    insertSteps(db, { id: track.value.id, instrument }, pattern.value.id, true);
-  }
-  db.insert(app.transport_observations, {
-    session_id: sessionId,
-    playing: false,
-    bar: 0,
-    observed_at: new Date(),
-    tempo_bpm: options.tempo,
-    pattern_id: pattern.value.id,
+    const pattern = tx.insert(app.patterns, {
+      session_id: session.id,
+      position: 0,
+      name: "Pattern 1",
+      length: options.length,
+    });
+    for (let position = 0; position < options.trackCount; position += 1) {
+      const { instrument, name } = instrumentName(position);
+      const track = tx.insert(app.tracks, {
+        session_id: session.id,
+        position,
+        name,
+        color: trackColor(position),
+        instrument,
+      });
+      for (let step = 0; step < MAX_STEPS; step += 1) {
+        if (!starterStep(instrument, step)) continue;
+        const row = await stepRow(
+          { sessionId: session.id, trackId: track.id, patternId: pattern.id, position: step },
+          true,
+        );
+        tx.upsert(app.steps, row.id, row.data);
+      }
+    }
+    tx.insert(app.transport_observations, {
+      session_id: session.id,
+      playing: false,
+      bar: 0,
+      observed_at: new Date(),
+      tempo_bpm: options.tempo,
+      pattern_id: pattern.id,
+    });
+    return session.id;
   });
-  return sessionId;
+  return result.value;
 }
 
-export function addTrack(
-  db: Db,
-  sessionId: string,
-  position: number,
-  patternIds: string[],
-): string {
-  const instrument = instrumentForPosition(position);
-  const track = db.insert(app.tracks, {
+/** A new track starts silent; its pads exist as soon as someone presses them. */
+export function addTrack(db: Db, sessionId: string, position: number) {
+  const { instrument, name } = instrumentName(position);
+  return db.insert(app.tracks, {
     session_id: sessionId,
     position,
-    name: INSTRUMENTS.find((option) => option.value === instrument)!.label,
+    name,
     color: trackColor(position),
     instrument,
   });
-  for (const patternId of patternIds)
-    insertSteps(db, { id: track.value.id, instrument }, patternId, false);
-  return track.value.id;
 }
 
-export function addPattern(
-  db: Db,
-  sessionId: string,
-  position: number,
-  length: number,
-  tracks: TrackSeed[],
-): string {
-  const pattern = db.insert(app.patterns, {
+export function addPattern(db: Db, sessionId: string, position: number, length: number) {
+  return db.insert(app.patterns, {
     session_id: sessionId,
     position,
     name: `Pattern ${position + 1}`,
     length,
   });
-  for (const track of tracks) insertSteps(db, track, pattern.value.id, false);
-  return pattern.value.id;
+}
+
+/** Removes a track and every step it has, in any pattern, as one transaction. */
+export async function removeTrack(db: Db, trackId: string) {
+  const result = await db.transaction(async (tx) => {
+    for (const step of await tx.all(app.steps.where({ track_id: trackId })))
+      tx.delete(app.steps, step.id);
+    tx.delete(app.tracks, trackId);
+  });
+  return result;
 }

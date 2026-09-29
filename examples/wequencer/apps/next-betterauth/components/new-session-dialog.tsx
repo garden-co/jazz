@@ -32,9 +32,9 @@ export function NewSessionDialog({
   const [trackCount, setTrackCount] = useState(8);
   const [length, setLength] = useState(16);
 
-  function submit(event: FormEvent<HTMLFormElement>) {
+  async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const sessionId = createSession(db, author, {
+    const sessionId = await createSession(db, author, {
       title: title.trim() || "Untitled session",
       tempo,
       trackCount,
@@ -47,7 +47,7 @@ export function NewSessionDialog({
   return (
     <Dialog isOpen={isOpen} onOpenChange={onOpenChange} purpose="form" width={440}>
       <DialogHeader title="New session" onOpenChange={onOpenChange} />
-      <form onSubmit={submit}>
+      <form onSubmit={(event) => void submit(event)}>
         <VStack gap={4} padding={4}>
           <TextInput label="Title" value={title} onChange={setTitle} isRequired />
           <NumberInput

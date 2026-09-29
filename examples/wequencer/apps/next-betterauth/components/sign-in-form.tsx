@@ -25,16 +25,17 @@ export function SignInForm() {
     setError(null);
     setIsPending(true);
     if (isSignUp) beginSignupIntent(email);
-    const { error } = await (isSignUp
-      ? authClient.signUp.email({ name, email, password })
-      : authClient.signIn.email({ email, password }));
-    if (error) {
+    try {
+      const { error } = await (isSignUp
+        ? authClient.signUp.email({ name, email, password })
+        : authClient.signIn.email({ email, password }));
+      if (error) throw new Error(error.message ?? (isSignUp ? "Sign-up failed" : "Sign-in failed"));
+      window.location.assign("/dashboard");
+    } catch (cause) {
       if (isSignUp) clearSignupIntent();
-      setError(error.message ?? (isSignUp ? "Sign-up failed" : "Sign-in failed"));
+      setError(cause instanceof Error ? cause.message : String(cause));
       setIsPending(false);
-      return;
     }
-    window.location.assign("/dashboard");
   }
 
   return (

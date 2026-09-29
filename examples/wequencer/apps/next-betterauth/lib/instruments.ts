@@ -40,10 +40,6 @@ export function trackColor(position: number) {
   return TRACK_COLORS[position % TRACK_COLORS.length]!;
 }
 
-export function instrumentLabel(instrument: Instrument) {
-  return INSTRUMENTS.find((option) => option.value === instrument)?.label ?? instrument;
-}
-
 /** The instrument a new track gets, cycling through the kit. */
 export function instrumentForPosition(position: number): Instrument {
   return INSTRUMENTS[position % INSTRUMENTS.length]!.value;

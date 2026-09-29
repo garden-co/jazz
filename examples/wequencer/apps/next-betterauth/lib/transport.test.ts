@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { isAudible, volumeToGain } from "./audio";
 import { starterStep } from "./instruments";
 import { strongestRole } from "./roles";
+import { stepId } from "./step-id";
 import {
   absoluteStepAt,
   retime,
@@ -86,5 +87,12 @@ describe("mix and roles", () => {
   it("seeds a four-on-the-floor starter groove", () => {
     expect([0, 4, 8, 12].every((step) => starterStep("kick", step))).toBe(true);
     expect(starterStep("kick", 1)).toBe(false);
+  });
+
+  it("derives one uuid-shaped row id per pad", async () => {
+    const id = await stepId("track", "pattern", 3);
+    expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-a[0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(await stepId("track", "pattern", 3)).toBe(id);
+    expect(await stepId("track", "pattern", 4)).not.toBe(id);
   });
 });

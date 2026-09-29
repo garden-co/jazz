@@ -5,7 +5,8 @@ import { Button } from "@astryxdesign/core/Button";
 import { HStack } from "@astryxdesign/core/HStack";
 import { SegmentedControl, SegmentedControlItem } from "@astryxdesign/core/SegmentedControl";
 import { Tab, TabList } from "@astryxdesign/core/TabList";
-import { app, type Pattern, type Track } from "@/schema";
+import { app, type Pattern } from "@/schema";
+import type { ReportWrite } from "@/lib/report-write";
 import { PATTERN_LENGTHS } from "@/lib/instruments";
 import { addPattern } from "@/lib/session-setup";
 import { retime, type TransportState } from "@/lib/transport";
@@ -21,36 +22,36 @@ export function PatternBar({
   patterns,
   current,
   transport,
-  tracks,
   canEdit,
+  reportWrite,
 }: {
   sessionId: string;
   patterns: Pattern[];
   current: Pattern | undefined;
   transport: TransportState;
-  tracks: Track[];
   canEdit: boolean;
+  reportWrite: ReportWrite;
 }) {
   const db = useDb();
 
   function select(patternId: string) {
     if (!canEdit || patternId === current?.id) return;
-    db.insert(app.transport_observations, {
-      session_id: sessionId,
-      ...retime({ ...transport, patternId: current?.id }, Date.now(), { patternId }),
-    });
+    void reportWrite(
+      db
+        .insert(app.transport_observations, {
+          session_id: sessionId,
+          ...retime({ ...transport, patternId: current?.id }, Date.now(), { patternId }),
+        })
+        .wait({ tier: "global" }),
+      "Switching pattern",
+    );
   }
 
   function add() {
     const position = (patterns.at(-1)?.position ?? -1) + 1;
-    const patternId = addPattern(
-      db,
-      sessionId,
-      position,
-      current?.length ?? 16,
-      tracks.map((track) => ({ id: track.id, instrument: track.instrument })),
-    );
-    select(patternId);
+    const pattern = addPattern(db, sessionId, position, current?.length ?? 16);
+    void reportWrite(pattern.wait({ tier: "global" }), "Adding a pattern");
+    select(pattern.value.id);
   }
 
   return (
@@ -82,7 +83,14 @@ export function PatternBar({
           size="sm"
           value={String(current.length)}
           isDisabled={!canEdit}
-          onChange={(value) => db.update(app.patterns, current.id, { length: Number(value) })}
+          onChange={(value) =>
+            void reportWrite(
+              db
+                .update(app.patterns, current.id, { length: Number(value) })
+                .wait({ tier: "global" }),
+              "Changing the pattern length",
+            )
+          }
         >
           {PATTERN_LENGTHS.map((count) => (
             <SegmentedControlItem key={count} value={String(count)} label={`${count} steps`} />

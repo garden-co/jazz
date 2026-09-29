@@ -11,6 +11,8 @@ import { VStack } from "@astryxdesign/core/VStack";
 import { app, type Instrument, type Track } from "@/schema";
 import { INSTRUMENTS } from "@/lib/instruments";
 import { volumeToGain } from "@/lib/audio";
+import type { ReportWrite } from "@/lib/report-write";
+import { removeTrack } from "@/lib/session-setup";
 
 export function TrackSettingsDialog({
   track,
@@ -23,7 +25,7 @@ export function TrackSettingsDialog({
   isCreator: boolean;
   onClose: () => void;
   onPreview: (instrument: Instrument, level: number) => void;
-  reportWrite: (write: Promise<unknown>, subject: string) => Promise<void>;
+  reportWrite: ReportWrite;
 }) {
   const db = useDb();
   const [name, setName] = useState(track.name);
@@ -36,13 +38,8 @@ export function TrackSettingsDialog({
   }
 
   async function remove() {
-    // Steps are removed first: their delete policy follows the track.
-    const steps = await db.all(app.steps.where({ track_id: track.id }));
-    for (const step of steps) db.delete(app.steps, step.id);
-    void reportWrite(
-      db.delete(app.tracks, track.id).wait({ tier: "global" }),
-      "Removing the track",
-    );
+    const result = await removeTrack(db, track.id);
+    void reportWrite(result.wait({ tier: "global" }), "Removing the track");
     onClose();
   }
 

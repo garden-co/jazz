@@ -11,11 +11,12 @@ import { EmptyState } from "@astryxdesign/core/EmptyState";
 import { Heading } from "@astryxdesign/core/Heading";
 import { HStack } from "@astryxdesign/core/HStack";
 import { Spinner } from "@astryxdesign/core/Spinner";
-import { app, type Step, type Track } from "@/schema";
+import { app, type Track } from "@/schema";
 import { ROLE_LABELS, strongestRole } from "@/lib/roles";
 import { MAX_TRACKS } from "@/lib/instruments";
-import { addTrack } from "@/lib/session-setup";
+import { addTrack, stepRow } from "@/lib/session-setup";
 import type { PlaybackTrack } from "@/lib/audio";
+import type { ReportWrite } from "@/lib/report-write";
 import type { TransportState } from "@/lib/transport";
 import { schedulePresenceHeartbeat } from "@/components/presence-heartbeat";
 import { PageColumn } from "@/components/page-column";
@@ -113,7 +114,7 @@ export function SessionPage({ sessionId }: { sessionId: string }) {
   const [isMembersOpen, setIsMembersOpen] = useState(false);
   const [settingsTrackId, setSettingsTrackId] = useState<string | null>(null);
 
-  const reportWrite = useCallback(async (write: Promise<unknown>, subject: string) => {
+  const reportWrite = useCallback<ReportWrite>(async (write, subject) => {
     setWriteError(null);
     try {
       await write;
@@ -129,14 +130,17 @@ export function SessionPage({ sessionId }: { sessionId: string }) {
     }
   }, []);
 
+  const patternId = pattern?.id;
   const onToggleStep = useCallback(
-    (step: Step) => {
-      void reportWrite(
-        db.update(app.steps, step.id, { enabled: !step.enabled }).wait({ tier: "global" }),
+    async (trackId: string, position: number, enabled: boolean) => {
+      if (!patternId) return;
+      const row = await stepRow({ sessionId, trackId, patternId, position }, enabled);
+      await reportWrite(
+        db.upsert(app.steps, row.id, row.data).wait({ tier: "global" }),
         "Pad update",
       );
     },
-    [db, reportWrite],
+    [db, patternId, reportWrite, sessionId],
   );
   const onUpdateTrack = useCallback(
     (trackId: string, change: Partial<Pick<Track, "muted" | "solo" | "volume">>) => {
@@ -207,6 +211,7 @@ export function SessionPage({ sessionId }: { sessionId: string }) {
         length={length}
         playhead={playhead}
         canEdit={canEdit}
+        reportWrite={reportWrite}
         isSoundOn={audio.isSoundOn}
         onSoundChange={audio.setSound}
       />
@@ -217,8 +222,8 @@ export function SessionPage({ sessionId }: { sessionId: string }) {
           patterns={patterns}
           current={pattern}
           transport={transport}
-          tracks={tracks}
           canEdit={canEdit}
+          reportWrite={reportWrite}
         />
         {pattern ? (
           <div className="sequencer-grid">
@@ -260,11 +265,11 @@ export function SessionPage({ sessionId }: { sessionId: string }) {
               label="Add track"
               variant="ghost"
               onClick={() =>
-                addTrack(
-                  db,
-                  sessionId,
-                  (tracks.at(-1)?.position ?? -1) + 1,
-                  patterns.map((candidate) => candidate.id),
+                void reportWrite(
+                  addTrack(db, sessionId, (tracks.at(-1)?.position ?? -1) + 1).wait({
+                    tier: "global",
+                  }),
+                  "Adding a track",
                 )
               }
             />
@@ -280,6 +285,7 @@ export function SessionPage({ sessionId }: { sessionId: string }) {
         presence={presence}
         author={author ?? undefined}
         isCreator={isCreator}
+        reportWrite={reportWrite}
       />
       {settingsTrack ? (
         <TrackSettingsDialog

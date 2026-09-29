@@ -58,14 +58,33 @@ const wequencerPermissions = s.definePermissions(
     policy.patterns.allowInsert.where((row) => canEdit(row.session_id));
     policy.patterns.allowUpdate.where((row) => canEdit(row.session_id));
     policy.patterns.allowDelete.where((row) => isCreator(row.session_id));
-    policy.steps.allowRead.where(allowedTo.read("track"));
-    // A step joins one track and one pattern; writing it needs edit access to
-    // both, so a step cannot be attached to another session's pattern.
-    policy.steps.allowInsert.where(allOf([allowedTo.update("track"), allowedTo.update("pattern")]));
-    policy.steps.allowUpdate.where(allOf([allowedTo.update("track"), allowedTo.update("pattern")]));
-    policy.steps.allowDelete.where(allowedTo.update("track"));
+    // A step's track and pattern must both belong to the step's session, and
+    // the writer must be able to edit that session.
+    const stepFitsSession = (row: {
+      session_id: RowRefValue;
+      track_id: RowRefValue;
+      pattern_id: RowRefValue;
+    }) =>
+      allOf([
+        canEdit(row.session_id),
+        policy.tracks.exists.where({ id: row.track_id, session_id: row.session_id }),
+        policy.patterns.exists.where({ id: row.pattern_id, session_id: row.session_id }),
+      ]);
+    policy.steps.allowRead.where((row) => isMember(row.session_id));
+    policy.steps.allowInsert.where(stepFitsSession);
+    policy.steps.allowUpdate.where(stepFitsSession);
+    policy.steps.allowDelete.where((row) => canEdit(row.session_id));
     policy.transport_observations.allowRead.where((row) => isMember(row.session_id));
-    policy.transport_observations.allowInsert.where((row) => canEdit(row.session_id));
+    // An observation may name the playing pattern, which must be this session's.
+    policy.transport_observations.allowInsert.where((row) =>
+      allOf([
+        canEdit(row.session_id),
+        anyOf([
+          { pattern_id: { isNull: true } },
+          policy.patterns.exists.where({ id: row.pattern_id, session_id: row.session_id }),
+        ]),
+      ]),
+    );
     policy.transport_observations.allowUpdate.where((row) => canEdit(row.session_id));
     policy.transport_observations.allowDelete.where((row) => canEdit(row.session_id));
     policy.presence.allowRead.where((row) => isMember(row.session_id));

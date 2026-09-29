@@ -192,7 +192,6 @@ describe("Wequencer cross-topology recovery", () => {
                 .insert(app.sessions, {
                   title: "Topology rehearsal",
                   tempo_bpm: 124,
-                  loop_steps: 16,
                 })
                 .wait({ tier: "global" });
               creatorMembership = await owner
@@ -243,6 +242,7 @@ describe("Wequencer cross-topology recovery", () => {
                   Array.from({ length: stepsPerTrack }, (_, position) =>
                     owner
                       .insert(app.steps, {
+                        session_id: session.id,
                         track_id: track.id,
                         pattern_id: pattern.id,
                         position,
@@ -616,6 +616,90 @@ describe("Wequencer cross-topology recovery", () => {
                 projectedWindow.map((track) => track.id),
               );
               expect(settledProjectedWindow.every((track) => !("color" in track))).toBe(true);
+            },
+          },
+          {
+            name: "viewer and cross-session writes are rejected",
+            run: async () => {
+              const viewerAccount = await registerAccount(
+                server,
+                await getJazzServerJwtForUser("wequencer-viewer", undefined, server.appId),
+              );
+              await owner
+                .insert(app.session_members, {
+                  session_id: session.id,
+                  member_author: viewerAccount.id,
+                  role: "viewer",
+                })
+                .wait({ tier: "global" });
+              const viewer = await openClient(server, "viewer", viewerAccount);
+              const viewerSteps = await waitForQuery(
+                viewer,
+                trackSteps(tracks[0].id, pattern.id),
+                (rows) => rows.length === stepsPerTrack,
+                "viewer reads the session's steps",
+                15_000,
+              );
+              await expect(
+                viewer
+                  .update(app.steps, viewerSteps[0]!.id, { enabled: true })
+                  .wait({ tier: "global" }),
+              ).rejects.toThrow();
+              await expect(
+                viewer
+                  .insert(app.transport_observations, {
+                    session_id: session.id,
+                    playing: true,
+                    bar: 0,
+                    observed_at: new Date(),
+                  })
+                  .wait({ tier: "global" }),
+              ).rejects.toThrow();
+
+              // The editor can edit a session of their own too, but a step
+              // or transport row must not borrow that session's pattern.
+              const elsewhere = await editor
+                .insert(app.sessions, { title: "Side project", tempo_bpm: 90 })
+                .wait({ tier: "global" });
+              await editor
+                .insert(app.session_members, {
+                  session_id: elsewhere.id,
+                  member_author: editorAccount.id,
+                  role: "owner",
+                })
+                .wait({ tier: "global" });
+              const foreignPattern = await editor
+                .insert(app.patterns, {
+                  session_id: elsewhere.id,
+                  position: 0,
+                  name: "Pattern 1",
+                  length: stepsPerTrack,
+                })
+                .wait({ tier: "global" });
+              await expect(
+                editor
+                  .insert(app.steps, {
+                    session_id: session.id,
+                    track_id: tracks[1].id,
+                    pattern_id: foreignPattern.id,
+                    position: 0,
+                    enabled: true,
+                    velocity: 100,
+                    probability: 100,
+                  })
+                  .wait({ tier: "global" }),
+              ).rejects.toThrow();
+              await expect(
+                editor
+                  .insert(app.transport_observations, {
+                    session_id: session.id,
+                    playing: true,
+                    bar: 0,
+                    observed_at: new Date(),
+                    pattern_id: foreignPattern.id,
+                  })
+                  .wait({ tier: "global" }),
+              ).rejects.toThrow();
             },
           },
           {

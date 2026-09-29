@@ -7,7 +7,7 @@ import { HStack } from "@astryxdesign/core/HStack";
 import { Slider } from "@astryxdesign/core/Slider";
 import { Text } from "@astryxdesign/core/Text";
 import { ToggleButton } from "@astryxdesign/core/ToggleButton";
-import { app, type Step, type Track } from "@/schema";
+import { app, type Track } from "@/schema";
 import { STEPS_PER_BEAT, TRACK_COLORS, trackColor } from "@/lib/instruments";
 
 export type TrackLaneProps = {
@@ -15,7 +15,7 @@ export type TrackLaneProps = {
   patternId: string;
   length: number;
   canEdit: boolean;
-  onToggleStep: (step: Step) => void;
+  onToggleStep: (trackId: string, position: number, enabled: boolean) => void;
   onUpdateTrack: (
     trackId: string,
     change: Partial<Pick<Track, "muted" | "solo" | "volume">>,
@@ -122,17 +122,18 @@ export const TrackLane = memo(function TrackLane({
         </div>
       </div>
       {Array.from({ length }, (_, position) => {
-        const step = byPosition.get(position);
+        // Steps are sparse: a pad without a row is simply off.
+        const enabled = byPosition.get(position)?.enabled ?? false;
         return (
           <button
-            key={step?.id ?? `missing-${position}`}
+            key={position}
             type="button"
             className="pad"
             aria-label={`${track.name}, step ${position + 1}`}
-            aria-pressed={step?.enabled ?? false}
+            aria-pressed={enabled}
             data-beat-start={position % STEPS_PER_BEAT === 0 ? "" : undefined}
-            disabled={!canEdit || !step}
-            onClick={() => step && onToggleStep(step)}
+            disabled={!canEdit}
+            onClick={() => onToggleStep(track.id, position, !enabled)}
           />
         );
       })}

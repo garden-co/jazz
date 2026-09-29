@@ -10,8 +10,6 @@ import { Grid } from "@astryxdesign/core/Grid";
 import { Heading } from "@astryxdesign/core/Heading";
 import { HStack } from "@astryxdesign/core/HStack";
 import { Spinner } from "@astryxdesign/core/Spinner";
-import { Text } from "@astryxdesign/core/Text";
-import { VStack } from "@astryxdesign/core/VStack";
 import { app } from "@/schema";
 import { AccountId } from "@/components/account-id";
 import { PageColumn } from "@/components/page-column";
@@ -44,12 +42,9 @@ export function SessionBrowser() {
         <Grid columns={{ minWidth: 240 }} gap={4}>
           {sessions.map((session) => (
             <ClickableCard key={session.id} label={session.title} href={`/dashboard/${session.id}`}>
-              <VStack gap={1}>
-                <Heading level={2} maxLines={1}>
-                  {session.title}
-                </Heading>
-                <Text type="supporting">{session.tempo_bpm} BPM</Text>
-              </VStack>
+              <Heading level={2} maxLines={1}>
+                {session.title}
+              </Heading>
             </ClickableCard>
           ))}
         </Grid>

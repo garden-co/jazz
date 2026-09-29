@@ -19,6 +19,7 @@ import { app, type MemberRole } from "@/schema";
 import { AccountId } from "@/components/account-id";
 import type { PresenceRow } from "@/components/presence-avatars";
 import { ROLE_LABELS } from "@/lib/roles";
+import type { ReportWrite } from "@/lib/report-write";
 
 type Member = { id: string; member_author: string; role: MemberRole };
 
@@ -40,6 +41,7 @@ export function MembersDialog({
   presence,
   author,
   isCreator,
+  reportWrite,
 }: {
   isOpen: boolean;
   onOpenChange: (isOpen: boolean) => void;
@@ -48,6 +50,7 @@ export function MembersDialog({
   presence: PresenceRow[];
   author: string | undefined;
   isCreator: boolean;
+  reportWrite: ReportWrite;
 }) {
   const db = useDb();
   const [accountId, setAccountId] = useState("");
@@ -62,7 +65,12 @@ export function MembersDialog({
     event.preventDefault();
     const invited = accountId.trim();
     if (!invited) return;
-    db.insert(app.session_members, { session_id: sessionId, member_author: invited, role });
+    void reportWrite(
+      db
+        .insert(app.session_members, { session_id: sessionId, member_author: invited, role })
+        .wait({ tier: "global" }),
+      "Adding the member",
+    );
     setAccountId("");
   }
 
@@ -98,7 +106,12 @@ export function MembersDialog({
                         label={`Remove ${name}`}
                         tooltip={`Remove ${name}`}
                         icon={<Icon icon="close" size="sm" />}
-                        onClick={() => db.delete(app.session_members, member.id)}
+                        onClick={() =>
+                          void reportWrite(
+                            db.delete(app.session_members, member.id).wait({ tier: "global" }),
+                            "Removing the member",
+                          )
+                        }
                       />
                     ) : null}
                   </HStack>

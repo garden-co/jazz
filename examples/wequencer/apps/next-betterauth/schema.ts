@@ -15,13 +15,14 @@ const schema = {
   sessions: s.table(
     {
       title: s.string(),
+      // The starting tempo; the newest transport observation overrides it.
       tempo_bpm: s.int(),
-      loop_steps: s.int(),
     },
     {
       session_membersViaSession: s.reverse("session_members", "session"),
       tracksViaSession: s.reverse("tracks", "session"),
       patternsViaSession: s.reverse("patterns", "session"),
+      stepsViaSession: s.reverse("steps", "session"),
       transport_observationsViaSession: s.reverse("transport_observations", "session"),
       presenceViaSession: s.reverse("presence", "session"),
     },
@@ -58,9 +59,8 @@ const schema = {
       { session: s.rel("sessions", "session_id"), stepsViaTrack: s.reverse("steps", "track") },
     )
     .indexOnly(["session_id", "position"]),
-  // A pattern is a named sequence of up to 64 steps. `length` only windows
-  // the steps that play; every pattern keeps one step row per track and
-  // position, so changing the length never races to create rows.
+  // A pattern is a named sequence of up to 64 steps; `length` windows the
+  // steps that play.
   patterns: s
     .table(
       {
@@ -72,9 +72,16 @@ const schema = {
       { session: s.rel("sessions", "session_id"), stepsViaPattern: s.reverse("steps", "pattern") },
     )
     .indexOnly(["session_id", "position"]),
+  // Steps are sparse: a pad without a row is off. The app derives a step's
+  // row id from (track, pattern, position) and upserts it, so bandmates who
+  // toggle the same new pad at once write the same row instead of two, and a
+  // track added concurrently with a pattern still gets working pads.
+  // `session_id` lets permissions check that the track and the pattern both
+  // belong to the same session.
   steps: s
     .table(
       {
+        session_id: s.uuid(),
         track_id: s.uuid(),
         pattern_id: s.uuid(),
         position: s.int(),
@@ -82,7 +89,11 @@ const schema = {
         velocity: s.int(),
         probability: s.int(),
       },
-      { track: s.rel("tracks", "track_id"), pattern: s.rel("patterns", "pattern_id") },
+      {
+        session: s.rel("sessions", "session_id"),
+        track: s.rel("tracks", "track_id"),
+        pattern: s.rel("patterns", "pattern_id"),
+      },
     )
     .indexOnly(["track_id", "pattern_id", "position"]),
   // A transport receipt is deliberately just a row with timing fields: the
