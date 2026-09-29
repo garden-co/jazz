@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createDb, type Db } from "../../../../packages/jazz-tools/src/runtime/db.js";
+import type { Db } from "../../../../packages/jazz-tools/src/runtime/db.js";
+import { createDb } from "../../../../packages/jazz-tools/src/runtime/testing/create-internal-db.js";
 import { deploy } from "../../../../packages/jazz-tools/src/dev/catalogue.js";
 import {
   TestCleanup,
