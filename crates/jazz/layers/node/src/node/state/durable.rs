@@ -16,7 +16,8 @@ where
             .await
     }
 
-    pub(crate) async fn record_scope_relay_authoritative_bundles_with_progress(
+    #[doc(hidden)]
+    pub async fn record_scope_relay_authoritative_bundles_with_progress(
         &mut self,
         bundles: &[VersionBundle],
         progress_waker: Option<&std::task::Waker>,
@@ -82,7 +83,8 @@ where
         .await
     }
 
-    pub(crate) async fn record_scope_relay_authoritative_repair_payloads_with_progress(
+    #[doc(hidden)]
+    pub async fn record_scope_relay_authoritative_repair_payloads_with_progress(
         &mut self,
         bundles: &[VersionBundle],
         authority_receipt_eligible: bool,
@@ -115,7 +117,8 @@ where
         .await
     }
 
-    pub(crate) async fn record_scope_relay_authored_pending_versions_with_progress(
+    #[doc(hidden)]
+    pub async fn record_scope_relay_authored_pending_versions_with_progress(
         &mut self,
         tx: &Transaction,
         versions: &[VersionRecord],
