@@ -60,6 +60,14 @@ export function SiteTopNav() {
   const pathname = usePathname();
   const [isSearchOpen, setSearchOpen] = useState(false);
   const openSearch = () => setSearchOpen(true);
+  // Other Jazz surfaces (the Cloud dashboard) link to `?search` to open this palette.
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    if (!url.searchParams.has("search")) return;
+    setSearchOpen(true);
+    url.searchParams.delete("search");
+    window.history.replaceState(null, "", url);
+  }, []);
   return (
     <>
       <TopNav
