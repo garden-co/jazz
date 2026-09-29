@@ -331,16 +331,11 @@ export default function HomePage() {
 
       <section className="home-section">
         <div className="home-container">
-          <SectionHeader id="how-it-works" title="One database, from the client to the cloud">
-            <Text as="p" display="block" type="large" color="secondary" weight="normal">
-              Jazz runs inside your apps, your servers and the cloud at once. Each keeps a synced
-              copy of the rows it uses, and Core keeps everyone consistent and secure.
-            </Text>
-          </SectionHeader>
+          <SectionHeader id="how-it-works" title="One database, from the client to the cloud" />
           <Figure
             className="home-figure-wide mt-12"
             number={1}
-            caption="Where Jazz runs. Every peer keeps a local copy of the rows it uses; Core authorizes and stores every write."
+            caption="Where Jazz runs. Every client and server module keeps a partial local copy of the data it uses; Jazz Cloud authorizes every write and holds all data."
           >
             <StackDiagram />
           </Figure>

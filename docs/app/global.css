@@ -252,8 +252,11 @@ h6 {
   font-weight: var(--font-weight-medium);
 }
 .home-diagram .dg-detail {
-  fill: var(--color-text-secondary);
   font-size: 12px;
+}
+/* Low specificity, so a dg-fill-* tone can highlight a detail line. */
+.home-diagram :where(.dg-detail) {
+  fill: var(--color-text-secondary);
 }
 .home-diagram .dg-label {
   font-size: 12px;

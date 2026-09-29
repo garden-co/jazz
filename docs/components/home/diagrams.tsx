@@ -124,7 +124,7 @@ function Box({
   h: number;
   tone?: Tone;
   title: string;
-  lines?: string[];
+  lines?: (string | { text: string; tone: Tone })[];
   center?: boolean;
 }) {
   const textTone = tone === "shared" ? "blue" : tone;
@@ -139,11 +139,19 @@ function Box({
       >
         {title}
       </text>
-      {lines?.map((line, index) => (
-        <text key={line} x={x + 12} y={y + 45 + index * 16} className="dg-detail">
-          {line}
-        </text>
-      ))}
+      {lines?.map((line, index) => {
+        const { text, tone: lineTone } = typeof line === "string" ? { text: line } : line;
+        return (
+          <text
+            key={text}
+            x={x + 12}
+            y={y + 45 + index * 16}
+            className={lineTone ? `dg-detail dg-fill-${lineTone}` : "dg-detail"}
+          >
+            {text}
+          </text>
+        );
+      })}
     </g>
   );
 }
@@ -169,39 +177,35 @@ function Label({
   );
 }
 
-/** Frontend, backend and cloud each hold a synced copy of the data. */
+/** Clients and server modules each hold a partial copy; Jazz Cloud holds all data. */
 export function StackDiagram() {
+  const copy = (where: string) => [
+    { text: "partial local copy", tone: "blue" as const },
+    { text: `(${where})`, tone: "blue" as const },
+  ];
   const peers = [
-    { x: 16, title: "web app", lines: ["browser", "local copy"] },
-    { x: 214, title: "mobile app", lines: ["react native", "local copy"] },
-    { x: 412, title: "backend", lines: ["typescript · rust", "local copy"] },
-    { x: 610, title: "agents & jobs", lines: ["any server", "local copy"] },
+    { x: 16, title: "web app", lines: ["browser", ...copy("on disk")] },
+    { x: 214, title: "mobile app", lines: ["react native", ...copy("on disk")] },
+    { x: 412, title: "backend", lines: ["typescript · rust", ...copy("in memory")] },
+    { x: 610, title: "agents & jobs", lines: ["any server", ...copy("in memory")] },
   ];
   const coreX = 250;
   const coreW = 300;
-  const busY = 150;
-  const peerY = 176;
+  const busY = 134;
+  const peerY = 164;
   return (
     <Diagram
-      viewBox="0 0 800 296"
-      label="Web apps, mobile apps, backends and agents each keep a local copy of the data they use and sync it with Jazz Core, in Jazz Cloud or self-hosted."
+      viewBox="0 0 800 300"
+      label="Web apps, mobile apps, backends and agents each keep a partial local copy of the data they use, on disk or in memory, and sync it with Jazz Cloud, which authorizes every write and holds all data."
     >
       <Box
         x={coreX}
         y={16}
         w={coreW}
         h={82}
-        tone="green"
-        title="core"
-        lines={["authorizes every write", "stores all data"]}
+        title="jazz cloud"
+        lines={["authorizes every write", { text: "all data", tone: "blue" }]}
       />
-      <Label x={coreX + coreW + 16} y={62} tone="green">
-        global
-      </Label>
-      <Label x={16} y={116} tone="muted">
-        jazz cloud or self-hosted
-      </Label>
-      <line x1={16} x2={784} y1={124} y2={124} className="dg-region" />
       {peers.map((peer) => {
         const cx = peer.x + 87;
         return (
@@ -217,7 +221,7 @@ export function StackDiagram() {
           />
         );
       })}
-      <Label x={410} y={116}>
+      <Label x={410} y={120}>
         sync
       </Label>
       {peers.map((peer) => (
@@ -226,17 +230,13 @@ export function StackDiagram() {
           x={peer.x}
           y={peerY}
           w={174}
-          h={82}
-          tone="blue"
+          h={98}
           title={peer.title}
           lines={peer.lines}
         />
       ))}
-      <Label x={16} y={284} tone="muted">
-        your apps and servers
-      </Label>
-      <Label x={784} y={284} tone="blue" anchor="end">
-        local
+      <Label x={16} y={288} tone="muted">
+        the clients and server modules making up your app
       </Label>
     </Diagram>
   );
