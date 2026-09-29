@@ -4,9 +4,9 @@ import { Button } from "@astryxdesign/core/Button";
 import { Dialog, DialogHeader } from "@astryxdesign/core/Dialog";
 import { Selector } from "@astryxdesign/core/Selector";
 import { HStack, VStack } from "@astryxdesign/core/Stack";
-import { app } from "../../schema.js";
 import type { FolderIndex } from "../folders.js";
 import { useAdvice, type Advice } from "../use-advice.js";
+import { checkMove, fallbackMovesInto, offerAction } from "../use-browser-advice.js";
 
 export interface MoveItem {
   kind: "file" | "folder";
@@ -26,18 +26,6 @@ interface MoveDialogProps {
 
 const TOP_LEVEL = "top-level";
 
-/** Asks Jazz whether `item` may move into `target` (`null` is the top level). */
-export function checkMove(
-  db: ReturnType<typeof useDb>,
-  item: { kind: "file" | "folder"; id: string },
-  target: string | null,
-): Promise<Advice> {
-  if (item.kind === "folder") return db.canUpdate(app.folders, item.id, { parent_id: target });
-  return target === null
-    ? Promise.resolve("denied")
-    : db.canUpdate(app.files, item.id, { folder_id: target });
-}
-
 export function MoveDialog({ item, index, revision, onMove, onClose }: MoveDialogProps) {
   const db = useDb();
   const [target, setTarget] = React.useState<string>();
@@ -55,10 +43,9 @@ export function MoveDialog({ item, index, revision, onMove, onClose }: MoveDialo
   }
   const advice = useAdvice(checks, `${revision}:${item?.id ?? ""}`);
   const isChecking = Object.keys(checks).some((key) => advice[key] === undefined);
-  // When Jazz cannot decide on the client, offer only the caller's own folders
-  // (and the top level for a folder they own); the server has the last word.
-  const allowed = (key: string, hint = item?.kind === "folder") =>
-    advice[key] === "allowed" || (advice[key] === "unknown" && hint);
+  const allowed = (target: string | null) =>
+    !!item &&
+    offerAction(advice[target ?? TOP_LEVEL], () => fallbackMovesInto(index, item, target));
 
   React.useEffect(() => setTarget(undefined), [item?.id]);
   return (
@@ -83,9 +70,9 @@ export function MoveDialog({ item, index, revision, onMove, onClose }: MoveDialo
               : "No other folders you can edit"
           }
           options={[
-            ...(allowed(TOP_LEVEL) ? [{ value: TOP_LEVEL, label: "Top level" }] : []),
+            ...(allowed(null) ? [{ value: TOP_LEVEL, label: "Top level" }] : []),
             ...candidates
-              .filter((folder) => allowed(folder.id, index.isMine(folder)))
+              .filter((folder) => allowed(folder.id))
               .map((folder) => ({ value: folder.id, label: index.label(folder) })),
           ]}
           value={target}

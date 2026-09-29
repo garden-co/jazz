@@ -57,9 +57,12 @@ invite links. It runs as a Vite and React single-page app on an anonymous local-
   reverse relations, and anyone else shows a generated name.
 - **What the UI offers.** Buttons, menu items, drop targets and move destinations come from
   `db.canInsert`, `db.canUpdate` and `db.canDelete` (`src/use-browser-advice.ts`), not from a copy
-  of the rules. While an answer is pending, or when Jazz answers "unknown" (as it can for access
-  inherited from a shared folder), the app falls back to a conservative hint: the user's own tree
-  and folders under one where they are an editor. The sync server decides every write either way.
+  of the rules. An action appears once Jazz has answered. Jazz currently answers "unknown" for any
+  check whose policy uses bounded recursive `allowedTo`, even for the folder's owner
+  ([#3769](https://github.com/garden-co/jazz/issues/3769)); until that is fixed, "unknown" alone
+  falls back to one temporary hint in `src/use-browser-advice.ts`: the user's own tree and folders
+  under one where they are an editor. The sync server decides every write either way, and a
+  rejected one shows as a toast.
 
 ## Run and test
 
@@ -99,7 +102,9 @@ documents each case for the examples page.
   tree, but cannot stop someone who can read a file from downloading it and uploading a copy.
 - Names of other members (for example a fellow editor who uploaded a file) are not visible to
   each other, only to the owner. Recursive reverse inheritance with `maxDepth`, which would allow
-  "anyone who can read a folder this account owns", is not supported by the server yet.
+  "anyone who can read a folder this account owns", is not supported by the server yet ("bounded
+  SELECT INHERITS under INHERITS_REFERENCING is unsupported",
+  [#3210](https://github.com/garden-co/jazz/issues/3210)).
 - A folder moved into its own subfolder is prevented by the app, not by a permission rule.
 - Large-value relay between browsers that use the persistent worker is tracked in
   [#1978](https://github.com/garden-co/jazz/issues/1978); remote chunk withholding in

@@ -21,14 +21,14 @@ import { FolderIndex } from "./folders.js";
 import { readFileBlob, saveBlob } from "./large-values.js";
 import { parseInviteHash, type Invite } from "./sharing.js";
 import { useEnsureProfile, useNames } from "./profiles.js";
-import { useBrowserAdvice } from "./use-browser-advice.js";
+import { checkMove, useBrowserAdvice } from "./use-browser-advice.js";
 import { useUploads } from "./use-uploads.js";
 import type { DropPayload } from "./drag.js";
 import { BrowserDialogs, type DialogState } from "./components/BrowserDialogs.js";
 import type { Entry, EntryAction } from "./components/FileTable.js";
 import { FolderTree } from "./components/FolderTree.js";
 import { FolderView, type FolderAction } from "./components/FolderView.js";
-import { checkMove, type MoveItem } from "./components/MoveDialog.js";
+import type { MoveItem } from "./components/MoveDialog.js";
 import { PreviewPanel, type PreviewFile } from "./components/PreviewPanel.js";
 
 function clearInviteHash() {

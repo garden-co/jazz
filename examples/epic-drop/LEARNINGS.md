@@ -30,7 +30,7 @@ folder only by their uploader, or by the tree owner, checked on the old folder w
 `policy.exists(policy.files.where({ id }).hopTo("folder").where({ owner_id: me }))`, which reads the
 stored row before the write. Profile reads
 that follow "anyone who can read a folder this account owns" are rejected by the server
-("bounded SELECT INHERITS under INHERITS_REFERENCING is unsupported"), so names follow membership
+("bounded SELECT INHERITS under INHERITS_REFERENCING is unsupported", #3210), so names follow membership
 rows instead, which carry the folder owner's id for that purpose.
 
 The UI asks `db.canInsert` / `canUpdate` / `canDelete` for what to offer instead of mirroring the

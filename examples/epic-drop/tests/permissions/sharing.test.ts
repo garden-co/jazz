@@ -322,6 +322,44 @@ describe("EpicDrop folder sharing", () => {
       .wait({ tier: "global" });
   });
 
+  it("keeps an owner's moves inside folders the owner owns", async () => {
+    const { demos, mixes } = await seedSharedTree();
+    // Alice can edit Bob's folder, but it is not hers.
+    const bobs = await testApp.seed((db) =>
+      db.insert(app.folders, { name: "Bob's", owner_id: bob }),
+    );
+    await testApp.seed((db) =>
+      db.insert(app.folderInvites, { folder_id: bobs.id, code: "alice-code", role: "editor" }),
+    );
+    await testApp.seed((db) =>
+      db.insert(app.folderMembers, {
+        folder_id: bobs.id,
+        user_id: alice,
+        role: "editor",
+        invite_code: "alice-code",
+        folder_owner_id: bob,
+      }),
+    );
+    const carolsUpload = await testApp.seed((db) =>
+      db.insert(app.files, {
+        folder_id: demos.id,
+        name: "carol.wav",
+        content_type: "audio/wav",
+        size_bytes: 1,
+        owner_id: carol,
+        contents: new Uint8Array([9]),
+      }),
+    );
+    const aliceDb = as(alice);
+
+    // Her own folder does not go into a folder she only edits.
+    await aliceDb.expectDenied((db) => db.update(app.folders, mixes.id, { parent_id: bobs.id }));
+    // Carol's upload leaves Alice's folder only for another folder of Alice's.
+    await aliceDb.expectDenied((db) =>
+      db.update(app.files, carolsUpload.id, { folder_id: bobs.id }),
+    );
+  });
+
   it("lets only the owner or a parent editor delete a folder", async () => {
     const { demos, mixes } = await seedSharedTree();
     await join(bob, demos.id, "editor");
