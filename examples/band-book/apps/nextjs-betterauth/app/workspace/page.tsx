@@ -4,8 +4,8 @@ import { Suspense, useCallback, useEffect, useState } from "react";
 import { Button } from "@astryxdesign/core";
 import { BandBookApp } from "@/src/components/BandBookApp";
 import { StatusScreen } from "@/components/status-screen";
-import { authClient, getJwtFromBetterAuth } from "@/src/lib/auth-client";
-import { bootstrapWorkspace } from "@/src/lib/account-enrollment";
+import { useSession } from "jazz-tools/react";
+import { bootstrapWorkspace } from "@/src/lib/server-calls";
 
 type Bootstrap =
   | { state: "loading" }
@@ -13,15 +13,14 @@ type Bootstrap =
   | { state: "failed"; message: string };
 
 export default function WorkspacePage() {
-  const { data: session, isPending } = authClient.useSession();
+  // The Jazz provider renders this page only once the account's client is ready.
+  const account = useSession()?.user.account;
   const [bootstrap, setBootstrap] = useState<Bootstrap>({ state: "loading" });
 
   const run = useCallback(async () => {
     setBootstrap({ state: "loading" });
     try {
-      const jwt = await getJwtFromBetterAuth();
-      if (!jwt) throw new Error("Your session has no Jazz token. Sign in again.");
-      const response = await bootstrapWorkspace(jwt);
+      const response = await bootstrapWorkspace();
       if (!response.ok) throw new Error(`The server answered ${response.status}.`);
       const { workspaceId } = (await response.json()) as { workspaceId: string };
       setBootstrap({ state: "ready", workspaceId });
@@ -34,9 +33,8 @@ export default function WorkspacePage() {
   }, []);
 
   useEffect(() => {
-    if (!isPending && !session) window.location.assign("/");
-    if (session) void run();
-  }, [isPending, session?.user.id, run]);
+    if (account) void run();
+  }, [account, run]);
 
   if (bootstrap.state === "failed")
     return (
@@ -46,8 +44,7 @@ export default function WorkspacePage() {
         action={<Button label="Try again" onClick={() => void run()} />}
       />
     );
-  if (!session || bootstrap.state === "loading")
-    return <StatusScreen label="Setting up your band" />;
+  if (bootstrap.state === "loading") return <StatusScreen label="Setting up your band" />;
   return (
     <Suspense fallback={<StatusScreen label="Opening BandBook" />}>
       <BandBookApp homeWorkspaceId={bootstrap.workspaceId} />

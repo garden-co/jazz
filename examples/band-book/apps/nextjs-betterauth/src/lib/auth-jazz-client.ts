@@ -2,7 +2,7 @@ import { app } from "@/schema";
 import permissions from "@/permissions";
 import type { JazzClient } from "jazz-tools/backend";
 import { createRequire as createRequireFromModule } from "node:module";
-import { configuredIssuer } from "./identity";
+import { appOrigin, jazzAppId, jazzEnv, jazzServerUrl } from "./config";
 import { serverSecret } from "./server-secret";
 
 const createRequire =
@@ -22,15 +22,16 @@ export async function authJazzClient(): Promise<JazzClient> {
   const pending = (globalThis.__bandBookAuthSession ??= createJazzSession({
     app,
     permissions,
-    // These explicit local defaults let Next evaluate auth routes during a
-    // bare production build. Deployments replace both public values.
-    appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID ?? "band-book-local",
+    appId: jazzAppId,
     driver: { type: "memory" },
-    serverUrl: process.env.NEXT_PUBLIC_JAZZ_SERVER_URL ?? "http://127.0.0.1:4200",
+    serverUrl: jazzServerUrl,
+    // `forRequest` verifies browser bearers against Better Auth's JWKS.
+    jwksUrl: `${appOrigin}/api/auth/jwks`,
+    jwtIssuer: appOrigin,
     initial: {
       backendSecret: serverSecret("BACKEND_SECRET", "band-book-development-backend-secret"),
     },
-    env: configuredIssuer === "http://127.0.0.1:3000" ? "dev" : "prod",
+    env: jazzEnv,
     tier: "global",
   }));
   try {

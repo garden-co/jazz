@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { useAll, useDb } from "jazz-tools/react";
+import { useDb, useOne } from "jazz-tools/react";
 import { Grid, HStack, Selector, Skeleton, TextInput, Token, VStack } from "@astryxdesign/core";
 import { app, type IssuePriority, type IssueStatus } from "@/schema";
 import {
@@ -18,10 +18,9 @@ const UNASSIGNED = "unassigned";
 export function IssueProperties({ pageId, editable }: { pageId: string; editable: boolean }) {
   const db = useDb();
   const { members } = useWorkspace();
-  const { data } = useAll(app.issues.where({ pageId }));
+  const { data: issue } = useOne(app.issues.where({ pageId }));
   const [newLabel, setNewLabel] = useState("");
-  const issue = data?.[0];
-  if (!data) return <Skeleton height={64} width="100%" />;
+  if (issue === undefined) return <Skeleton height={64} width="100%" />;
   if (!issue) return null;
 
   const addLabel = () => {

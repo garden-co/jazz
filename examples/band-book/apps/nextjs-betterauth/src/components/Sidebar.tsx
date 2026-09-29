@@ -13,13 +13,14 @@ import {
   SideNavSection,
   type DropdownMenuOption,
 } from "@astryxdesign/core";
-import type { Member, Page, Workspace } from "@/schema";
+import { app, type Member, type Page, type Workspace } from "@/schema";
 import { PAGE_TREE_MAX_DEPTH } from "@/src/lib/limits";
 import { createPage } from "@/src/lib/page-actions";
 import { MovePageDialog } from "./MovePageDialog";
 import { DeletePageDialog } from "./DeletePageDialog";
 import { WorkspaceDialog } from "./WorkspaceDialog";
-import { ROLE_LABELS, useCanRestructure, usePageAccess, useWorkspace } from "./workspace-context";
+import { useCan } from "./use-can";
+import { ROLE_LABELS, useWorkspace } from "./workspace-context";
 
 /** Workspace switcher and the nested page tree. */
 export function Sidebar({
@@ -36,7 +37,20 @@ export function Sidebar({
   const [dialog, setDialog] = useState<
     { kind: "move" | "delete"; pageId: string } | { kind: "workspace" } | null
   >(null);
-  const canCreateTopLevel = role === "owner" || role === "member";
+  const canCreateTopLevel = useCan(
+    (db) =>
+      db.canInsert(app.pages, {
+        workspaceId: workspace.id,
+        parentId: null,
+        title: "",
+        kind: "doc",
+      }),
+    workspace.id,
+  );
+  const canManageBand = useCan(
+    (db) => db.canUpdate(app.workspaces, workspace.id, { name: workspace.name }),
+    workspace.id,
+  );
   const roleOf = (workspaceId: string) =>
     memberships.find((member) => member.workspaceId === workspaceId)?.role;
 
@@ -63,7 +77,7 @@ export function Sidebar({
                     onClick={() => onSwitchWorkspace(candidate.id)}
                   />
                 ))}
-                {role === "owner" && (
+                {canManageBand && (
                   <Item label="Band settings" onClick={() => setDialog({ kind: "workspace" })} />
                 )}
               </List>
@@ -76,9 +90,7 @@ export function Sidebar({
           ) : undefined
         }
       >
-        <SideNavSection
-          title={canCreateTopLevel || role === "viewer" ? "Pages" : "Shared with you"}
-        >
+        <SideNavSection title={role === "guest" ? "Shared with you" : "Pages"}>
           {tree.roots
             .filter((page) => page.kind !== "issue")
             .map((page) => (
@@ -115,8 +127,9 @@ function PageNavItem({
   onDelete: (pageId: string) => void;
 }) {
   const { tree, selectedPageId, openPage } = useWorkspace();
-  const access = usePageAccess(page.id);
-  const canRestructure = useCanRestructure(page.id);
+  const canEdit = useCan((db) => db.canUpdate(app.pages, page.id, { title: page.title }), page.id);
+  // Deleting and moving both need edit access from above the page.
+  const canRestructure = useCan((db) => db.canDelete(app.pages, page.id), page.id);
   // Issues live in their database view, not in the sidebar.
   const children = page.kind === "issues" ? [] : tree.children(page.id);
   const canNest = tree.depth(page.id) + 1 < PAGE_TREE_MAX_DEPTH;
@@ -124,7 +137,7 @@ function PageNavItem({
     !!selectedPageId && tree.ancestors(selectedPageId).some((ancestor) => ancestor.id === page.id);
 
   const items: DropdownMenuOption[] = [];
-  if (access === "edit" && canNest && page.kind === "doc")
+  if (canEdit && canNest && page.kind === "doc")
     items.push({ label: "Add subpage", onClick: () => onAddChild(page.id) });
   if (canRestructure) {
     items.push({ label: "Move to…", onClick: () => onMove(page.id) });

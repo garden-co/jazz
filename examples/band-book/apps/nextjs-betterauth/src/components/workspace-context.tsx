@@ -2,7 +2,7 @@
 
 import { createContext, useContext } from "react";
 import type { GrantRole, Member, Page, Workspace, WorkspaceRole } from "@/schema";
-import { buildPageTree, pageAccess, type PageAccess, type PageTree } from "@/src/lib/tree";
+import type { PageTree } from "@/src/lib/tree";
 
 export type WorkspaceState = {
   me: string;
@@ -11,7 +11,11 @@ export type WorkspaceState = {
   members: Member[];
   pages: Page[];
   tree: PageTree<Page>;
-  grants: ReadonlyMap<string, GrantRole>;
+  /**
+   * Changes whenever something that permission advice depends on changes:
+   * the viewer's role, their page grants, or the shape of the page tree.
+   */
+  accessVersion: string;
   selectedPageId: string | null;
   openPage: (pageId: string | null) => void;
 };
@@ -23,31 +27,6 @@ export function useWorkspace(): WorkspaceState {
   const state = useContext(WorkspaceContext);
   if (!state) throw new Error("useWorkspace must be used inside a workspace");
   return state;
-}
-
-export function useTree(pages: Page[]): PageTree<Page> {
-  return buildPageTree(pages);
-}
-
-/** Edit, view or nothing on one page, derived the same way permissions.ts decides. */
-export function usePageAccess(pageId: string): PageAccess {
-  const { tree, role, grants } = useWorkspace();
-  return pageAccess(tree, pageId, role, grants);
-}
-
-/** Owners and band members share pages; only owners manage the band itself. */
-export function canShare(role: WorkspaceRole | undefined): boolean {
-  return role === "owner" || role === "member";
-}
-
-/** Deleting or moving a page needs edit access from above it, like the policy. */
-export function useCanRestructure(pageId: string): boolean {
-  const { tree, role, grants } = useWorkspace();
-  const parentId = tree.byId.get(pageId)?.parentId;
-  if (role === "owner" || role === "member") return true;
-  return (
-    !!parentId && tree.byId.has(parentId) && pageAccess(tree, parentId, role, grants) === "edit"
-  );
 }
 
 export const ROLE_LABELS: Record<WorkspaceRole, string> = {

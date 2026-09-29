@@ -25,7 +25,8 @@ import { IssueProperties } from "./IssueProperties";
 import { IssuesDatabase } from "./IssuesDatabase";
 import { MovePageDialog } from "./MovePageDialog";
 import { ShareDialog } from "./ShareDialog";
-import { canShare, useCanRestructure, usePageAccess, useWorkspace } from "./workspace-context";
+import { useCan } from "./use-can";
+import { useWorkspace } from "./workspace-context";
 
 /** The selected page: breadcrumbs, title, actions and its body. */
 export function PageScreen() {
@@ -47,12 +48,23 @@ export function PageScreen() {
 
 function PageBody({ pageId }: { pageId: string }) {
   const db = useDb();
-  const { workspace, tree, role, openPage } = useWorkspace();
+  const { me, workspace, tree, openPage } = useWorkspace();
   const page = tree.byId.get(pageId)!;
-  const access = usePageAccess(pageId);
-  const canRestructure = useCanRestructure(pageId);
+  const canEdit = useCan((db) => db.canUpdate(app.pages, pageId, { title: page.title }), pageId);
+  const editable = canEdit === true;
+  // Deleting and moving both need edit access from above the page.
+  const canRestructure = useCan((db) => db.canDelete(app.pages, pageId), pageId);
+  const canShare = useCan(
+    (db) =>
+      db.canInsert(app.pageGrants, {
+        workspaceId: workspace.id,
+        pageId,
+        account: me,
+        role: "viewer",
+      }),
+    pageId,
+  );
   const [dialog, setDialog] = useState<"share" | "move" | "delete" | null>(null);
-  const editable = access === "edit";
   const ancestors = tree.ancestors(pageId);
   const subpages = page.kind === "issues" ? [] : tree.children(pageId);
   const canNest = editable && page.kind === "doc" && tree.depth(pageId) + 1 < PAGE_TREE_MAX_DEPTH;
@@ -83,10 +95,8 @@ function PageBody({ pageId }: { pageId: string }) {
             <BreadcrumbItem isCurrent>{page.title || "Untitled"}</BreadcrumbItem>
           </Breadcrumbs>
           <HStack gap={2} align="center">
-            {!editable && <Badge label="View only" />}
-            {canShare(role) && (
-              <Button label="Share" size="sm" onClick={() => setDialog("share")} />
-            )}
+            {canEdit === false && <Badge label="View only" />}
+            {canShare && <Button label="Share" size="sm" onClick={() => setDialog("share")} />}
             {menu.length > 0 && (
               <MoreMenu label="Page actions" size="sm" items={menu} alignment="end" />
             )}

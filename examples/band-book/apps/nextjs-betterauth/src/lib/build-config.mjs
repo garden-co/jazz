@@ -40,7 +40,9 @@ export function assertBuildConfiguration(config = readBuildConfig()) {
   return config;
 }
 
-if (import.meta.url === new URL(process.argv[1], "file:").href) {
+// Run as a script (`node src/lib/build-config.mjs`), not when a bundle imports it.
+const entry = typeof process !== "undefined" ? process.argv?.[1] : undefined;
+if (entry && import.meta.url === new URL(entry, "file:").href) {
   const config = assertBuildConfiguration();
   console.log(
     usesLocalDefaults(config)

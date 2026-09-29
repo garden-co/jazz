@@ -59,7 +59,10 @@ export function UploadDialog({
         byteLength: file.size,
         bytes: counted,
       });
-      db.insert(app.blocks, {
+      // A transaction cannot stream a large value, so the attachment is stored
+      // first and the block that shows it follows. If the authority refuses the
+      // block, the attachment is removed again rather than left unreferenced.
+      const block = db.insert(app.blocks, {
         workspaceId: workspace.id,
         pageId,
         parentBlockId: null,
@@ -69,6 +72,7 @@ export function UploadDialog({
         checked: false,
         attachmentId: stored.value.id,
       });
+      block.wait({ tier: "edge" }).catch(() => db.delete(app.attachments, stored.value.id));
       onClose();
     } catch (cause) {
       setSent(null);

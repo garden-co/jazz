@@ -4,8 +4,12 @@ import { useState, type FormEvent } from "react";
 import { Banner, Button, Card, Heading, Text, TextInput, VStack } from "@astryxdesign/core";
 import { authClient } from "@/src/lib/auth-client";
 
-/** Email and password via Better Auth, then on to `next` (the workspace or an invite). */
-export function SignInForm({ next = "/workspace" }: { next?: string }) {
+/**
+ * Email and password via Better Auth. The form only talks to Better Auth; the
+ * Jazz provider notices the new session, logs in or registers the account and
+ * then renders whichever page the visitor opened (the workspace or an invite).
+ */
+export function SignInForm() {
   const [mode, setMode] = useState<"sign-in" | "sign-up">("sign-in");
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
@@ -21,12 +25,8 @@ export function SignInForm({ next = "/workspace" }: { next?: string }) {
     const { error } = signingUp
       ? await authClient.signUp.email({ name, email, password })
       : await authClient.signIn.email({ email, password });
-    if (error) {
-      setError(error.message ?? "Could not sign in");
-      setPending(false);
-      return;
-    }
-    window.location.assign(next);
+    if (error) setError(error.message ?? "Could not sign in");
+    setPending(false);
   }
 
   return (

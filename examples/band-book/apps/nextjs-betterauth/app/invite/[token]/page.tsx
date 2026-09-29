@@ -3,25 +3,24 @@
 import { use, useEffect, useState } from "react";
 import { Button } from "@astryxdesign/core";
 import { StatusScreen } from "@/components/status-screen";
-import { authClient, getJwtFromBetterAuth } from "@/src/lib/auth-client";
-import { redeemInviteLink } from "@/src/lib/account-enrollment";
+import { useSession } from "jazz-tools/react";
+import { redeemInviteLink } from "@/src/lib/server-calls";
 
-/** Signed out: sign in first and come back. Signed in: redeem, then open the shared page. */
+/**
+ * Signed-out visitors see the sign-in form here (from the Jazz provider) and
+ * stay on this page, so signing in redeems the invite and opens the page.
+ */
 export default function InvitePage({ params }: { params: Promise<{ token: string }> }) {
   const { token } = use(params);
-  const { data: session, isPending } = authClient.useSession();
+  const account = useSession()?.user.account;
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (isPending) return;
-    if (!session) {
-      window.location.assign(`/?next=${encodeURIComponent(`/invite/${token}`)}`);
-      return;
-    }
+    if (!account) return;
     void (async () => {
-      const jwt = await getJwtFromBetterAuth();
-      if (!jwt) return setError("Your session has no Jazz token. Sign in again.");
-      const response = await redeemInviteLink(jwt, token);
+      const response = await redeemInviteLink(token).catch((cause: unknown) => cause);
+      if (!(response instanceof Response))
+        return setError(response instanceof Error ? response.message : String(response));
       if (!response.ok)
         return setError(
           response.status === 404
@@ -36,7 +35,7 @@ export default function InvitePage({ params }: { params: Promise<{ token: string
       if (pageId) search.set("p", pageId);
       window.location.assign(`/workspace?${search.toString()}`);
     })();
-  }, [isPending, session?.user.id, token]);
+  }, [account, token]);
 
   if (error)
     return (

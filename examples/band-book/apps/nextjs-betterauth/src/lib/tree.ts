@@ -1,4 +1,4 @@
-import type { GrantRole, Page, WorkspaceRole } from "@/schema";
+import type { Page } from "@/schema";
 
 export type PageNode = Pick<Page, "id" | "parentId" | "title" | "kind">;
 
@@ -57,24 +57,4 @@ export function buildPageTree<T extends PageNode>(pages: readonly T[]): PageTree
   };
   const depth = (id: string) => ancestors(id).length;
   return { byId, roots, children, ancestors, descendantIds, depth };
-}
-
-export type PageAccess = "edit" | "view" | "none";
-
-/**
- * What the current person may do on a page, for showing or hiding controls.
- * This mirrors permissions.ts so the UI does not offer actions the server will
- * reject; the policies remain the only enforcement.
- */
-export function pageAccess(
-  tree: PageTree,
-  pageId: string,
-  role: WorkspaceRole | undefined,
-  grants: ReadonlyMap<string, GrantRole>,
-): PageAccess {
-  if (role === "owner" || role === "member") return "edit";
-  const chain = [...tree.ancestors(pageId).map((page) => page.id), pageId];
-  if (chain.some((id) => grants.get(id) === "editor")) return "edit";
-  if (role === "viewer" || chain.some((id) => grants.has(id))) return "view";
-  return "none";
 }

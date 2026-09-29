@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useAll, useDb } from "jazz-tools/react";
+import { useDb, useOne } from "jazz-tools/react";
 import { Button, Item, ProgressBar, Skeleton, Text, VStack } from "@astryxdesign/core";
 import { app } from "@/schema";
 
@@ -18,11 +18,10 @@ export function AttachmentBlock({
   kind: "image" | "file";
 }) {
   // Metadata only: listing a page never pulls attachment bytes.
-  const { data } = useAll(
+  const { data: meta } = useOne(
     app.attachments.where({ id: attachmentId }).select("name", "mimeType", "byteLength"),
   );
-  const meta = data?.[0];
-  if (!data) return <Skeleton height={48} width="100%" />;
+  if (meta === undefined) return <Skeleton height={48} width="100%" />;
   if (!meta) return <Text type="supporting">This attachment is not available to you.</Text>;
   if (kind === "image" && meta.byteLength <= INLINE_IMAGE_LIMIT)
     return <InlineImage attachmentId={attachmentId} name={meta.name} mimeType={meta.mimeType} />;
@@ -45,8 +44,8 @@ function InlineImage({
   name: string;
   mimeType: string;
 }) {
-  const { data } = useAll(app.attachments.where({ id: attachmentId }).select("bytes"));
-  const bytes = data?.[0]?.bytes;
+  const { data } = useOne(app.attachments.where({ id: attachmentId }).select("bytes"));
+  const bytes = data?.bytes;
   const [url, setUrl] = useState<string | null>(null);
   useEffect(() => {
     if (!bytes) return;

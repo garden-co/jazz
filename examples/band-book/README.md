@@ -15,7 +15,8 @@ It is the catalogue app for three Jazz patterns:
   crew (read everything). On top of that, a grant on one page reaches every
   page and block below it, so a guest collaborator can edit one song and see
   nothing else. All of it is enforced by row policies in `permissions.ts`,
-  never by hiding buttons.
+  never by hiding buttons; the UI asks Jazz's permission advice
+  (`db.canUpdate` and friends) which controls to show.
 - **A database inside the document tool.** Issues are ordinary pages under an
   issues page, with a row of properties (status, assignee, priority, labels).
 
@@ -53,8 +54,16 @@ without them when the app id, origin or server URL differ from the defaults).
 **One auth model.** Better Auth owns the browser session and signs an ES256
 JWT. Jazz maps the JWT's issuer and subject to an account; every membership,
 grant and assignee stores that account id. The same subject from a different
-issuer is a different person. Server routes act only when the Better Auth
-session and the Jazz session agree on who is calling.
+issuer is a different person. In the browser, `JazzProvider` takes
+`auth={betterAuth(authClient)}`: it follows the Better Auth session, logs in or
+registers the account atomically, and shows the sign-in form while signed out.
+Server routes verify the same JWT, sent as a bearer, against Better Auth's JWKS
+and the account registry.
+
+**Atomic writes.** Anything that spans rows commits as one transaction: an
+issue's page with its properties, a block with its children, and a page with
+its whole subtree, including the grants and invite links that point into it, so
+a link to a deleted page stops working.
 
 **Retry-safe bootstrap.** The demo band is written in one exclusive
 transaction with ids derived from the account, so a retry, a double click or
@@ -99,15 +108,18 @@ grafting attempts, issuer isolation, issue/database consistency and real
 `$createdAt` ordering. `tests/permissions/bootstrap.test.ts` covers the
 bootstrap's idempotency under retries and races, and invite redemption.
 
-Benchmarks for BandBook live in `benchmarks/` and are maintained separately.
+Benchmarks for BandBook are added in #3730.
 
 ## Known gaps
 
 - Drafts and suggested edits are not implemented yet. Jazz's documented branch
   views (`branchBy`, `{ branch, base }` reads) are the intended foundation.
 - Moving a page under one of its own descendants is prevented by the UI, not by
-  a policy.
+  a policy: policies cannot yet express an acyclic parent reference
+  (garden-co/jazz#3743).
+- Which controls appear comes from Jazz's permission advice (`db.canUpdate`
+  and friends), not from a copy of the rules. Advice for moving a page under a
+  page that has no subpages yet answers "denied" (garden-co/jazz#3556), so such
+  pages are missing from the move dialog until that is fixed.
 - Block order uses floating-point positions; after about fifty inserts at the
   same spot two blocks compare equal and fall back to creation order.
-- Deleting a page deletes its subtree from the client, deepest page first. A
-  client that goes offline halfway leaves the rest for a retry.

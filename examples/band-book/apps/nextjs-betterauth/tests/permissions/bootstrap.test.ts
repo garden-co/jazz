@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { app } from "../../schema.js";
 import { ensureDemoWorkspace, seedId } from "../../src/lib/bootstrap.js";
 import { redeemInvite } from "../../src/lib/invites.js";
+import { deletePageTree } from "../../src/lib/page-actions.js";
+import { buildPageTree } from "../../src/lib/tree.js";
 import { DEMO_PAGES, flattenSeedPages } from "../../src/lib/seed.js";
 import { startAuthority } from "./authority.js";
 
@@ -128,6 +130,35 @@ describe("invite links", () => {
     expect(
       await redeemInvite(auth().backend, invite.token, crypto.randomUUID(), "Late"),
     ).toBeNull();
+  });
+
+  it("stop working once their page is deleted, taking its grants along", async () => {
+    const owner = crypto.randomUUID();
+    const guest = crypto.randomUUID();
+    const { workspaceId } = await ensureDemoWorkspace(auth().backend, owner, "Ada");
+    const song = seedId(owner, "page:harbour-lights");
+    const ownerDb = auth().as("ada", owner);
+    const invite = await ownerDb
+      .insert(app.invites, {
+        workspaceId,
+        pageId: song,
+        role: "editor",
+        token: "deleted-page-invite-token",
+        label: "Can edit: Harbour lights",
+      })
+      .wait(global);
+    await redeemInvite(auth().backend, invite.token, guest, "Guest");
+
+    const pages = await ownerDb.all(app.pages.where({ workspaceId }), global);
+    await deletePageTree(ownerDb, buildPageTree(pages), song, global);
+
+    expect(
+      await redeemInvite(auth().backend, invite.token, crypto.randomUUID(), "Late"),
+    ).toBeNull();
+    const inSubtree = { pageId: song };
+    expect(await auth().backend.all(app.invites.where(inSubtree), global)).toEqual([]);
+    expect(await auth().backend.all(app.pageGrants.where(inSubtree), global)).toEqual([]);
+    expect(await auth().backend.all(app.pages.where({ id: song }), global)).toEqual([]);
   });
 
   it("promote a guest to a band role with a band invite", async () => {

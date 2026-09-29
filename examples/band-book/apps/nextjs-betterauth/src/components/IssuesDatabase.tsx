@@ -58,8 +58,8 @@ export function IssuesDatabase({
     return page ? [{ ...issue, title: page.title }] : [];
   });
 
-  const addIssue = (status: IssueStatus) => {
-    const page = createIssue(db, {
+  const addIssue = async (status: IssueStatus) => {
+    const page = await createIssue(db, {
       workspaceId: workspace.id,
       databaseId,
       title: "",
@@ -83,7 +83,7 @@ export function IssuesDatabase({
       key: "title",
       header: "Title",
       renderCell: (issue) => (
-        <Link onClick={() => openPage(issue.pageId)} hasUnderline={false} weight="medium">
+        <Link onClick={() => openPage(issue.pageId)} weight="medium">
           {issue.title || "Untitled"}
         </Link>
       ),
@@ -130,7 +130,7 @@ export function IssuesDatabase({
               label="New issue"
               size="sm"
               variant="primary"
-              onClick={() => addIssue("todo")}
+              onClick={() => void addIssue("todo")}
             />
           ) : undefined
         }
@@ -145,7 +145,9 @@ export function IssuesDatabase({
           title="No issues"
           description="Track gear, logistics and songwriting to-dos here."
           actions={
-            editable ? <Button label="New issue" onClick={() => addIssue("todo")} /> : undefined
+            editable ? (
+              <Button label="New issue" onClick={() => void addIssue("todo")} />
+            ) : undefined
           }
         />
       ) : view === "table" ? (
@@ -166,7 +168,7 @@ export function IssuesDatabase({
                       label={`New ${STATUS_LABELS[status].toLowerCase()} issue`}
                       size="sm"
                       variant="ghost"
-                      onClick={() => addIssue(status)}
+                      onClick={() => void addIssue(status)}
                     >
                       Add
                     </Button>

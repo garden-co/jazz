@@ -6,7 +6,7 @@
 import assert from "node:assert/strict";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { chromium } from "playwright";
+import { chromium } from "@playwright/test";
 
 const origin = process.env.APP_ORIGIN ?? "http://127.0.0.1:3000";
 const screenshots = process.env.SCREENSHOTS;

@@ -76,15 +76,6 @@ body {
   }
 }
 
-/* A bullet marker, aligned with the first line of the block's text. */
-.bb-bullet {
-  flex: none;
-  width: var(--spacing-4);
-  line-height: var(--text-body-leading);
-  color: var(--color-text-secondary);
-  text-align: center;
-}
-
 .bb-image {
   display: block;
   max-width: 100%;

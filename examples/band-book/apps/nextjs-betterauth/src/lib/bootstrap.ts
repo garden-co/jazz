@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { Db } from "jazz-tools";
 import { app } from "@/schema";
 import { POSITION_STEP } from "./positions";
+import { retryOnConflict } from "./retry";
 import { DEMO_PAGES, DEMO_WORKSPACE_NAME, flattenSeedPages, type SeedBlock } from "./seed";
 
 /**
@@ -25,8 +26,6 @@ export function seedId(account: string, key: string): string {
 
 export type BootstrapResult = { workspaceId: string; created: boolean };
 
-const RETRYABLE = /exclusive_conflict|transaction_conflict|cascade_rejected/;
-
 /**
  * Create the account's demo band workspace once. This is the app's only
  * first-open side effect and runs on the server with backend authority, never
@@ -45,77 +44,72 @@ export async function ensureDemoWorkspace(
   now: () => number = Date.now,
 ): Promise<BootstrapResult> {
   const workspaceId = seedId(account, "workspace");
-  for (let attempt = 0; ; attempt++) {
-    try {
-      const write = await db.exclusiveTransaction(async (tx) => {
-        const existing = await tx.one(app.workspaces.where({ id: workspaceId }).includeDeleted());
-        if (existing) return false;
-        let clock = now();
-        const at = () => ({ updatedAt: clock++ });
-        const id = (key: string) => seedId(account, key);
+  return await retryOnConflict(async () => {
+    const write = await db.exclusiveTransaction(async (tx) => {
+      const existing = await tx.one(app.workspaces.where({ id: workspaceId }).includeDeleted());
+      if (existing) return false;
+      let clock = now();
+      const at = () => ({ updatedAt: clock++ });
+      const id = (key: string) => seedId(account, key);
 
-        tx.insert(app.workspaces, { name: DEMO_WORKSPACE_NAME }, { id: workspaceId, ...at() });
+      tx.insert(app.workspaces, { name: DEMO_WORKSPACE_NAME }, { id: workspaceId, ...at() });
+      tx.insert(
+        app.members,
+        { workspaceId, account, displayName, role: "owner" },
+        { id: id("member:owner"), ...at() },
+      );
+
+      for (const page of flattenSeedPages(DEMO_PAGES)) {
+        const pageId = id(`page:${page.key}`);
         tx.insert(
-          app.members,
-          { workspaceId, account, displayName, role: "owner" },
-          { id: id("member:owner"), ...at() },
+          app.pages,
+          {
+            workspaceId,
+            parentId: page.parentKey ? id(`page:${page.parentKey}`) : null,
+            title: page.title,
+            kind: page.kind,
+          },
+          { id: pageId, ...at() },
         );
-
-        for (const page of flattenSeedPages(DEMO_PAGES)) {
-          const pageId = id(`page:${page.key}`);
+        if (page.issue) {
           tx.insert(
-            app.pages,
+            app.issues,
             {
               workspaceId,
-              parentId: page.parentKey ? id(`page:${page.parentKey}`) : null,
-              title: page.title,
-              kind: page.kind,
+              pageId,
+              databaseId: id(`page:${page.parentKey}`),
+              status: page.issue.status,
+              priority: page.issue.priority,
+              assignee: page.issue.status === "done" ? null : account,
+              labels: page.issue.labels,
             },
-            { id: pageId, ...at() },
+            { id: id(`issue:${page.key}`), ...at() },
           );
-          if (page.issue) {
+        }
+        const insertBlocks = (blocks: SeedBlock[], parentBlockId: string | null, path: string) =>
+          blocks.forEach((block, index) => {
+            const blockId = id(`block:${page.key}:${path}${index}`);
             tx.insert(
-              app.issues,
+              app.blocks,
               {
                 workspaceId,
                 pageId,
-                databaseId: id(`page:${page.parentKey}`),
-                status: page.issue.status,
-                priority: page.issue.priority,
-                assignee: page.issue.status === "done" ? null : account,
-                labels: page.issue.labels,
+                parentBlockId,
+                position: (index + 1) * POSITION_STEP,
+                kind: block.kind,
+                text: block.text ?? "",
+                checked: block.checked ?? false,
+                attachmentId: null,
               },
-              { id: id(`issue:${page.key}`), ...at() },
+              { id: blockId, ...at() },
             );
-          }
-          const insertBlocks = (blocks: SeedBlock[], parentBlockId: string | null, path: string) =>
-            blocks.forEach((block, index) => {
-              const blockId = id(`block:${page.key}:${path}${index}`);
-              tx.insert(
-                app.blocks,
-                {
-                  workspaceId,
-                  pageId,
-                  parentBlockId,
-                  position: (index + 1) * POSITION_STEP,
-                  kind: block.kind,
-                  text: block.text ?? "",
-                  checked: block.checked ?? false,
-                  attachmentId: null,
-                },
-                { id: blockId, ...at() },
-              );
-              insertBlocks(block.children ?? [], blockId, `${path}${index}.`);
-            });
-          insertBlocks(page.blocks ?? [], null, "");
-        }
-        return true;
-      });
-      const created = await write.wait();
-      return { workspaceId, created };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (attempt >= 5 || !RETRYABLE.test(message)) throw error;
-    }
-  }
+            insertBlocks(block.children ?? [], blockId, `${path}${index}.`);
+          });
+        insertBlocks(page.blocks ?? [], null, "");
+      }
+      return true;
+    });
+    const created = await write.wait();
+    return { workspaceId, created };
+  });
 }

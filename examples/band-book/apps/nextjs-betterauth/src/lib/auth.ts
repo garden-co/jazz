@@ -4,9 +4,8 @@ import { bearer, jwt } from "better-auth/plugins";
 import { jazzAdapter } from "jazz-tools/better-auth-adapter";
 import { app } from "@/schema";
 import { authJazzClient } from "@/src/lib/auth-jazz-client";
+import { appOrigin } from "@/src/lib/config";
 import { serverSecret } from "@/src/lib/server-secret";
-
-const appOrigin = process.env.NEXT_PUBLIC_APP_ORIGIN ?? "http://127.0.0.1:3000";
 
 export const auth = betterAuth({
   baseURL: appOrigin,

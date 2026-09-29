@@ -2,7 +2,7 @@
 
 import { useCallback, useMemo } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useAll, useSession } from "jazz-tools/react";
+import { useAll, useJazzAuth, useSession } from "jazz-tools/react";
 import {
   AppShell,
   Avatar,
@@ -27,6 +27,7 @@ import { WorkspaceProvider, type WorkspaceState } from "./workspace-context";
  */
 export function BandBookApp({ homeWorkspaceId }: { homeWorkspaceId: string }) {
   const me = useSession()?.user.account ?? null;
+  const { logout } = useJazzAuth();
   const router = useRouter();
   const pathname = usePathname();
   const params = useSearchParams();
@@ -56,9 +57,15 @@ export function BandBookApp({ homeWorkspaceId }: { homeWorkspaceId: string }) {
   );
 
   const tree = useMemo(() => buildPageTree(pages ?? []), [pages]);
-  const grants = useMemo(
-    () => new Map((myGrants ?? []).map((grant) => [grant.pageId, grant.role] as const)),
-    [myGrants],
+  const role = myMemberships?.find((member) => member.workspaceId === workspaceId)?.role;
+  const accessVersion = useMemo(
+    () =>
+      [
+        role ?? "none",
+        ...(myGrants ?? []).map((grant) => `${grant.pageId}:${grant.role}`).sort(),
+        ...(pages ?? []).map((page) => `${page.id}<${page.parentId ?? ""}`),
+      ].join(","),
+    [role, myGrants, pages],
   );
 
   const selectedPageId = params.get("p");
@@ -96,7 +103,8 @@ export function BandBookApp({ homeWorkspaceId }: { homeWorkspaceId: string }) {
           items={[
             {
               label: "Sign out",
-              onClick: () => void authClient.signOut().then(() => window.location.assign("/")),
+              // Flushes Jazz, then revokes the Better Auth session.
+              onClick: () => void logout(),
             },
           ]}
         />
@@ -117,11 +125,11 @@ export function BandBookApp({ homeWorkspaceId }: { homeWorkspaceId: string }) {
   const state: WorkspaceState = {
     me,
     workspace,
-    role: myMemberships.find((member) => member.workspaceId === workspace.id)?.role,
+    role,
     members: members ?? [],
     pages: (pages ?? []) as WorkspaceState["pages"],
     tree: tree as WorkspaceState["tree"],
-    grants,
+    accessVersion,
     selectedPageId,
     openPage: (pageId) => openPage(pageId),
   };

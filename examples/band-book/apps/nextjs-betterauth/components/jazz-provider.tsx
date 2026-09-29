@@ -1,74 +1,38 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { createAccountManager } from "jazz-tools";
-import { createJazzClient, JazzClientProvider, type JazzClient } from "jazz-tools/react";
-import { authClient, getJwtFromBetterAuth } from "@/src/lib/auth-client";
-import { loginOrRegister } from "@/src/lib/account-enrollment";
+import { Button } from "@astryxdesign/core";
+import { betterAuth, JazzProvider as CoreJazzProvider } from "jazz-tools/react";
+import { SignInForm } from "@/components/sign-in-form";
 import { StatusScreen } from "@/components/status-screen";
+import { authClient } from "@/src/lib/auth-client";
+import { jazzAppId, jazzEnv, jazzServerUrl } from "@/src/lib/config";
 
-const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID ?? "band-book-local";
-const serverUrl = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL ?? "http://127.0.0.1:4200";
+const auth = betterAuth(authClient);
 
 /**
- * Opens one Jazz client per Better Auth session. Signed-out pages render
- * without a client; a new session always gets a fresh client, so one person's
- * local data is never shown to the next person on the same browser.
+ * Jazz owns the session lifecycle: it follows Better Auth's session,
+ * atomically logs in or registers the account, and renders the app only once
+ * its client is ready. Signed-out visitors see the sign-in form wherever they
+ * land, so an invite link works before and after signing in.
  */
 export function JazzProvider({ children }: { children: React.ReactNode }) {
-  const { data: session } = authClient.useSession();
-  const [connection, setConnection] = useState<
-    { client: JazzClient; sessionId: string; userId: string } | undefined
-  >();
-  const [error, setError] = useState<{ cause: Error; sessionId: string; userId: string }>();
-  const clientRef = useRef<JazzClient | undefined>(undefined);
-  useEffect(() => {
-    if (!session?.user) return;
-    let cancelled = false;
-    setError(undefined);
-    void (async () => {
-      const accounts = await createAccountManager({ appId, serverUrl, env: "dev" });
-      const account = await loginOrRegister(accounts, { getToken: requireBetterAuthToken });
-      const opened = await createJazzClient({ appId, serverUrl, account });
-      if (cancelled) return void opened.shutdown();
-      await clientRef.current?.shutdown({ waitForSync: true });
-      if (cancelled) return void opened.shutdown();
-      clientRef.current = opened;
-      setError(undefined);
-      setConnection({ client: opened, sessionId: session.session.id, userId: session.user.id });
-    })().catch((cause) => {
-      if (!cancelled)
-        setError({
-          cause: cause instanceof Error ? cause : new Error(String(cause)),
-          sessionId: session.session.id,
-          userId: session.user.id,
-        });
-    });
-    return () => {
-      cancelled = true;
-      const opened = clientRef.current;
-      clientRef.current = undefined;
-      setConnection(undefined);
-      void opened?.shutdown();
-    };
-  }, [session?.session.id, session?.user.id]);
-  if (!session?.user) return <>{children}</>;
-  const visibleError =
-    error?.sessionId === session.session.id && error.userId === session.user.id
-      ? error.cause
-      : undefined;
-  if (visibleError)
-    return <StatusScreen label="Could not open BandBook" error={visibleError.message} />;
-  const client =
-    connection?.sessionId === session.session.id && connection.userId === session.user.id
-      ? connection.client
-      : undefined;
-  if (!client) return <StatusScreen label="Opening BandBook" />;
-  return <JazzClientProvider client={client}>{children}</JazzClientProvider>;
-}
-
-async function requireBetterAuthToken(): Promise<string> {
-  const token = await getJwtFromBetterAuth();
-  if (!token) throw new Error("Better Auth did not provide a Jazz session token.");
-  return token;
+  return (
+    <CoreJazzProvider
+      appId={jazzAppId}
+      serverUrl={jazzServerUrl}
+      env={jazzEnv}
+      auth={auth}
+      signedOut={<SignInForm />}
+      loading={<StatusScreen label="Opening BandBook" />}
+      error={(state) => (
+        <StatusScreen
+          label="Could not open BandBook"
+          error={state.error?.message ?? "Something went wrong."}
+          action={<Button label="Try again" onClick={() => void state.retry()} />}
+        />
+      )}
+    >
+      {children}
+    </CoreJazzProvider>
+  );
 }

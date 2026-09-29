@@ -8,6 +8,8 @@ import {
   Divider,
   DropdownMenu,
   HStack,
+  List,
+  ListItem,
   MoreMenu,
   Skeleton,
   VStack,
@@ -141,8 +143,11 @@ export function BlockEditor({ pageId, editable }: { pageId: string; editable: bo
       });
     collect(block.id);
     doomed.push(block);
-    for (const row of doomed) db.delete(app.blocks, row.id);
-    if (block.attachmentId) db.delete(app.attachments, block.attachmentId);
+    // One transaction, so a block never loses its children without also going.
+    void db.transaction((tx) => {
+      for (const row of doomed) tx.delete(app.blocks, row.id);
+      if (block.attachmentId) tx.delete(app.attachments, block.attachmentId);
+    });
   };
 
   const indent = (block: Row) => {
@@ -366,12 +371,9 @@ function BlockContent({
       );
     case "bullet":
       return (
-        <HStack gap={1} align="start">
-          <span className="bb-bullet" aria-hidden>
-            •
-          </span>
-          {text("List item")}
-        </HStack>
+        <List listStyle="disc" density="compact">
+          <ListItem label={text("List item")} />
+        </List>
       );
     case "quote":
       return <Blockquote>{text("Quote")}</Blockquote>;

@@ -62,7 +62,7 @@ const schema = {
       },
       { workspace: s.rel("workspaces", "workspaceId"), page: s.rel("pages", "pageId") },
     )
-    .indexOnly(["pageId", "account"]),
+    .indexOnly(["pageId", "account", "workspaceId"]),
   // Blocks are ordered by a fractional `position` inside their parent block
   // (or the page when `parentBlockId` is null), so an insert between two
   // blocks never rewrites its siblings.
@@ -121,7 +121,7 @@ const schema = {
         database: s.rel("pages", "databaseId"),
       },
     )
-    .indexOnly(["databaseId", "status"]),
+    .indexOnly(["databaseId", "status", "pageId"]),
   // An invite is a bearer capability. Only people who may share its scope can
   // read or create it. The server redeems a token on the invitee's behalf
   // (app/api/invites/redeem), so tokens never reach anyone else's client.
@@ -136,7 +136,7 @@ const schema = {
       },
       { workspace: s.rel("workspaces", "workspaceId"), page: s.rel("pages", "pageId") },
     )
-    .indexOnly(["token"]),
+    .indexOnly(["token", "pageId", "workspaceId"]),
 };
 
 type AppSchema = s.Schema<typeof schema>;

@@ -1,12 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useDb } from "jazz-tools/react";
 import { Button, Dialog, Heading, HStack, Selector, Text, VStack } from "@astryxdesign/core";
 import { app } from "@/schema";
 import { PAGE_TREE_MAX_DEPTH } from "@/src/lib/limits";
 import { moveTargets } from "@/src/lib/page-actions";
-import { pageAccess } from "@/src/lib/tree";
 import { useWorkspace } from "./workspace-context";
 
 const TOP_LEVEL = "top-level";
@@ -14,24 +13,49 @@ const TOP_LEVEL = "top-level";
 /** Pick a new parent. The policy checks edit access to the destination. */
 export function MovePageDialog({ pageId, onClose }: { pageId: string; onClose: () => void }) {
   const db = useDb();
-  const { tree, pages, role, grants } = useWorkspace();
+  const { tree, pages, accessVersion } = useWorkspace();
   const page = tree.byId.get(pageId);
   const [target, setTarget] = useState(page?.parentId ?? TOP_LEVEL);
+  // Destinations the policy would accept, from core's permission advice.
+  const [allowed, setAllowed] = useState<ReadonlySet<string> | null>(null);
+  const candidates = page
+    ? moveTargets(tree, pages, pageId).filter((candidate) => {
+        const subtreeHeight = Math.max(
+          0,
+          ...[...tree.descendantIds(pageId)].map((id) => tree.depth(id) - tree.depth(pageId)),
+        );
+        return tree.depth(candidate.id) + 1 + subtreeHeight < PAGE_TREE_MAX_DEPTH;
+      })
+    : [];
+  const candidateKey = candidates.map((candidate) => candidate.id).join(",");
+
+  useEffect(() => {
+    let current = true;
+    const parents = [TOP_LEVEL, ...candidateKey.split(",").filter(Boolean)];
+    void Promise.all(
+      parents.map(async (parent) => {
+        const parentId = parent === TOP_LEVEL ? null : parent;
+        const advice = await db.canUpdate(app.pages, pageId, { parentId }).catch(() => "denied");
+        return advice === "denied" ? null : parent;
+      }),
+    ).then((results) => {
+      if (current) setAllowed(new Set(results.filter((parent) => parent !== null)));
+    });
+    return () => {
+      current = false;
+    };
+  }, [db, pageId, candidateKey, accessVersion]);
+
   if (!page) return null;
-  const subtreeHeight = Math.max(
-    0,
-    ...[...tree.descendantIds(pageId)].map((id) => tree.depth(id) - tree.depth(pageId)),
-  );
-  const options = moveTargets(tree, pages, pageId)
-    .filter((candidate) => pageAccess(tree, candidate.id, role, grants) === "edit")
-    .filter((candidate) => tree.depth(candidate.id) + 1 + subtreeHeight < PAGE_TREE_MAX_DEPTH)
+  const options = candidates
+    .filter((candidate) => allowed?.has(candidate.id))
     .map((candidate) => ({
       value: candidate.id,
       label: [...tree.ancestors(candidate.id), candidate]
         .map((node) => node.title || "Untitled")
         .join(" / "),
     }));
-  const canTopLevel = role === "owner" || role === "member";
+  const canTopLevel = allowed?.has(TOP_LEVEL) ?? false;
   return (
     <Dialog
       isOpen

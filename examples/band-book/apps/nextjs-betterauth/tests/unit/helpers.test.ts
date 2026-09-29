@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { comparePositioned, positionBetween } from "../../src/lib/positions";
 import { applyTextSplice, textSplice } from "../../src/lib/text-splice";
-import { buildPageTree, pageAccess } from "../../src/lib/tree";
+import { buildPageTree } from "../../src/lib/tree";
 import { seedId } from "../../src/lib/bootstrap";
 
 describe("textSplice", () => {
@@ -66,14 +66,6 @@ describe("page tree", () => {
   it("treats a page whose parent is hidden as a root", () => {
     const guestView = buildPageTree(pages.filter((page) => page.id !== "songs"));
     expect(guestView.roots.map((page) => page.id)).toEqual(["harbour", "tour"]);
-  });
-
-  it("mirrors the policy: grants apply to descendants", () => {
-    const grants = new Map([["harbour", "editor" as const]]);
-    expect(pageAccess(tree, "notes", "guest", grants)).toBe("edit");
-    expect(pageAccess(tree, "songs", "guest", grants)).toBe("none");
-    expect(pageAccess(tree, "tour", "viewer", new Map())).toBe("view");
-    expect(pageAccess(tree, "tour", "member", new Map())).toBe("edit");
   });
 });
 
