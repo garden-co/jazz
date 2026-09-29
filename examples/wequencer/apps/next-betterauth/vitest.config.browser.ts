@@ -36,7 +36,7 @@ export default defineConfig({
       instances: [{ browser: "chromium", headless: true }],
       commands: {
         jazzBrowserTopologyLog,
-        jazzServerInfo: async (_context, appId, schema) => jazzServerInfo(appId, schema),
+        jazzServerInfo: async (_context, appId) => jazzServerInfo(appId),
         jazzServerStop: async (_context, serverUrl) => stopJazzServerByUrl(serverUrl),
         jazzServerBlockNetwork: async ({ context }, serverUrl) =>
           blockJazzServerNetwork(context, serverUrl),
