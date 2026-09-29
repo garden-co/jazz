@@ -92,7 +92,10 @@ struct Net {
 
 impl Net {
     fn new(clients: &[u8]) -> Self {
-        let schema = schema();
+        Self::with_schema(schema(), clients)
+    }
+
+    fn with_schema(schema: JazzSchema, clients: &[u8]) -> Self {
         let mut core = InMemoryServerShell::start(
             InMemoryServerShellConfig::new(schema.clone(), identity(0xc0, AuthorSubject::SYSTEM))
                 .with_role(NodeRole::Core),
@@ -186,8 +189,30 @@ impl Net {
         tier: DurabilityTier,
         open_tx: Option<OpenTransactionId>,
     ) -> Result<SerializedReadResult, jazz::db::Error> {
+        self.try_read_as(client, query, tier, open_tx, None)
+    }
+
+    /// [`Self::try_read`] admitted as `author` with its session claims, the
+    /// way the language bindings issue a signed-in client's reads.
+    fn try_read_as(
+        &self,
+        client: usize,
+        query: &Query,
+        tier: DurabilityTier,
+        open_tx: Option<OpenTransactionId>,
+        author: Option<AuthorSubject>,
+    ) -> Result<SerializedReadResult, jazz::db::Error> {
         let db = self.db(client);
         let bytes = postcard::to_allocvec(query).unwrap();
+        let admission = author.map(|author| {
+            (
+                author,
+                jazz::tools::policy_claims::canonical_policy_binding_claims(
+                    &author,
+                    BTreeMap::new(),
+                ),
+            )
+        });
         let read = db.all_serialized_query(
             &bytes,
             ReadOpts {
@@ -195,8 +220,8 @@ impl Net {
                 ..ReadOpts::default()
             },
             open_tx,
-            None,
-            None,
+            admission,
+            author,
             tier >= DurabilityTier::Global,
             || false,
             |attachment| db.detach_query(attachment),
@@ -1195,4 +1220,151 @@ fn reference_array_relation_conflicts_with_a_new_claim_on_the_read_row() {
 #[test]
 fn reference_array_relation_commits_despite_a_claim_on_another_row() {
     assert_eq!(redeem_while_claiming(false), Redeem::Joined);
+}
+
+/// How the shares of [`owned_lists_schema`] are readable. Lists are always
+/// readable only by their creator.
+#[derive(Clone, Copy, Debug)]
+enum SharePolicy {
+    /// Only by their creator.
+    Creator,
+    /// By whoever can read their list.
+    InheritedFromList,
+}
+
+/// Lists and their shares under read policies that consult the reader's
+/// session (garden-co/jazz#3694).
+fn owned_lists_schema(shares: SharePolicy) -> JazzSchema {
+    use jazz::tools::TablePolicies;
+    use jazz::tools::public_schema::{Operation, PolicyExpr};
+    let creator = || {
+        PolicyExpr::eq_session(
+            "$createdBy.account",
+            vec!["user".to_owned(), "account".to_owned()],
+        )
+    };
+    let policies = |read: PolicyExpr| {
+        TablePolicies::new()
+            .with_select(read)
+            .with_insert(PolicyExpr::True)
+            .with_update(Some(creator()), creator())
+            .with_delete(creator())
+    };
+    let share_read = match shares {
+        SharePolicy::Creator => creator(),
+        SharePolicy::InheritedFromList => PolicyExpr::Inherits {
+            operation: Operation::Select,
+            via_column: "list".into(),
+            max_depth: None,
+        },
+    };
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("lists")
+                    .column("title", ColumnType::Text)
+                    .policies(policies(creator())),
+            )
+            .table(
+                TableSchemaBuilder::new("shares")
+                    .column("note", ColumnType::Text)
+                    .fk_column("list", "lists")
+                    .policies(policies(share_read)),
+            )
+            .build(),
+    )
+}
+
+fn share_cells(note: &str, list: RowUuid) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("note".to_owned(), Value::String(note.to_owned())),
+        ("list".to_owned(), Value::Uuid(list.0)),
+    ])
+}
+
+/// How an exclusive read reaches a list's shares.
+#[derive(Clone, Copy, Debug)]
+enum ShareRead {
+    /// The list, including its shares (a reverse relation).
+    ListWithShares,
+    /// The shares, including their list (a forward reference).
+    SharesWithList,
+}
+
+/// A signed-in client reads its own list with its shares inside an
+/// exclusive transaction, then adds a share. Returns how many rows the read
+/// returned and whether the server accepted the commit.
+fn read_own_list_then_share(shares: SharePolicy, read: ShareRead) -> (usize, Redeem) {
+    let net = Net::with_schema(owned_lists_schema(shares), &[0x0a]);
+    let db = net.db(0);
+    let list = block_on(db.insert(
+        "lists",
+        BTreeMap::from([("title".to_owned(), Value::String("groceries".to_owned()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    net.settle(0, list.mergeable_tx_id()).expect("list settles");
+    let list = list.row_uuid();
+    let share =
+        block_on(db.insert("shares", share_cells("red", list), Default::default())).unwrap();
+    net.settle(0, share.mergeable_tx_id())
+        .expect("share settles");
+
+    let query = match read {
+        ShareRead::ListWithShares => Query::from("lists")
+            .filter(eq(col("title"), lit("groceries")))
+            .array_subquery(ArraySubquery::new("shares", "shares", "list", "id")),
+        ShareRead::SharesWithList => Query::from("shares")
+            .filter(eq(col("note"), lit("red")))
+            .include("list"),
+    };
+    let open = OpenTransactionId::new();
+    block_on(db.begin_exclusive(open)).unwrap();
+    let rows = net
+        .try_read_as(
+            0,
+            &query,
+            DurabilityTier::Local,
+            Some(open),
+            Some(AuthorSubject::for_test_bytes([0x0a; 16])),
+        )
+        .map(|result| root_rows(&query, result).len())
+        .expect("the exclusive read resolves");
+    net.drive(db.exclusive_tx_ref(open).insert(
+        "shares",
+        share_cells("red", list),
+        Default::default(),
+    ))
+    .unwrap();
+    let tx_id = net.drive(db.commit_exclusive_handle(open)).unwrap();
+    let outcome = match net.settle(0, tx_id) {
+        Ok(_) => Redeem::Joined,
+        Err(_) => Redeem::Conflict,
+    };
+    (rows, outcome)
+}
+
+fn assert_include_resolves_and_commits(shares: SharePolicy) {
+    for read in [ShareRead::ListWithShares, ShareRead::SharesWithList] {
+        assert_eq!(
+            read_own_list_then_share(shares, read),
+            (1, Redeem::Joined),
+            "{shares:?} {read:?}"
+        );
+    }
+}
+
+/// An include in an exclusive transaction hydrates at the transaction's
+/// snapshot, where the server evaluates the included table's read policy
+/// under the reader's session. A policy comparing the reader's account
+/// resolves and commits instead of timing out.
+#[test]
+fn include_under_creator_read_policies_commits() {
+    assert_include_resolves_and_commits(SharePolicy::Creator);
+}
+
+/// The same for a relational policy: shares readable through their list.
+#[test]
+fn include_under_an_inherited_read_policy_commits() {
+    assert_include_resolves_and_commits(SharePolicy::InheritedFromList);
 }

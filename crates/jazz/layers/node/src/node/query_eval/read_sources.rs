@@ -1148,8 +1148,11 @@ where
                         .project(maintained_view_history_storage_field_names(&table)),
                     row_uuid_field: "row_uuid".to_owned(),
                 });
-            let graph = match &authorization {
-                SourceAuthorizationRequest::System => base,
+            // A prepared binding routes the policy proof by its claim and
+            // parameter fields, which later joins project, exactly as for a
+            // current source.
+            let (graph, routing_fields) = match &authorization {
+                SourceAuthorizationRequest::System => (base, BTreeSet::new()),
                 SourceAuthorizationRequest::PolicyFiltered {
                     permission_subject,
                     plan,
@@ -1192,17 +1195,20 @@ where
                     let output_fields = descriptor_field_names(&descriptor).map_err(|_| {
                         source_resolution_error(request, SourceGap::HistoricalStorageCut)
                     })?;
-                    self.node
+                    let filtered = self
+                        .node
                         .compose_policy_filtered_current_source_graph(
                             policy_request,
                             base,
                             &output_fields,
                         )
-                        .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
-                        .graph
+                        .map_err(|error| {
+                            source_resolution_error_from_policy_proof(request, error)
+                        })?;
+                    (filtered.graph, filtered.route_fields)
                 }
             };
-            (graph, descriptor, metadata, BTreeSet::new())
+            (graph, descriptor, metadata, routing_fields)
         } else if let Some(tx_id) = open_tx_overlay {
             let include_deleted = request.visibility == RowVisibility::IncludeDeleted;
             // A query's root source needs no read of its own: the query
