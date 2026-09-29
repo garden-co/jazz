@@ -3116,6 +3116,91 @@ fn detach_connection_removes_connection_from_db_ticks() {
     assert!(upstream_transport.try_recv().is_none());
 }
 
+// Internal owner contention: a host can close a transport while a suspended
+// operation owns the peer, but public callers cannot hold that owner
+// deterministically.
+#[test]
+fn detach_while_a_suspended_operation_owns_the_peer_completes_on_next_tick() {
+    let schema = schema();
+    let client_author = AuthorSubject::for_test_bytes([0xc2; 16]);
+    let client = open_db(0xc2, client_author, &schema);
+    let (client_transport, mut upstream_transport) = duplex();
+
+    let query = Query::from("todos").filter(eq(col("done"), lit(false)));
+    let _subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+
+    let suspended_owner = crate::db::block_on(upstream.lock());
+    assert!(client.detach_connection(&upstream));
+    assert!(!client.detach_connection(&upstream));
+    drop(suspended_owner);
+
+    client.tick().unwrap();
+    while upstream_transport.try_recv().is_some() {}
+    assert!(!client.detach_connection(&upstream));
+    client.tick().unwrap();
+    assert!(upstream_transport.try_recv().is_none());
+}
+
+// A poll-once host (NAPI) drops a tick that is still pending. A detach queued
+// behind a suspended owner must survive that dropped tick.
+#[test]
+fn deferred_detach_survives_a_tick_dropped_while_the_owner_is_suspended() {
+    use std::future::Future;
+    use std::pin::pin;
+    use std::task::{Context, Poll, Waker};
+
+    let schema = schema();
+    let client_author = AuthorSubject::for_test_bytes([0xc3; 16]);
+    let client = open_db(0xc3, client_author, &schema);
+    client.set_drops_pending_ticks_for_test(true);
+    let (client_transport, mut upstream_transport) = duplex();
+
+    let query = Query::from("todos").filter(eq(col("done"), lit(false)));
+    let _subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+
+    let suspended_owner = crate::db::block_on(upstream.lock());
+    assert!(client.detach_connection(&upstream));
+    {
+        let mut tick = pin!(client.tick());
+        let mut cx = Context::from_waker(Waker::noop());
+        let _ = tick.as_mut().poll(&mut cx);
+    }
+    drop(suspended_owner);
+
+    client.tick().unwrap();
+    while upstream_transport.try_recv().is_some() {}
+    assert!(!client.detach_connection(&upstream));
+    client.tick().unwrap();
+    assert!(upstream_transport.try_recv().is_none());
+}
+
+// The node owner, not only a peer, can be held by a suspended operation.
+#[test]
+fn detach_while_a_suspended_operation_owns_the_node_completes_on_next_tick() {
+    let schema = schema();
+    let client_author = AuthorSubject::for_test_bytes([0xc4; 16]);
+    let client = open_db(0xc4, client_author, &schema);
+    let (client_transport, mut upstream_transport) = duplex();
+
+    let query = Query::from("todos").filter(eq(col("done"), lit(false)));
+    let _subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+
+    let node = client.node.node();
+    let suspended_owner = crate::db::block_on(node.lock());
+    assert!(client.detach_connection(&upstream));
+    assert!(!client.detach_connection(&upstream));
+    drop(suspended_owner);
+
+    client.tick().unwrap();
+    while upstream_transport.try_recv().is_some() {}
+    assert!(!client.detach_connection(&upstream));
+    client.tick().unwrap();
+    assert!(upstream_transport.try_recv().is_none());
+}
+
 #[test]
 fn accepted_subscriber_is_served_under_subscriber_author_identity() {
     let schema = owner_read_schema();
