@@ -1,0 +1,31 @@
+/* Local styles for StagePlan. Tokens only; components come from Astryx. */
+
+body {
+  margin: 0;
+  background: var(--color-background-body);
+}
+
+/* Page bodies share one readable width. */
+.page {
+  width: 100%;
+  max-width: 1280px;
+  margin-inline: auto;
+  box-sizing: border-box;
+}
+
+/* Board columns: show where a dragged card will land. */
+.board-column {
+  border-radius: var(--radius-container);
+  outline: 2px dashed transparent;
+  outline-offset: -2px;
+}
+
+.board-column[data-drop-target="true"] {
+  outline-color: var(--color-accent);
+}
+
+@media (max-width: 480px) {
+  .page {
+    padding-inline: var(--spacing-4) !important;
+  }
+}
