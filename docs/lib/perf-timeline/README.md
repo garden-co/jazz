@@ -1,65 +1,32 @@
-# Jazz performance timeline
+# Jazz performance timeline data
 
-Small read-only Next.js dashboard for public `garden-co/jazz` CodSpeed wallclock
-history. No Jazz native build, database, or CodSpeed token is needed.
+Read-only CodSpeed wallclock history for public `garden-co/jazz`, served at
+`/api/timeline` and shown on the docs site's examples & benchmarks page
+(`/examples`, `components/showcase/`). No Jazz native build, database, or
+CodSpeed token is needed. `/perf-timeline`, the former standalone explorer,
+redirects to `/examples`.
 
 Descriptions and throughput counts come from the benchmark-owned metadata
 catalogue at [../../../dev/benchmarks/metadata](../../../dev/benchmarks/metadata/README.md), not from
-dashboard-specific prose or numbers parsed from names. It currently covers all
-47 known current/retired wallclock series. Unknown names still show timings but
-receive no guessed description or throughput.
+page-specific prose or numbers parsed from names. Unknown names still show
+timings but receive no guessed description or throughput.
 
-Estimated time is the default. The measured mode is labeled “Deterministic runner”
-(CodSpeed wallclock samples still vary). Estimates use the requested **5× assumption**:
-estimated seconds = measured seconds / 5; estimated rate = measured rate × 5.
-Every estimated number carries `*`, with a visible footnote explaining that this
-is illustrative, not a measured machine prediction. The raw receipt table and
-upstream/API data remain unmodified. Rates are work count / median duration, not
+The page shows the requested **5× estimate** (estimated seconds = measured
+seconds / 5), marked `*` with a visible footnote; each history popover also
+shows the measured runner time. Rates are work count / median duration, not
 an independent mean-throughput or sustained-concurrency measurement.
 
-Summary cards run first → latest, with workload rates directly below timings.
-Log scale is the default; uncheck “Log scale” to use a linear zero-based axis.
-Both sides of the chart show the same Y ticks: rounded 1/2/5 linear steps, or
-1/2/5 decade values in log mode (powers of ten for wide ranges). Rounding happens
-in displayed units. The full graph and sparklines share the resulting domain.
+## Classification
 
-```sh
-pnpm install --filter docs... --ignore-scripts
-pnpm --filter docs dev
-pnpm --filter docs test:perf-timeline
-pnpm --filter docs build
-```
-
-## Reading the graph
-
-- Y: wallclock **median in seconds**, automatically formatted as s/ms/µs. The
-  optional min–max whisker is observed sample range, not a confidence interval.
-- X: measured release/PR/commit checkpoints, ordered by **run timestamp** (reviewed historical backfills use release publication time), with
-  equal spacing. Labels show the run's **UTC calendar day**, PR/release and
-  commit hash. This is not a Git ancestry diagram or elapsed-time scale.
-- Thick amber: main commits proven to be included in a semantic-version tag,
-  plus exact tag matches. Solid green: main runs without proven release inclusion.
-  Dashed purple: currently open PRs. Historical closed/merged PR trials and
-  unregistered other branches are completely excluded from the API dataset, navigation,
-  receipts and plots. A PR having merged does not make its earlier experimental
-  commits measurements of main. Separate branches/PRs are never connected.
+- Released: main commits proven to be included in a semantic-version tag, exact
+  tag matches, and audited historical backfills. Main: main runs without proven
+  release inclusion. Open PR: currently open PRs. Historical closed/merged PR
+  trials and unregistered branches are excluded from the API dataset.
 - Releases without an exact measured commit are identified but never assigned
-  estimated values. Version tags are used, not inferred npm publication dates.
-- An ancestor keeps its measured SHA on the axis; the receipt identifies a tag
-  containing it. It is not presented as a measurement of that release's tree.
-- Sparklines use the full available history and the same geometry as the large
-  plot, including zero/log scale and min–max domain. The active preview follows
-  every filter; other previews follow window/status, as they do when selected
-  (selecting another benchmark resets the branch filter).
-- Missing and simulation-only results are excluded. Completed measurements from
-  a run with other failed/pending jobs remain visible with the run status.
-- Benchmark IDs separate series even if display names coincide. Reruns remain
-  separate receipts, not averaged. Harness, fixtures, machine and configuration
-  changes can invalidate comparisons; inspect linked runs and source commits.
-
-The selected benchmark is shareable through `?benchmark=<id-or-name>`. Every
-point has a result ID, run link, commit link, and PR link where available. The
-receipt table exposes exact seconds for keyboard and assistive-technology users.
+  estimated values. Missing and simulation-only results are excluded; reruns
+  remain separate receipts, not averaged.
+- A metric card's number is the newest released measurement
+  (`lib/showcase/summary.ts`); open-PR experiments never feed a card.
 
 ## Sources and caching
 
@@ -100,17 +67,12 @@ data reach the browser. When CodSpeed fails, a server instance that already
 built a timeline returns it with a warning naming when it was retrieved; a
 cold instance returns HTTP 502 with a retry UI.
 
-## Docs route and deployment
-
-The dashboard lives at `/perf-timeline` in the docs app and is intentionally absent
-from site navigation and search content. It uses the shared Fumadocs home layout,
-fonts, and theme. Its stylesheet is scoped to `.perf-timeline`.
+## Deployment
 
 Deploy through the existing docs project; no separate app or Vercel project is
-required. The public API remains `/api/timeline`. Set the optional server-only
-`PERF_GITHUB_TOKEN` on that project only if higher public-source limits are needed.
-
-After building, run `pnpm --filter docs test:perf-timeline:e2e` for browser checks.
+required. Set the optional server-only `PERF_GITHUB_TOKEN` on that project only
+if higher public-source limits are needed. `tests/examples.browser.mjs` checks
+the page against a fixture after `pnpm --filter docs build`.
 
 ## Audited historical backfills
 
