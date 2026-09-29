@@ -2,7 +2,7 @@ import { createJazzContext, type JazzContext } from "../backend/create-jazz-cont
 import { Db } from "../runtime/db.js";
 import { localFirstAccountId } from "../accounts/local-first.js";
 import { createHash } from "node:crypto";
-import { mintLocalFirstToken, verifyLocalFirstIdentityProof } from "jazz-napi";
+import { mintLocalFirstToken } from "jazz-napi";
 import { localFirstSessionFromToken } from "../backend/request-auth.js";
 import { ANONYMOUS_JWT_ISSUER, LOCAL_FIRST_JWT_ISSUER } from "../runtime/client-session.js";
 import type { Session } from "../runtime/context.js";
@@ -22,7 +22,8 @@ export type PolicyTestAppOptions = {
  * `issuer` may be omitted for `authMode: "local-first"`: the test app then
  * acts as a real local-first guest. It derives a local-first key from
  * `user_id` and uses that key's verified subject and founding account (see
- * {@link PolicyTestApp.accountFor}). An explicit external issuer keeps the
+ * {@link PolicyTestApp.sessionFor}). A guest has no custom claims or
+ * `account_id`. An explicit external issuer keeps the
  * trusted `forSession` semantics: the session is that issuer's principal
  * acting for `account_id`, whatever `authMode` says.
  */
@@ -118,13 +119,17 @@ function localFirstPolicySession(appId: string, session: PolicyTestSession): Ses
         "omit `account_id` and read it from `testApp.accountFor(session)` instead.",
     );
   }
+  if (Object.keys(session.claims ?? {}).length > 0) {
+    throw new Error(
+      "PolicyTestApp.as: local-first guests cannot carry custom claims, because a self-signed " +
+        "local-first token has none; use an external session to test claim-based policies.",
+    );
+  }
   const seed = createHash("sha256")
     .update(`jazz-policy-test-local-first\0${session.user_id}`)
     .digest("base64url");
   const token = mintLocalFirstToken(seed, appId, LOCAL_FIRST_TOKEN_TTL_SECONDS);
-  const admitted = localFirstSessionFromToken(token, appId, verifyLocalFirstIdentityProof);
-  admitted.claims = { ...admitted.claims, ...session.claims };
-  return admitted;
+  return localFirstSessionFromToken(token, appId);
 }
 
 function withPolicyTestAccount(session: Session): Session {
@@ -203,7 +208,17 @@ export class PolicyTestApp {
    * founding account derived from its key, as a real local-first client gets.
    */
   accountFor(session: PolicyTestSession): string {
-    return this.policySession(session).account_id!;
+    return this.sessionFor(session).account_id!;
+  }
+
+  /**
+   * The session {@link PolicyTestApp.as} acts with. For a local-first guest
+   * this is the verified session of its derived key: `user_id` is the
+   * key-derived subject (not the `user_id` passed in) and `account_id` is its
+   * founding account. Other sessions are returned as they will be used.
+   */
+  sessionFor(session: PolicyTestSession): Session {
+    return this.policySession(session);
   }
 
   private policySession(session: PolicyTestSession): Session {

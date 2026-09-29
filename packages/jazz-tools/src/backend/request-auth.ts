@@ -1,3 +1,4 @@
+import { verifyLocalFirstIdentityProof as verifyNativeLocalFirstIdentityProof } from "jazz-napi";
 import { withAuthRequestDeadline } from "../runtime/auth-request-deadline.js";
 import { requestAccountRegistry, readAccountAssignment } from "../accounts/registry-client.js";
 import {
@@ -480,8 +481,8 @@ function localFirstSessionFromVerifiedProof(payload: JwtPayload, verifiedUserId:
 
 /**
  * Build the session `resolveRequestSession` produces for a local-first bearer
- * token, for trusted in-process harnesses that already hold the native
- * verifier and cannot await registry admission (the policy test app).
+ * token, for trusted in-process harnesses that cannot await registry
+ * admission (the policy test app). It always uses the native verifier.
  *
  * The account is the registry's deterministic founding account for the
  * verified subject, and native admission re-verifies the token against that
@@ -490,13 +491,9 @@ function localFirstSessionFromVerifiedProof(payload: JwtPayload, verifiedUserId:
  *
  * @internal
  */
-export function localFirstSessionFromToken(
-  token: string,
-  appId: string,
-  verifyToken: (token: string, appId: string) => { ok: boolean; id?: string | null },
-): Session {
+export function localFirstSessionFromToken(token: string, appId: string): Session {
   const payload = requireJwtPayload(token);
-  const verified = verifyToken(token, appId);
+  const verified = verifyNativeLocalFirstIdentityProof(token, appId);
   if (payload.iss !== LOCAL_FIRST_JWT_ISSUER || !verified.ok || !verified.id) {
     throw new Error("Invalid local-first identity proof");
   }

@@ -11,6 +11,7 @@ import {
   type LocalJazzServerHandle,
   startLocalJazzServer,
 } from "./index.js";
+import { LOCAL_FIRST_JWT_ISSUER } from "../runtime/client-session.js";
 import { settlePolicySeed, settlePolicySeedForSessionReads } from "./policy-test-app.js";
 
 const tempRoots: string[] = [];
@@ -533,6 +534,59 @@ describe("createPolicyTestApp", () => {
           authMode: "local-first",
         }),
       ).toThrow(/founding account derived from their key/);
+    } finally {
+      await policyTestApp.shutdown();
+    }
+  }, 10_000);
+
+  it("treats the reserved local-first issuer as a self-signed guest", async () => {
+    const policyTestApp = await createPolicyTestApp(testApp, testPermissions, expect);
+
+    try {
+      const withIssuer = policyTestApp.sessionFor({
+        issuer: LOCAL_FIRST_JWT_ISSUER,
+        user_id: "guest-device",
+        claims: {},
+        authMode: "local-first",
+      });
+      const withoutIssuer = policyTestApp.sessionFor({
+        user_id: "guest-device",
+        claims: {},
+        authMode: "local-first",
+      });
+      expect(withIssuer).toMatchObject({
+        issuer: LOCAL_FIRST_JWT_ISSUER,
+        authMode: "local-first",
+        user_id: withoutIssuer.user_id,
+        account_id: withoutIssuer.account_id,
+      });
+      expect(withIssuer.user_id).not.toBe("guest-device");
+
+      expect(() =>
+        policyTestApp.as({
+          issuer: LOCAL_FIRST_JWT_ISSUER,
+          user_id: "guest-device",
+          account_id: "00000000-0000-4000-8000-000000000002",
+          claims: {},
+          authMode: "local-first",
+        }),
+      ).toThrow(/founding account derived from their key/);
+    } finally {
+      await policyTestApp.shutdown();
+    }
+  }, 10_000);
+
+  it("rejects custom claims for a self-signed local-first guest", async () => {
+    const policyTestApp = await createPolicyTestApp(testApp, testPermissions, expect);
+
+    try {
+      expect(() =>
+        policyTestApp.as({
+          user_id: "guest-device",
+          claims: { join_code: "invite-123" },
+          authMode: "local-first",
+        }),
+      ).toThrow(/local-first guests cannot carry custom claims/);
     } finally {
       await policyTestApp.shutdown();
     }
