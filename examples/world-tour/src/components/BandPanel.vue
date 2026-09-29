@@ -70,7 +70,7 @@ const { data: invites } = useAll(() => app.bandInvites.where({ bandId: props.ban
 const membership = computed(() => members.value?.find((m) => m.userId === props.userId));
 const invite = computed(() => invites.value?.[0]);
 const inviteLink = computed(() =>
-  invite.value?.code ? buildInviteLink(props.band.id, invite.value.code) : "",
+  invite.value ? buildInviteLink(props.band.id, invite.value.code) : "",
 );
 const publicLink = computed(() => bandLink(props.band.id));
 

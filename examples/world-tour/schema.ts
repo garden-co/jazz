@@ -18,10 +18,7 @@ const schema = {
   bandInvites: s.table(
     {
       bandId: s.uuid(),
-      // Optional only because the members insert policy compares it with the optional
-      // `members.inviteCode`, and correlating a required column with an optional one
-      // is rejected at publish (OperandTypeMismatch). Codes are always set.
-      code: s.string().optional(),
+      code: s.string(),
     },
     { band: s.rel("bands", "bandId") },
   ),
