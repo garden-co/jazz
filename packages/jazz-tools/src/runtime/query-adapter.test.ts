@@ -43,6 +43,7 @@ const scalarApp = s.defineApp({
     {
       timestamp: s.timestamp(),
       bytes: s.bytes(),
+      nullableBytes: s.bytes().optional(),
       metadata: s.json(),
       tags: s.array(s.string()),
     },
@@ -569,6 +570,15 @@ describe("translateQuery", () => {
         },
       },
     ]);
+  });
+
+  it("lowers nullable Bytea null checks without converting flags as bytes", () => {
+    expect(
+      translatedConditions(scalarApp.filters.where({ nullableBytes: { isNull: true } })),
+    ).toEqual([{ IsNull: { column: { column: "nullableBytes" } } }]);
+    expect(
+      translatedConditions(scalarApp.filters.where({ nullableBytes: { isNull: false } })),
+    ).toEqual([{ IsNotNull: { column: { column: "nullableBytes" } } }]);
   });
 
   it("lowers direct JSON objects as one equality", () => {
