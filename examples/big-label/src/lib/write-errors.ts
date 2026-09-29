@@ -1,27 +1,29 @@
 import { PersistedWriteRejectedError } from "jazz-tools";
 
 /**
- * The rejection code of a failed write, such as "permission_denied" or
- * "exclusive_conflict", or undefined for other errors.
+ * The rejection code of a write the server or the local runtime refused, such
+ * as "permission_denied" or "transaction_conflict", or undefined for any other
+ * error.
  */
 export function writeErrorCode(error: unknown): string | undefined {
-  if (!(error instanceof Error)) return undefined;
   // Server routes load the native backend outside the Next bundle, so its
   // error class can be a different copy from this import: match the name too.
-  if (error instanceof PersistedWriteRejectedError || error.name === "PersistedWriteRejectedError")
+  if (
+    error instanceof PersistedWriteRejectedError ||
+    (error instanceof Error && error.name === "PersistedWriteRejectedError")
+  )
     return (error as PersistedWriteRejectedError).code;
-  const { code } = error as { code?: unknown };
-  if (typeof code === "string") return code;
-  // Workaround for https://github.com/garden-co/jazz/issues/2713: with the
-  // native runtime, a conflict can be thrown from `wait()` as a plain Error
-  // "(code): reason" instead of a PersistedWriteRejectedError. Delete this
-  // fallback when that lands (#3753).
-  return /^\((\w+)\): /.exec(error.message)?.[1];
+  return undefined;
 }
 
+/**
+ * Codes that mean another transaction won the race: read again and retry.
+ * A conflict found locally is `transaction_conflict`; one found by the
+ * authority is `exclusive_conflict`.
+ */
 const retryableConflicts = new Set([
-  "exclusive_conflict",
   "transaction_conflict",
+  "exclusive_conflict",
   "cascade_rejected",
 ]);
 
