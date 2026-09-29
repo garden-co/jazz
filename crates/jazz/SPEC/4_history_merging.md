@@ -308,28 +308,52 @@ stamps). Two images of different authored schema layouts keep whole-row
 last-writer-wins by the same comparison, and the winner's stamp covers every
 slot. The pending local overlay is not stamped and always wins locally.
 
-**Durable layout.** The carrier is one field named `_col_stamps`, appended
-after `authored_columns` to the history, global-current and ahead-current
-records (groove `Bytes`, so one variable-width field with the usual `u32`
-offset-table entry, §2.7 of the groove storage model), and one trailing field
-`col_stamps` of the wire `VersionRecord` (a postcard byte sequence: varint
-length, then the raw bytes). Its contents are exactly one of:
+**Durable layout.** Stamps are stored as hidden constant-width groove `U48`
+fields (groove SPEC §2.7, `INV-STORAGE-37`: 6 bytes little-endian in the
+record's fixed-width region, no offset-table entry). The history,
+global-current, ahead-current and ahead-shadow records carry, after
+`authored_columns`, one stamp field per slot in slot order: slot `i < L` is the
+`i`-th `Lww` user column of the image's authored table schema in schema column
+order (merge-strategy columns are skipped, not zero-filled), and slot `L` is
+`_deletion`. The stamp field of the cell field `F` is named `_ts_F`:
+`_ts__app_<column>` in a logical layout, `_ts__app_<physical id>` in a physical
+table, and `_ts__deletion`. Each value is Unix milliseconds; HLC physical
+milliseconds are 46 bits wide, so every stamp fits `U48` with the two high
+bits zero. Rejected-version records carry no stamps.
 
-- empty — an **unstamped** image: an uploaded or pending local patch, a query
-  witness, or a payload whose stamps are unknown. A merge treats every slot of
-  an unstamped previous image as stamp `0`.
-- `6 * (L + 1)` bytes, where `L` is the number of `Lww` user columns of the
-  image's authored table schema: slot `i < L` is the `i`-th `Lww` column in
-  schema column order (merge-strategy columns are skipped, not zero-filled),
-  and slot `L` is `_deletion`. Each slot is an **unsigned 48-bit
-  little-endian** integer of Unix milliseconds (`byte[0]` is least
-  significant). HLC physical milliseconds are 46 bits wide, so every stamp
-  fits; the two high bits are zero.
+A physical table (§16) holds the union of its variants' stamp fields: one
+`_ts__app_<id>` per physical column that is `Lww` in at least one schema
+variant, plus `_ts__deletion`. Each variant layout selects exactly the stamps
+of the `Lww` cells it carries, so a narrower older-schema variant has fewer
+stamp fields. A projection of one variant into another layout carries a
+target cell's stamp from the source field that supplies the cell (including a
+lens `Rename`/`Copy`); a target cell the source does not carry, carries only as
+a lens default, or carries as a merge-strategy column projects stamp `0`.
 
-Any other length is invalid and rejected on decode and on wire ingest. The
-layout is a fixed stride per slot so a later columnar in-memory form can index
-slot `k` at byte `6k` without parsing. Byte-level corpus fixtures for this
-field are deferred (see the linear-history experiment PR).
+An **unstamped** image (an uploaded or pending local patch, a query witness,
+or a payload whose stamps are unknown) stores `0` in every slot, which is
+exactly how a merge treats it.
+
+**Wire layout.** The wire `VersionRecord` carries one trailing field
+`col_stamps` (a postcard byte sequence: varint length, then the raw bytes).
+Its contents are exactly one of:
+
+- empty — every slot is `0` (including every unstamped image);
+- `6 * (L + 1)` bytes, one unsigned 48-bit little-endian stamp per slot in the
+  slot order above (`byte[0]` least significant), with at least one nonzero
+  slot.
+
+Any other length, and a nonempty all-zero carrier, is invalid and rejected on
+wire ingest; encoders emit the canonical form. The byte receipts are the
+`node::col_stamps` unit tests (wire carrier and stored field bytes) and the
+groove `U48` record/key fixtures.
+
+**Per-row cost.** With `L` stamped columns the stamps occupy `6 * (L + 1)`
+bytes of the fixed region of each history/current row, and nothing else; the
+former single variable-width `Bytes` carrier cost the same payload plus a
+one-byte stored-scalar tag and a 4-byte offset-table entry (5 bytes net for a
+stamped row saved), while an unstamped image, formerly 5 bytes, now also costs
+`6 * (L + 1)`.
 
 ### 4.8 Subsumed merge-strategy backlog
 

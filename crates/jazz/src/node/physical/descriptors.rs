@@ -399,11 +399,23 @@ pub(super) fn physical_version_storage_tables(
             .take(HistoryRowRecord::USER_CELLS)
             .cloned()
             .collect::<Vec<_>>();
+        let stamp_columns = physical_stamp_columns(
+            variants
+                .iter()
+                .map(|(_, table, mapping, _)| (*table, *mapping)),
+        );
+        let is_stamp_column = |column: &GrooveColumnSchema| {
+            column
+                .name
+                .starts_with(crate::schema::STAMP_FIELD_PREFIX)
+        };
         let trailing_history_columns = template
             .columns
             .iter()
             .skip(HistoryRowRecord::USER_CELLS + template_table.columns.len())
+            .filter(|column| !is_stamp_column(column))
             .cloned()
+            .chain(stamp_columns.iter().cloned())
             .collect::<Vec<_>>();
         // First form the persistent registry for every scalar enum occurrence.
         // Concurrent schemas may use the same authored ordinal for distinct
@@ -829,7 +841,9 @@ pub(super) fn physical_version_storage_tables(
             .columns
             .iter()
             .skip(GlobalCurrentRowRecord::USER_CELLS + template_table.columns.len())
+            .filter(|column| !is_stamp_column(column))
             .cloned()
+            .chain(stamp_columns.iter().cloned())
             .collect::<Vec<_>>();
         let current_columns = || {
             current_system_columns
@@ -1273,7 +1287,8 @@ fn physical_history_field_names_for_case(
         mapping,
         present,
         HistoryRowRecord::PREFIX_FIELD_NAMES,
-        &["authored_columns", crate::schema::COLUMN_STAMPS_FIELD],
+        &["authored_columns"],
+        true,
         "physical history column mapping missing",
     )
 }
@@ -1295,7 +1310,8 @@ fn physical_current_field_names_for_case(
         mapping,
         present,
         GlobalCurrentRowRecord::PREFIX_FIELD_NAMES,
-        &["authored_columns", crate::schema::COLUMN_STAMPS_FIELD],
+        &["authored_columns"],
+        true,
         "physical current column mapping missing",
     )
 }
@@ -1318,6 +1334,7 @@ fn physical_rejected_version_field_names_for_case(
         present,
         RejectedVersionRowRecord::PREFIX_FIELD_NAMES,
         &[],
+        false,
         "physical rejected-version column mapping missing",
     )
 }
@@ -1331,10 +1348,12 @@ fn physical_row_field_names(
     present: Option<&BTreeSet<String>>,
     prefix: &[&str],
     suffix: &[&str],
+    stamps: bool,
     missing_mapping: &'static str,
 ) -> Result<Vec<String>, Error> {
-    let mut fields = Vec::with_capacity(prefix.len() + table.columns.len() + suffix.len());
+    let mut fields = Vec::with_capacity(prefix.len() + 2 * table.columns.len() + suffix.len() + 1);
     fields.extend(prefix.iter().map(|name| (*name).to_owned()));
+    let mut stamp_fields = Vec::new();
     for column in &table.columns {
         if present.is_some_and(|present| !present.contains(&column.name)) {
             continue;
@@ -1344,10 +1363,44 @@ fn physical_row_field_names(
             .get(&column.name)
             .copied()
             .ok_or(Error::InvalidStoredValue(missing_mapping))?;
-        fields.push(physical_user_column_field(column_id));
+        let field = physical_user_column_field(column_id);
+        if table.merge_strategy(&column.name) == crate::schema::MergeStrategy::Lww {
+            stamp_fields.push(crate::schema::stamp_field_name(&field));
+        }
+        fields.push(field);
     }
     fields.extend(suffix.iter().map(|name| (*name).to_owned()));
+    if stamps {
+        // Hidden per-column LWW stamps of the cells this layout carries, in
+        // schema order, then `_deletion` (SPEC 4.6).
+        fields.extend(stamp_fields);
+        fields.push(crate::schema::stamp_field_name("_deletion"));
+    }
     Ok(fields)
+}
+
+/// The physical stamp columns of one lineage: `_ts__app_<id>` for every
+/// physical column that is `Lww` in at least one variant, by id, then
+/// `_ts__deletion`. Each variant's layout selects its own subset by name.
+fn physical_stamp_columns<'a>(
+    variants: impl IntoIterator<Item = (&'a TableSchema, &'a TablePhysicalMapping)>,
+) -> Vec<GrooveColumnSchema> {
+    let mut ids = BTreeSet::new();
+    for (table, mapping) in variants {
+        for column in &table.columns {
+            if table.merge_strategy(&column.name) == crate::schema::MergeStrategy::Lww
+                && let Some(id) = mapping.columns.get(&column.name)
+            {
+                ids.insert(*id);
+            }
+        }
+    }
+    ids.into_iter()
+        .map(|id| crate::schema::column_stamp_column(&physical_user_column_field(id)))
+        .chain(std::iter::once(crate::schema::column_stamp_column(
+            "_deletion",
+        )))
+        .collect()
 }
 
 pub(crate) fn physical_column_epoch_is_compatible(

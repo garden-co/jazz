@@ -943,12 +943,12 @@ pub struct VersionRecord {
     /// presence is unavailable; consumers must conservatively treat every
     /// present payload cell as authored.
     authored_columns: Option<BTreeSet<String>>,
-    /// Per-column last-writer-wins stamps of this row image: empty when
-    /// unstamped (an uploaded patch), otherwise one unsigned 48-bit
-    /// little-endian Unix-millisecond stamp per plain column of the authored
-    /// table in schema order, then one for `_deletion`. Encoded as a postcard
-    /// byte sequence (varint length, raw bytes). See SPEC ch. 4, "Column
-    /// stamps".
+    /// Per-column last-writer-wins stamps of this row image: empty when every
+    /// stamp is `0` (an unstamped image such as an uploaded patch), otherwise
+    /// one unsigned 48-bit little-endian Unix-millisecond stamp per plain
+    /// column of the authored table in schema order, then one for `_deletion`,
+    /// with at least one nonzero stamp. Encoded as a postcard byte sequence
+    /// (varint length, raw bytes). See SPEC ch. 4, "Column stamps".
     col_stamps: Vec<u8>,
 }
 
@@ -2717,7 +2717,7 @@ fn encode_policy_claim_node(
             policy_claim_container(POLICY_CLAIM_ARRAY)?,
             values.iter().collect(),
         ),
-        Value::Record(_) | Value::Enum(_) | Value::Large(_) => {
+        Value::Record(_) | Value::Enum(_) | Value::Large(_) | Value::U48(_) => {
             return Err(
                 "policy binding directory does not admit engine-owned claim values".to_owned(),
             );
@@ -6009,6 +6009,9 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
             panic!(
                 "union-valued values are an internal Groove representation, not a Jazz protocol value"
             )
+        }
+        Value::U48(_) => {
+            panic!("U48 is an engine-owned stamp width, not a Jazz protocol value")
         }
         Value::Large(value) => {
             bytes.push(15);

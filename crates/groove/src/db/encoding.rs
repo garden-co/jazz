@@ -489,6 +489,10 @@ pub(super) fn encode_primary_key_part(key: &mut Vec<u8>, value: &Value) -> Resul
             key.push(3);
             key.extend(value.to_be_bytes());
         }
+        Value::U48(value) => {
+            key.push(16);
+            key.extend(records::u48_be_bytes(*value)?);
+        }
         Value::I32(value) => {
             key.push(14);
             key.extend(order_preserving_i32_bits(*value).to_be_bytes());
@@ -594,6 +598,15 @@ pub(super) fn decode_primary_key_part(
             );
             Ok(Value::U64(value))
         }
+        records::ValueType::U48 => {
+            expect_key_tag(bytes, 16)?;
+            let value = records::u48_from_be_bytes(
+                take_key_bytes(bytes, 6)?
+                    .try_into()
+                    .expect("slice has u48 length"),
+            );
+            Ok(Value::U48(value))
+        }
         records::ValueType::I32 => {
             expect_key_tag(bytes, 14)?;
             let value = u32::from_be_bytes(
@@ -698,6 +711,14 @@ pub(super) fn decode_index_key_part(
                 take_persisted_index_key_bytes(bytes, index_name, 8)?
                     .try_into()
                     .expect("slice has u64 length"),
+            )))
+        }
+        ColumnType::U48 => {
+            expect_persisted_index_key_tag(bytes, index_name, 16)?;
+            Ok(Value::U48(records::u48_from_be_bytes(
+                take_persisted_index_key_bytes(bytes, index_name, 6)?
+                    .try_into()
+                    .expect("slice has u48 length"),
             )))
         }
         ColumnType::I32 => {

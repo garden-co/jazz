@@ -49,6 +49,10 @@ pub enum Value {
     I32(i32),
     Record(OwnedRecord),
     Enum(EnumValue),
+    /// Unsigned 48-bit integer in `0..=U48_MAX`, carried widened in a `u64`.
+    /// Encoders reject out-of-range payloads (`INV-STORAGE-37`). Appended last
+    /// so existing serde variant indices of this carrier are unchanged.
+    U48(u64),
 }
 
 /// One selected case of a [`EnumSchema`].
@@ -458,6 +462,11 @@ pub enum ValueType {
     Record(Box<RecordDescriptor>),
     /// A variable-width tagged payload record selected by a stable enum case.
     Enum(Box<EnumSchema>),
+    /// Constant-width unsigned 48-bit integer (`INV-STORAGE-37`): 6 bytes
+    /// little-endian in a record's fixed region, 6 bytes big-endian as a tuple
+    /// member or ordered key part. Appended last so existing serde variant
+    /// indices of this type are unchanged.
+    U48,
 }
 
 /// Opaque marker for physical-only value encodings beneath the public
@@ -507,6 +516,40 @@ const DESCRIPTOR_NODE_NULLABLE: u8 = 21;
 const DESCRIPTOR_NODE_RECORD: u8 = 22;
 const DESCRIPTOR_NODE_ENUM: u8 = 23;
 const DESCRIPTOR_NODE_ENUM_CASE: u8 = 24;
+const DESCRIPTOR_NODE_U48: u8 = 25;
+
+/// Largest value representable by [`ValueType::U48`] (`2^48 - 1`).
+pub const U48_MAX: u64 = (1 << 48) - 1;
+
+fn checked_u48(value: u64) -> Result<u64, Error> {
+    if value > U48_MAX {
+        Err(Error::U48OutOfRange(value))
+    } else {
+        Ok(value)
+    }
+}
+
+fn u48_le_bytes(value: u64) -> Result<[u8; 6], Error> {
+    let bytes = checked_u48(value)?.to_le_bytes();
+    Ok([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]])
+}
+
+pub(crate) fn u48_be_bytes(value: u64) -> Result<[u8; 6], Error> {
+    let bytes = checked_u48(value)?.to_be_bytes();
+    Ok([bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]])
+}
+
+pub(crate) fn u48_from_le_bytes(bytes: [u8; 6]) -> u64 {
+    let mut wide = [0u8; 8];
+    wide[..6].copy_from_slice(&bytes);
+    u64::from_le_bytes(wide)
+}
+
+pub(crate) fn u48_from_be_bytes(bytes: [u8; 6]) -> u64 {
+    let mut wide = [0u8; 8];
+    wide[2..].copy_from_slice(&bytes);
+    u64::from_be_bytes(wide)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DescriptorCodecNode {
@@ -697,6 +740,7 @@ fn descriptor_codec_push_value_type(
         ValueType::U16 => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_U16)),
         ValueType::U32 => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_U32)),
         ValueType::U64 => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_U64)),
+        ValueType::U48 => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_U48)),
         ValueType::I32 => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_I32)),
         ValueType::I64 => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_I64)),
         ValueType::F64 => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_F64)),
@@ -914,6 +958,7 @@ fn descriptor_codec_decode_value_type(
         DESCRIPTOR_NODE_U16 => scalar(DESCRIPTOR_NODE_U16, ValueType::U16),
         DESCRIPTOR_NODE_U32 => scalar(DESCRIPTOR_NODE_U32, ValueType::U32),
         DESCRIPTOR_NODE_U64 => scalar(DESCRIPTOR_NODE_U64, ValueType::U64),
+        DESCRIPTOR_NODE_U48 => scalar(DESCRIPTOR_NODE_U48, ValueType::U48),
         DESCRIPTOR_NODE_I32 => scalar(DESCRIPTOR_NODE_I32, ValueType::I32),
         DESCRIPTOR_NODE_I64 => scalar(DESCRIPTOR_NODE_I64, ValueType::I64),
         DESCRIPTOR_NODE_F64 => scalar(DESCRIPTOR_NODE_F64, ValueType::F64),
@@ -1215,6 +1260,7 @@ pub fn collect_by_ordered_scalar(value_type: &ValueType) -> bool {
         | ValueType::U16
         | ValueType::U32
         | ValueType::U64
+        | ValueType::U48
         | ValueType::I32
         | ValueType::I64
         | ValueType::F64
@@ -1597,6 +1643,7 @@ impl ValueType {
             Self::U16 => Some(2),
             Self::U64 | Self::I64 => Some(8),
             Self::U32 | Self::I32 => Some(4),
+            Self::U48 => Some(6),
             Self::F64 => Some(8),
             Self::Uuid => Some(16),
             Self::EnumTag(_) => Some(1),
@@ -1742,6 +1789,7 @@ pub(super) fn encode_fixed_value(
         (Value::U16(value), ValueType::U16) => bytes.extend(value.to_le_bytes()),
         (Value::U32(value), ValueType::U32) => bytes.extend(value.to_le_bytes()),
         (Value::U64(value), ValueType::U64) => bytes.extend(value.to_le_bytes()),
+        (Value::U48(value), ValueType::U48) => bytes.extend(u48_le_bytes(*value)?),
         (Value::I32(value), ValueType::I32) => bytes.extend(value.to_le_bytes()),
         (Value::I64(value), ValueType::I64) => bytes.extend(value.to_le_bytes()),
         (Value::F64(value), ValueType::F64) => {
@@ -1787,6 +1835,7 @@ pub(super) fn decode_value(bytes: &[u8], value_type: &ValueType) -> Result<Value
         ValueType::U16 => Ok(Value::U16(u16::from_le_bytes(read_exact::<2>(bytes)?))),
         ValueType::U32 => Ok(Value::U32(u32::from_le_bytes(read_exact::<4>(bytes)?))),
         ValueType::U64 => Ok(Value::U64(u64::from_le_bytes(read_exact::<8>(bytes)?))),
+        ValueType::U48 => Ok(Value::U48(u48_from_le_bytes(read_exact::<6>(bytes)?))),
         ValueType::I32 => Ok(Value::I32(i32::from_le_bytes(read_exact::<4>(bytes)?))),
         ValueType::I64 => Ok(Value::I64(i64::from_le_bytes(read_exact::<8>(bytes)?))),
         ValueType::F64 => {
@@ -1915,6 +1964,7 @@ fn validate_value_inner(
         ValueType::U16 => read_exact::<2>(bytes).map(|_| ()),
         ValueType::U32 | ValueType::I32 => read_exact::<4>(bytes).map(|_| ()),
         ValueType::U64 | ValueType::I64 => read_exact::<8>(bytes).map(|_| ()),
+        ValueType::U48 => read_exact::<6>(bytes).map(|_| ()),
         ValueType::F64 => {
             let value = f64::from_le_bytes(read_exact::<8>(bytes)?);
             // NaN has no representation in any persisted record state. This
@@ -2260,6 +2310,7 @@ fn decode_array(bytes: &[u8], element_type: &ValueType) -> Result<Value, Error> 
 
 pub(crate) fn ensure_value_type(value: &Value, value_type: &ValueType) -> Result<(), Error> {
     match (value, value_type) {
+        (Value::U48(value), ValueType::U48) => checked_u48(*value).map(|_| ()),
         (Value::U8(_), ValueType::U8)
         | (Value::U16(_), ValueType::U16)
         | (Value::U32(_), ValueType::U32)
@@ -2463,6 +2514,7 @@ fn encode_tuple_member(
         (Value::U16(value), ValueType::U16) => bytes.extend(value.to_be_bytes()),
         (Value::U32(value), ValueType::U32) => bytes.extend(value.to_be_bytes()),
         (Value::U64(value), ValueType::U64) => bytes.extend(value.to_be_bytes()),
+        (Value::U48(value), ValueType::U48) => bytes.extend(u48_be_bytes(*value)?),
         (Value::I32(value), ValueType::I32) => bytes.extend(order_preserving_i32(*value)),
         (Value::I64(value), ValueType::I64) => bytes.extend(order_preserving_i64(*value)),
         (Value::Bool(value), ValueType::Bool) => bytes.push(u8::from(*value)),
@@ -2519,6 +2571,7 @@ fn decode_tuple_member(bytes: &[u8], value_type: &ValueType) -> Result<Value, Er
         ValueType::U16 => Ok(Value::U16(u16::from_be_bytes(read_exact::<2>(bytes)?))),
         ValueType::U32 => Ok(Value::U32(u32::from_be_bytes(read_exact::<4>(bytes)?))),
         ValueType::U64 => Ok(Value::U64(u64::from_be_bytes(read_exact::<8>(bytes)?))),
+        ValueType::U48 => Ok(Value::U48(u48_from_be_bytes(read_exact::<6>(bytes)?))),
         ValueType::I32 => Ok(Value::I32(i32_from_order_preserving(read_exact::<4>(
             bytes,
         )?))),

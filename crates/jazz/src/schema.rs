@@ -1032,6 +1032,17 @@ impl TableSchema {
         self.history_storage_table()
     }
 
+    /// The hidden per-column LWW stamp fields of a row state: one `U48`
+    /// field per `Lww` user column in schema order, then `_deletion`.
+    pub(crate) fn column_stamp_columns(&self) -> Vec<groove::schema::ColumnSchema> {
+        self.columns
+            .iter()
+            .filter(|user_column| self.merge_strategy(&user_column.name) == MergeStrategy::Lww)
+            .map(|user_column| column_stamp_column(&app_storage_column_name(&user_column.name)))
+            .chain(std::iter::once(column_stamp_column("_deletion")))
+            .collect()
+    }
+
     fn history_storage_table_named(&self, name: String) -> GrooveTableSchema {
         let mut columns = vec![
             column("branch_key", GrooveColumnType::Bytes),
@@ -1059,7 +1070,7 @@ impl TableSchema {
             "authored_columns",
             GrooveColumnType::U64.array_of().nullable(),
         ));
-        columns.push(column_stamps_column());
+        columns.extend(self.column_stamp_columns());
 
         GrooveTableSchema::new(name, columns)
             .with_primary_key(PrimaryKey::composite([
@@ -1105,7 +1116,7 @@ impl TableSchema {
             "authored_columns",
             GrooveColumnType::U64.array_of().nullable(),
         ));
-        content_columns.push(column_stamps_column());
+        content_columns.extend(self.column_stamp_columns());
         let mut content_table = GrooveTableSchema::new(
             format!("jazz_{}_global_current", self.name),
             content_columns,
@@ -1161,7 +1172,7 @@ impl TableSchema {
             "authored_columns",
             GrooveColumnType::U64.array_of().nullable(),
         ));
-        content_columns.push(column_stamps_column());
+        content_columns.extend(self.column_stamp_columns());
         GrooveTableSchema::new(format!("jazz_{}_ahead_current", self.name), content_columns)
             // One overlay row per row: the newest pending local image.
             .with_primary_key(PrimaryKey::composite([
@@ -1327,16 +1338,21 @@ fn tx_id_column() -> GrooveColumnType {
     GrooveColumnType::Tuple(vec![GrooveColumnType::U64, GrooveColumnType::Uuid])
 }
 
-/// Name of the row-state field holding per-column last-writer-wins stamps.
-/// See `crates/jazz/SPEC/4_history_merging.md` ("Column stamps").
-pub(crate) const COLUMN_STAMPS_FIELD: &str = "_col_stamps";
+/// Name prefix of the hidden per-column LWW stamp fields of a row state.
+pub(crate) const STAMP_FIELD_PREFIX: &str = "_ts_";
 
-/// `_col_stamps` is one opaque byte string: empty for an unstamped image, or
-/// one fixed-width 6-byte little-endian stamp per stamped slot. A plain
-/// `Bytes` field keeps the physical carrier independent of the column count,
-/// so every schema variant of a physical lineage shares one field type.
-fn column_stamps_column() -> groove::schema::ColumnSchema {
-    column(COLUMN_STAMPS_FIELD, GrooveColumnType::Bytes)
+/// Name of the hidden stamp field of the row-state cell field `cell_field`:
+/// `_ts__app_<column>` for a logical user cell, `_ts__app_<id>` for a
+/// physical one, and `_ts__deletion`.
+pub(crate) fn stamp_field_name(cell_field: &str) -> String {
+    format!("{STAMP_FIELD_PREFIX}{cell_field}")
+}
+
+/// Hidden constant-width stamp field of one row-state cell field: groove
+/// `U48` Unix milliseconds of the write that last set the cell. See
+/// `crates/jazz/SPEC/4_history_merging.md` ("Column stamps").
+pub(crate) fn column_stamp_column(cell_field: &str) -> groove::schema::ColumnSchema {
+    column(stamp_field_name(cell_field), GrooveColumnType::U48)
 }
 
 fn column(name: impl Into<String>, column_type: GrooveColumnType) -> groove::schema::ColumnSchema {
