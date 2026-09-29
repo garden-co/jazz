@@ -10,9 +10,14 @@
     "test:browser": "vitest run --config vitest.config.browser.ts",
     "test:schema": "vitest run schema.test.ts --environment node",
     "typecheck:browser-config": "tsc --project tsconfig.browser.json",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
+    "@astryxdesign/core": "0.6.3",
+    "@garden-co/design": "github:garden-co/design#fe96522c2484b894380fab7f0217b76ee4bda3a2",
+    "better-auth": "1.7.1",
+    "jazz-napi": "workspace:*",
     "jazz-tools": "workspace:*",
     "next": "catalog:default",
     "react": "19.2.4",
