@@ -13,6 +13,7 @@ export async function POST(request: Request) {
     accountRegistry: accountRegistryUrl(serverUrl, appId),
     jwksUrl: `${origin}/api/auth/jwks`,
     jwtIssuer: origin,
+    jwtAudience: origin,
   });
   if (!session.account_id) return Response.json({ error: "account required" }, { status: 401 });
   // Better Auth's JWT carries the user's name; it becomes the display name
