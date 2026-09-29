@@ -16,14 +16,20 @@ const INFRASTRUCTURE_ACCOUNT_CODES = new Set([
   "invalid_account_response",
 ]);
 
-// jazz-tools rejects bad bearers with plain `Error`s whose messages are its
-// documented verification failures; there is no typed error to test yet.
-const JWT_REJECTIONS = [
-  "Invalid JWT",
+// jazz-tools rejects bad bearers with plain `Error`s carrying these exact
+// verification messages (backend/request-auth.ts). Server-side faults such as
+// "Invalid JWT public key" or "Unable to fetch JWKS" are deliberately absent.
+// TODO: replace this list with a typed verification error once core has one.
+const JWT_REJECTION_MESSAGES = new Set([
+  "Invalid JWT header",
+  "Invalid JWT payload",
   "JWT has expired",
-  "JWT issuer does not match",
-  "JWT audience does not match",
-];
+  "JWT issuer does not match the configured issuer",
+  "JWT audience does not match the configured audience",
+  "No matching JWK found",
+]);
+// Signature failures are wrapped as `Invalid JWT: <reason>`.
+const WRAPPED_SIGNATURE_REJECTION = "Invalid JWT: ";
 
 /**
  * Verify the request's bearer once, through the backend client: it checks the
@@ -55,5 +61,8 @@ export async function verifiedRequest(
 function isAuthRejection(error: unknown): boolean {
   if (error instanceof AccountAuthError) return !INFRASTRUCTURE_ACCOUNT_CODES.has(error.code);
   if (!(error instanceof Error)) return false;
-  return JWT_REJECTIONS.some((prefix) => error.message.startsWith(prefix));
+  return (
+    JWT_REJECTION_MESSAGES.has(error.message) ||
+    error.message.startsWith(WRAPPED_SIGNATURE_REJECTION)
+  );
 }

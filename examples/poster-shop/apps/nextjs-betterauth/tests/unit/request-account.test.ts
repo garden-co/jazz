@@ -41,6 +41,7 @@ it("returns null for rejected JWTs and unadmitted identities", async () => {
   for (const error of [
     new Error("Invalid JWT: JWT signature verification failed"),
     new Error("JWT has expired"),
+    new Error("No matching JWK found"),
     new AccountAuthError("identity_not_assigned"),
   ]) {
     expect(await verifiedRequest(clientRejecting(error).client, bearer())).toBeNull();
@@ -50,6 +51,7 @@ it("returns null for rejected JWTs and unadmitted identities", async () => {
 it("rethrows infrastructure failures instead of reporting them as sign-in problems", async () => {
   for (const error of [
     new Error("Unable to fetch JWKS: HTTP 503"),
+    new Error("Invalid JWT public key"),
     new AccountAuthError("account_request_failed"),
   ]) {
     await expect(verifiedRequest(clientRejecting(error).client, bearer())).rejects.toBe(error);
