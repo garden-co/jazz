@@ -55,9 +55,14 @@ pnpm install
 pnpm --filter jamazon-nextjs-betterauth dev
 ```
 
-Open <http://127.0.0.1:3000>. `pnpm dev` starts a local Jazz server alongside Next.js. The
-checked-in local defaults need no configuration and select the sandbox payment provider; see
-[`.env.example`](apps/nextjs-betterauth/.env.example) for everything else.
+Open <http://127.0.0.1:3000>. `pnpm dev` starts a local Jazz server alongside Next.js, selects
+the sandbox payment provider and, on first run, generates local `BACKEND_SECRET` and
+`BETTER_AUTH_SECRET` values into `.env.development.local` (git-ignored). No secret is checked in.
+
+Configuration fails closed. Local defaults apply only to a non-production process on a loopback
+origin; any production build or start must set the origin, Jazz app, both secrets and
+`PAYMENT_PROVIDER` (see [`.env.example`](apps/nextjs-betterauth/.env.example)), or it refuses to
+start.
 
 To try Stripe test mode, set `PAYMENT_PROVIDER=stripe`, `STRIPE_SECRET_KEY=sk_test_…` and
 `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY=pk_test_…`. Live keys are refused.
@@ -81,6 +86,8 @@ Runs against a local Jazz server started by `createPolicyTestApp`:
 - `tests/permissions.test.ts`: the catalogue is public and read-only; carts are private and
   lines cannot move between them; orders and payments are readable only by their shopper and
   never writable by clients.
+- `tests/build-config.test.ts`: configuration fails closed; production never uses local
+  defaults and there are no fallback secrets.
 - `tests/checkout.test.ts`: racing and repeated checkouts make one order and decrement stock
   once; payments are created once per order with one idempotency key; a decline then an
   approval, duplicate and late reports settle to one paid order; racing fulfilment workers ship

@@ -10,17 +10,23 @@ import type { Db } from "jazz-tools";
 import { JazzProvider, useDb, useJazzAuth, useSession } from "jazz-tools/react";
 import { createContext, useContext, useEffect, useMemo, useRef, type ReactNode } from "react";
 import { authClient, requireBetterAuthToken } from "@/src/lib/auth-client";
+import { LOCAL_DEFAULTS } from "@/src/lib/build-config.mjs";
 import { claimGuestCart, readGuestCart, type GuestCartLine } from "@/src/store/cart";
 import { StoreShell } from "./StoreShell";
 
-const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID ?? "jamazon-local";
-const serverUrl = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL ?? "http://127.0.0.1:4200";
-const origin = process.env.NEXT_PUBLIC_APP_ORIGIN ?? "http://127.0.0.1:3000";
+const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID || LOCAL_DEFAULTS.appId;
+const serverUrl = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL || LOCAL_DEFAULTS.serverUrl;
+const origin = process.env.NEXT_PUBLIC_APP_ORIGIN || LOCAL_DEFAULTS.origin;
 const GUEST_CART_KEY = "jamazon:guest-cart-to-claim";
 
 // Set while a sign-in, sign-up or sign-out runs, so the restore effect below
 // never races it (a racing login would register the identity to a new account
 // before sign-up can link it to the guest).
+//
+// It is module state rather than React state on purpose: it must be visible
+// synchronously to an effect that runs mid-transition, without waiting for a
+// re-render, and there is one Jazz client per page. `useJazzAuth` does not
+// serialise session transitions itself; if it did, this flag could go.
 let changingAccount = false;
 async function changeAccount(run: () => Promise<void>) {
   changingAccount = true;
@@ -91,6 +97,9 @@ function ShopperProvider({ children }: { children: ReactNode }) {
   // Restore: a Better Auth session exists (say, after signing in on this
   // browser in another tab) but Jazz still runs the guest account.
   const restoring = useRef(false);
+  // Deliberately keyed on the auth state only: `db`, `account` and `actions`
+  // change identity as a consequence of the switch this effect starts, and
+  // re-running on them would start a second switch.
   useEffect(() => {
     if (isPending || !auth?.user || isSignedIn || restoring.current || changingAccount) return;
     restoring.current = true;
@@ -100,6 +109,7 @@ function ShopperProvider({ children }: { children: ReactNode }) {
   }, [isPending, auth?.user?.id, isSignedIn]);
 
   // After switching accounts, claim the lines the guest had in their cart.
+  // `db` is left out of the deps: it changes with the account, which is.
   useEffect(() => {
     if (!isSignedIn || !account) return;
     const pending = takeGuestCart();

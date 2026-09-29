@@ -25,8 +25,19 @@ export function useCart(account: string) {
   const cartId = ids.cart(account);
   const { data: carts } = useAll(app.carts.where({ id: cartId }));
   const { data: lines } = useAll(app.cartLines.where({ cartId }));
-  const { data: products } = useAll(app.products);
-  const { data: stock } = useAll(app.stock);
+  // Subscribe to just the products in the cart (and their stock), not the
+  // whole catalogue.
+  const productIds = useMemo(
+    () => (lines ?? []).filter((line) => line.quantity > 0).map((line) => line.productId),
+    [lines],
+  );
+  const inCart = productIds.length > 0;
+  const { data: products } = useAll(
+    inCart ? app.products.where({ id: { in: productIds } }) : undefined,
+  );
+  const { data: stock } = useAll(
+    inCart ? app.stock.where({ productId: { in: productIds } }) : undefined,
+  );
   const cart: Cart | undefined = carts?.[0];
 
   const items = useMemo<CartItem[]>(() => {
@@ -51,7 +62,7 @@ export function useCart(account: string) {
     count,
     subtotalCents,
     shippingCents: shippingCents(method, subtotalCents),
-    isLoading: lines === undefined || products === undefined,
+    isLoading: lines === undefined || (inCart && products === undefined),
     quantityOf: (productId: string) =>
       items.find((item) => item.product.id === productId)?.line.quantity ?? 0,
     setQuantity: (productId: string, quantity: number) =>

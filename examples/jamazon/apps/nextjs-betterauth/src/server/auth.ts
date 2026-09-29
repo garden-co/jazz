@@ -10,7 +10,7 @@ import { serverSecret } from "@/src/lib/server-secret";
 export const auth = betterAuth({
   baseURL: serverConfig.origin,
   trustedOrigins: [serverConfig.origin],
-  secret: serverSecret("BETTER_AUTH_SECRET", "8fQ2wKx7NcR4bVt1LmZ9aYe3HdS6uJp0GoXi5TrWnEk2BvMs"),
+  secret: serverSecret("BETTER_AUTH_SECRET"),
   database: jazzAdapter({ db: async () => (await backend()).db, schema: app.wasmSchema }),
   emailAndPassword: {
     enabled: true,

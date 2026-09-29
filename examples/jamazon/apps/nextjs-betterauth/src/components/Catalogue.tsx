@@ -29,7 +29,11 @@ export function Catalogue({ categorySlug }: { categorySlug?: string }) {
   if (term) query = query.where({ searchText: { contains: term } });
   const waitingForCategory = categorySlug !== undefined && !category;
   const { data: products } = useAll(waitingForCategory ? undefined : query);
-  const { data: stock = [] } = useAll(app.stock);
+  // Stock for the products on screen only, not the whole table.
+  const shownIds = products?.map((product) => product.id) ?? [];
+  const { data: stock = [] } = useAll(
+    shownIds.length ? app.stock.where({ productId: { in: shownIds } }) : undefined,
+  );
 
   const title = category?.name ?? (categorySlug ? "" : "All products");
   return (

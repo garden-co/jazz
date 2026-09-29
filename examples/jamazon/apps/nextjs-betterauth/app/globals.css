@@ -61,18 +61,6 @@ body {
   --art-line: var(--color-icon-yellow);
 }
 
-/* Pushes the following items in an HStack to the end. */
-.spacer {
-  flex: 1;
-}
-
-/* Product page: art beside details, stacked on narrow screens. */
-.product-layout {
-  display: grid;
-  gap: var(--spacing-8);
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  align-items: start;
-}
 /* Checkout: form beside the order summary, stacked on narrow screens. */
 .with-summary {
   display: grid;
@@ -81,7 +69,6 @@ body {
   align-items: start;
 }
 @media (max-width: 800px) {
-  .product-layout,
   .with-summary {
     grid-template-columns: minmax(0, 1fr);
   }

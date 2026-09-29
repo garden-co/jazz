@@ -32,7 +32,7 @@ export async function backend(): Promise<JazzClient> {
     driver: { type: "memory" },
     serverUrl: serverConfig.serverUrl,
     initial: {
-      backendSecret: serverSecret("BACKEND_SECRET", "jamazon-development-backend-secret"),
+      backendSecret: serverSecret("BACKEND_SECRET"),
     },
     env: serverConfig.isLocal ? "dev" : "prod",
     tier: "global",

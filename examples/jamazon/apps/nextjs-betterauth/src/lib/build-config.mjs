@@ -12,23 +12,34 @@ const PROVIDERS = ["sandbox", "stripe"];
 /** @param {Record<string, string | undefined>} env */
 export function readBuildConfig(env = process.env) {
   return {
-    origin: env.NEXT_PUBLIC_APP_ORIGIN ?? LOCAL_DEFAULTS.origin,
-    appId: env.NEXT_PUBLIC_JAZZ_APP_ID ?? LOCAL_DEFAULTS.appId,
-    serverUrl: env.NEXT_PUBLIC_JAZZ_SERVER_URL ?? LOCAL_DEFAULTS.serverUrl,
-    backendSecret: env.BACKEND_SECRET,
-    betterAuthSecret: env.BETTER_AUTH_SECRET,
-    paymentProvider: env.PAYMENT_PROVIDER,
-    stripeSecretKey: env.STRIPE_SECRET_KEY,
-    stripePublishableKey: env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY,
+    nodeEnv: env.NODE_ENV,
+    /** Public settings set explicitly rather than defaulted (deployments must set all). */
+    unsetPublic: [
+      "NEXT_PUBLIC_APP_ORIGIN",
+      "NEXT_PUBLIC_JAZZ_APP_ID",
+      "NEXT_PUBLIC_JAZZ_SERVER_URL",
+    ].filter((name) => !env[name]),
+    origin: env.NEXT_PUBLIC_APP_ORIGIN || LOCAL_DEFAULTS.origin,
+    appId: env.NEXT_PUBLIC_JAZZ_APP_ID || LOCAL_DEFAULTS.appId,
+    serverUrl: env.NEXT_PUBLIC_JAZZ_SERVER_URL || LOCAL_DEFAULTS.serverUrl,
+    backendSecret: env.BACKEND_SECRET || undefined,
+    betterAuthSecret: env.BETTER_AUTH_SECRET || undefined,
+    paymentProvider: env.PAYMENT_PROVIDER || undefined,
+    stripeSecretKey: env.STRIPE_SECRET_KEY || undefined,
+    stripePublishableKey: env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY || undefined,
   };
 }
 
 /**
- * Local runs are recognised by a loopback origin. The app id and server URL
- * are not part of the test: `withJazz` generates both for `next dev`.
+ * A local run is a non-production process (`next dev`, tests) on a loopback
+ * origin. Anything else, including a production build that forgot to set
+ * NEXT_PUBLIC_APP_ORIGIN, is a deployment and must be configured explicitly.
+ * The app id and server URL are not part of the test: `withJazz` generates
+ * both for `next dev`.
  * @param {ReturnType<typeof readBuildConfig>} config
  */
 export function usesLocalDefaults(config = readBuildConfig()) {
+  if (config.nodeEnv === "production") return false;
   const { hostname } = new URL(config.origin);
   return hostname === "127.0.0.1" || hostname === "localhost";
 }
@@ -43,7 +54,7 @@ export function paymentProvider(config = readBuildConfig()) {
   const provider =
     config.paymentProvider ??
     (usesLocalDefaults(config) ? LOCAL_DEFAULTS.paymentProvider : undefined);
-  if (!provider) throw new Error("Jamazon nonlocal configuration requires PAYMENT_PROVIDER");
+  if (!provider) throw new Error("Jamazon deployments must set PAYMENT_PROVIDER");
   if (!PROVIDERS.includes(provider))
     throw new Error(`PAYMENT_PROVIDER must be one of ${PROVIDERS.join(", ")}; got ${provider}`);
   if (provider === "stripe") {
@@ -57,26 +68,28 @@ export function paymentProvider(config = readBuildConfig()) {
   return /** @type {"sandbox" | "stripe"} */ (provider);
 }
 
-/** Reject partial/nonlocal configurations before Next evaluates any route. */
-/** @param {ReturnType<typeof readBuildConfig>} config */
+/**
+ * Reject incomplete configurations before any route runs. Both secrets are
+ * always required: there are no checked-in secrets, and `pnpm dev` generates
+ * local ones (see dev-secrets.mjs). Deployments must also name their origin,
+ * Jazz app and server, and payment provider.
+ * @param {ReturnType<typeof readBuildConfig>} config
+ */
 export function assertBuildConfiguration(config = readBuildConfig()) {
-  paymentProvider(config);
-  if (usesLocalDefaults(config)) return config;
+  const local = usesLocalDefaults(config);
   const missing = [
+    ...(local ? [] : config.unsetPublic),
+    !local && !config.paymentProvider && "PAYMENT_PROVIDER",
     !config.backendSecret && "BACKEND_SECRET",
     !config.betterAuthSecret && "BETTER_AUTH_SECRET",
   ].filter(Boolean);
   if (missing.length) {
     throw new Error(
-      `Jamazon nonlocal configuration requires BACKEND_SECRET and BETTER_AUTH_SECRET; missing: ${missing.join(", ")}`,
+      local
+        ? `Jamazon is missing ${missing.join(", ")}. Start it with \`pnpm dev\`, which generates local secrets.`
+        : `Jamazon deployments must set ${missing.join(", ")}.`,
     );
   }
+  paymentProvider(config);
   return config;
-}
-
-if (import.meta.url === new URL(process.argv[1], "file:").href) {
-  const config = assertBuildConfiguration();
-  console.log(
-    `Jamazon build config: ${usesLocalDefaults(config) ? "checked-in local defaults" : "configured nonlocal deployment"}, ${paymentProvider(config)} payments`,
-  );
 }

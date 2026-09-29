@@ -18,10 +18,17 @@ afterEach(async () => testApp.shutdown());
 
 const strings = ids.product("JAM-001");
 
+describe("local-first guests (needs garden-co/jazz#3741)", () => {
+  it.todo("a guest reads the catalogue and cannot write it");
+  it.todo("a guest fills its own cart and cannot read another shopper's");
+  it.todo("a guest cannot read any order");
+});
+
 describe("catalogue", () => {
   it("is readable by any account, and writable by none", async () => {
-    // A local-first guest cannot be modelled with PolicyTestApp yet (see the
-    // PR's "Core bugs found"); a second, unrelated account stands in for "anyone".
+    // PolicyTestApp cannot act as a local-first guest yet; the core fix is
+    // https://github.com/garden-co/jazz/pull/3741. Until it lands, a second,
+    // unrelated account stands in for "anyone" (see the todos below).
     const guest = shopper(testApp, "someone-else").db;
     const alice = shopper(testApp, "alice");
     for (const db of [guest, alice.db]) {

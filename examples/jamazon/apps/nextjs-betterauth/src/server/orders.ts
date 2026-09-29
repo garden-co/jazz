@@ -1,4 +1,4 @@
-import type { Db } from "jazz-tools";
+import { PersistedWriteRejectedError, type Db } from "jazz-tools";
 import { app, type Order, type OrderStatus, type Payment } from "@/schema";
 import { ids, orderCode } from "@/src/lib/ids";
 import { shippingCents } from "@/src/store/pricing";
@@ -265,21 +265,48 @@ async function currentStatus(db: Db, orderId: string): Promise<OrderStatus> {
   return order.status;
 }
 
+const RETRYABLE_CONFLICTS = new Set([
+  "exclusive_conflict",
+  "transaction_conflict",
+  "cascade_rejected",
+]);
+const MAX_ATTEMPTS = 8;
+
 /**
  * Exclusive transactions are rejected when a concurrent write touched what
- * they read. Re-running is safe: every function above re-reads first.
+ * they read. Re-running is safe: every function above re-reads first. Retries
+ * back off exponentially with jitter so racing writers spread out.
  */
 async function retryConflicts<T>(run: () => Promise<T>): Promise<T> {
-  for (let attempt = 0; ; attempt++) {
+  for (let attempt = 1; ; attempt++) {
     try {
       return await run();
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (
-        attempt >= 20 ||
-        !/exclusive_conflict|transaction_conflict|cascade_rejected/.test(message)
-      )
-        throw error;
+      if (attempt >= MAX_ATTEMPTS || !isRetryableConflict(error)) throw error;
+      const delay = Math.min(10 * 2 ** attempt, 500) * (0.5 + Math.random());
+      await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
+}
+
+function isRetryableConflict(error: unknown): boolean {
+  const code = conflictCode(error);
+  return code !== undefined && RETRYABLE_CONFLICTS.has(code);
+}
+
+function conflictCode(error: unknown): string | undefined {
+  // The backend client is loaded outside the Next bundle (see backend.ts), so
+  // its error class can be a different copy from the one imported here; the
+  // name check covers that case.
+  if (
+    error instanceof PersistedWriteRejectedError ||
+    (error instanceof Error && error.name === "PersistedWriteRejectedError")
+  )
+    return (error as PersistedWriteRejectedError).code;
+  // Known core gap: with the native runtime, a conflict detected while the
+  // client ticks is thrown from `wait()` as a plain Error "(code): reason"
+  // rather than a PersistedWriteRejectedError. Read the code from that shape
+  // until the runtime reports it as a rejection.
+  const match = error instanceof Error ? /^\((\w+)\): /.exec(error.message) : null;
+  return match?.[1];
 }

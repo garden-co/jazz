@@ -3,6 +3,7 @@
 import { BreadcrumbItem, Breadcrumbs } from "@astryxdesign/core/Breadcrumbs";
 import { Button } from "@astryxdesign/core/Button";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
+import { Grid } from "@astryxdesign/core/Grid";
 import { MetadataList, MetadataListItem } from "@astryxdesign/core/MetadataList";
 import { NumberInput } from "@astryxdesign/core/NumberInput";
 import { Skeleton } from "@astryxdesign/core/Skeleton";
@@ -71,7 +72,7 @@ export function ProductDetail({ slug }: { slug: string }) {
           )}
           <BreadcrumbItem isCurrent>{product.name}</BreadcrumbItem>
         </Breadcrumbs>
-        <div className="product-layout">
+        <Grid columns={{ minWidth: 360, max: 2 }} gap={8} align="start">
           <ProductArt art={product.art} hue={product.hue} label={product.name} />
           <VStack gap={5}>
             <VStack gap={2}>
@@ -124,7 +125,7 @@ export function ProductDetail({ slug }: { slug: string }) {
               ))}
             </MetadataList>
           </VStack>
-        </div>
+        </Grid>
       </VStack>
     </Page>
   );

@@ -1,8 +1,14 @@
 import type { NextConfig } from "next";
 import { withJazz } from "jazz-tools/dev/next";
-import { paymentProvider, readBuildConfig } from "./src/lib/build-config.mjs";
+import {
+  assertBuildConfiguration,
+  paymentProvider,
+  readBuildConfig,
+} from "./src/lib/build-config.mjs";
 
-const config = readBuildConfig();
+// Fails closed: a deployment without its origin, secrets and payment provider
+// does not start. `pnpm dev` generates the local secrets first.
+const config = assertBuildConfiguration(readBuildConfig());
 
 export default withJazz(
   {
@@ -13,7 +19,7 @@ export default withJazz(
   } satisfies NextConfig,
   {
     server: {
-      backendSecret: process.env.BACKEND_SECRET ?? "jamazon-development-backend-secret",
+      backendSecret: config.backendSecret,
       jwksUrl: `${config.origin}/api/auth/jwks`,
     },
   },

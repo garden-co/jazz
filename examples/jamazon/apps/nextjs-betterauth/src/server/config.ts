@@ -1,6 +1,11 @@
-import { paymentProvider, readBuildConfig, usesLocalDefaults } from "@/src/lib/build-config.mjs";
+import {
+  assertBuildConfiguration,
+  paymentProvider,
+  readBuildConfig,
+  usesLocalDefaults,
+} from "@/src/lib/build-config.mjs";
 
-const build = readBuildConfig();
+const build = assertBuildConfiguration(readBuildConfig());
 
 /** Server-side configuration, resolved once. */
 export const serverConfig = {
