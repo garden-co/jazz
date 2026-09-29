@@ -90,7 +90,8 @@ where
             // must still run the ordinary repair path below, even when their
             // fate metadata is unchanged.
             *terminal_fate_persisted = true;
-            self.persist_storage_consistency_marker_through(tx_id.time).await?;
+            self.persist_storage_consistency_marker_through(tx_id.time)
+                .await?;
             self.rejections.child_txs_by_parent.remove(&tx_id);
             self.prune_child_edges(tx_id);
             return Ok(());
