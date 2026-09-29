@@ -13,6 +13,12 @@ export function readBuildConfig(env = process.env) {
     backendSecret: env.BACKEND_SECRET,
     betterAuthSecret: env.BETTER_AUTH_SECRET,
     nodeEnv: env.NODE_ENV,
+    /** Which deployment settings were set explicitly rather than defaulted. */
+    explicit: {
+      origin: Boolean(env.NEXT_PUBLIC_APP_ORIGIN),
+      appId: Boolean(env.NEXT_PUBLIC_JAZZ_APP_ID),
+      serverUrl: Boolean(env.NEXT_PUBLIC_JAZZ_SERVER_URL),
+    },
   };
 }
 
@@ -35,13 +41,19 @@ export function usesLocalDefaults(config = readBuildConfig()) {
 /** @param {ReturnType<typeof readBuildConfig>} config */
 export function assertBuildConfiguration(config = readBuildConfig()) {
   if (usesLocalDefaults(config)) return config;
+  // In production the local defaults would silently become the JWT issuer,
+  // audience and JWKS URL, so the deployment settings must be explicit too.
+  const production = config.nodeEnv === "production";
   const missing = [
+    production && !config.explicit.origin && "NEXT_PUBLIC_APP_ORIGIN",
+    production && !config.explicit.appId && "NEXT_PUBLIC_JAZZ_APP_ID",
+    production && !config.explicit.serverUrl && "NEXT_PUBLIC_JAZZ_SERVER_URL",
     !config.backendSecret && "BACKEND_SECRET",
     !config.betterAuthSecret && "BETTER_AUTH_SECRET",
   ].filter(Boolean);
   if (missing.length) {
     throw new Error(
-      `BandBook production or nonlocal configuration requires BACKEND_SECRET and BETTER_AUTH_SECRET; missing: ${missing.join(", ")}`,
+      `BandBook production or nonlocal configuration is incomplete; missing: ${missing.join(", ")}`,
     );
   }
   return config;

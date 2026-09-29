@@ -5,6 +5,13 @@ import {
   usesLocalDefaults,
 } from "../../src/lib/build-config.mjs";
 
+const deployment = {
+  NEXT_PUBLIC_APP_ORIGIN: "https://band.example",
+  NEXT_PUBLIC_JAZZ_APP_ID: "band-book",
+  NEXT_PUBLIC_JAZZ_SERVER_URL: "https://jazz.example",
+};
+const secrets = { BACKEND_SECRET: "b", BETTER_AUTH_SECRET: "a" };
+
 describe("build config", () => {
   it("uses the checked-in development values only outside production", () => {
     expect(usesLocalDefaults(readBuildConfig({ NODE_ENV: "development" }))).toBe(true);
@@ -12,14 +19,29 @@ describe("build config", () => {
   });
 
   it("fails closed when a production deploy forgets its secrets", () => {
-    expect(() => assertBuildConfiguration(readBuildConfig({ NODE_ENV: "production" }))).toThrow(
-      /BACKEND_SECRET, BETTER_AUTH_SECRET/,
-    );
+    expect(() =>
+      assertBuildConfiguration(readBuildConfig({ NODE_ENV: "production", ...deployment })),
+    ).toThrow(/missing: BACKEND_SECRET, BETTER_AUTH_SECRET$/);
     expect(
       assertBuildConfiguration(
-        readBuildConfig({ NODE_ENV: "production", BACKEND_SECRET: "b", BETTER_AUTH_SECRET: "a" }),
+        readBuildConfig({ NODE_ENV: "production", ...deployment, ...secrets }),
       ).backendSecret,
     ).toBe("b");
+  });
+
+  it("fails closed when a production deploy forgets its origin, app id or server URL", () => {
+    // Otherwise the local origin would silently become the JWT issuer and audience.
+    expect(() =>
+      assertBuildConfiguration(readBuildConfig({ NODE_ENV: "production", ...secrets })),
+    ).toThrow(
+      /missing: NEXT_PUBLIC_APP_ORIGIN, NEXT_PUBLIC_JAZZ_APP_ID, NEXT_PUBLIC_JAZZ_SERVER_URL$/,
+    );
+    const { NEXT_PUBLIC_APP_ORIGIN: _origin, ...withoutOrigin } = deployment;
+    expect(() =>
+      assertBuildConfiguration(
+        readBuildConfig({ NODE_ENV: "production", ...withoutOrigin, ...secrets }),
+      ),
+    ).toThrow(/missing: NEXT_PUBLIC_APP_ORIGIN$/);
   });
 
   it("requires secrets for any nonlocal deployment", () => {
