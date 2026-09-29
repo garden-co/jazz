@@ -117,7 +117,7 @@ where
                 "physical current marker mapping missing",
             ))?;
         let table = self.table_in_schema_ref(logical_table, schema_version)?;
-        let physical_fields = physical_current_read_descriptor(table, &mapping)?
+        let physical_fields = physical_current_descriptor(table, &mapping)?
             .fields()
             .iter()
             .map(|field| {
@@ -160,7 +160,7 @@ where
                 "physical current marker mapping missing",
             ))?;
         let table = self.table_in_schema_ref(logical_table, schema_version)?;
-        let physical_fields = physical_current_read_descriptor(table, &mapping)?
+        let physical_fields = physical_current_descriptor(table, &mapping)?
             .fields()
             .iter()
             .map(|field| {
@@ -460,10 +460,9 @@ where
                 physical_ahead_shadow_table_name(target_mapping.table_id),
             ];
             for storage_table in &storage_tables {
-                // Reads never see the storage-internal stamp fields.
-                let logical_output = current_read_descriptor(&target_table);
-                let physical_names =
-                    physical_current_read_field_names(&target_table, &target_mapping)?;
+                let logical_output =
+                    target_table.global_current_storage_table().record_schema();
+                let physical_names = physical_current_field_names(&target_table, &target_mapping)?;
                 let output = widened_projection_descriptor(
                     &logical_output,
                     &physical_names,
@@ -611,7 +610,7 @@ where
             physical_ahead_shadow_table_name(target_mapping.table_id),
         ];
         for storage_table in &storage_tables {
-            let logical_output = current_read_descriptor(&target_table);
+            let logical_output = target_table.global_current_storage_table().record_schema();
             // This query-local target is the semantic read boundary. Unlike
             // the durable all-fields storage target, it must expose the
             // authored descriptor itself: enum tags are translated into that
@@ -715,7 +714,7 @@ where
             physical_ahead_shadow_table_name(target_mapping.table_id),
         ];
         let target_table = self.table_in_schema(target_table_name, target_schema)?;
-        let authored_output = physical_current_read_descriptor(&target_table, &target_mapping)?;
+        let authored_output = physical_current_descriptor(&target_table, &target_mapping)?;
         let physical_fields = authored_output
             .fields()
             .iter()
@@ -814,6 +813,44 @@ where
                             ))?;
                             if available.contains(&name) {
                                 Ok(ProjectField::named(name))
+                            } else if let Some(cell) =
+                                name.strip_prefix(crate::schema::STAMP_FIELD_PREFIX)
+                            {
+                                // A stamp follows its cell. When the source
+                                // variant carries the cell under another
+                                // physical field (a lens Rename/Copy), take
+                                // that field's stamp; a cell the source does
+                                // not carry, or carries unstamped, is stamp 0.
+                                let source_cell = match target_columns_by_physical_field.get(cell)
+                                {
+                                    Some(column) => self.lens_current_cell(
+                                        source_schema,
+                                        &source_table_name,
+                                        &source_mapping,
+                                        &available,
+                                        target_schema,
+                                        target_table_name,
+                                        column,
+                                    )?,
+                                    None => None,
+                                };
+                                Ok(match source_cell {
+                                    Some(CurrentWinnerCellProjection::Field { name: source, .. })
+                                        if available.contains(
+                                            &crate::schema::stamp_field_name(&source),
+                                        ) =>
+                                    {
+                                        ProjectField::renamed(
+                                            crate::schema::stamp_field_name(&source),
+                                            name,
+                                        )
+                                    }
+                                    _ => ProjectField::literal_typed(
+                                        name,
+                                        Value::U48(0),
+                                        records::ValueType::U48,
+                                    ),
+                                })
                             } else if let Some(column) = target_columns_by_physical_field.get(&name)
                             {
                                 // Only mapped user columns can be absent because
@@ -1337,12 +1374,11 @@ where
                 }
             }
         }
-        // A current projection is a read boundary: it never carries the
-        // storage-internal stamp fields. A history projection keeps them,
-        // since history images feed merges and the wire `col_stamps`.
-        let target_record_schema = match shape {
-            ContentProjectionShape::History => target_table.history_storage_table().record_schema(),
-            ContentProjectionShape::Current => current_read_descriptor(&target_table),
+        let target_storage = match shape {
+            ContentProjectionShape::History => target_table.history_storage_table(),
+            ContentProjectionShape::Current => {
+                target_table.global_current_storage_table()
+            }
         };
         let user_cells = match shape {
             ContentProjectionShape::History => HistoryRowRecord::USER_CELLS,
@@ -1361,7 +1397,7 @@ where
                 physical_history_field_names(&target_table, target_mapping)?
             }
             ContentProjectionShape::Current => {
-                physical_current_read_field_names(&target_table, target_mapping)?
+                physical_current_field_names(&target_table, target_mapping)?
             }
         };
         let physical_storage = match shape {
@@ -1378,11 +1414,11 @@ where
                 ContentProjectionShape::History => {
                     authored_history_projection_descriptor(&target_table)
                 }
-                ContentProjectionShape::Current => target_record_schema.clone(),
+                ContentProjectionShape::Current => target_storage.record_schema(),
             }
         } else {
             widened_projection_descriptor(
-                &target_record_schema,
+                &target_storage.record_schema(),
                 &physical_names,
                 self.database.table_schema(&physical_storage)?,
             )?
@@ -1390,7 +1426,8 @@ where
         // Author aliases are physical shorthand: expand them back into the
         // logical author records here, at the physical-to-logical boundary.
         let author_dictionary = self.author_aliases.dictionary().clone();
-        let mut fields = target_record_schema
+        let mut fields = target_storage
+            .record_schema()
             .fields()
             .iter()
             .take(user_cells)
@@ -1534,7 +1571,8 @@ where
             }
         }
         fields.extend(
-            target_record_schema
+            target_storage
+                .record_schema()
                 .fields()
                 .iter()
                 .skip(user_cells + target_table.columns.len())

@@ -6,6 +6,11 @@
 
 mod publication_type;
 
+use std::borrow::Cow;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
+
 use serde::Serialize;
 
 use crate::db::{RemovedRow, SubscriptionOutputRow};
@@ -128,8 +133,9 @@ pub struct Row<'a> {
     pub row_id: RowUuid,
     /// Whether the row is an opt-in deleted historical row.
     pub deleted: bool,
-    /// Packed record bytes described by the enclosing batch.
-    pub raw: &'a [u8],
+    /// Packed record bytes described by the enclosing batch. Borrowed from
+    /// the row unless the host boundary had to strip storage-internal fields.
+    pub raw: Cow<'a, [u8]>,
 }
 
 /// Relation snapshot envelope used by both native hosts.
@@ -231,15 +237,130 @@ pub fn encode_subscription_delta(
     })
 }
 
+/// Whether `field` is a storage-internal per-column LWW stamp (`_ts_<cell>`,
+/// SPEC 4.6). Stamps are the only `U48` fields a row can carry, and the
+/// frozen v1 host grammar has no tag for `U48`.
+fn is_storage_stamp(field: &groove::records::DescriptorField) -> bool {
+    field.value_type == groove::records::ValueType::U48
+        && field
+            .name
+            .as_deref()
+            .is_some_and(|name| name.starts_with(crate::schema::STAMP_FIELD_PREFIX))
+}
+
+/// The host-boundary view of one row descriptor with its stamp fields removed:
+/// a byte-copy projector plus the retained source slots.
+struct StampStrip {
+    projector: groove::records::RecordProjector,
+    target: groove::records::RecordDescriptor,
+    retained: Box<[usize]>,
+}
+
+thread_local! {
+    /// Per input descriptor: `None` when it carries no stamps (the row bytes
+    /// are published as-is), else its strip plan. Descriptors are interned,
+    /// so this is keyed by handle and bounded by the live descriptor set.
+    static STAMP_STRIPS: RefCell<HashMap<groove::records::RecordDescriptor, Option<Rc<StampStrip>>>> =
+        RefCell::new(HashMap::new());
+}
+
+fn stamp_strip(
+    descriptor: &groove::records::RecordDescriptor,
+) -> Result<Option<Rc<StampStrip>>, postcard::Error> {
+    if let Some(cached) = STAMP_STRIPS.with(|cache| cache.borrow().get(descriptor).cloned()) {
+        return Ok(cached);
+    }
+    let strip = if descriptor.fields().iter().any(is_storage_stamp) {
+        let retained = descriptor
+            .fields()
+            .iter()
+            .enumerate()
+            .filter(|(_, field)| !is_storage_stamp(field))
+            .map(|(index, _)| index)
+            .collect::<Box<[usize]>>();
+        let target = groove::records::RecordDescriptor::new_with_fields(
+            retained
+                .iter()
+                .map(|index| descriptor.fields()[*index].clone()),
+        );
+        let projector = groove::records::RecordProjector::new(
+            *descriptor,
+            target,
+            retained
+                .iter()
+                .enumerate()
+                .map(|(target, source)| (*source, target)),
+        )
+        .map_err(|_| postcard::Error::SerdeSerCustom)?;
+        Some(Rc::new(StampStrip {
+            projector,
+            target,
+            retained,
+        }))
+    } else {
+        None
+    };
+    STAMP_STRIPS.with(|cache| {
+        cache.borrow_mut().insert(*descriptor, strip.clone());
+    });
+    Ok(strip)
+}
+
+/// One row as it may leave the engine toward a host or client.
+pub(crate) struct PublishedRecord<'a> {
+    /// Descriptor of `raw`, without storage-internal fields.
+    pub(crate) descriptor: groove::records::RecordDescriptor,
+    /// Record bytes; borrowed from the row when nothing was stripped.
+    pub(crate) raw: Cow<'a, [u8]>,
+    /// Publication bindings aligned with `descriptor`.
+    pub(crate) fields: Vec<&'a CurrentRowPublicationField>,
+}
+
+/// Strip the storage-internal stamp fields (SPEC 4.6) from a row at the host
+/// boundary. Internal reads carry the stored current layout unchanged, so
+/// query pipelines stay zero-copy; only rows that leave the engine pay for
+/// one fixed-region field copy, and only when their descriptor has stamps.
+pub(crate) fn published_record(row: &CurrentRow) -> Result<PublishedRecord<'_>, postcard::Error> {
+    let (descriptor, raw) = row.encoded_record();
+    let publication = row.publication_fields();
+    match stamp_strip(descriptor)? {
+        None => Ok(PublishedRecord {
+            descriptor: *descriptor,
+            raw: Cow::Borrowed(raw),
+            fields: publication.iter().collect(),
+        }),
+        Some(strip) => {
+            let stripped = strip
+                .projector
+                .project(descriptor.bind(raw))
+                .map_err(|_| postcard::Error::SerdeSerCustom)?;
+            Ok(PublishedRecord {
+                descriptor: strip.target,
+                raw: Cow::Owned(stripped.into_raw()),
+                fields: strip
+                    .retained
+                    .iter()
+                    .map(|index| &publication[*index])
+                    .collect(),
+            })
+        }
+    }
+}
+
 /// Group only adjacent rows with equal table and tagged descriptor.
+///
+/// This is the host publication boundary: storage-internal stamp fields are
+/// removed here (see [`published_record`]), never in the read pipeline.
 pub fn row_batches(rows: &[CurrentRow]) -> Result<Vec<RowBatch<'_>>, postcard::Error> {
     let mut batches: Vec<RowBatch<'_>> = Vec::new();
     for row in rows {
-        let (descriptor, raw) = row.encoded_record();
-        let binding_descriptor = descriptor
+        let published = published_record(row)?;
+        let raw = published.raw;
+        let binding_descriptor = published
+            .descriptor
             .fields()
             .iter()
-            .zip(row.publication_fields())
+            .zip(published.fields)
             .map(|(field, binding)| {
                 let name = match binding {
                     CurrentRowPublicationField::StoredColumn { id, output_name } => {

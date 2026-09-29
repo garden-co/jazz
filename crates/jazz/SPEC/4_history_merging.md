@@ -330,12 +330,19 @@ target cell's stamp from the source field that supplies the cell (including a
 lens `Rename`/`Copy`); a target cell the source does not carry, carries only as
 a lens default, or carries as a merge-strategy column projects stamp `0`.
 
-Stamps are **storage-internal**. Only history projections (which feed merges
-and the wire `col_stamps`) carry them; merges read the stored records
-directly. Current-row read projections, physical current-winner projections,
-and so every row delivered to a query, subscription, relay or host, omit the
-stamp fields entirely. The host row grammar therefore never sees a `U48`
-field.
+Stamps are **storage-internal** and are stripped at the **host boundary**,
+not in the read pipeline. Current-row reads carry the stored current layout
+unchanged, stamps included, so a projection that keeps the stored layout
+borrows the stored bytes instead of re-encoding every row; internal operators
+(policies, joins, sort, limit) may see the stamp fields. They are not
+application columns: a query cannot filter, order by or select them, and
+`select(...)`/`$` metadata projections never produce them. Where a row leaves
+the engine — the shared host row batches (`binding_codec::row_batches`, used
+by NAPI, WASM and relay one-shot reads, relation snapshots and subscription
+deltas) and the public Rust client row bytes — every `U48` `_ts_*` field is
+removed from the descriptor and the record by a per-descriptor cached
+byte-copy projection; a descriptor without stamps is published as-is. The
+host row grammar therefore never sees a `U48` field.
 
 An **unstamped** image (an uploaded or pending local patch, a query witness,
 or a payload whose stamps are unknown) stores `0` in every slot, which is
