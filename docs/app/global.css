@@ -253,6 +253,7 @@ h6 {
 }
 .home-diagram .dg-detail {
   font-size: 12px;
+  font-weight: var(--font-weight-normal);
 }
 /* Low specificity, so a dg-fill-* tone can highlight a detail line. */
 .home-diagram :where(.dg-detail) {

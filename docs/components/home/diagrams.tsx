@@ -115,6 +115,7 @@ function Box({
   h,
   tone = "ink",
   title,
+  note,
   lines,
   center,
 }: {
@@ -124,6 +125,8 @@ function Box({
   h: number;
   tone?: Tone;
   title: string;
+  /** Muted aside after the title, in the detail size. */
+  note?: string;
   lines?: (string | { text: string; tone: Tone })[];
   center?: boolean;
 }) {
@@ -138,6 +141,11 @@ function Box({
         className={`dg-title dg-fill-${textTone}`}
       >
         {title}
+        {note ? (
+          <tspan dx={8} className="dg-detail">
+            {note}
+          </tspan>
+        ) : null}
       </text>
       {lines?.map((line, index) => {
         const { text, tone: lineTone } = typeof line === "string" ? { text: line } : line;
@@ -204,6 +212,7 @@ export function StackDiagram() {
         w={coreW}
         h={82}
         title="jazz cloud"
+        note="(or self-hosted via CLI)"
         lines={["authorizes every write", { text: "all data", tone: "blue" }]}
       />
       {peers.map((peer) => {
