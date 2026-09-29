@@ -807,11 +807,11 @@ impl Backend {
         )
     }
 
-    fn prepare_query(
+    async fn prepare_query(
         &self,
         query: &crate::query::Query,
     ) -> std::result::Result<crate::db::PreparedQuery, CoreDbError> {
-        self.0.prepare_query_for_open_schema(query)
+        StackSafeFuture::new(self.0.prepare_query_for_open_schema_async(query)).await
     }
 
     async fn row_provenance_for_subscription(
@@ -1247,10 +1247,10 @@ impl ClientDb {
         author: CoreAuthorSubject,
     ) -> Result<Vec<crate::node::CurrentRow>> {
         let prepared = {
-            let inner = self.inner.borrow();
-            inner
-                .backend()?
+            let backend = self.inner.borrow().backend_clone()?;
+            backend
                 .prepare_query(&query)
+                .await
                 .map_err(|error| JazzError::Query(error.to_string()))?
         };
         let backend = {
@@ -2213,16 +2213,11 @@ impl ClientDbInner {
         wait_for_coverage: bool,
         scope: Option<(CoreAuthorSubject, BTreeMap<String, CoreValue>)>,
     ) -> Result<Vec<crate::node::CurrentRow>> {
-        let (db, prepared) = {
-            let inner = inner.borrow();
-            (
-                inner.backend_clone()?,
-                inner
-                    .backend()?
-                    .prepare_query(&query)
-                    .map_err(|error| JazzError::Query(error.to_string()))?,
-            )
-        };
+        let db = inner.borrow().backend_clone()?;
+        let prepared = db
+            .prepare_query(&query)
+            .await
+            .map_err(|error| JazzError::Query(error.to_string()))?;
         let prepared = match scope {
             Some((author, claims)) => prepared.with_identity_claims(author, claims),
             None => prepared,
@@ -2350,14 +2345,11 @@ impl ClientDbInner {
         // concurrent shutdown can therefore cancel and await this path even
         // when core subscription setup is still in flight.
         let (mut shutdown_cancellation, completion) = inner.borrow_mut().admit_subscription()?;
-        let (db, prepared) = {
-            let inner = inner.borrow();
-            let prepared = inner
-                .backend()?
-                .prepare_query(&query)
-                .map_err(|error| JazzError::Query(error.to_string()))?;
-            (inner.backend_clone()?, prepared)
-        };
+        let db = inner.borrow().backend_clone()?;
+        let prepared = db
+            .prepare_query(&query)
+            .await
+            .map_err(|error| JazzError::Query(error.to_string()))?;
         let prepared = match scope {
             Some((author, claims)) => prepared.with_identity_claims(author, claims),
             None => prepared,
