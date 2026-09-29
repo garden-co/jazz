@@ -2132,15 +2132,19 @@ pub(super) struct VersionRowParts {
     pub(super) col_stamps: Vec<u8>,
 }
 
-// Record layout depends on the table name (enum registry binding) and ordered
-// physical column shape, not defaults, indices, or policies. Compare the shape
-// itself: schema objects are mutable and a table name alone is insufficient.
+// Record layout depends on the table name (enum registry binding), the ordered
+// physical column shape, and each column's merge strategy (a merge column has
+// no last-writer-wins stamp field, SPEC 4.6) — not defaults, indices, or
+// policies. Compare all of it: schema objects are mutable, and two tables with
+// the same name and column types but different merge strategies (two apps in
+// one process, or a strategy-only schema change) have different layouts.
 struct HistoryDescriptorCacheEntry {
     table_name: String,
     columns: Vec<(
         String,
         groove::schema::ColumnType,
         crate::schema::LargeValueSemanticKind,
+        crate::schema::MergeStrategy,
     )>,
     descriptor: records::RecordDescriptor,
     wire_descriptor: records::RecordDescriptor,
@@ -2172,15 +2176,14 @@ fn version_record_descriptors(
         if let Some(entry) = cache.iter().find(|entry| {
             entry.table_name == table.name
                 && entry.columns.len() == table.columns.len()
-                && entry
-                    .columns
-                    .iter()
-                    .zip(&table.columns)
-                    .all(|((name, ty, kind), column)| {
+                && entry.columns.iter().zip(&table.columns).all(
+                    |((name, ty, kind, strategy), column)| {
                         name == &column.name
                             && ty == &column.column_type
                             && kind == &column.large_value_kind
-                    })
+                            && *strategy == table.merge_strategy(&column.name)
+                    },
+                )
         }) {
             return (entry.descriptor, entry.wire_descriptor);
         }
@@ -2203,6 +2206,7 @@ fn version_record_descriptors(
                         column.name.clone(),
                         column.column_type.clone(),
                         column.large_value_kind,
+                        table.merge_strategy(&column.name),
                     )
                 })
                 .collect(),
