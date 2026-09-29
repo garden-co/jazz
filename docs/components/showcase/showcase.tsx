@@ -110,21 +110,24 @@ function MetricCard({
           <Text type="supporting" display="block">
             {metric.label}
           </Text>
-          <Text
-            size="2xl"
-            weight="medium"
-            hasTabularNumbers
-            display="block"
-            className="metric-headline whitespace-nowrap"
-          >
-            {time}
+          {/* The unit gets its own line: beside the number it clipped in
+            narrow cards. */}
+          <VStack gap={0}>
+            <Text
+              size="2xl"
+              weight="medium"
+              hasTabularNumbers
+              display="block"
+              className="metric-headline whitespace-nowrap"
+            >
+              {time}
+            </Text>
             {metric.per && (
-              <Text color="secondary" weight="normal">
-                {" "}
+              <Text color="secondary" display="block">
                 per {metric.per.unit}
               </Text>
             )}
-          </Text>
+          </VStack>
           <Text type="supporting" hasTabularNumbers display="block">
             {basisText(summary)}
             {previous && (
