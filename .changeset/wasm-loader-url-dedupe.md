@@ -2,4 +2,4 @@
 "jazz-tools": patch
 ---
 
-Loading the WASM runtime twice with the same URL no longer initializes it a second time.
+In the browser, loading Jazz no longer fetches and decodes the same WASM file again when the account manager and the database both initialize it.
