@@ -5,7 +5,7 @@
 //! [`super::query_eval`]. It is the node API layer used by the `Db` facade before
 //! writes become protocol commit units.
 
-use super::query_eval::NarrowedSourceRead;
+use super::query_eval::{ExclusiveSourceReads, NarrowedSourceRead};
 use super::*;
 use crate::tx::{BranchViewCopyEvidence, BranchWriteIntent, BranchWriteOperation};
 
@@ -348,12 +348,13 @@ where
     pub(super) fn offer_tx_narrowed_source_reads(
         &mut self,
         tx_id: OpenTransactionId,
-        reads: BTreeMap<crate::node::query_engine::SourceId, NarrowedSourceRead>,
+        reads: ExclusiveSourceReads,
     ) -> Result<SourceNarrowing, Error> {
         let narrowing = &mut self.open_tx_mut(tx_id)?.source_narrowing;
         let offered = SourceNarrowing {
             recording: narrowing.recording,
-            offered: reads,
+            offered: reads.reads,
+            payload: reads.payload,
             claimed: Vec::new(),
         };
         Ok(std::mem::replace(narrowing, offered))
@@ -371,8 +372,8 @@ where
     }
 
     /// Claim the read of `source`, a source beyond its query's root: the
-    /// narrowed read offered for it, or nothing while a narrowed read is being
-    /// recorded. An exclusive transaction reads such a source no other way:
+    /// narrowed read offered for it, or nothing for sync payload or while a
+    /// narrowed read is being recorded. An exclusive transaction reads such a source no other way:
     /// its query already failed with [`Error::UnsupportedExclusiveRead`] if a
     /// source had no narrowed read (garden-co/jazz#3694).
     pub(super) fn claim_tx_source_read(
@@ -382,7 +383,7 @@ where
     ) -> Result<(), Error> {
         let exclusive = self.transaction_is_exclusive(tx_id)?;
         let narrowing = &mut self.open_tx_mut(tx_id)?.source_narrowing;
-        if narrowing.recording {
+        if narrowing.recording || narrowing.payload.contains(source) {
             return Ok(());
         }
         match narrowing.offered.get(source) {
@@ -1340,13 +1341,13 @@ where
                             .narrowed_predicate_reads
                             .contains(&(predicate.shape_id, predicate.binding_id));
                         if query.aggregate.is_some()
-                            || (!narrowed && !query.joins.is_empty())
+                            || (!narrowed
+                                && (!query.joins.is_empty() || !query.array_subqueries.is_empty()))
                             || query.flat_join.is_some()
                             || !query.policy_branches.is_empty()
                             || !query.reachable.is_empty()
                             || !query.inherits.is_empty()
                             || !query.includes.is_empty()
-                            || !query.array_subqueries.is_empty()
                             || query.relation.is_some()
                             || self.predicate_read_is_degenerate_whole_table(predicate)?
                         {
@@ -2141,6 +2142,8 @@ pub(super) struct SourceNarrowing {
     /// cover them, so they record nothing.
     pub(super) recording: bool,
     pub(super) offered: BTreeMap<crate::node::query_engine::SourceId, NarrowedSourceRead>,
+    /// Implicit root reference sources: sync payload that records no read.
+    pub(super) payload: BTreeSet<crate::node::query_engine::SourceId>,
     pub(super) claimed: Vec<NarrowedSourceRead>,
 }
 

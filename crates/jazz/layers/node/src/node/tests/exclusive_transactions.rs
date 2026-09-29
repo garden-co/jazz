@@ -2809,6 +2809,12 @@ fn narrowing_hierarchy_schema() -> JazzSchema {
                 PublicTableSchemaBuilder::new("todos")
                     .column("title", PublicColumnType::Text)
                     .fk_column("project", "projects")
+                    .array_fk_column("assignees", "people")
+                    .policies(public_all_policies()),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("people")
+                    .column("name", PublicColumnType::Text)
                     .policies(public_all_policies()),
             )
             .table(
@@ -2880,7 +2886,18 @@ fn assert_narrowed_reads(
         BTreeMap::new()
     };
     let binding = shape.bind(values).unwrap();
-    let reads = node.exclusive_source_reads(&shape, &binding, false).unwrap();
+    let sources = node
+        .exclusive_source_reads(&shape, &binding, false)
+        .unwrap();
+    // Implicit root references are sync payload and record no read.
+    assert!(sources.payload.iter().all(|source| matches!(
+        source.path.components.as_slice(),
+        [
+            crate::node::query_engine::SourceRole::Root,
+            crate::node::query_engine::SourceRole::Alias(alias),
+        ] if alias.starts_with("reference:")
+    )));
+    let reads = sources.reads;
     assert_eq!(
         reads.keys().cloned().collect::<Vec<_>>(),
         expected
@@ -2958,14 +2975,6 @@ fn narrowed_reads_follow_a_join_chain_to_the_root() {
         vec![narrowing_body_is_hi()],
         Some(to_todos),
     ));
-    let mut projects = crate::query::Query::from("projects");
-    projects.joins.push(narrowing_reverse_join(
-        "todos",
-        "project",
-        "id",
-        vec![narrowing_title_is_a()],
-        None,
-    ));
     assert_narrowed_reads(
         query,
         vec![
@@ -2976,10 +2985,6 @@ fn narrowed_reads_follow_a_join_chain_to_the_root() {
             (
                 narrowing_source("reactions", &["alias=join_via:0:nested:0"]),
                 reactions,
-            ),
-            (
-                narrowing_source("projects", &["root", "alias=reference:project"]),
-                projects,
             ),
         ],
     );
@@ -3042,14 +3047,6 @@ fn narrowed_reads_follow_nested_arrays_to_the_root() {
         vec![narrowing_body_is_hi()],
         Some(to_todos),
     ));
-    let mut projects = crate::query::Query::from("projects");
-    projects.joins.push(narrowing_reverse_join(
-        "todos",
-        "project",
-        "id",
-        vec![narrowing_title_is_a()],
-        None,
-    ));
     assert_narrowed_reads(
         query,
         vec![
@@ -3064,11 +3061,33 @@ fn narrowed_reads_follow_nested_arrays_to_the_root() {
                 ),
                 reactions,
             ),
-            (
-                narrowing_source("projects", &["root", "alias=reference:project"]),
-                projects,
-            ),
         ],
+    );
+}
+
+/// A relation through an array of references correlates by membership,
+/// which an equality join cannot express: its narrowed read requires at
+/// least one parent row whose array holds it.
+#[test]
+fn narrowed_reads_follow_a_reference_array_by_membership() {
+    let query = crate::query::Query::from("todos")
+        .filter(narrowing_title_is_a())
+        .array_subquery(crate::query::ArraySubquery::new(
+            "assignees",
+            "people",
+            "id",
+            "assignees",
+        ));
+    let mut to_todos = crate::query::ArraySubquery::new("narrowed_parent", "todos", "assignees", "id");
+    to_todos.filters = vec![narrowing_title_is_a()];
+    to_todos.requirement = crate::query::ArraySubqueryRequirement::AtLeastOne;
+    let people = crate::query::Query::from("people").array_subquery(to_todos);
+    assert_narrowed_reads(
+        query,
+        vec![(
+            narrowing_source("people", &["root", "child=0:assignees"]),
+            people,
+        )],
     );
 }
 

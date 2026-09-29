@@ -49,6 +49,7 @@ fn schema() -> JazzSchema {
                     .column("code", ColumnType::Text)
                     .fk_column("invite", "invites"),
             )
+            .table(TableSchemaBuilder::new("claims").array_fk_column("invite_ids", "invites"))
             .allow_all()
             .build(),
     )
@@ -262,6 +263,16 @@ impl Net {
         self.settle(client, write.mergeable_tx_id())
             .expect("grant settles");
         write.row_uuid()
+    }
+
+    fn create_claim(&self, client: usize, invite: RowUuid) {
+        let claim = BTreeMap::from([(
+            "invite_ids".to_owned(),
+            Value::Array(vec![Value::Uuid(invite.0)]),
+        )]);
+        let write = block_on(self.db(client).insert("claims", claim, Default::default())).unwrap();
+        self.settle(client, write.mergeable_tx_id())
+            .expect("claim settles");
     }
 
     fn revoke(&self, client: usize, invite: RowUuid) {
@@ -1135,4 +1146,53 @@ fn exclusive_read_through_a_flat_join_is_unsupported() {
         ),
         "{error}"
     );
+}
+
+/// Redeem the invite `abc` after reading it with the claims whose invite
+/// list holds it, while a claim on `abc` or on another invite is filed
+/// between the read and the commit.
+fn redeem_while_claiming(claim_read_invite: bool) -> Redeem {
+    let net = Net::new(&[0x0a, 0x0b]);
+    let abc = net.create_invite(OWNER, "abc");
+    let xyz = net.create_invite(OWNER, "xyz");
+    net.unrelated_receipt(BACKEND);
+
+    let db = net.db(BACKEND);
+    let open = OpenTransactionId::new();
+    block_on(db.begin_exclusive(open)).unwrap();
+    let query = invite_query("abc").array_subquery(ArraySubquery::new(
+        "claims",
+        "claims",
+        "invite_ids",
+        "id",
+    ));
+    assert_eq!(
+        net.read(BACKEND, &query, DurabilityTier::Local, Some(open))
+            .len(),
+        1
+    );
+    net.create_claim(OWNER, if claim_read_invite { abc } else { xyz });
+    net.drive(
+        db.exclusive_tx_ref(open)
+            .insert("members", cells("abc"), Default::default()),
+    )
+    .unwrap();
+    let tx_id = net.drive(db.commit_exclusive_handle(open)).unwrap();
+    match net.settle(BACKEND, tx_id) {
+        Ok(_) => Redeem::Joined,
+        Err(_) => Redeem::Conflict,
+    }
+}
+
+/// A relation through an array of references records the rows whose array
+/// holds the read row: a new claim on the read invite conflicts.
+#[test]
+fn reference_array_relation_conflicts_with_a_new_claim_on_the_read_row() {
+    assert_eq!(redeem_while_claiming(true), Redeem::Conflict);
+}
+
+/// A claim on another invite is outside that read and does not conflict.
+#[test]
+fn reference_array_relation_commits_despite_a_claim_on_another_row() {
+    assert_eq!(redeem_while_claiming(false), Redeem::Joined);
 }

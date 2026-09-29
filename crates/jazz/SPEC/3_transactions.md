@@ -331,8 +331,12 @@ recorded reads against current global state:
   only on the query and its binding, and it keeps only conjuncts of the
   original query, so it covers every row the query could have consulted
   there, present or absent. A write elsewhere in that table does not
-  conflict. A query with any other source (a lookup join, a reference
-  array, a read of deleted root rows, or any source of a query with policy
+  conflict. A hop through an array of references correlates by membership:
+  the narrowed read then requires, through nested correlated arrays, at
+  least one parent row whose array holds the row. Implicit root references
+  are sync payload that never decides a query's result, so they record no
+  read. A query with any other source (a lookup join, a recursive traversal,
+  a read of deleted root rows, or any source of a query with policy
   branches, a flat join or a retained relation tree) fails with an error
   naming the read pattern as not supported in exclusive transactions yet;
   it is never recorded as a read of the whole table. When the reader's read policy

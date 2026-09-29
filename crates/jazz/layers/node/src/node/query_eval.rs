@@ -256,7 +256,7 @@ use normalization::*;
 
 mod narrowed_reads;
 
-pub(in crate::node) use narrowed_reads::NarrowedSourceRead;
+pub(in crate::node) use narrowed_reads::{ExclusiveSourceReads, NarrowedSourceRead};
 
 mod subscriptions;
 
@@ -3742,6 +3742,7 @@ where
         let mut queries = Vec::new();
         for read in self
             .exclusive_source_reads(shape, binding, include_deleted)?
+            .reads
             .into_values()
         {
             let query = read.shape.query().clone();
@@ -3768,7 +3769,7 @@ where
         {
             self.exclusive_source_reads(shape, binding, include_deleted)?
         } else {
-            BTreeMap::new()
+            ExclusiveSourceReads::default()
         };
         self.offer_tx_narrowed_source_reads(tx_id, reads)
     }
