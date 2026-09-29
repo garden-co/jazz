@@ -129,7 +129,7 @@ try {
   await page.reload();
   await page
     .getByRole("alert")
-    .filter({ hasText: "CodSpeed history is temporarily unavailable" })
+    .filter({ hasText: "Benchmark history is temporarily unavailable" })
     .waitFor();
 
   assert.deepEqual(errors, []);

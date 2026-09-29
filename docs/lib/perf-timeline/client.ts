@@ -8,7 +8,7 @@ export function fetchTimeline(force = false): Promise<Timeline> {
   if (!pending || force) {
     const request = fetch("/api/timeline").then(async (response) => {
       if (!response.ok)
-        throw new Error("CodSpeed history is temporarily unavailable. Please try again.");
+        throw new Error("Benchmark history is temporarily unavailable. Please try again.");
       return (await response.json()) as Timeline;
     });
     // A failed request must not poison later callers.

@@ -1,0 +1,71 @@
+name: Benchmark timeline snapshot
+
+# The only place that reads CodSpeed for the docs site. It builds the
+# /examples benchmark timeline once a day and after every release, and uploads
+# it to the `perf-timeline-data` pre-release, which the site serves from. See
+# docs/lib/perf-timeline/README.md.
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  # A human publishing the GitHub release, and the publish workflow finishing
+  # (its tag push uses the Actions token, which triggers no workflows).
+  release:
+    types: [published]
+  workflow_run:
+    workflows: ["Publish jazz-tools alpha"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: perf-timeline-snapshot
+  cancel-in-progress: false
+
+env:
+  SNAPSHOT_TAG: perf-timeline-data
+
+jobs:
+  snapshot:
+    if: >-
+      (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') &&
+      (github.event_name != 'release' || github.event.release.tag_name != 'perf-timeline-data')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # Full commit history and every tag, so release ancestry is answered by
+      # local git instead of GitHub's compare API. Blobs are not needed.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          fetch-tags: true
+          filter: blob:none
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24
+      - name: Ensure the snapshot release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$SNAPSHOT_TAG" >/dev/null 2>&1 ||
+            gh release create "$SNAPSHOT_TAG" --prerelease --latest=false \
+              --target "${{ github.event.repository.default_branch }}" \
+              --title "Benchmark timeline data" \
+              --notes "Machine-updated data for the docs benchmark timeline. Not a Jazz release. Built by .github/workflows/perf-timeline-snapshot.yml."
+      - name: Download the previous CodSpeed result cache
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "$SNAPSHOT_TAG" --pattern codspeed-results.json --dir previous || true
+      - name: Build the snapshot
+        working-directory: docs
+        run: node scripts/perf-timeline-snapshot.ts "$RUNNER_TEMP/snapshot" ../previous/codspeed-results.json
+      - name: Upload the snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$SNAPSHOT_TAG" --clobber \
+            "$RUNNER_TEMP/snapshot/timeline.json" \
+            "$RUNNER_TEMP/snapshot/codspeed-results.json"
