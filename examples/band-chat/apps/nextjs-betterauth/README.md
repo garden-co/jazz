@@ -71,7 +71,10 @@ pnpm dev
 `pnpm dev` needs no configuration. It serves http://127.0.0.1:3000, `withJazz`
 supplies a local Jazz app and sync server, and local `BACKEND_SECRET` and
 `BETTER_AUTH_SECRET` values are generated into the git-ignored
-`.env.development.local`. No secret is checked in.
+`.env.development.local`. No secret is checked in. The local sync server keeps
+its data in `node_modules/.cache/jazz-dev-server`; if Better Auth reports that
+it cannot decrypt its private key after the secret changed, delete that
+directory.
 
 Configuration fails closed. Local defaults apply only to a non-production
 process on a loopback origin; a production build or start must set every value
