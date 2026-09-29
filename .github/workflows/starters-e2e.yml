@@ -138,6 +138,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          HEAD_BRANCH: ${{ github.head_ref || github.ref_name }}
           PREVIEW_RUN_ID: ${{ inputs.preview_run_id }}
         run: node dev/scripts/await-release-preview.mjs
 

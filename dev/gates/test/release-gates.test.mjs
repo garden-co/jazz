@@ -153,6 +153,11 @@ test("release starter runs test the release preview's packages instead of rebuil
     assert.match(step, /if: env\.REUSE_PREVIEW != 'true'/, buildStep);
   }
   assert.match(prepare, /run: node dev\/scripts\/await-release-preview\.mjs/);
+  assert.match(
+    prepare,
+    /HEAD_SHA: \$\{\{ github\.event\.pull_request\.head\.sha \|\| github\.sha \}\}/,
+  );
+  assert.match(prepare, /HEAD_BRANCH: \$\{\{ github\.head_ref \|\| github\.ref_name \}\}/);
   for (const artifact of ["pkg-jazz-tools", "pkg-jazz-wasm", "pkg-jazz-napi"])
     assert.match(
       prepare,
