@@ -24,7 +24,9 @@ an independent mean-throughput or sustained-concurrency measurement.
   trials and unregistered branches are excluded from the API dataset.
 - Releases without an exact measured commit are identified but never assigned
   estimated values. Missing and simulation-only results are excluded; reruns
-  remain separate receipts, not averaged.
+  remain separate receipts, not averaged. The scheduled nightly CodSpeed run
+  adds points only for benchmarks not already measured at that commit, so it
+  never gives a merge case a second point at one SHA.
 - A metric card's number is the newest released measurement
   (`lib/showcase/summary.ts`); open-PR experiments never feed a card.
 - A benchmark renamed without changing its numbers (declared `stitch` in

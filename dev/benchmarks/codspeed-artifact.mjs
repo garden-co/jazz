@@ -26,11 +26,14 @@ const nativeExample = (name) => ({
 
 // Two suites share this table. `merge` (pull requests with the `benchmark`
 // label and every main merge) measures each workload's `benches`. `nightly`
-// (the scheduled run on main, or a manual dispatch) also measures its
-// `nightly` extras: more bench targets of the same package, built with the
-// same features, and environment for the run command. Nightly names are
-// ordinary CodSpeed names, so each keeps its own history across nightly runs.
-// JAZZ_CODSPEED_SUITE selects the suite; unset means `merge`.
+// (the scheduled run on main, or a manual dispatch) measures only the
+// workloads' `nightly` extras: other bench targets of the same package, built
+// with the same features, or the same targets with environment that selects
+// their other cases. It never re-measures a merge case, so each case gets one
+// point per commit in the perf timeline, and it skips workloads and groups
+// without extras. Nightly names are ordinary CodSpeed names, so each keeps
+// its own history across nightly runs. JAZZ_CODSPEED_SUITE selects the suite;
+// unset means `merge`.
 export const suites = ["merge", "nightly"];
 export function currentSuite(env = process.env) {
   const suite = env.JAZZ_CODSPEED_SUITE || "merge";
@@ -76,8 +79,13 @@ const workloadSpecs = {
     minStack: null,
     timeout: 40,
     // The reference engines (SQLite, pull plans, snapshot re-runs) and the
-    // smaller sizes, from the same executables.
-    nightly: { benches: [], env: { GROOVE_BENCH_SWEEP: "1" }, timeout: 40 },
+    // smaller IVM sizes, from the same executables. GROOVE_BENCH_SWEEP=1
+    // also skips the IVM cases at the largest size, which merges measure.
+    nightly: {
+      benches: ["pull_vs_snapshot", "steady_state"],
+      env: { GROOVE_BENCH_SWEEP: "1" },
+      timeout: 40,
+    },
   },
 };
 export const workloads = Object.keys(workloadSpecs);
@@ -100,17 +108,30 @@ const workloadGroups = {
   "public-apps": ["world-tour", "poster-shop", "jamazon-warehouse"],
   engine: ["groove-ivm"],
 };
-export const groups = Object.keys(workloadGroups);
 {
   const grouped = Object.values(workloadGroups).flat();
   assert.deepEqual([...grouped].sort(), [...workloads].sort(), "every workload in one group");
   assert.equal(new Set(grouped).size, grouped.length, "no workload in two groups");
 }
 
-export function groupWorkloads(group) {
-  assert.ok(Object.hasOwn(workloadGroups, group), "unknown group");
-  return workloadGroups[group];
+// The workloads a suite measures: every workload per merge, only those with
+// nightly extras at night.
+export function suiteWorkloads(suite = currentSuite()) {
+  assert.ok(suites.includes(suite), `unknown suite: ${suite}`);
+  return workloads.filter((w) => suite === "merge" || workloadSpecs[w].nightly);
 }
+
+export function groupWorkloads(group, suite = currentSuite()) {
+  assert.ok(Object.hasOwn(workloadGroups, group), "unknown group");
+  const measured = suiteWorkloads(suite);
+  return workloadGroups[group].filter((w) => measured.includes(w));
+}
+
+// The groups a suite builds and measures: those with at least one workload.
+export function suiteGroups(suite = currentSuite()) {
+  return Object.keys(workloadGroups).filter((g) => groupWorkloads(g, suite).length > 0);
+}
+export const groups = suiteGroups("merge");
 const format = "jazz-codspeed-benchmark-artifact-v2";
 // Observed codspeed-macro checkout root. Relative DWARF paths still receive
 // origin=unknown; match the absolute repository root uploaded by the runner.
@@ -129,13 +150,9 @@ function spec(workload, suite = currentSuite()) {
   assert.ok(Object.hasOwn(workloadSpecs, workload), "unknown workload");
   assert.ok(suites.includes(suite), `unknown suite: ${suite}`);
   const { nightly, ...base } = workloadSpecs[workload];
-  if (suite !== "nightly" || !nightly) return { ...base, env: {} };
-  return {
-    ...base,
-    benches: [...base.benches, ...nightly.benches],
-    env: nightly.env,
-    timeout: base.timeout + nightly.timeout,
-  };
+  if (suite === "merge") return { ...base, env: {} };
+  assert.ok(nightly, `${workload} has no nightly extras`);
+  return { ...base, benches: nightly.benches, env: nightly.env, timeout: nightly.timeout };
 }
 
 export function contractFor(workload, suite = currentSuite()) {
@@ -147,7 +164,7 @@ export function contractFor(workload, suite = currentSuite()) {
 // RUST_MIN_STACK is unset to Rust std: the default thread stack.
 export function measureSettings(suite = currentSuite()) {
   return Object.fromEntries(
-    workloads.map((w) => [
+    suiteWorkloads(suite).map((w) => [
       w,
       {
         min_stack: workloadSpecs[w].minStack ? String(workloadSpecs[w].minStack) : "",
@@ -161,9 +178,9 @@ export function measureSettings(suite = currentSuite()) {
 // so its timeout is the sum of theirs.
 export function groupMeasureSettings(suite = currentSuite()) {
   return Object.fromEntries(
-    groups.map((group) => [
+    suiteGroups(suite).map((group) => [
       group,
-      { timeout: groupWorkloads(group).reduce((sum, w) => sum + spec(w, suite).timeout, 0) },
+      { timeout: groupWorkloads(group, suite).reduce((sum, w) => sum + spec(w, suite).timeout, 0) },
     ]),
   );
 }
@@ -190,7 +207,7 @@ export function runArgs(workload, suite = currentSuite()) {
 // environment, stopping at the first failure. The CodSpeed action runs it as
 // a single session.
 export function runCommand(group, suite = currentSuite()) {
-  return groupWorkloads(group)
+  return groupWorkloads(group, suite)
     .map((workload) => {
       const { minStack, env } = spec(workload, suite);
       const stack = minStack ? `RUST_MIN_STACK=${minStack} ` : "env -u RUST_MIN_STACK ";
@@ -341,7 +358,7 @@ async function main() {
     return;
   }
   if (action === "matrix") {
-    console.log(JSON.stringify(workloads));
+    console.log(JSON.stringify(suiteWorkloads()));
     return;
   }
   if (action === "measure") {
@@ -349,7 +366,7 @@ async function main() {
     return;
   }
   if (action === "groups") {
-    console.log(JSON.stringify(groups));
+    console.log(JSON.stringify(suiteGroups()));
     return;
   }
   if (action === "suite") {

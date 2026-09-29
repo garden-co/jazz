@@ -11,9 +11,11 @@ thread stack and timeout, and `workloadGroups` groups the workloads into six
 CodSpeed jobs (stage-plan, docs-and-access, live-apps, files-and-ops,
 public-apps, engine) whose packages enable the same `jazz` features, so each
 build job compiles the Jazz stack once. Each workload can also list `nightly`
-extras (more bench targets or run environment) that only the nightly suite
-(`JAZZ_CODSPEED_SUITE=nightly`: the scheduled run, or a manual dispatch)
-builds and measures. The
+extras (other bench targets, or run environment that selects other cases of
+the same targets). The nightly suite (`JAZZ_CODSPEED_SUITE=nightly`: the
+scheduled run, or a manual dispatch) builds and measures only those extras,
+and only the workloads and groups that have them, so no case is measured twice
+at one commit. The
 workflow's plan job reads its `groups` and `group-measure` output; each group's
 build job builds its workloads one after another with their own `build-args`
 in one shared target directory and seals one bundle per workload into one

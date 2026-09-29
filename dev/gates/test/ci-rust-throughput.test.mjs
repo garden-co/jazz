@@ -1510,8 +1510,8 @@ test("CodSpeed baselines every main merge and runs only for benchmark-labeled PR
   assert.deepEqual(document.on.pull_request, {
     types: ["labeled", "synchronize", "reopened"],
   });
-  // One daily schedule, and it runs only the nightly suite (the per-merge
-  // cases plus the nightly extras). It is not a main baseline: merges still
+  // One daily schedule, and it runs only the nightly suite (the nightly
+  // extras, never a per-merge case). It is not a main baseline: merges still
   // baseline themselves, and nightly runs use their own concurrency group, so
   // they never replace or delay a pending merge run.
   assert.equal(document.on.schedule.length, 1, "one nightly schedule");

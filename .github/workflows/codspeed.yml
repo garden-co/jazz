@@ -10,15 +10,16 @@ on:
   # push workflows) or a main run failed.
   push:
     branches: [main]
-  # The nightly suite: everything the merge suite measures plus each
-  # workload's nightly extras (the `nightly` bench targets and the Groove
-  # reference-engine sweep), listed in dev/benchmarks/codspeed-artifact.mjs.
+  # The nightly suite: only the workloads' nightly extras (the `nightly` bench
+  # targets and the Groove reference-engine sweep), listed in
+  # dev/benchmarks/codspeed-artifact.mjs. It never re-measures a merge case,
+  # so each case gets one perf-timeline point per commit.
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
     inputs:
       suite:
-        description: "merge: the per-merge cases; nightly: those plus the nightly extras"
+        description: "merge: the per-merge cases; nightly: only the nightly extras"
         type: choice
         options: [merge, nightly]
         default: merge

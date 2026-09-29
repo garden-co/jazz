@@ -40,8 +40,10 @@
 //!
 //! CodSpeed (the Engine section of the examples page) measures only the IVM
 //! engines (`prepared_warm`, `prepared_cold`) at 5,000 users on every merge.
-//! The full sweep, including the reference engines, runs with
-//! `GROOVE_BENCH_SWEEP=1`, which the nightly CodSpeed run sets:
+//! `GROOVE_BENCH_SWEEP=1`, which the nightly CodSpeed run sets, measures the
+//! rest instead: the reference engines and the smaller IVM size. The two runs
+//! never share a case, so each case gets one CodSpeed point per commit. Run
+//! both for the full sweep:
 //!
 //! ```text
 //! cargo bench -p groove --bench pull_vs_snapshot
@@ -74,16 +76,16 @@ fn main() {
     divan::main();
 }
 
-/// CodSpeed measures only Groove's IVM (prepared) engines at the larger table
-/// size. `GROOVE_BENCH_SWEEP=1` also runs the smaller size and the reference
-/// engines (`snapshot`, `pull`), which are skipped otherwise.
+/// Per merge, CodSpeed measures only Groove's IVM (prepared) engines at the
+/// larger table size. `GROOVE_BENCH_SWEEP=1` measures the rest instead: the
+/// smaller size and the reference engines (`snapshot`, `pull`).
 fn sweep() -> bool {
     std::env::var_os("GROOVE_BENCH_SWEEP").is_some()
 }
 
 fn ivm_user_counts() -> Vec<u64> {
     if sweep() {
-        USER_COUNTS.to_vec()
+        USER_COUNTS[..USER_COUNTS.len() - 1].to_vec()
     } else {
         vec![USER_COUNTS[USER_COUNTS.len() - 1]]
     }
