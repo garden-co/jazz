@@ -2561,6 +2561,78 @@ fn connect_upstream_waits_for_active_node_state_borrow() {
     let _connection = crate::local_executor::block_on(connection);
 }
 
+/// A trusted-serving host (a backend `forSession()` scope, or the policy test
+/// app) installs a session's claims before each write it admits. An earlier
+/// queued upsert suspended on cold storage owns the node, so installing the
+/// next write's claims must neither re-enter that owner nor overtake it: the
+/// claims wait behind it and take effect in admission order.
+///
+/// Controlled storage is needed to hold the queued upsert suspended; the
+/// binding tests cannot pause it at this ownership boundary.
+#[test]
+fn identity_claims_wait_behind_a_suspended_queued_upsert() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xd8; 16]);
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, control) = TestStorage::controlled(&refs);
+    let eviction = storage.clone();
+    let db = block_on(Db::open(DbConfig {
+        schema,
+        storage,
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xd8; 16]),
+            author,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xd8))),
+    }))
+    .unwrap();
+    let id = row(0xd8);
+    db.insert(
+        "todos",
+        cells("seed", false, author),
+        crate::db::InsertOptions {
+            row_id: Some(id),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.tick().unwrap();
+
+    eviction.evict_all();
+    control.pause_on(TestStorageOperation::ScanOpen);
+    control.pause_on(TestStorageOperation::Get);
+    let first = db
+        .enqueue_upsert(
+            "todos".to_owned(),
+            id,
+            cells("first", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    db.drive_queued_mutation_once();
+    assert!(
+        db.node.node().try_lock().is_none(),
+        "the cold upsert must own the node while suspended"
+    );
+
+    let claims = BTreeMap::from([("role".to_owned(), Value::String("editor".to_owned()))]);
+    db.set_identity_claims(author, claims.clone());
+    assert_eq!(
+        db.queued_mutation_count(),
+        2,
+        "claims must be ordered behind the suspended upsert, not applied around it"
+    );
+
+    control.resume();
+    block_on(db.drain_queued_mutations_for_binding());
+    block_on(first.write_state()).unwrap();
+    assert_eq!(
+        block_on(db.node.node().lock()).session_claims_for(author),
+        claims
+    );
+}
+
 /// Test-only marker for an authenticated SYSTEM backend transport. Ordinary
 /// session links must not send `SessionClaims`: their authenticated handshake
 /// is the authority for those claims.

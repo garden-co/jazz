@@ -2618,16 +2618,38 @@ where
     }
 
     /// Attach process-local auth claims for `identity`.
+    ///
+    /// Queued mutations read ambient claims when the owner executes them, so
+    /// claims take effect in admission order: immediately while the owner
+    /// queue is quiescent and the node is free, otherwise as an owner
+    /// operation behind every operation already admitted. This synchronous
+    /// entry point therefore never re-enters a suspended owner operation.
     pub fn set_identity_claims(&self, identity: AuthorSubject, claims: BTreeMap<String, Value>) {
-        let changed = {
-            let mut node = self.node.node.borrow_mut();
+        if self.node.owner_queue_is_quiescent()
+            && let Some(mut node) = self.node.node.try_lock()
+        {
             let previous_revision = node.session_claim_revision(identity);
             node.set_session_claims(identity, claims);
-            node.session_claim_revision(identity) != previous_revision
-        };
-        if changed {
-            self.node.schedule_tick(TickUrgency::Deferred);
+            let changed = node.session_claim_revision(identity) != previous_revision;
+            drop(node);
+            if changed {
+                self.node.schedule_tick(TickUrgency::Deferred);
+            }
+            return;
         }
+        let runtime = Rc::clone(&self.node);
+        self.node.enqueue_owner_operation(Box::pin(async move {
+            let changed = {
+                let mut node = runtime.node.lock().await;
+                let previous_revision = node.session_claim_revision(identity);
+                node.set_session_claims(identity, claims);
+                node.session_claim_revision(identity) != previous_revision
+            };
+            if changed {
+                runtime.schedule_tick(TickUrgency::Deferred);
+            }
+            Ok(())
+        }));
     }
 
     /// Attach claims without synchronously reentering a suspended storage operation.

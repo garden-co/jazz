@@ -592,6 +592,45 @@ describe("createPolicyTestApp", () => {
     }
   }, 10_000);
 
+  it("admits concurrent upserts of one row from the same session in order", async () => {
+    // Every session write installs that session's claims before it is
+    // admitted. The first upsert stays suspended on the owner, so the second
+    // write's claims must queue behind it instead of re-entering it.
+    const upsertPermissions = definePermissions(testApp, ({ policy, session }) => {
+      policy.todos.allowRead.where({ ownerId: session.user.account });
+      policy.todos.allowInsert.where({ ownerId: session.user.account });
+      policy.todos.allowUpdate.where({ ownerId: session.user.account });
+    });
+    const policyTestApp = await createPolicyTestApp(testApp, upsertPermissions, expect);
+
+    try {
+      const ownerId = "00000000-0000-4000-8000-000000000001";
+      const alice = policyTestApp.as({
+        issuer: "https://policy-test.example",
+        user_id: "alice",
+        account_id: ownerId,
+        claims: {},
+        authMode: "external",
+      });
+      const id = "00000000-0000-4000-8000-0000000000a1";
+
+      await Promise.all([
+        alice.upsert(testApp.todos, id, { title: "first", done: false, ownerId }).wait({
+          tier: "global",
+        }),
+        alice.upsert(testApp.todos, id, { title: "second", done: false, ownerId }).wait({
+          tier: "global",
+        }),
+      ]);
+
+      await expect(alice.all(testApp.todos.where({ id }))).resolves.toEqual([
+        expect.objectContaining({ id, title: "second" }),
+      ]);
+    } finally {
+      await policyTestApp.shutdown();
+    }
+  }, 10_000);
+
   it("exposes expectAllowed and expectDenied on session-scoped test dbs", async () => {
     const policyTestApp = await createPolicyTestApp(testApp, testPermissions, expect);
 
