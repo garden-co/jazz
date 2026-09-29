@@ -6806,6 +6806,8 @@ where
 {
     match error {
         TransportError::Backpressure => {
+            #[cfg(feature = "sync-autopsy")]
+            sync_autopsy::record("transport backpressure: deferred retry scheduled");
             node.borrow_mut().record_transport_backpressure_retry();
             schedule_tick_in(scheduler, TickUrgency::Deferred);
             true
@@ -6823,6 +6825,8 @@ where
     S: OrderedKvStorage,
 {
     if error.code == ErrorCode::Backpressure {
+        #[cfg(feature = "sync-autopsy")]
+        sync_autopsy::record("db backpressure: deferred retry scheduled");
         node.borrow_mut().record_transport_backpressure_retry();
         schedule_tick_in(scheduler, TickUrgency::Deferred);
         true

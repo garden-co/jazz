@@ -1692,7 +1692,10 @@ pub type MutationErrorCallback = Rc<dyn Fn(&MutationErrorEvent) + 'static>;
 pub mod sync_autopsy {
     use super::*;
 
-    const MAX_EVENTS: usize = 512;
+    // Large enough to span a writer's burst plus a waiter's polling: one
+    // process-wide ring shared by every node, so a poll loop's frames must
+    // not evict the upload history an autopsy is meant to explain.
+    const MAX_EVENTS: usize = 8192;
 
     static ENABLED: AtomicBool = AtomicBool::new(false);
     static EVENTS: LazyLock<Mutex<VecDeque<String>>> =
