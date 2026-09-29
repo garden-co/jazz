@@ -452,26 +452,42 @@ export interface BranchView {
   base?: BranchViewBase;
 }
 
-export interface QueryExecutionOptions {
-  /** Read tier: `ReadTier.LocalFirst` or `ReadTier.Remote`. */
-  tier?: QueryReadTier;
-  /**
-   * Local-first reads only: how long the initial load may
-   * wait for the server's answer, in milliseconds. Defaults to `0`, which
-   * shows local data at once.
-   *
-   * While the client is online (connected, or its connection attempt is still
-   * young), a subscription's first callback, or a one-shot read, waits up to
-   * this long for the server's answer and then shows it; if the server has not
-   * answered in time, it shows the local result. Offline, without a server,
-   * or after `db.disconnect()` it never waits. Later changes behave as usual
-   * for local-first: local writes show immediately and remote changes as
-   * they arrive. `ReadTier.Remote` ignores it.
-   */
-  firstLoadRemoteWaitMs?: number;
+/**
+ * The read tier and the options only that tier accepts: `tier` discriminates
+ * the shape, so a first-load wait on a `ReadTier.Remote` read does not type-check.
+ */
+export type ReadTierOptions =
+  | {
+      /** Read tier: `ReadTier.LocalFirst` or `ReadTier.Remote`. */
+      tier?: typeof ReadTier.LocalFirst;
+      /**
+       * How long the initial load may wait for the server's answer, in
+       * milliseconds. Defaults to `0`, which shows local data at once.
+       *
+       * While the client is online (connected, or its connection attempt is still
+       * young), a subscription's first callback, or a one-shot read, waits up to
+       * this long for the server's answer and then shows it; if the server has not
+       * answered in time, it shows the local result. Offline, without a server,
+       * or after `db.disconnect()` it never waits. Later changes behave as usual
+       * for local-first: local writes show immediately and remote changes as
+       * they arrive.
+       */
+      firstLoadRemoteWaitMs?: number;
+    }
+  | {
+      /** Read tier: `ReadTier.LocalFirst` or `ReadTier.Remote`. */
+      tier: typeof ReadTier.Remote;
+      /**
+       * Only local-first reads wait for the server on their first load; a
+       * remote read always waits for the server. Ignored at runtime if given.
+       */
+      firstLoadRemoteWaitMs?: never;
+    };
+
+export type QueryExecutionOptions = ReadTierOptions & {
   /** Admit exact-head history, falling back to an optional live or frozen base. */
   branch?: BranchView;
-}
+};
 
 /**
  * Copy the product-facing subset of query options before crossing a public
@@ -488,14 +504,15 @@ export function publicQueryExecutionOptions(
   if (!options) return undefined;
   const candidate = options as { tier?: unknown; branch?: unknown };
   rejectRemovedReadTier(candidate.tier);
-  const result: QueryExecutionOptions = {};
+  const result: InternalQueryExecutionOptions = {};
   if (isPublicQueryReadTier(candidate.tier)) result.tier = candidate.tier;
   const firstLoadRemoteWaitMs = normalizeFirstLoadRemoteWaitMs(
     (candidate as { firstLoadRemoteWaitMs?: unknown }).firstLoadRemoteWaitMs,
   );
   if (firstLoadRemoteWaitMs !== undefined) result.firstLoadRemoteWaitMs = firstLoadRemoteWaitMs;
   if (candidate.branch !== undefined) result.branch = candidate.branch as BranchView;
-  return result;
+  // The runtime ignores a Remote read's wait; the types reject it.
+  return result as QueryExecutionOptions;
 }
 
 /** @internal `local-only` is deliberately excluded from the product surface. */

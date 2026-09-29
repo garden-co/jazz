@@ -33,6 +33,7 @@ import {
   type UpdateOptions as InternalUpdateOptions,
   type DurabilityTier,
   type QueryExecutionOptions,
+  type ReadTierOptions,
   type InternalQueryExecutionOptions,
   type QueryPropagation,
   type QueryVisibility,
@@ -203,7 +204,7 @@ export type QualifiedBranch = Record<string, BranchValue>;
 export type Branch = BranchValue | QualifiedBranch;
 export type BranchBase = Branch | readonly [branch: Branch, snapshot: unknown];
 
-export type QueryOptions = Omit<QueryExecutionOptions, "branch"> & {
+export type QueryOptions = ReadTierOptions & {
   /** Current branch coordinate. A scalar selects a table with one `branchBy` column. */
   branch?: Branch;
   /** Optional live base, or `[base, snapshotRef]` for a frozen base. */

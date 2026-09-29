@@ -142,7 +142,8 @@ In Rust, use `client.query_local_first(query, Duration::from_millis(500))` and
 - Queries with an `offset` read the server's page while waiting, because a partly synced cache
   would apply the offset to the wrong rows. On timeout they show the cached page.
 - The default, `0`, is plain `"local-first"`. The option applies to local-first reads (including
-  the browser default); `"remote"` ignores it.
+  the browser default); TypeScript rejects it on a `"remote"` read, which
+  always waits for the server (plain JavaScript callers have it ignored).
 
 <Callout type="warn" title="Removed read tiers">
   Reads accept only `"local-first"` and `"remote"`. `"local-first-unless-empty"` was removed: use

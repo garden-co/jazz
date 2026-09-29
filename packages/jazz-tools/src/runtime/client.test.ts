@@ -15,7 +15,9 @@ import {
   type MutationErrorEvent,
   type OpenTransactionId,
   type WriteReceipt,
+  type QueryExecutionOptions,
 } from "./client.js";
+import type { QueryOptions } from "./db.js";
 import type { AppContext } from "./context.js";
 import type { RuntimeSubscriptionDelta, WasmSchema } from "../drivers/types.js";
 
@@ -636,6 +638,17 @@ describe("public read tiers", () => {
     );
   });
 
+  it("types a first-load wait as local-first only", () => {
+    const local: QueryExecutionOptions = { tier: ReadTier.LocalFirst, firstLoadRemoteWaitMs: 500 };
+    const defaultTier: QueryOptions = { firstLoadRemoteWaitMs: 500 };
+    const remote: QueryOptions = { tier: ReadTier.Remote };
+    // @ts-expect-error Only local-first reads wait for the server on their first load.
+    const remoteWait: QueryExecutionOptions = { tier: ReadTier.Remote, firstLoadRemoteWaitMs: 500 };
+    // @ts-expect-error The Db read options discriminate on the tier too.
+    const dbRemoteWait: QueryOptions = { tier: "remote", firstLoadRemoteWaitMs: 500 };
+    expect([local, defaultTier, remote, remoteWait, dbRemoteWait]).toHaveLength(5);
+  });
+
   it("passes a local-first server wait to the runtime and ignores it elsewhere", async () => {
     const runtime = makeFakeRuntime();
     runtime.query.mockResolvedValue([]);
@@ -660,7 +673,8 @@ describe("public read tiers", () => {
     ] as const;
     for (const [options, nativeTier, optionsJson] of reads) {
       runtime.query.mockClear();
-      await client.query('{"relation_ir":{"table":"todos"}}', options);
+      // The Remote case is a JavaScript caller: the types reject its wait.
+      await client.query('{"relation_ir":{"table":"todos"}}', options as QueryExecutionOptions);
       expect(runtime.query.mock.calls[0]?.[2]).toBe(nativeTier);
       expect(runtime.query.mock.calls[0]?.[3]).toBe(optionsJson);
     }

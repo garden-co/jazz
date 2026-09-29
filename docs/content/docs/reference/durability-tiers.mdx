@@ -42,7 +42,7 @@ New applications should use the two product read choices `"local-first"` and `"r
 
 A local-first read accepts an optional `firstLoadRemoteWaitMs` that bounds how long
 its first result may wait for the server. The default, `0`, is plain `"local-first"`. It applies to
-`"local-first"` and the browser default; `"remote"` ignores it. In Rust, use
+`"local-first"` and the browser default; TypeScript rejects it with `"remote"` (JavaScript callers have it ignored). In Rust, use
 `client.query_local_first(query, timeout)` and `client.subscribe_local_first(query, timeout)`.
 
 Only the initial load waits: a one-shot read, or a subscription's first callback. While the client
