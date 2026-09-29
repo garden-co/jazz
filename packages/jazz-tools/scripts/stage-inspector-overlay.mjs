@@ -43,6 +43,7 @@ async function validateOverlay(directory) {
 }
 
 const here = dirname(fileURLToPath(import.meta.url)); // packages/jazz-tools/scripts
+const packageRoot = dirname(here);
 const src = join(here, "../../inspector/dist-embedded");
 const dest = join(here, "../dist/dev/inspector-overlay/embedded");
 const parent = dirname(dest);
@@ -58,7 +59,8 @@ if (!destinationExists && (await pathExists(backup))) {
   // A completed promotion may have been interrupted before deleting its old backup.
   await rm(backup, { recursive: true, force: true });
 }
-const stage = await mkdtemp(join(parent, ".inspector-overlay-stage-"));
+// Keep interrupted stage trees outside dist so packaging cannot include partial assets.
+const stage = await mkdtemp(join(packageRoot, ".inspector-overlay-stage-"));
 let primaryError;
 
 try {
