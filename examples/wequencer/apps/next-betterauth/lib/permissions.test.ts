@@ -141,12 +141,10 @@ describe("Wequencer permissions", () => {
     const fromCreator = stepRow(address, true);
     const fromEditor = stepRow(address, true);
     expect(fromEditor.id).toBe(fromCreator.id);
-    // Awaited one after the other: two in-flight upserts of one id abort a
-    // trusted-serving session db today (https://github.com/garden-co/jazz/issues/3758).
-    // The app's own pad presses are client-local writes and are unaffected.
-    // Order does not matter to the outcome: both writers target the same row.
-    await creator.db.upsert(app.steps, fromCreator.id, fromCreator.data).wait({ tier: "global" });
-    await editor.db.upsert(app.steps, fromEditor.id, fromEditor.data).wait({ tier: "global" });
+    await Promise.all([
+      creator.db.upsert(app.steps, fromCreator.id, fromCreator.data).wait({ tier: "global" }),
+      editor.db.upsert(app.steps, fromEditor.id, fromEditor.data).wait({ tier: "global" }),
+    ]);
 
     const rows = await creator.db.all(
       app.steps.where({ track_id: track.id, pattern_id: pattern.id }),
