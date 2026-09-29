@@ -242,7 +242,7 @@ function trackedInputContents(root, paths) {
       const dirty = spawnSync("git", args, { cwd: root, encoding: "buffer" });
       if (dirty.status !== 0)
         throw new Error(
-          `artifact provenance: could not inspect dirty inputs: ${dirty.error?.message ?? dirty.stderr?.toString("utf8").trim() ?? "unknown error"}`,
+          `artifact provenance: could not inspect dirty inputs: ${dirty.error?.message ?? (dirty.stderr?.toString("utf8").trim() || "unknown error")}`,
         );
       for (const path of dirty.stdout.toString("utf8").split("\0")) if (path) dirtyPaths.add(path);
     }
