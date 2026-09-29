@@ -1059,3 +1059,184 @@ fn pending_edit_after_synced_rebase_keeps_synced_cells_across_added_column_linea
         "alice's second pending edit must not revert bob's synced title"
     );
 }
+
+/// The `records` table of the TypeScript concurrent-merge suite: `count`
+/// always merges as a counter; `tags` merges as a grow-only set only when
+/// `gset` is set, and is an ordinary last-writer-wins column otherwise.
+fn records_schema(gset: bool) -> JazzSchema {
+    use jazz::tools::test_support::AllowAll;
+    use jazz::tools::{ColumnMergeStrategy, RowDescriptor, TableName};
+    let mut schema = SchemaBuilder::new()
+        .table(
+            TableSchemaBuilder::new("records")
+                .column("title", ColumnType::Text)
+                .column("archived", ColumnType::Boolean)
+                .column("count", ColumnType::Integer)
+                .column(
+                    "tags",
+                    ColumnType::Array {
+                        element: Box::new(ColumnType::Text),
+                    },
+                ),
+        )
+        .allow_all()
+        .build();
+    let table = schema
+        .get_mut(&TableName::new("records"))
+        .expect("records table exists");
+    table.columns = RowDescriptor::new(
+        table
+            .columns
+            .columns
+            .iter()
+            .map(|column| match column.name.as_str() {
+                "count" => column.clone().merge_strategy(ColumnMergeStrategy::Counter),
+                "tags" if gset => column.clone().merge_strategy(ColumnMergeStrategy::GSet),
+                _ => column.clone(),
+            })
+            .collect(),
+    );
+    compile_schema(&schema)
+}
+
+/// Two apps in one process whose `records` tables differ only in the merge
+/// strategy of `tags` each converge concurrent writes and serve a fresh
+/// editor.
+///
+/// Mirrors `packages/jazz-tools/src/backend/concurrent-merge.integration.test.ts`,
+/// whose Counter-only and GSet-and-Counter cases run one after the other in
+/// one process against in-process servers. A merge column carries no
+/// last-writer-wins stamp slot, so the two tables have different stored row
+/// layouts even though their column names and types are identical.
+///
+/// ```text
+/// for tags in [LWW, GSet]:            (fresh core, fresh app each round)
+///   writer ──insert──► core ◄──update── observer   (concurrent)
+///   editor ──Global read──► core ──► the one converged row
+/// ```
+#[test]
+fn apps_differing_only_in_a_merge_strategy_each_converge_in_one_process() {
+    for (round, gset) in [false, true].into_iter().enumerate() {
+        let round = round as u8;
+        let schema = records_schema(gset);
+        let mut core = InMemoryServerShell::start(
+            InMemoryServerShellConfig::new(
+                schema.clone(),
+                identity(0xc8 + round, AuthorSubject::SYSTEM),
+            )
+            .with_role(NodeRole::Core),
+        )
+        .unwrap();
+        let writer = open_db(0xa8 + round, author(0xa8 + round), &schema);
+        let observer = open_db(0xb8 + round, author(0xb8 + round), &schema);
+        let writer_wire = QueuedWireTransport::default();
+        let observer_wire = QueuedWireTransport::default();
+        let writer_session =
+            connect_client_to_core(&mut core, &writer, &writer_wire, author(0xa8 + round));
+        let observer_session =
+            connect_client_to_core(&mut core, &observer, &observer_wire, author(0xb8 + round));
+
+        let row = RowUuid::from_bytes([0xd8 + round; 16]);
+        let seed = block_on(writer.insert(
+            "records",
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("seed".to_owned())),
+                ("archived".to_owned(), Value::Bool(false)),
+                ("count".to_owned(), Value::I32(0)),
+                ("tags".to_owned(), tags(&["seed"])),
+            ]),
+            jazz::db::InsertOptions {
+                row_id: Some(row),
+                updated_at_ms: Some(100),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        for _ in 0..4 {
+            pump_client_core(&writer, &writer_wire, &mut core, writer_session);
+        }
+        assert_eq!(
+            writer
+                .write_state(seed.mergeable_tx_id())
+                .unwrap()
+                .durability,
+            DurabilityTier::Global,
+            "round {round}: the seed settles at Core"
+        );
+        for db in [&writer, &observer] {
+            let prepared = db.prepare_query(&Query::from("records")).unwrap();
+            std::mem::forget(block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap());
+        }
+        for _ in 0..2 {
+            pump_client_core(&observer, &observer_wire, &mut core, observer_session);
+            pump_client_core(&writer, &writer_wire, &mut core, writer_session);
+        }
+
+        for (db, title, at) in [(&writer, "left", 200), (&observer, "right", 300)] {
+            block_on(db.update(
+                "records",
+                row,
+                BTreeMap::from([
+                    ("title".to_owned(), Value::String(title.to_owned())),
+                    ("tags".to_owned(), tags(&[title])),
+                ]),
+                jazz::db::UpdateOptions {
+                    updated_at_ms: Some(at),
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        }
+        for _ in 0..4 {
+            pump_client_core(&writer, &writer_wire, &mut core, writer_session);
+            pump_client_core(&observer, &observer_wire, &mut core, observer_session);
+        }
+
+        let editor = open_db(0xe8 + round, author(0xe8 + round), &schema);
+        let editor_wire = QueuedWireTransport::default();
+        let editor_session =
+            connect_client_to_core(&mut core, &editor, &editor_wire, author(0xe8 + round));
+        let prepared = editor.prepare_query(&Query::from("records")).unwrap();
+        let mut subscription = block_on(editor.subscribe(
+            &prepared,
+            ReadOpts {
+                tier: DurabilityTier::Global,
+                ..ReadOpts::default()
+            },
+        ))
+        .unwrap();
+        for _ in 0..4 {
+            pump_client_core(&editor, &editor_wire, &mut core, editor_session);
+        }
+        let mut settled_rows = None;
+        while let Some(event) = subscription.try_next_event() {
+            if let jazz::db::SubscriptionEvent::Delta {
+                settled: true,
+                added,
+                ..
+            } = event
+            {
+                settled_rows = Some(added);
+            }
+        }
+        let rows = settled_rows
+            .unwrap_or_else(|| panic!("round {round}: the editor's Global read settles"));
+        assert_eq!(rows.len(), 1, "round {round}: one converged row");
+        let table = &schema.tables[0];
+        assert_eq!(
+            rows[0].row.cell(table, "title"),
+            Some(Value::String("right".to_owned())),
+            "round {round}: the later title wins"
+        );
+        let expected_tags = if gset {
+            tags(&["left", "right", "seed"])
+        } else {
+            tags(&["right"])
+        };
+        assert_eq!(
+            rows[0].row.cell(table, "tags"),
+            Some(expected_tags),
+            "round {round}"
+        );
+    }
+}
