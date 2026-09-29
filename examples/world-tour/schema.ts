@@ -27,7 +27,10 @@ const schema = {
       bandId: s.uuid(),
       userId: s.uuid(),
       name: s.string(),
-      // The invite code this member joined with. Empty for the band owner.
+      // The invite code this member joined with; empty for the band owner. Other
+      // members can read it. That is no leak beyond the band: the code only admits
+      // people while it is current, the owner resets it whenever a member is removed,
+      // and anyone already in the band can see everything a new member would.
       inviteCode: s.string().optional(),
     },
     { band: s.rel("bands", "bandId") },
@@ -40,8 +43,9 @@ const schema = {
       lat: s.float(),
       lng: s.float(),
       capacity: s.int().optional(),
-      // Venues are shared places, readable by everyone. The creator owns a venue,
-      // and so does the band it was added for.
+      // Venues are public places, readable by everyone. A venue added for a band is
+      // managed by that band's members; the app only offers a band its own venues,
+      // so no other band's stops depend on it.
       ownerId: s.uuid(),
       bandId: s.uuid().optional(),
     },

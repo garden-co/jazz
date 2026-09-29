@@ -80,7 +80,7 @@ a {
 .form,
 .fieldset,
 .field,
-.dialog,
+.dialog__body,
 .sheet__body,
 .stop-detail,
 .calendar,
@@ -100,7 +100,7 @@ a {
 }
 
 .form,
-.dialog,
+.dialog__body,
 .stop-detail {
   gap: var(--spacing-4);
 }
@@ -471,22 +471,21 @@ textarea.input {
 
 /* ─── Dialog ─── */
 
-.dialog-backdrop {
-  position: fixed;
-  z-index: 40;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  padding: var(--spacing-4);
+.dialog {
+  width: min(28rem, calc(100% - 2 * var(--spacing-4)));
+  max-width: none;
+  max-height: calc(100% - 2 * var(--spacing-4));
+  padding: 0;
+  color: inherit;
+  box-shadow: var(--shadow-high);
+}
+
+.dialog::backdrop {
   background: var(--color-overlay);
 }
 
-.dialog {
-  width: min(28rem, 100%);
-  max-height: 100%;
-  overflow-y: auto;
+.dialog__body {
   padding: var(--spacing-6);
-  box-shadow: var(--shadow-high);
 }
 
 .dialog__header {
@@ -619,6 +618,41 @@ textarea.input {
 
 .calendar__stop[aria-pressed="true"] {
   outline: var(--focus-outline-width) solid var(--color-accent);
+}
+
+/* Status is shown by shape as well as colour: a filled dot, a ring, a cross. */
+.status-mark {
+  display: inline-block;
+  flex: none;
+  width: 0.5rem;
+  height: 0.5rem;
+  margin-right: var(--spacing-1);
+  border: calc(var(--border-width) * 2) solid currentColor;
+  border-radius: 50%;
+  vertical-align: 0.05em;
+}
+
+.status-mark[data-status="confirmed"] {
+  background: currentColor;
+}
+
+.status-mark[data-status="cancelled"] {
+  border: 0;
+  border-radius: 0;
+  background:
+    linear-gradient(45deg, transparent 42%, currentColor 42% 58%, transparent 58%),
+    linear-gradient(-45deg, transparent 42%, currentColor 42% 58%, transparent 58%);
+}
+
+.calendar__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-1) var(--spacing-4);
+  margin: 0;
+  padding: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--text-supporting-size);
+  list-style: none;
 }
 
 /* ─── Phones ─── */

@@ -83,6 +83,37 @@ async function seedTour() {
   return { band, membership, venue, confirmed, tentative, note };
 }
 
+/** A second band, owned by the outsider, with its own venue and stop. */
+async function seedOtherBand() {
+  const band = await testApp.seed((db) =>
+    db.insert(app.bands, { name: "The Other Band", ownerId: accounts.outsider }),
+  );
+  await testApp.seed((db) =>
+    db.insert(app.members, { bandId: band.id, userId: accounts.outsider, name: "Other owner" }),
+  );
+  const venue = await testApp.seed((db) =>
+    db.insert(app.venues, {
+      name: "Paradiso",
+      city: "Amsterdam",
+      country: "Netherlands",
+      lat: 52.36,
+      lng: 4.88,
+      ownerId: accounts.outsider,
+      bandId: band.id,
+    }),
+  );
+  const stop = await testApp.seed((db) =>
+    db.insert(app.stops, {
+      bandId: band.id,
+      venueId: venue.id,
+      date: new Date(2026, 9, 2, 20),
+      status: "confirmed",
+      publicDescription: "Other band's show",
+    }),
+  );
+  return { band, venue, stop };
+}
+
 const ids = (rows: { id: string }[]) => rows.map((r) => r.id).sort();
 
 beforeEach(async () => {
@@ -186,6 +217,66 @@ describe("band members", () => {
     await member.expectDenied((db) => db.delete(app.members, ownerMembership.id));
     await member.delete(app.members, tour.membership.id).wait({ tier: "global" });
     expect(ids(await member.all(app.stops))).toEqual([tour.confirmed.id]);
+  });
+
+  it("lose the band's venues when they leave, even ones they created", async () => {
+    const tour = await seedTour();
+    const member = as("member");
+    const venue = member.insert(app.venues, {
+      name: "Razzmatazz",
+      city: "Barcelona",
+      country: "Spain",
+      lat: 41.4,
+      lng: 2.19,
+      ownerId: accounts.member,
+      bandId: tour.band.id,
+    });
+    await venue.wait({ tier: "global" });
+
+    await member.delete(app.members, tour.membership.id).wait({ tier: "global" });
+    await member.expectDenied((db) => db.update(app.venues, venue.value.id, { capacity: 1 }));
+    await member.expectDenied((db) => db.delete(app.venues, venue.value.id));
+  });
+});
+
+describe("other bands", () => {
+  it("cannot move or delete a venue this band's stops use", async () => {
+    const tour = await seedTour();
+    await seedOtherBand();
+    const otherOwner = as("outsider");
+
+    await otherOwner.expectDenied((db) => db.update(app.venues, tour.venue.id, { lat: 0, lng: 0 }));
+    await otherOwner.expectDenied((db) => db.delete(app.venues, tour.venue.id));
+  });
+
+  it("cannot attach private notes to this band's stops", async () => {
+    const tour = await seedTour();
+    const other = await seedOtherBand();
+
+    // A member of this band can't annotate the other band's stop, under either band.
+    const member = as("member");
+    await member.expectDenied((db) =>
+      db.insert(app.stopNotes, { stopId: other.stop.id, bandId: tour.band.id, body: "Mine now" }),
+    );
+    await member.expectDenied((db) =>
+      db.insert(app.stopNotes, { stopId: other.stop.id, bandId: other.band.id, body: "Mine now" }),
+    );
+    // Nor can the other band annotate this band's stop.
+    await as("outsider").expectDenied((db) =>
+      db.insert(app.stopNotes, { stopId: tour.confirmed.id, bandId: other.band.id, body: "Hi" }),
+    );
+  });
+
+  it("cannot be handed a venue by changing its band", async () => {
+    const tour = await seedTour();
+    const other = await seedOtherBand();
+    const owner = as("owner");
+
+    await owner.expectDenied((db) =>
+      db.update(app.venues, tour.venue.id, { bandId: other.band.id }),
+    );
+    // Dropping the band would leave the venue to its creator alone.
+    await owner.expectDenied((db) => db.update(app.venues, tour.venue.id, { bandId: null }));
   });
 });
 

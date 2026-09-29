@@ -33,39 +33,43 @@
           :aria-pressed="stop.id === selectedStopId"
           draggable="true"
           :title="`${stop.venue?.name} (${statusLabels[stop.status]})`"
+          :aria-label="`${stop.venue?.city}, ${statusLabels[stop.status]}`"
           @click="emit('selectStop', stop.id)"
           @dragstart="$event.dataTransfer?.setData('text/plain', stop.id)"
         >
-          {{ stop.venue?.city }}
+          <span class="status-mark" :data-status="stop.status" aria-hidden="true" />{{
+            stop.venue?.city
+          }}
         </button>
       </div>
     </div>
+    <ul class="calendar__legend" aria-hidden="true">
+      <li v-for="(label, status) in statusLabels" :key="status">
+        <span class="status-mark" :data-status="status" />{{ label }}
+      </li>
+    </ul>
   </section>
 </template>
 
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { useDb } from "jazz-tools/vue";
+import { useAll, useDb } from "jazz-tools/vue";
 import { app, type StopWithVenue } from "../../schema.js";
 import { buildMonthGrid } from "../lib/calendar-grid.js";
 import { statusLabels, toDateInput } from "../lib/format.js";
 import Button from "./ui/Button.vue";
 import Icon from "./ui/Icon.vue";
 
-const props = defineProps<{ stops: StopWithVenue[]; selectedStopId: string | null }>();
+const props = defineProps<{ bandId: string; anchor: Date; selectedStopId: string | null }>();
 const emit = defineEmits<{ selectStop: [stopId: string] }>();
 
 const db = useDb();
 const weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
-// Open on the selected stop's month, or the first stop's, until the user pages.
+// Open on the anchor's month (the selected stop, or the next one) until the user pages.
 const offset = ref(0);
-const anchor = computed(() => {
-  const selected = props.stops.find((s) => s.id === props.selectedStopId);
-  return selected?.date ?? props.stops[0]?.date ?? new Date();
-});
 const month = computed(
-  () => new Date(anchor.value.getFullYear(), anchor.value.getMonth() + offset.value, 1),
+  () => new Date(props.anchor.getFullYear(), props.anchor.getMonth() + offset.value, 1),
 );
 const monthLabel = computed(() =>
   month.value.toLocaleDateString("en-GB", { month: "long", year: "numeric" }),
@@ -77,9 +81,23 @@ const days = computed(() =>
     .map((day) => ({ ...day, key: toDateInput(day.date) })),
 );
 
+// Every stop in the visible grid, including the padding days of the next and
+// previous months. The stops policy hides tentative and cancelled dates from
+// non-members, but only members see the calendar.
+const { data: stopRows } = useAll(() => {
+  const first = days.value[0].date;
+  const end = new Date(days.value[days.value.length - 1].date);
+  end.setDate(end.getDate() + 1);
+  return app.stops
+    .where({ bandId: props.bandId, date: { gte: first, lt: end } })
+    .include({ venue: true })
+    .orderBy("date", "asc");
+});
+const stops = computed(() => (stopRows.value ?? []).filter((s) => s.venue));
+
 const stopsByDay = computed(() => {
   const map = new Map<string, StopWithVenue[]>();
-  for (const stop of props.stops) {
+  for (const stop of stops.value) {
     const key = toDateInput(stop.date);
     map.set(key, [...(map.get(key) ?? []), stop]);
   }
@@ -99,7 +117,7 @@ function shiftMonth(delta: number) {
 const dropKey = ref<string | null>(null);
 function onDrop(day: Date, event: DragEvent) {
   dropKey.value = null;
-  const stop = props.stops.find((s) => s.id === event.dataTransfer?.getData("text/plain"));
+  const stop = stops.value.find((s) => s.id === event.dataTransfer?.getData("text/plain"));
   if (!stop) return;
   const date = new Date(day);
   date.setHours(stop.date.getHours(), stop.date.getMinutes());

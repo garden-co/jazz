@@ -38,30 +38,37 @@ export default s.definePermissions(app, ({ policy, session, anyOf, allOf }) => {
       { userId: me },
       anyOf([
         isOwnerOf(member.bandId),
-        allOf([
-          { inviteCode: { isNull: false } },
-          policy.bandInvites.exists.where({ bandId: member.bandId, code: member.inviteCode }),
-        ]),
+        policy.bandInvites.exists.where({ bandId: member.bandId, code: member.inviteCode }),
       ]),
     ]),
   );
   policy.members.allowDelete.where((member) => anyOf([{ userId: me }, isOwnerOf(member.bandId)]));
 
-  // Venues: public places. The creator owns a venue, and so do the members of the
-  // band it was added for.
-  const managesVenue = (venue: BandScoped) => anyOf([{ ownerId: me }, isMemberOf(venue.bandId)]);
+  // Venues: public places. A band's venue is managed by the band's current members
+  // (a creator who leaves loses it); a venue without a band belongs to its creator.
+  const managesVenue = (venue: BandScoped) =>
+    anyOf([allOf([{ bandId: { isNull: true } }, { ownerId: me }]), isMemberOf(venue.bandId)]);
   policy.venues.allowRead.always();
   policy.venues.allowInsert.where((venue) =>
     allOf([{ ownerId: me }, anyOf([{ bandId: { isNull: true } }, isMemberOf(venue.bandId)])]),
   );
-  policy.venues.allowUpdate
-    .whereOld(managesVenue)
-    .whereNew((venue) =>
-      allOf([
-        managesVenue(venue),
-        policy.venues.exists.where({ id: venue.id, ownerId: venue.ownerId }),
+  policy.venues.allowUpdate.whereOld(managesVenue).whereNew((venue) =>
+    allOf([
+      managesVenue(venue),
+      // Neither the creator nor the band can be changed by an update.
+      anyOf([
+        policy.venues.exists.where({ id: venue.id, ownerId: venue.ownerId, bandId: venue.bandId }),
+        allOf([
+          { bandId: { isNull: true } },
+          policy.venues.exists.where({
+            id: venue.id,
+            ownerId: venue.ownerId,
+            bandId: { isNull: true },
+          }),
+        ]),
       ]),
-    );
+    ]),
+  );
   policy.venues.allowDelete.where(managesVenue);
 
   // Stops: the public sees confirmed dates; the band sees and edits everything.

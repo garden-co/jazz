@@ -85,27 +85,33 @@ function startEdit() {
   editing.value = true;
 }
 
+// The stop and its private note change together, in one transaction.
 function save() {
   const { id, bandId, date } = props.stop;
+  const existing = note.value;
   // Keep the show's time of day when only the day changes.
   const day = fromDateInput(draft.date);
   day.setHours(date.getHours(), date.getMinutes());
-  db.update(app.stops, id, {
-    date: day,
-    status: draft.status,
-    publicDescription: draft.description,
-  });
-
   const body = draft.notes.trim();
-  if (note.value && body) db.update(app.stopNotes, note.value.id, { body });
-  else if (note.value) db.delete(app.stopNotes, note.value.id);
-  else if (body) db.insert(app.stopNotes, { stopId: id, bandId, body });
+  void db.transaction((tx) => {
+    tx.update(app.stops, id, {
+      date: day,
+      status: draft.status,
+      publicDescription: draft.description,
+    });
+    if (existing && body) tx.update(app.stopNotes, existing.id, { body });
+    else if (existing) tx.delete(app.stopNotes, existing.id);
+    else if (body) tx.insert(app.stopNotes, { stopId: id, bandId, body });
+  });
   editing.value = false;
 }
 
 function deleteStop() {
-  if (note.value) db.delete(app.stopNotes, note.value.id);
-  db.delete(app.stops, props.stop.id);
+  const existing = note.value;
+  void db.transaction((tx) => {
+    if (existing) tx.delete(app.stopNotes, existing.id);
+    tx.delete(app.stops, props.stop.id);
+  });
   emit("deleted");
 }
 </script>

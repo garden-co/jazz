@@ -54,8 +54,9 @@
     <Sheet :open="!!sheet" :title="sheetTitle" @close="closeSheet" @closed="shownSheet = null">
       <template v-if="shownSheet?.kind === 'stop'">
         <TourCalendar
-          :stops="stops"
-          :selected-stop-id="selectedStop?.id ?? null"
+          :band-id="shownSheet.bandId"
+          :anchor="selectedStop?.date ?? stops[0]?.date ?? today"
+          :selected-stop-id="shownSheet.stopId"
           @select-stop="selectStop"
         />
         <StopDetail
@@ -112,7 +113,7 @@ import { app } from "../schema.js";
 import { MapController } from "./lib/map-controller";
 import { findNearestStop } from "./lib/nearest-stop";
 import { useRoute } from "./lib/routes";
-import { startDemoTour } from "./seed-loader";
+import { claimDemoBand, startDemoTour } from "./seed-loader";
 import AddStopPopover from "./components/AddStopPopover.vue";
 import BandPanel from "./components/BandPanel.vue";
 import JoinBand from "./components/JoinBand.vue";
@@ -150,19 +151,28 @@ const isMember = computed(() => !!memberships.value?.some((m) => m.bandId === ba
 const isOwner = computed(() => !!band.value && band.value.ownerId === userId.value);
 
 const roleLine = computed(() => {
-  if (!band.value) return "Loading the tour…";
+  if (!band.value) return seedFailed.value ? "No tour yet." : "Loading the tour…";
   if (isOwner.value) return "Your band. Click the globe to add a stop.";
   if (isMember.value) return "You're in this band. Click the globe to add a stop.";
   return "Public tour page with confirmed dates";
 });
 
 // A fresh app has no bands: start the seeded demo tour, owned by this account.
+// If another first visitor wins the race, their band shows up through `someBand`.
 let seeding = false;
+const seedFailed = ref(false);
 watch([userId, memberships, someBand], async ([id, mine, any]) => {
   if (seeding || !id || !mine || !any || mine.length > 0 || any.length > 0 || route.value.bandId)
     return;
   seeding = true;
-  await startDemoTour(db, { userId: id, ownerName: "Tour manager" });
+  try {
+    seedFailed.value = !(await claimDemoBand(db, { userId: id, ownerName: "Tour manager" }));
+  } catch (error) {
+    console.error("Could not write the demo tour", error);
+    seedFailed.value = true;
+  } finally {
+    seeding = false;
+  }
 });
 
 const starting = ref(false);
@@ -176,9 +186,9 @@ async function startOwnTour() {
   }
 }
 
-// --- The next three weeks of stops -------------------------------------------
+// --- The next three weeks of stops, for the globe and the public poster -------
 // One query for everybody: the stops policy returns every stop to band members
-// and only confirmed ones to the public.
+// and only confirmed ones to the public. The calendar queries its own month.
 
 const today = ref(startOfToday());
 const dayTimer = setInterval(() => {
@@ -203,15 +213,23 @@ const stops = computed(() => (stopRows.value ?? []).filter((s) => s.venue));
 // --- Sheet, popover and posters -----------------------------------------------
 
 type SheetState =
-  | { kind: "stop"; stopId: string }
+  | { kind: "stop"; stopId: string; bandId: string }
   | { kind: "create"; lat: number; lng: number }
   | { kind: "band" };
 const sheet = ref<SheetState | null>(null);
 // Keeps the content rendered while the sheet slides out.
 const shownSheet = ref<SheetState | null>(null);
+// The selected stop can be outside the next three weeks (picked in the calendar).
+const { data: selectedRows } = useAll(() => {
+  const s = shownSheet.value;
+  return s?.kind === "stop"
+    ? app.stops.where({ id: s.stopId }).include({ venue: true })
+    : undefined;
+});
 const selectedStop = computed(() => {
   const s = shownSheet.value;
-  return s?.kind === "stop" ? (stops.value.find((stop) => stop.id === s.stopId) ?? null) : null;
+  const stop = selectedRows.value?.[0];
+  return s?.kind === "stop" && stop?.id === s.stopId && stop.venue ? stop : null;
 });
 const sheetTitle = computed(() => {
   const s = shownSheet.value;
@@ -237,13 +255,26 @@ function selectStop(stopId: string) {
   const stop = stops.value.find((s) => s.id === stopId);
   mapCtrl?.stopTour();
   touring.value = false;
-  if (isMember.value) openSheet({ kind: "stop", stopId });
+  if (isMember.value && bandId.value) openSheet({ kind: "stop", stopId, bandId: bandId.value });
   else {
     showPoster.value = false;
     posterStopId.value = stopId;
   }
   if (stop?.venue) mapCtrl?.flyTo(stop.venue, { duration: 1500 });
 }
+
+// Stops picked in the calendar or just created may not be on the globe's list yet.
+watch(
+  () => selectedStop.value?.venue,
+  (venue, previous) => {
+    if (
+      venue &&
+      venue.id !== previous?.id &&
+      !stops.value.some((s) => s.id === selectedStop.value?.id)
+    )
+      mapCtrl?.flyTo(venue, { duration: 1500 });
+  },
+);
 
 function selectNearest(point: { lat: number; lng: number }) {
   const nearest = findNearestStop(

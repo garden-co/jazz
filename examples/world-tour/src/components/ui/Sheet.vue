@@ -2,7 +2,7 @@
   <aside
     class="sheet"
     :class="{ open }"
-    :aria-hidden="!open"
+    :inert="!open"
     @transitionend.self="!open && emit('closed')"
   >
     <header class="sheet__header">

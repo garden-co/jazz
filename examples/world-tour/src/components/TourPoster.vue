@@ -18,7 +18,7 @@
     </template>
     <p v-else class="text-secondary">No confirmed dates in the next three weeks.</p>
     <div class="actions">
-      <Button variant="primary" @click="emit('dismiss')">Explore the globe</Button>
+      <Button variant="primary" autofocus @click="emit('dismiss')">Explore the globe</Button>
     </div>
   </Dialog>
 </template>

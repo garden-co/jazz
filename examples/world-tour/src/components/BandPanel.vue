@@ -81,15 +81,24 @@ async function copy() {
   setTimeout(() => (copied.value = false), 2000);
 }
 
-function resetInvite() {
-  if (invite.value) db.delete(app.bandInvites, invite.value.id);
-  db.insert(app.bandInvites, { bandId: props.band.id, code: newInviteCode() });
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+function replaceInvite(tx: Tx) {
+  if (invite.value) tx.delete(app.bandInvites, invite.value.id);
+  tx.insert(app.bandInvites, { bandId: props.band.id, code: newInviteCode() });
 }
 
-// A kept invite link would let a removed member straight back in, so revoking resets it.
+function resetInvite() {
+  void db.transaction(replaceInvite);
+}
+
+// A kept invite link would let a removed member straight back in, so revoking
+// resets it in the same transaction.
 function revoke(memberId: string) {
-  db.delete(app.members, memberId);
-  resetInvite();
+  void db.transaction((tx) => {
+    tx.delete(app.members, memberId);
+    replaceInvite(tx);
+  });
 }
 
 function leave() {

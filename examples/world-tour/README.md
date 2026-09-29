@@ -17,7 +17,7 @@ Every visitor has a local-first account. Band membership, enforced in [`permissi
 - **Public visitors** see the band and its confirmed stops. Tentative and cancelled stops, private notes, invites and the member list never reach them.
 - **Members** see and edit every stop, rename the band and add venues. They join with the owner's invite link (`#/bands/<id>/join/<code>`); nobody can add themselves to a band without the current code.
 - **The owner** manages the invite link and removes members. Removing a member also resets the link, so a revoked member can't rejoin with the old one.
-- **Venues** are public places, owned by whoever created them and by the band they were added for.
+- **Venues** are public places. Each band adds its own and its members manage them, so no other band can move or delete a venue this band's stops use.
 
 ## Demo data
 
@@ -37,8 +37,8 @@ pnpm walkthrough:shots
 public schedule and venue shapes needed to measure the app's two browse paths:
 the member calendar and the confirmed-only public calendar. Both are ordered,
 bounded three-week itinerary reads with their venue relation included.
-It does not import frontend code or claim to cover the app's unresolved
-membership/venue-ownership policy decisions.
+It does not import frontend code or cover the app's permissions, and its
+shapes predate the app's `ownerId` and `stopNotes` columns.
 
 ```bash
 cargo test -p jazz-example-world-tour-benchmark

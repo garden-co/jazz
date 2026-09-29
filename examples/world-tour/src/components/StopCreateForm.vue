@@ -110,7 +110,10 @@ const props = defineProps<{ lat: number; lng: number; bandId: string; userId: st
 const emit = defineEmits<{ created: [stopId: string]; cancel: [] }>();
 
 const db = useDb();
-const { data: venues } = useAll(app.venues.orderBy("name", "asc"));
+// Only this band's venues: another band's venue could be moved or deleted by that band.
+const { data: venues } = useAll(() =>
+  app.venues.where({ bandId: props.bandId }).orderBy("name", "asc"),
+);
 
 const venueMode = ref<"new" | "existing">("new");
 const existingVenueId = ref("");
@@ -125,32 +128,39 @@ const venue = reactive({
 const show = reactive({ date: "", status: "tentative" as StopStatus, description: "", notes: "" });
 
 async function submit() {
-  const venueId =
-    venueMode.value === "existing"
-      ? existingVenueId.value
-      : db.insert(app.venues, {
-          ...venue,
-          capacity: venue.capacity || undefined,
-          ownerId: props.userId,
-          bandId: props.bandId,
-        }).value.id;
-
   const date = fromDateInput(show.date);
   date.setHours(20);
-  const stop = db.insert(app.stops, {
-    bandId: props.bandId,
-    venueId,
-    date,
-    status: show.status,
-    publicDescription: show.description,
-  });
-  emit("created", stop.value.id);
 
+  // The venue and the stop go in one transaction.
+  const created = await db.transaction((tx) => {
+    const venueId =
+      venueMode.value === "existing"
+        ? existingVenueId.value
+        : tx.insert(app.venues, {
+            ...venue,
+            capacity: venue.capacity || undefined,
+            ownerId: props.userId,
+            bandId: props.bandId,
+          }).id;
+    return tx.insert(app.stops, {
+      bandId: props.bandId,
+      venueId,
+      date,
+      status: show.status,
+      publicDescription: show.description,
+    }).id;
+  });
+  const stopId = created.value;
+  emit("created", stopId);
+
+  // The note can't join that transaction: its policy checks that the stop exists
+  // in the band, and permission `exists` checks only see committed rows
+  // (INV-RLS-9). Whether they should see a transaction's own writes is an open
+  // question for the core team; until then the note waits for the stop.
   const body = show.notes.trim();
   if (body) {
-    // The note's policy checks that the stop belongs to the band, so let the stop land first.
-    await stop.wait({ tier: "global" });
-    db.insert(app.stopNotes, { stopId: stop.value.id, bandId: props.bandId, body });
+    await created.wait({ tier: "global" });
+    db.insert(app.stopNotes, { stopId, bandId: props.bandId, body });
   }
 }
 </script>

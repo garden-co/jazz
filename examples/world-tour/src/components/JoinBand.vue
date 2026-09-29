@@ -7,7 +7,7 @@
       </p>
       <label class="field">
         <span class="field__label">Your name</span>
-        <input v-model="name" class="input" required autocomplete="name" />
+        <input v-model="name" class="input" required autocomplete="name" autofocus />
         <span class="field__hint">The rest of the band sees this.</span>
       </label>
       <p v-if="error" class="field__error" role="alert">{{ error }}</p>
