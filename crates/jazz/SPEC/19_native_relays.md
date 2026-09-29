@@ -213,7 +213,10 @@ embedded Rust library.
 
 The first public ABI is V1. It includes host-generated opaque admission
 capabilities and trusted revocation; no earlier implementation number or
-compatibility path is part of the released contract.
+compatibility path is part of the released contract. ABI 2 (alpha.58) adds
+coded operation errors (response 25) as answers to existing commands; see
+§19.6 ("Coded operation errors"). The exported constant keeps its `NATIVE_RELAY_ABI_V1` name and carries
+the current version.
 
 The ABI stays coarse and binary:
 
@@ -610,8 +613,8 @@ responses so the eventual shared adapter keeps their existing error
 attribution; malformed bytes and lifecycle failures still fail closed at the C
 boundary.
 
-**Coded operation errors.** Response 25, `CodedOperationError`, is appended to
-V1: a code string followed by a reason string. A failure caused by a core
+**Coded operation errors.** Response 25, `CodedOperationError`, is introduced
+by ABI 2: a code string followed by a reason string. A failure caused by a core
 `jazz::db::Error` uses it, with the code set to the stable
 `ErrorCode::as_str` spelling (for example `not_observed`) and the reason set to
 the core error's unchanged display text (`"NotObserved: …"`). Every other
@@ -619,9 +622,12 @@ failure keeps response 8, `OperationError`, with only a reason. The TypeScript
 decoder presents both as one `operationError` response with an optional
 `code`, and the shared adapter throws it as an `Error` whose `code` is that
 string. Bytes are pinned by `foreground_coded_operation_error_v1_byte_contract`.
-Unlike other V1 appends, this response answers existing commands, so a native
-artifact carrying it must not run beneath a JavaScript bundle older than the
-decoder that understands it; such a bundle fails closed on the unknown tag.
+Because this response answers existing commands, it bumped the relay ABI to 2:
+a JavaScript bundle and a native build from different ABIs refuse to open with
+the "new native development/release build required" error, so neither an old
+decoder meets tag 25 nor new JavaScript meets an uncoded core failure. A
+JavaScript-only OTA update onto an ABI 1 native build therefore needs a new
+native build.
 
 This slice intentionally delegates every mutation to the existing core
 transaction APIs with their default options. It therefore does not invent
