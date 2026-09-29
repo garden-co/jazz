@@ -127,4 +127,11 @@ mod tests {
         assert!(counts[0] > counts[1]);
         assert!(counts[1] > counts[9]);
     }
+
+    #[test]
+    #[should_panic(expected = "weights total overflow")]
+    fn lcg_weighted_index_panics_on_total_weight_overflow() {
+        let mut rng = Lcg::new(7);
+        rng.weighted_index(&[u64::MAX, 1]);
+    }
 }
