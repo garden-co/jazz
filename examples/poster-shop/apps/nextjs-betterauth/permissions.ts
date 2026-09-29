@@ -10,6 +10,8 @@ type Role = "viewer" | "editor" | "admin";
  *
  * | table         | read   | insert           | update               | delete          |
  * | ------------- | ------ | ---------------- | -------------------- | --------------- |
+ * | canvases      | member | never (server)   | admin                | admin           |
+ * | canvasMembers | member | admin            | admin                | admin, self     |
  * | layers        | member | editor, admin    | editor, admin        | editor, admin * |
  * | shapes        | member | editor, admin *  | editor, admin *      | editor, admin * |
  * | assets        | member | editor, admin    | never (immutable)    | editor, admin   |
@@ -63,24 +65,17 @@ export default definePermissions(app, ({ policy, session, anyOf, allOf, allowedT
     policy.layers.exists.where({ id: shape.layerId, canvasId: shape.canvasId, locked: false });
 
   policy.canvases.allowRead.where((canvas) => canRead(canvas));
-  // Canvas bootstrap is intentionally unconditional. `allowedTo.insert` is
-  // therefore never used for child tables: it would inherit this rule.
-  policy.canvases.allowInsert.always();
+  // Canvases (and their first admin membership) are only ever created by the
+  // server-side bootstrap in src/lib/bootstrap.ts, which writes with backend
+  // authority and bypasses these rules. No client may create a canvas, so
+  // there is no unconditional insert rule for child tables to inherit.
+  policy.canvases.allowInsert.never();
   policy.canvases.allowUpdate.where((canvas) => isAdmin(canvas));
   policy.canvases.allowDelete.where((canvas) => isAdmin(canvas));
   policy.canvasMembers.allowRead.where(allowedTo.read("canvas"));
-  policy.canvasMembers.allowInsert.where((member) =>
-    anyOf([
-      allowedTo.update("canvas"),
-      allOf([
-        { memberAuthor: session.user.account, role: "admin" },
-        policy.canvases.exists.where({
-          id: member.canvasId,
-          "$createdBy.account": session.user.account,
-        }),
-      ]),
-    ]),
-  );
+  // Admins may add members directly; everyone else joins through the invite
+  // route, which inserts the membership with backend authority.
+  policy.canvasMembers.allowInsert.where(allowedTo.update("canvas"));
   policy.canvasMembers.allowUpdate.where(allowedTo.update("canvas"));
   policy.canvasMembers.allowDelete.where(
     anyOf([allowedTo.update("canvas"), { memberAuthor: session.user.account }]),
@@ -98,9 +93,7 @@ export default definePermissions(app, ({ policy, session, anyOf, allOf, allowedT
   // layer cannot be moved onto someone else's canvas.
   policy.layers.allowRead.where(allowedTo.read("canvas"));
   policy.layers.allowInsert.where((layer) => canEditCanvas(layer.canvasId));
-  policy.layers.allowUpdate
-    .whereOld((layer) => canEditCanvas(layer.canvasId))
-    .whereNew((layer) => canEditCanvas(layer.canvasId));
+  policy.layers.allowUpdate.where((layer) => canEditCanvas(layer.canvasId));
   policy.layers.allowDelete.where((layer) =>
     allOf([canEditCanvas(layer.canvasId), { locked: false }]),
   );
@@ -114,9 +107,7 @@ export default definePermissions(app, ({ policy, session, anyOf, allOf, allowedT
     allOf([unlockedLayerOnSameCanvas(shape), canEditCanvas(shape.canvasId)]);
   policy.shapes.allowRead.where(allowedTo.read("canvas"));
   policy.shapes.allowInsert.where((shape) => canWriteShape(shape));
-  policy.shapes.allowUpdate
-    .whereOld((shape) => canWriteShape(shape))
-    .whereNew((shape) => canWriteShape(shape));
+  policy.shapes.allowUpdate.where((shape) => canWriteShape(shape));
   policy.shapes.allowDelete.where((shape) => canWriteShape(shape));
 
   // Asset bytes are immutable once uploaded; a replacement is a new asset.

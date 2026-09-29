@@ -240,7 +240,11 @@ describe("PosterShop cross-topology recovery", () => {
                 .insert(app.shapes, shape(canvas.id, layer.id, 3))
                 .wait({ tier: "global" });
               await owner
-                .insert(app.checkpoints, { canvasId: canvas.id, label: "Approved", branch: "main" })
+                .insert(app.checkpoints, {
+                  canvasId: canvas.id,
+                  label: "Approved",
+                  snapshot: { layers: [], shapes: [] },
+                })
                 .wait({ tier: "global" });
               expect([ownerShape.zIndex, editorShape.zIndex]).toEqual([0, 1]);
             },

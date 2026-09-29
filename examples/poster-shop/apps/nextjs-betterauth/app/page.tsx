@@ -1,19 +1,23 @@
+import { Center } from "@astryxdesign/core";
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { SignInForm } from "@/components/sign-in-form";
 import { auth } from "@/src/lib/auth";
 
-export default function Home({ searchParams }: { searchParams: Promise<{ join?: string }> }) {
-  return <HomeContent searchParams={searchParams} />;
+export default function Home() {
+  return <HomeContent />;
 }
 
-async function HomeContent({ searchParams }: { searchParams: Promise<{ join?: string }> }) {
+async function HomeContent() {
   const session = await auth.api.getSession({ headers: await headers() });
-  const { join } = await searchParams;
-  if (session) redirect(join ? `/dashboard?join=${encodeURIComponent(join)}` : "/dashboard");
+  // Browsers keep the URL fragment across this redirect, so an invite link
+  // (`#invite/...`) survives without ever being sent to the server.
+  if (session) redirect("/dashboard");
   return (
-    <main className="centered-page">
-      <SignInForm />
+    <main>
+      <Center minHeight="100dvh" padding={4}>
+        <SignInForm />
+      </Center>
     </main>
   );
 }

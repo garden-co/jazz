@@ -5,6 +5,7 @@ import {
   Button,
   EmptyState,
   FileInput,
+  Grid,
   Heading,
   HStack,
   Text,
@@ -137,13 +138,13 @@ export function AssetShelf({
           }
         />
       ) : (
-        <ul className="asset-grid">
+        <Grid role="list" aria-label="Images" columns={{ minWidth: 128 }} gap={3}>
           {assets.map((asset) => (
-            <li key={asset.id}>
+            <div role="listitem" key={asset.id}>
               <AssetTile asset={asset} canPlace={canEdit} onPlace={() => void place(asset)} />
-            </li>
+            </div>
           ))}
-        </ul>
+        </Grid>
       )}
     </VStack>
   );

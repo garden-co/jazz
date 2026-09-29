@@ -1,6 +1,6 @@
 "use client";
 
-import { useAll, useDb } from "jazz-tools/react";
+import { useDb, useOne } from "jazz-tools/react";
 import { useEffect, useState } from "react";
 import { app } from "@/schema";
 
@@ -10,23 +10,53 @@ export const ASSET_PAGE_BYTES = 256 * 1024;
 type Db = ReturnType<typeof useDb>;
 type AssetMeta = { id: string; byteLength: number; mimeType: string };
 
-// Assets are immutable (permissions deny updates), so an object URL per asset
-// id can be shared by every thumbnail and image shape for the whole session.
-const urls = new Map<string, Promise<string>>();
+// Assets are immutable (permissions deny updates), so one object URL per asset
+// id is shared by every thumbnail and image shape that shows it. Entries are
+// reference counted and revoked shortly after the last user unmounts, so
+// switching posters or deleting images does not leak blobs for the session.
+type Entry = { url: Promise<string>; refs: number; release?: ReturnType<typeof setTimeout> };
+const entries = new Map<string, Entry>();
+const RELEASE_DELAY_MS = 5_000;
 
 /**
  * Read an asset's bytes with typed large-value range selections
  * (`select({ bytes: { from, to } })`, #2088) and expose them as an object URL.
+ * Call the returned `release` once the URL is no longer displayed.
  */
-export function readAssetUrl(db: Db, asset: AssetMeta): Promise<string> {
-  let pending = urls.get(asset.id);
-  if (!pending) {
-    pending = readAssetBlob(db, asset).then((blob) => URL.createObjectURL(blob));
+export function acquireAssetUrl(
+  db: Db,
+  asset: AssetMeta,
+): { url: Promise<string>; release: () => void } {
+  let entry = entries.get(asset.id);
+  if (!entry) {
+    const url = readAssetBlob(db, asset).then((blob) => URL.createObjectURL(blob));
+    const created: Entry = { url, refs: 0 };
     // A failed read must not poison later attempts, e.g. once the bytes sync.
-    pending.catch(() => urls.delete(asset.id));
-    urls.set(asset.id, pending);
+    url.catch(() => {
+      if (entries.get(asset.id) === created) entries.delete(asset.id);
+    });
+    entries.set(asset.id, created);
+    entry = created;
   }
-  return pending;
+  const held = entry;
+  held.refs += 1;
+  if (held.release) clearTimeout(held.release);
+  held.release = undefined;
+  let released = false;
+  return {
+    url: held.url,
+    release() {
+      if (released) return;
+      released = true;
+      held.refs -= 1;
+      if (held.refs > 0) return;
+      held.release = setTimeout(() => {
+        if (held.refs > 0 || entries.get(asset.id) !== held) return;
+        entries.delete(asset.id);
+        void held.url.then((url) => URL.revokeObjectURL(url)).catch(() => undefined);
+      }, RELEASE_DELAY_MS);
+    },
+  };
 }
 
 async function readAssetBlob(db: Db, asset: AssetMeta): Promise<Blob> {
@@ -52,13 +82,15 @@ export function useAssetUrl(asset: AssetMeta | null | undefined): string | null 
   useEffect(() => {
     if (!id || byteLength === undefined || !mimeType) return;
     let cancelled = false;
-    void readAssetUrl(db, { id, byteLength, mimeType })
+    const held = acquireAssetUrl(db, { id, byteLength, mimeType });
+    void held.url
       .then((next) => {
         if (!cancelled) setUrl({ id, url: next });
       })
       .catch(() => undefined);
     return () => {
       cancelled = true;
+      held.release();
     };
   }, [db, id, byteLength, mimeType]);
   return url && url.id === id ? url.url : null;
@@ -66,8 +98,8 @@ export function useAssetUrl(asset: AssetMeta | null | undefined): string | null 
 
 /** Object URL for an asset id, reading only its metadata columns first. */
 export function useAssetUrlById(assetId: string | null | undefined): string | null {
-  const { data } = useAll(
+  const { data } = useOne(
     assetId ? app.assets.where({ id: assetId }).select("id", "byteLength", "mimeType") : undefined,
   );
-  return useAssetUrl(data?.[0]);
+  return useAssetUrl(data);
 }

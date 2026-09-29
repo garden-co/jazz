@@ -83,7 +83,7 @@ export function demoPoster(displayName: string, newId: () => string): DemoPoster
     text: shape.text ?? null,
   }));
   return {
-    title: `${displayName.trim() || "Untitled"}'s poster`,
+    title: displayName.trim() ? `${displayName.trim()}'s poster` : "Late set poster",
     layers,
     shapes,
     checkpoint: { label: "First draft", snapshot: takeSnapshot(layers, shapes) },

@@ -24,7 +24,7 @@ export function SignInForm() {
       setPending(false);
       return;
     }
-    window.location.assign(`/dashboard${window.location.search}`);
+    window.location.assign(`/dashboard${window.location.hash}`);
   };
 
   return (

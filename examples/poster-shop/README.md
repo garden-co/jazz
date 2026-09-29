@@ -29,8 +29,10 @@ animation frame. Both are ordinary local-first updates.
 
 ## Authorization
 
-`permissions.ts` gives every child table its own role predicate (#1926); none
-inherits the unconditional canvas insert.
+`permissions.ts` gives every child table its own role predicate (#1926).
+No client can create a canvas or promote itself: canvases and first admins
+come only from the server bootstrap, and other memberships from an admin or
+the server invite route.
 
 - Members (viewers included) read the poster and publish only their own
   cursor row. Nobody can write, reassign or delete another member's cursor.
@@ -42,6 +44,17 @@ inherits the unconditional canvas insert.
 - Editors and admins upload images. Asset bytes are immutable; a replacement
   is a new asset.
 - Admins save checkpoints. Checkpoints are immutable and cannot be deleted.
+- Admins issue, list and revoke invite links.
+
+## Invite links
+
+An invite link looks like `/dashboard#invite/<canvasId>/<token>`. The token
+lives in the URL fragment, so it never reaches server logs, CDN logs or
+`Referer` headers; the client posts it to `/api/join` in the request body.
+The route follows the invite-links recipe: one exclusive transaction checks
+for an existing membership (so reopening a link is idempotent and never
+changes an existing role), reads the private invite, inserts the membership
+and deletes a single-use invite, so two people cannot both redeem one.
 
 ## Images as large values
 
@@ -61,17 +74,23 @@ the live poster is a follow-up.
 
 ## First open
 
-`/api/bootstrap` runs server-side with backend authority. One exclusive
+`/api/bootstrap` verifies the caller with `client.forRequest(request)` and
+writes through `client.withAttributionForRequest(request)`, so it keeps
+backend authority while stamping the verified user as author. One exclusive
 transaction checks for an existing membership and otherwise creates the
 canvas, the admin membership and a deterministic demo poster (see
 `src/lib/demo-poster.ts`) with a "First draft" checkpoint. Conflicting
 first opens retry with bounded exponential backoff; persistent conflicts end
-in a recoverable 503 instead of a hung request (#2615).
+in a recoverable 503 instead of a hung request (#2615). Concurrent calls for
+one account share a single run on the server, and the dashboard shares one
+request between React StrictMode's double mount.
 
 ## Tests
 
-- `pnpm test` runs the policy receipts against a local Jazz server and the
-  unit tests for the poster model, the seed and the bootstrap retry.
+- `pnpm test` runs the policy receipts and the server actions (bootstrap and
+  invite redemption: idempotency, racing first opens, racing single-use
+  redeems, no role downgrade) against a local Jazz server, plus unit tests
+  for the poster model, the seed and the conflict retry.
 - `pnpm test:browser` runs the browser → serving core topology receipt:
   concurrent ordered edits, an offline local shape across persistent reopen,
   replay to a peer after reconnect, a bounded shape-window query and a

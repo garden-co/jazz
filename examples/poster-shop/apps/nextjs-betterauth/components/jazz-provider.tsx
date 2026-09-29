@@ -1,11 +1,10 @@
 "use client";
 
-import { Banner, Spinner } from "@astryxdesign/core";
+import { Banner, Center, Spinner } from "@astryxdesign/core";
 import { useEffect, useRef, useState } from "react";
 import { createAccountManager } from "jazz-tools";
 import { createJazzClient, JazzClientProvider, type JazzClient } from "jazz-tools/react";
 import { authClient, getJwtFromBetterAuth } from "@/src/lib/auth-client";
-import { loginOrRegister } from "@/src/lib/account-enrollment";
 
 const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID ?? "poster-shop-local";
 const serverUrl = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL ?? "http://127.0.0.1:4200";
@@ -24,7 +23,9 @@ export function JazzProvider({ children }: { children: React.ReactNode }) {
     void (async () => {
       const accounts = await createAccountManager({ appId, serverUrl, env: "dev" });
       const credential = { getToken: requireBetterAuthToken };
-      const account = await loginOrRegister(accounts, credential);
+      // One ordered core decision: the active assignment, or a new account
+      // for a fresh identity (docs/auth/authentication).
+      const account = await accounts.loginOrRegisterJWT(credential);
       const opened = await createJazzClient({ appId, serverUrl, account });
       if (cancelled) return void opened.shutdown();
       await clientRef.current?.shutdown({ waitForSync: true });
@@ -55,12 +56,14 @@ export function JazzProvider({ children }: { children: React.ReactNode }) {
       : undefined;
   if (visibleError)
     return (
-      <main className="centered-page">
-        <Banner
-          status="error"
-          title="Could not open the poster studio"
-          description={visibleError.message}
-        />
+      <main>
+        <Center minHeight="100dvh" padding={4}>
+          <Banner
+            status="error"
+            title="Could not open the poster studio"
+            description={visibleError.message}
+          />
+        </Center>
       </main>
     );
   const client =
@@ -69,8 +72,10 @@ export function JazzProvider({ children }: { children: React.ReactNode }) {
       : undefined;
   if (!client)
     return (
-      <main className="centered-page">
-        <Spinner label="Opening the poster studio" />
+      <main>
+        <Center minHeight="100dvh" padding={4}>
+          <Spinner label="Opening the poster studio" />
+        </Center>
       </main>
     );
   return <JazzClientProvider client={client}>{children}</JazzClientProvider>;

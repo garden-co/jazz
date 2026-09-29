@@ -1,9 +1,9 @@
 "use client";
 
-import { Banner, Button, Spinner } from "@astryxdesign/core";
+import { Banner, Button, Center, Spinner } from "@astryxdesign/core";
 import { useEffect, useState } from "react";
 import { PosterShopApp } from "@/src/App";
-import { bootstrapPersonalCanvas, joinCanvasWithInvite } from "@/src/lib/account-enrollment";
+import { parseInviteFragment, prepareStudio } from "@/src/lib/account-enrollment";
 import { authClient, getJwtFromBetterAuth } from "@/src/lib/auth-client";
 
 export default function Dashboard() {
@@ -11,53 +11,49 @@ export default function Dashboard() {
   const [bootstrap, setBootstrap] = useState<"loading" | "ready" | "failed">("loading");
   const [attempt, setAttempt] = useState(0);
   const [joinedCanvasId, setJoinedCanvasId] = useState<string | null>(null);
+  const userId = session?.user.id;
   useEffect(() => {
-    if (!session) return;
+    if (!userId) return;
     let cancelled = false;
     setBootstrap("loading");
-    const invite = new URLSearchParams(window.location.search).get("join");
-    void (async () => {
-      const token = await getJwtFromBetterAuth();
-      if (!token) return false;
-      const bootstrapped = await bootstrapPersonalCanvas(token);
-      if (!bootstrapped.ok) return false;
-      if (invite) {
-        const joined = await joinCanvasWithInvite(token, invite);
-        if (!joined.ok) return false;
-        const { canvasId } = (await joined.json()) as { canvasId: string };
-        if (!cancelled) setJoinedCanvasId(canvasId);
+    const invite = parseInviteFragment(window.location.hash);
+    void prepareStudio(userId, getJwtFromBetterAuth, invite).then((result) => {
+      if (cancelled) return;
+      if (result.ok && invite) {
+        setJoinedCanvasId(result.joinedCanvasId);
+        // Drop the redeemed token from the address bar and history.
         window.history.replaceState(null, "", "/dashboard");
       }
-      return true;
-    })()
-      .catch(() => false)
-      .then((ok) => {
-        if (!cancelled) setBootstrap(ok ? "ready" : "failed");
-      });
+      setBootstrap(result.ok ? "ready" : "failed");
+    });
     return () => {
       cancelled = true;
     };
-  }, [session?.user.id, attempt]);
+  }, [userId, attempt]);
   useEffect(() => {
     // Signed-out visitors (for example from an invite link) sign in first and
-    // come back with the same query string.
-    if (!isPending && !session) window.location.assign(`/${window.location.search}`);
+    // come back with the same fragment; it never reaches the server.
+    if (!isPending && !session) window.location.assign(`/${window.location.hash}`);
   }, [isPending, session]);
   if (!session || bootstrap === "loading")
     return (
-      <main className="centered-page">
-        <Spinner label="Preparing your poster studio" />
+      <main>
+        <Center minHeight="100dvh" padding={4}>
+          <Spinner label="Preparing your poster studio" />
+        </Center>
       </main>
     );
   if (bootstrap === "failed")
     return (
-      <main className="centered-page">
-        <Banner
-          status="error"
-          title="Could not prepare your poster studio"
-          description="The server did not finish setting up your first poster. Your work is safe; try again."
-          endContent={<Button label="Try again" onClick={() => setAttempt(attempt + 1)} />}
-        />
+      <main>
+        <Center minHeight="100dvh" padding={4}>
+          <Banner
+            status="error"
+            title="Could not prepare your poster studio"
+            description="The server did not finish setting up your first poster. Your work is safe; try again."
+            endContent={<Button label="Try again" onClick={() => setAttempt(attempt + 1)} />}
+          />
+        </Center>
       </main>
     );
   return <PosterShopApp initialCanvasId={joinedCanvasId} />;

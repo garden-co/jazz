@@ -1,48 +1,15 @@
-import { AccountAuthError } from "jazz-tools";
-import { describe, expect, it, vi } from "vitest";
-import { bootstrapPersonalCanvas, loginOrRegister } from "../../src/lib/account-enrollment";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  bootstrapPersonalCanvas,
+  inviteLinkFor,
+  joinCanvasWithInvite,
+  parseInviteFragment,
+  prepareStudio,
+} from "../../src/lib/account-enrollment";
 
-describe("PosterShop account bootstrap", () => {
-  it("enrolls only after the registry says the identity is unassigned", async () => {
-    const account = { id: crypto.randomUUID(), identity: { issuer: "issuer", subject: "user" } };
-    const accounts = {
-      loginJWT: vi.fn().mockRejectedValue(new AccountAuthError("identity_not_assigned")),
-      registerJWT: vi.fn().mockResolvedValue(account),
-    };
-    await expect(loginOrRegister(accounts as never, { getToken: async () => "jwt" })).resolves.toBe(
-      account,
-    );
-    expect(accounts.registerJWT).toHaveBeenCalledOnce();
-  });
+afterEach(() => vi.unstubAllGlobals());
 
-  it("does not turn a different registry failure into an enrollment", async () => {
-    const accounts = {
-      loginJWT: vi.fn().mockRejectedValue(new AccountAuthError("identity_not_authorized")),
-      registerJWT: vi.fn(),
-    };
-    await expect(
-      loginOrRegister(accounts as never, { getToken: async () => "jwt" }),
-    ).rejects.toMatchObject({
-      code: "identity_not_authorized",
-    });
-    expect(accounts.registerJWT).not.toHaveBeenCalled();
-  });
-
-  it("retries login when another strict-mode instance enrolled first", async () => {
-    const account = { id: crypto.randomUUID(), identity: { issuer: "issuer", subject: "user" } };
-    const accounts = {
-      loginJWT: vi
-        .fn()
-        .mockRejectedValueOnce(new AccountAuthError("identity_not_assigned"))
-        .mockResolvedValueOnce(account),
-      registerJWT: vi.fn().mockRejectedValue(new AccountAuthError("identity_already_assigned")),
-    };
-    await expect(loginOrRegister(accounts as never, { getToken: async () => "jwt" })).resolves.toBe(
-      account,
-    );
-    expect(accounts.loginJWT).toHaveBeenCalledTimes(2);
-  });
-
+describe("PosterShop studio preparation", () => {
   it("passes the admitted bearer to bootstrap", async () => {
     const request = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
     vi.stubGlobal("fetch", request);
@@ -51,6 +18,34 @@ describe("PosterShop account bootstrap", () => {
       "/api/bootstrap",
       expect.objectContaining({ headers: { authorization: "Bearer admitted-jwt" } }),
     );
-    vi.unstubAllGlobals();
+  });
+
+  it("keeps invite tokens in the fragment and the request body only", async () => {
+    const invite = { canvasId: crypto.randomUUID(), token: crypto.randomUUID() };
+    const link = new URL(inviteLinkFor("https://posters.test", invite));
+    expect(link.pathname).toBe("/dashboard");
+    expect(link.search).toBe("");
+    expect(parseInviteFragment(link.hash)).toEqual(invite);
+    expect(parseInviteFragment("#invite/not-a-uuid/also-not")).toBeNull();
+
+    const request = vi.fn().mockResolvedValue(Response.json({ ok: true }));
+    vi.stubGlobal("fetch", request);
+    await joinCanvasWithInvite("jwt", invite);
+    const [url, init] = request.mock.calls[0]!;
+    expect(url).toBe("/api/join");
+    expect(JSON.parse(init.body)).toEqual(invite);
+  });
+
+  it("shares one in-flight preparation between StrictMode mounts", async () => {
+    const request = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
+    vi.stubGlobal("fetch", request);
+    const getToken = vi.fn().mockResolvedValue("jwt");
+    const [first, second] = await Promise.all([
+      prepareStudio("user-1", getToken, null),
+      prepareStudio("user-1", getToken, null),
+    ]);
+    expect(first).toEqual({ ok: true, joinedCanvasId: null });
+    expect(second).toBe(first);
+    expect(request).toHaveBeenCalledOnce();
   });
 });

@@ -1,6 +1,6 @@
 "use client";
 
-import { Banner, Button, HStack, IconButton, Toolbar } from "@astryxdesign/core";
+import { Banner, Button, HStack, IconButton, Toolbar, VStack } from "@astryxdesign/core";
 import { useAll, useDb } from "jazz-tools/react";
 import { ArrowDownToLine, ArrowUpToLine, Circle, Copy, Square, Trash2, Type } from "lucide-react";
 import {
@@ -269,7 +269,7 @@ export function CanvasSurface({
     : liveOrder;
 
   return (
-    <div className="canvas-column">
+    <VStack gap={3}>
       {previewCheckpointId ? (
         <Banner
           status="info"
@@ -409,7 +409,7 @@ export function CanvasSurface({
           )}
         </svg>
       </div>
-    </div>
+    </VStack>
   );
 }
 

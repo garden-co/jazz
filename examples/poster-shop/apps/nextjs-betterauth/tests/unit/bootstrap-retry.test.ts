@@ -1,14 +1,17 @@
+import { PersistedWriteRejectedError } from "jazz-tools";
 import { expect, it } from "vitest";
 import { BootstrapConflictError, withBoundedConflictRetry } from "../../src/lib/retry.js";
 
 const noSleep = async () => undefined;
+const rejected = (code: string) =>
+  new PersistedWriteRejectedError("tx" as never, code, "another transaction won");
 
 it("retries a transient first-open conflict and then succeeds", async () => {
   let calls = 0;
   const result = await withBoundedConflictRetry(
     async () => {
       calls += 1;
-      if (calls < 3) throw new Error("exclusive_conflict: canvasMembers changed");
+      if (calls < 3) throw rejected("exclusive_conflict");
       return "canvas";
     },
     { sleep: noSleep },
@@ -24,7 +27,7 @@ it("terminates a persistent conflict with a recoverable error (#2615)", async ()
     withBoundedConflictRetry(
       async () => {
         calls += 1;
-        throw new Error("transaction_conflict");
+        throw rejected("transaction_conflict");
       },
       { attempts: 4, baseDelayMs: 10, sleep: async (ms) => void delays.push(ms) },
     ),
@@ -33,16 +36,36 @@ it("terminates a persistent conflict with a recoverable error (#2615)", async ()
   expect(delays).toEqual([10, 20, 40]);
 });
 
-it("does not retry unrelated failures", async () => {
+it("retries the native binding's coded conflict error", async () => {
   let calls = 0;
-  await expect(
-    withBoundedConflictRetry(
-      async () => {
-        calls += 1;
-        throw new Error("permission_denied");
-      },
-      { sleep: noSleep },
-    ),
-  ).rejects.toThrow("permission_denied");
-  expect(calls).toBe(1);
+  const nativeConflict = Object.assign(new Error("TransactionConflict: parent changed"), {
+    code: "transaction_conflict",
+  });
+  await withBoundedConflictRetry(
+    async () => {
+      calls += 1;
+      if (calls === 1) throw nativeConflict;
+    },
+    { sleep: noSleep },
+  );
+  expect(calls).toBe(2);
+});
+
+it("does not retry other rejections or errors that only mention a conflict", async () => {
+  for (const error of [
+    rejected("permission_denied"),
+    new Error("exclusive_conflict mentioned in an unrelated message"),
+  ]) {
+    let calls = 0;
+    await expect(
+      withBoundedConflictRetry(
+        async () => {
+          calls += 1;
+          throw error;
+        },
+        { sleep: noSleep },
+      ),
+    ).rejects.toBe(error);
+    expect(calls).toBe(1);
+  }
 });

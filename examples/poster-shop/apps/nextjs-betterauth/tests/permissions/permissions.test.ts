@@ -21,7 +21,22 @@ beforeEach(async () => {
 });
 afterEach(async () => testApp.shutdown());
 
-it("allows an admin to bootstrap a canvas and an editor to add same-canvas shapes", async () => {
+/** Canvases and their first admin only come from the server bootstrap. */
+async function seedCanvas(title: string, ownerId: string) {
+  const canvas = await testApp.seed((db) =>
+    db.insert(app.canvases, { title, width: 1080, height: 1350 }),
+  );
+  await testApp.seed((db) =>
+    db.insert(app.canvasMembers, {
+      canvasId: canvas.id,
+      memberAuthor: authorFor(ownerId),
+      role: "admin",
+    }),
+  );
+  return canvas;
+}
+
+it("lets a seeded admin add members and an editor add same-canvas shapes", async () => {
   const ownerId = "poster-owner",
     editorId = "poster-editor";
   const owner = testApp.as({
@@ -45,16 +60,7 @@ it("allows an admin to bootstrap a canvas and an editor to add same-canvas shape
     claims: {},
     authMode: "external",
   });
-  const canvas = await owner
-    .insert(app.canvases, { title: "Poster", width: 1080, height: 1350 })
-    .wait({ tier: "global" });
-  await owner
-    .insert(app.canvasMembers, {
-      canvasId: canvas.id,
-      memberAuthor: authorFor(ownerId),
-      role: "admin",
-    })
-    .wait({ tier: "global" });
+  const canvas = await seedCanvas("Poster", ownerId);
   const membership = await owner
     .insert(app.canvasMembers, {
       canvasId: canvas.id,
@@ -137,11 +143,8 @@ it("keeps canvas ordering and history markers behind the same membership boundar
     claims: {},
     authMode: "external",
   });
-  const canvas = await owner
-    .insert(app.canvases, { title: "Deterministic canvas", width: 1080, height: 1350 })
-    .wait({ tier: "global" });
+  const canvas = await seedCanvas("Deterministic canvas", ownerId);
   for (const [userId, role] of [
-    [ownerId, "admin"],
     [editorId, "editor"],
     [viewerId, "viewer"],
   ] as const) {
@@ -168,10 +171,18 @@ it("keeps canvas ordering and history markers behind the same membership boundar
     [front.id, 1],
   ]);
   await editor.expectDenied((db) =>
-    db.insert(app.checkpoints, { canvasId: canvas.id, label: "forged", branch: "main" }),
+    db.insert(app.checkpoints, {
+      canvasId: canvas.id,
+      label: "forged",
+      snapshot: { layers: [], shapes: [] },
+    }),
   );
   const checkpoint = await owner
-    .insert(app.checkpoints, { canvasId: canvas.id, label: "Approved poster", branch: "main" })
+    .insert(app.checkpoints, {
+      canvasId: canvas.id,
+      label: "Approved poster",
+      snapshot: { layers: [], shapes: [] },
+    })
     .wait({ tier: "global" });
   await editor.expectDenied((db) =>
     db.update(app.checkpoints, checkpoint.id, { label: "rewritten" }),
@@ -214,19 +225,7 @@ it("denies cross-canvas shapes even for an admin of both canvases", async () => 
     claims: {},
     authMode: "external",
   });
-  const createCanvas = async (title: string) => {
-    const canvas = await owner
-      .insert(app.canvases, { title, width: 1080, height: 1350 })
-      .wait({ tier: "global" });
-    await owner
-      .insert(app.canvasMembers, {
-        canvasId: canvas.id,
-        memberAuthor: authorFor(ownerId),
-        role: "admin",
-      })
-      .wait({ tier: "global" });
-    return canvas;
-  };
+  const createCanvas = (title: string) => seedCanvas(title, ownerId);
   const [left, right] = await Promise.all([createCanvas("Left"), createCanvas("Right")]);
   const foreignLayer = await owner
     .insert(app.layers, { canvasId: right.id, name: "Foreign", zIndex: 0, visible: true })
@@ -263,10 +262,8 @@ async function canvasWithRoles(
   others: readonly (readonly [string, "viewer" | "editor" | "admin"])[],
 ) {
   const owner = actor(ownerId);
-  const canvas = await owner
-    .insert(app.canvases, { title, width: 1080, height: 1350 })
-    .wait({ tier: "global" });
-  for (const [userId, role] of [[ownerId, "admin"] as const, ...others]) {
+  const canvas = await seedCanvas(title, ownerId);
+  for (const [userId, role] of others) {
     await owner
       .insert(app.canvasMembers, { canvasId: canvas.id, memberAuthor: authorFor(userId), role })
       .wait({ tier: "global" });
@@ -427,6 +424,10 @@ it("keeps invites visible to and issued by admins only", async () => {
   expect(
     await editor.all(app.canvasInvites.where({ canvasId: canvas.id }), { tier: "global" }),
   ).toEqual([]);
+  const listed = await owner.all(app.canvasInvites.where({ canvasId: canvas.id }), {
+    tier: "global",
+  });
+  expect(listed.map((row) => [row.id, row.singleUse])).toEqual([[invite.id, false]]);
   await editor.expectDenied((db) => db.delete(app.canvasInvites, invite.id));
   // A client can never self-admit with a token; redeeming is server-side.
   await actor("invite-stranger").expectDenied((db) =>
@@ -437,4 +438,26 @@ it("keeps invites visible to and issued by admins only", async () => {
     }),
   );
   await owner.delete(app.canvasInvites, invite.id).wait({ tier: "global" });
+});
+
+it("keeps canvas creation and self-promotion on the server", async () => {
+  const stranger = actor("canvas-stranger");
+  await stranger.expectDenied((db) =>
+    db.insert(app.canvases, { title: "Pirate poster", width: 1080, height: 1350 }),
+  );
+  const { canvas } = await canvasWithRoles("Guarded", "guard-owner", [["guard-editor", "editor"]]);
+  await stranger.expectDenied((db) =>
+    db.insert(app.canvasMembers, {
+      canvasId: canvas.id,
+      memberAuthor: authorFor("canvas-stranger"),
+      role: "admin",
+    }),
+  );
+  await actor("guard-editor").expectDenied((db) =>
+    db.insert(app.canvasMembers, {
+      canvasId: canvas.id,
+      memberAuthor: authorFor("guard-editor"),
+      role: "admin",
+    }),
+  );
 });

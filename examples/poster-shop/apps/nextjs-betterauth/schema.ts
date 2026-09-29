@@ -28,17 +28,20 @@ const schema = {
     .indexOnly(["canvasId", "memberAuthor"]),
   // An admin-issued invite link. Redeeming one is a server-side action
   // (app/api/join) that checks the token with backend authority and adds a
-  // membership; clients never write their own membership row.
+  // membership; clients never write their own membership row. The token only
+  // ever travels in a URL fragment, and a single-use invite is deleted in the
+  // same exclusive transaction that admits its first redeemer.
   canvasInvites: s
     .table(
       {
         canvasId: s.uuid(),
         token: s.string(),
         role: s.enum("viewer", "editor"),
+        singleUse: s.boolean().default(false),
       },
       { canvas: s.rel("canvases", "canvasId") },
     )
-    .indexOnly(["token"]),
+    .indexOnly(["canvasId", "token"]),
   // Every live canvas view is parent-scoped and ordered. Keep those indexes in
   // the app schema rather than relying on a renderer-side sort or scan.
   layers: s
@@ -94,8 +97,8 @@ const schema = {
         asset: s.rel("assets", "assetId"),
       },
     )
-    .indexOnly(["canvasId", "zIndex"])
-    .indexOnly(["layerId", "zIndex"]),
+    // One call: `indexOnly` replaces any earlier list rather than adding to it.
+    .indexOnly(["canvasId", "layerId", "zIndex"]),
   cursors: s
     .table(
       {
@@ -121,12 +124,11 @@ const schema = {
       {
         canvasId: s.uuid(),
         label: s.string(),
-        branch: s.string(),
-        snapshot: s.json().optional(),
+        snapshot: s.json(),
       },
       { canvas: s.rel("canvases", "canvasId") },
     )
-    .indexOnly(["canvasId", "label"]),
+    .indexOnly(["canvasId"]),
 };
 
 type AppSchema = s.Schema<typeof schema>;

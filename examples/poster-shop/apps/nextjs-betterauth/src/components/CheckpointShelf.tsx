@@ -34,10 +34,10 @@ export function CheckpointShelf({
 }) {
   const db = useDb();
   const { data: checkpoints = [] } = useAll(
-    app.checkpoints.where({ canvasId }).select("id", "label", "$createdAt"),
-  );
-  const ordered = [...checkpoints].sort(
-    (a, b) => Number(b.$createdAt ?? 0) - Number(a.$createdAt ?? 0),
+    app.checkpoints
+      .where({ canvasId })
+      .select("id", "label", "$createdAt")
+      .orderBy("$createdAt", "desc"),
   );
   const [label, setLabel] = useState("");
   const [saving, setSaving] = useState(false);
@@ -53,7 +53,6 @@ export function CheckpointShelf({
       db.insert(app.checkpoints, {
         canvasId,
         label: label.trim() || `Checkpoint ${checkpoints.length + 1}`,
-        branch: "main",
         snapshot: takeSnapshot(layers, shapes),
       });
       setLabel("");
@@ -78,7 +77,7 @@ export function CheckpointShelf({
           <Button label="Save" variant="primary" isLoading={saving} onClick={() => void save()} />
         </HStack>
       )}
-      {ordered.length === 0 ? (
+      {checkpoints.length === 0 ? (
         <EmptyState
           isCompact
           headingLevel={3}
@@ -88,7 +87,7 @@ export function CheckpointShelf({
         />
       ) : (
         <List density="compact" hasDividers>
-          {ordered.map((checkpoint) => {
+          {checkpoints.map((checkpoint) => {
             const previewing = checkpoint.id === previewCheckpointId;
             return (
               <ListItem

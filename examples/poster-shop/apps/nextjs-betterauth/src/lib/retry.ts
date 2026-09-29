@@ -1,6 +1,27 @@
-/** Error codes that mean "another first-open raced us; read again and retry". */
-export const RETRYABLE_BOOTSTRAP_CONFLICT =
-  /exclusive_conflict|transaction_conflict|cascade_rejected/;
+import { PersistedWriteRejectedError } from "jazz-tools";
+
+/**
+ * Rejection codes that mean "another exclusive transaction raced us; read
+ * again and retry". These are the codes the Better Auth adapter retries.
+ */
+export const RETRYABLE_CONFLICT_CODES: ReadonlySet<string> = new Set([
+  "cascade_rejected",
+  "exclusive_conflict",
+  "transaction_conflict",
+]);
+
+/**
+ * A settled rejection (`PersistedWriteRejectedError`) with a conflict code.
+ * On the native backend an exclusive conflict currently surfaces as the
+ * binding's core error instead, an `Error` whose stable `code` property is
+ * `transaction_conflict` (see jazz-tools native-error-code.ts), so that
+ * documented shape is accepted as well. Error messages are never parsed.
+ */
+export function isRetryableConflict(error: unknown): boolean {
+  if (error instanceof PersistedWriteRejectedError) return RETRYABLE_CONFLICT_CODES.has(error.code);
+  const code = error instanceof Error ? (error as { code?: unknown }).code : undefined;
+  return typeof code === "string" && RETRYABLE_CONFLICT_CODES.has(code);
+}
 
 /** A recoverable bootstrap failure: the client may simply try again later. */
 export class BootstrapConflictError extends Error {
@@ -32,8 +53,7 @@ export async function withBoundedConflictRetry<T>(
     try {
       return await attempt();
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (!RETRYABLE_BOOTSTRAP_CONFLICT.test(message)) throw error;
+      if (!isRetryableConflict(error)) throw error;
       lastError = error;
       if (index < attempts - 1) await sleep(baseDelayMs * 2 ** index);
     }

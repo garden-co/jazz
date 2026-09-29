@@ -68,8 +68,8 @@ export function PosterStudio({ initialCanvasId }: { initialCanvasId: string | nu
   };
 
   return (
-    <div className="studio">
-      <header className="studio-header">
+    <VStack gap={4} padding={4} minHeight="100dvh">
+      <HStack as="header" justify="between" vAlign="center" wrap="wrap" gap={3}>
         <HStack gap={3} vAlign="center" wrap="wrap">
           <Heading level={1} maxLines={1}>
             {active.title}
@@ -97,7 +97,7 @@ export function PosterStudio({ initialCanvasId }: { initialCanvasId: string | nu
             }}
           />
         </HStack>
-      </header>
+      </HStack>
       <div className="studio-grid">
         <aside className="studio-layers" aria-label="Layers">
           <LayerPanel
@@ -164,7 +164,7 @@ export function PosterStudio({ initialCanvasId }: { initialCanvasId: string | nu
           </VStack>
         </aside>
       </div>
-    </div>
+    </VStack>
   );
 }
 

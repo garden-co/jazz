@@ -31,6 +31,10 @@ export async function authJazzClient(): Promise<JazzClient> {
       backendSecret: serverSecret("BACKEND_SECRET", "poster-shop-development-backend-secret"),
     },
     env: configuredIssuer === "http://127.0.0.1:3000" ? "dev" : "prod",
+    // `forRequest` and `withAttributionForRequest` verify Better Auth bearer
+    // JWTs against this app's own JWKS before resolving the Jazz account.
+    jwksUrl: `${configuredIssuer}/api/auth/jwks`,
+    jwtIssuer: configuredIssuer,
     tier: "global",
   }));
   try {

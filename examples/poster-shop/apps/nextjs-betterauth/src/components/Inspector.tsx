@@ -13,7 +13,7 @@ import {
   ToggleButtonGroup,
   VStack,
 } from "@astryxdesign/core";
-import { useAll, useDb } from "jazz-tools/react";
+import { useAll, useDb, useOne } from "jazz-tools/react";
 import { MousePointerClick } from "lucide-react";
 import { app } from "@/schema";
 import { MIN_SHAPE_SIZE, PALETTE, fillColor, nextZIndex } from "@/src/lib/poster";
@@ -31,9 +31,8 @@ export function Inspector({
   canEdit: boolean;
 }) {
   const db = useDb();
-  const { data: rows } = useAll(shapeId ? app.shapes.where({ id: shapeId }) : undefined);
+  const { data: shape } = useOne(shapeId ? app.shapes.where({ id: shapeId }) : undefined);
   const { data: layers = [] } = useAll(app.layers.where({ canvasId }).orderBy("zIndex", "desc"));
-  const shape = rows?.[0];
   if (!shape)
     return (
       <EmptyState
@@ -73,7 +72,7 @@ export function Inspector({
             isDisabled={!canEdit}
             onChange={(fill) => fill && update({ fill })}
           >
-            <div className="swatches">
+            <HStack gap={1} wrap="wrap">
               {PALETTE.map((colour) => (
                 <ToggleButton
                   key={colour.key}
@@ -85,7 +84,7 @@ export function Inspector({
                   icon={<Swatch fill={fillColor(colour.key)} />}
                 />
               ))}
-            </div>
+            </HStack>
           </ToggleButtonGroup>
         </VStack>
       )}
