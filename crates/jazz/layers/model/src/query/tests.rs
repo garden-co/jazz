@@ -1199,4 +1199,84 @@ mod tests {
             "17acefa1-5bd0-53c6-8451-02ee5bad1a5d"
         );
     }
+
+    fn nullable_correlation_schema() -> RuntimeSchema {
+        RuntimeSchema::new([
+            TableSchema::new("shows", [ColumnSchema::new("name", ColumnType::String)]),
+            TableSchema::new(
+                "members",
+                [
+                    ColumnSchema::new("show", ColumnType::Uuid),
+                    ColumnSchema::new("parent", ColumnType::Uuid),
+                    ColumnSchema::new("invite_code", ColumnType::String.nullable()),
+                ],
+            )
+            .with_reference("show", "shows")
+            .with_reference("parent", "shows"),
+            TableSchema::new(
+                "invites",
+                [
+                    ColumnSchema::new("show", ColumnType::Uuid),
+                    ColumnSchema::new("parent", ColumnType::Uuid.nullable()),
+                    ColumnSchema::new("code", ColumnType::String),
+                ],
+            )
+            .with_reference("show", "shows")
+            .with_reference("parent", "shows"),
+        ])
+    }
+
+    // `exists invites where invites.show = members.show and invites.code = members.invite_code`:
+    // an equality between an optional and a required column of the same type is
+    // well-typed. A NULL side never matches, so nullability can't widen access.
+    #[test]
+    fn join_correlations_accept_optional_and_required_columns_of_one_type() {
+        let schema = nullable_correlation_schema();
+        let optional_text = Query::from("members").join_via_column_with_correlations(
+            "invites",
+            "show",
+            "show",
+            [JoinCorrelation {
+                join_column: "code".to_owned(),
+                source_column: "invite_code".to_owned(),
+            }],
+            [],
+        );
+        optional_text
+            .validate_runtime(&schema)
+            .expect("optional text correlates with required text");
+
+        let optional_ref = Query::from("members").join_via_column_with_correlations(
+            "invites",
+            "show",
+            "show",
+            [JoinCorrelation {
+                join_column: "parent".to_owned(),
+                source_column: "parent".to_owned(),
+            }],
+            [],
+        );
+        optional_ref
+            .validate_runtime(&schema)
+            .expect("a required reference correlates with an optional reference");
+    }
+
+    #[test]
+    fn join_correlations_still_reject_different_types() {
+        let schema = nullable_correlation_schema();
+        let error = Query::from("members")
+            .join_via_column_with_correlations(
+                "invites",
+                "show",
+                "show",
+                [JoinCorrelation {
+                    join_column: "code".to_owned(),
+                    source_column: "parent".to_owned(),
+                }],
+                [],
+            )
+            .validate_runtime(&schema)
+            .expect_err("text never correlates with a UUID");
+        assert_eq!(error, QueryError::OperandTypeMismatch);
+    }
 }
