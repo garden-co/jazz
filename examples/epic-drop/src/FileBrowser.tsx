@@ -99,6 +99,7 @@ export function FileBrowser() {
       size: 0,
       modified: null,
       owner: nameOf(sub.owner_id),
+      ownerId: sub.owner_id,
     })),
     ...files.map((file) => ({
       id: file.id,
@@ -108,6 +109,7 @@ export function FileBrowser() {
       size: file.size_bytes,
       modified: file.$updatedAt ?? null,
       owner: nameOf(file.owner_id),
+      ownerId: file.owner_id,
     })),
   ];
   const may = useBrowserAdvice({ index, userId, folderId: folder?.id, entries, revision });

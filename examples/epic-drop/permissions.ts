@@ -5,9 +5,14 @@ import { app, MAX_FOLDER_DEPTH } from "./schema.js";
  * Folder access is inherited down the tree. A folder is visible to its owner,
  * to members of that folder, and to anyone who can see its parent. Editing its
  * contents follows the same shape with owners, editor members and editable
- * parents. Moving or deleting a folder is reserved for its owner and for
- * people who can edit its parent, so an invite never lets someone take the
- * shared folder itself somewhere else.
+ * parents.
+ *
+ * Every folder in a tree belongs to the owner of its top-level folder: a
+ * subfolder takes its parent's owner, even when an editor creates it, and a
+ * folder only moves by its owner and only into another folder they own. So
+ * nothing an invite reaches can be carried out of the owner's tree, which
+ * would re-share it with whoever can see the new place. Files follow the same
+ * idea: a file changes folder only by its uploader or the owner of the tree.
  */
 
 export default s.definePermissions(app, ({ allOf, anyOf, allowedTo, policy, session }) => {
@@ -35,7 +40,15 @@ export default s.definePermissions(app, ({ allOf, anyOf, allowedTo, policy, sess
       allowedTo.read("parent", depth),
     ]),
   );
-  policy.folders.allowInsert.where(allOf([{ owner_id: me }, placementAllowed]));
+  policy.folders.allowInsert.where((folder) =>
+    allOf([
+      placementAllowed,
+      anyOf([
+        allOf([{ parent_id: { isNull: true } }, { owner_id: me }]),
+        policy.folders.exists.where({ id: folder.parent_id, owner_id: folder.owner_id }),
+      ]),
+    ]),
+  );
   policy.folders.allowUpdate
     .whereOld((folder) =>
       anyOf([
@@ -55,8 +68,14 @@ export default s.definePermissions(app, ({ allOf, anyOf, allowedTo, policy, sess
             { parent_id: { isNull: true } },
             policy.folders.exists.where({ id: folder.id, parent_id: { isNull: true } }),
           ]),
-          // ...only its owner moves it, and only into a folder they can edit.
-          allOf([{ owner_id: me }, placementAllowed]),
+          // ...only its owner moves it, and only within what they own.
+          allOf([
+            { owner_id: me },
+            anyOf([
+              { parent_id: { isNull: true } },
+              policy.folders.exists.where({ id: folder.parent_id, owner_id: me }),
+            ]),
+          ]),
         ]),
       ]),
     );
@@ -109,8 +128,9 @@ export default s.definePermissions(app, ({ allOf, anyOf, allowedTo, policy, sess
   policy.folderInvites.allowDelete.where((invite) =>
     policy.folders.exists.where({ id: invite.folder_id, owner_id: me }),
   );
-  // Files follow their folder. Uploads are stamped with the uploader, and a
-  // file can only be moved between folders the caller can edit.
+  // Files follow their folder. Uploads are stamped with the uploader. Editors
+  // rename files in place; a file changes folder only by its uploader, or by
+  // the owner of the tree when both folders are theirs.
   policy.files.allowRead.where(allowedTo.read("folder"));
   policy.files.allowInsert.where(allOf([{ owner_id: me }, allowedTo.update("folder")]));
   policy.files.allowUpdate
@@ -119,6 +139,16 @@ export default s.definePermissions(app, ({ allOf, anyOf, allowedTo, policy, sess
       allOf([
         allowedTo.update("folder"),
         policy.files.exists.where({ id: file.id, owner_id: file.owner_id }),
+        anyOf([
+          policy.files.exists.where({ id: file.id, folder_id: file.folder_id }),
+          { owner_id: me },
+          allOf([
+            policy.folders.exists.where({ id: file.folder_id, owner_id: me }),
+            policy.exists(
+              policy.files.where({ id: file.id }).hopTo("folder").where({ owner_id: me }),
+            ),
+          ]),
+        ]),
       ]),
     );
   policy.files.allowDelete.where(allowedTo.update("folder"));

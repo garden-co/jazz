@@ -29,14 +29,17 @@ export interface Entry extends Record<string, unknown> {
   size: number;
   modified: Date | null;
   owner: string;
+  ownerId: string;
 }
 
 export type EntryAction = "open" | "download" | "rename" | "move" | "share" | "delete";
 
 interface FileTableProps {
   entries: Entry[];
-  /** Rename and move. */
+  /** Rename. */
   canEdit: (entry: Entry) => boolean;
+  /** Move, by dragging the row or from its menu. */
+  canMove: (entry: Entry) => boolean;
   canDelete: (entry: Entry) => boolean;
   canShare: (entry: Entry) => boolean;
   /** Whether files and items may be dropped on a folder row. */
@@ -58,6 +61,7 @@ const comparators = {
 export function FileTable({
   entries,
   canEdit,
+  canMove,
   canDelete,
   canShare,
   canDropOn,
@@ -83,7 +87,7 @@ export function FileTable({
   const dragPlugin = React.useMemo<TablePlugin<Entry>>(
     () => ({
       transformBodyRow: (props, item) =>
-        canEdit(item)
+        canMove(item)
           ? {
               ...props,
               htmlProps: {
@@ -94,7 +98,7 @@ export function FileTable({
             }
           : props,
     }),
-    [canEdit],
+    [canMove],
   );
 
   const columns: TableColumn<Entry>[] = [
@@ -161,7 +165,12 @@ export function FileTable({
           presentation="adaptive"
           items={menuItems(
             entry,
-            { edit: canEdit(entry), delete: canDelete(entry), share: canShare(entry) },
+            {
+              edit: canEdit(entry),
+              move: canMove(entry),
+              delete: canDelete(entry),
+              share: canShare(entry),
+            },
             (action) => onAction(entry, action),
           )}
         />
@@ -184,7 +193,7 @@ export function FileTable({
 
 function menuItems(
   entry: Entry,
-  may: { edit: boolean; delete: boolean; share: boolean },
+  may: { edit: boolean; move: boolean; delete: boolean; share: boolean },
   run: (action: EntryAction) => void,
 ): DropdownMenuOption[] {
   const items: DropdownMenuOption[] = [
@@ -192,12 +201,8 @@ function menuItems(
   ];
   if (entry.kind === "file") items.push({ label: "Download", onClick: () => run("download") });
   if (may.share) items.push({ label: "Share", onClick: () => run("share") });
-  if (may.edit) {
-    items.push(
-      { label: "Rename", onClick: () => run("rename") },
-      { label: "Move", onClick: () => run("move") },
-    );
-  }
+  if (may.edit) items.push({ label: "Rename", onClick: () => run("rename") });
+  if (may.move) items.push({ label: "Move", onClick: () => run("move") });
   if (may.delete) {
     items.push(
       { type: "divider" },

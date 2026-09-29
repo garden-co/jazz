@@ -61,9 +61,11 @@ export function BrowserDialogs({
         onClose={onClose}
         onSubmit={(name) => {
           if (!userId || dialog?.type !== "new-folder") return;
+          // A subfolder belongs to the owner of its tree, whoever creates it.
+          const parent = dialog.parentId ? index.byId.get(dialog.parentId) : undefined;
           const created = db.insert(app.folders, {
             name,
-            owner_id: userId,
+            owner_id: parent?.owner_id ?? userId,
             parent_id: dialog.parentId,
           });
           onOpenFolder(created.value.id);

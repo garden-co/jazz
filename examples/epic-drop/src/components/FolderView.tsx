@@ -53,10 +53,10 @@ export function FolderView({
 
   const menu = [
     ...(may.canEdit("folder", folder.id)
-      ? [
-          { label: "Rename folder", onClick: () => onFolderAction("rename") },
-          { label: "Move folder", onClick: () => onFolderAction("move") },
-        ]
+      ? [{ label: "Rename folder", onClick: () => onFolderAction("rename") }]
+      : []),
+    ...(may.canMove("folder", folder.owner_id)
+      ? [{ label: "Move folder", onClick: () => onFolderAction("move") }]
       : []),
     ...(may.canDelete("folder", folder.id)
       ? [
@@ -130,6 +130,7 @@ export function FolderView({
         <FileTable
           entries={entries}
           canEdit={(entry) => may.canEdit(entry.kind, entry.id)}
+          canMove={(entry) => may.canMove(entry.kind, entry.ownerId)}
           canDelete={(entry) => may.canDelete(entry.kind, entry.id)}
           canShare={(entry) => entry.kind === "folder" && may.canShare(entry.id)}
           canDropOn={may.canUpload}

@@ -160,8 +160,12 @@ describe("EpicDrop folder sharing", () => {
       })
       .wait({ tier: "global" });
     await bobDb.update(app.files, file.id, { name: "take-1-final.wav" }).wait({ tier: "global" });
+    // A subfolder belongs to the owner of the tree, whoever creates it.
+    await bobDb.expectDenied((db) =>
+      db.insert(app.folders, { name: "Stems", owner_id: bob, parent_id: mixes.id }),
+    );
     await bobDb
-      .insert(app.folders, { name: "Stems", owner_id: bob, parent_id: mixes.id })
+      .insert(app.folders, { name: "Stems", owner_id: alice, parent_id: mixes.id })
       .wait({ tier: "global" });
 
     // Uploads are stamped with the uploader, and ownership never moves.
@@ -230,6 +234,92 @@ describe("EpicDrop folder sharing", () => {
     const aliceDb = as(alice);
     await aliceDb.update(app.folders, mixes.id, { parent_id: null }).wait({ tier: "global" });
     await aliceDb.update(app.folders, mixes.id, { parent_id: demos.id }).wait({ tier: "global" });
+  });
+
+  it("does not let an editor re-share a file or a subfolder by moving it out", async () => {
+    const { demos, mixes, file } = await seedSharedTree();
+    await join(bob, demos.id, "editor");
+    const bobs = await testApp.seed((db) =>
+      db.insert(app.folders, { name: "Bob's", owner_id: bob }),
+    );
+    await testApp.seed((db) =>
+      db.insert(app.folderInvites, { folder_id: bobs.id, code: "dave-code", role: "viewer" }),
+    );
+    await testApp.seed((db) =>
+      db.insert(app.folderMembers, {
+        folder_id: bobs.id,
+        user_id: dave,
+        role: "viewer",
+        invite_code: "dave-code",
+        folder_owner_id: bob,
+      }),
+    );
+    const bobDb = as(bob);
+
+    // Alice's file stays in Alice's tree.
+    await bobDb.expectDenied((db) => db.update(app.files, file.id, { folder_id: bobs.id }));
+    await expect(as(dave).all(app.files.where({ id: file.id }).select("name"))).resolves.toEqual(
+      [],
+    );
+
+    // A subfolder Bob creates in Demos is Alice's, so he cannot carry it out
+    // with Alice's files inside.
+    const stems = await bobDb.insert(app.folders, {
+      name: "Stems",
+      owner_id: alice,
+      parent_id: mixes.id,
+    });
+    await stems.wait({ tier: "global" });
+    const aliceFile = await testApp.seed((db) =>
+      db.insert(app.files, {
+        folder_id: stems.value.id,
+        name: "stem.wav",
+        content_type: "audio/wav",
+        size_bytes: 1,
+        owner_id: alice,
+        contents: new Uint8Array([7]),
+      }),
+    );
+    await bobDb.expectDenied((db) =>
+      db.update(app.folders, stems.value.id, { parent_id: bobs.id }),
+    );
+    await expect(
+      as(dave).all(app.files.where({ id: aliceFile.id }).select("name")),
+    ).resolves.toEqual([]);
+
+    // Bob's own upload is his to move.
+    const bobsFile = await bobDb.insert(app.files, {
+      folder_id: mixes.id,
+      name: "bob.wav",
+      content_type: "audio/wav",
+      size_bytes: 1,
+      owner_id: bob,
+      contents: new Uint8Array([8]),
+    });
+    await bobsFile.wait({ tier: "global" });
+    await bobDb
+      .update(app.files, bobsFile.value.id, { folder_id: bobs.id })
+      .wait({ tier: "global" });
+
+    // Alice reorganises her own tree, including files others uploaded there.
+    const aliceDb = as(alice);
+    await aliceDb.update(app.files, file.id, { folder_id: demos.id }).wait({ tier: "global" });
+    await aliceDb
+      .update(app.folders, stems.value.id, { parent_id: demos.id })
+      .wait({ tier: "global" });
+    const carolsUpload = await testApp.seed((db) =>
+      db.insert(app.files, {
+        folder_id: demos.id,
+        name: "carol.wav",
+        content_type: "audio/wav",
+        size_bytes: 1,
+        owner_id: carol,
+        contents: new Uint8Array([9]),
+      }),
+    );
+    await aliceDb
+      .update(app.files, carolsUpload.id, { folder_id: mixes.id })
+      .wait({ tier: "global" });
   });
 
   it("lets only the owner or a parent editor delete a folder", async () => {

@@ -11,8 +11,9 @@ invite links. It runs as a Vite and React single-page app on an anonymous local-
   Each upload shows its progress and can be cancelled; a cancelled upload leaves no file behind.
 - Sort the file table by name, type, size, modified time or owner.
 - Rename, move (drag a row onto a folder, or use the Move dialog) and delete files and folders.
-  Deleting asks for confirmation. Editors of a shared folder rename, move and delete what is inside
-  it; only a folder's owner moves the folder itself.
+  Deleting asks for confirmation. Editors of a shared folder rename and delete what is inside it
+  and move their own uploads; folders, and other people's files, move only within their owner's
+  own folders.
 - Preview files. Images, audio, video and PDFs play from a Blob, so audio and video are seekable.
   Text files show their first 64 KB and load more on request. Anything else shows its first
   512 bytes as hex.
@@ -42,8 +43,12 @@ invite links. It runs as a Vite and React single-page app on an anonymous local-
   `allowedTo.read("parent", { maxDepth: 8 })`, so a share reaches eight levels of subfolders, and
   the app stops offering "New folder" at that depth. Files follow their folder. Uploads are stamped
   with the uploader, and neither renames nor moves can change an owner.
-- **Moving and deleting folders.** Only a folder's owner changes its parent; editors rename it in
-  place. Otherwise an editor could move a shared folder under one of their own and share it on.
+- **Moving and deleting.** Every folder in a tree belongs to the owner of its top-level folder: a
+  subfolder takes its parent's owner even when an editor creates it. Only a folder's owner changes
+  its parent, and only to another folder they own; editors rename in place. A file changes folder
+  only by its uploader, or by the tree's owner between two of their folders. Otherwise an editor
+  could move a shared folder, a subfolder or a file under one of their own folders and so share it
+  with whoever can see that one.
   Deleting a folder takes its owner or someone who can edit its parent, so an invite to a folder
   never lets you delete the folder itself. A folder's delete is one transaction with its subfolders,
   files and sharing rows, so the server accepts or rejects the whole tree.
@@ -67,8 +72,9 @@ cargo test -p jazz-example-epic-drop-benchmark
 
 - `tests/permissions` checks the sharing rules against a local Jazz server: private by default,
   joining only with a live invite of the same folder, role and owner, read-only viewers, editors
-  who cannot take over ownership, manage access, move a shared folder under their own or delete it,
-  names visible only across a membership, and revocation.
+  who cannot take over ownership, manage access, carry a shared folder, subfolder or file out to a
+  folder of their own, or delete the shared folder, names visible only across a membership, and
+  revocation.
 - `tests/browser` covers multi-chunk upload with a metadata-only listing, a cancelled upload that
   publishes nothing before a clean retry, file and folder authority for moves, whole-value
   download, range previews (including ranges clamped at the end of a file), and a second account
@@ -88,8 +94,8 @@ documents each case for the examples page.
   would need range reads behind an HTTP-style range source, such as a service worker.
 - `size_bytes` is a 32-bit integer, so files over 2 GB are refused before upload.
 - Invite links are bearer capabilities. Revoking a link stops new joins; removing a member ends
-  their access. Anyone who can read a file can also copy it elsewhere; permissions stop moves, not
-  copies.
+  their access. Permissions keep shared folders and files inside the owner's
+  tree, but cannot stop someone who can read a file from downloading it and uploading a copy.
 - Names of other members (for example a fellow editor who uploaded a file) are not visible to
   each other, only to the owner. Recursive reverse inheritance with `maxDepth`, which would allow
   "anyone who can read a folder this account owns", is not supported by the server yet.
