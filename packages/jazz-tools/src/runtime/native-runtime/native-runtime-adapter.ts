@@ -203,13 +203,14 @@ type PendingNativePermissionAdvice = {
 
 const QUERY_COVERAGE_TIMEOUT = "Timed out waiting for query coverage";
 
-/** Native bindings report core errors as `<code>: <message>` (`NotObserved: ...`). */
+/**
+ * Native bindings report core errors as `<code>: <message>` (`NotObserved: ...`).
+ * NAPI throws an `Error`; the WASM binding throws the bare string.
+ */
 function isQueryCoverageTimeout(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    (error.message === QUERY_COVERAGE_TIMEOUT ||
-      error.message === `NotObserved: ${QUERY_COVERAGE_TIMEOUT}`)
-  );
+  const message =
+    error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
+  return message === QUERY_COVERAGE_TIMEOUT || message === `NotObserved: ${QUERY_COVERAGE_TIMEOUT}`;
 }
 
 function isPendingNativeRead(value: unknown): value is PendingNativeRead {
