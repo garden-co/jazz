@@ -976,6 +976,18 @@ async function pauseMigrationPublicationForTest(phase: string): Promise<void> {
   });
 }
 
+function failMigrationStepForTest(step: string): void {
+  if (process.env.NODE_ENV !== "test" || process.env.JAZZ_TEST_MIGRATION_FAIL_AT !== step) return;
+  throw Object.assign(new Error(`EBUSY: injected test failure at ${step}`), { code: "EBUSY" });
+}
+
+function migrationLockTimeoutMs(): number {
+  const override = Number(process.env.JAZZ_TEST_MIGRATION_LOCK_TIMEOUT_MS);
+  return process.env.NODE_ENV === "test" && Number.isSafeInteger(override) && override > 0
+    ? override
+    : 10_000;
+}
+
 async function signalMigrationLockContentionForTest(): Promise<void> {
   if (process.env.NODE_ENV !== "test") return;
   const marker = process.env.JAZZ_TEST_MIGRATION_LOCK_CONTENTION_MARKER;
@@ -1243,7 +1255,8 @@ async function withMigrationDirectoryLock<T>(
     token: randomUUID(),
   };
   const ownerPath = join(lockDir, migrationLockOwnerRecordName(owner.token));
-  const deadline = Date.now() + 10_000;
+  const deadline = Date.now() + migrationLockTimeoutMs();
+  const staleLockHint = `If no \`jazz-tools migrations create\` is running for this directory, delete ${lockDir} and retry.`;
   let unknownOwnerSince: number | null = null;
   for (;;) {
     try {
@@ -1267,8 +1280,11 @@ async function withMigrationDirectoryLock<T>(
       }
       let existing: MigrationLockOwner;
       let existingPath: string;
+      let legacyOwner = false;
       try {
-        const [record, ...extra] = await readdir(lockDir);
+        const entries = await readdir(lockDir);
+        legacyOwner = entries.includes("owner.json");
+        const [record, ...extra] = entries;
         const recordToken = record ? MIGRATION_LOCK_OWNER_RECORD.exec(record)?.[1] : undefined;
         if (!record || !recordToken || extra.length > 0) {
           throw new Error("expected exactly one owner record");
@@ -1286,8 +1302,11 @@ async function withMigrationDirectoryLock<T>(
         // window. Wait for that owner, but never steal the lock if it remains
         // unknown: fail closed with the directory intact.
         if (Date.now() - unknownOwnerSince >= 500) {
+          const legacy = legacyOwner
+            ? " (it holds an owner.json left by an older jazz-tools, which is never recovered automatically)"
+            : "";
           throw new Error(
-            `Cannot safely acquire migration lock ${lockDir}; owner metadata is missing, invalid, or unsafe`,
+            `Cannot safely acquire migration lock ${lockDir}; owner metadata is missing, invalid, or unsafe${legacy}. ${staleLockHint}`,
           );
         }
         await new Promise((resolve) => setTimeout(resolve, 10));
@@ -1321,13 +1340,13 @@ async function withMigrationDirectoryLock<T>(
           throw removeError;
         }
         await syncDirectory(migrationsDir);
-        await pauseMigrationPublicationForTest("lock-quarantined");
+        await pauseMigrationPublicationForTest("lock-recovered");
         await rm(claimed, { force: true });
         continue;
       }
       if (Date.now() >= deadline) {
         throw new Error(
-          `Timed out waiting for another migration generator to release ${lockDir}; owner pid=${existing.pid} host=${existing.hostname}`,
+          `Timed out waiting for another migration generator to release ${lockDir}; it is held by pid ${existing.pid} on host ${existing.hostname}. ${staleLockHint}`,
         );
       }
       await new Promise((resolve) => setTimeout(resolve, 10));
@@ -1338,17 +1357,42 @@ async function withMigrationDirectoryLock<T>(
     await recoverMigrationPublication(storage);
     return await operation();
   } finally {
-    // Release only our own instance: once our record is gone the directory is
-    // an ownerless lock nobody else may remove, so rmdir cannot hit a newer one.
-    const released = await unlink(ownerPath).then(
-      () => true,
-      () => false,
-    );
-    if (released) {
-      await rmdir(lockDir).catch(() => undefined);
-      await syncDirectory(migrationsDir);
-    }
+    await releaseMigrationDirectoryLock(lockDir, ownerPath, owner.token);
   }
+}
+
+/**
+ * Release our lock instance the same way recovery claims a stale one: move our
+ * token-named record out first, so the directory becomes an ownerless lock that
+ * nobody else removes and the rmdir can only hit our own instance. If the
+ * rmdir fails (for example EBUSY from a Windows virus scanner), put the record
+ * back: the lock then stays attributed to our pid, which is dead once we exit,
+ * so the next run recovers it instead of failing closed on an ownerless lock.
+ */
+async function releaseMigrationDirectoryLock(
+  lockDir: string,
+  ownerPath: string,
+  token: string,
+): Promise<void> {
+  const released = `${lockDir}.released-${token}.json`;
+  try {
+    await rename(ownerPath, released);
+  } catch {
+    // Our record is already gone, so this instance is no longer ours to remove.
+    return;
+  }
+  try {
+    failMigrationStepForTest("release-rmdir");
+    await rmdir(lockDir);
+  } catch (error) {
+    await rename(released, ownerPath).catch(() => undefined);
+    console.warn(
+      `Could not remove migration lock ${lockDir} (${(error as NodeJS.ErrnoException).code ?? error}); the next run will recover it.`,
+    );
+    return;
+  }
+  await unlink(released).catch(() => undefined);
+  await syncDirectory(dirname(lockDir));
 }
 
 function processIsAlive(pid: number): boolean {
