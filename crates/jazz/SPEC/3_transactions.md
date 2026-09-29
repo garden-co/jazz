@@ -39,7 +39,7 @@ Invariant digest:
 - `INV-TX-21`: Accepted global transactions MUST maintain per-layer global-current tables/change stream.
 - `INV-TX-22`: Downstream incomplete exclusive bundles MUST be stored but remain invisible for subscription views whose required exclusive payload is incomplete; they MAY become visible for a maintained subscription view once that view's required exclusive versions are present, even before all `n_total_writes` versions are known.
 - `INV-TX-24`: A caller-generated `OpenTransactionId` MUST name mutable work unchanged across local and worker runtimes, MUST be terminal after commit or rollback, and MUST never be accepted by an API requiring the post-commit `TransactionId`; only successful commit transitions `OpenTransactionId` to `TransactionId`.
-- `INV-TX-25`: A `CommitUnit` is one durable-publication boundary: canonical transaction/history rows, current/maintained-view inputs, fate/durability metadata, and recovery markers MUST become observable together. A failed or ambiguous persistence finalization MUST emit no `FateUpdate`, view/subscription update, or peer broadcast; reopen MUST either recover the entire unit or suppress it. Once persistence has completed, or a local publication has transferred to the node-owned ordered persistence queue, observer refresh failure MUST NOT be reported as commit failure.
+- `INV-TX-25`: A `CommitUnit` is one durable-publication boundary: canonical transaction/history rows, current/maintained-view inputs, fate/durability metadata, and ahead-current cleanup MUST become observable together. A failed or ambiguous persistence finalization MUST emit no `FateUpdate`, view/subscription update, or peer broadcast; reopen MUST either recover the entire unit or suppress it. Once persistence has completed, or a local publication has transferred to the node-owned ordered persistence queue, observer refresh failure MUST NOT be reported as commit failure.
 - `INV-TX-26`: Client-side mergeable mutation staging MAY validate structure, schema, locally required preimages, and transaction consistency, but MUST NOT reject from a local read- or write-policy evaluation. The fate authority alone issues the definitive authorization verdict from complete admitted policy inputs.
 
 ## Details
@@ -118,20 +118,22 @@ redelivered with a different payload, it fails as `ConflictingCommitUnit`
 
 `CommitUnit { tx, versions }` is the one atomic boundary for both storage and
 publication (`INV-TX-25`). The store may internally stage canonical history,
-currency/index state, IVM durable terminals, fate metadata, and recovery
-markers, but neither an acknowledgement nor a derived/subscription payload may
+currency/index state, IVM durable terminals, and fate metadata, but neither an acknowledgement nor a derived/subscription payload may
 escape until the required durable boundary completes. A local persistence
 relay acknowledges only its own durable boundary; it cannot manufacture a
 Core acceptance. A returned `FateUpdate` or `ViewUpdate` is publication, not
 speculative progress.
 
-If a process stops after an implementation's first durable stage and before its
-final marker/cleanup stage, recovery must inspect that state before serving it.
-It may complete a coherent unit or suppress it, but it must never serve a
-mixture such as history without currency, fate without versions, or a derived
-row that cannot be recreated from the recovered canonical state. This is the
-sync-core contract that the future asynchronous persistent instance preserves;
-an async completion/ack is not a second semantic commit.
+Transaction fate reconciliation is independent of carrier scope: an older
+pending fragment cannot downgrade a stored terminal fate or erase its global
+time. Settlement covers all locally held versions of that transaction, not
+only the incoming fragment. Its fate, accepted global-current effects (or
+rejection cleanup), and removal from the ahead-current overlay share one
+storage-atomic batch. A failed batch leaves the prior durable state intact;
+reopen does not scan settled transaction history to repair the overlay. No
+clean-close or consistency marker is required for this invariant. Existing
+stores containing leftovers from earlier implementations are not repaired.
+An async completion/ack is not a second semantic commit.
 
 The commit result and observer refresh result are distinct after this boundary.
 Before persistence completes or ordered publication ownership transfers, failure
