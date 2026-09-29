@@ -4258,6 +4258,27 @@ fn subscription_needs_targeted_refresh(
     maintained.uses_logical_tables(changed_logical_tables)
 }
 
+/// The answer of [`check_deletion_reconciliation`] when it needs no node
+/// work: a stream that is not reconciling, has finished, is waiting on a
+/// probe, or has no upstream answer to compare against. Checked before the
+/// (large) async check is built, since every refresh of every live stream
+/// asks and almost all of them are in one of these states.
+fn deletion_reconciliation_known(state: &Rc<RefCell<SubscriptionState>>) -> Option<bool> {
+    let state = state.borrow();
+    match &state.deletion_reconciliation {
+        DeletionReconciliation::Disabled | DeletionReconciliation::Done => Some(false),
+        DeletionReconciliation::Pending { .. } | DeletionReconciliation::Probing { .. } => {
+            Some(true)
+        }
+        DeletionReconciliation::Unchecked
+        | DeletionReconciliation::Deferred { .. }
+        | DeletionReconciliation::Discovering { .. } => state
+            .upstream_subscription_handles
+            .is_empty()
+            .then_some(false),
+    }
+}
+
 /// Re-evaluate live subscriptions whose maintained logical inputs may have
 /// changed. Protocol and lifecycle refreshes use the unfiltered wrapper below.
 /// Compare a fresh strict stream's first settled authority answer with the
@@ -4286,24 +4307,16 @@ async fn check_deletion_reconciliation<S>(
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    if let Some(withheld) = deletion_reconciliation_known(state) {
+        return Ok(withheld);
+    }
     let (shape, binding, subscription, author, request_claims, previous) = {
         let mut state_ref = state.borrow_mut();
-        match &state_ref.deletion_reconciliation {
-            DeletionReconciliation::Disabled | DeletionReconciliation::Done => return Ok(false),
-            DeletionReconciliation::Pending { .. } | DeletionReconciliation::Probing { .. } => {
-                return Ok(true);
-            }
-            DeletionReconciliation::Unchecked
-            | DeletionReconciliation::Deferred { .. }
-            | DeletionReconciliation::Discovering { .. } => {}
-        }
-        let Some(subscription) = state_ref
+        let subscription = state_ref
             .upstream_subscription_handles
             .first()
             .map(|handle| handle.subscription)
-        else {
-            return Ok(false);
-        };
+            .expect("checked by deletion_reconciliation_known");
         let previous = std::mem::replace(
             &mut state_ref.deletion_reconciliation,
             DeletionReconciliation::Unchecked,
@@ -4694,13 +4707,18 @@ where
         // draining its graph but must not report settlement.
         // The first check runs before this refresh drains the stream's own
         // graph; the check after that drain can then discover candidates.
-        let mut deletion_withheld = Box::pin(check_deletion_reconciliation(
-            node,
-            &state,
-            None,
-            progress_waker,
-        ))
-        .await?;
+        let mut deletion_withheld = match deletion_reconciliation_known(&state) {
+            Some(withheld) => withheld,
+            None => {
+                Box::pin(check_deletion_reconciliation(
+                    node,
+                    &state,
+                    None,
+                    progress_waker,
+                ))
+                .await?
+            }
+        };
         let request_claims = state
             .borrow()
             .request_identity_claims

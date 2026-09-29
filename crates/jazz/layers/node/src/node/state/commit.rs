@@ -903,10 +903,24 @@ where
         row_uuid: RowUuid,
     ) -> Result<Option<TxId>, Error> {
         let table_schema = self.table_in_schema(table, schema_version)?;
-        Ok(self
-            .local_current_content_row_candidate(&table_schema, row_uuid, schema_version)
+        // Only the winner's identity is needed: read the local image (the
+        // pending overlay, else the synced image) by key, exactly as the
+        // deletion winner below does, rather than evaluating a query graph.
+        // A deleted image is not visible content.
+        let Some(image) = self
+            .query_local_view_winner_in_branch(
+                &table_schema.name,
+                &BranchKey::default(),
+                row_uuid,
+            )
             .await?
-            .and_then(|(_, (time, node), deleted)| (!deleted).then(|| TxId::new(time, node))))
+        else {
+            return Ok(None);
+        };
+        if image.is_deleted() {
+            return Ok(None);
+        }
+        self.version_tx_id(&image).map(Some)
     }
 
     #[doc(hidden)]
