@@ -8,7 +8,8 @@
     "build": "node ../../packages/jazz-tools/dist/cli.js validate && vite build",
     "preview": "vite preview",
     "test:browser": "node ../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.browser.ts",
-    "test": "vitest run --config vitest.config.browser.ts"
+    "test": "vitest run --config vitest.config.browser.ts",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@workos-inc/authkit-react": "^0.16.0",
@@ -24,7 +25,6 @@
     "@vitest/browser": "catalog:default",
     "@vitest/browser-playwright": "catalog:default",
     "jose": "^6.2.1",
-    "jsdom": "catalog:default",
     "typescript": "catalog:default",
     "vite": "catalog:default",
     "vite-plugin-top-level-await": "catalog:default",

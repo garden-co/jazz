@@ -218,7 +218,8 @@ array&hairsp;—&hairsp;empty (`[]`) if no rows match, or populated with the req
 For detail pages, use `useOne` (or `QuerySubscriptionOne` in Svelte). It takes the same query and
 options as `useAll`, limits it to one row, and gives you that row instead of an array:
 
-- `undefined` while the first result is loading.
+- `undefined` while the first result is loading, and also when the query failed (see `error`) or
+  was skipped.
 - `null` once loaded, if no row matches or you aren't allowed to read it.
 - The row itself otherwise, with any relations you asked for in `include(...)`.
 
@@ -245,8 +246,9 @@ options as `useAll`, limits it to one row, and gives you that row instead of an 
   </Tab>
 </Tabs>
 
-Like `useAll`, `useOne` accepts `undefined` instead of a query to skip evaluation. In React, use
-[`useOneSuspense`](#react-suspense-and-transitions) to suspend instead.
+Like `useAll`, `useOne` accepts `undefined` instead of a query to skip evaluation. React and Vue
+also have `useOneSuspense`, which waits for the first result instead of reporting a loading state
+(see [React Suspense and Transitions](#react-suspense-and-transitions)).
 
 ### Fine-grained updates
 
