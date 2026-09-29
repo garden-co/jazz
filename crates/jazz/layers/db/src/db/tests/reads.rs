@@ -4796,6 +4796,13 @@ fn relation_snapshot_selected_unset_nullable_json_root_with_include() {
         terminal_nested_values(&snapshot, project, "jobsViaProject", "row_uuid"),
         vec![Value::Uuid(job.0)]
     );
+    let (descriptor, raw) = snapshot.rows[0].encoded_record();
+    assert_eq!(
+        groove::records::BorrowedRecord::new(raw, descriptor)
+            .get("_app_meta")
+            .unwrap(),
+        Value::Nullable(None)
+    );
 
     let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
     let maintained = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
@@ -4803,6 +4810,207 @@ fn relation_snapshot_selected_unset_nullable_json_root_with_include() {
         row_ids(&maintained.rows[..maintained.root_count]),
         vec![project]
     );
+}
+
+fn nullable_json_include_schema() -> JazzSchema {
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("projects")
+                    .column("name", PublicColumnType::Text)
+                    .nullable_column("pmeta", PublicColumnType::Json { schema: None }),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("jobs")
+                    .column("title", PublicColumnType::Text)
+                    .nullable_column("note", PublicColumnType::Text)
+                    .nullable_column("meta", PublicColumnType::Json { schema: None })
+                    .column("req", PublicColumnType::Json { schema: None })
+                    .nullable_fk_column("projectId", "projects"),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("tasks")
+                    .column("label", PublicColumnType::Text)
+                    .nullable_column("tmeta", PublicColumnType::Json { schema: None })
+                    .fk_column("jobId", "jobs"),
+            ),
+    )
+}
+
+fn nested_field_values(value: Value, field: &str) -> Vec<Value> {
+    let Value::Array(children) = value else {
+        panic!("array expected, got {value:?}")
+    };
+    children
+        .into_iter()
+        .map(|child| {
+            let Value::Record(child) = child else {
+                panic!("record")
+            };
+            child.get(field).unwrap()
+        })
+        .collect()
+}
+
+/// Includes with nullable JSON beside nullable text and required JSON, nested
+/// JSON children, parents without children and a null forward reference (#3662).
+#[test]
+fn relation_snapshot_nullable_json_includes_with_anchor_only_nested_and_mixed_columns() {
+    let schema = nullable_json_include_schema();
+    let db = open_db(0xe1, AuthorSubject::for_test_bytes([0xe1; 16]), &schema);
+    let ins = |table: &str, cols: Vec<(&str, Value)>| {
+        db.insert(
+            table,
+            cols.into_iter().map(|(k, v)| (k.to_owned(), v)).collect(),
+            Default::default(),
+        )
+        .unwrap()
+        .row_uuid()
+    };
+    let some = |v: Value| Value::Nullable(Some(Box::new(v)));
+    let empty_project = ins("projects", vec![("name", Value::String("empty".into()))]);
+    let project = ins(
+        "projects",
+        vec![
+            ("name", Value::String("p".into())),
+            ("pmeta", Value::String("{\"p\":1}".into())),
+        ],
+    );
+    let job_unset = ins(
+        "jobs",
+        vec![
+            ("title", Value::String("a".into())),
+            ("req", Value::String("{\"r\":1}".into())),
+            ("projectId", some(Value::Uuid(project.0))),
+        ],
+    );
+    let job_set = ins(
+        "jobs",
+        vec![
+            ("title", Value::String("b".into())),
+            ("note", some(Value::String("n".into()))),
+            ("meta", Value::String("[1,2]".into())),
+            ("req", Value::String("{\"r\":2}".into())),
+            ("projectId", some(Value::Uuid(project.0))),
+        ],
+    );
+    let orphan_job = ins(
+        "jobs",
+        vec![
+            ("title", Value::String("orphan".into())),
+            ("req", Value::String("{}".into())),
+            ("projectId", Value::Nullable(None)),
+        ],
+    );
+    let _task_unset = ins(
+        "tasks",
+        vec![
+            ("label", Value::String("t1".into())),
+            ("jobId", Value::Uuid(job_unset.0)),
+        ],
+    );
+    let _task_set = ins(
+        "tasks",
+        vec![
+            ("label", Value::String("t2".into())),
+            ("tmeta", Value::String("\"x\"".into())),
+            ("jobId", Value::Uuid(job_unset.0)),
+        ],
+    );
+
+    // Reverse include with an anchor-only project and nested tasks.
+    let query = Query::from("projects").array_subquery(
+        ArraySubquery::new("jobsViaProject", "jobs", "projectId", "id")
+            .order_by("title", OrderDirection::Asc)
+            .nested(
+                ArraySubquery::new("tasks", "tasks", "jobId", "id")
+                    .order_by("label", OrderDirection::Asc),
+            ),
+    );
+    let prepared = db.prepare_query(&query).unwrap();
+    for pass in 0..2 {
+        let snapshot = if pass == 0 {
+            let mut s = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
+            block_on(db.hydrate_rows_for_binding(&mut s.rows)).unwrap();
+            s
+        } else {
+            let mut sub = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+            snapshot_from_event(block_on(sub.next_raw()).unwrap())
+        };
+        let mut roots = row_ids(&snapshot.rows[..snapshot.root_count]);
+        roots.sort();
+        let mut expected = vec![empty_project, project];
+        expected.sort();
+        assert_eq!(roots, expected, "pass {pass}");
+        assert!(
+            terminal_nested_values(&snapshot, empty_project, "jobsViaProject", "row_uuid")
+                .is_empty()
+        );
+        assert_eq!(
+            terminal_nested_values(&snapshot, project, "jobsViaProject", "row_uuid"),
+            vec![Value::Uuid(job_unset.0), Value::Uuid(job_set.0)],
+            "pass {pass}"
+        );
+        if pass == 0 {
+            assert_eq!(
+                terminal_nested_values(&snapshot, project, "jobsViaProject", "note"),
+                vec![Value::Nullable(None), some(Value::String("n".into()))]
+            );
+            assert_eq!(
+                terminal_nested_values(&snapshot, project, "jobsViaProject", "meta"),
+                vec![Value::Nullable(None), some(Value::String("[1,2]".into()))]
+            );
+            let tasks = terminal_nested_values(&snapshot, project, "jobsViaProject", "tasks");
+            assert_eq!(
+                nested_field_values(tasks[0].clone(), "tmeta"),
+                vec![Value::Nullable(None), some(Value::String("\"x\"".into()))]
+            );
+            assert!(nested_field_values(tasks[1].clone(), "tmeta").is_empty());
+        }
+    }
+
+    // Selected child JSON with provenance, ordered by a hidden nullable text column.
+    let query = Query::from("projects").array_subquery(
+        ArraySubquery::new("jobsViaProject", "jobs", "projectId", "id")
+            .select(["meta", "$createdAt", "$updatedBy"])
+            .order_by("note", OrderDirection::Desc),
+    );
+    let prepared = db.prepare_query(&query).unwrap();
+    let mut s = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
+    block_on(db.hydrate_rows_for_binding(&mut s.rows)).unwrap();
+    assert_eq!(s.root_count, 2);
+    let mut sub = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    let m = snapshot_from_event(block_on(sub.next_raw()).unwrap());
+    assert_eq!(m.root_count, 2);
+
+    // Required include keeps only the project with jobs.
+    let query = Query::from("projects").array_subquery(
+        ArraySubquery::new("jobsViaProject", "jobs", "projectId", "id")
+            .requirement(crate::query::ArraySubqueryRequirement::AtLeastOne),
+    );
+    let prepared = db.prepare_query(&query).unwrap();
+    let s = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
+    assert_eq!(row_ids(&s.rows[..s.root_count]), vec![project]);
+
+    // Forward include from jobs to projects; orphan job has null FK (anchor-only).
+    let query = Query::from("jobs").array_subquery(ArraySubquery::new(
+        "project",
+        "projects",
+        "id",
+        "projectId",
+    ));
+    let prepared = db.prepare_query(&query).unwrap();
+    let mut s = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
+    block_on(db.hydrate_rows_for_binding(&mut s.rows)).unwrap();
+    assert_eq!(s.root_count, 3);
+    assert!(terminal_nested_values(&s, orphan_job, "project", "pmeta").is_empty());
+    assert_eq!(
+        terminal_nested_values(&s, job_set, "project", "pmeta"),
+        vec![some(Value::String("{\"p\":1}".into()))]
+    );
+    let mut sub = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    let m = snapshot_from_event(block_on(sub.next_raw()).unwrap());
+    assert_eq!(m.root_count, 3);
 }
 
 fn assert_relation_snapshot_unset_nullable_json_include(forward: bool) {

@@ -1904,7 +1904,7 @@ fn retain_collect_slot_value(
     // so the anchor and association arms agree on the outer wrapper.
     let output_value_type =
         collect_unwrapped_output_type(source, &source_field, &source_value_type);
-    let value_type = collect_slot_input_type(source_value_type, &output_value_type);
+    let value_type = collect_slot_input_type(&output_value_type);
     slot.fields.push(CollectFlatField {
         input: format!("{prefix}_{source_field}"),
         output: source_field.clone(),

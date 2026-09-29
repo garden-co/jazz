@@ -186,22 +186,11 @@ pub(super) fn collect_unwrapped_output_type(
         .unwrap_or_else(|| fallback.clone())
 }
 
-/// A collector child input carries one anchor wrapper around its logical
-/// output: anchor rows have no child and fill it with NULL. Current-row cells
-/// usually arrive with that presence wrapper already. Indirect JSON storage has
-/// a single null for absence and application NULL, so a nullable JSON cell
-/// arrives as exactly its logical output type and still needs the wrapper.
-pub(super) fn collect_slot_input_type(
-    source_value_type: ValueType,
-    output_value_type: &ValueType,
-) -> ValueType {
-    if matches!(source_value_type, ValueType::Nullable(_))
-        && &source_value_type != output_value_type
-    {
-        source_value_type
-    } else {
-        ValueType::Nullable(Box::new(source_value_type))
-    }
+/// A collector child input carries exactly one anchor wrapper around its
+/// logical output: anchor rows have no child and fill it with NULL, and
+/// CollectBy removes only that wrapper.
+pub(super) fn collect_slot_input_type(output_value_type: &ValueType) -> ValueType {
+    ValueType::Nullable(Box::new(output_value_type.clone()))
 }
 
 fn collect_slot_layouts(
@@ -267,7 +256,7 @@ fn collect_slot_layouts(
                     let value_type = if is_row_id {
                         source_value_type
                     } else {
-                        collect_slot_input_type(source_value_type, &output_value_type)
+                        collect_slot_input_type(&output_value_type)
                     };
                     Ok(CollectFlatField {
                         input: format!("{prefix}_{source_field}"),
@@ -534,18 +523,14 @@ fn collect_flat_projection(
                     if field.is_row_id {
                         ProjectField::renamed(source, &field.input)
                     } else {
-                        // Anchor rows have no child, so collector child payload
-                        // fields carry an outer anchor wrapper. Current-row
-                        // storage usually provides it already; a source whose
-                        // only nullable wrapper is the application NULL (indirect
-                        // JSON storage) needs a distinct one, which CollectBy
-                        // removes while preserving the inner NULL.
-                        let source_type = source_field_type(child_source, source_field);
-                        if source_type.is_some_and(|source_type| {
-                            matches!(source_type, ValueType::Nullable(_))
-                                && field.value_type
-                                    == ValueType::Nullable(Box::new(source_type.clone()))
-                        }) {
+                        // Current-row cells usually carry the anchor wrapper
+                        // already. Indirect JSON storage has one null for
+                        // absence and application NULL, so a nullable JSON
+                        // cell arrives as exactly its logical output and needs
+                        // a distinct wrapper.
+                        if source_field_type(child_source, source_field)
+                            == Some(&field.output_value_type)
+                        {
                             ProjectField::nullable(source, &field.input)
                         } else {
                             ProjectField::nullable_flat(source, &field.input)
