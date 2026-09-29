@@ -1,7 +1,7 @@
 import { definePermissions } from "jazz-tools/permissions";
 import { permissions as betterAuthPermissions } from "./schema-better-auth/schema";
-import { app } from "./schema.js";
-import { catalogueEditors } from "./src/roles.js";
+import { app } from "./schema";
+import { catalogueEditors } from "./src/roles";
 
 /**
  * Tenant admission has one authority: the app-owned backend bootstrap route.

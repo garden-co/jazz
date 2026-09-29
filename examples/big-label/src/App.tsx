@@ -21,13 +21,13 @@ import { app } from "../schema";
 import { OrganizationProvider, type CurrentOrganization } from "./lib/organization";
 import { href, useRoute, type Route } from "./lib/route";
 import { isRole, roleLabels } from "./roles";
-import { ArtistPage, ArtistsPage } from "./pages/artists";
-import { CataloguePage, CataloguesPage } from "./pages/catalogues";
-import { OverviewPage } from "./pages/overview";
-import { PeoplePage } from "./pages/people";
-import { ReleasePage, ReleasesPage } from "./pages/releases";
-import { SettingsPage } from "./pages/settings";
-import { TeamPage, TeamsPage } from "./pages/teams";
+import { ArtistPage, ArtistsPage } from "./screens/artists";
+import { CataloguePage, CataloguesPage } from "./screens/catalogues";
+import { OverviewPage } from "./screens/overview";
+import { PeoplePage } from "./screens/people";
+import { ReleasePage, ReleasesPage } from "./screens/releases";
+import { SettingsPage } from "./screens/settings";
+import { TeamPage, TeamsPage } from "./screens/teams";
 
 const selectedOrganizationKey = "big-label-organization";
 
