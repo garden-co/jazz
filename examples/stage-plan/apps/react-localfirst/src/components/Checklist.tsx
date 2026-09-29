@@ -10,7 +10,7 @@ import { SegmentedControl, SegmentedControlItem } from "@astryxdesign/core/Segme
 import { HStack, VStack } from "@astryxdesign/core/Stack";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { app } from "../../schema.js";
-import { useMe } from "../data/me.js";
+import { useMe } from "../model/me.js";
 import { Page } from "./Page.js";
 
 type Filter = "all" | "open" | "done";

@@ -3,7 +3,7 @@ import { DateInput, type DateInputProps } from "@astryxdesign/core/DateInput";
 import { Grid } from "@astryxdesign/core/Grid";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { TimeInput, type TimeInputProps } from "@astryxdesign/core/TimeInput";
-import type { ShowInput } from "../data/actions.js";
+import type { ShowInput } from "../model/actions.js";
 import { FormDialog } from "./FormDialog.js";
 
 type ShowDialogProps = {

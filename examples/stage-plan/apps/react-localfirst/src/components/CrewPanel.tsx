@@ -10,8 +10,8 @@ import { HStack, VStack } from "@astryxdesign/core/Stack";
 import { Heading, Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { app, type Show } from "../../schema.js";
-import { rotateInvite, type CrewMember } from "../data/actions.js";
-import { useMe } from "../data/me.js";
+import { rotateInvite, type CrewMember } from "../model/actions.js";
+import { useMe } from "../model/me.js";
 import { href, navigate } from "../router.js";
 
 export function CrewPanel({ show, crew }: { show: Show; crew: CrewMember[] }) {

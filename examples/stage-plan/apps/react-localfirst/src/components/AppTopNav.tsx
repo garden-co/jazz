@@ -4,7 +4,7 @@ import { Avatar } from "@astryxdesign/core/Avatar";
 import { Switch } from "@astryxdesign/core/Switch";
 import { HStack } from "@astryxdesign/core/Stack";
 import { TopNav, TopNavHeading, TopNavItem } from "@astryxdesign/core/TopNav";
-import type { Me } from "../data/actions.js";
+import type { Me } from "../model/actions.js";
 import { href, type Route } from "../router.js";
 import { ProfileDialog } from "./ProfileDialog.js";
 

@@ -24,8 +24,8 @@ import {
   STATUS_LABELS,
   updateTaskNotes,
   type CrewMember,
-} from "../data/actions.js";
-import { useMe } from "../data/me.js";
+} from "../model/actions.js";
+import { useMe } from "../model/me.js";
 import { ActivityFeed } from "./ActivityFeed.js";
 
 type TaskWithTime = Task & { $updatedAt: Date };

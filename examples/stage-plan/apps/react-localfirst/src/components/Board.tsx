@@ -18,8 +18,8 @@ import {
   rankBetween,
   STATUS_LABELS,
   type CrewMember,
-} from "../data/actions.js";
-import { useMe } from "../data/me.js";
+} from "../model/actions.js";
+import { useMe } from "../model/me.js";
 import { href } from "../router.js";
 
 type BoardProps = { showId: string; tasks: Task[]; crew: CrewMember[] };

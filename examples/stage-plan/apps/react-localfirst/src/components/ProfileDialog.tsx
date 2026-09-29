@@ -3,7 +3,7 @@ import { useDb } from "jazz-tools/react";
 import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { app } from "../../schema.js";
-import type { Me } from "../data/actions.js";
+import type { Me } from "../model/actions.js";
 import { FormDialog } from "./FormDialog.js";
 
 type ProfileDialogProps = { me: Me; isOpen: boolean; onOpenChange: (isOpen: boolean) => void };
