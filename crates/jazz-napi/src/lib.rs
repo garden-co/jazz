@@ -5160,7 +5160,10 @@ mod tests {
         let thrown = crate::BindingError::from(crate::napi_error(core));
         assert_eq!(thrown.status.as_ref(), "not_observed");
         assert_eq!(thrown.reason, "NotObserved: not resident");
-        assert!(thrown.cause.is_none(), "the code carrier never reaches JavaScript");
+        assert!(
+            thrown.cause.is_none(),
+            "the code carrier never reaches JavaScript"
+        );
 
         let other = crate::BindingError::from(crate::napi_error("database is closed"));
         assert_eq!(other.status.as_ref(), "GenericFailure");
