@@ -48,10 +48,11 @@ To see stock contention, have both operators order 4 "Vintage tube amp" (5 on ha
 moment. The authority accepts one order; the other checkout re-reads stock and fails with
 "Insufficient stock", with nothing charged or taken.
 
-The local defaults in `src/lib/config.ts` make `pnpm dev` and `pnpm build` work without
-configuration. A deployment sets `NEXT_PUBLIC_APP_ORIGIN`, `NEXT_PUBLIC_JAZZ_APP_ID`,
-`NEXT_PUBLIC_JAZZ_SERVER_URL`, `BACKEND_SECRET` and `BETTER_AUTH_SECRET`; the secrets are
-required as soon as the origin is not local.
+Configuration fails closed (`src/lib/config.ts`). A development run on a loopback origin uses
+local defaults, so `pnpm dev` works without setup. A production process (`pnpm build`,
+`pnpm start`) is always a deployment: it refuses to start without `NEXT_PUBLIC_APP_ORIGIN`,
+`BACKEND_SECRET` and `BETTER_AUTH_SECRET`, and never falls back to localhost or the development
+secrets. A deployment also sets `NEXT_PUBLIC_JAZZ_APP_ID` and `NEXT_PUBLIC_JAZZ_SERVER_URL`.
 
 ## Two-phase checkout
 

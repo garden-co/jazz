@@ -1,11 +1,24 @@
 import type { NextConfig } from "next";
 import { withJazz } from "jazz-tools/dev/next";
-import { appOrigin, serverSecret } from "./src/lib/config";
+import { appOrigin, assertServerConfiguration, serverSecret } from "./src/lib/config";
+
+// Fail at startup, not on the first request, when a deployment lacks its secrets.
+assertServerConfiguration();
 
 export default withJazz(
   {
     reactStrictMode: true,
     serverExternalPackages: ["jazz-napi", "jazz-tools/backend"],
+    // The shared modules import each other with Node ESM ".js" specifiers.
+    // Turbopack resolves those to the ".ts" source; `next dev --webpack` needs
+    // the alias spelled out.
+    webpack: (config: { resolve: { extensionAlias?: Record<string, string[]> } }) => {
+      config.resolve.extensionAlias = {
+        ...config.resolve.extensionAlias,
+        ".js": [".ts", ".tsx", ".js"],
+      };
+      return config;
+    },
   } satisfies NextConfig,
   {
     server: {

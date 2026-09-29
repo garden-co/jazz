@@ -192,10 +192,50 @@ interface DraftOrder {
   reserved_lines?: string | null;
 }
 
-/** Read a draft's reservation. Only drafts written by {@link reserveOrder} carry one. */
-export function reservationOf(order: { reserved_lines?: string | null }): ReservedLine[] {
+/**
+ * Read and validate a draft's reservation. Only drafts written by
+ * {@link reserveOrder} carry one; anything else stored in the column is
+ * refused rather than placed or released. When the order's total is given,
+ * the reserved amounts must add up to it.
+ */
+export function reservationOf(order: {
+  reserved_lines?: string | null;
+  total_cents?: number;
+}): ReservedLine[] {
   if (!order.reserved_lines) throw new Error("this order has no reservation to place or release");
-  return JSON.parse(order.reserved_lines) as ReservedLine[];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(order.reserved_lines);
+  } catch {
+    throw new Error("this order's reservation is unreadable");
+  }
+  const isCount = (value: unknown, min: number): value is number =>
+    typeof value === "number" && Number.isSafeInteger(value) && value >= min;
+  if (!Array.isArray(parsed) || parsed.length === 0 || parsed.length > MAX_ORDER_LINES) {
+    throw new Error("this order's reservation is unreadable");
+  }
+  const lines = parsed.map((entry: unknown): ReservedLine => {
+    const { itemId, quantity, amountCents } = (entry ?? {}) as Record<string, unknown>;
+    if (
+      typeof itemId !== "string" ||
+      !itemId ||
+      !isCount(quantity, 1) ||
+      !isCount(amountCents, 0)
+    ) {
+      throw new Error("this order's reservation is unreadable");
+    }
+    return { itemId, quantity, amountCents };
+  });
+  if (new Set(lines.map((line) => line.itemId)).size !== lines.length) {
+    throw new Error("this order's reservation is unreadable");
+  }
+  if (
+    order.total_cents !== undefined &&
+    lines.reduce((sum, line) => sum + line.amountCents, 0) !== order.total_cents
+  ) {
+    throw new Error("this order's reservation doesn't match its total");
+  }
+  return lines;
 }
 
 /**
@@ -611,7 +651,11 @@ function normalizeLines(lines: readonly PurchaseLine[]): PurchaseLine[] {
   if (merged.size > MAX_ORDER_LINES) {
     throw new Error(`an order has at most ${MAX_ORDER_LINES} lines`);
   }
-  return [...merged].map(([itemId, quantity]) => ({ itemId, quantity }));
+  // Sorted by item, so the same order asked for in any line order is the same
+  // request, and its reservation compares equal.
+  return [...merged]
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+    .map(([itemId, quantity]) => ({ itemId, quantity }));
 }
 
 /**

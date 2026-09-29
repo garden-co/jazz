@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { Db } from "jazz-tools";
+import { PersistedWriteRejectedError, type Db } from "jazz-tools";
 import { createPolicyTestApp, type PolicyTestApp, type TestDb } from "jazz-tools/testing";
 import permissions from "../../permissions.js";
 import { app, REORDER_LEVEL_CAP } from "../../schema.js";
@@ -14,6 +14,7 @@ import {
   purchase,
   releaseReservation,
   RequestMismatchError,
+  reservationOf,
   reserveOrder,
   recordPayment,
 } from "../../src/warehouse.js";
@@ -463,6 +464,129 @@ describe("stock contention", () => {
     expect(
       await manager.db.all(app.order_lines.where({ order_id: reserved.draft.id }).limit(5), read),
     ).toEqual([]);
+  });
+
+  it("automatically releases the reservation when the authority rejects placing it", async () => {
+    const manager = actor("auto-release-manager");
+    const east = await buildWarehouse(manager, "east");
+    // No real policy rejects placing an order while letting the same account
+    // release it, so the authority's rejection of the second transaction
+    // (placing) is injected; reserving and releasing run for real.
+    const rejection = new PersistedWriteRejectedError(
+      "injected-placement" as ConstructorParameters<typeof PersistedWriteRejectedError>[0],
+      "permission_denied",
+      "Write rejected by server authorization",
+    );
+    const real = asDb(manager.db);
+    let exclusiveCalls = 0;
+    const db = new Proxy(real, {
+      get(target, property) {
+        if (property === "exclusiveTransaction") {
+          return (...args: Parameters<Db["exclusiveTransaction"]>) => {
+            exclusiveCalls += 1;
+            if (exclusiveCalls === 2) return Promise.reject(rejection);
+            return target.exclusiveTransaction(...args);
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+
+    await expect(
+      purchase(db, {
+        warehouseId: east.warehouse.id,
+        districtId: east.district.id,
+        customerId: east.customer.id,
+        lines: [{ itemId: east.item.id, quantity: 3 }],
+        idempotencyKey: "rejected-placement",
+      }),
+    ).rejects.toBe(rejection);
+    expect(exclusiveCalls).toBe(3);
+
+    const read = { tier: "global" } as const;
+    const [order] = await manager.db.all(
+      app.orders.where({ idempotency_key: "rejected-placement" }).limit(1),
+      read,
+    );
+    expect(order?.status).toBe(ORDER_STATUS.cancelled);
+    const [stock] = await manager.db.all(app.stock.where({ id: east.stock.id }).limit(1), read);
+    expect(stock?.on_hand).toBe(5);
+    const [customer] = await manager.db.all(
+      app.customers.where({ id: east.customer.id }).limit(1),
+      read,
+    );
+    expect(customer?.balance_cents).toBe(0);
+    expect(
+      await manager.db.all(app.order_lines.where({ order_id: order!.id }).limit(5), read),
+    ).toEqual([]);
+  });
+
+  it("refuses a stored reservation that isn't one reserveOrder wrote", () => {
+    const valid = JSON.stringify([{ itemId: "a", quantity: 2, amountCents: 200 }]);
+    expect(reservationOf({ reserved_lines: valid, total_cents: 200 })).toEqual([
+      { itemId: "a", quantity: 2, amountCents: 200 },
+    ]);
+    for (const reserved_lines of [
+      "not json",
+      "{}",
+      "[]",
+      JSON.stringify([{ itemId: "a", quantity: 0, amountCents: 0 }]),
+      JSON.stringify([{ itemId: "", quantity: 1, amountCents: 0 }]),
+      JSON.stringify([{ itemId: "a", quantity: 1.5, amountCents: 0 }]),
+      JSON.stringify([
+        { itemId: "a", quantity: 1, amountCents: 100 },
+        { itemId: "a", quantity: 1, amountCents: 100 },
+      ]),
+    ]) {
+      expect(() => reservationOf({ reserved_lines })).toThrow(/reservation/);
+    }
+    expect(() => reservationOf({ reserved_lines: valid, total_cents: 199 })).toThrow(
+      /doesn't match its total/,
+    );
+  });
+
+  it("treats the same lines in another order as the same request", async () => {
+    const manager = actor("reordered-manager");
+    const east = await buildWarehouse(manager, "east");
+    const second = await manager.db
+      .insert(app.items, {
+        sku: "east-cable",
+        name: "Patch cable",
+        unit_price_cents: 500,
+        operator_id: manager.account,
+      })
+      .wait({ tier: "global" });
+    await manager.db
+      .insert(app.stock, {
+        warehouse_id: east.warehouse.id,
+        item_id: second.id,
+        on_hand: 10,
+        reorder_level: 2,
+      })
+      .wait({ tier: "global" });
+    const request = {
+      warehouseId: east.warehouse.id,
+      districtId: east.district.id,
+      customerId: east.customer.id,
+      idempotencyKey: "reordered",
+    };
+    const reserved = await reserveOrder(asDb(manager.db), {
+      ...request,
+      lines: [
+        { itemId: east.item.id, quantity: 1 },
+        { itemId: second.id, quantity: 2 },
+      ],
+    });
+    if (!("draft" in reserved)) throw new Error("expected a draft");
+    const receipt = await purchase(asDb(manager.db), {
+      ...request,
+      lines: [
+        { itemId: second.id, quantity: 2 },
+        { itemId: east.item.id, quantity: 1 },
+      ],
+    });
+    expect(receipt).toMatchObject({ orderId: reserved.draft.id, totalCents: 2_000 });
   });
 
   it("releases a reservation whose placement was rejected, restoring stock, balance and status", async () => {

@@ -147,6 +147,15 @@ export function OrderStatus() {
   );
 }
 
+/** A draft's reservation for display; an unreadable one shows no lines. */
+function readableReservation(order: ShownOrder) {
+  try {
+    return reservationOf({ reserved_lines: order.reservedLines, total_cents: order.totalCents });
+  } catch {
+    return [];
+  }
+}
+
 interface ShownOrder {
   id: string;
   number: number;
@@ -163,7 +172,7 @@ function OrderDetails({ warehouseId, order }: { warehouseId: string; order: Show
   // A draft has no lines yet: show what it reserved instead.
   const rows =
     order.status === ORDER_STATUS.draft && order.reservedLines
-      ? reservationOf({ reserved_lines: order.reservedLines }).map((line, index) => ({
+      ? readableReservation(order).map((line, index) => ({
           key: `${index}`,
           lineNumber: index + 1,
           item: items.data?.find((item) => item.id === line.itemId)?.name,
