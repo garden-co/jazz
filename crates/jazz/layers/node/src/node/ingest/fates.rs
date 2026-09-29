@@ -54,19 +54,10 @@ where
         let mut stored = self
             .query_transaction(tx_id).await?
             .ok_or(Error::MissingTransaction(tx_id))?;
-        if let (Some(current), Some(next)) = (stored.global_time, global_time)
-            && next < current
-        {
-            return Err(Error::NonMonotoneState("global seq cannot move backwards"));
-        }
         let already_accepted = matches!(stored.fate, Fate::Accepted);
         let previous_global_time = stored.global_time;
         let previous_durability = stored.durability;
-        stored.fate = next_fate(&stored.fate, fate)?;
-        stored.global_time = global_time.or(stored.global_time);
-        if let Some(durability) = durability {
-            stored.durability = stored.durability.max(durability);
-        }
+        stored.reconcile_fate(fate, global_time, durability)?;
         let advanced_global_times = if matches!(stored.fate, Fate::Accepted)
             && let Some(global_time) = stored.global_time
         {
@@ -91,11 +82,6 @@ where
             // validation. Exclusive fragments deliberately defer current
             // installation and must still run the ordinary repair path below,
             // even when their fate metadata is unchanged.
-            //
-            // This path performs no cleanup, so it deliberately does not
-            // advance the storage-consistency marker: vouching here would
-            // hide any leftover from recovery's settled-ahead sweep. A marker
-            // that lags only widens that sweep.
             #[cfg(test)]
             {
                 let tx_versions = self.query_versions_for_tx(tx_id).await?;
@@ -209,10 +195,6 @@ where
         let persisted = applied.persist().await;
         self.database.finish_persistence(persisted)?;
         *terminal_fate_persisted = !matches!(stored.fate, Fate::Pending);
-        if matches!(stored.fate, Fate::Rejected(_)) || stored.global_time.is_some() {
-            self.persist_storage_consistency_marker_through(tx_id.time)
-                .await?;
-        }
         #[cfg(test)]
         {
             let rows = content_versions
