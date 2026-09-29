@@ -258,3 +258,188 @@ async fn deleted_accepted_invitation_is_gone_from_the_recipient_local_store() {
         })
         .await;
 }
+
+/// Revoking an editor by deleting its accepted invitation reaches the
+/// editor's default local read as a deletion, while rows that merely lost
+/// authorization stay cached (INV-SYNC-14).
+///
+/// Mirrors the record-player browser topology's "converge, then owner
+/// revokes editor" phase: the editor holds the playlist, one entry and its
+/// invitation from earlier reads; the owner deletes the invitation, which is
+/// also what grants the editor access to the playlist and its entries. The
+/// editor's concurrent Remote (Global) waits all reach zero rows, and only
+/// then does a default-tier (`LocalFirst`) read run.
+///
+/// ```text
+/// owner ──playlist + entry + invite──► server ──► editor (accepts)
+/// editor ──Remote reads (holds playlist, entry, invite)
+/// owner ──delete invite──► server
+/// editor ──Remote waits: entries, entry, playlist, invite all empty
+/// editor ──LocalFirst reads: invite gone; playlist and entry still cached
+/// ```
+#[tokio::test]
+async fn revoked_editor_default_read_drops_deleted_invitation_but_keeps_unauthorized_rows() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let server = JazzServer::start_with_schema(schema())
+                .await
+                .expect("start test server");
+            let owner = connect(&server, OWNER_ID).await;
+            let editor = connect(&server, EDITOR_ID).await;
+
+            let (playlist, _, tx) = owner
+                .insert(
+                    "playlists",
+                    row_input!("owner_id" => OWNER_ID, "name" => "Road tape"),
+                )
+                .expect("owner creates the playlist");
+            settle(&owner, tx, DurabilityTier::GlobalServer).await;
+            let (entry, _, tx) = owner
+                .insert(
+                    "entries",
+                    row_input!("playlist_id" => playlist, "position" => 1),
+                )
+                .expect("owner adds an entry");
+            settle(&owner, tx, DurabilityTier::GlobalServer).await;
+            let (invite, _, tx) = owner
+                .insert(
+                    "invitations",
+                    row_input!(
+                        "playlist_id" => playlist,
+                        "owner_id" => OWNER_ID,
+                        "subject" => EDITOR_ID,
+                        "role" => "editor",
+                        "status" => "pending"
+                    ),
+                )
+                .expect("owner invites the editor");
+            settle(&owner, tx, DurabilityTier::GlobalServer).await;
+
+            wait_for_query(
+                &editor,
+                by_id("invitations", invite),
+                ReadTier::Remote,
+                TIMEOUT,
+                "editor observes the pending invitation",
+                |rows| (rows.len() == 1).then_some(()),
+            )
+            .await;
+            let tx = editor
+                .update(
+                    "invitations",
+                    invite,
+                    vec![("status".into(), Value::Text("accepted".into()))],
+                )
+                .expect("editor accepts");
+            settle(&editor, tx, DurabilityTier::GlobalServer).await;
+
+            let entries_of_playlist =
+                || Query::from("entries").filter(eq(col("playlist_id"), lit(*playlist.uuid())));
+            tokio::join!(
+                wait_for_query(
+                    &editor,
+                    entries_of_playlist(),
+                    ReadTier::Remote,
+                    TIMEOUT,
+                    "accepted editor reads the playlist's entries",
+                    |rows| (rows.len() == 1).then_some(()),
+                ),
+                wait_for_query(
+                    &editor,
+                    by_id("entries", entry),
+                    ReadTier::Remote,
+                    TIMEOUT,
+                    "accepted editor reads the entry by id",
+                    |rows| (rows.len() == 1).then_some(()),
+                ),
+                wait_for_query(
+                    &editor,
+                    by_id("playlists", playlist),
+                    ReadTier::Remote,
+                    TIMEOUT,
+                    "accepted editor reads the playlist",
+                    |rows| (rows.len() == 1).then_some(()),
+                ),
+                wait_for_query(
+                    &editor,
+                    by_id("invitations", invite),
+                    ReadTier::Remote,
+                    TIMEOUT,
+                    "accepted editor reads the accepted invitation",
+                    |rows| (rows.len() == 1).then_some(()),
+                ),
+            );
+
+            let tx = owner
+                .delete("invitations", invite)
+                .expect("owner deletes the invitation");
+            settle(&owner, tx, DurabilityTier::GlobalServer).await;
+            tokio::join!(
+                wait_for_query(
+                    &editor,
+                    entries_of_playlist(),
+                    ReadTier::Remote,
+                    TIMEOUT,
+                    "revoked editor loses the playlist's entries",
+                    |rows| rows.is_empty().then_some(()),
+                ),
+                wait_for_query(
+                    &editor,
+                    by_id("entries", entry),
+                    ReadTier::Remote,
+                    TIMEOUT,
+                    "revoked editor loses the entry by id",
+                    |rows| rows.is_empty().then_some(()),
+                ),
+                wait_for_query(
+                    &editor,
+                    by_id("playlists", playlist),
+                    ReadTier::Remote,
+                    TIMEOUT,
+                    "revoked editor loses the playlist",
+                    |rows| rows.is_empty().then_some(()),
+                ),
+                wait_for_query(
+                    &editor,
+                    by_id("invitations", invite),
+                    ReadTier::Remote,
+                    TIMEOUT,
+                    "revoked editor loses the deleted invitation",
+                    |rows| rows.is_empty().then_some(()),
+                ),
+            );
+
+            let default_ids = |query: Query| {
+                let editor = &editor;
+                async move {
+                    editor
+                        .query(query, ReadTier::LocalFirst)
+                        .await
+                        .map(jazz::tools::test_support::ordinary_rows)
+                        .expect("default-tier read")
+                        .into_iter()
+                        .map(|(id, _)| id)
+                        .collect::<Vec<_>>()
+                }
+            };
+            assert!(
+                default_ids(by_id("invitations", invite)).await.is_empty(),
+                "the deleted invitation is gone from the editor's default read"
+            );
+            assert_eq!(
+                default_ids(by_id("playlists", playlist)).await,
+                vec![playlist],
+                "the undeleted playlist stays cached after losing authorization"
+            );
+            assert_eq!(
+                default_ids(by_id("entries", entry)).await,
+                vec![entry],
+                "the undeleted entry stays cached after losing authorization"
+            );
+
+            owner.shutdown().await.expect("shutdown owner");
+            editor.shutdown().await.expect("shutdown editor");
+            server.shutdown().await;
+        })
+        .await;
+}
