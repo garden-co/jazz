@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import type { Db } from "jazz-tools";
 import { app, type Turn } from "@/schema";
 import { backendJazzClient } from "@/src/lib/backend-jazz-client";
@@ -16,7 +15,7 @@ declare global {
 }
 
 // One identity per server process. Next dev reloads modules, so keep it global.
-const runner = (globalThis.__musicAgentRunner ??= { id: randomUUID(), active: new Set() });
+const runner = (globalThis.__musicAgentRunner ??= { id: crypto.randomUUID(), active: new Set() });
 
 /** Queue a new assistant reply under `parentId` and show it as the conversation's head. */
 export function queueAssistantTurn(db: Db, conversationId: string, parentId: string): string {

@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { app } from "@/schema";
 import { addDays } from "@/src/agent/tools";
 import { queueAssistantTurn } from "@/src/agent/runner";
@@ -56,8 +55,12 @@ export async function ensureWorkspace(accountId: string, authUserId: string, dis
         const existing = await tx.all(app.profiles.where({ accountId }));
         if (existing[0]) return null;
         const ownerAccount = accountId;
-        tx.insert(app.profiles, { accountId, authUserId, displayName }, { id: randomUUID() });
-        const artistId = randomUUID();
+        tx.insert(
+          app.profiles,
+          { accountId, authUserId, displayName },
+          { id: crypto.randomUUID() },
+        );
+        const artistId = crypto.randomUUID();
         tx.insert(
           app.artists,
           { ownerAccount, name: "The Night Shift Trio", homeCity: "Chicago", genre: "jazz" },
@@ -67,24 +70,24 @@ export async function ensureWorkspace(accountId: string, authUserId: string, dis
           tx.insert(
             app.songs,
             { ownerAccount, artistId, title, durationSeconds, energy },
-            { id: randomUUID() },
+            { id: crypto.randomUUID() },
           );
         for (const [name, city, capacity, style, bookingContact] of VENUES)
           tx.insert(
             app.venues,
             { ownerAccount, name, city, capacity, style, bookingContact },
-            { id: randomUUID() },
+            { id: crypto.randomUUID() },
           );
         const today = new Date().toISOString().slice(0, 10);
         for (const [offset, kind, title, city] of CALENDAR)
           tx.insert(
             app.calendarEvents,
             { ownerAccount, artistId, date: addDays(today, offset), kind, title, city },
-            { id: randomUUID() },
+            { id: crypto.randomUUID() },
           );
 
-        const conversationId = randomUUID();
-        const userTurnId = randomUUID();
+        const conversationId = crypto.randomUUID();
+        const userTurnId = crypto.randomUUID();
         tx.insert(
           app.conversations,
           {
@@ -118,7 +121,7 @@ export async function ensureWorkspace(accountId: string, authUserId: string, dis
             byteLength: payload.byteLength,
             payload,
           },
-          { id: randomUUID() },
+          { id: crypto.randomUUID() },
         );
         return { conversationId, userTurnId };
       });
