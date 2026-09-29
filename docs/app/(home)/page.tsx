@@ -367,7 +367,7 @@ export default function HomePage() {
         <div className="home-container grid gap-12 lg:grid-cols-12">
           <div className="lg:col-span-5">
             <Heading level={2} type="display-3" id="cloud" className="home-anchor">
-              A globally synced, auto-scaling database cloud
+              A globally synced, auto&#8209;scaling database cloud
             </Heading>
             <div className="home-prose mt-6">
               <p>
