@@ -187,7 +187,7 @@ fn pre_linear_native_corpora_are_refused_before_any_mutation() {
     let directory = tempfile::tempdir().unwrap();
     let archive = checked_fixture(
         include_str!("../fixtures/current-native-jazz-rocksdb.tar.gz.base64"),
-        "130c0d93e12d81fa7528511ca1b4994c8981f2dbd6d67c89e8bfdc5c98bcad06",
+        "21a6c49b90d83f33ba3deba2cfd7605db155e78deeec22f683158037c66d7ba7",
     );
     let path = unpack_rocksdb(directory.path(), &archive);
     assert_refused(
