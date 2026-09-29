@@ -797,9 +797,8 @@ where
             Value::Large(value_ref) => {
                 let staged = self
                     .node
-                    .node
-                    .lock()
-                    .await
+                    .lock_for_large_value_staging()
+                    .await?
                     .append_and_stage_large_value(*value_ref, bytes)
                     .await?;
                 self.write_staged_large_value_update(table, row, column, staged, nullable)
@@ -857,9 +856,8 @@ where
             Value::Large(value_ref) => {
                 let staged = self
                     .node
-                    .node
-                    .lock()
-                    .await
+                    .lock_for_large_value_staging()
+                    .await?
                     .edit_and_stage_large_value(*value_ref, offset, delete_length, insert)
                     .await?;
                 self.write_staged_large_value_update(table, row, column, staged, nullable)
@@ -984,7 +982,7 @@ where
                     .cells(cells)
                     .authored_columns(authored_columns);
             let published = {
-                let mut node = self.node.node.lock().await;
+                let mut node = self.node.lock_for_large_value_staging().await?;
                 let commit = if staged.is_empty() {
                     node.seal_inherited_large_values(commit, self.schema_version_id, true)
                         .await?
@@ -1188,9 +1186,8 @@ where
             };
             let staged = self
                 .node
-                .node
-                .lock()
-                .await
+                .lock_for_large_value_staging()
+                .await?
                 .edit_and_stage_large_value(current, offset, delete_length, splice.insert.clone())
                 .await?;
             if let Some(previous) = final_staged.replace(staged) {
@@ -1275,9 +1272,8 @@ where
         };
         let staged = self
             .node
-            .node
-            .lock()
-            .await
+            .lock_for_large_value_staging()
+            .await?
             .edit_and_stage_large_value(large.as_ref().clone(), 0, large.byte_length, replacement)
             .await?;
         Ok((
@@ -1330,7 +1326,7 @@ where
         nullable: bool,
     ) -> Result<WriteHandle<S>, Error> {
         let published = {
-            let mut node = self.node.node.lock().await;
+            let mut node = self.node.lock_for_large_value_staging().await?;
             let mut cells = node
                 .current_physical_cells_in_schema(self.schema_version_id, table, row)
                 .await?
@@ -1671,9 +1667,8 @@ where
         let initialized_now = !upload.initialized;
         if !upload.initialized {
             self.node
-                .node
-                .lock()
-                .await
+                .lock_for_large_value_staging()
+                .await?
                 .begin_streaming_large_value_upload(upload.id, upload.kind)
                 .await?;
             upload.initialized = true;
@@ -1686,9 +1681,8 @@ where
         if let Err(error) = push_result {
             upload.preparation.take();
             self.node
-                .node
-                .lock()
-                .await
+                .lock_for_large_value_staging()
+                .await?
                 .evict_pending_large_value_upload(upload.id)
                 .await?;
             return Err(crate::node::Error::from(error).into());
@@ -1701,19 +1695,15 @@ where
             return Ok(());
         }
         let stage_result = {
-            let node = self.node.node.lock().await;
+            let node = self.node.lock_for_large_value_staging().await?;
             node.stage_large_value_chunk_batch(upload.id, upload.kind, chunks)
                 .await
         };
         if let Err(error) = stage_result {
             upload.preparation.take();
-            let _ = self
-                .node
-                .node
-                .lock()
-                .await
-                .evict_pending_large_value_upload(upload.id)
-                .await;
+            if let Ok(node) = self.node.lock_for_large_value_staging().await {
+                let _ = node.evict_pending_large_value_upload(upload.id).await;
+            }
             return Err(error.into());
         }
         Ok(())
@@ -1727,9 +1717,8 @@ where
         self.ensure_mutation_operation_admitted()?;
         upload.preparation.take();
         self.node
-            .node
-            .lock()
-            .await
+            .lock_for_large_value_staging()
+            .await?
             .evict_pending_large_value_upload(upload.id)
             .await?;
         Ok(())
@@ -1769,9 +1758,8 @@ where
         };
         if !upload.initialized {
             self.node
-                .node
-                .lock()
-                .await
+                .lock_for_large_value_staging()
+                .await?
                 .begin_streaming_large_value_upload(upload.id, upload.kind)
                 .await?;
             upload.initialized = true;
@@ -1783,19 +1771,15 @@ where
         let (value_ref, _) = match preparation.finish() {
             Ok(finished) => finished,
             Err(error) => {
-                let _ = self
-                    .node
-                    .node
-                    .lock()
-                    .await
-                    .evict_pending_large_value_upload(upload.id)
-                    .await;
+                if let Ok(node) = self.node.lock_for_large_value_staging().await {
+                    let _ = node.evict_pending_large_value_upload(upload.id).await;
+                }
                 return Err(crate::node::Error::from(error).into());
             }
         };
         let chunks = std::mem::take(&mut *upload.emitted.borrow_mut());
         let staged_result = {
-            let node = self.node.node.lock().await;
+            let node = self.node.lock_for_large_value_staging().await?;
             match node
                 .stage_large_value_chunk_batch(upload.id, upload.kind, chunks)
                 .await
@@ -1809,13 +1793,9 @@ where
             Err(error) => {
                 // Cleanup is best-effort here so the terminal operation reports
                 // its original staging/finalization failure.
-                let _ = self
-                    .node
-                    .node
-                    .lock()
-                    .await
-                    .evict_pending_large_value_upload(upload.id)
-                    .await;
+                if let Ok(node) = self.node.lock_for_large_value_staging().await {
+                    let _ = node.evict_pending_large_value_upload(upload.id).await;
+                }
                 return Err(error.into());
             }
         };
@@ -2136,7 +2116,11 @@ where
             commit = commit.permission_subject(permission_subject);
         }
         let published = {
-            let mut node = self.node.node.lock().await;
+            let mut node = if commit.needs_large_value_staging() {
+                self.node.lock_for_large_value_staging().await?
+            } else {
+                self.node.node.lock().await
+            };
             let commit = node
                 .seal_inherited_large_values(commit, self.schema_version_id, true)
                 .await?
@@ -2812,7 +2796,14 @@ where
                 .deletion(DeletionEvent::Restored),
         ));
         let published = {
-            let mut node = self.node.node.lock().await;
+            let mut node = if commits
+                .iter()
+                .any(MergeableCommit::needs_large_value_staging)
+            {
+                self.node.lock_for_large_value_staging().await?
+            } else {
+                self.node.node.lock().await
+            };
             if let Some(reserved) = self.reserved_tx_id {
                 node.commit_mergeable_many_in_schema_at(self.schema_version_id, commits, reserved)
                     .await?
@@ -2907,7 +2898,11 @@ where
         // Db is an untrusted client: structurally valid writes are staged and
         // sent optimistically. A serving authority assigns the policy fate.
         let published = {
-            let mut node = self.node.node.lock().await;
+            let mut node = if commit.needs_large_value_staging() {
+                self.node.lock_for_large_value_staging().await?
+            } else {
+                self.node.node.lock().await
+            };
             let commit = node
                 .seal_inherited_large_values(
                     commit,

@@ -1011,6 +1011,18 @@ where
         Ok(())
     }
 
+    /// Whether committing this transaction can stage large scalar content.
+    #[doc(hidden)]
+    pub fn transaction_needs_large_value_staging(
+        &self,
+        id: OpenTransactionId,
+    ) -> Result<bool, Error> {
+        Ok(self.open_tx(id)?.writes.iter().any(|write| {
+            let (PendingCells::Replace(cells) | PendingCells::Patch(cells)) = &write.cells;
+            cells.values().any(value_needs_large_value_staging)
+        }))
+    }
+
     /// Commit an exclusive transaction and return its sync commit unit.
     pub async fn commit_exclusive_bound(
         &mut self,
