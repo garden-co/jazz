@@ -1,7 +1,7 @@
 import { definePermissions } from "jazz-tools/permissions";
 import { permissions as betterAuthPermissions } from "./schema-better-auth/schema";
 import { app } from "./schema";
-import { catalogueEditors } from "./src/roles";
+import { catalogueEditors, invitableRoles, roles } from "./src/roles";
 
 /**
  * Tenant admission has one authority: the app-owned backend bootstrap route.
@@ -31,6 +31,8 @@ const tenantPermissions = definePermissions(app, ({ policy, session, allowedTo, 
         }),
       ),
     );
+  // Only the roles the app knows; a new member can't start as an admin.
+  const oneOfRoles = (allowed: readonly string[]) => anyOf(allowed.map((role) => ({ role })));
   const personMatchesMembership = (row: { personId: unknown; userId: unknown }) =>
     policy.people.exists.where({ id: row.personId as never, userId: row.userId as never });
   const artistBelongsToRelease = (row: { artistId: unknown; organizationId: unknown }) =>
@@ -92,11 +94,13 @@ const tenantPermissions = definePermissions(app, ({ policy, session, allowedTo, 
     // The proposed row must not be able to make itself satisfy `admin(...)`.
     // First admins come only from the trusted bootstrap route; existing admins
     // can invite non-admin members, and may promote them later through update.
-    allOf([admin(row.organizationId), personMatchesMembership(row), { role: { ne: "admin" } }]),
+    allOf([admin(row.organizationId), personMatchesMembership(row), oneOfRoles(invitableRoles)]),
   );
   policy.memberships.allowUpdate
     .whereOld((row) => admin(row.organizationId))
-    .whereNew((row) => allOf([admin(row.organizationId), personMatchesMembership(row)]));
+    .whereNew((row) =>
+      allOf([admin(row.organizationId), personMatchesMembership(row), oneOfRoles(roles)]),
+    );
   policy.memberships.allowDelete.where((row) => admin(row.organizationId));
 
   policy.teams.allowRead.where((row) => member(row.organizationId));

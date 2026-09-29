@@ -22,17 +22,15 @@ export async function POST(request: Request) {
 
   const client = await authJazzClient();
   const caller = await client.forRequest(request);
+  // Answer only admins, read as the caller, so nobody else can probe which
+  // emails have accounts or who belongs to the label. The membership write
+  // below is still checked by permissions.ts on its own.
+  const isAdmin = await caller.one(
+    app.memberships.where({ organizationId, userId: account.accountId, role: "admin" }),
+  );
+  if (!isAdmin) return Response.json({ status: "forbidden" }, { status: 403 });
   const person = await findPersonByEmail(client.db, email);
-  if (!person) {
-    // Only say an email is unknown to someone who could have added it, so
-    // other users can't probe which emails have accounts.
-    const isAdmin = await caller.one(
-      app.memberships.where({ organizationId, userId: account.accountId, role: "admin" }),
-    );
-    return isAdmin
-      ? Response.json({ status: "not-found" }, { status: 404 })
-      : Response.json({ status: "forbidden" }, { status: 403 });
-  }
+  if (!person) return Response.json({ status: "not-found" }, { status: 404 });
   const status = await addMember(caller, { organizationId, person, role });
   return Response.json(status === "forbidden" ? { status } : { status, name: person.name }, {
     status: statusCodes[status],

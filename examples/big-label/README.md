@@ -57,7 +57,9 @@ To add a member, an admin enters their email. `POST /api/members` uses the
 backend only to look the email up in `personEmails` (written only by the
 bootstrap route from the verified sign-in, and unreadable by browsers). It then
 writes the membership as the caller, via `forRequest()`, so `permissions.ts`
-decides: only admins add members, never as admins. The write is an exclusive
+decides: only admins add members, only as editors or viewers. The route
+answers non-admins with "forbidden" before looking anything up, so it can't be
+used to probe emails or membership. The write is an exclusive
 transaction that first reads the person's membership, so a double submit adds
 them once. The person needs to have signed in once.
 

@@ -16,6 +16,7 @@ import {
 } from "../src/lib/mutations";
 import { loadDemoData } from "../src/lib/demo-data";
 import { addMember, findPersonByEmail } from "../src/lib/members";
+import { isExclusiveConflict } from "../src/lib/write-errors";
 
 let testApp: PolicyTestApp | undefined;
 afterEach(async () => await testApp?.shutdown());
@@ -296,17 +297,26 @@ describe("BigLabel workflows", () => {
       expect.objectContaining({ name: "outsider" }),
     ]);
 
-    // A double submit adds the member once.
+    // A double submit adds the member once. Both transactions read before
+    // either commits, so one loses with a conflict, retries, and finds the
+    // membership the other added.
+    const conflicts: unknown[] = [];
     const twice = await Promise.all(
       [as("admin"), as("admin")].map((caller) =>
-        addMember(caller, {
-          organizationId: org.id,
-          person: { id: newcomer.id, userId: accounts.newcomer },
-          role: "editor",
-        }),
+        addMember(
+          caller,
+          {
+            organizationId: org.id,
+            person: { id: newcomer.id, userId: accounts.newcomer },
+            role: "editor",
+          },
+          { onConflict: (error) => conflicts.push(error) },
+        ),
       ),
     );
     expect(twice.sort()).toEqual(["added", "already-member"]);
+    expect(conflicts).toHaveLength(1);
+    expect(conflicts.every(isExclusiveConflict)).toBe(true);
     await expect(
       as("admin").all(app.memberships.where({ organizationId: org.id, personId: newcomer.id })),
     ).resolves.toHaveLength(1);

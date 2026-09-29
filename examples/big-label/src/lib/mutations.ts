@@ -62,13 +62,23 @@ export async function nextCatalogNumber(
   organizationId: string,
   catalogue: { id: string; code: string },
 ) {
-  const [highest] = await db.all(
-    app.releases
-      .where({ organizationId, catalogueId: catalogue.id, catalogSequence: { gte: 0 } })
-      .orderBy("catalogSequence", "desc")
-      .limit(1),
+  const inCatalogue = { organizationId, catalogueId: catalogue.id };
+  const [[highest], [lastByText]] = await Promise.all([
+    db.all(
+      app.releases
+        .where({ ...inCatalogue, catalogSequence: { gte: 0 } })
+        .orderBy("catalogSequence", "desc")
+        .limit(1),
+    ),
+    // Releases saved before catalogSequence existed only have the text, which
+    // sorts correctly as long as the numbers have the same width.
+    db.all(app.releases.where(inCatalogue).orderBy("catalogNumber", "desc").limit(1)),
+  ]);
+  const sequence = Math.max(
+    highest?.catalogSequence ?? 0,
+    (lastByText && catalogSequence(lastByText.catalogNumber)) ?? 0,
   );
-  return formatCatalogNumber(catalogue.code, (highest?.catalogSequence ?? 0) + 1);
+  return formatCatalogNumber(catalogue.code, sequence + 1);
 }
 
 export class ArtistHasReleasesError extends Error {

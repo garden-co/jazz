@@ -1,6 +1,7 @@
-import { PersistedWriteRejectedError, type Db } from "jazz-tools";
+import type { Db } from "jazz-tools";
 import { app } from "../../schema";
 import { normalizeEmail } from "./emails";
+import { isExclusiveConflict, isPermissionDenied } from "./write-errors";
 
 /**
  * Looks up who signed in with `email`. Emails are private: only the trusted
@@ -28,6 +29,7 @@ export type AddMemberStatus = "added" | "already-member" | "forbidden";
 export async function addMember(
   caller: Db,
   input: { organizationId: string; person: { id: string; userId: string }; role: string },
+  options: { onConflict?: (error: unknown) => void } = {},
 ): Promise<AddMemberStatus> {
   for (let attempt = 0; ; attempt++) {
     try {
@@ -49,15 +51,12 @@ export async function addMember(
       });
       return await write.wait();
     } catch (error) {
-      if (error instanceof PersistedWriteRejectedError) return "forbidden";
-      if (attempt < 3 && isExclusiveConflict(error)) continue;
+      if (isPermissionDenied(error)) return "forbidden";
+      if (attempt < 3 && isExclusiveConflict(error)) {
+        options.onConflict?.(error);
+        continue;
+      }
       throw error;
     }
   }
-}
-
-/** Whether an exclusive transaction lost to a concurrent write and can be retried. */
-export function isExclusiveConflict(error: unknown) {
-  const message = error instanceof Error ? error.message : String(error);
-  return /exclusive_conflict|transaction_conflict|cascade_rejected/.test(message);
 }

@@ -6,6 +6,9 @@
 export const roles = ["admin", "editor", "viewer"] as const;
 export type Role = (typeof roles)[number];
 
+/** Roles an admin can give a new member; admins are promoted, never inserted. */
+export const invitableRoles: readonly Role[] = ["editor", "viewer"];
+
 /** Roles that can change artists, releases and team release assignments. */
 export const catalogueEditors: readonly Role[] = ["admin", "editor"];
 

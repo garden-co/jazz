@@ -3,7 +3,7 @@ import { app } from "../../schema";
 import { authJazzClient } from "./auth-jazz-client";
 import { planPersonalBootstrap } from "./bootstrap-state";
 import { normalizeEmail } from "./emails";
-import { isExclusiveConflict } from "./members";
+import { isExclusiveConflict } from "./write-errors";
 
 /**
  * Server-mediated first-tenant bootstrap. Ordinary clients never receive the

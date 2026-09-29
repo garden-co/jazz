@@ -64,6 +64,18 @@ describe("BigLabel roles at the Jazz edge", () => {
         role: "admin",
       }),
     );
+    // Roles are the three the app knows, and new members can't start as admins.
+    await admin.expectDenied((db) =>
+      db.insert(app.memberships, {
+        organizationId: seeded.org.id,
+        personId: seeded.outsider.id,
+        userId: accounts.outsider,
+        role: "owner",
+      }),
+    );
+    await admin.expectDenied((db) =>
+      db.update(app.memberships, seeded.viewerMembership.id, { role: "superuser" }),
+    );
     // A membership must name the person it belongs to.
     await admin.expectDenied((db) =>
       db.insert(app.memberships, {
@@ -149,6 +161,11 @@ describe("BigLabel roles at the Jazz edge", () => {
         searchKey: "forged catalogue",
       }),
     );
+
+    // Admins may still change a member to another known role.
+    await admin
+      .update(app.memberships, seeded.viewerMembership.id, { role: "editor" })
+      .wait({ tier: "global" });
 
     // Foreign labels stay unreadable, including their catalogues and staffing.
     const foreign = { organizationId: seeded.org.id };
