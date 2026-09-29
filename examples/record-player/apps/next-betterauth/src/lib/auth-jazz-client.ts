@@ -18,13 +18,17 @@ declare global {
 
 /** Share one session owner across concurrent auth/bootstrap calls and Next reloads. */
 export async function authJazzClient(): Promise<JazzClient> {
+  // Fail closed: `withJazz` injects a generated secret in development; a
+  // deployment must set its own.
+  const backendSecret = process.env.BACKEND_SECRET;
+  if (!backendSecret) throw new Error("BACKEND_SECRET must be set");
   const pending = (globalThis.__recordPlayerAuthJazzSession ??= createJazzSession({
     app,
     permissions,
     appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID!,
     driver: { type: "memory" },
     serverUrl: process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!,
-    initial: { backendSecret: process.env.BACKEND_SECRET! },
+    initial: { backendSecret },
     env: process.env.NODE_ENV === "production" ? "prod" : "dev",
     tier: "global",
   }));

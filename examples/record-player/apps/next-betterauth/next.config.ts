@@ -8,9 +8,8 @@ export default withJazz(
     serverExternalPackages: ["jazz-napi", "jazz-tools/backend"],
   },
   {
-    server: {
-      backendSecret: process.env.BACKEND_SECRET ?? "record-player-development-backend-secret",
-      jwksUrl: `${appOrigin}/api/auth/jwks`,
-    },
+    // Without BACKEND_SECRET in the environment, the development server
+    // generates one and exposes it to the auth backend as BACKEND_SECRET.
+    server: { jwksUrl: `${appOrigin}/api/auth/jwks` },
   },
 );

@@ -50,8 +50,12 @@ export function ShareDialog({
       return;
     }
     setError(undefined);
-    await store.invite(playlist.id, subject, role);
-    setRecipient("");
+    try {
+      await store.invite(playlist.id, subject, role);
+      setRecipient("");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
   }
 
   return (

@@ -77,8 +77,9 @@ describe("RecordPlayer library and playlists", () => {
       { mimeType: "audio/wav", byteLength: wav.byteLength },
     );
 
-    const window = await store.readAudioRange(trackId, 1000, 1000 + AUDIO_WINDOW_BYTES);
-    expect(window).toEqual(wav.slice(1000, 1000 + AUDIO_WINDOW_BYTES));
+    expect(wav.byteLength).toBeLessThan(AUDIO_WINDOW_BYTES);
+    const window = await store.readAudioRange(trackId, 1000, 9000);
+    expect(window).toEqual(wav.slice(1000, 9000));
     const tail = await store.readAudioRange(trackId, wav.byteLength - 10, wav.byteLength);
     expect(tail).toEqual(wav.slice(wav.byteLength - 10));
     expect(await store.readAudio(trackId)).toEqual(wav);

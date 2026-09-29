@@ -28,8 +28,12 @@ export type PlaylistEntry = {
 export const ALBUM_TRACK_LIMIT = 32;
 export const PLAYLIST_WINDOW_OFFSET = 8;
 export const PLAYLIST_WINDOW_LIMIT = 16;
-/** Size of one audio range read during playback. */
-export const AUDIO_WINDOW_BYTES = 64 * 1024;
+/**
+ * Size of one audio range read during playback. Until exact chunk demand lands
+ * (#2090), every range read materialises the whole stored value before slicing
+ * it, so windows are kept large to bound that repeated cost.
+ */
+export const AUDIO_WINDOW_BYTES = 512 * 1024;
 
 /**
  * Fractional ordering: a new position strictly between two neighbours (either
@@ -100,8 +104,9 @@ export class JazzRecordPlayerStore {
   }
 
   /**
-   * Reads `[from, to)` of a track's audio. Only the requested slice is
-   * returned to the app; the rest of the value is never copied into JS.
+   * Reads `[from, to)` of a track's audio and returns only that slice. Today
+   * Jazz still materialises the whole value to cut the slice (#2090); callers
+   * don't need to change when it reads just the requested chunks.
    */
   async readAudioRange(trackId: string, from: number, to: number): Promise<Uint8Array | null> {
     const [row] = await this.db.all(

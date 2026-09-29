@@ -40,6 +40,7 @@ export function UploadDialog({
   const [files, setFiles] = useState<File[]>([]);
   const [progress, setProgress] = useState<UploadProgress>();
   const [error, setError] = useState<string>();
+  const [createdAlbumId, setCreatedAlbumId] = useState<string>();
   const isUploading = progress !== undefined;
   const canSubmit = files.length > 0 && (album || title.trim()) && !isUploading;
 
@@ -50,14 +51,18 @@ export function UploadDialog({
     setFiles([]);
     setProgress(undefined);
     setError(undefined);
+    setCreatedAlbumId(undefined);
   }
 
   async function submit() {
     setError(undefined);
     setProgress({ label: "Preparing", sentBytes: 0, totalBytes: 1 });
     try {
+      // A retry after a failed upload reuses the album it already created:
+      // catalogue rows cannot be deleted (see README, Known limits).
       const albumId =
         album?.id ??
+        createdAlbumId ??
         store.createAlbum({
           title: title.trim(),
           artist: artist.trim() || "Unknown artist",
@@ -65,6 +70,7 @@ export function UploadDialog({
             ? { bytes: new Uint8Array(await cover.arrayBuffer()), mimeType: cover.type }
             : undefined,
         });
+      if (!album) setCreatedAlbumId(albumId);
       await uploadTracks(store, albumId, files, album ? nextOrdinal : 1, setProgress);
       reset();
       onUploaded(albumId);

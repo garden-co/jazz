@@ -15,7 +15,7 @@ audio back in byte ranges.
   metadata columns. Cover images live in their own column and each cover is
   read on its own, so a large library renders before any art arrives
   (`app/cover-art.tsx`).
-- **Range reads for playback.** The player reads audio in 64 KiB windows with
+- **Range reads for playback.** The player reads audio in 512 KiB windows with
   typed large-value selections, `select({ audio_bytes: { from, to } })`
   (`src/audio-stream.ts`). MP3 and WebM windows are appended to a
   `MediaSource` so playback starts after the first window; WAV and other
@@ -71,12 +71,16 @@ pnpm build
 
 - Range reads currently materialise the whole stored value before slicing it
   ([#2090](https://github.com/garden-co/jazz/issues/2090)), so each window
-  costs as much as a whole-value read. The app reads in windows anyway, so it
-  gets the benefit when exact chunk demand lands.
+  costs as much as a whole-value read. Windows are therefore large (512 KiB),
+  and the short demo tracks fit in a single window; uploaded songs are read in
+  several. The app reads in windows anyway, so it gets the benefit when exact
+  chunk demand lands.
 - Seeking ahead of the loaded range waits for the sequential reads to catch up;
   the player does not yet prioritise the window under the seek position.
 - Invitations are addressed by Jazz account ID. There is no directory to look
   someone up by email, and the recipient cannot see a playlist's name until
   they accept, because the read policy admits accepted invitations only.
 - Albums and tracks cannot be edited or deleted; the permissions only allow
-  inserts into the shared catalogue.
+  inserts into the shared catalogue. An upload that fails part-way leaves the
+  album and the tracks written so far; retrying from the same dialog reuses
+  that album.

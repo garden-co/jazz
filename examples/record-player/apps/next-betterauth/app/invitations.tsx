@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useAll } from "jazz-tools/react";
 import { Button } from "@astryxdesign/core/Button";
+import { Code } from "@astryxdesign/core/Code";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
 import { Heading } from "@astryxdesign/core/Heading";
 import { Icon } from "@astryxdesign/core/Icon";
@@ -47,7 +48,7 @@ export function Invitations({ onAccepted }: { onAccepted(): void }) {
           Playlist owners invite you by this ID. It is your Jazz account, not your email.
         </Text>
         <HStack gap={2} vAlign="center" wrap="wrap">
-          <code className="rp-account-id">{me ?? "Not connected"}</code>
+          <Code>{me ?? "Not connected"}</Code>
           <Button
             label={copied ? "Copied" : "Copy"}
             variant="secondary"

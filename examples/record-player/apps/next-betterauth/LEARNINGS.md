@@ -3,7 +3,7 @@
 - Audio is written with public `insertStreaming` and played back through typed
   large-value range selections (`select({ audio_bytes: { from, to } })`, #2088).
   Library browsing selects metadata only. Range reads still materialise the
-  whole stored value before slicing (#2090, #3471); the player reads in 64 KiB
+  whole stored value before slicing (#2090, #3471); the player reads in 512 KiB
   windows regardless, so it gains from exact chunk demand without changes.
 - Store the byte length (and media type) beside a streamed value. A range read
   must stay inside the value and the typed query API has no length-only

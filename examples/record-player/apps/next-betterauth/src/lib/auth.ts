@@ -15,7 +15,7 @@ if (process.env.NODE_ENV === "production" && !secret) {
 export const auth = betterAuth({
   baseURL: origin,
   trustedOrigins: [origin],
-  secret: secret ?? "record-player-development-secret",
+  secret: secret || "record-player-development-secret",
   database: jazzAdapter({ db: async () => (await authJazzClient()).db, schema: app.wasmSchema }),
   emailAndPassword: { enabled: true, autoSignIn: true, minPasswordLength: 8 },
   plugins: [

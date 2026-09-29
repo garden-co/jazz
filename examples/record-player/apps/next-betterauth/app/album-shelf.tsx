@@ -66,7 +66,12 @@ export function AlbumShelf({
             className="rp-shelf-item"
             onClick={() => onSelect(album.id)}
           >
-            <CoverArt albumId={album.id} title={album.title} size="lg" />
+            <CoverArt
+              albumId={album.id}
+              title={album.title}
+              hasCover={Boolean(album.cover_mime)}
+              size="lg"
+            />
             <VStack gap={0.5}>
               <Text weight="semibold" maxLines={1}>
                 {album.title}

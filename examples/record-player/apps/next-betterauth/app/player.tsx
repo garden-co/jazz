@@ -11,6 +11,7 @@ import {
   type ReactNode,
 } from "react";
 import { Pause, Play, SkipBack, SkipForward, Volume2, VolumeX } from "lucide-react";
+import { Card } from "@astryxdesign/core/Card";
 import { HStack, VStack } from "@astryxdesign/core/Stack";
 import { Icon } from "@astryxdesign/core/Icon";
 import { IconButton } from "@astryxdesign/core/IconButton";
@@ -196,10 +197,15 @@ function PlayerBar(props: {
       ? `${track.artist} · reading audio ${Math.round(loaded * 100)}%`
       : track.artist;
   return (
-    <div className="rp-player" role="region" aria-label="Player">
+    <Card padding={3} className="rp-player" role="region" aria-label="Player">
       <HStack gap={3} vAlign="center" wrap="wrap" justify="between">
         <HStack gap={2} vAlign="center" className="rp-player-track">
-          <CoverArt albumId={track.albumId} title={track.title} size="sm" />
+          <CoverArt
+            albumId={track.albumId}
+            title={track.title}
+            hasCover={track.hasCover}
+            size="sm"
+          />
           <VStack gap={0.5} className="rp-player-text">
             <Text weight="semibold" maxLines={1}>
               {track.title}
@@ -271,7 +277,7 @@ function PlayerBar(props: {
           </div>
         </HStack>
       </HStack>
-    </div>
+    </Card>
   );
 }
 

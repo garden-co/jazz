@@ -26,12 +26,28 @@ export function placeholderHue(seed: string): (typeof PLACEHOLDER_HUES)[number] 
 type Size = "sm" | "md" | "lg";
 
 /**
- * Album art. The cover bytes are a separate, lazily read column: the shelf
- * query never selects them, so browsing stays metadata-only and each cover
- * arrives on its own.
+ * Album art. Cover bytes live in their own column that the shelf query never
+ * selects. Each cover is read only once it scrolls near the viewport, so a
+ * long shelf holds a handful of cover subscriptions rather than one per album.
  */
-export function CoverArt({ albumId, title, size }: { albumId: string; title: string; size: Size }) {
-  const cover = useAll(app.albums.where({ id: albumId }).select("cover_image", "cover_mime"));
+export function CoverArt({
+  albumId,
+  title,
+  hasCover,
+  size,
+}: {
+  albumId: string;
+  title: string;
+  hasCover?: boolean;
+  size: Size;
+}) {
+  const [element, setElement] = useState<HTMLElement | null>(null);
+  const isNear = useIsNearViewport(hasCover ? element : null);
+  const cover = useAll(
+    hasCover && isNear
+      ? app.albums.where({ id: albumId }).select("cover_image", "cover_mime")
+      : undefined,
+  );
   const row = cover.data?.[0];
   const url = useObjectUrl(row?.cover_image ?? undefined, row?.cover_mime ?? undefined);
   if (url) {
@@ -39,6 +55,7 @@ export function CoverArt({ albumId, title, size }: { albumId: string; title: str
   }
   return (
     <div
+      ref={setElement}
       className="rp-cover rp-cover-placeholder"
       data-size={size}
       data-hue={placeholderHue(albumId)}
@@ -46,6 +63,22 @@ export function CoverArt({ albumId, title, size }: { albumId: string; title: str
       {size !== "sm" && <span className="rp-cover-title">{title}</span>}
     </div>
   );
+}
+
+function useIsNearViewport(element: HTMLElement | null): boolean {
+  const [isNear, setIsNear] = useState(false);
+  useEffect(() => {
+    if (!element || isNear) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) setIsNear(true);
+      },
+      { rootMargin: "50%" },
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [element, isNear]);
+  return isNear;
 }
 
 function useObjectUrl(bytes: Uint8Array | undefined, mime: string | undefined) {

@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "next dev",
-    "build": "node ../../../../packages/jazz-tools/dist/cli.js validate && next build",
+    "build": "jazz-tools validate && next build",
     "start": "next start",
     "test": "pnpm test:unit && pnpm test:provider && pnpm test:selection",
     "test:unit": "vitest run --config vitest.config.unit.ts",

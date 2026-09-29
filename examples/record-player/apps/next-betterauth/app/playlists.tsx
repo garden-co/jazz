@@ -18,7 +18,7 @@ import { app } from "../schema";
 import type { PlayableTrack } from "../src/audio-stream";
 import { positionBetween } from "../src/record-player";
 import { formatDuration } from "./format";
-import { useAlbums, usePlaylists, useStore, type PlaylistSummary } from "./library-data";
+import { usePlaylists, useStore, type PlaylistSummary } from "./library-data";
 import { usePlayer } from "./player";
 import { ShareDialog } from "./share-dialog";
 
@@ -78,7 +78,6 @@ type EntryRow = {
 function PlaylistDetail({ playlist }: { playlist: PlaylistSummary }) {
   const store = useStore();
   const player = usePlayer();
-  const albums = useAlbums();
   const [isSharing, setSharing] = useState(false);
   const entries = useAll(
     app.playlist_entries
@@ -86,40 +85,38 @@ function PlaylistDetail({ playlist }: { playlist: PlaylistSummary }) {
       .orderBy("position", "asc")
       .limit(500)
       .include({
-        track: app.tracks.select(
-          "album_id",
-          "title",
-          "duration_ms",
-          "audio_mime",
-          "audio_byte_length",
-        ),
+        track: app.tracks
+          .select("album_id", "title", "duration_ms", "audio_mime", "audio_byte_length")
+          .include({ album: app.albums.select("title", "artist", "cover_mime") }),
       }),
   );
 
-  const rows = useMemo<EntryRow[]>(() => {
-    const albumById = new Map((albums.data ?? []).map((album) => [album.id, album]));
-    return (entries.data ?? []).flatMap((entry) => {
-      // A track can be missing while it syncs; show it once it arrives.
-      if (!entry.track) return [];
-      const album = albumById.get(entry.track.album_id);
-      return [
-        {
-          id: entry.id,
-          position: entry.position,
-          track: {
-            id: entry.track.id,
-            title: entry.track.title,
-            albumId: entry.track.album_id,
-            albumTitle: album?.title ?? "",
-            artist: album?.artist ?? "",
-            durationMs: entry.track.duration_ms,
-            mimeType: entry.track.audio_mime,
-            byteLength: entry.track.audio_byte_length,
+  const rows = useMemo<EntryRow[]>(
+    () =>
+      (entries.data ?? []).flatMap((entry) => {
+        // A track can be missing while it syncs; show it once it arrives.
+        if (!entry.track) return [];
+        const album = entry.track.album;
+        return [
+          {
+            id: entry.id,
+            position: entry.position,
+            track: {
+              id: entry.track.id,
+              title: entry.track.title,
+              albumId: entry.track.album_id,
+              albumTitle: album?.title ?? "",
+              artist: album?.artist ?? "",
+              hasCover: Boolean(album?.cover_mime),
+              durationMs: entry.track.duration_ms,
+              mimeType: entry.track.audio_mime,
+              byteLength: entry.track.audio_byte_length,
+            },
           },
-        },
-      ];
-    });
-  }, [entries.data, albums.data]);
+        ];
+      }),
+    [entries.data],
+  );
 
   function move(index: number, by: -1 | 1) {
     const entry = rows[index]!;

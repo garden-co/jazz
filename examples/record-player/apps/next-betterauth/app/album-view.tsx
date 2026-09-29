@@ -41,6 +41,7 @@ export function useAlbumTracks(album: Album | undefined): TrackRow[] | undefined
     byteLength: track.audio_byte_length,
     albumId: album!.id,
     artist: album!.artist,
+    hasCover: Boolean(album!.cover_mime),
   }));
 }
 
@@ -52,7 +53,12 @@ export function AlbumView({ album, onAddTracks }: { album: Album; onAddTracks():
   return (
     <VStack gap={4}>
       <HStack gap={4} vAlign="end" wrap="wrap">
-        <CoverArt albumId={album.id} title={album.title} size="md" />
+        <CoverArt
+          albumId={album.id}
+          title={album.title}
+          hasCover={Boolean(album.cover_mime)}
+          size="md"
+        />
         <VStack gap={2}>
           <VStack gap={0.5}>
             <Heading level={2}>{album.title}</Heading>

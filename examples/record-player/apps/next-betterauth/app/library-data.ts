@@ -15,11 +15,13 @@ export function useAccountId(): string | undefined {
   return useSession()?.user.account ?? undefined;
 }
 
-export type Album = { id: string; title: string; artist: string };
+export type Album = { id: string; title: string; artist: string; cover_mime?: string | null };
 
-/** Metadata-only: the shelf never selects cover or audio bytes. */
+/** Metadata-only: the shelf never selects cover or audio bytes, only whether a cover exists. */
 export function useAlbums() {
-  return useAll(app.albums.orderBy("title", "asc").limit(200).select("title", "artist"));
+  return useAll(
+    app.albums.orderBy("title", "asc").limit(200).select("title", "artist", "cover_mime"),
+  );
 }
 
 export type PlaylistSummary = {

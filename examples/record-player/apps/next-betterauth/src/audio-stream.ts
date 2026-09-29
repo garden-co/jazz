@@ -5,6 +5,7 @@ export type PlayableTrack = {
   title: string;
   artist: string;
   albumId: string;
+  hasCover?: boolean;
   durationMs: number;
   mimeType?: string | null;
   byteLength?: number | null;
@@ -29,8 +30,9 @@ type Options = {
  * Opens a track's audio from its Jazz large value.
  *
  * Audio is read in fixed-size byte windows with typed range selections
- * (`select({ audio_bytes: { from, to } })`), so the app never holds the whole
- * value as one JS allocation before it starts. Formats the browser can append
+ * (`select({ audio_bytes: { from, to } })`). Each window currently costs a
+ * whole-value read inside Jazz (#2090); the app-side shape is already the one
+ * exact chunk demand will make cheap. Formats the browser can append
  * to a MediaSource (MP3, WebM/Opus) start playing after the first window; other
  * formats (WAV, AAC in MP4, FLAC) are assembled into a Blob first.
  */
