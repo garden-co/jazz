@@ -89,18 +89,22 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       - name: Cache Rust build artifacts
-        # Restores third-party crates (including the RocksDB C++ build) and the
-        # cargo-installed wasm-pack. Workspace crates are always rebuilt, so the
-        # packed artifacts still come from this tree. Only default-branch runs
-        # (the nightly dispatch) save; release PRs and branch dispatches read.
+        # Restores third-party crates (including the RocksDB C++ build).
+        # Workspace crates are always rebuilt, so the packed artifacts still
+        # come from this tree. Only default-branch runs (the nightly dispatch)
+        # save; release PRs and branch dispatches read.
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           prefix-key: starters-e2e-v1
           cache-on-failure: true
+          cache-bin: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Install Rust prerequisites
-        run: pnpm run ensure:rust-toolchain
+      # Same pinned, version-validated installer as the shipped package build,
+      # so a cached wasm-pack can never outlive its pin.
+      - uses: ./.github/actions/install-rust-tool
+        with:
+          tool: wasm-pack@0.13.1
 
       - name: Build release artifacts and packages
         run: pnpm run build:starters-e2e
