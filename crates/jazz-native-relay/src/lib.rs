@@ -1449,8 +1449,8 @@ impl NativeRelayHost {
     /// own upstream is the local relay core, which is always attached, so it
     /// cannot tell whether the authoritative server could answer. Only a
     /// change is reported, so an `Attempting` report timestamps the start of
-    /// the attempt the relay first observed. Foregrounds without a native
-    /// socket session keep the core's derived state.
+    /// the attempt the relay first observed. A foreground without a native
+    /// socket session has no server to wait for.
     fn sync_foreground_remote_link(&mut self, foreground: u64) {
         let Some(opened) = self.foregrounds.get(&foreground) else {
             return;
@@ -1462,6 +1462,7 @@ impl NativeRelayHost {
             .private_socket_sessions
             .contains_key(&relay.admitted_scope)
         {
+            self.report_foreground_remote_link(foreground, RemoteLinkHint::NoServer);
             return;
         }
         let scope = opened.scope.clone();
@@ -1496,6 +1497,17 @@ impl NativeRelayHost {
             }
         };
         if previous == Some(hint) {
+            return;
+        }
+        self.report_foreground_remote_link(foreground, hint);
+    }
+
+    fn report_foreground_remote_link(&mut self, foreground: u64, hint: RemoteLinkHint) {
+        if self
+            .foregrounds
+            .get(&foreground)
+            .is_none_or(|opened| opened.remote_link_hint == Some(hint))
+        {
             return;
         }
         let reported = self
