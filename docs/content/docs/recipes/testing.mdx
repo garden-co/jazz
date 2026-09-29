@@ -89,9 +89,14 @@ The returned `PolicyTestApp` provides:
 
 - `testApp.seed(fn)`&hairsp;—&hairsp;run setup writes as an admin, bypassing policy checks, and wait for them to reach the server
 - `testApp.as(session)`&hairsp;—&hairsp;create a `TestDb` client scoped to a specific session
+- `testApp.accountFor(session)`&hairsp;—&hairsp;get the account a session acts for, for example to seed rows a local-first guest owns
 - `testDb.expectAllowed(fn)`&hairsp;—&hairsp;check that a write can be staged locally, then roll it back; this does not prove that the server will accept it
 - `testDb.expectDenied(fn)`&hairsp;—&hairsp;wait for the server to reject a write because of a policy
 - `testApp.shutdown()`&hairsp;—&hairsp;stop the local client and server
+
+To test as a local-first guest, pass `authMode: "local-first"` and leave out `issuer` and
+`account_id`. The test app derives a local-first key from `user_id` and acts exactly like a real
+local-first client with that key, including its own account.
 
 For read policies, assert on returned rows directly. Denied reads are filtered out rather than
 throwing.

@@ -425,6 +425,83 @@ describe("createPolicyTestApp", () => {
     }
   }, 10_000);
 
+  it("runs policies as a local-first guest session without an explicit issuer", async () => {
+    const guestSchema = {
+      products: s.table({ title: s.string() }, {}),
+      staffNotes: s.table({ body: s.string() }, {}),
+      carts: s.table({ item: s.string(), ownerId: s.uuid() }, {}),
+    };
+    const guestApp: s.App<s.Schema<typeof guestSchema>> = s.defineApp(guestSchema);
+    const guestPermissions = definePermissions(guestApp, ({ policy, session, allOf }) => {
+      policy.products.allowRead.where(
+        session.where({ authMode: { in: ["local-first", "external"] } }),
+      );
+      policy.products.allowInsert.where(session.where({ authMode: "external" }));
+      policy.staffNotes.allowRead.where(session.where({ authMode: "external" }));
+      policy.carts.allowRead.where({ ownerId: session.user.account });
+      policy.carts.allowInsert.where(
+        allOf([{ ownerId: session.user.account }, session.where({ authMode: "local-first" })]),
+      );
+    });
+    const policyTestApp = await createPolicyTestApp(guestApp, guestPermissions, expect);
+
+    try {
+      const product = await policyTestApp.seed((db) =>
+        db.insert(guestApp.products, { title: "Visible to guests" }),
+      );
+      const note = await policyTestApp.seed((db) =>
+        db.insert(guestApp.staffNotes, { body: "Staff only" }),
+      );
+
+      const guestSession = {
+        user_id: "guest-device",
+        claims: {},
+        authMode: "local-first",
+      } as const;
+      const guest = policyTestApp.as(guestSession);
+      const guestAccount = policyTestApp.accountFor(guestSession);
+      const otherAccount = policyTestApp.accountFor({ ...guestSession, user_id: "other-device" });
+      expect(otherAccount).not.toBe(guestAccount);
+
+      await expect(guest.all(guestApp.products.where({ id: product.id }))).resolves.toEqual([
+        expect.objectContaining({ id: product.id }),
+      ]);
+      await expect(guest.all(guestApp.staffNotes.where({ id: note.id }))).resolves.toEqual([]);
+
+      const cart = await guest
+        .insert(guestApp.carts, { item: "Tea", ownerId: guestAccount })
+        .wait({ tier: "global" });
+      await expect(guest.all(guestApp.carts.where({ id: cart.id }))).resolves.toEqual([
+        expect.objectContaining({ id: cart.id, ownerId: guestAccount }),
+      ]);
+
+      await guest.expectDenied((db) => db.insert(guestApp.products, { title: "Guest product" }));
+      await guest.expectDenied((db) =>
+        db.insert(guestApp.carts, { item: "Someone else's", ownerId: otherAccount }),
+      );
+    } finally {
+      await policyTestApp.shutdown();
+    }
+  }, 20_000);
+
+  it("rejects a non-local-first issuer for a local-first policy session", async () => {
+    const policyTestApp = await createPolicyTestApp(testApp, testPermissions, expect);
+
+    try {
+      expect(() =>
+        policyTestApp.as({
+          // @ts-expect-error: local-first sessions only use the reserved local-first issuer.
+          issuer: "https://policy-test.example",
+          user_id: "guest-device",
+          claims: {},
+          authMode: "local-first",
+        }),
+      ).toThrow(/local-first sessions use issuer "urn:jazz:local-first"/);
+    } finally {
+      await policyTestApp.shutdown();
+    }
+  }, 10_000);
+
   it("exposes expectAllowed and expectDenied on session-scoped test dbs", async () => {
     const policyTestApp = await createPolicyTestApp(testApp, testPermissions, expect);
 

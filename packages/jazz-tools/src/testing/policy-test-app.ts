@@ -1,8 +1,11 @@
 import { createJazzContext, type JazzContext } from "../backend/create-jazz-context.js";
 import { Db } from "../runtime/db.js";
 import { localFirstAccountId } from "../accounts/local-first.js";
-import { ANONYMOUS_JWT_ISSUER } from "../runtime/client-session.js";
-import type { Session } from "../runtime/context.js";
+import { createHash } from "node:crypto";
+import { mintLocalFirstToken, verifyLocalFirstIdentityProof } from "jazz-napi";
+import { localFirstSessionFromToken } from "../backend/request-auth.js";
+import { ANONYMOUS_JWT_ISSUER, LOCAL_FIRST_JWT_ISSUER } from "../runtime/client-session.js";
+import type { AuthMode, Session } from "../runtime/context.js";
 import type { WasmSchema } from "../drivers/types.js";
 import type { CompiledPermissions } from "../permissions/index.js";
 import { deploy } from "../dev/catalogue.js";
@@ -13,6 +16,24 @@ export type PolicyTestAppOptions = {
   /** Override only the client credential; the local authority keeps its configured secret. */
   clientBackendSecret?: string | null;
 };
+/**
+ * Session accepted by {@link PolicyTestApp.as}.
+ *
+ * Local-first sessions always use Jazz's reserved local-first issuer at
+ * runtime, so `issuer` is omitted for `authMode: "local-first"`. Their
+ * `user_id` names the guest device: the test app derives a local-first key
+ * from it and acts with that key's verified subject and founding account,
+ * exactly like a real local-first client (see {@link PolicyTestApp.accountFor}).
+ */
+export type PolicyTestSession =
+  | (Omit<Session, "issuer" | "authMode"> & {
+      authMode: Exclude<AuthMode, "local-first">;
+      issuer: string;
+    })
+  | (Omit<Session, "issuer" | "authMode"> & {
+      authMode: "local-first";
+      issuer?: typeof LOCAL_FIRST_JWT_ISSUER;
+    });
 type ExpectLike = (value: unknown) => {
   not: {
     toThrow(expected?: unknown): void;
@@ -82,6 +103,41 @@ function policyTestAccountId(session: Session): string {
   );
 }
 
+// Self-signed local-first proofs are accepted for at most one hour.
+const LOCAL_FIRST_TOKEN_TTL_SECONDS = 3600;
+
+/**
+ * Build the session a real local-first client presents to a backend: a
+ * self-signed local-first token for a key derived from `user_id`, verified and
+ * bound to the registry's founding account exactly as `forRequest()` does.
+ * The native runtime then admits it through the same proof check, so no
+ * reserved-issuer check is bypassed.
+ */
+function localFirstPolicySession(
+  appId: string,
+  session: Extract<PolicyTestSession, { authMode: "local-first" }>,
+): Session {
+  if (session.issuer !== undefined && session.issuer !== LOCAL_FIRST_JWT_ISSUER) {
+    throw new Error(
+      `PolicyTestApp.as: local-first sessions use issuer "${LOCAL_FIRST_JWT_ISSUER}"; ` +
+        `omit \`issuer\` instead of passing "${session.issuer}".`,
+    );
+  }
+  if (session.account_id !== undefined) {
+    throw new Error(
+      "PolicyTestApp.as: local-first sessions own the founding account derived from their key; " +
+        "omit `account_id` and read it from `testApp.accountFor(session)` instead.",
+    );
+  }
+  const seed = createHash("sha256")
+    .update(`jazz-policy-test-local-first\0${session.user_id}`)
+    .digest("base64url");
+  const token = mintLocalFirstToken(seed, appId, LOCAL_FIRST_TOKEN_TTL_SECONDS);
+  const admitted = localFirstSessionFromToken(token, appId, verifyLocalFirstIdentityProof);
+  admitted.claims = { ...admitted.claims, ...session.claims };
+  return admitted;
+}
+
 function withPolicyTestAccount(session: Session): Session {
   if (
     session.account_id !== undefined ||
@@ -148,9 +204,22 @@ export class PolicyTestApp {
   /**
    * Get a database client for the given session.
    */
-  as(session: Session): TestDb {
-    const db = this.jazzContext.forSession(withPolicyTestAccount(session));
+  as(session: PolicyTestSession): TestDb {
+    const db = this.jazzContext.forSession(this.policySession(session));
     return asTestDb(db, this.expect);
+  }
+
+  /**
+   * The account a session acts for. For a local-first session this is the
+   * founding account derived from its key, as a real local-first client gets.
+   */
+  accountFor(session: PolicyTestSession): string {
+    return this.policySession(session).account_id!;
+  }
+
+  private policySession(session: PolicyTestSession): Session {
+    if (session.authMode !== "local-first") return withPolicyTestAccount(session as Session);
+    return localFirstPolicySession(this.server.appId, session);
   }
 
   /**

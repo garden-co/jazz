@@ -19,6 +19,7 @@ import {
   type JwtPayload,
 } from "../runtime/client-session.js";
 import type { Session } from "../runtime/context.js";
+import { localFirstAccountId } from "../accounts/local-first.js";
 import type { BackendJwtPublicKey } from "./create-jazz-context.js";
 
 // Only verified requests that completed account admission receive this capability.
@@ -466,6 +467,45 @@ async function verifyExternalJwt(
   );
 }
 
+function localFirstSessionFromVerifiedProof(payload: JwtPayload, verifiedUserId: string): Session {
+  const session = internalSessionFromVerifiedReservedJwtPayload(payload, "local-first");
+  if (!session) {
+    throw new Error("Invalid JWT payload");
+  }
+  if (session.user_id !== verifiedUserId) {
+    throw new Error("Invalid local-first identity proof");
+  }
+  return session;
+}
+
+/**
+ * Build the session `resolveRequestSession` produces for a local-first bearer
+ * token, for trusted in-process harnesses that already hold the native
+ * verifier and cannot await registry admission (the policy test app).
+ *
+ * The account is the registry's deterministic founding account for the
+ * verified subject, and native admission re-verifies the token against that
+ * exact account on every ingress, so this grants nothing a forged token could
+ * use.
+ *
+ * @internal
+ */
+export function localFirstSessionFromToken(
+  token: string,
+  appId: string,
+  verifyToken: (token: string, appId: string) => { ok: boolean; id?: string | null },
+): Session {
+  const payload = requireJwtPayload(token);
+  const verified = verifyToken(token, appId);
+  if (payload.iss !== LOCAL_FIRST_JWT_ISSUER || !verified.ok || !verified.id) {
+    throw new Error("Invalid local-first identity proof");
+  }
+  const session = localFirstSessionFromVerifiedProof(payload, verified.id);
+  session.account_id = localFirstAccountId(appId, session.user_id);
+  localFirstProofs.set(session, { token, appId });
+  return session;
+}
+
 export async function resolveRequestSession(
   request: RequestLike,
   config: BackendRequestAuthConfig,
@@ -505,14 +545,7 @@ export async function resolveRequestSession(
     }
 
     const verifiedUserId = await verifyLocalFirstIdentityProof(token, config.appId);
-    const session = internalSessionFromVerifiedReservedJwtPayload(payload, "local-first");
-    if (!session) {
-      throw new Error("Invalid JWT payload");
-    }
-    if (session.user_id !== verifiedUserId) {
-      throw new Error("Invalid local-first identity proof");
-    }
-    const admitted = await admit(session);
+    const admitted = await admit(localFirstSessionFromVerifiedProof(payload, verifiedUserId));
     localFirstProofs.set(admitted, { token, appId: config.appId });
     return admitted;
   }
