@@ -399,7 +399,8 @@ async fn missing_operation_policies_deny_reads_and_writes() {
                         assert!(
                             error.contains("authorization_denied")
                                 || error.contains("read policy denied")
-                                || error.contains("not loaded locally"),
+                                // Only an UPDATE needs the row's current cells.
+                                || (operation == "UPDATE" && error.contains("not loaded locally")),
                             "{case}: {operation}: {error}"
                         );
                     }
