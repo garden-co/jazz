@@ -99,10 +99,14 @@ describe("createDb in-memory driver", () => {
     });
     const { value: unset } = db.insert(optionalJson.jobs, { title: "unset" });
     await db.update(optionalJson.jobs, unset.id, { meta: [1, "two"] }).wait({ tier: "local" });
+    const { value: exclusive } = await db.exclusiveTransaction((tx) =>
+      tx.insert(optionalJson.jobs, { title: "exclusive", meta: { b: 2 } }),
+    );
 
     const rows = await db.all(optionalJson.jobs);
     expect(rows.find((row) => row.id === withObject.id)?.meta).toEqual({ a: 1 });
     expect(rows.find((row) => row.id === unset.id)?.meta).toEqual([1, "two"]);
+    expect(rows.find((row) => row.id === exclusive.id)?.meta).toEqual({ b: 2 });
   });
 
   it("executes typed partial selects and page-relative diffs end to end", async () => {

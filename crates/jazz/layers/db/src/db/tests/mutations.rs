@@ -4795,6 +4795,18 @@ fn nullable_json_accepts_present_values_wrapped_as_nullable() {
         Default::default(),
     ))
     .unwrap();
+    let exclusive = db.exclusive_tx().unwrap();
+    let exclusive_row = exclusive
+        .insert(
+            "docs",
+            BTreeMap::from([
+                ("name".to_owned(), Value::String("exclusive".to_owned())),
+                ("meta".to_owned(), present("{\"b\":2}")),
+            ]),
+            Default::default(),
+        )
+        .unwrap();
+    exclusive.commit().unwrap();
 
     let prepared = db.prepare_query(&Query::from("docs")).unwrap();
     let mut rows = block_on(db.all(&prepared, ReadOpts::default())).unwrap();
@@ -4813,4 +4825,5 @@ fn nullable_json_accepts_present_values_wrapped_as_nullable() {
     let read = |json: &str| Value::Nullable(Some(Box::new(present(json))));
     assert_eq!(meta(wrapped), read("[1,2]"));
     assert_eq!(meta(bare), read("{\"a\":1}"));
+    assert_eq!(meta(exclusive_row), read("{\"b\":2}"));
 }
