@@ -44,6 +44,11 @@ fn schema() -> JazzSchema {
             .table(TableSchemaBuilder::new("invites").column("code", ColumnType::Text))
             .table(TableSchemaBuilder::new("members").column("code", ColumnType::Text))
             .table(TableSchemaBuilder::new("audit").column("note", ColumnType::Text))
+            .table(
+                TableSchemaBuilder::new("grants")
+                    .column("code", ColumnType::Text)
+                    .fk_column("invite", "invites"),
+            )
             .allow_all()
             .build(),
     )
@@ -234,6 +239,15 @@ impl Net {
         .unwrap();
         self.settle(client, write.mergeable_tx_id())
             .expect("invite settles");
+        write.row_uuid()
+    }
+
+    fn create_grant(&self, client: usize, code: &str, invite: RowUuid) -> RowUuid {
+        let mut grant = cells(code);
+        grant.insert("invite".to_owned(), Value::Uuid(invite.0));
+        let write = block_on(self.db(client).insert("grants", grant, Default::default())).unwrap();
+        self.settle(client, write.mergeable_tx_id())
+            .expect("grant settles");
         write.row_uuid()
     }
 
@@ -941,4 +955,148 @@ fn global_tier_join_commits_despite_unrelated_joined_rows() {
     net.settle(2, tx_id)
         .expect("nobody redeemed this invite, so the redemption commits");
     assert_eq!(net.members(), 2);
+}
+
+/// garden-co/jazz#3694: a read through a join or a correlated relation records
+/// only the joined rows it could have consulted, so a redemption of another
+/// invite that lands between the read and the commit does not conflict it.
+fn assert_redemption_check_commits_despite_a_concurrent_unrelated_redemption(
+    check: RedemptionCheck,
+) {
+    let net = Net::new(&[0x0a, 0x0b, 0x0c]);
+    net.create_invite(OWNER, "abc");
+    net.create_invite(OWNER, "xyz");
+    net.read(BACKEND, &invite_query("xyz"), DurabilityTier::Global, None);
+    net.read(2, &invite_query("abc"), DurabilityTier::Global, None);
+
+    let outcome = redeem_unless_redeemed(&net, 2, "abc", check, false, || {
+        assert_eq!(
+            redeem_unless_redeemed(&net, BACKEND, "xyz", check, false, || {}),
+            Redeem::Joined
+        );
+    });
+    assert_eq!(outcome, Redeem::Joined);
+    assert_eq!(net.members(), 2);
+}
+
+#[test]
+fn join_commits_despite_a_concurrent_unrelated_redemption() {
+    assert_redemption_check_commits_despite_a_concurrent_unrelated_redemption(
+        RedemptionCheck::Join,
+    );
+}
+
+#[test]
+fn relation_commits_despite_a_concurrent_unrelated_redemption() {
+    assert_redemption_check_commits_despite_a_concurrent_unrelated_redemption(
+        RedemptionCheck::Relation,
+    );
+}
+
+/// The narrowed read still covers a correlated row that was absent when the
+/// relation read ran: a concurrent redemption of the same invite conflicts.
+#[test]
+fn relation_redemption_check_conflicts_with_a_concurrent_redemption() {
+    let net = Net::new(&[0x0a, 0x0b, 0x0c]);
+    net.create_invite(OWNER, "abc");
+    net.read(BACKEND, &invite_query("abc"), DurabilityTier::Global, None);
+    net.read(2, &invite_query("abc"), DurabilityTier::Global, None);
+
+    let outcome = redeem_unless_redeemed(&net, 2, "abc", RedemptionCheck::Relation, false, || {
+        assert_eq!(
+            redeem_unless_redeemed(
+                &net,
+                BACKEND,
+                "abc",
+                RedemptionCheck::Relation,
+                false,
+                || {}
+            ),
+            Redeem::Joined
+        );
+    });
+    assert_eq!(outcome, Redeem::Conflict);
+    assert_eq!(net.members(), 1, "the invite was redeemed only once");
+}
+
+/// The redeeming client receives the unrelated redemption before it commits.
+/// Its local serializability check compares the narrowed read's output rather
+/// than rejecting on any newer row in the joined table.
+#[test]
+fn join_commits_after_receiving_an_unrelated_redemption() {
+    let net = Net::new(&[0x0a, 0x0b, 0x0c]);
+    net.create_invite(OWNER, "abc");
+    net.create_invite(OWNER, "xyz");
+    net.read(BACKEND, &invite_query("xyz"), DurabilityTier::Global, None);
+    net.read(2, &invite_query("abc"), DurabilityTier::Global, None);
+
+    let outcome = redeem_unless_redeemed(&net, 2, "abc", RedemptionCheck::Join, false, || {
+        assert_eq!(
+            redeem_unless_redeemed(&net, BACKEND, "xyz", RedemptionCheck::Join, false, || {}),
+            Redeem::Joined
+        );
+        assert_eq!(
+            net.read(2, &Query::from("members"), DurabilityTier::Global, None)
+                .len(),
+            1,
+            "the redeeming client holds the unrelated redemption"
+        );
+    });
+    assert_eq!(outcome, Redeem::Joined);
+    assert_eq!(net.members(), 2);
+}
+
+fn grant_query(code: &str) -> Query {
+    Query::from("grants")
+        .filter(eq(col("code"), lit(code)))
+        .include("invite")
+}
+
+/// Redeem the grant `g` after reading it with the invite it includes, while
+/// either that invite or another one is revoked between the read and the
+/// commit.
+fn redeem_grant_while_revoking(revoke_included: bool) -> Redeem {
+    let net = Net::new(&[0x0a, 0x0b]);
+    let abc = net.create_invite(OWNER, "abc");
+    let xyz = net.create_invite(OWNER, "xyz");
+    net.create_grant(OWNER, "g", abc);
+    net.unrelated_receipt(BACKEND);
+
+    let db = net.db(BACKEND);
+    let open = OpenTransactionId::new();
+    block_on(db.begin_exclusive(open)).unwrap();
+    assert_eq!(
+        net.read(
+            BACKEND,
+            &grant_query("g"),
+            DurabilityTier::Local,
+            Some(open)
+        )
+        .len(),
+        1
+    );
+    net.revoke(OWNER, if revoke_included { abc } else { xyz });
+    net.drive(
+        db.exclusive_tx_ref(open)
+            .insert("members", cells("g"), Default::default()),
+    )
+    .unwrap();
+    let tx_id = net.drive(db.commit_exclusive_handle(open)).unwrap();
+    match net.settle(BACKEND, tx_id) {
+        Ok(_) => Redeem::Joined,
+        Err(_) => Redeem::Conflict,
+    }
+}
+
+/// An include records only the rows its reference reaches: revoking another
+/// invite does not conflict the redemption.
+#[test]
+fn include_commits_despite_an_unrelated_revocation() {
+    assert_eq!(redeem_grant_while_revoking(false), Redeem::Joined);
+}
+
+/// Revoking the included invite still conflicts.
+#[test]
+fn include_conflicts_when_the_included_row_is_revoked() {
+    assert_eq!(redeem_grant_while_revoking(true), Redeem::Conflict);
 }

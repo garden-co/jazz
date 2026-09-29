@@ -2788,3 +2788,295 @@ fn exclusive_reads_and_their_validation_share_one_identity() {
     ));
 }
 
+
+/// Orgs own projects, projects own todos, todos own comments and comments own
+/// reactions, all readable by anyone.
+fn narrowing_hierarchy_schema() -> JazzSchema {
+    build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("orgs")
+                    .column("name", PublicColumnType::Text)
+                    .policies(public_all_policies()),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("projects")
+                    .column("name", PublicColumnType::Text)
+                    .fk_column("org", "orgs")
+                    .policies(public_all_policies()),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .fk_column("project", "projects")
+                    .policies(public_all_policies()),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("comments")
+                    .column("body", PublicColumnType::Text)
+                    .fk_column("todo", "todos")
+                    .policies(public_all_policies()),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("reactions")
+                    .column("emoji", PublicColumnType::Text)
+                    .fk_column("comment", "comments")
+                    .policies(public_all_policies()),
+            ),
+    )
+}
+
+/// The join from a child row to the parent rows `on` identifies in `table`.
+fn narrowing_reverse_join(
+    table: &str,
+    on: &str,
+    child: &str,
+    filters: Vec<crate::query::Predicate>,
+    up: Option<crate::query::JoinVia>,
+) -> crate::query::JoinVia {
+    crate::query::JoinVia {
+        table: table.to_owned(),
+        on_column: on.to_owned(),
+        target: if on == "id" {
+            crate::query::JoinTarget::RowId
+        } else {
+            crate::query::JoinTarget::Column
+        },
+        source_column: Some(child.to_owned()),
+        source_lookup: None,
+        correlated_filters: Vec::new(),
+        filters,
+        nested_joins: up.into_iter().collect(),
+    }
+}
+
+fn narrowing_source(table: &str, path: &[&str]) -> crate::node::query_engine::SourceId {
+    use crate::node::query_engine::{SourcePath, SourceRole};
+    let components = path
+        .iter()
+        .map(|component| match component.split_once('=') {
+            Some(("child", name)) => SourceRole::CorrelatedChild(name.to_owned()),
+            Some(("alias", name)) => SourceRole::Alias(name.to_owned()),
+            _ => SourceRole::Root,
+        })
+        .collect();
+    crate::node::query_engine::SourceId {
+        table: table.to_owned(),
+        path: SourcePath { components },
+    }
+}
+
+/// Assert `query`'s narrowed reads are exactly `expected`, source by source.
+fn assert_narrowed_reads(
+    query: crate::query::Query,
+    expected: Vec<(crate::node::query_engine::SourceId, crate::query::Query)>,
+) {
+    let schema = narrowing_hierarchy_schema();
+    let (_dir, node) = open_node_with_schema(node(1), schema.clone());
+    let shape = query.validate(&schema).unwrap();
+    let values = if shape.params().contains_key("title") {
+        BTreeMap::from([("title".to_owned(), Value::String("a".to_owned()))])
+    } else {
+        BTreeMap::new()
+    };
+    let binding = shape.bind(values).unwrap();
+    let reads = node.narrowed_source_reads(&shape, &binding).unwrap();
+    assert_eq!(
+        reads.keys().cloned().collect::<Vec<_>>(),
+        expected
+            .iter()
+            .map(|(source, _)| source.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>(),
+    );
+    for (source, narrowed) in expected {
+        assert_eq!(
+            reads[&source].shape.query(),
+            narrowed.validate(&schema).unwrap().query(),
+            "narrowed read of {source:?}"
+        );
+        assert!(reads[&source].shape.params().is_empty());
+    }
+}
+
+fn narrowing_title_is_a() -> crate::query::Predicate {
+    crate::query::eq(crate::query::col("title"), crate::query::lit("a"))
+}
+
+fn narrowing_body_is_hi() -> crate::query::Predicate {
+    crate::query::eq(crate::query::col("body"), crate::query::lit("hi"))
+}
+
+fn narrowing_todos_titled() -> crate::query::Query {
+    crate::query::Query::from("todos").filter(crate::query::eq(
+        crate::query::col("title"),
+        crate::query::param("title"),
+    ))
+}
+
+/// garden-co/jazz#3694: each source a join chain reads is narrowed to the
+/// rows correlated with its parent under the parent's filters, up to the
+/// root's filters with their parameters bound. The root's implicit reference
+/// is narrowed the same way.
+///
+/// White-box: soundness rests on the exact shape of each narrowed read, which
+/// no public API exposes. The `exclusive_snapshot_coverage` integration tests
+/// cover what a client observes (unrelated writes commit, related ones
+/// conflict).
+#[test]
+fn narrowed_reads_follow_a_join_chain_to_the_root() {
+    let mut query = narrowing_todos_titled();
+    query.joins.push(crate::query::JoinVia {
+        table: "comments".to_owned(),
+        on_column: "todo".to_owned(),
+        target: crate::query::JoinTarget::Column,
+        source_column: None,
+        source_lookup: None,
+        correlated_filters: Vec::new(),
+        filters: vec![narrowing_body_is_hi()],
+        nested_joins: vec![crate::query::JoinVia {
+            table: "reactions".to_owned(),
+            on_column: "comment".to_owned(),
+            target: crate::query::JoinTarget::Column,
+            source_column: None,
+            source_lookup: None,
+            correlated_filters: Vec::new(),
+            filters: Vec::new(),
+            nested_joins: Vec::new(),
+        }],
+    });
+    let to_todos =
+        narrowing_reverse_join("todos", "id", "todo", vec![narrowing_title_is_a()], None);
+    let mut comments = crate::query::Query::from("comments").filter(narrowing_body_is_hi());
+    comments.joins.push(to_todos.clone());
+    let mut reactions = crate::query::Query::from("reactions");
+    reactions.joins.push(narrowing_reverse_join(
+        "comments",
+        "id",
+        "comment",
+        vec![narrowing_body_is_hi()],
+        Some(to_todos),
+    ));
+    let mut projects = crate::query::Query::from("projects");
+    projects.joins.push(narrowing_reverse_join(
+        "todos",
+        "project",
+        "id",
+        vec![narrowing_title_is_a()],
+        None,
+    ));
+    assert_narrowed_reads(
+        query,
+        vec![
+            (
+                narrowing_source("comments", &["alias=join_via:0"]),
+                comments,
+            ),
+            (
+                narrowing_source("reactions", &["alias=join_via:0:nested:0"]),
+                reactions,
+            ),
+            (
+                narrowing_source("projects", &["root", "alias=reference:project"]),
+                projects,
+            ),
+        ],
+    );
+}
+
+/// Each segment of an include path is narrowed to the rows the previous
+/// segment references.
+#[test]
+fn narrowed_reads_follow_an_include_path_to_the_root() {
+    let to_todos =
+        narrowing_reverse_join("todos", "project", "id", vec![narrowing_title_is_a()], None);
+    let mut projects = crate::query::Query::from("projects");
+    projects.joins.push(to_todos.clone());
+    let mut orgs = crate::query::Query::from("orgs");
+    orgs.joins.push(narrowing_reverse_join(
+        "projects",
+        "org",
+        "id",
+        Vec::new(),
+        Some(to_todos),
+    ));
+    assert_narrowed_reads(
+        narrowing_todos_titled().include("project.org"),
+        vec![
+            (
+                narrowing_source("projects", &["root", "alias=include:0:0"]),
+                projects,
+            ),
+            (
+                narrowing_source("orgs", &["root", "alias=include:0:1"]),
+                orgs,
+            ),
+        ],
+    );
+}
+
+/// Correlated arrays, nested ones included, are narrowed to the rows
+/// correlated with their owner rows under the owners' filters.
+#[test]
+fn narrowed_reads_follow_nested_arrays_to_the_root() {
+    let query = narrowing_todos_titled().array_subquery(
+        ArraySubquery::new("comments", "comments", "todo", "id")
+            .filter(narrowing_body_is_hi())
+            .nested(ArraySubquery::new(
+                "reactions",
+                "reactions",
+                "comment",
+                "id",
+            )),
+    );
+    let to_todos =
+        narrowing_reverse_join("todos", "id", "todo", vec![narrowing_title_is_a()], None);
+    let mut comments = crate::query::Query::from("comments").filter(narrowing_body_is_hi());
+    comments.joins.push(to_todos.clone());
+    let mut reactions = crate::query::Query::from("reactions");
+    reactions.joins.push(narrowing_reverse_join(
+        "comments",
+        "id",
+        "comment",
+        vec![narrowing_body_is_hi()],
+        Some(to_todos),
+    ));
+    let mut projects = crate::query::Query::from("projects");
+    projects.joins.push(narrowing_reverse_join(
+        "todos",
+        "project",
+        "id",
+        vec![narrowing_title_is_a()],
+        None,
+    ));
+    assert_narrowed_reads(
+        query,
+        vec![
+            (
+                narrowing_source("comments", &["root", "child=0:comments"]),
+                comments,
+            ),
+            (
+                narrowing_source(
+                    "reactions",
+                    &["root", "child=0:comments", "child=0.0:reactions"],
+                ),
+                reactions,
+            ),
+            (
+                narrowing_source("projects", &["root", "alias=reference:project"]),
+                projects,
+            ),
+        ],
+    );
+}
+
+/// A flat join routes its filters per source, so its root rows are not
+/// constrained by the root's own filters alone: it narrows nothing.
+#[test]
+fn narrowed_reads_skip_a_flat_join() {
+    let query =
+        crate::query::Query::from("todos").flat_join("comments", "todos._id", "comments.todo");
+    assert_narrowed_reads(query, Vec::new());
+}

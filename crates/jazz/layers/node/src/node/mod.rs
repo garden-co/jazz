@@ -357,6 +357,8 @@ pub use query_engine::{
 #[cfg(feature = "testing")]
 pub use query_eval::LocalMaintainedViewSubscriptionFootprint;
 #[cfg(any(test, feature = "testing"))]
+pub use query_eval::set_exclusive_source_narrowing_for_test;
+#[cfg(any(test, feature = "testing"))]
 pub use query_eval::take_client_physical_row_query_calls_for_test;
 pub use query_eval::{
     CoveredInputReceiver, LocalAuthorityReconciliation, LocalMaintainedViewSubscription,

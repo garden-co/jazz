@@ -560,25 +560,24 @@ where
                 .await?;
             coverage = Some(required);
         }
-        // The read records each joined, included or related table as a read
-        // of the whole table, which the authority validates against every
-        // row the reader can see there. Hydrate those tables too, so rows
-        // this replica never received do not make the read conflict.
+        // The read records each joined, included or related source as a
+        // narrowed read of the rows it could have consulted there, or as a
+        // read of its whole table, which the authority validates against the
+        // rows the reader can see. Hydrate those reads too, so rows this
+        // replica never received do not make the read conflict.
         let mut table_coverage = Vec::new();
         if exclusive_snapshot_read
             && coverage.is_some()
             && let Some(open_tx) = open_tx
         {
-            let tables = self
-                .query_non_root_source_tables(open_tx, &prepared)
+            let queries = self
+                .exclusive_source_hydration_queries(open_tx, &prepared)
                 .await?;
-            for table in tables {
+            for query in queries {
                 let Some(epoch) = self.node.remote_link.arm() else {
                     break;
                 };
-                let table_query = self
-                    .prepare_query_async(&Query::from(table.as_str()))
-                    .await?;
+                let table_query = self.prepare_query_async(&query).await?;
                 let mut hydration_opts = opts.clone();
                 hydration_opts.tier = DurabilityTier::Global;
                 let hydration = SerializedReadCoverage {

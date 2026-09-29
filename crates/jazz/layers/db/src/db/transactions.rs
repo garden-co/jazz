@@ -44,16 +44,17 @@ where
             .map_err(Into::into)
     }
 
-    /// Tables `prepared` reads beyond its root, which an exclusive read in
-    /// `id` records as whole-table reads.
-    pub(super) async fn query_non_root_source_tables(
+    /// The queries an exclusive read of `prepared` in `id` hydrates for the
+    /// sources it reads beyond its root: each source's narrowed read, or its
+    /// whole table.
+    pub(super) async fn exclusive_source_hydration_queries(
         &self,
         id: OpenTransactionId,
         prepared: &PreparedQuery,
-    ) -> Result<BTreeSet<String>, Error> {
+    ) -> Result<Vec<Query>, Error> {
         self.lock_for_transaction_operation(id)
             .await?
-            .query_non_root_source_tables(prepared.shape(), prepared.binding())
+            .exclusive_source_hydration_queries(prepared.shape(), prepared.binding())
             .map_err(Into::into)
     }
 
