@@ -12,6 +12,9 @@ export default withJazz(
     server: {
       backendSecret: process.env.BACKEND_SECRET ?? "music-agent-development-backend-secret",
       jwksUrl: `${appOrigin}/api/auth/jwks`,
+      // The Jazz server only accepts app JWTs whose issuer and audience match.
+      jwtIssuer: appOrigin,
+      jwtAudience: appOrigin,
     },
   },
 );

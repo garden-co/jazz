@@ -19,6 +19,7 @@ export async function POST(request: Request) {
     accountRegistry: accountRegistryUrl(serverUrl, appId),
     jwksUrl: `${origin}/api/auth/jwks`,
     jwtIssuer: origin,
+    jwtAudience: origin,
   });
   if (jazzSession.user_id !== session.user.id)
     return Response.json({ error: "session identity mismatch" }, { status: 401 });
