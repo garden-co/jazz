@@ -11,7 +11,12 @@ import { musicAgentBenchmarks } from "../../../examples/music-agent/benchmarks/m
 import { bigLabelBenchmarks } from "../../../examples/big-label/benchmarks/metadata.ts";
 import { permissionedBenchmarks } from "../../../examples/permissioned-resources/benchmarks/metadata.ts";
 export { metadataRevision, throughput, type BenchmarkMetadata } from "./types.ts";
-export { formerBenchmarkNames } from "./former-names.ts";
+export {
+  formerBenchmarks,
+  formerBenchmarkNames,
+  stitchedFormerNames,
+  type FormerBenchmark,
+} from "./former-names.ts";
 
 // Hero examples in the docs page's order, then the anonymized adopter
 // workload. Engine benchmarks (crates/groove) carry no per-case metadata.

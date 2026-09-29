@@ -497,9 +497,78 @@ export type BenchmarkSection = {
   description: string;
   /** Repository-relative directories whose metadata sources belong here. */
   sources: string[];
-  /** Benchmarks without metadata (engine benches) that belong here, by CodSpeed name. */
-  names?: RegExp;
+  /**
+   * Benchmarks without metadata (the engine benches) listed here, by CodSpeed
+   * benchmark id: one bench name repeats once per scenario module, so a name
+   * alone does not identify a row.
+   */
+  benchmarks?: readonly EngineBenchmark[];
 };
+
+/** One engine row: a CodSpeed benchmark id and the scenario that tells it apart. */
+export type EngineBenchmark = {
+  /** CodSpeed's benchmark id, stable for the URI below. */
+  id: string;
+  /** CodSpeed name, shared by every scenario of the same bench. */
+  name: string;
+  scenario: string;
+  /** CodSpeed URI: `crates/groove/benches/<bench>.rs::<scenario module>::<name>`. */
+  uri: string;
+};
+
+const scenarioLabels: Record<string, string> = {
+  author_posts: "Author posts",
+  feed: "Feed",
+  feed_top20: "Top-20 feed",
+  tasks: "Tasks",
+};
+
+function engineBenchmark(id: string, bench: string, module: string, name: string): EngineBenchmark {
+  return {
+    id,
+    name,
+    scenario: scenarioLabels[module],
+    uri: `crates/groove/benches/${bench}.rs::${module}::${name}`,
+  };
+}
+
+/**
+ * The Groove cases CodSpeed measures on every merge, and only those: the IVM
+ * engines at the measured size. Smaller sizes and the reference engines run
+ * in the nightly CodSpeed run (`GROOVE_BENCH_SWEEP=1`); they are not listed,
+ * so a size that stops being measured is not shown with a frozen number.
+ */
+export const engineBenchmarks: readonly EngineBenchmark[] = [
+  engineBenchmark(
+    "6ab494d0ad9a6239bfdd8982",
+    "pull_vs_snapshot",
+    "author_posts",
+    "prepared_warm[5000]",
+  ),
+  engineBenchmark("6ab494d0ad9a6239bfdd8992", "pull_vs_snapshot", "feed", "prepared_warm[5000]"),
+  engineBenchmark(
+    "6ab494d0ad9a6239bfdd898a",
+    "pull_vs_snapshot",
+    "feed_top20",
+    "prepared_warm[5000]",
+  ),
+  engineBenchmark(
+    "6ab494d0ad9a6239bfdd8980",
+    "pull_vs_snapshot",
+    "author_posts",
+    "prepared_cold[5000]",
+  ),
+  engineBenchmark("6ab494d0ad9a6239bfdd8990", "pull_vs_snapshot", "feed", "prepared_cold[5000]"),
+  engineBenchmark(
+    "6ab494d0ad9a6239bfdd8988",
+    "pull_vs_snapshot",
+    "feed_top20",
+    "prepared_cold[5000]",
+  ),
+  engineBenchmark("6ab4a076ad9a6239bfddd0c7", "steady_state", "feed", "ivm[100]"),
+  engineBenchmark("6ab4a076ad9a6239bfddd0bd", "steady_state", "feed_top20", "ivm[100]"),
+  engineBenchmark("6ab4a076ad9a6239bfddd0d1", "steady_state", "tasks", "ivm[100]"),
+];
 
 export const moreBenchmarkSections: BenchmarkSection[] = [
   {
@@ -513,31 +582,67 @@ export const moreBenchmarkSections: BenchmarkSection[] = [
     id: "engine",
     title: "Engine",
     description:
-      "What no product owns: Groove's incremental view maintenance measured directly, for one-shot reads through prepared shapes and for keeping many live subscriptions current as writes arrive, across the author-posts, feed and top-20 feed scenarios. The reference engines they are compared against (SQLite re-query, hand-written pull plans, snapshot re-runs) run nightly, not on every merge.",
+      "What no product owns: Groove's incremental view maintenance measured directly, for one-shot reads through prepared shapes (author posts, feed and top-20 feed) and for keeping 100 live subscriptions current as writes arrive (feed, top-20 feed and tasks). The reference engines they are compared against (SQLite re-query, hand-written pull plans, snapshot re-runs) and the smaller sizes run in the nightly CodSpeed run, not on every merge.",
     sources: ["crates/"],
-    names: /(^|::)(prepared_warm|prepared_cold|ivm)\[/,
+    benchmarks: engineBenchmarks,
   },
 ];
 
 /**
- * Where the examples page lists a benchmark: the id of the hero example whose
- * suite holds its metadata source, the id of a "More benchmarks" section, or
- * null for a result no current suite produces (a retired name still in the
- * CodSpeed history).
+ * Where the examples page lists a benchmark with metadata: the id of the hero
+ * example whose suite holds its metadata source, the id of a "More benchmarks"
+ * section, or null for a result no current suite produces (a retired name
+ * still in the CodSpeed history). Engine rows have no metadata and are listed
+ * by id instead (`BenchmarkSection.benchmarks`).
  */
-export function placeBenchmark(name: string, source: string | undefined): string | null {
-  if (source) {
-    const hero = heroExamples.find(
-      (example) => example.benchmarks && source.startsWith(`${example.benchmarks}/`),
-    );
-    if (hero) return hero.id;
-  }
-  const section = moreBenchmarkSections.find(
-    (candidate) =>
-      (source && candidate.sources.some((prefix) => source.startsWith(prefix))) ||
-      (!source && candidate.names?.test(name)),
+export function placeBenchmark(source: string | undefined): string | null {
+  if (!source) return null;
+  const hero = heroExamples.find(
+    (example) => example.benchmarks && source.startsWith(`${example.benchmarks}/`),
+  );
+  if (hero) return hero.id;
+  const section = moreBenchmarkSections.find((candidate) =>
+    candidate.sources.some((prefix) => source.startsWith(prefix)),
   );
   return section?.id ?? null;
+}
+
+/** A row of a benchmark table: a benchmark and, for engine rows, its scenario. */
+export type Placed<E> = E & { scenario?: string };
+
+/**
+ * Every current benchmark that is not a metric card, grouped by the hero
+ * example or "More benchmarks" section that lists it, sorted by name (then
+ * scenario). `byName` holds the newest result per name for benchmarks with
+ * metadata; engine rows come from `byId`, one per catalogued id. Retired
+ * names and unmeasured engine sizes are left out.
+ */
+export function groupBenchmarks<E extends { bench: { id: string; name: string } }>(
+  byName: ReadonlyMap<string, E>,
+  byId: ReadonlyMap<string, E>,
+  sourceOf: (name: string) => string | undefined,
+): Map<string, Placed<E>[]> {
+  const grouped = new Map<string, Placed<E>[]>();
+  const add = (place: string, entry: Placed<E>) =>
+    grouped.set(place, [...(grouped.get(place) ?? []), entry]);
+  for (const [name, entry] of byName) {
+    if (heroBenchmarkNames.has(name)) continue;
+    const place = placeBenchmark(sourceOf(name));
+    if (place) add(place, entry);
+  }
+  for (const section of moreBenchmarkSections) {
+    for (const row of section.benchmarks ?? []) {
+      const entry = byId.get(row.id);
+      if (entry) add(section.id, { ...entry, scenario: row.scenario });
+    }
+  }
+  for (const entries of grouped.values())
+    entries.sort(
+      (a, b) =>
+        a.bench.name.localeCompare(b.bench.name) ||
+        (a.scenario ?? "").localeCompare(b.scenario ?? ""),
+    );
+  return grouped;
 }
 
 export const heroBenchmarkNames = new Set(

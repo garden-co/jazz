@@ -27,6 +27,10 @@ an independent mean-throughput or sustained-concurrency measurement.
   remain separate receipts, not averaged.
 - A metric card's number is the newest released measurement
   (`lib/showcase/summary.ts`); open-PR experiments never feed a card.
+- A benchmark renamed without changing its numbers (declared `stitch` in
+  `dev/benchmarks/metadata/former-names.ts`, backed by same-base CodSpeed
+  runs) continues its former name's history, so its card keeps its releases.
+  Other renames start a new history.
 
 ## Sources and caching
 

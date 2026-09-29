@@ -27,20 +27,21 @@ import {
   formatThroughput,
 } from "@/lib/perf-timeline/presentation";
 import {
-  heroBenchmarkNames,
+  groupBenchmarks,
   heroExamples,
   moreBenchmarkSections,
-  placeBenchmark,
   type HeroExample,
   type Lookup,
+  type Placed,
 } from "@/lib/showcase/catalogue";
-import { summarize, type MetricSummary } from "@/lib/showcase/summary";
+import { stitchFormerHistory, summarize, type MetricSummary } from "@/lib/showcase/summary";
 
 import { basisText, Change, WithHistory } from "./metrics";
 
 const repo = "https://github.com/garden-co/jazz";
 
-type Summaries = Map<string, { bench: Benchmark; summary: MetricSummary }>;
+type Entry = { bench: Benchmark; summary: MetricSummary };
+type Summaries = Map<string, Entry>;
 
 function useSummaries() {
   const [data, setData] = useState<Timeline | null>(null);
@@ -48,39 +49,34 @@ function useSummaries() {
   useEffect(() => {
     fetchTimeline().then(setData, (cause: Error) => setError(cause.message));
   }, []);
-  const summaries = useMemo(() => {
+  const { summaries, byId } = useMemo(() => {
     const byName: Summaries = new Map();
-    for (const bench of data?.benchmarks ?? []) {
+    const byId: Summaries = new Map();
+    // Declared-equivalent renames keep their former name's history.
+    for (const bench of stitchFormerHistory(data?.benchmarks ?? [])) {
       const summary = summarize(bench);
+      if (!summary) continue;
+      byId.set(bench.id, { bench, summary });
       // Names can repeat across retired IDs; keep the one with the newest data.
       const existing = byName.get(bench.name);
-      if (summary && (!existing || existing.summary.headline.date < summary.headline.date))
+      if (!existing || existing.summary.headline.date < summary.headline.date)
         byName.set(bench.name, { bench, summary });
     }
-    return byName;
+    return { summaries: byName, byId };
   }, [data]);
-  return { data, error, summaries };
+  return { data, error, summaries, byId };
 }
-
-type Entry = { bench: Benchmark; summary: MetricSummary };
 
 /**
  * Every current benchmark that is not a metric card, keyed by the hero example
- * or "More benchmarks" section that owns it. Retired names are left out.
+ * or "More benchmarks" section that owns it. Engine rows are keyed by id, one
+ * per scenario. Retired names are left out.
  */
-function useGroups(summaries: Summaries) {
-  return useMemo(() => {
-    const grouped = new Map<string, Entry[]>();
-    for (const [name, entry] of summaries) {
-      if (heroBenchmarkNames.has(name)) continue;
-      const place = placeBenchmark(name, getBenchmarkMetadata(name)?.source);
-      if (!place) continue;
-      grouped.set(place, [...(grouped.get(place) ?? []), entry]);
-    }
-    for (const entries of grouped.values())
-      entries.sort((a, b) => a.bench.name.localeCompare(b.bench.name));
-    return grouped;
-  }, [summaries]);
+function useGroups(summaries: Summaries, byId: Summaries) {
+  return useMemo(
+    () => groupBenchmarks(summaries, byId, (name) => getBenchmarkMetadata(name)?.source),
+    [summaries, byId],
+  );
 }
 
 function MetricCard({
@@ -237,7 +233,7 @@ function Hero({
 }: {
   example: HeroExample;
   summaries: Summaries;
-  others: Entry[];
+  others: Placed<Entry>[];
   lookup: Lookup;
   loading: boolean;
 }) {
@@ -316,7 +312,7 @@ function Hero({
   );
 }
 
-function BenchmarkTable({ entries }: { entries: Entry[] }) {
+function BenchmarkTable({ entries }: { entries: Placed<Entry>[] }) {
   return (
     <Table density="compact" verticalAlign="top">
       <TableHeader>
@@ -326,15 +322,19 @@ function BenchmarkTable({ entries }: { entries: Entry[] }) {
         </TableRow>
       </TableHeader>
       <TableBody>
-        {entries.map(({ bench, summary }) => {
+        {entries.map(({ bench, summary, scenario }) => {
           const metadata = getBenchmarkMetadata(bench.name);
+          const label = scenario ? `${bench.name} (${scenario})` : bench.name;
           const previous = summary.history.at(-2);
           const time = displayedTime(summary.headline.median, true);
           return (
             <TableRow key={bench.id}>
               <TableCell>
                 <VStack gap={0.5}>
-                  <Text display="block">{metadata?.title ?? bench.name.replaceAll("_", " ")}</Text>
+                  <Text display="block">
+                    {metadata?.title ?? bench.name.replaceAll("_", " ")}
+                    {scenario && ` · ${scenario}`}
+                  </Text>
                   <Text type="code" color="secondary" display="block" className="break-all">
                     {bench.name}
                   </Text>
@@ -345,14 +345,14 @@ function BenchmarkTable({ entries }: { entries: Entry[] }) {
                   benchmarkId={bench.id}
                   name={bench.name}
                   summary={summary}
-                  label={bench.name}
+                  label={label}
                   alignment="end"
                 >
                   <div
                     className="benchmark-median"
                     tabIndex={0}
                     role="group"
-                    aria-label={`${bench.name}: ${time}. Focus for history.`}
+                    aria-label={`${label}: ${time}. Focus for history.`}
                   >
                     <VStack gap={0.5}>
                       <Text weight="medium" hasTabularNumbers display="block">
@@ -385,7 +385,13 @@ function BenchmarkTable({ entries }: { entries: Entry[] }) {
   );
 }
 
-function MoreBenchmarks({ groups, loading }: { groups: Map<string, Entry[]>; loading: boolean }) {
+function MoreBenchmarks({
+  groups,
+  loading,
+}: {
+  groups: Map<string, Placed<Entry>[]>;
+  loading: boolean;
+}) {
   return (
     <VStack as="section" id="benchmarks" gap={6} className="scroll-mt-24">
       <VStack gap={2}>
@@ -417,14 +423,14 @@ function MoreBenchmarks({ groups, loading }: { groups: Map<string, Entry[]>; loa
 }
 
 export function Showcase() {
-  const { data, error, summaries } = useSummaries();
+  const { data, error, summaries, byId } = useSummaries();
   const loading = !data && !error;
   const lookup: Lookup = (name) => {
     const seconds = summaries.get(name)?.summary.headline.median;
     return seconds === undefined ? null : estimatedSeconds(seconds);
   };
   const released = [...summaries.values()].some((entry) => entry.summary.basis === "release");
-  const groups = useGroups(summaries);
+  const groups = useGroups(summaries, byId);
 
   return (
     <div className="mx-auto w-full max-w-[1120px] px-4 pb-24 pt-10 sm:px-8">

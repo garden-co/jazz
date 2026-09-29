@@ -6,14 +6,17 @@ import { formatTime } from "../lib/perf-timeline/model.ts";
 import { heroExamples, moreBenchmarkSections } from "../lib/showcase/catalogue.ts";
 
 // Follow the catalogue rather than hardcoding one example: the first hero and
-// its first per-operation metric card, a non-card benchmark of the same suite,
-// and an engine result listed under "More benchmarks".
+// its first per-operation metric card, and two engine rows under "More
+// benchmarks" that share a name but not a scenario.
 const hero = heroExamples.find((example) => example.metrics.some((metric) => metric.per));
 const metric = hero.metrics.find((candidate) => candidate.per);
 const perCount = metric.per.count;
 const estimate = (seconds) => `${formatTime(seconds / 5)}*`;
 const perOperation = (seconds) => estimate(seconds / perCount);
-const engine = moreBenchmarkSections.find((section) => section.names);
+const engine = moreBenchmarkSections.find((section) => section.benchmarks);
+const [engineA, engineB] = engine.benchmarks.filter(
+  (row, _, rows) => rows.filter((other) => other.name === row.name).length > 1,
+);
 
 // Exercise the built examples page against a deterministic /api/timeline
 // fixture. No token or live CodSpeed/GitHub access is needed.
@@ -82,7 +85,10 @@ try {
           point("open", 4, 0.001),
         ],
       },
-      { id: "engine", name: "ivm[100]", points: [point("main", 2, 0.5)] },
+      { id: engineA.id, name: engineA.name, points: [point("main", 2, 0.5)] },
+      { id: engineB.id, name: engineB.name, points: [point("main", 2, 0.75)] },
+      // A size CodSpeed no longer measures on every merge is not listed.
+      { id: "retired-size", name: "prepared_cold[500]", points: [point("main", 2, 0.125)] },
       // A retired name still in CodSpeed history is not listed.
       { id: "retired", name: "retired_benchmark", points: [point("main", 2, 0.25)] },
     ],
@@ -132,13 +138,19 @@ try {
   // Open-PR experiments never feed a card or its history.
   assert.ok(!`${await card.innerText()} ${history}`.includes(formatTime(0.001 / 5 / perCount)));
 
-  // Engine results are listed under More benchmarks, attributed to main when
-  // unreleased; retired names are not.
+  // Engine results are listed under More benchmarks by id, one row per
+  // scenario, attributed to main when unreleased; retired names and sizes are
+  // not.
   const more = await page.locator("#benchmarks").innerText();
   const engineSection = await page.locator(`#${engine.id}`).innerText();
-  assert.match(engineSection, /ivm\[100\]/);
-  assert.ok(engineSection.includes(estimate(0.5)));
-  assert.doesNotMatch(more, /retired_benchmark/);
+  for (const [row, median] of [
+    [engineA, 0.5],
+    [engineB, 0.75],
+  ]) {
+    assert.ok(engineSection.includes(row.scenario), row.uri);
+    assert.ok(engineSection.includes(estimate(median)), row.uri);
+  }
+  assert.doesNotMatch(more, /retired_benchmark|prepared_cold\[500\]/);
   assert.equal(await page.locator(`#${hero.id} video`).count(), hero.video ? 1 : 0);
 
   await page.setViewportSize({ width: 390, height: 844 });
