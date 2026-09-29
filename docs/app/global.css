@@ -183,99 +183,83 @@ h6 {
   font-size: inherit;
 }
 
-/* Homepage diagrams (components/home/diagrams.tsx): drawn with theme tokens
-   so they follow light and dark mode. Sizes are in SVG user units. */
+/* Homepage diagrams (components/home/diagrams.tsx), in the style of the
+   Jazz print material: square boxes, mono labels, thin wires with open
+   arrowheads. Blue = local, green = global. Sizes are SVG user units. */
 .home-diagram {
-  font-family: var(--font-family-body);
-}
-.home-diagram .dg-title,
-.home-diagram .dg-title-sm {
-  fill: var(--color-text-primary);
-  font-weight: var(--font-weight-medium);
-  font-size: 16px;
-}
-.home-diagram .dg-title-sm {
-  font-size: 14px;
-}
-.home-diagram .dg-sub,
-.home-diagram .dg-sub-sm {
-  fill: var(--color-text-secondary);
-  font-size: 14px;
-}
-.home-diagram .dg-sub-sm {
-  font-size: 13px;
-}
-.home-diagram .dg-code,
-.home-diagram .dg-code-strong {
   font-family: var(--font-family-code);
-  fill: var(--color-text-secondary);
-  font-size: 13px;
 }
-.home-diagram .dg-code-strong {
+.home-diagram .dg-stroke-ink {
+  stroke: var(--color-text-primary);
+}
+.home-diagram .dg-stroke-blue {
+  stroke: var(--color-jazz-blue);
+}
+.home-diagram .dg-stroke-green {
+  stroke: var(--color-jazz-green);
+}
+.home-diagram .dg-stroke-muted {
+  stroke: var(--color-text-secondary);
+}
+.home-diagram .dg-fill-ink {
   fill: var(--color-text-primary);
 }
-.home-diagram .dg-node,
-.home-diagram .dg-row {
-  fill: var(--color-background-card);
-  stroke: var(--color-border);
+.home-diagram .dg-fill-blue {
+  fill: var(--color-jazz-blue);
 }
-.home-diagram .dg-node-strong {
+.home-diagram .dg-fill-green {
+  fill: var(--color-jazz-green);
+}
+.home-diagram .dg-fill-muted {
+  fill: var(--color-text-secondary);
+}
+.home-diagram .dg-box {
   fill: var(--color-background-card);
-  stroke: var(--color-border-emphasized);
+  stroke-width: 2;
+}
+.home-diagram .dg-box-dash {
+  fill: none;
+  stroke-width: 2;
+  stroke-dasharray: 6 6;
+}
+.home-diagram .dg-wire,
+.home-diagram .dg-chevron {
+  fill: none;
   stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
-.home-diagram .dg-row-kept {
-  fill: var(--color-background-card);
-  stroke: var(--color-accent);
-}
-.home-diagram .dg-band {
-  fill: var(--color-background-muted);
-  stroke: var(--color-border);
-}
-.home-diagram .dg-pill {
-  fill: var(--color-background-muted);
+.home-diagram .dg-wire-dashed {
+  stroke-dasharray: 4 4;
 }
 .home-diagram .dg-lane {
-  stroke: var(--color-border);
-  stroke-dasharray: 3 4;
-}
-.home-diagram .dg-lane-strong {
-  stroke: var(--color-border-emphasized);
-  stroke-width: 2;
-}
-.home-diagram .dg-link,
-.home-diagram .dg-link-accent {
   fill: none;
-  stroke: var(--color-border-emphasized);
-  stroke-width: 1.5;
+  stroke-width: 2.5;
 }
-.home-diagram .dg-link-accent {
-  stroke: var(--color-accent);
-}
-.home-diagram .dg-link-dashed {
+.home-diagram .dg-region {
   fill: none;
-  stroke: var(--color-accent);
-  stroke-width: 1.5;
-  stroke-dasharray: 5 4;
+  stroke: var(--color-text-secondary);
+  stroke-width: 1;
+  stroke-dasharray: 3 5;
 }
-.home-diagram .dg-arrow-head {
-  fill: var(--color-border-emphasized);
+.home-diagram .dg-bracket {
+  fill: none;
+  stroke: var(--color-text-secondary);
+  stroke-width: 1;
 }
-.home-diagram .dg-arrow-head-accent,
-.home-diagram .dg-dot-accent {
-  fill: var(--color-accent);
+.home-diagram .dg-title {
+  font-size: 15px;
+  font-weight: var(--font-weight-medium);
 }
-.home-diagram .dg-dot {
+.home-diagram .dg-detail {
   fill: var(--color-text-secondary);
+  font-size: 12px;
 }
-.home-diagram .dg-dot-hollow,
-.home-diagram .dg-dot-hollow-accent {
-  fill: var(--color-background-card);
-  stroke: var(--color-border-emphasized);
-  stroke-width: 2;
+.home-diagram .dg-label {
+  font-size: 12px;
 }
-.home-diagram .dg-dot-hollow-accent {
-  stroke: var(--color-accent);
+.home-diagram .dg-struck {
+  text-decoration: line-through;
 }
 
 /* Site footer (components/site/site-footer.tsx). */

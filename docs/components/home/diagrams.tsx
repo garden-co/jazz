@@ -1,7 +1,16 @@
 import type { ReactNode } from "react";
 
-// Static explainer diagrams for the homepage. They draw with theme tokens
-// (see `.home-diagram` in app/global.css), so they follow light and dark mode.
+// Static explainer diagrams for the homepage, drawn in the style of the Jazz
+// print material: square boxes with mono labels, thin wires with rounded
+// elbows and open arrowheads. Colour carries meaning throughout:
+//   blue  = local (on a device, instantly visible, mergeable)
+//   green = global (Core, authoritative, exclusive)
+//   blue/green dashed = shared by both
+// Everything draws with theme tokens (see `.home-diagram` in app/global.css),
+// so the diagrams follow light and dark mode.
+
+type Tone = "ink" | "blue" | "green" | "shared" | "muted";
+type Point = [number, number];
 
 function Diagram({
   label,
@@ -21,436 +30,562 @@ function Diagram({
       xmlns="http://www.w3.org/2000/svg"
     >
       <defs>
-        <marker
-          id="home-arrow"
-          viewBox="0 0 8 8"
-          refX="7"
-          refY="4"
-          markerWidth="7"
-          markerHeight="7"
-          orient="auto-start-reverse"
-        >
-          <path d="M0 0 L8 4 L0 8 z" className="dg-arrow-head" />
-        </marker>
-        <marker
-          id="home-arrow-accent"
-          viewBox="0 0 8 8"
-          refX="7"
-          refY="4"
-          markerWidth="7"
-          markerHeight="7"
-          orient="auto-start-reverse"
-        >
-          <path d="M0 0 L8 4 L0 8 z" className="dg-arrow-head-accent" />
-        </marker>
+        {(["ink", "blue", "green", "muted"] as const).map((tone) => (
+          <marker
+            key={tone}
+            id={`dg-arrow-${tone}`}
+            viewBox="0 0 10 10"
+            refX="9"
+            refY="5"
+            markerWidth="10"
+            markerHeight="10"
+            markerUnits="userSpaceOnUse"
+            orient="auto-start-reverse"
+          >
+            <path d="M2 1 L9 5 L2 9" className={`dg-chevron dg-stroke-${tone}`} />
+          </marker>
+        ))}
       </defs>
       {children}
     </svg>
   );
 }
 
-function Node({
+/** An orthogonal path through `points` with rounded corners of radius `r`. */
+function rounded(points: Point[], r = 10): string {
+  let d = `M${points[0][0]} ${points[0][1]}`;
+  for (let i = 1; i < points.length - 1; i++) {
+    const [px, py] = points[i - 1];
+    const [cx, cy] = points[i];
+    const [nx, ny] = points[i + 1];
+    const inLen = Math.hypot(cx - px, cy - py);
+    const outLen = Math.hypot(nx - cx, ny - cy);
+    const k = Math.min(r, inLen / 2, outLen / 2);
+    const ax = cx - ((cx - px) / inLen) * k;
+    const ay = cy - ((cy - py) / inLen) * k;
+    const bx = cx + ((nx - cx) / outLen) * k;
+    const by = cy + ((ny - cy) / outLen) * k;
+    d += ` L${ax} ${ay} Q${cx} ${cy} ${bx} ${by}`;
+  }
+  const [lx, ly] = points[points.length - 1];
+  return `${d} L${lx} ${ly}`;
+}
+
+function Wire({
+  points,
+  tone = "ink",
+  start,
+  end = true,
+  dashed,
+}: {
+  points: Point[];
+  tone?: Exclude<Tone, "shared">;
+  start?: boolean;
+  end?: boolean;
+  dashed?: boolean;
+}) {
+  return (
+    <path
+      d={rounded(points)}
+      className={`dg-wire dg-stroke-${tone}${dashed ? " dg-wire-dashed" : ""}`}
+      markerStart={start ? `url(#dg-arrow-${tone})` : undefined}
+      markerEnd={end ? `url(#dg-arrow-${tone})` : undefined}
+    />
+  );
+}
+
+function Frame({ x, y, w, h, tone }: { x: number; y: number; w: number; h: number; tone: Tone }) {
+  if (tone === "shared") {
+    // Green underneath, blue dashes on top: reads as alternating blue/green.
+    return (
+      <g>
+        <rect x={x} y={y} width={w} height={h} rx={2} className="dg-box dg-stroke-green" />
+        <rect x={x} y={y} width={w} height={h} rx={2} className="dg-box-dash dg-stroke-blue" />
+      </g>
+    );
+  }
+  return <rect x={x} y={y} width={w} height={h} rx={2} className={`dg-box dg-stroke-${tone}`} />;
+}
+
+/** A box with a mono title and optional mono detail lines. */
+function Box({
   x,
   y,
   w,
   h,
+  tone = "ink",
   title,
-  sub,
-  emphasis,
+  lines,
+  center,
 }: {
   x: number;
   y: number;
   w: number;
   h: number;
+  tone?: Tone;
   title: string;
-  sub?: string;
-  emphasis?: boolean;
+  lines?: string[];
+  center?: boolean;
 }) {
+  const textTone = tone === "shared" ? "blue" : tone;
   return (
     <g>
-      <rect
-        x={x}
-        y={y}
-        width={w}
-        height={h}
-        rx={6}
-        className={emphasis ? "dg-node-strong" : "dg-node"}
-      />
-      <text x={x + 12} y={y + 26} className="dg-title">
+      <Frame x={x} y={y} w={w} h={h} tone={tone} />
+      <text
+        x={center ? x + w / 2 : x + 12}
+        y={lines ? y + 23 : y + h / 2 + 5}
+        textAnchor={center ? "middle" : undefined}
+        className={`dg-title dg-fill-${textTone}`}
+      >
         {title}
       </text>
-      {sub ? (
-        <text x={x + 12} y={y + 46} className="dg-sub">
-          {sub}
+      {lines?.map((line, index) => (
+        <text key={line} x={x + 12} y={y + 45 + index * 16} className="dg-detail">
+          {line}
         </text>
-      ) : null}
+      ))}
     </g>
   );
 }
 
-function Pill({ x, y, w, children }: { x: number; y: number; w: number; children: string }) {
+/** A small mono label, e.g. on a wire. */
+function Label({
+  x,
+  y,
+  children,
+  tone = "ink",
+  anchor,
+}: {
+  x: number;
+  y: number;
+  children: string;
+  tone?: Tone;
+  anchor?: "start" | "middle" | "end";
+}) {
   return (
-    <g>
-      <rect x={x} y={y} width={w} height={26} rx={3} className="dg-pill" />
-      <text x={x + 8} y={y + 17} className="dg-code">
-        {children}
-      </text>
-    </g>
+    <text x={x} y={y} textAnchor={anchor} className={`dg-label dg-fill-${tone}`}>
+      {children}
+    </text>
   );
 }
 
 /** Frontend, backend and cloud each hold a synced copy of the data. */
 export function StackDiagram() {
   const peers = [
-    { x: 16, title: "Web app", sub: "browser" },
-    { x: 213, title: "Mobile app", sub: "React Native" },
-    { x: 411, title: "Your backend", sub: "TypeScript or Rust" },
-    { x: 608, title: "Agents & jobs", sub: "any server" },
+    { x: 16, title: "web app", lines: ["browser", "local copy"] },
+    { x: 214, title: "mobile app", lines: ["react native", "local copy"] },
+    { x: 412, title: "backend", lines: ["typescript · rust", "local copy"] },
+    { x: 610, title: "agents & jobs", lines: ["any server", "local copy"] },
   ];
+  const coreX = 250;
+  const coreW = 300;
+  const busY = 150;
+  const peerY = 176;
   return (
     <Diagram
-      viewBox="0 0 800 330"
+      viewBox="0 0 800 296"
       label="Web apps, mobile apps, backends and agents each keep a local copy of the data they use and sync it with Jazz Core, in Jazz Cloud or self-hosted."
     >
-      <rect x={16} y={16} width={768} height={100} rx={9} className="dg-band" />
-      <text x={32} y={44} className="dg-sub">
-        Jazz Cloud or self-hosted
-      </text>
-      <Node
-        x={250}
-        y={34}
-        w={300}
-        h={64}
-        title="Core"
-        sub="authorizes and durably stores writes"
-        emphasis
+      <Box
+        x={coreX}
+        y={16}
+        w={coreW}
+        h={82}
+        tone="green"
+        title="core"
+        lines={["authorizes every write", "stores all data"]}
       />
+      <Label x={coreX + coreW + 16} y={62} tone="green">
+        global
+      </Label>
+      <Label x={16} y={116} tone="muted">
+        jazz cloud or self-hosted
+      </Label>
+      <line x1={16} x2={784} y1={124} y2={124} className="dg-region" />
+      {peers.map((peer) => {
+        const cx = peer.x + 87;
+        return (
+          <Wire
+            key={peer.title}
+            points={[
+              [400, 98],
+              [400, busY],
+              [cx, busY],
+              [cx, peerY],
+            ]}
+            start={peer.x === 16}
+          />
+        );
+      })}
+      <Label x={410} y={116}>
+        sync
+      </Label>
       {peers.map((peer) => (
-        <path
+        <Box
           key={peer.title}
-          d={`M${peer.x + 88} 226 C ${peer.x + 88} 170, 400 164, 400 98`}
-          className="dg-link-dashed"
+          x={peer.x}
+          y={peerY}
+          w={174}
+          h={82}
+          tone="blue"
+          title={peer.title}
+          lines={peer.lines}
         />
       ))}
-      <rect x={380} y={150} width={40} height={22} rx={3} className="dg-pill" />
-      <text x={400} y={166} textAnchor="middle" className="dg-sub-sm">
-        sync
-      </text>
-      {peers.map((peer) => (
-        <g key={peer.title}>
-          <Node x={peer.x} y={226} w={176} h={94} title={peer.title} sub={peer.sub} />
-          <Pill x={peer.x + 12} y={284} w={152}>
-            local copy
-          </Pill>
-        </g>
-      ))}
+      <Label x={16} y={284} tone="muted">
+        your apps and servers
+      </Label>
+      <Label x={784} y={284} tone="blue" anchor="end">
+        local
+      </Label>
     </Diagram>
   );
 }
 
-/** A write is visible locally at once; `wait({ tier })` picks the confirmation. */
+/** A write is visible locally at once and globally once Core accepts it. */
 export function ConsistencyDiagram() {
   return (
     <Diagram
-      viewBox="0 0 640 270"
+      viewBox="0 0 640 290"
       label="A write applies on the device immediately. wait with tier local resolves once it is saved locally; wait with tier global resolves once Core has authorized and stored it."
     >
-      <text x={16} y={77} className="dg-title">
-        Device
-      </text>
-      <text x={16} y={197} className="dg-title">
-        Core
-      </text>
-      <line x1={110} y1={72} x2={624} y2={72} className="dg-lane" />
-      <line x1={110} y1={192} x2={624} y2={192} className="dg-lane" />
-
-      <text x={138} y={44} className="dg-code-strong">
-        db.insert(…)
-      </text>
-      <path
-        d="M150 78 C 150 160, 300 192, 424 192"
-        className="dg-link-accent"
-        markerEnd="url(#home-arrow-accent)"
+      <Label x={16} y={24} tone="muted">
+        device
+      </Label>
+      <line x1={16} x2={624} y1={34} y2={34} className="dg-region" />
+      <Box x={16} y={52} w={150} h={40} tone="ink" title="db.insert(…)" center />
+      <Wire
+        points={[
+          [166, 72],
+          [206, 72],
+        ]}
       />
-      <circle cx={150} cy={72} r={7} className="dg-dot-accent" />
-      <text x={178} y={106} className="dg-sub">
-        visible to local queries at once
-      </text>
-
-      <circle cx={248} cy={72} r={5} className="dg-dot" />
-      <text x={236} y={44} className="dg-code">
-        {'wait({ tier: "local" })'}
-      </text>
-
-      <circle cx={430} cy={192} r={7} className="dg-dot-accent" />
-      <text x={430} y={226} textAnchor="middle" className="dg-sub">
-        authorized and durably stored
-      </text>
-      <path d="M434 186 L 540 80" className="dg-link" markerEnd="url(#home-arrow)" />
-      <circle cx={544} cy={72} r={5} className="dg-dot" />
-      <text x={624} y={44} textAnchor="end" className="dg-code">
-        {'wait({ tier: "global" })'}
-      </text>
-
-      <text x={16} y={258} className="dg-sub">
-        Offline, only local resolves; global waits until Core accepts or rejects.
-      </text>
+      <Box
+        x={206}
+        y={52}
+        w={200}
+        h={74}
+        tone="blue"
+        title='tier: "local"'
+        lines={["visible to local queries", "works offline"]}
+      />
+      <Box
+        x={446}
+        y={52}
+        w={178}
+        h={74}
+        tone="green"
+        title='tier: "global"'
+        lines={["accepted everywhere"]}
+      />
+      <Label x={16} y={170} tone="muted">
+        core
+      </Label>
+      <line x1={16} x2={624} y1={180} y2={180} className="dg-region" />
+      <Wire
+        points={[
+          [306, 126],
+          [306, 232],
+          [380, 232],
+        ]}
+        end={false}
+      />
+      <Box x={380} y={206} w={170} h={52} tone="green" title="authorize, store" center />
+      <Wire
+        points={[
+          [550, 232],
+          [590, 232],
+          [590, 126],
+        ]}
+        tone="green"
+      />
+      <Label x={316} y={222}>
+        sync
+      </Label>
+      <Label x={16} y={280} tone="muted">
+        offline: local resolves, global waits for core
+      </Label>
     </Diagram>
   );
 }
 
-/** The user's query and the table's read policy compile into one plan. */
+/** The read policy and the query run as one plan; only allowed rows sync. */
 export function PermissionsDiagram() {
   const rows = [
-    { title: "Plan launch", kept: true },
-    { title: "Draft pricing", kept: false },
-    { title: "Review PR", kept: true },
-    { title: "Book venue", kept: false },
+    { title: "plan launch", kept: true },
+    { title: "draft pricing", kept: false },
+    { title: "review pr", kept: true },
+    { title: "book venue", kept: false },
   ];
   return (
     <Diagram
-      viewBox="0 0 640 280"
+      viewBox="0 0 640 300"
       label="A query and the table's read policy are optimized together as one plan, so only rows the user may read are synced."
     >
-      <text x={16} y={26} className="dg-sub">
-        your query
-      </text>
-      <Pill x={16} y={36} w={300}>
-        {"todos.where({ done: false })"}
-      </Pill>
-      <text x={16} y={100} className="dg-sub">
-        read policy
-      </text>
-      <Pill x={16} y={110} w={300}>
-        {"{ owner_id: session.user.account }"}
-      </Pill>
-      <path d="M316 48 C 332 48, 332 98, 340 98" className="dg-link" />
-      <path
-        d="M316 122 C 332 122, 332 98, 340 98"
-        className="dg-link"
-        markerEnd="url(#home-arrow)"
+      <Box x={16} y={40} w={96} h={40} title="todos" center />
+      <Wire
+        points={[
+          [112, 60],
+          [150, 60],
+        ]}
       />
-      <Node x={344} y={66} w={138} h={64} title="One plan" sub="query + policy" emphasis />
-      <path d="M482 98 L 496 98" className="dg-link-accent" markerEnd="url(#home-arrow-accent)" />
+      <Box x={150} y={40} w={196} h={40} tone="green" title="owner_id = you" center />
+      <Label x={158} y={28} tone="green">
+        read policy
+      </Label>
+      <Wire
+        points={[
+          [346, 60],
+          [384, 60],
+        ]}
+      />
+      <Box x={384} y={40} w={150} h={40} tone="blue" title="done = false" center />
+      <Label x={392} y={28} tone="blue">
+        your query
+      </Label>
+      <Wire
+        points={[
+          [534, 60],
+          [566, 60],
+        ]}
+      />
+      <Box x={566} y={40} w={58} h={40} tone="blue" title="ui" center />
+      <path d="M150 96 V104 H534 V96" className="dg-bracket" />
+      <Label x={342} y={122} anchor="middle">
+        one plan, optimized together
+      </Label>
       {rows.map((row, index) => {
-        const y = 16 + index * 52;
+        const y = 146 + index * 34;
         return (
-          <g key={row.title} opacity={row.kept ? 1 : 0.5}>
-            <rect
-              x={500}
-              y={y}
-              width={124}
-              height={44}
-              rx={3}
-              className={row.kept ? "dg-row-kept" : "dg-row"}
-            />
-            <text x={510} y={y + 19} className="dg-title-sm">
+          <g key={row.title}>
+            <Frame x={150} y={y} w={384} h={28} tone={row.kept ? "blue" : "muted"} />
+            <text
+              x={162}
+              y={y + 19}
+              className={`dg-label dg-fill-${row.kept ? "blue" : "muted"}${row.kept ? "" : " dg-struck"}`}
+            >
               {row.title}
             </text>
-            <text x={510} y={y + 35} className="dg-sub-sm">
-              {row.kept ? "owner: you" : "not synced"}
+            <text
+              x={522}
+              y={y + 19}
+              textAnchor="end"
+              className={`dg-label dg-fill-${row.kept ? "blue" : "muted"}`}
+            >
+              {row.kept ? "synced" : "never leaves core"}
             </text>
           </g>
         );
       })}
-      <text x={16} y={246} className="dg-sub">
-        Core only syncs rows the policy allows, so the client can query
-      </text>
-      <text x={16} y={266} className="dg-sub">
-        its local copy with no round trip to check access.
-      </text>
     </Diagram>
   );
 }
 
-/** Each row keeps a branching history of every edit. */
+/** Git-like history for one row: main, a draft branch, and a merge. */
 export function HistoryDiagram() {
-  const main = [
-    { x: 80, who: "Ana" },
-    { x: 180, who: "Ana" },
-    { x: 400, who: "Sam" },
-    { x: 570, who: "merge" },
-  ];
-  const draft = [
-    { x: 260, who: "agent" },
-    { x: 350, who: "agent" },
-    { x: 470, who: "Ana" },
-  ];
+  const mainY = 70;
+  const draftY = 170;
+  const commit = (x: number, y: number, tone: Tone, label: string, below?: boolean) => (
+    <g key={`${x}-${y}`}>
+      <rect
+        x={x - 7}
+        y={y - 7}
+        width={14}
+        height={14}
+        rx={2}
+        className={`dg-box dg-stroke-${tone}`}
+      />
+      <Label x={x} y={below ? y + 28 : y - 16} tone={tone} anchor="middle">
+        {label}
+      </Label>
+    </g>
+  );
   return (
     <Diagram
       viewBox="0 0 640 250"
       label="One row's history: edits on the main branch, a draft branch edited by an agent, and a merge back into main."
     >
-      <text x={16} y={26} className="dg-sub">
-        History of one row
-      </text>
-      <text x={16} y={96} className="dg-code">
+      <Label x={16} y={mainY + 5} tone="green">
         main
-      </text>
-      <text x={16} y={176} className="dg-code">
+      </Label>
+      <Label x={16} y={draftY + 5} tone="blue">
         draft
-      </text>
-      <line x1={80} y1={92} x2={620} y2={92} className="dg-lane-strong" />
+      </Label>
+      <line x1={80} x2={624} y1={mainY} y2={mainY} className="dg-lane dg-stroke-green" />
       <path
-        d="M180 92 C 220 92, 220 172, 260 172 L 470 172 C 520 172, 520 92, 570 92"
-        className="dg-link-accent"
+        d={rounded(
+          [
+            [210, mainY],
+            [250, mainY],
+            [250, draftY],
+            [470, draftY],
+            [470, mainY],
+            [513, mainY],
+          ],
+          18,
+        )}
+        className="dg-lane dg-stroke-blue"
       />
-      {main.map((commit) => (
-        <g key={`m-${commit.x}`}>
-          <circle
-            cx={commit.x}
-            cy={92}
-            r={7}
-            className={commit.who === "merge" ? "dg-dot-accent" : "dg-dot-hollow"}
-          />
-          <text x={commit.x} y={70} textAnchor="middle" className="dg-sub-sm">
-            {commit.who}
-          </text>
-        </g>
-      ))}
-      {draft.map((commit) => (
-        <g key={`d-${commit.x}`}>
-          <circle cx={commit.x} cy={172} r={7} className="dg-dot-hollow-accent" />
-          <text x={commit.x} y={202} textAnchor="middle" className="dg-sub-sm">
-            {commit.who}
-          </text>
-        </g>
-      ))}
-      <text x={16} y={240} className="dg-sub">
-        Read any version, compare branches, and see who changed what.
-      </text>
+      {commit(110, mainY, "green", "ana")}
+      {commit(210, mainY, "green", "ana")}
+      {commit(310, draftY, "blue", "agent", true)}
+      {commit(390, draftY, "blue", "agent", true)}
+      {commit(410, mainY, "green", "sam")}
+      <rect
+        x={513}
+        y={mainY - 7}
+        width={14}
+        height={14}
+        rx={2}
+        className="dg-box dg-stroke-green"
+      />
+      <rect
+        x={513}
+        y={mainY - 7}
+        width={14}
+        height={14}
+        rx={2}
+        className="dg-box-dash dg-stroke-blue"
+      />
+      <Label x={520} y={mainY - 16} anchor="middle">
+        merge
+      </Label>
+      <Label x={16} y={236} tone="muted">
+        read any version · compare branches · see who changed what
+      </Label>
     </Diagram>
   );
 }
 
-/** Migrations translate between live schema versions instead of stopping the world. */
+/** Two app versions share one table through a migration lens. */
 export function SchemaDiagram() {
   return (
     <Diagram
       viewBox="0 0 640 270"
       label="Clients on schema version 1 and version 2 read and write the same data. A migration lens translates the done column to a status column in both directions."
     >
-      <Node x={16} y={16} w={176} h={128} title="App v1" sub="still running" />
-      <Pill x={28} y={72} w={152}>
-        title: string
-      </Pill>
-      <Pill x={28} y={104} w={152}>
-        done: boolean
-      </Pill>
-
-      <Node x={448} y={16} w={176} h={128} title="App v2" sub="just shipped" />
-      <Pill x={460} y={72} w={152}>
-        title: string
-      </Pill>
-      <Pill x={460} y={104} w={152}>
-        status: enum
-      </Pill>
-
-      <rect x={236} y={52} width={168} height={56} rx={6} className="dg-node-strong" />
-      <text x={320} y={76} textAnchor="middle" className="dg-title">
-        Migration lens
-      </text>
-      <text x={320} y={96} textAnchor="middle" className="dg-code">
-        {"done ⇄ status"}
-      </text>
-      <path
-        d="M196 80 L 232 80"
-        className="dg-link-accent"
-        markerStart="url(#home-arrow-accent)"
-        markerEnd="url(#home-arrow-accent)"
+      <Box
+        x={16}
+        y={24}
+        w={176}
+        h={96}
+        tone="blue"
+        title="app v1"
+        lines={["still running", "title: string", "done: boolean"]}
       />
-      <path
-        d="M408 80 L 444 80"
-        className="dg-link-accent"
-        markerStart="url(#home-arrow-accent)"
-        markerEnd="url(#home-arrow-accent)"
+      <Box
+        x={448}
+        y={24}
+        w={176}
+        h={96}
+        tone="blue"
+        title="app v2"
+        lines={["just shipped", "title: string", "status: enum"]}
       />
-
-      <path d="M320 108 L 320 176" className="dg-link" markerEnd="url(#home-arrow)" />
-      <rect x={180} y={180} width={280} height={44} rx={6} className="dg-band" />
-      <text x={320} y={207} textAnchor="middle" className="dg-title-sm">
-        One table, both versions live
-      </text>
-      <text x={16} y={258} className="dg-sub">
-        Old and new clients keep reading and writing the same rows.
-      </text>
+      <Box
+        x={232}
+        y={44}
+        w={176}
+        h={56}
+        tone="shared"
+        title="migration lens"
+        lines={["done ⇄ status"]}
+      />
+      <Wire
+        points={[
+          [192, 72],
+          [232, 72],
+        ]}
+        start
+      />
+      <Wire
+        points={[
+          [448, 72],
+          [408, 72],
+        ]}
+        start
+      />
+      <Wire
+        points={[
+          [320, 100],
+          [320, 170],
+        ]}
+        start
+        tone="green"
+      />
+      <Box
+        x={200}
+        y={170}
+        w={240}
+        h={60}
+        tone="green"
+        title="todos"
+        lines={["one table, both versions live"]}
+      />
+      <Label x={16} y={258} tone="muted">
+        no stop-the-world migration · old clients keep working
+      </Label>
     </Diagram>
   );
 }
 
-/** The parts of a typical backend that Jazz takes on. */
+/** A typical backend stack compared with what Jazz covers. */
 export function BackendDiagram() {
   const typical = [
-    "API endpoints",
-    "WebSocket fan-out",
-    "Cache and invalidation",
-    "Permission checks",
-    "Message queue",
-    "Blob storage and CDN",
-    "Database",
+    "api endpoints",
+    "websocket fan-out",
+    "cache + invalidation",
+    "permission checks",
+    "message queue",
+    "blob storage + cdn",
+    "database",
   ];
-  const withJazz = [
-    "Sync and live queries",
-    "Row-level permissions",
-    "Durable streams",
-    "Files and blobs",
-    "Database",
+  const jazz = [
+    "sync + live queries",
+    "row-level permissions",
+    "durable streams",
+    "files + blobs",
+    "database",
   ];
-  const rowH = 28;
-  const step = rowH + 4;
+  const row = 32;
   return (
     <Diagram
-      viewBox="0 0 640 316"
+      viewBox="0 0 640 358"
       label="A typical stack needs API endpoints, WebSocket fan-out, caching, permission checks, a queue, blob storage and a database. With Jazz, your business logic sits on one layer that covers sync, permissions, streams, files and the database."
     >
-      <text x={16} y={26} className="dg-title">
-        Typical stack
-      </text>
-      <rect x={16} y={40} width={284} height={32} rx={3} className="dg-node" />
-      <text x={28} y={61} className="dg-title-sm">
-        Business logic
-      </text>
-      {typical.map((layer, index) => (
-        <g key={layer}>
-          <rect x={16} y={80 + index * step} width={284} height={rowH} rx={3} className="dg-row" />
-          <text x={28} y={80 + index * step + 19} className="dg-sub">
-            {layer}
-          </text>
-        </g>
+      <Label x={16} y={24} tone="muted">
+        typical stack
+      </Label>
+      <Label x={344} y={24} tone="muted">
+        with jazz
+      </Label>
+      <Box x={16} y={36} w={280} h={row + 4} title="business logic" />
+      {typical.map((item, index) => (
+        <Box
+          key={item}
+          x={16}
+          y={82 + index * (row + 6)}
+          w={280}
+          h={row}
+          tone="muted"
+          title={item}
+        />
       ))}
-
-      <text x={340} y={26} className="dg-title">
-        With Jazz
-      </text>
-      <rect x={340} y={40} width={284} height={32} rx={3} className="dg-node" />
-      <text x={352} y={61} className="dg-title-sm">
-        Business logic
-      </text>
-      <rect
-        x={340}
-        y={80}
-        width={284}
-        height={withJazz.length * step + 36}
-        rx={6}
-        className="dg-node-strong"
-      />
-      <text x={352} y={102} className="dg-title-sm">
-        Jazz
-      </text>
-      {withJazz.map((layer, index) => (
-        <g key={layer}>
-          <rect
-            x={352}
-            y={112 + index * step}
-            width={260}
-            height={rowH}
-            rx={3}
-            className="dg-row-kept"
-          />
-          <text x={364} y={112 + index * step + 19} className="dg-sub">
-            {layer}
-          </text>
-        </g>
+      <Box x={344} y={36} w={280} h={row + 4} title="business logic" />
+      <Frame x={344} y={82} w={280} h={260} tone="shared" />
+      <Label x={356} y={104} tone="blue">
+        jazz
+      </Label>
+      {jazz.map((item, index) => (
+        <Box
+          key={item}
+          x={356}
+          y={116 + index * (row + 13)}
+          w={256}
+          h={row}
+          tone={index === jazz.length - 1 ? "green" : "blue"}
+          title={item}
+        />
       ))}
     </Diagram>
   );
