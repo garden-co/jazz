@@ -1304,9 +1304,7 @@ where
                 format!("unknown column {table}.{column}"),
             ));
         }
-        if self
-            .authorize_read_for_identity(table, row, self.identity.author)
-            .await?
+        if self.authorize_read_for_identity(table, row, self.identity.author)?
             != PermissionAdvice::Allowed
         {
             return Err(Error::new(
@@ -2606,28 +2604,27 @@ where
     }
 
     /// Evaluate a read for the serving path without disclosing data.
-    ///
-    /// The dry run reads storage, so it waits for the node owner and yields
-    /// on cold storage like every other storage-facing operation.
-    pub async fn authorize_read_for_identity(
+    pub fn authorize_read_for_identity(
         &self,
         table: &str,
         row: RowUuid,
         author: AuthorSubject,
     ) -> Result<PermissionAdvice, Error> {
         self.table_schema(table)?;
-        let allowed = self
-            .node
-            .node
-            .lock()
-            .await
-            .dry_run_read_current_allows(table, row, author)
-            .await?;
-        Ok(if allowed {
-            PermissionAdvice::Allowed
-        } else {
-            PermissionAdvice::Denied
+        crate::local_executor::block_on(
+            self.node
+                .node
+                .borrow_mut()
+                .dry_run_read_current_allows(table, row, author),
+        )
+        .map(|allowed| {
+            if allowed {
+                PermissionAdvice::Allowed
+            } else {
+                PermissionAdvice::Denied
+            }
         })
+        .map_err(Into::into)
     }
 
     /// Advise whether an update may be allowed. Client-local replicas return
@@ -3660,11 +3657,7 @@ where
         identity: AuthorSubject,
     ) -> Result<(RowCells, Option<TxId>, BTreeSet<String>), Error> {
         self.ensure_row_not_deleted(table, row).await?;
-        if self
-            .authorize_read_for_identity(table, row, identity)
-            .await?
-            != PermissionAdvice::Allowed
-        {
+        if self.authorize_read_for_identity(table, row, identity)? != PermissionAdvice::Allowed {
             return Err(read_for_write_denied("UPDATE", table));
         }
         let authored_columns = patch.keys().cloned().collect();

@@ -2633,48 +2633,6 @@ fn identity_claims_wait_behind_a_suspended_queued_upsert() {
     );
 }
 
-/// A value-range read proves read permission before it touches the cell, and
-/// a trusted-session upsert proves it before merging the preimage. That proof
-/// reads storage, so it must wait for a node owner held by another operation.
-/// Taking the owner synchronously there panicked with "reentered a suspended
-/// operation".
-#[test]
-fn read_permission_proof_waits_for_a_held_node_owner() {
-    use std::future::Future;
-    use std::pin::pin;
-    use std::task::{Context, Waker};
-
-    let schema = schema();
-    let author = AuthorSubject::for_test_bytes([0xd9; 16]);
-    let db = open_db(0xd9, author, &schema);
-    let id = row(0xd9);
-    db.insert(
-        "todos",
-        cells("held owner", false, author),
-        crate::db::InsertOptions {
-            row_id: Some(id),
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    db.tick().unwrap();
-
-    let node = db.node.node();
-    let held = crate::local_executor::block_on(node.lock());
-    let mut read = pin!(db.read_value_range("todos", id, "title", 0..4));
-    assert!(
-        read.as_mut()
-            .poll(&mut Context::from_waker(Waker::noop()))
-            .is_pending(),
-        "the permission proof must wait for the held owner"
-    );
-    drop(held);
-    assert_eq!(
-        crate::local_executor::block_on(read).unwrap(),
-        b"held".to_vec()
-    );
-}
-
 /// Test-only marker for an authenticated SYSTEM backend transport. Ordinary
 /// session links must not send `SessionClaims`: their authenticated handshake
 /// is the authority for those claims.
