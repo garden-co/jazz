@@ -3605,6 +3605,7 @@ fn terminal_operations_to_js(
 
     let table = jazz::binding_codec::terminal_event_layouts(operations)
         .map_err(|error| JsValue::from_str(&error))?;
+    let layout_serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
     let encoded = js_sys::Array::new_with_length(operations.len() as u32);
     for (index, (operation, payload_layout)) in operations
         .iter()
@@ -3667,7 +3668,10 @@ fn terminal_operations_to_js(
     set_prop(
         &envelope,
         "layouts",
-        serde_wasm_bindgen::to_value(&table.layouts).map_err(to_js_error)?,
+        table
+            .layouts
+            .serialize(&layout_serializer)
+            .map_err(to_js_error)?,
     )?;
     set_prop(&envelope, "operations", encoded.into())?;
     Ok(envelope.into())

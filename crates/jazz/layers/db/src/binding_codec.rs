@@ -311,7 +311,7 @@ pub fn terminal_event_layouts(
     let mut layout_indices = std::collections::HashMap::new();
     let mut operation_layouts = Vec::with_capacity(operations.len());
     for operation in operations {
-        let descriptor = terminal_operation_value_descriptor(operation)?;
+        let descriptor = terminal_descendant_value_descriptor(operation)?;
         if matches!(
             &operation.edit,
             groove::ivm::TerminalEdit::Remove { .. } | groove::ivm::TerminalEdit::Move { .. }
@@ -361,8 +361,18 @@ pub fn terminal_operations_to_json(
 }
 
 /// Resolve the packed payload descriptor from the operation's root descriptor
-/// and named collection path. Insert/Update values contain only this child.
+/// and named collection path. Root operations use the root descriptor; Insert/Update
+/// values in descendant operations contain only the selected child.
 pub(crate) fn terminal_operation_value_descriptor(
+    operation: &TerminalOperation,
+) -> Result<groove::records::RecordDescriptor, String> {
+    if operation.path.is_empty() {
+        return Ok(operation.root_descriptor);
+    }
+    terminal_descendant_value_descriptor(operation)
+}
+
+fn terminal_descendant_value_descriptor(
     operation: &TerminalOperation,
 ) -> Result<groove::records::RecordDescriptor, String> {
     validate_terminal_operation_path(operation)?;
