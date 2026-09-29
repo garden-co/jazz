@@ -1,8 +1,6 @@
 "use client";
 
-import { FileAudio } from "lucide-react";
 import { Card } from "@astryxdesign/core/Card";
-import { Icon } from "@astryxdesign/core/Icon";
 import { HStack, VStack } from "@astryxdesign/core/Stack";
 import { Text } from "@astryxdesign/core/Text";
 
@@ -26,7 +24,6 @@ export function AttachmentPlayer({ attachment }: { attachment: AttachmentSummary
     <Card padding={3} width="100%">
       <VStack gap={2}>
         <HStack gap={2} align="center">
-          <Icon icon={FileAudio} size="sm" color="secondary" />
           <Text weight="medium" maxLines={1} hasTruncateTooltip>
             {attachment.filename}
           </Text>

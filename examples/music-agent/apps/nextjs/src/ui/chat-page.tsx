@@ -2,11 +2,9 @@
 
 import { useEffect, useState } from "react";
 import { useAll, useDb, useSession } from "jazz-tools/react";
-import { MessageSquarePlus } from "lucide-react";
 import { AppShell } from "@astryxdesign/core/AppShell";
 import { Badge } from "@astryxdesign/core/Badge";
 import { Button } from "@astryxdesign/core/Button";
-import { Icon } from "@astryxdesign/core/Icon";
 import { SideNav, SideNavHeading, SideNavItem, SideNavSection } from "@astryxdesign/core/SideNav";
 import { TopNav, TopNavHeading } from "@astryxdesign/core/TopNav";
 import { app } from "@/schema";
@@ -68,7 +66,6 @@ export function MusicAgentApp({ agentLabel, userName }: { agentLabel: string; us
       topContent={
         <Button
           label="New conversation"
-          icon={<Icon icon={MessageSquarePlus} size="sm" />}
           onClick={startConversation}
           isDisabled={!artist}
           width="100%"

@@ -1,10 +1,8 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { Paperclip } from "lucide-react";
 import { ChatComposer, ChatComposerDrawer } from "@astryxdesign/core/Chat";
-import { Icon } from "@astryxdesign/core/Icon";
-import { IconButton } from "@astryxdesign/core/IconButton";
+import { Button } from "@astryxdesign/core/Button";
 import { Token } from "@astryxdesign/core/Token";
 
 export function Composer({
@@ -35,23 +33,13 @@ export function Composer({
         setDraft("");
         setFiles([]);
       }}
-      status={
-        error
-          ? { type: "error", message: error }
-          : isReplying
-            ? {
-                type: "warning",
-                message: "The agent is replying. It keeps going if you close this tab.",
-              }
-            : undefined
-      }
+      status={error ? { type: "error", message: error } : undefined}
       headerActions={
         <>
-          <IconButton
+          <Button
             size="sm"
             variant="ghost"
             label="Attach audio"
-            icon={<Icon icon={Paperclip} size="sm" />}
             onClick={() => picker.current?.click()}
             isDisabled={isReplying}
           />

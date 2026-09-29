@@ -1,6 +1,5 @@
 "use client";
 
-import { ChevronLeft, ChevronRight, RefreshCw } from "lucide-react";
 import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
 import {
@@ -74,7 +73,7 @@ export function AssistantMessage({
             size="sm"
             variant="ghost"
             label="Previous reply"
-            icon={<Icon icon={ChevronLeft} size="sm" />}
+            icon={<Icon icon="chevronLeft" size="sm" />}
             isDisabled={branch.index === 0}
             onClick={() => onShowBranch(-1)}
           />
@@ -85,19 +84,18 @@ export function AssistantMessage({
             size="sm"
             variant="ghost"
             label="Next reply"
-            icon={<Icon icon={ChevronRight} size="sm" />}
+            icon={<Icon icon="chevronRight" size="sm" />}
             isDisabled={branch.index === branch.count - 1}
             onClick={() => onShowBranch(1)}
           />
         </HStack>
       )}
       {!working && (
-        <IconButton
+        <Button
           size="sm"
           variant="ghost"
-          label="Regenerate reply"
-          tooltip="Regenerate as a new branch"
-          icon={<Icon icon={RefreshCw} size="sm" />}
+          label="Regenerate"
+          tooltip="Answer again as a new branch"
           onClick={onRegenerate}
         />
       )}

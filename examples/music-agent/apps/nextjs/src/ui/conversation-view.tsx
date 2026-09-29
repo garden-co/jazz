@@ -83,7 +83,11 @@ export function ConversationView({
           isReplying={replying}
           error={error}
           onSend={(text, files) => act(() => send(text, files))}
-          placeholder={`Ask ${agentLabel === "Claude" ? "Claude" : "the agent"} about venues, dates or a setlist`}
+          placeholder={
+            replying
+              ? "Replying. This keeps going if you close the tab."
+              : `Ask ${agentLabel === "Claude" ? "Claude" : "the agent"} about venues, dates or a setlist`
+          }
         />
       }
       emptyState={
