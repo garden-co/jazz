@@ -3021,9 +3021,7 @@ where
     }
 
     pub(super) fn next_now_ms(&self) -> u64 {
-        let next = self.next_now_ms.get();
-        self.next_now_ms.set(next + 1);
-        next
+        self.next_now_ms.next_now_ms()
     }
 
     pub(super) fn ensure_open_schema_admitted(&self) -> Result<(), Error> {

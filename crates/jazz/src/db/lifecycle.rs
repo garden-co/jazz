@@ -188,7 +188,7 @@ where
                     .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
             )),
             row_id_source_guarantees_fresh,
-            next_now_ms: Rc::new(Cell::new(1)),
+            next_now_ms: Rc::new(WriteClock::default()),
             reserved_tx_id: None,
             owner_operation_admitted: false,
             backend_attribution: false,
@@ -300,7 +300,7 @@ where
                     .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
             )),
             row_id_source_guarantees_fresh,
-            next_now_ms: Rc::new(Cell::new(1)),
+            next_now_ms: Rc::new(WriteClock::default()),
             reserved_tx_id: None,
             owner_operation_admitted: false,
             backend_attribution: false,
@@ -367,7 +367,7 @@ where
                     .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
             )),
             row_id_source_guarantees_fresh,
-            next_now_ms: Rc::new(Cell::new(1)),
+            next_now_ms: Rc::new(WriteClock::default()),
             reserved_tx_id: None,
             owner_operation_admitted: false,
             backend_attribution: false,
@@ -622,6 +622,19 @@ where
     /// This must be called before application writes or subscriptions begin.
     pub fn set_non_durable_client(&self) {
         self.node.set_non_durable_client();
+    }
+
+    /// Tick this runtime's transaction HLC from the Unix wall clock for every
+    /// write that does not supply its own `updated_at_ms`.
+    ///
+    /// Application runtimes must do this: linear history resolves plain
+    /// columns last-writer-wins by the writer's physical milliseconds, so the
+    /// default deterministic counter (restarting at 1 on every open) would
+    /// let an earlier write outrank a later one. Shared by every clone of
+    /// this database.
+    #[cfg(feature = "runtime")]
+    pub(crate) fn use_wall_clock_for_writes(&self) {
+        self.next_now_ms.wall.set(true);
     }
 
     /// Return the highest transaction HLC observed by this live runtime.

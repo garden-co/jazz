@@ -616,9 +616,12 @@ impl Backend {
         } else {
             StackSafeFuture::new(CoreDb::open(config)).await
         };
-        Ok(Self(Rc::new(db.map_err(|error| {
-            JazzError::Connection(error.to_string())
-        })?)))
+        let db = db.map_err(|error| JazzError::Connection(error.to_string()))?;
+        // Application writes carry wall-clock physical milliseconds, exactly
+        // as the TypeScript runtime passes `Date.now()`: linear history
+        // resolves plain columns last-writer-wins by that time.
+        db.use_wall_clock_for_writes();
+        Ok(Self(Rc::new(db)))
     }
 
     fn set_tick_scheduler(&self, scheduler: Rc<TickSchedulerImpl>) {
