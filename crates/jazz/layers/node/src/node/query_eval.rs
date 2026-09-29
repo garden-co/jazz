@@ -3713,6 +3713,40 @@ where
         Ok(())
     }
 
+    /// Tables `shape` reads beyond its root: joined, included, correlated
+    /// and relation tables. An exclusive read records each as a read of the
+    /// whole table (garden-co/jazz#3694), so a partial node hydrates them
+    /// before reading.
+    #[doc(hidden)]
+    pub fn query_non_root_source_tables(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+    ) -> Result<BTreeSet<String>, Error> {
+        use crate::node::query_engine::{RowSetExpr, SourceRole};
+        let normalized = self.normalized_row_set_shape(shape, binding)?;
+        let is_non_root = |source: &crate::node::query_engine::SourceId| {
+            source.path.components != [SourceRole::Root]
+        };
+        Ok(normalized
+            .nodes
+            .values()
+            .filter_map(|node| match node {
+                RowSetExpr::Source { source, .. } if is_non_root(source) => {
+                    Some(source.table.clone())
+                }
+                _ => None,
+            })
+            .chain(
+                normalized
+                    .auxiliary_sources
+                    .iter()
+                    .filter(|source| is_non_root(source))
+                    .map(|source| source.table.clone()),
+            )
+            .collect())
+    }
+
     /// Prove the rows of the policy-filtered tables a query read beyond its
     /// root, as the rows the reader can see. Each becomes a whole-table read
     /// run as the reader, so the authority's re-run under the same policies

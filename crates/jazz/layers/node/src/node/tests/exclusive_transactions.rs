@@ -2769,3 +2769,22 @@ fn exclusive_policy_read_set_does_not_grow_with_the_policy_table() {
     assert_eq!(open_tx.row_reads.len(), 1);
     assert_eq!(open_tx.predicate_reads.len(), 1);
 }
+
+/// The authority validates exclusive reads as the transaction's permission
+/// subject, so that must be the identity the reads ran as: the identity bound
+/// at open. A commit under any other author is refused.
+#[test]
+fn exclusive_reads_and_their_validation_share_one_identity() {
+    let schema = member_visible_todos_schema();
+    let (_dir, mut node) = open_node_with_schema(node(1), schema);
+    let reader = user(0x51);
+    let open = OpenTransactionId::new();
+    node.open_exclusive_for_identity(open, reader).unwrap();
+    node.tx_write(open, "audit", row(0x71), title_cells("redeemed"), None)
+        .unwrap();
+    assert!(matches!(
+        node.commit_exclusive_settled(open, AuthorSubject::SYSTEM, 20),
+        Err(Error::OpenTransactionIdentityMismatch)
+    ));
+}
+

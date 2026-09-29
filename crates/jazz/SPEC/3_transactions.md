@@ -324,7 +324,10 @@ recorded reads against current global state:
   read of that whole table with a proof for each row, so a row added there
   conflicts even when a proof from another read covers the root. When the
   reader's read policy filters that source, the whole-table read runs as the
-  reader and proves only the rows it can see. The tables a read policy
+  reader and proves only the rows it can see. A partial node's online
+  exclusive read hydrates each such table whole at its snapshot, so rows it
+  never received do not make the read conflict; offline, such a read
+  conflicts if the replica lacks a row the reader can see there. The tables a read policy
   consults are not recorded: the authority re-runs every predicate read under
   the reader's policies, so a change there conflicts exactly when it changes
   what the reader sees.

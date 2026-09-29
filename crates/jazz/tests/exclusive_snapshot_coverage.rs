@@ -876,3 +876,34 @@ fn join_redemption_check_conflicts_with_a_concurrent_redemption() {
     assert_eq!(outcome, Redeem::Conflict);
     assert_eq!(net.members(), 1, "the invite was redeemed only once");
 }
+
+/// A redemption check through the invite's redemptions must not conflict on
+/// redemptions of other invites the backend never received: nobody redeemed
+/// this invite, so the redemption commits.
+fn assert_redemption_check_commits_despite_unrelated_redemptions(check: RedemptionCheck) {
+    let net = Net::new(&[0x0a, 0x0b, 0x0c]);
+    net.create_invite(OWNER, "abc");
+    net.create_invite(OWNER, "xyz");
+    net.read(BACKEND, &invite_query("xyz"), DurabilityTier::Global, None);
+    assert_eq!(
+        redeem_unless_redeemed(&net, BACKEND, "xyz", check, false, || {}),
+        Redeem::Joined
+    );
+    net.read(2, &invite_query("abc"), DurabilityTier::Global, None);
+
+    assert_eq!(
+        redeem_unless_redeemed(&net, 2, "abc", check, false, || {}),
+        Redeem::Joined
+    );
+    assert_eq!(net.members(), 2);
+}
+
+#[test]
+fn join_commits_despite_unrelated_joined_rows() {
+    assert_redemption_check_commits_despite_unrelated_redemptions(RedemptionCheck::Join);
+}
+
+#[test]
+fn relation_commits_despite_unrelated_related_rows() {
+    assert_redemption_check_commits_despite_unrelated_redemptions(RedemptionCheck::Relation);
+}

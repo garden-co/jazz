@@ -548,6 +548,49 @@ where
                 None => drop(hydration),
             }
         }
+        // The read records each joined, included or related table as a read
+        // of the whole table, which the authority validates against every
+        // row the reader can see there. Hydrate those tables too, so rows
+        // this replica never received do not make the read conflict.
+        let mut table_coverage = Vec::new();
+        if coverage.is_some()
+            && let Some(open_tx) = open_tx
+        {
+            let tables = self
+                .query_non_root_source_tables(open_tx, &prepared)
+                .await?;
+            for table in tables {
+                let Some(epoch) = self.node.remote_link.arm() else {
+                    break;
+                };
+                let table_query = self
+                    .prepare_query_async(&Query::from(table.as_str()))
+                    .await?;
+                let mut hydration_opts = opts.clone();
+                hydration_opts.tier = DurabilityTier::Global;
+                let hydration = SerializedReadCoverage {
+                    attachment: Some(
+                        self.attach_query_with_opts_async(
+                            &table_query,
+                            hydration_opts,
+                            Some(open_tx),
+                            author,
+                        )
+                        .await?,
+                    ),
+                    release: Some(release_coverage),
+                };
+                let covered = self.wait_for_serialized_read_coverage(&hydration, coverage_expired);
+                match self.race_remote_answer(epoch, covered).await {
+                    Some(result) => {
+                        result?;
+                        table_coverage.push(hydration);
+                    }
+                    None => break,
+                }
+            }
+        }
+        let _table_coverage = table_coverage;
         if coverage.is_none() && require_coverage {
             let attachment = self
                 .attach_query_with_opts_async(&prepared, opts.clone(), open_tx, author)

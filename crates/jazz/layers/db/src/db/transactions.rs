@@ -44,6 +44,19 @@ where
             .map_err(Into::into)
     }
 
+    /// Tables `prepared` reads beyond its root, which an exclusive read in
+    /// `id` records as whole-table reads.
+    pub(super) async fn query_non_root_source_tables(
+        &self,
+        id: OpenTransactionId,
+        prepared: &PreparedQuery,
+    ) -> Result<BTreeSet<String>, Error> {
+        self.lock_for_transaction_operation(id)
+            .await?
+            .query_non_root_source_tables(prepared.shape(), prepared.binding())
+            .map_err(Into::into)
+    }
+
     /// Build a mergeable transaction that commits multiple writes under one id.
     pub async fn mergeable_tx(&self) -> Result<MergeableTx<'_, S>, Error> {
         let tx_id = OpenTransactionId::new();
