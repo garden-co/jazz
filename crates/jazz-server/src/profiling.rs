@@ -11,8 +11,10 @@
 //!
 //! - on the public listener, with `X-Jazz-Admin-Secret`;
 //! - on the optional diagnostics listener ([`DiagnosticsConfig::listen`]),
-//!   without credentials. Operators bind that listener to an address only
-//!   their own infrastructure can reach.
+//!   with `Authorization: Bearer <DiagnosticsConfig::token>`. That token is a
+//!   read-only scrape credential an operator can share across servers
+//!   without handing out admin secrets. Only a loopback listener may run
+//!   without a token.
 //!
 //! [`ServerBuilder::with_heap_profiler`]: crate::ServerBuilder::with_heap_profiler
 
@@ -37,12 +39,34 @@ pub const HEAP_PROFILE_PATH: &str = "/debug/pprof/heap";
 pub type HeapProfileDump = fn() -> Result<Vec<u8>, String>;
 
 /// Process diagnostics the server shell serves next to the app routes.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct DiagnosticsConfig {
     /// Heap profiler of the running executable, when its allocator has one.
     pub heap_profiler: Option<HeapProfileDump>,
-    /// Address of the unauthenticated diagnostics listener. `None` disables it.
+    /// Address of the diagnostics listener. `None` disables it.
     pub listen: Option<SocketAddr>,
+    /// Bearer token the diagnostics listener requires.
+    pub token: Option<String>,
+}
+
+impl DiagnosticsConfig {
+    /// Reject listener setups that would expose profiles to anyone who can
+    /// reach the address.
+    pub fn validate(&self) -> Result<(), String> {
+        match (self.listen, &self.token) {
+            (Some(addr), None) if !addr.ip().is_loopback() => Err(format!(
+                "the diagnostics listener on {addr} requires a diagnostics token; \
+                 only loopback addresses may run without one"
+            )),
+            (None, Some(_)) => {
+                Err("a diagnostics token was given without a diagnostics listener".to_owned())
+            }
+            (_, Some(token)) if token.is_empty() => {
+                Err("the diagnostics token must not be empty".to_owned())
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -64,11 +88,22 @@ pub(crate) fn admin_router(
         })
 }
 
-/// Router for the diagnostics listener. It performs no authentication.
-pub fn diagnostics_router(heap_profiler: Option<HeapProfileDump>) -> Router {
+#[derive(Clone)]
+struct DiagnosticsHeapProfileState {
+    heap_profiler: Option<HeapProfileDump>,
+    token: Option<String>,
+}
+
+/// Router for the diagnostics listener. With a token, every request must
+/// carry `Authorization: Bearer <token>`; without one it is open, which
+/// [`DiagnosticsConfig::validate`] allows only on loopback.
+pub fn diagnostics_router(heap_profiler: Option<HeapProfileDump>, token: Option<String>) -> Router {
     Router::new()
         .route(HEAP_PROFILE_PATH, get(diagnostics_heap_profile_handler))
-        .with_state(heap_profiler)
+        .with_state(DiagnosticsHeapProfileState {
+            heap_profiler,
+            token,
+        })
 }
 
 async fn admin_heap_profile_handler(
@@ -85,9 +120,25 @@ async fn admin_heap_profile_handler(
 }
 
 async fn diagnostics_heap_profile_handler(
-    State(heap_profiler): State<Option<HeapProfileDump>>,
+    State(state): State<DiagnosticsHeapProfileState>,
+    headers: HeaderMap,
 ) -> Response {
-    heap_profile_response(heap_profiler).await
+    if let Some(expected) = &state.token {
+        let provided = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "));
+        if provided != Some(expected.as_str()) {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse::unauthorized(
+                    "Diagnostics token required for this operation",
+                )),
+            )
+                .into_response();
+        }
+    }
+    heap_profile_response(state.heap_profiler).await
 }
 
 async fn heap_profile_response(heap_profiler: Option<HeapProfileDump>) -> Response {
@@ -154,9 +205,17 @@ mod tests {
     }
 
     async fn get(router: Router, admin_secret: Option<&str>) -> (StatusCode, Vec<u8>) {
+        get_with(
+            router,
+            admin_secret.map(|secret| ("X-Jazz-Admin-Secret", secret.to_owned())),
+        )
+        .await
+    }
+
+    async fn get_with(router: Router, header: Option<(&str, String)>) -> (StatusCode, Vec<u8>) {
         let mut request = Request::builder().uri(HEAP_PROFILE_PATH);
-        if let Some(secret) = admin_secret {
-            request = request.header("X-Jazz-Admin-Secret", secret);
+        if let Some((name, value)) = header {
+            request = request.header(name, value);
         }
         let response = router
             .oneshot(request.body(Body::empty()).unwrap())
@@ -196,12 +255,62 @@ mod tests {
         assert_eq!(get(router, Some("anything")).await.0, StatusCode::FORBIDDEN);
     }
 
-    /// The diagnostics listener serves the profile to alice's in-cluster
-    /// scraper without credentials; the operator decides who can reach it.
+    /// The diagnostics listener serves the profile to alice's scraper with
+    /// the shared diagnostics token, and refuses mallory, a neighbouring pod
+    /// with no or a wrong token, or one presenting the token outside a
+    /// bearer header.
     #[tokio::test]
-    async fn diagnostics_heap_profile_needs_no_credentials() {
+    async fn diagnostics_heap_profile_requires_the_diagnostics_token() {
+        let router = || diagnostics_router(Some(fake_dump), Some("scrape".to_owned()));
+        let bearer = |token: &str| Some(("authorization", format!("Bearer {token}")));
+
+        assert_eq!(get_with(router(), None).await.0, StatusCode::UNAUTHORIZED);
         assert_eq!(
-            get(diagnostics_router(Some(fake_dump)), None).await,
+            get_with(router(), bearer("wrong")).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            get_with(router(), Some(("authorization", "scrape".to_owned())))
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            get_with(router(), bearer("scrape")).await,
+            (StatusCode::OK, FAKE_PROFILE.to_vec())
+        );
+    }
+
+    /// Without a token only a loopback listener is allowed, so profiles are
+    /// never open to other pods on the network.
+    #[test]
+    fn open_diagnostics_listeners_are_loopback_only() {
+        let config = |listen: &str, token: Option<&str>| DiagnosticsConfig {
+            heap_profiler: None,
+            listen: Some(listen.parse().unwrap()),
+            token: token.map(str::to_owned),
+        };
+
+        assert!(config("127.0.0.1:6060", None).validate().is_ok());
+        assert!(config("[::1]:6060", None).validate().is_ok());
+        assert!(config("0.0.0.0:6060", None).validate().is_err());
+        assert!(config("0.0.0.0:6060", Some("")).validate().is_err());
+        assert!(config("0.0.0.0:6060", Some("scrape")).validate().is_ok());
+        assert!(
+            DiagnosticsConfig {
+                token: Some("scrape".to_owned()),
+                ..Default::default()
+            }
+            .validate()
+            .is_err()
+        );
+    }
+
+    /// An open loopback listener serves the profile without credentials.
+    #[tokio::test]
+    async fn diagnostics_heap_profile_without_a_token_is_open() {
+        assert_eq!(
+            get(diagnostics_router(Some(fake_dump), None), None).await,
             (StatusCode::OK, FAKE_PROFILE.to_vec())
         );
     }
@@ -210,7 +319,7 @@ mod tests {
     /// explicit "not supported yet" instead of an empty profile.
     #[tokio::test]
     async fn builds_without_a_heap_profiler_say_so() {
-        let (status, body) = get(diagnostics_router(None), None).await;
+        let (status, body) = get(diagnostics_router(None, None), None).await;
 
         assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
         assert!(
@@ -223,7 +332,7 @@ mod tests {
     /// A failed dump reaches alice as a 500 carrying the allocator's reason.
     #[tokio::test]
     async fn dump_failures_surface_as_internal_errors() {
-        let (status, body) = get(diagnostics_router(Some(failing_dump)), None).await;
+        let (status, body) = get(diagnostics_router(Some(failing_dump), None), None).await;
 
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert!(

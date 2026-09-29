@@ -96,7 +96,8 @@ jobs:
           set -euo pipefail
           ./dist/${{ matrix.output }} server 00000000-0000-0000-0000-000000000001 \
             --in-memory --port 1625 --admin-secret heap-check \
-            --diagnostics-listen 127.0.0.1:6060 > server.log 2>&1 &
+            --diagnostics-listen 127.0.0.1:6060 --diagnostics-token heap-scrape \
+            > server.log 2>&1 &
           server_pid=$!
           trap 'kill "$server_pid" 2>/dev/null || true; cat server.log' EXIT
           for _ in $(seq 1 50); do
@@ -107,6 +108,7 @@ jobs:
             --header 'X-Jazz-Admin-Secret: heap-check' \
             http://127.0.0.1:1625/debug/pprof/heap
           curl --silent --show-error --fail --output diagnostics.pb.gz \
+            --header 'Authorization: Bearer heap-scrape' \
             http://127.0.0.1:6060/debug/pprof/heap
           for profile in public.pb.gz diagnostics.pb.gz; do
             # Symbolized in-process from the binary's own line tables.

@@ -40,6 +40,7 @@ pub async fn run(
     diagnostics: DiagnosticsConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let app_id = AppId::from_string(app_id_str)?;
+    diagnostics.validate()?;
     let app_id_string = app_id.to_string();
     let admin_secret = auth_config.admin_secret.clone();
     info!("Starting Jazz server for app: {}", app_id);
@@ -74,11 +75,9 @@ pub async fn run(
     let _diagnostics_task = match diagnostics.listen {
         Some(addr) => {
             let listener = tokio::net::TcpListener::bind(addr).await?;
-            info!(
-                "Diagnostics listening on http://{} (unauthenticated)",
-                listener.local_addr()?
-            );
-            let router = profiling::diagnostics_router(diagnostics.heap_profiler);
+            info!("Diagnostics listening on http://{}", listener.local_addr()?);
+            let router =
+                profiling::diagnostics_router(diagnostics.heap_profiler, diagnostics.token.clone());
             Some(AbortOnDrop(tokio::spawn(async move {
                 if let Err(error) = serve(listener, router).await {
                     tracing::warn!("diagnostics listener stopped: {error}");

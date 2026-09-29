@@ -199,13 +199,19 @@ enum Commands {
         #[arg(long, env = "JAZZ_BOUND_PORT_FILE", hide = true)]
         bound_port_file: Option<String>,
 
-        /// Address for an unauthenticated diagnostics listener serving
-        /// `/debug/pprof/heap`, e.g. `0.0.0.0:6060`.
+        /// Address for a diagnostics listener serving `/debug/pprof/heap`,
+        /// e.g. `0.0.0.0:6060`.
         ///
-        /// Bind it only where your own infrastructure can reach it. The same
+        /// Non-loopback addresses require `--diagnostics-token`. The same
         /// profile is served on the main port with the admin secret.
         #[arg(long, env = "JAZZ_DIAGNOSTICS_LISTEN")]
         diagnostics_listen: Option<std::net::SocketAddr>,
+
+        /// Bearer token the diagnostics listener requires
+        /// (`Authorization: Bearer <TOKEN>`). A read-only scrape credential
+        /// that can be shared across servers without their admin secrets.
+        #[arg(long, env = "JAZZ_DIAGNOSTICS_TOKEN", requires = "diagnostics_listen")]
+        diagnostics_token: Option<String>,
     },
 }
 
@@ -254,6 +260,7 @@ async fn main() {
             shutdown_timeout_secs,
             bound_port_file,
             diagnostics_listen,
+            diagnostics_token,
         } => {
             let node_env_mode = resolve_node_env_mode();
             let explicitly_allowed = allow_local_first_auth;
@@ -306,6 +313,7 @@ async fn main() {
                     #[cfg(not(target_os = "linux"))]
                     heap_profiler: None,
                     listen: diagnostics_listen,
+                    token: diagnostics_token,
                 },
             )
             .await
