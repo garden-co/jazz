@@ -330,6 +330,17 @@ where
                 .map_err(|_| Error::UnadmittedWriteAuthor)?
                 .as_author_subject();
         }
+        // Bindings send a present optional-JSON value wrapped as nullable.
+        // Lower it to the bare stored scalar before anything validates or
+        // stores the cells, exactly as positional exclusive writes do.
+        for (schema_version, commit) in &mut commits {
+            let table = self.table_in_schema_ref(&commit.table, *schema_version)?;
+            for (name, value) in &mut commit.cells {
+                if let Some(column) = table.columns.iter().find(|column| &column.name == name) {
+                    *value = column.storage_value(std::mem::replace(value, Value::Nullable(None)));
+                }
+            }
+        }
         // This is the lowest common local commit construction boundary: direct
         // inserts, facade update/upsert, open transactions, and batched paths
         // all pass here before durable/outbox publication. Fill only exact

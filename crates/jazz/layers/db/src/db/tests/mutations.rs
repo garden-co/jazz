@@ -4864,3 +4864,76 @@ fn client_partial_update_of_unloaded_row_is_not_observed_rather_than_read_denied
         );
     }
 }
+
+/// Bindings send a present nullable JSON value wrapped as nullable (#2733).
+/// It is stored like the bare value and reads back unchanged.
+#[test]
+fn nullable_json_accepts_present_values_wrapped_as_nullable() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("docs")
+                .column("name", PublicColumnType::Text)
+                .nullable_column("meta", PublicColumnType::Json { schema: None }),
+        ),
+    );
+    let db = open_db(0xd1, AuthorSubject::for_test_bytes([0xd1; 16]), &schema);
+    let present = |json: &str| Value::Nullable(Some(Box::new(Value::String(json.to_owned()))));
+    let wrapped = block_on(db.insert(
+        "docs",
+        BTreeMap::from([
+            ("name".to_owned(), Value::String("wrapped".to_owned())),
+            ("meta".to_owned(), present("{\"a\":1}")),
+        ]),
+        Default::default(),
+    ))
+    .unwrap()
+    .row_uuid();
+    let bare = block_on(db.insert(
+        "docs",
+        BTreeMap::from([
+            ("name".to_owned(), Value::String("bare".to_owned())),
+            ("meta".to_owned(), Value::String("{\"a\":1}".to_owned())),
+        ]),
+        Default::default(),
+    ))
+    .unwrap()
+    .row_uuid();
+    block_on(db.update(
+        "docs",
+        wrapped,
+        BTreeMap::from([("meta".to_owned(), present("[1,2]"))]),
+        Default::default(),
+    ))
+    .unwrap();
+    let exclusive = db.exclusive_tx().unwrap();
+    let exclusive_row = exclusive
+        .insert(
+            "docs",
+            BTreeMap::from([
+                ("name".to_owned(), Value::String("exclusive".to_owned())),
+                ("meta".to_owned(), present("{\"b\":2}")),
+            ]),
+            Default::default(),
+        )
+        .unwrap();
+    exclusive.commit().unwrap();
+
+    let prepared = db.prepare_query(&Query::from("docs")).unwrap();
+    let mut rows = block_on(db.all(&prepared, ReadOpts::default())).unwrap();
+    block_on(db.hydrate_rows_for_binding(&mut rows)).unwrap();
+    let meta = |row: RowUuid| {
+        let row = rows
+            .iter()
+            .find(|candidate| candidate.row_uuid() == row)
+            .unwrap();
+        let (descriptor, raw) = row.encoded_record();
+        groove::records::BorrowedRecord::new(raw, descriptor)
+            .get("meta")
+            .unwrap()
+    };
+    // Result rows carry a presence wrapper around the logical nullable cell.
+    let read = |json: &str| Value::Nullable(Some(Box::new(present(json))));
+    assert_eq!(meta(wrapped), read("[1,2]"));
+    assert_eq!(meta(bare), read("{\"a\":1}"));
+    assert_eq!(meta(exclusive_row), read("{\"b\":2}"));
+}
