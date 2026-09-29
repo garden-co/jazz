@@ -216,7 +216,7 @@ fn claim_only_operand_value(
 ) -> Option<Value> {
     let value = match operand {
         Operand::Literal(value) => value.clone(),
-        Operand::Claim(name) => crate::tools::policy_claims::policy_claim_at_path(
+        Operand::Claim(name) => crate::model::policy_claims::policy_claim_at_path(
             claim_values,
             &crate::query::operand_claim_path(name),
         )?,
@@ -1687,7 +1687,7 @@ mod authorization_scope_compiler_tests {
 
     #[test]
     fn publisher_support_scope_omits_the_learner_alternative() {
-        use crate::tools::public_api::policy::{CmpOp, PolicyValue};
+        use crate::model::public_api::policy::{CmpOp, PolicyValue};
         let role_is = |role: &str| PublicPolicyExpr::SessionCmp {
             path: vec!["claims".to_owned(), "role".to_owned()],
             op: CmpOp::Eq,
