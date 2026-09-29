@@ -246,6 +246,38 @@ describe("PosterShop cross-topology recovery", () => {
             },
           },
           {
+            name: "presence writes stay off the shape query",
+            run: async () => {
+              const shapeSnapshotsBefore = windowSnapshots.length;
+              const cursor = await owner
+                .insert(app.cursors, {
+                  canvasId: canvas.id,
+                  author: accountFromDb(owner),
+                  name: "Owner",
+                  x: 1,
+                  y: 1,
+                  color: "0",
+                })
+                .wait({ tier: "global" });
+              for (let step = 2; step <= 6; step += 1) {
+                await owner
+                  .update(app.cursors, cursor.id, { x: step * 10, y: step * 10 })
+                  .wait({ tier: "global" });
+              }
+              await waitForQuery(
+                reader,
+                app.cursors.where({ canvasId: canvas.id }),
+                (rows) => rows.some((row) => row.x === 60),
+                "reader receives the latest cursor position",
+                15_000,
+                "global",
+              );
+              // The reader's shape subscription saw no new result for any of
+              // the six presence writes.
+              expect(windowSnapshots.length).toBe(shapeSnapshotsBefore);
+            },
+          },
+          {
             name: "revoke editor before owner lifecycle fault",
             run: async () => {
               await owner.delete(app.canvasMembers, editorMembership.id).wait({ tier: "global" });
@@ -394,7 +426,7 @@ function shape(canvasId: string, layerId: string, zIndex: number) {
     height: 20,
     rotation: 0,
     zIndex,
-    fill: "#ff5a36",
+    fill: "tangerine",
   };
 }
 

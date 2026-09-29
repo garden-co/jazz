@@ -7,6 +7,7 @@ const schema = {
     { title: s.string(), width: s.int(), height: s.int() },
     {
       canvasMembersViaCanvas: s.reverse("canvasMembers", "canvas"),
+      canvasInvitesViaCanvas: s.reverse("canvasInvites", "canvas"),
       layersViaCanvas: s.reverse("layers", "canvas"),
       assetsViaCanvas: s.reverse("assets", "canvas"),
       shapesViaCanvas: s.reverse("shapes", "canvas"),
@@ -25,6 +26,19 @@ const schema = {
       { canvas: s.rel("canvases", "canvasId") },
     )
     .indexOnly(["canvasId", "memberAuthor"]),
+  // An admin-issued invite link. Redeeming one is a server-side action
+  // (app/api/join) that checks the token with backend authority and adds a
+  // membership; clients never write their own membership row.
+  canvasInvites: s
+    .table(
+      {
+        canvasId: s.uuid(),
+        token: s.string(),
+        role: s.enum("viewer", "editor"),
+      },
+      { canvas: s.rel("canvases", "canvasId") },
+    )
+    .indexOnly(["token"]),
   // Every live canvas view is parent-scoped and ordered. Keep those indexes in
   // the app schema rather than relying on a renderer-side sort or scan.
   layers: s
@@ -34,13 +48,16 @@ const schema = {
         name: s.string(),
         zIndex: s.int(),
         visible: s.boolean(),
+        // A locked layer is an authorization fact, not only a UI hint: shape
+        // writes on a locked layer are denied by permissions.ts.
+        locked: s.boolean().default(false),
       },
       { canvas: s.rel("canvases", "canvasId"), shapesViaLayer: s.reverse("shapes", "layer") },
     )
     .indexOnly(["canvasId", "zIndex"]),
-  // Asset bytes deliberately remain outside the canvas listing projection.
-  // fileId is the future large-value/blob locator (#1833, #1839, #1844); this
-  // metadata row is useful even when the bytes are not locally available.
+  // `bytes` is a large value written with db.insertStreaming. Listings select
+  // only the metadata columns, and the image is read back with typed byte-range
+  // selections, so browsing the shelf never materializes every upload.
   assets: s
     .table(
       {
@@ -48,7 +65,9 @@ const schema = {
         name: s.string(),
         mimeType: s.string(),
         byteLength: s.int(),
-        fileId: s.string().optional(),
+        width: s.int(),
+        height: s.int(),
+        bytes: s.bytes(),
       },
       { canvas: s.rel("canvases", "canvasId"), shapesViaAsset: s.reverse("shapes", "asset") },
     )
@@ -85,15 +104,26 @@ const schema = {
         x: s.float(),
         y: s.float(),
         color: s.string(),
+        name: s.string().default(""),
+        // Cleared when the pointer leaves the poster, so idle collaborators
+        // do not leave a frozen arrow behind.
+        active: s.boolean().default(true),
       },
       { canvas: s.rel("canvases", "canvasId") },
     )
     .indexOnly(["canvasId", "author"]),
-  // A checkpoint is an immutable, named application history marker. It does
-  // not claim branch winner semantics that the core has not specified yet.
+  // A checkpoint is an immutable, named application snapshot: `snapshot` holds
+  // the layers and shapes as they were when it was saved (see
+  // src/lib/poster.ts). It does not claim branch winner semantics that the
+  // core has not specified yet.
   checkpoints: s
     .table(
-      { canvasId: s.uuid(), label: s.string(), branch: s.string() },
+      {
+        canvasId: s.uuid(),
+        label: s.string(),
+        branch: s.string(),
+        snapshot: s.json().optional(),
+      },
       { canvas: s.rel("canvases", "canvasId") },
     )
     .indexOnly(["canvasId", "label"]),
@@ -102,3 +132,6 @@ const schema = {
 type AppSchema = s.Schema<typeof schema>;
 export const app: s.App<AppSchema> = s.defineApp(schema);
 export type Canvas = s.RowOf<typeof app.canvases>;
+export type Layer = s.RowOf<typeof app.layers>;
+export type Shape = s.RowOf<typeof app.shapes>;
+export type Cursor = s.RowOf<typeof app.cursors>;

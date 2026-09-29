@@ -1,37 +1,81 @@
 # PosterShop
 
-PosterShop is a deliberately vendor-neutral collaborative gig-poster canvas.
-It models the durable data a tldraw-like UI needs—canvases, ordered layers,
-shapes, asset metadata, and immutable checkpoint markers—without coupling the
-example to a rendering library. The UI is deliberately split into independently
-subscribed layer, canvas, cursor, asset-metadata, and checkpoint surfaces so a
-high-rate presence write does not require reading an asset shelf or re-running
-a renderer-wide query. Cursors are ephemeral presence rows and are never part
-of history.
+PosterShop is a collaborative gig-poster designer. Everyone on a poster edits
+the same SVG artboard live: rectangles, ellipses, text and uploaded images,
+arranged on ordered layers, with each collaborator's cursor drawn on the
+poster. It works offline and syncs when the connection returns.
 
-The first slice only exposes settled authorization: admins bootstrap and manage
-membership, editors and admins add layers and same-canvas shapes, and admins add immutable
-checkpoints. Asset mutation, layer/shape mutation and deletion, cursor creation,
-and checkpoint deletion remain default-deny until their ownership rules are
-specified in #1926. The UI keeps those surfaces read-only rather than offering
-an action with an undecided authorization contract.
+The UI uses the Jazz design system (Astryx components with the Jazz theme);
+the artboard itself is app code drawn on design tokens. Shape colours are
+stored as palette keys (`ink`, `sun`, `blue`, …) that map to data tokens, so
+a poster never carries raw colour values.
 
-Shape insertion requires two correlated proofs: the current user is an editor
-or admin of `shape.canvasId`, and `shape.layerId` resolves to a layer whose
-`canvasId` equals `shape.canvasId`. This explicitly denies attaching a shape to
-a layer from another canvas; it never falls back to membership alone.
+## What each surface reads
 
-The browser topology receipt runs this ordinary application schema and policy
-set through browser → serving core. It verifies concurrent ordered edits, an
-offline local shape across persistent reopen, replay to a peer after reconnect,
-the same bounded shape-window query used by a viewport, and a post-revocation
-write denial. Its deterministic timeout/fault plumbing comes from the shared
-example topology harness; it does not replace the application's queries or
-policy evaluator.
+The studio is split into independently subscribed surfaces, so a high-rate
+write in one never re-runs another's query:
 
-`checkpoints.branch` is only a named marker at this stage. It does not expose a
-branch view, choose a winner, or claim canvas-specific concurrent ordering
-semantics; those requirements need a separate core contract.
+| Surface          | Query                                                       |
+| ---------------- | ----------------------------------------------------------- |
+| Artboard         | `shapes` and `layers` of the canvas, ordered by `zIndex`    |
+| Cursor layer     | `cursors` of the canvas where `active` — nothing else       |
+| Inspector        | the one selected shape                                      |
+| Asset shelf      | asset metadata columns only (never the `bytes` large value) |
+| Asset thumbnails | `select({ bytes: { from, to } })` pages of one asset        |
+| History          | checkpoint labels; the snapshot JSON only while previewing  |
+
+Cursor moves are throttled to one write per 50 ms and drags to one write per
+animation frame. Both are ordinary local-first updates.
+
+## Authorization
+
+`permissions.ts` gives every child table its own role predicate (#1926); none
+inherits the unconditional canvas insert.
+
+- Members (viewers included) read the poster and publish only their own
+  cursor row. Nobody can write, reassign or delete another member's cursor.
+- Editors and admins create, rename, reorder, hide and lock layers, and
+  create, move, resize, recolour, reorder and delete shapes.
+- A shape must sit on an unlocked layer of its own canvas. Locking a layer is
+  enforced by the policy, not only the UI, and it denies cross-canvas
+  attachment.
+- Editors and admins upload images. Asset bytes are immutable; a replacement
+  is a new asset.
+- Admins save checkpoints. Checkpoints are immutable and cannot be deleted.
+
+## Images as large values
+
+An upload streams the file into `assets.bytes` with `db.insertStreaming`, so
+the app never holds the whole file as one array. Thumbnails and image shapes
+read the bytes back in 256 KiB pages with typed large-value range selections
+(#2088) and share one object URL per asset.
+
+## Checkpoints
+
+A checkpoint stores a JSON snapshot of the poster's layers and shapes. The
+History panel previews any checkpoint on the artboard, read-only, and "Back
+to live" returns to the shared poster. Jazz documents branch views with a
+frozen base, but no public API yet produces the snapshot reference a frozen
+base needs, so the snapshot is application data. Restoring a checkpoint into
+the live poster is a follow-up.
+
+## First open
+
+`/api/bootstrap` runs server-side with backend authority. One exclusive
+transaction checks for an existing membership and otherwise creates the
+canvas, the admin membership and a deterministic demo poster (see
+`src/lib/demo-poster.ts`) with a "First draft" checkpoint. Conflicting
+first opens retry with bounded exponential backoff; persistent conflicts end
+in a recoverable 503 instead of a hung request (#2615).
+
+## Tests
+
+- `pnpm test` runs the policy receipts against a local Jazz server and the
+  unit tests for the poster model, the seed and the bootstrap retry.
+- `pnpm test:browser` runs the browser → serving core topology receipt:
+  concurrent ordered edits, an offline local shape across persistent reopen,
+  replay to a peer after reconnect, a bounded shape-window query and a
+  post-revocation write denial.
 
 ## Running the Next/Better Auth example
 
@@ -39,11 +83,5 @@ Copy `apps/nextjs-betterauth/.env.example` to `.env.local`, then replace the
 local Jazz app id and server URL when connecting to a deployed backend. The
 checked-in defaults deliberately let `pnpm --dir apps/nextjs-betterauth build`
 evaluate auth routes without an unset configuration; they do not start a Jazz
-server for you. Memberships and cursor identity use canonical JSON
-`[issuer, subject]` authors, so equal provider subjects from different issuers
-cannot share access.
-
-Large asset bytes are intentionally not materialized by this first app slice.
-`assets` carries metadata and an optional `fileId`; the conventional file table
-integration remains linked to #1833, #1839, and #1844. Shape and asset metadata
-must continue to work while that path is red.
+server for you. Memberships and cursor identity use the canonical Jazz account
+id, so equal provider subjects from different issuers cannot share access.

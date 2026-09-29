@@ -1,21 +1,166 @@
-:root {
-  color: #201826;
-  background: #fff8f2;
-  font-family: ui-sans-serif, system-ui, sans-serif;
-}
+/* Page chrome only: components come from the design system, colours and
+   spacing from its tokens. */
 body {
-  max-width: 900px;
-  margin: 0 auto;
-  padding: 3rem 1.5rem;
+  margin: 0;
+  background: var(--color-background-body, Canvas);
+  color: var(--color-text-primary, CanvasText);
 }
-button {
-  background: #201826;
-  border: 0;
-  border-radius: 0.5rem;
-  color: white;
-  cursor: pointer;
-  padding: 0.7rem 1rem;
+
+[data-astryx-theme] {
+  min-height: 100dvh;
+  background: var(--color-background-body);
 }
-li {
-  margin: 0.4rem 0;
+
+.centered-page {
+  display: grid;
+  min-height: 100dvh;
+  place-items: center;
+  padding: var(--spacing-4);
+  box-sizing: border-box;
+}
+
+.studio {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-4);
+  padding: var(--spacing-4);
+  box-sizing: border-box;
+  min-height: 100dvh;
+}
+
+.studio-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-3);
+}
+
+.studio-grid {
+  display: grid;
+  gap: var(--spacing-4);
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "canvas" "panel" "layers";
+}
+
+.studio-layers {
+  grid-area: layers;
+}
+.studio-canvas {
+  grid-area: canvas;
+  min-width: 0;
+}
+.studio-panel {
+  grid-area: panel;
+}
+
+@media (min-width: 720px) {
+  .studio-grid {
+    grid-template-columns: minmax(0, 1fr) 20rem;
+    grid-template-areas: "canvas panel" "layers panel";
+    align-items: start;
+  }
+}
+
+@media (min-width: 1200px) {
+  .studio-grid {
+    grid-template-columns: 18rem minmax(0, 1fr) 20rem;
+    grid-template-areas: "layers canvas panel";
+  }
+}
+
+.canvas-column {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-3);
+}
+
+.artboard-frame {
+  display: flex;
+  justify-content: center;
+}
+
+.artboard {
+  display: block;
+  width: 100%;
+  max-width: calc((100dvh - 12rem) * 0.8);
+  min-width: min(100%, 16rem);
+  height: auto;
+  border: var(--border-width) solid var(--color-border);
+  border-radius: var(--radius-container);
+  touch-action: none;
+  user-select: none;
+}
+
+.artboard:focus-visible {
+  outline: var(--focus-outline-width) var(--focus-outline-style) var(--focus-outline-color);
+  outline-offset: var(--focus-outline-offset);
+}
+
+.shape-editable {
+  cursor: move;
+}
+
+.poster-text {
+  font-family: var(--font-family-heading);
+  font-weight: var(--font-weight-bold);
+}
+
+.selection-outline {
+  fill: none;
+  stroke: var(--color-accent);
+  stroke-width: 2px;
+  vector-effect: non-scaling-stroke;
+  pointer-events: none;
+}
+
+.selection-handle {
+  fill: var(--color-background-card);
+  stroke: var(--color-accent);
+  stroke-width: 2px;
+  vector-effect: non-scaling-stroke;
+}
+.selection-handle-nw,
+.selection-handle-se {
+  cursor: nwse-resize;
+}
+.selection-handle-ne,
+.selection-handle-sw {
+  cursor: nesw-resize;
+}
+
+.cursor-label-background {
+  fill: currentColor;
+  rx: var(--radius-inner);
+}
+
+.cursor-label {
+  fill: var(--color-on-dark);
+  font-family: var(--font-family-body);
+  font-size: var(--text-supporting-size);
+  font-weight: var(--font-weight-medium);
+}
+
+.swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-1);
+}
+
+.swatch {
+  width: 100%;
+  height: 100%;
+}
+.swatch circle {
+  stroke: var(--color-border-emphasized);
+  stroke-width: 1px;
+}
+
+.asset-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(8rem, 1fr));
+  gap: var(--spacing-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }

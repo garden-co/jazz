@@ -4,6 +4,6 @@ import { defineConfig } from "vitest/config";
  * runners: importing browser commands in the normal Vitest pool is an error. */
 export default defineConfig({
   test: {
-    include: ["tests/permissions/**/*.test.ts"],
+    include: ["tests/permissions/**/*.test.ts", "tests/unit/**/*.test.ts"],
   },
 });

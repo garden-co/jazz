@@ -33,3 +33,12 @@ export async function bootstrapPersonalCanvas(token: string): Promise<Response> 
     headers: { authorization: `Bearer ${token}` },
   });
 }
+
+export async function joinCanvasWithInvite(token: string, inviteToken: string): Promise<Response> {
+  return await fetch("/api/join", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ token: inviteToken }),
+  });
+}

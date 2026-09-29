@@ -2,16 +2,17 @@ import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { SignInForm } from "@/components/sign-in-form";
 import { auth } from "@/src/lib/auth";
-export default function Home() {
-  return <HomeContent />;
+
+export default function Home({ searchParams }: { searchParams: Promise<{ join?: string }> }) {
+  return <HomeContent searchParams={searchParams} />;
 }
 
-async function HomeContent() {
+async function HomeContent({ searchParams }: { searchParams: Promise<{ join?: string }> }) {
   const session = await auth.api.getSession({ headers: await headers() });
-  if (session) redirect("/dashboard");
+  const { join } = await searchParams;
+  if (session) redirect(join ? `/dashboard?join=${encodeURIComponent(join)}` : "/dashboard");
   return (
-    <main>
-      <p>LOCAL-FIRST POSTER STUDIO</p>
+    <main className="centered-page">
       <SignInForm />
     </main>
   );
