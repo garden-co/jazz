@@ -10,7 +10,7 @@ const turn = (
   id,
   parentId,
   role,
-  createdAt: new Date(at),
+  $createdAt: new Date(at),
 });
 
 // u1 → a1 → u2 → a2

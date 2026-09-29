@@ -66,7 +66,6 @@ const schema = {
         title: s.string(),
         // The leaf of the branch the conversation currently shows.
         headTurnId: s.uuid().optional(),
-        createdAt: s.timestamp(),
       },
       {
         turnsViaConversation: s.reverse("turns", "conversation"),
@@ -93,7 +92,6 @@ const schema = {
         // last sign of life. A stale heartbeat means the process went away.
         runnerId: s.string().optional(),
         heartbeatAt: s.timestamp().optional(),
-        createdAt: s.timestamp(),
       },
       {
         conversation: s.rel("conversations", "conversationId"),
@@ -136,5 +134,7 @@ type AppSchema = s.Schema<typeof schema>;
 export const app: s.App<AppSchema> = s.defineApp(schema);
 export type Conversation = s.RowOf<typeof app.conversations>;
 export type Turn = s.RowOf<typeof app.turns>;
+/** Turns as the UI reads them: with Jazz's own creation time (`$createdAt`). */
+export type TimedTurn = Turn & { $createdAt: Date };
 export type ToolCall = s.RowOf<typeof app.toolCalls>;
 export type Attachment = s.RowOf<typeof app.attachments>;

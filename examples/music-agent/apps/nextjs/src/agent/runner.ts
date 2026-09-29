@@ -26,7 +26,8 @@ export function queueAssistantTurn(db: Db, conversationId: string, parentId: str
     body: "",
     status: "queued",
     provider: agentLabel(),
-    createdAt: new Date(),
+    // Queued counts as alive: the sweeper only interrupts it if no runner claims it.
+    heartbeatAt: new Date(),
   });
   db.update(app.conversations, conversationId, { headTurnId: turn.id });
   return turn.id;
@@ -270,8 +271,7 @@ export async function sweepStaleTurns(now = Date.now()): Promise<number> {
 }
 
 function isStale(turn: Turn, now: number) {
-  const lastSeen = turn.heartbeatAt ?? turn.createdAt;
-  return now - new Date(lastSeen).getTime() > STALE_AFTER_MS;
+  return !turn.heartbeatAt || now - new Date(turn.heartbeatAt).getTime() > STALE_AFTER_MS;
 }
 
 export function startSweeper() {

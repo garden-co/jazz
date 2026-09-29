@@ -21,7 +21,7 @@ export function ConversationView({
 }) {
   const db = useDb();
   const where = { conversationId: conversation.id };
-  const { data: turns = [] } = useAll(app.turns.where(where));
+  const { data: turns = [] } = useAll(app.turns.where(where).select("*", "$createdAt"));
   const { data: toolCalls = [] } = useAll(app.toolCalls.where(where).orderBy("ordinal", "asc"));
   // Attachment metadata only: the audio bytes are fetched page by page by the player.
   const { data: attachments = [] } = useAll(
@@ -52,7 +52,6 @@ export function ConversationView({
       role: "user",
       body: text,
       status: "complete",
-      createdAt: new Date(),
     });
     const userTurnId = userWrite.value.id;
     const uploads = await Promise.all(

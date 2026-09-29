@@ -3,10 +3,10 @@ export type TurnNode = {
   id: string;
   parentId?: string | null;
   role: "user" | "assistant";
-  createdAt: Date | string | number;
+  $createdAt: Date | string | number;
 };
 
-const time = (turn: TurnNode) => new Date(turn.createdAt).getTime();
+const time = (turn: TurnNode) => new Date(turn.$createdAt).getTime();
 
 /** The turns on the branch ending at `headId`, oldest first. */
 export function branchPath<T extends TurnNode>(

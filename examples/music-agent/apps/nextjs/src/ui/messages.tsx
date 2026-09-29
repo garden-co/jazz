@@ -17,7 +17,7 @@ import { Spinner } from "@astryxdesign/core/Spinner";
 import { HStack } from "@astryxdesign/core/Stack";
 import { Text } from "@astryxdesign/core/Text";
 import { Timestamp } from "@astryxdesign/core/Timestamp";
-import type { ToolCall, Turn } from "@/schema";
+import type { TimedTurn as Turn, ToolCall } from "@/schema";
 import { AttachmentPlayer, type AttachmentSummary } from "./attachment-player";
 
 export function UserMessage({
@@ -155,7 +155,7 @@ function RecoveryActions({
 }
 
 function SentAt({ turn }: { turn: Turn }) {
-  return <Timestamp value={new Date(turn.createdAt).getTime()} format="time" />;
+  return <Timestamp value={turn.$createdAt.getTime()} format="time" />;
 }
 
 function toolCallItem(call: ToolCall): ChatToolCallItem {

@@ -95,7 +95,6 @@ export async function ensureWorkspace(accountId: string, authUserId: string, dis
             artistId,
             title: "Single release show",
             headTurnId: userTurnId,
-            createdAt: new Date(),
           },
           { id: conversationId },
         );
@@ -106,7 +105,6 @@ export async function ensureWorkspace(accountId: string, authUserId: string, dis
             role: "user",
             body: FIRST_PROMPT,
             status: "complete",
-            createdAt: new Date(),
           },
           { id: userTurnId },
         );

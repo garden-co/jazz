@@ -39,7 +39,7 @@ export function MusicAgentApp({ agentLabel, userName }: { agentLabel: string; us
   const db = useDb();
   const account = useSession()?.user.account;
   const { data: artists = [] } = useAll(app.artists);
-  const { data: conversations = [] } = useAll(app.conversations.orderBy("createdAt", "desc"));
+  const { data: conversations = [] } = useAll(app.conversations.orderBy("$createdAt", "desc"));
   const [selectedId, setSelectedId] = useState<string>();
   const artist = artists[0];
   const selected = conversations.find((c) => c.id === selectedId) ?? conversations[0];
@@ -50,7 +50,6 @@ export function MusicAgentApp({ agentLabel, userName }: { agentLabel: string; us
       ownerAccount: account,
       artistId: artist.id,
       title: "New conversation",
-      createdAt: new Date(),
     });
     setSelectedId(value.id);
   }
