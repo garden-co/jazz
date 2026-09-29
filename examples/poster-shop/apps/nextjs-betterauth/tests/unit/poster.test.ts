@@ -56,8 +56,8 @@ describe("reorder", () => {
       { id: "b", zIndex: 0 },
       { id: "c", zIndex: 1 },
     ];
+    // Only rows whose index changes are written; "b" already sits at 0.
     expect(reorder(items, "a", "up")).toEqual([
-      { id: "b", zIndex: 0 },
       { id: "a", zIndex: 1 },
       { id: "c", zIndex: 2 },
     ]);
