@@ -2412,3 +2412,121 @@ fn exclusive_point_read_and_commit_decode_no_payload_per_row_version() {
         "snapshot coverage must not decode a stored transaction per row version"
     );
 }
+
+fn watched_shape_for(title: &str) -> (ValidatedQuery, Binding) {
+    let shape = crate::query::Query::from("todos")
+        .filter(crate::query::eq(
+            crate::query::col("title"),
+            crate::query::lit(title),
+        ))
+        .validate(&schema())
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    (shape, binding)
+}
+
+/// garden-co/jazz#3694. A partial node's snapshot cut advances with any
+/// authority receipt, not only with receipts that delivered the rows an
+/// exclusive query later reads. A row the reader still holds may therefore be
+/// deleted at the authority before the claimed cut: rebuilding the predicate at
+/// that cut shows it absent both then and now, so only a proof of the row the
+/// reader actually saw can reject the commit.
+#[test]
+fn exclusive_query_conflicts_when_a_returned_row_was_deleted_before_the_claimed_cut() {
+    let (_client_dir, mut client) = open_node_with_uuid(node(1));
+    let (_other_dir, mut other) = open_node_with_uuid(node(2));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let (shape, binding) = watched_shape_for("invite");
+    register_shape_binding(&mut core, &shape, &binding);
+
+    let (_insert, unit) = other
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row(1), 10).cells(title_cells("invite")),
+        )
+        .unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit.clone())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    other.apply_sync_message_settled(fate.clone()).unwrap();
+    client.apply_sync_message_settled(unit).unwrap();
+    client.apply_sync_message_settled(fate).unwrap();
+
+    // The revocation reaches the authority but never this reader.
+    commit_mergeable_global(
+        &mut other,
+        &mut core,
+        MergeableCommit::new("todos", row(1), 12).deletion(DeletionEvent::Deleted),
+    );
+    // An unrelated receipt settles through the revocation's global time.
+    client.record_authoritative_settled_through(core.clock.committed_global_time);
+
+    let open = OpenTransactionId::new();
+    client.open_exclusive(open).unwrap();
+    assert_eq!(client.tx_query(open, &shape, &binding).unwrap().len(), 1);
+    client
+        .tx_write(open, "todos", row(2), title_cells("member"), None)
+        .unwrap();
+    let (_tx_id, unit) = client
+        .commit_exclusive_settled(open, AuthorSubject::SYSTEM, 13)
+        .unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let SyncMessage::FateUpdate { fate, .. } = fate else {
+        panic!("expected fate update");
+    };
+    assert_eq!(fate, Fate::Rejected(RejectionReason::ExclusiveConflict));
+}
+
+/// Whole-table reads validate by table currency after the claimed cut, so they
+/// need the same per-row proof as filtered queries (garden-co/jazz#3694).
+#[test]
+fn exclusive_table_read_conflicts_when_a_returned_row_was_deleted_before_the_claimed_cut() {
+    let (_client_dir, mut client) = open_node_with_uuid(node(1));
+    let (_other_dir, mut other) = open_node_with_uuid(node(2));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+
+    let (_insert, unit) = other
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row(1), 10).cells(title_cells("invite")),
+        )
+        .unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit.clone())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    other.apply_sync_message_settled(fate.clone()).unwrap();
+    client.apply_sync_message_settled(unit).unwrap();
+    client.apply_sync_message_settled(fate).unwrap();
+
+    commit_mergeable_global(
+        &mut other,
+        &mut core,
+        MergeableCommit::new("todos", row(1), 12).deletion(DeletionEvent::Deleted),
+    );
+    client.record_authoritative_settled_through(core.clock.committed_global_time);
+
+    let open = OpenTransactionId::new();
+    client.open_exclusive(open).unwrap();
+    assert_eq!(client.tx_current_rows(open, "todos").unwrap().len(), 1);
+    client
+        .tx_write(open, "todos", row(2), title_cells("member"), None)
+        .unwrap();
+    let (_tx_id, unit) = client
+        .commit_exclusive_settled(open, AuthorSubject::SYSTEM, 13)
+        .unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let SyncMessage::FateUpdate { fate, .. } = fate else {
+        panic!("expected fate update");
+    };
+    assert_eq!(fate, Fate::Rejected(RejectionReason::ExclusiveConflict));
+}

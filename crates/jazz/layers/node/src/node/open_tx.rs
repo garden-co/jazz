@@ -242,6 +242,45 @@ where
         Ok(result)
     }
 
+    /// Pin the snapshot version of each root row a transaction query returned.
+    ///
+    /// A predicate read alone is validated by rebuilding the query at the base
+    /// snapshot. A partial node's base cut is only a coordinate in the
+    /// authority's history (any receipt advances it), so a row this node still
+    /// holds may already be deleted or replaced at that cut. Recording the
+    /// version actually observed lets the authority reject that stale read
+    /// row by row (garden-co/jazz#3694). Rows staged by this transaction have
+    /// no snapshot version and need no proof.
+    pub(super) async fn record_tx_query_row_reads(
+        &mut self,
+        tx_id: OpenTransactionId,
+        schema_version: SchemaVersionId,
+        table: &str,
+        rows: impl IntoIterator<Item = RowUuid>,
+    ) -> Result<(), Error> {
+        let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
+        for row_uuid in rows {
+            let Some(version) = self
+                .snapshot_row_in_schema(schema_version, table, row_uuid, &snapshot)
+                .await?
+                .read_version
+            else {
+                continue;
+            };
+            let open_tx = self.open_tx_mut(tx_id)?;
+            if !open_tx.row_reads.iter().any(|read| {
+                read.table == table && read.row_uuid == row_uuid && read.version == version
+            }) {
+                open_tx.row_reads.push(RowRead {
+                    table: table.to_owned(),
+                    row_uuid,
+                    version,
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Classify an explicit exclusive insert target that the transaction's
     /// overlaid point read reports as absent: a committed or staged deletion
     /// still occupies the id. The staged overlay is keyed by `(table, row)`,
@@ -330,6 +369,25 @@ where
         let mut snapshot_rows = self
             .snapshot_rows_in_schema(schema_version, table, &snapshot)
             .await?;
+        {
+            // Same per-row proof as `record_tx_query_row_reads`, taken from
+            // the snapshot rows already resolved here (garden-co/jazz#3694).
+            let open_tx = self.open_tx_mut(tx_id)?;
+            for (row_uuid, snapshot_row) in &snapshot_rows {
+                let Some(version) = snapshot_row.read_version else {
+                    continue;
+                };
+                if !open_tx.row_reads.iter().any(|read| {
+                    read.table == table && read.row_uuid == *row_uuid && read.version == version
+                }) {
+                    open_tx.row_reads.push(RowRead {
+                        table: table.to_owned(),
+                        row_uuid: *row_uuid,
+                        version,
+                    });
+                }
+            }
+        }
         let mut rows = snapshot_rows.keys().copied().collect::<BTreeSet<_>>();
         rows.extend(
             self.open_tx(tx_id)?

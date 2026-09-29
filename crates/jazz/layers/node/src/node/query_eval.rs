@@ -3576,6 +3576,16 @@ where
         let open_tx = self.open_tx_mut(tx_id)?;
         open_tx.predicate_reads.truncate(predicate_len);
         open_tx.predicate_reads.push(predicate_read);
+        if shape.query().aggregate.is_none() {
+            let table = shape.query().table.as_str();
+            let root_rows = snapshot.rows[..snapshot.root_count.min(snapshot.rows.len())]
+                .iter()
+                .filter(|row| row.table() == table)
+                .map(CurrentRow::row_uuid)
+                .collect::<Vec<_>>();
+            self.record_tx_query_row_reads(tx_id, shape.schema_version(), table, root_rows)
+                .await?;
+        }
         Ok(snapshot)
     }
 
@@ -3627,6 +3637,15 @@ where
         let open_tx = self.open_tx_mut(tx_id)?;
         open_tx.predicate_reads.truncate(predicate_len);
         open_tx.predicate_reads.push(predicate_read);
+        if query.aggregate.is_none() {
+            let root_rows = rows
+                .iter()
+                .filter(|row| row.table() == query.table)
+                .map(CurrentRow::row_uuid)
+                .collect::<Vec<_>>();
+            self.record_tx_query_row_reads(tx_id, shape.schema_version(), &query.table, root_rows)
+                .await?;
+        }
         self.finish_engine_query_rows_in_schema(query, shape.schema_version(), &mut rows)?;
         if query.array_subqueries.is_empty() {
             self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
