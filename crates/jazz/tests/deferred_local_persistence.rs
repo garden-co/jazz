@@ -1414,3 +1414,92 @@ fn queued_commit_uses_host_clock_before_staging_runs() {
         );
     }
 }
+
+/// Alice queues a second large write while the first publication's persistence
+/// is paused. Her inline writes must remain resident, and her two large writes
+/// must reach Local after storage resumes. Controlled storage makes the lock
+/// ordering deterministic rather than depending on browser timing.
+///
+/// alice -> large A -> paused persistence -> large B waits without node lock
+/// alice -> inline insert/update (visible) -> resume -> A and B settle
+#[test]
+fn large_value_staging_releases_node_while_prior_publication_persists() {
+    let schema = JazzSchema::new(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("title", ColumnType::Text)
+                    .column("done", ColumnType::Boolean),
+            )
+            .build(),
+    )
+    .unwrap();
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, control) = TestStorage::controlled(&refs);
+    let alice = block_on(Db::open(DbConfig::new(
+        schema,
+        storage,
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xd1; 16]),
+            author: AuthorSubject::for_test_bytes([0xd1; 16]),
+        },
+    )))
+    .unwrap();
+    alice.set_deferred_local_persistence(true);
+    let first = block_on(alice.insert(
+        "todos",
+        row! { title: "a".repeat(128 * 1024), done: false },
+        Default::default(),
+    ))
+    .unwrap();
+    control.pause_on(TestStorageOperation::WriteMany);
+    let second = alice
+        .enqueue_insert(
+            "todos".to_owned(),
+            row! { title: "b".repeat(128 * 1024), done: false },
+            Default::default(),
+        )
+        .unwrap();
+    alice.drive_queued_mutation_once();
+    let waker = noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    let mut inline = Box::pin(alice.insert(
+        "todos",
+        row! { title: "alice's inline write", done: false },
+        Default::default(),
+    ));
+    assert!(
+        matches!(inline.as_mut().poll(&mut cx), Poll::Ready(Ok(_))),
+        "waiting for A must leave the node available to inline writes"
+    );
+    drop(inline);
+    let mut inline_update = Box::pin(alice.update(
+        "todos",
+        first.row_uuid(),
+        row! { done: true },
+        Default::default(),
+    ));
+    assert!(
+        matches!(inline_update.as_mut().poll(&mut cx), Poll::Ready(Ok(_))),
+        "an inherited large descriptor must not delay an inline field update"
+    );
+    drop(inline_update);
+    control.resume();
+    for _ in 0..32 {
+        let mut tick = Box::pin(alice.tick());
+        if let Poll::Ready(Err(error)) = tick.as_mut().poll(&mut cx) {
+            panic!("settlement tick failed: {error}");
+        }
+    }
+    for write in [&first, &second] {
+        let mut settled = Box::pin(write.wait(DurabilityTier::Local));
+        assert!(
+            matches!(settled.as_mut().poll(&mut cx), Poll::Ready(Ok(_))),
+            "both large writes must settle after storage resumes"
+        );
+    }
+    let query = block_on(alice.prepare_query_async(&alice.table("todos"))).unwrap();
+    let rows = block_on(alice.all(&query, ReadOpts::default())).unwrap();
+    assert_eq!(rows.len(), 3);
+}
