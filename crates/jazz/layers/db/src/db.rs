@@ -4827,14 +4827,40 @@ struct ScalarReconciliation {
 /// Query programs carry no deletion witnesses: a deletion reaches a client
 /// only as a row delta on a coverage that was live when it happened. A row
 /// this client retained from an earlier, closed read can therefore be live
-/// locally while the authority's settled answer omits it. Before such a
-/// stream first reports `settled`, exactly those omitted rows are probed
-/// through the ordinary current-rows path and their images (including
-/// deletions and policy exclusions) are ingested. A stream whose local and
-/// authority views agree never leaves `Unchecked` for `Probing`.
-/// Bound on how long a strict stream's first settlement may wait for local
-/// candidate discovery before settling on the authority's answer alone.
+/// locally while the authority's settled answer omits it. Such omitted rows
+/// are probed through the ordinary current-rows path and their images
+/// (including deletions) are ingested. A stream whose local and authority
+/// views agree never leaves `Unchecked` for `Pending`.
+///
+/// Reconciliation is reliable, not best-effort (INV-SYNC-48): the stream only
+/// *withholds its first settlement* for at most `DELETION_DISCOVERY_LIMIT`.
+/// Past that bound, or when the stream closes first, outstanding discovery
+/// moves to the runtime and outstanding rows stay in the runtime's
+/// [`HeldRowChecks`] until the authority answers each one.
+/// Bound on how long a strict stream's first settlement may wait for
+/// reconciliation before settling on the authority's answer alone. The
+/// reconciliation itself continues past it.
 const DELETION_DISCOVERY_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// What a candidate discovery needs once its stream is gone.
+struct DeletionDiscoverySpec {
+    shape: ValidatedQuery,
+    binding: Binding,
+    author: AuthorSubject,
+    claims: BTreeMap<String, Value>,
+    context: crate::protocol::PolicyBindingKey,
+    /// Rows in the settled authority answer: readable, so never probed.
+    authoritative: BTreeSet<RowUuid>,
+}
+
+impl DeletionDiscoverySpec {
+    fn same_discovery(&self, other: &Self) -> bool {
+        self.shape == other.shape
+            && self.binding == other.binding
+            && self.author == other.author
+            && self.context == other.context
+    }
+}
 
 #[derive(Default)]
 enum DeletionReconciliation {
@@ -4844,28 +4870,147 @@ enum DeletionReconciliation {
     Disabled,
     /// No settled authority answer has been compared yet.
     Unchecked,
-    /// The authority answer settled while other query work was pending.
-    /// Candidate discovery waits for an idle runtime (a new graph must not
-    /// queue behind, e.g., large-value chunk hydration that this same turn
-    /// has to request) up to `DELETION_DISCOVERY_LIMIT` from `since`.
-    Deferred { since: web_time::Instant },
-    /// The authority answer settled; a cold Local-tier graph of the same
-    /// query is still producing the client's candidate inventory.
+    /// The authority answer settled before this stream's own receiver graph
+    /// installed that closure. Discovery waits for that per-stream progress
+    /// (never for a globally idle runtime).
+    Deferred {
+        since: web_time::Instant,
+        spec: Box<DeletionDiscoverySpec>,
+    },
+    /// The authority answer settled; a Local-tier graph of the same query is
+    /// still producing the client's candidate inventory.
     Discovering {
         maintained: LocalMaintainedViewSubscription,
         runtime_token: u64,
         since: web_time::Instant,
+        spec: Box<DeletionDiscoverySpec>,
     },
-    /// Local rows the authority omitted. The runtime probes them in
-    /// `MAX_CURRENT_ROWS` batches; settlement is withheld until the last
-    /// batch resolves.
+    /// Local rows the authority omitted, not yet handed to the runtime's
+    /// [`HeldRowChecks`].
     Pending {
         rows: Vec<crate::protocol::CurrentRowCoordinate>,
-        active: Option<ScalarProbe>,
         context: crate::protocol::PolicyBindingKey,
+        since: web_time::Instant,
     },
-    /// The probe resolved (or the views agreed); settle as usual.
+    /// The rows are in [`HeldRowChecks`]; settlement is withheld until each
+    /// resolves or the settlement bound passes.
+    Probing {
+        rows: Vec<(String, RowUuid)>,
+        since: web_time::Instant,
+    },
+    /// The views agreed, the probe resolved, or settlement stopped waiting;
+    /// settle as usual.
     Done,
+}
+
+impl DeletionReconciliation {
+    fn waiting_since(&self) -> Option<web_time::Instant> {
+        match self {
+            Self::Deferred { since, .. }
+            | Self::Discovering { since, .. }
+            | Self::Pending { since, .. }
+            | Self::Probing { since, .. } => Some(*since),
+            Self::Disabled | Self::Unchecked | Self::Done => None,
+        }
+    }
+}
+
+/// One held row the authority has not yet answered as deleted, readable or
+/// unavailable. Owned by the runtime, not by the stream that found it.
+struct HeldRowCheck {
+    coordinate: crate::protocol::CurrentRowCoordinate,
+    context: crate::protocol::PolicyBindingKey,
+    attempts: u32,
+    retry_at: Option<web_time::Instant>,
+}
+
+struct HeldRowProbe {
+    rows: Vec<(String, RowUuid)>,
+    deadline: web_time::Instant,
+    future: Pin<Box<dyn Future<Output = row_availability::CurrentRowsResult>>>,
+}
+
+/// Runtime-owned deletion reconciliation that outlives the strict stream
+/// which discovered it (INV-SYNC-48). Rows are deduplicated per
+/// `(table, row)`; an unanswered probe (Unknown, dropped receipt, timeout,
+/// disconnect) is retried with backoff, immediately on a new upstream link,
+/// and never while no upstream is admitted. A row whose local coordinate
+/// changes is dropped: its new version is what later reads reconcile.
+#[derive(Default)]
+struct HeldRowChecks {
+    rows: BTreeMap<(String, RowUuid), HeldRowCheck>,
+    active: Option<HeldRowProbe>,
+    /// Discoveries whose stream closed or stopped waiting before its
+    /// candidate inventory was complete. Only `Deferred` and `Discovering`.
+    discoveries: Vec<DeletionReconciliation>,
+    upstream_connection: Option<u64>,
+}
+
+impl HeldRowChecks {
+    fn enqueue(
+        &mut self,
+        rows: Vec<crate::protocol::CurrentRowCoordinate>,
+        context: &crate::protocol::PolicyBindingKey,
+    ) -> Vec<(String, RowUuid)> {
+        let mut keys = Vec::with_capacity(rows.len());
+        for coordinate in rows {
+            let key = (coordinate.table.clone(), coordinate.row);
+            let replace = self
+                .rows
+                .get(&key)
+                .is_none_or(|existing| existing.coordinate != coordinate);
+            if replace {
+                self.rows.insert(
+                    key.clone(),
+                    HeldRowCheck {
+                        coordinate,
+                        context: context.clone(),
+                        attempts: 0,
+                        retry_at: None,
+                    },
+                );
+            }
+            keys.push(key);
+        }
+        keys
+    }
+
+    /// Hand a stream's unfinished discovery to the runtime. A discovery of
+    /// the same query and context supersedes the older authority answer;
+    /// the redundant one is returned so its discovery graph can be released.
+    #[must_use]
+    fn adopt_discovery(
+        &mut self,
+        reconciliation: DeletionReconciliation,
+    ) -> Option<DeletionReconciliation> {
+        let spec = match &reconciliation {
+            DeletionReconciliation::Deferred { spec, .. }
+            | DeletionReconciliation::Discovering { spec, .. } => spec,
+            _ => return None,
+        };
+        if let Some(existing) = self
+            .discoveries
+            .iter_mut()
+            .find_map(|existing| match existing {
+                DeletionReconciliation::Deferred { spec: existing, .. }
+                | DeletionReconciliation::Discovering { spec: existing, .. }
+                    if existing.same_discovery(spec) =>
+                {
+                    Some(existing)
+                }
+                _ => None,
+            })
+        {
+            existing.authoritative = spec.authoritative.clone();
+            return Some(reconciliation);
+        }
+        self.discoveries.push(reconciliation);
+        None
+    }
+
+    fn retry_delay(attempts: u32) -> std::time::Duration {
+        std::time::Duration::from_millis((250u64 << attempts.min(7)).min(30_000))
+    }
 }
 
 struct SubscriptionState {

@@ -443,3 +443,194 @@ async fn revoked_editor_default_read_drops_deleted_invitation_but_keeps_unauthor
         })
         .await;
 }
+
+/// A held row deleted at Core is deleted locally even when the editor's
+/// query runtime never idles while its strict reads settle (INV-SYNC-48).
+///
+/// Actors: `owner` creates a playlist with one entry and invites `editor`,
+/// who accepts and reads all three rows. While `editor` keeps issuing fresh
+/// Remote reads without pause (the churn a browser client's polling
+/// `waitForQuery` loops produce), `owner` deletes the invitation and the
+/// editor's Remote waits reach zero rows. Deletion reconciliation must not
+/// wait for an idle runtime or give up at the settlement bound: the deleted
+/// invitation eventually leaves the editor's local store, while the playlist
+/// and entry, which merely lost authorization, stay cached (INV-SYNC-14).
+///
+/// ```text
+/// owner ──playlist + entry + invite──► server ──► editor (accepts, reads all)
+/// editor ──fresh Remote reads, continuously ─────────────────────────────┐
+/// owner ──delete invite──► server                                        │
+/// editor ──Remote waits: invite, playlist, entry all empty               │
+/// editor ──local store: invite gone; playlist and entry still cached ◄───┘
+/// ```
+#[tokio::test]
+async fn deleted_invitation_reaches_local_store_while_remote_reads_keep_the_runtime_busy() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let server = JazzServer::start_with_schema(schema())
+                .await
+                .expect("start test server");
+            let owner = connect(&server, OWNER_ID).await;
+            let editor = connect(&server, EDITOR_ID).await;
+
+            let (playlist, _, tx) = owner
+                .insert(
+                    "playlists",
+                    row_input!("owner_id" => OWNER_ID, "name" => "Road tape"),
+                )
+                .expect("owner creates the playlist");
+            settle(&owner, tx, DurabilityTier::GlobalServer).await;
+            let (entry, _, tx) = owner
+                .insert(
+                    "entries",
+                    row_input!("playlist_id" => playlist, "position" => 1),
+                )
+                .expect("owner adds an entry");
+            settle(&owner, tx, DurabilityTier::GlobalServer).await;
+            let (invite, _, tx) = owner
+                .insert(
+                    "invitations",
+                    row_input!(
+                        "playlist_id" => playlist,
+                        "owner_id" => OWNER_ID,
+                        "subject" => EDITOR_ID,
+                        "role" => "editor",
+                        "status" => "pending"
+                    ),
+                )
+                .expect("owner invites the editor");
+            settle(&owner, tx, DurabilityTier::GlobalServer).await;
+            wait_for_query(
+                &editor,
+                by_id("invitations", invite),
+                ReadTier::Remote,
+                TIMEOUT,
+                "editor observes the pending invitation",
+                |rows| (rows.len() == 1).then_some(()),
+            )
+            .await;
+            let tx = editor
+                .update(
+                    "invitations",
+                    invite,
+                    vec![("status".into(), Value::Text("accepted".into()))],
+                )
+                .expect("editor accepts");
+            settle(&editor, tx, DurabilityTier::GlobalServer).await;
+            for (query, what) in [
+                (by_id("invitations", invite), "the accepted invitation"),
+                (by_id("playlists", playlist), "the playlist"),
+                (by_id("entries", entry), "the entry"),
+            ] {
+                wait_for_query(
+                    &editor,
+                    query,
+                    ReadTier::Remote,
+                    TIMEOUT,
+                    format!("accepted editor reads {what}"),
+                    |rows| (rows.len() == 1).then_some(()),
+                )
+                .await;
+            }
+
+            // Fresh Remote reads, back to back, for the rest of the scenario.
+            let stop = std::cell::Cell::new(false);
+            let churn = |query: fn() -> Query| {
+                let (editor, stop) = (&editor, &stop);
+                async move {
+                    while !stop.get() {
+                        let _ = tokio::time::timeout(
+                            Duration::from_secs(2),
+                            editor.query(query(), ReadTier::Remote),
+                        )
+                        .await;
+                    }
+                }
+            };
+            let scenario = async {
+                let tx = owner
+                    .delete("invitations", invite)
+                    .expect("owner deletes the invitation");
+                settle(&owner, tx, DurabilityTier::GlobalServer).await;
+                tokio::join!(
+                    wait_for_query(
+                        &editor,
+                        by_id("invitations", invite),
+                        ReadTier::Remote,
+                        TIMEOUT,
+                        "revoked editor loses the deleted invitation",
+                        |rows| rows.is_empty().then_some(()),
+                    ),
+                    wait_for_query(
+                        &editor,
+                        by_id("playlists", playlist),
+                        ReadTier::Remote,
+                        TIMEOUT,
+                        "revoked editor loses the playlist",
+                        |rows| rows.is_empty().then_some(()),
+                    ),
+                    wait_for_query(
+                        &editor,
+                        by_id("entries", entry),
+                        ReadTier::Remote,
+                        TIMEOUT,
+                        "revoked editor loses the entry",
+                        |rows| rows.is_empty().then_some(()),
+                    ),
+                );
+                // Reconciliation may finish after the reads settled; it must
+                // finish, not be abandoned.
+                let deadline = tokio::time::Instant::now() + TIMEOUT;
+                while !local_rows(&editor, by_id("invitations", invite))
+                    .await
+                    .is_empty()
+                {
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "the deleted invitation never left the editor's local store"
+                    );
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                stop.set(true);
+            };
+            tokio::join!(
+                churn(|| Query::from("entries")),
+                churn(|| Query::from("playlists")),
+                churn(|| Query::from("invitations")),
+                scenario,
+            );
+
+            let default_ids = |query: Query| {
+                let editor = &editor;
+                async move {
+                    editor
+                        .query(query, ReadTier::LocalFirst)
+                        .await
+                        .map(jazz::tools::test_support::ordinary_rows)
+                        .expect("default-tier read")
+                        .into_iter()
+                        .map(|(id, _)| id)
+                        .collect::<Vec<_>>()
+                }
+            };
+            assert!(
+                default_ids(by_id("invitations", invite)).await.is_empty(),
+                "the deleted invitation is gone from the editor's default read"
+            );
+            assert_eq!(
+                default_ids(by_id("playlists", playlist)).await,
+                vec![playlist],
+                "the undeleted playlist stays cached after losing authorization"
+            );
+            assert_eq!(
+                default_ids(by_id("entries", entry)).await,
+                vec![entry],
+                "the undeleted entry stays cached after losing authorization"
+            );
+
+            owner.shutdown().await.expect("shutdown owner");
+            editor.shutdown().await.expect("shutdown editor");
+            server.shutdown().await;
+        })
+        .await;
+}
