@@ -125,10 +125,25 @@ describe("NativeRuntimeAdapter server transport", () => {
   it.each([
     [
       "transport mentioning a nested rejection",
-      new Error("Protocol: upstream reported WriteRejected: quoted peer diagnostic"),
+      Object.assign(
+        new Error("Protocol: upstream reported WriteRejected: quoted peer diagnostic"),
+        {
+          code: "protocol",
+        },
+      ),
     ],
-    ["not-observed", new Error("NotObserved: transaction is not resident")],
-    ["schema", new Error("Schema: invalid authored branch value")],
+    // Only the core code classifies a rejection; rejection-shaped text alone does not.
+    ["uncoded rejection-shaped text", new Error("WriteRejected: no core code")],
+    [
+      "not-observed",
+      Object.assign(new Error("NotObserved: transaction is not resident"), {
+        code: "not_observed",
+      }),
+    ],
+    [
+      "schema",
+      Object.assign(new Error("Schema: invalid authored branch value"), { code: "schema" }),
+    ],
     ["cancellation", Object.assign(new Error("operation cancelled"), { name: "AbortError" })],
     ["unknown", new Error("unknown lifecycle failure")],
   ])("preserves %s lifecycle errors from native write waits", async (_kind, nativeError) => {
@@ -199,7 +214,9 @@ describe("NativeRuntimeAdapter server transport", () => {
     const write = {
       ...fakeWrite(),
       wait: async () => {
-        throw new Error("WriteRejected: queued write was denied");
+        throw Object.assign(new Error("WriteRejected: queued write was denied"), {
+          code: "write_rejected",
+        });
       },
     };
     const runtime = new NativeRuntimeAdapter(

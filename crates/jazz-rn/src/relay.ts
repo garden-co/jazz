@@ -206,7 +206,12 @@ export type NativeForegroundResponse =
   | { type: "unsubscribed"; closed: boolean }
   | { type: "closed"; closed: boolean }
   | { type: "pending"; operation: number }
-  | { type: "operationError"; reason: string }
+  | {
+      type: "operationError";
+      reason: string;
+      /** The stable core `ErrorCode` string when a core error caused the failure. */
+      code?: string;
+    }
   | { type: "cancelled"; cancelled: boolean }
   | { type: "transactionOpened"; transaction: number }
   | { type: "inserted"; rowId: Uint8Array }
@@ -675,6 +680,20 @@ export function decodeNativeForegroundResponse(bytes: Uint8Array): NativeForegro
     };
   if (tag === 22 && bytes.length === 2 && (bytes[1] === 0 || bytes[1] === 1))
     return { type: "streamingMutationAborted", aborted: bytes[1] === 1 };
+  if (tag === 25) {
+    // CodedOperationError: postcard code string, then the reason string.
+    let codeEnd = 1;
+    while (codeEnd < bytes.length && (bytes[codeEnd]! & 0x80) !== 0) codeEnd++;
+    if (codeEnd >= bytes.length) throw new Error("Malformed native operation error code");
+    const codeLength = decodeForegroundU64(bytes.subarray(1, codeEnd + 1), "error code length");
+    const next = codeEnd + 1 + codeLength;
+    if (next > bytes.length) throw new Error("Malformed native operation error code");
+    return {
+      type: "operationError",
+      code: decodeForegroundUtf8(bytes, codeEnd + 1, codeLength, "error code"),
+      reason: decodeForegroundString(bytes.subarray(next), "operation error"),
+    };
+  }
   if (
     tag === 16 &&
     bytes.length === 4 &&
