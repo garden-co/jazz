@@ -119,18 +119,16 @@ const bandBookPermissions = definePermissions(
       ]);
     policy.pageGrants.allowRead.where((grant) => anyOf([{ account: me }, sharesPage(grant)]));
     policy.pageGrants.allowInsert.where(sharesPage);
-    policy.pageGrants.allowUpdate
-      .whereOld(sharesPage)
-      .whereNew((grant) =>
-        allOf([
-          sharesPage(grant),
-          policy.pageGrants.exists.where({
-            id: grant.id,
-            pageId: grant.pageId,
-            account: grant.account,
-          }),
-        ]),
-      );
+    policy.pageGrants.allowUpdate.whereOld(sharesPage).whereNew((grant) =>
+      allOf([
+        sharesPage(grant),
+        policy.pageGrants.exists.where({
+          id: grant.id,
+          pageId: grant.pageId,
+          account: grant.account,
+        }),
+      ]),
+    );
     policy.pageGrants.allowDelete.where((grant) => anyOf([sharesPage(grant), { account: me }]));
 
     // Blocks and attachments inherit everything from their page ----------------
