@@ -11612,6 +11612,9 @@ mod tests {
         relay
             .pump()
             .expect("cleanup cannot wait synchronously for the held owner");
+        // A strict one-shot reads through its own stream (INV-SYNC-48), so it
+        // holds an upstream coverage refcount but no separate query coverage
+        // registration; the refcount must survive until the owner resumes.
         assert_eq!(
             relay
                 .run(move |worker| Ok(worker
@@ -11619,7 +11622,7 @@ mod tests {
                     .db
                     .query_coverage_attachment_counts_for_test()))
                 .unwrap(),
-            (1, 1)
+            (1, 0)
         );
         assert!(client.cancel_foreground_operation(holder).unwrap());
         relay.pump().unwrap();
