@@ -1,6 +1,5 @@
 import { withJazz } from "jazz-tools/dev/next";
-
-const appOrigin = process.env.NEXT_PUBLIC_APP_ORIGIN ?? "http://127.0.0.1:3000";
+import { APP_ORIGIN as appOrigin } from "./lib/app-origin";
 
 export default withJazz(
   {},

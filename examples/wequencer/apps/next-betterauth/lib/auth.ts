@@ -4,12 +4,12 @@ import { bearer, jwt } from "better-auth/plugins";
 import { jazzAdapter } from "jazz-tools/better-auth-adapter";
 import { app } from "@/schema";
 import { authJazzClient } from "@/lib/auth-jazz-client";
-
-const appOrigin = process.env.NEXT_PUBLIC_APP_ORIGIN ?? "http://127.0.0.1:3000";
+import { APP_ORIGIN as appOrigin } from "@/lib/app-origin";
+import { serverSecret } from "@/lib/server-secret";
 
 export const auth = betterAuth({
   baseURL: appOrigin,
-  secret: process.env.BETTER_AUTH_SECRET ?? "wequencer-development-secret",
+  secret: serverSecret("BETTER_AUTH_SECRET", "wequencer-development-secret"),
   trustedOrigins: [appOrigin],
   database: jazzAdapter({ db: async () => (await authJazzClient()).db, schema: app.wasmSchema }),
   emailAndPassword: {
