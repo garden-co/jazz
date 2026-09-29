@@ -322,28 +322,20 @@ impl Net {
         .is_ok()
     }
 
-    /// Seed `joined_rows` redeemed invites and the unredeemed invites `open`.
+    /// Seed `joined_rows` redeemed invites and the unredeemed invites `open`,
+    /// settling each write before the next as the application would.
     fn seed(&self, joined_rows: usize, open: &[&str]) {
-        let db = self.db(0);
-        let mut last = None;
-        for index in 0..joined_rows {
-            let code = format!("redeemed-{index}");
-            block_on(db.insert("invites", cells(&code), Default::default())).unwrap();
-            last = Some(
-                block_on(db.insert("members", cells(&code), Default::default()))
-                    .unwrap()
-                    .mergeable_tx_id(),
-            );
-        }
-        for code in open {
-            last = Some(
-                block_on(db.insert("invites", cells(code), Default::default()))
-                    .unwrap()
-                    .mergeable_tx_id(),
-            );
-        }
-        if let Some(last) = last {
-            assert!(self.settle(0, last), "seed settles");
+        let redeemed = (0..joined_rows)
+            .flat_map(|index| {
+                let code = format!("redeemed-{index}");
+                [("invites", code.clone()), ("members", code)]
+            })
+            .collect::<Vec<_>>();
+        let open = open.iter().map(|code| ("invites", (*code).to_owned()));
+        for (table, code) in redeemed.into_iter().chain(open) {
+            let write =
+                block_on(self.db(0).insert(table, cells(&code), Default::default())).unwrap();
+            assert!(self.settle(0, write.mergeable_tx_id()), "seed settles");
         }
     }
 
