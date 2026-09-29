@@ -861,7 +861,7 @@ where
         let (branch_key, _) = schema
             .project_branch_selector(&table_schema, branch)
             .map_err(Error::InvalidBranchKey)?;
-        self.query_local_winner_in_branch(table, &branch_key, row_uuid)
+        self.query_local_view_winner_in_branch(table, &branch_key, row_uuid)
             .await
     }
 
@@ -925,9 +925,14 @@ where
         let table_schema = self.table_in_schema(table, schema_version)?;
         // Deletion is stamped into the row image: the "deletion winner" is the
         // current image's transaction while that image is deleted.
-        // The newest local image is one ordered point read of history.
+        // The local image is the pending overlay, or the synced image once
+        // the row has settled and its overlay is gone.
         let Some(image) = self
-            .query_local_winner_in_branch(&table_schema.name, &BranchKey::default(), row_uuid)
+            .query_local_view_winner_in_branch(
+                &table_schema.name,
+                &BranchKey::default(),
+                row_uuid,
+            )
             .await?
         else {
             return Ok(None);
