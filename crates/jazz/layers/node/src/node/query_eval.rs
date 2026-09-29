@@ -3585,6 +3585,15 @@ where
                 .collect::<Vec<_>>();
             self.record_tx_query_row_reads(tx_id, shape.schema_version(), table, root_rows)
                 .await?;
+        } else {
+            self.record_tx_aggregate_input_reads(
+                tx_id,
+                shape,
+                binding,
+                identity,
+                authorization_mode,
+            )
+            .await?;
         }
         Ok(snapshot)
     }
@@ -3645,12 +3654,59 @@ where
                 .collect::<Vec<_>>();
             self.record_tx_query_row_reads(tx_id, shape.schema_version(), &query.table, root_rows)
                 .await?;
+        } else {
+            self.record_tx_aggregate_input_reads(
+                tx_id,
+                shape,
+                binding,
+                identity,
+                authorization_mode,
+            )
+            .await?;
         }
         self.finish_engine_query_rows_in_schema(query, shape.schema_version(), &mut rows)?;
         if query.array_subqueries.is_empty() {
             self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
         }
         Ok(rows)
+    }
+
+    /// Prove the rows an exclusive aggregate read consumed. An aggregate
+    /// returns no rows to prove, so the transaction also reads the aggregate's
+    /// input rows; the authority validates the aggregate against them
+    /// (garden-co/jazz#3694).
+    async fn record_tx_aggregate_input_reads(
+        &mut self,
+        tx_id: OpenTransactionId,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorSubject,
+        authorization_mode: QueryAuthorizationMode,
+    ) -> Result<(), Error> {
+        let Some(input) = shape.query().aggregate_input() else {
+            return Ok(());
+        };
+        if !self.transaction_is_exclusive(tx_id)? {
+            return Ok(());
+        }
+        let schema = &self
+            .catalogue
+            .catalogue_schemas
+            .get(&shape.schema_version())
+            .ok_or(Error::InvalidStoredValue("transaction schema is unknown"))?
+            .schema;
+        let input = input.validate(schema)?;
+        let input_binding = input.bind(binding.values().clone())?;
+        Box::pin(self.tx_query_in_authorization_mode(
+            tx_id,
+            &input,
+            &input_binding,
+            identity,
+            false,
+            authorization_mode,
+        ))
+        .await?;
+        Ok(())
     }
 
     fn transaction_query_identity(

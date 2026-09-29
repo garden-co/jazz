@@ -20,8 +20,8 @@ use std::task::{Context, Poll, Waker};
 mod common;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, ErrorCode, ExclusiveTxOps, ReadOpts, RemoteLinkHint,
-    SerializedReadResult, WireTransportAdapter, block_on,
+    Db, DbConfig, DbIdentity, ExclusiveTxOps, ReadOpts, RemoteLinkHint, SerializedReadResult,
+    WireTransportAdapter, block_on,
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
@@ -482,10 +482,10 @@ fn a_redemption_on_another_backend_is_seen_as_taken() {
 }
 
 /// Offline, an exclusive read answers from the replica instead of waiting for
-/// an authority that cannot answer, but the transaction cannot commit: the
-/// replica cannot vouch for the snapshot its cut claims (INV-TX-13).
+/// an authority that cannot answer. The transaction commits locally and the
+/// authority accepts it once it syncs, because every row it read still holds.
 #[test]
-fn offline_exclusive_read_answers_from_the_replica_but_cannot_commit() {
+fn offline_prepared_exclusive_commit_succeeds_while_its_reads_hold() {
     let net = Net::new(&[0x0a, 0x0b]);
     let invite = net.create_invite(OWNER, "abc");
     assert_eq!(
@@ -510,18 +510,53 @@ fn offline_exclusive_read_answers_from_the_replica_but_cannot_commit() {
             .insert("members", cells("abc"), Default::default()),
     )
     .unwrap();
-    let error = net.drive(db.commit_exclusive_handle(open)).unwrap_err();
-    assert_eq!(error.code, ErrorCode::NotObserved);
+    let tx_id = net.drive(db.commit_exclusive_handle(open)).unwrap();
     db.set_remote_link_hint(RemoteLinkHint::Live);
+    net.settle(BACKEND, tx_id)
+        .expect("the offline read still holds, so the authority accepts it");
+    assert_eq!(net.members(), 1);
+}
+
+/// An invite revoked while the backend was offline: its offline-prepared
+/// redemption read the stale invite, so the authority rejects it.
+#[test]
+fn offline_prepared_redemption_of_a_revoked_invite_conflicts() {
+    let net = Net::new(&[0x0a, 0x0b]);
+    let invite = net.create_invite(OWNER, "abc");
+    net.read(BACKEND, &invite_query("abc"), DurabilityTier::Global, None);
+    let db = net.db(BACKEND);
+    db.set_remote_link_hint(RemoteLinkHint::NoServer);
+    let open = OpenTransactionId::new();
+    block_on(db.begin_exclusive(open)).unwrap();
+    assert_eq!(
+        net.read_while(
+            BACKEND,
+            &invite_query("abc"),
+            open,
+            RemoteLinkHint::NoServer
+        ),
+        Some(vec![invite])
+    );
+    net.drive(
+        db.exclusive_tx_ref(open)
+            .insert("members", cells("abc"), Default::default()),
+    )
+    .unwrap();
+    let tx_id = net.drive(db.commit_exclusive_handle(open)).unwrap();
+
+    net.revoke(OWNER, invite);
+    db.set_remote_link_hint(RemoteLinkHint::Live);
+    assert!(net.settle(BACKEND, tx_id).is_err());
     assert_eq!(net.members(), 0);
 }
 
 /// The double-redeem half of #3694 offline: a backend whose cut covers
 /// another backend's redemption, but which never received it, reads "nobody
-/// redeemed it" from its replica. That absence guard returns no row to prove,
-/// so the commit must be refused rather than accepted by the authority.
+/// redeemed it" from its replica. That absence guard proves no row, so the
+/// redemption the authority returns for it now is a phantom and the commit
+/// is rejected.
 #[test]
-fn offline_absence_guard_cannot_commit() {
+fn offline_absence_guard_conflicts_when_the_invite_was_taken() {
     let net = Net::new(&[0x0a, 0x0b, 0x0c]);
     net.create_invite(OWNER, "abc");
     net.read(BACKEND, &invite_query("abc"), DurabilityTier::Global, None);
@@ -543,15 +578,15 @@ fn offline_absence_guard_cannot_commit() {
             .insert("members", cells("abc"), Default::default()),
     )
     .unwrap();
-    let error = net.drive(db.commit_exclusive_handle(open)).unwrap_err();
-    assert_eq!(error.code, ErrorCode::NotObserved);
+    let tx_id = net.drive(db.commit_exclusive_handle(open)).unwrap();
     db.set_remote_link_hint(RemoteLinkHint::Live);
+    assert!(net.settle(2, tx_id).is_err());
     assert_eq!(net.members(), 1, "the invite was redeemed only once");
 }
 
 /// An exclusive read waiting on its snapshot hydration stops waiting when
 /// the authority becomes unreachable and answers from the replica; the
-/// transaction then cannot commit.
+/// transaction still commits because its read holds.
 #[test]
 fn exclusive_read_falls_back_to_the_replica_when_the_link_is_lost() {
     let net = Net::new(&[0x0a, 0x0b]);
@@ -579,14 +614,13 @@ fn exclusive_read_falls_back_to_the_replica_when_the_link_is_lost() {
     )
     .unwrap();
     db.set_remote_link_hint(RemoteLinkHint::Live);
-    let error = net.drive(db.commit_exclusive_handle(open)).unwrap_err();
-    assert_eq!(error.code, ErrorCode::NotObserved);
-    assert_eq!(net.members(), 0);
+    let tx_id = net.drive(db.commit_exclusive_handle(open)).unwrap();
+    net.settle(BACKEND, tx_id).expect("the read still holds");
+    assert_eq!(net.members(), 1);
 }
 
 /// A transaction whose snapshot claims no authority state reads its replica
-/// offline and still commits: the authority validates its predicates from
-/// the beginning of history.
+/// offline and still commits.
 #[test]
 fn offline_exclusive_commit_from_a_genesis_snapshot_is_allowed() {
     let net = Net::new(&[0x0a]);
@@ -604,7 +638,7 @@ fn offline_exclusive_commit_from_a_genesis_snapshot_is_allowed() {
     )
     .unwrap();
     net.drive(db.commit_exclusive_handle(open))
-        .expect("a genesis snapshot needs no hydration");
+        .expect("an offline commit is prepared locally");
 }
 
 /// garden-co/jazz#3696: every way of reading the invite inside an exclusive
@@ -666,9 +700,10 @@ fn invite_used_up_before_the_cut_never_adds_a_member() {
     assert_eq!(net.members(), 1);
 }
 
-/// The never-received half of #3694 through the Rust transaction API: a
-/// second backend must see the first backend's redemption.
-fn assert_redemption_on_another_backend_is_seen(whole_table: bool) {
+/// The absence guard of a single-use invite read through the Rust API: a
+/// second backend that never received the first redemption must not redeem
+/// it again, whether it reads the filtered query or the whole table.
+fn assert_second_backend_cannot_redeem_through_the_rust_api(whole_table: bool) {
     let net = Net::new(&[0x0a, 0x0b, 0x0c]);
     net.create_invite(OWNER, "abc");
     net.read(BACKEND, &invite_query("abc"), DurabilityTier::Global, None);
@@ -682,39 +717,15 @@ fn assert_redemption_on_another_backend_is_seen(whole_table: bool) {
         net.drive(db.exclusive_tx_ref(open).all("members"))
             .unwrap()
             .into_iter()
-            .filter(|row| !row.is_deleted())
-            .count()
+            .any(|row| !row.is_deleted() && row.cell_at(0) == Some(Value::String("abc".to_owned())))
     } else {
         let prepared = db
             .prepare_query(&Query::from("members").filter(eq(col("code"), lit("abc"))))
             .unwrap();
-        net.drive(db.exclusive_tx_ref(open).all_prepared(&prepared))
+        !net.drive(db.exclusive_tx_ref(open).all_prepared(&prepared))
             .unwrap()
-            .len()
+            .is_empty()
     };
-    assert_eq!(taken, 1, "the second backend must see the first redemption");
-}
-
-/// The absence guard of a single-use invite read through the Rust API: a
-/// second backend must not redeem it again.
-#[test]
-fn a_second_backend_cannot_redeem_through_the_rust_api() {
-    let net = Net::new(&[0x0a, 0x0b, 0x0c]);
-    net.create_invite(OWNER, "abc");
-    net.read(BACKEND, &invite_query("abc"), DurabilityTier::Global, None);
-    assert_eq!(net.redeem(BACKEND, "abc"), Redeem::Joined);
-    net.unrelated_receipt(2);
-
-    let db = net.db(2);
-    let open = OpenTransactionId::new();
-    block_on(db.begin_exclusive(open)).unwrap();
-    let prepared = db
-        .prepare_query(&Query::from("members").filter(eq(col("code"), lit("abc"))))
-        .unwrap();
-    let taken = !net
-        .drive(db.exclusive_tx_ref(open).all_prepared(&prepared))
-        .unwrap()
-        .is_empty();
     if !taken {
         net.drive(
             db.exclusive_tx_ref(open)
@@ -729,11 +740,11 @@ fn a_second_backend_cannot_redeem_through_the_rust_api() {
 }
 
 #[test]
-fn a_redemption_on_another_backend_is_seen_through_the_rust_api() {
-    assert_redemption_on_another_backend_is_seen(false);
+fn a_second_backend_cannot_redeem_through_the_rust_api() {
+    assert_second_backend_cannot_redeem_through_the_rust_api(false);
 }
 
 #[test]
-fn a_redemption_on_another_backend_is_seen_through_a_whole_table_read() {
-    assert_redemption_on_another_backend_is_seen(true);
+fn a_second_backend_cannot_redeem_through_a_whole_table_read() {
+    assert_second_backend_cannot_redeem_through_the_rust_api(true);
 }

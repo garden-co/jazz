@@ -163,7 +163,6 @@ where
                 predicate_reads: Vec::new(),
                 writes: Vec::new(),
                 user_metadata_json: None,
-                snapshot_unhydrated: false,
             },
         );
         Ok(())
@@ -983,24 +982,6 @@ where
         Ok(())
     }
 
-    /// Record that a read in this exclusive transaction was answered from the
-    /// local replica without hydrating the transaction's snapshot through the
-    /// authority. If the snapshot claims authority state (a non-genesis global
-    /// base), the replica cannot vouch for rows it never received below that
-    /// cut (an absence guard reads nothing to prove), so the commit is
-    /// refused. A genesis snapshot claims nothing: the authority validates its
-    /// predicates from the beginning of history.
-    pub fn mark_exclusive_snapshot_unhydrated(
-        &mut self,
-        tx_id: OpenTransactionId,
-    ) -> Result<(), Error> {
-        let open_tx = self.open_tx_mut(tx_id)?;
-        if open_tx.base_snapshot.global_base != GlobalTime(0) {
-            open_tx.snapshot_unhydrated = true;
-        }
-        Ok(())
-    }
-
     /// Attach application metadata to an open transaction.
     pub fn tx_set_metadata(&mut self, tx_id: OpenTransactionId, json: String) -> Result<(), Error> {
         self.open_tx_mut(tx_id)?.user_metadata_json = Some(json);
@@ -1081,9 +1062,6 @@ where
             .await?
         {
             return Err(Error::TransactionConflict);
-        }
-        if self.open_tx(open_batch_id)?.snapshot_unhydrated {
-            return Err(Error::ExclusiveSnapshotNotHydrated);
         }
         let open_tx = self
             .open_tx
@@ -2078,8 +2056,6 @@ pub(super) struct OpenTransaction {
     pub(super) writes: Vec<PendingWrite>,
     /// Optional application metadata.
     pub(super) user_metadata_json: Option<String>,
-    /// A read answered from the replica without hydrating the snapshot.
-    pub(super) snapshot_unhydrated: bool,
 }
 
 impl OpenTransaction {

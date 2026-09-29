@@ -3284,13 +3284,6 @@ pub enum Error {
     /// An exclusive transaction no longer matches its fixed local snapshot.
     #[error("row visible parent changed since transaction write was staged")]
     TransactionConflict,
-    /// An exclusive transaction read from the local replica while the
-    /// authority could not serve its snapshot (INV-TX-13), so its reads
-    /// cannot vouch for rows the replica never received.
-    #[error(
-        "exclusive transaction read offline, so its snapshot was never hydrated; abandon it and retry in a new transaction"
-    )]
-    ExclusiveSnapshotNotHydrated,
     /// Stored value failed validation.
     #[error("invalid stored value: {0}")]
     InvalidStoredValue(&'static str),

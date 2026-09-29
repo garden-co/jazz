@@ -44,16 +44,6 @@ where
             .map_err(Into::into)
     }
 
-    pub(super) async fn mark_exclusive_snapshot_unhydrated(
-        &self,
-        id: OpenTransactionId,
-    ) -> Result<(), Error> {
-        self.lock_for_transaction_operation(id)
-            .await?
-            .mark_exclusive_snapshot_unhydrated(id)
-            .map_err(Into::into)
-    }
-
     /// Build a mergeable transaction that commits multiple writes under one id.
     pub async fn mergeable_tx(&self) -> Result<MergeableTx<'_, S>, Error> {
         let tx_id = OpenTransactionId::new();

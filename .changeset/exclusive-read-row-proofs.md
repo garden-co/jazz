@@ -2,6 +2,8 @@
 "jazz-tools": patch
 ---
 
-Exclusive transactions no longer act on stale data. Reads inside an exclusive transaction now fetch the server's rows for their snapshot first, so a backend sees rows it had never received (for example someone else's redemption of a single-use invite). A row the server already deleted, such as a revoked invite, can no longer be committed on: the server now checks every row the transaction read, including on retries after `exclusive_conflict`.
+Exclusive transactions no longer act on stale data. The server now checks an exclusive transaction against the rows it actually read, including counts and other aggregates, and rejects the commit with `exclusive_conflict` if any of them was deleted or changed, or if a row now matches one of its queries that it did not see (for example someone else's redemption of a single-use invite). A revoked invite can no longer be redeemed.
 
-While the server is unreachable, exclusive reads answer from local data instead of waiting, but such a transaction can no longer commit: its commit fails because its reads could not be checked against the server. Retry it in a new exclusive transaction once the server is reachable again. Apps that have never synced with a server are unaffected.
+Exclusive transactions can now be prepared offline: reads answer from local data, the commit is stored locally, and the server accepts it once it syncs if everything the transaction read still holds.
+
+**Upgrade clients that use exclusive transactions.** Servers now require the row records that alpha.58 clients send with each exclusive read. An exclusive transaction from an older client whose query read returned any rows is rejected with `exclusive_conflict` on every attempt, until the client is upgraded.

@@ -513,10 +513,10 @@ where
         // hold, and the authority validates the predicate against a cut the
         // reader never had (garden-co/jazz#3694).
         //
-        // Offline, the read keeps the replica's answer so the transaction
-        // stays usable, but the replica cannot vouch for rows it never
-        // received: the transaction is marked unhydrated and its commit is
-        // refused.
+        // Offline, the read keeps the replica's answer. Hydration only keeps
+        // reads fresh: the authority validates the rows the read actually
+        // returned (its row proofs), so a stale offline read conflicts at
+        // commit instead of being accepted.
         let exclusive_snapshot_read = match open_tx {
             Some(open_tx) if self.node.receives_commits_as_local() => {
                 self.transaction_is_exclusive(open_tx).await?
@@ -527,7 +527,6 @@ where
         let mut coverage = None;
         let hydrate =
             exclusive_snapshot_read && effective_read_tier(&opts) < DurabilityTier::Global;
-        let mut hydrated = !hydrate;
         if hydrate && let Some(epoch) = self.node.remote_link.arm() {
             let mut hydration_opts = opts.clone();
             hydration_opts.tier = DurabilityTier::Global;
@@ -543,15 +542,11 @@ where
                 Some(result) => {
                     result?;
                     coverage = Some(hydration);
-                    hydrated = true;
                 }
                 // The authority became unreachable: drop the pending
                 // hydration and read the replica.
                 None => drop(hydration),
             }
-        }
-        if !hydrated && let Some(open_tx) = open_tx {
-            self.mark_exclusive_snapshot_unhydrated(open_tx).await?;
         }
         if coverage.is_none() && require_coverage {
             let attachment = self

@@ -351,16 +351,24 @@ where
                 return Ok(false);
             }
         }
+        // Predicate reads are validated against the rows the transaction
+        // proved it read, not against the authority's state at the base
+        // snapshot: a client that read offline, or from a replica that never
+        // held every row below its base, only saw what its proofs name
+        // (garden-co/jazz#3694). The row proofs above are all still current.
+        let identity = tx.permission_subject.unwrap_or(tx.made_by);
+        let mut proven = BTreeMap::<&str, BTreeSet<RowUuid>>::new();
+        for read in tx.row_read_set.as_deref().unwrap_or(&[]) {
+            proven
+                .entry(read.table.as_str())
+                .or_default()
+                .insert(read.row_uuid);
+        }
+        let no_rows = BTreeSet::new();
         for predicate in tx.predicate_read_set.as_deref().unwrap_or(&[]) {
-            if self.predicate_read_is_degenerate_whole_table(predicate)? {
-                if self
-                    .global_currency_changed_outside_snapshot(&predicate.table, base_snapshot)
-                    .await?
-                {
-                    return Ok(false);
-                }
-            } else if self
-                .shape_predicate_changed_after(predicate, base_snapshot)
+            let proven = proven.get(predicate.table.as_str()).unwrap_or(&no_rows);
+            if self
+                .predicate_read_differs_from_proven(predicate, base_snapshot, identity, proven)
                 .await?
             {
                 return Ok(false);
@@ -436,6 +444,90 @@ where
         Ok(predicate.shape_id == shape.shape_id() && predicate.binding_id == binding.binding_id())
     }
 
+    /// Whether an exclusive predicate read no longer returns what the
+    /// transaction read. Every row the predicate returns now, evaluated as the
+    /// transaction's permission subject, must be one the transaction proved
+    /// it read; otherwise a row appeared or changed into the result since. A
+    /// proved row the predicate returned at the base snapshot but no longer
+    /// returns left the result through another row (a join or policy
+    /// source). An aggregate read is validated through the rows it consumed.
+    ///
+    /// A client that recorded no row proofs for its predicate reads (before
+    /// alpha.58) conflicts whenever such a read returned rows.
+    async fn predicate_read_differs_from_proven(
+        &mut self,
+        predicate: &PredicateRead,
+        snapshot: &Snapshot,
+        identity: AuthorSubject,
+        proven: &BTreeSet<RowUuid>,
+    ) -> Result<bool, Error> {
+        let Some((shape, binding)) = self.predicate_read_validation_shape(predicate)? else {
+            return Ok(true);
+        };
+        let table = shape.query().table.clone();
+        let now = self
+            .query_rows_with_prepared_plan_for_identity(
+                &shape,
+                &binding,
+                DurabilityTier::Global,
+                None,
+                identity,
+            )
+            .await?
+            .iter()
+            .filter(|row| row.table() == table)
+            .map(CurrentRow::row_uuid)
+            .collect::<BTreeSet<_>>();
+        if !now.is_subset(proven) {
+            return Ok(true);
+        }
+        Ok(self
+            .shape_output_tx_set_at_snapshot(&shape, &binding, snapshot)
+            .await?
+            .into_iter()
+            .any(|(row, _)| proven.contains(&row) && !now.contains(&row)))
+    }
+
+    /// The shape and binding an authority evaluates to validate a predicate
+    /// read: the read's own shape, or for an aggregate the rows it consumed.
+    /// `None` when the read no longer names a known shape and binding.
+    fn predicate_read_validation_shape(
+        &self,
+        predicate: &PredicateRead,
+    ) -> Result<Option<(ValidatedQuery, Binding)>, Error> {
+        // Shape IDs include the authoring schema. A migration must not make an
+        // unchanged read conflict merely because this authority uses another view.
+        let validated = std::iter::once(&self.catalogue.schema)
+            .chain(
+                self.catalogue
+                    .catalogue_schemas
+                    .values()
+                    .map(|schema| &schema.schema),
+            )
+            .find_map(|schema| {
+                predicate
+                    .shape
+                    .validate(schema)
+                    .ok()
+                    .filter(|shape| shape.shape_id() == predicate.shape_id)
+                    .map(|shape| (shape, schema))
+            });
+        let Some((shape, schema)) = validated else {
+            return Ok(None);
+        };
+        let binding = shape.bind(predicate.binding_values.clone())?;
+        if binding.binding_id() != predicate.binding_id {
+            return Ok(None);
+        }
+        let Some(input) = shape.query().aggregate_input() else {
+            return Ok(Some((shape, binding)));
+        };
+        let input = input.validate(schema)?;
+        let binding = input.bind(predicate.binding_values.clone())?;
+        Ok(Some((input, binding)))
+    }
+
+    #[cfg(test)]
     pub(super) async fn shape_predicate_changed_after(
         &mut self,
         predicate: &PredicateRead,
