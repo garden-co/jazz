@@ -175,7 +175,7 @@ export function SiteSearch({
       onOpenChange={setOpen}
       searchSource={source}
       label="Search the docs"
-      input={<CommandPaletteInput placeholder="Search the docs" />}
+      input={<SearchInput />}
       emptyBootstrapText="Type to search the docs"
       emptySearchText="No results"
       onValueChange={(id) => {
