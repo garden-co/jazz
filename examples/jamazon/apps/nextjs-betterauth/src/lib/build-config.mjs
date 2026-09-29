@@ -23,13 +23,14 @@ export function readBuildConfig(env = process.env) {
   };
 }
 
-/** @param {ReturnType<typeof readBuildConfig>} config */
+/**
+ * Local runs are recognised by a loopback origin. The app id and server URL
+ * are not part of the test: `withJazz` generates both for `next dev`.
+ * @param {ReturnType<typeof readBuildConfig>} config
+ */
 export function usesLocalDefaults(config = readBuildConfig()) {
-  return (
-    config.origin === LOCAL_DEFAULTS.origin &&
-    config.appId === LOCAL_DEFAULTS.appId &&
-    config.serverUrl === LOCAL_DEFAULTS.serverUrl
-  );
+  const { hostname } = new URL(config.origin);
+  return hostname === "127.0.0.1" || hostname === "localhost";
 }
 
 /**
