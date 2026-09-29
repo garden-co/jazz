@@ -47,6 +47,8 @@ mod coverage_group_flush_once;
 mod deferred_local_persistence;
 #[path = "../dynamic_schema_views.rs"]
 mod dynamic_schema_views;
+#[path = "../error_code_strings.rs"]
+mod error_code_strings;
 #[path = "../fate_regressions.rs"]
 mod fate_regressions;
 #[cfg(feature = "testing")]

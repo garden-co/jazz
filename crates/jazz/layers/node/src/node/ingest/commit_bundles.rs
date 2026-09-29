@@ -641,13 +641,14 @@ where
             }
             let mut batch = self.database.open_batch();
             let mut version_bundles = Vec::new();
+            let mut previously_stored = Vec::new();
             for version in versions {
                 let stored = self.prepare_exact_history_version(existing.node_alias, tx.tx_id.time, &version).await?;
                 let (table, record) = self.version_storage_write_binding(&stored)?;
                 let key = self.version_storage_primary_key(&stored)?;
                 match batch.ensure_exact(&self.database, table.as_ref(), key, record).await? {
                     groove::db::EnsureExactOutcome::Inserted => version_bundles.push(version),
-                    groove::db::EnsureExactOutcome::AlreadyIdentical => {},
+                    groove::db::EnsureExactOutcome::AlreadyIdentical => previously_stored.push(stored),
                     groove::db::EnsureExactOutcome::Conflict => return Err(Error::ConflictingCommitUnit(tx.tx_id)),
                 }
             }
@@ -660,6 +661,7 @@ where
                 batch,
                 tx,
                 version_bundles,
+                previously_stored,
                 fate,
                 global_time,
                 durability,
