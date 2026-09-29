@@ -1018,7 +1018,7 @@ fn align_union_route_fields(
     fields: &BTreeSet<String>,
     request: &LoweringContext<'_>,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
-    let route_fields = parameter_domain_for_request(request)?.routing_params;
+    let route_fields = &request.parameter_domain()?.routing_params;
     let missing = fields
         .difference(&branch.fields)
         .cloned()
@@ -1357,7 +1357,7 @@ fn lower_linear_plan_steps_cached(
     } else {
         BTreeSet::new()
     };
-    let route_fields = parameter_domain_for_request(request)?.routing_params;
+    let route_fields = &request.parameter_domain()?.routing_params;
 
     for (step_index, step) in plan.steps.iter().enumerate() {
         match step {

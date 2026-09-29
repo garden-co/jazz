@@ -258,10 +258,12 @@ pub(super) fn lowered_terminals(
     // with that exact carrier. Every CoveredInput terminal below is derived
     // from this rebuilt closure; otherwise the public root can be scoped
     // while its source witnesses are accidentally unscoped.
-    let root_route_fields = graph_declared_output_fields(&initial_closure.visible_root)
+    let initial_visible_root_fields = graph_declared_output_fields(&initial_closure.visible_root);
+    let root_route_fields = initial_visible_root_fields
+        .as_ref()
         .map(|fields| {
             routing_param_fields
-                .intersection(&fields)
+                .intersection(fields)
                 .cloned()
                 .collect::<BTreeSet<_>>()
         })
@@ -270,10 +272,10 @@ pub(super) fn lowered_terminals(
         .union(&root_occurrence_fields)
         .cloned()
         .collect::<BTreeSet<_>>();
-    let closure = if root_route_fields == initial_root_route_fields {
-        initial_closure
+    let (closure, visible_root_fields) = if root_route_fields == initial_root_route_fields {
+        (initial_closure, initial_visible_root_fields)
     } else {
-        lower_closure_membership(
+        let closure = lower_closure_membership(
             graph.clone(),
             request,
             plan,
@@ -281,9 +283,12 @@ pub(super) fn lowered_terminals(
             resolved_sources,
             &root_route_fields,
             &closure_root_carrier_fields,
-        )?
+        )?;
+        let fields = graph_declared_output_fields(&closure.visible_root);
+        (closure, fields)
     };
-    let claim_route_fields = parameter_domain_for_request(request)
+    let claim_route_fields = request
+        .parameter_domain()
         .map_err(single_gap_report)?
         .claim_params
         .keys()
@@ -307,7 +312,7 @@ pub(super) fn lowered_terminals(
     // even when the physical source's own routing descriptor does not. Keep
     // that exact graph-local set on root-only terminals; child occurrences
     // remain constrained by their own descriptors below.
-    let root_source_route_fields = graph_declared_output_fields(&closure.visible_root)
+    let root_source_route_fields = visible_root_fields
         .map(|fields| {
             root_route_fields
                 .intersection(&fields)
@@ -1385,7 +1390,10 @@ fn lower_collect_by_app_rows(
     route_fields: &BTreeSet<String>,
     available_fields: &BTreeSet<String>,
 ) -> CapabilityResult<LoweredCollectByAppRows> {
-    let mut parameter_domain = parameter_domain_for_request(request).map_err(single_gap_report)?;
+    let mut parameter_domain = request
+        .parameter_domain()
+        .map_err(single_gap_report)?
+        .clone();
     collect_binding_source_params(&visible_root, &mut parameter_domain);
     let mut layout = collect_layout(
         projection,
@@ -3335,8 +3343,8 @@ pub(super) fn route_literal_project_field(
     route_field: &str,
     request: &LoweringContext<'_>,
 ) -> Result<ProjectField, UnsupportedReason> {
-    let domain = parameter_domain_for_request(request)?;
-    route_literal_project_field_for_domain(route_field, request, &domain)
+    let domain = request.parameter_domain()?;
+    route_literal_project_field_for_domain(route_field, request, domain)
 }
 
 /// Build a literal route field using the descriptor domain that will bind the

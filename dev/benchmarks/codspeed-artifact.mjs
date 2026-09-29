@@ -67,7 +67,7 @@ const workloadSpecs = {
   },
   "selective-hydration": {
     package: "jazz",
-    benches: ["selective_global_hydration"],
+    benches: ["selective_global_hydration", "authorization_support_branches"],
     features: "testing",
     minStack: null,
     timeout: 35,

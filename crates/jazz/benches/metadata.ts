@@ -24,6 +24,26 @@ export const coreBenchmarks: BenchmarkMetadata[] = [
     },
     source: "crates/jazz/benches/selective_global_hydration.rs",
   })),
+  ...[4, 6].map((factors) => ({
+    name: `update_support_branches[${factors}]`,
+    title: `Update authorization support · ${2 ** factors} policy branches`,
+    description:
+      "Compile and hydrate the authorization-support view an authority opens for a session's first update of a table whose update policy has many branches.",
+    fixture: `Update policy is an AND of ${factors} ORs of two correlated exists grants: ${2 ** factors} branches of ${factors} joins each. Empty tables.`,
+    storage: "In-memory Jazz node",
+    includes: [
+      "Support-scope policy compilation for the update's using and check clauses",
+      "Query-program lowering, Groove graph compilation and initial hydration of both support subscriptions",
+    ],
+    excludes: ["Schema compilation and node opening"],
+    work: {
+      count: 1,
+      unit: "support views/s",
+      explanation:
+        "One update support scope per iteration on a fresh node, so no compiled program is reused. Compare the 16- and 64-branch rungs for branch scaling.",
+    },
+    source: "crates/jazz/benches/authorization_support_branches.rs",
+  })),
   {
     name: "attach_route_bindings[100]",
     title: "Attach 100 route subscriptions",

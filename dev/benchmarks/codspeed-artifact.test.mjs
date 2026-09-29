@@ -168,7 +168,8 @@ test("each workload builds and runs exactly what it measured on the macro runner
     w1: "--package jazz-example-benchmark-w1 --bench reads_memory_walltime --bench reads_rocksdb_walltime --bench ahead_current",
     "route-subscription": "--package jazz --bench route_subscription_curve --features testing",
     "groove-ivm": "--package groove --bench pull_vs_snapshot --bench steady_state",
-    "selective-hydration": "--package jazz --bench selective_global_hydration --features testing",
+    "selective-hydration":
+      "--package jazz --bench selective_global_hydration --bench authorization_support_branches --features testing",
   };
   assert.deepEqual(workloads, Object.keys(previous));
   for (const [workload, args] of Object.entries(previous)) {
