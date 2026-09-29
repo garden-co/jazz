@@ -392,8 +392,6 @@ pub struct NodeOpenReceipt {
     pub recover_global_times: Duration,
     /// Pending-edge and rejected-transaction recovery time.
     pub recover_pending_and_rejected: Duration,
-    /// Bounded unclean-close cleanup time.
-    pub recover_unclean_close: Duration,
     /// Persisted maintained-query known-state recovery time.
     pub recover_known_state: Duration,
     /// In-memory ahead-current index reconstruction time.
