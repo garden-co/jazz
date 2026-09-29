@@ -158,8 +158,8 @@ fn pre_linear_native_corpora_are_refused_before_any_mutation() {
     for (base64, archive_sha, sqlite_sha, unknown, store) in [
         (
             include_str!("../fixtures/current-native-jazz.sqlite.gz.base64"),
-            "4bd6ef06288d01b2d89cc53402b6cff3e470d25341d4e9dbcfe9fddd54b8bf7e",
-            "20e7f266e895183cb8251a2543b389464800110f849b8a5572a80e139a9b567d",
+            "a3606d7045d477dab33d9bf0c60d3a1d1c1608dfd581f9e1bbf1c8abd6447c13",
+            "28902888353cf33af039811b82c45875a3c2f72a4176e06e3e5d50826b8734bd",
             &[][..],
             "pre-linear current SQLite corpus",
         ),
