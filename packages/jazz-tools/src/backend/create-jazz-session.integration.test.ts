@@ -388,6 +388,26 @@ describe("Node shared backend session", () => {
       await mergeable.wait({ tier: "global" });
       expect(mergeable.value.read).toMatchObject({ text: "invite" });
 
+      // Users may not insert notes; the attributed transaction admits the
+      // write as the backend while recording the user as its author.
+      const admitted = await attributed.exclusiveTransaction(async (tx) => {
+        await tx.one(app.notes.where({ id: note.id }));
+        return tx.insert(app.notes, { text: "backend admitted" }).id;
+      });
+      await admitted.wait();
+      expect(
+        await backend.db.one(app.notes.select("$createdBy").where({ id: admitted.value })),
+      ).toMatchObject({ $createdBy: { account: account.id, identity: account.identity } });
+
+      await expect(
+        attributed.exclusiveTransaction(async (tx) => {
+          await tx.one(app.notes.where({ id: note.id }));
+          tx.insert(app.posts, { text: "rolled back" });
+          throw new Error("abort redeem");
+        }),
+      ).rejects.toThrow("abort redeem");
+      expect(await backend.db.all(app.posts.where({ text: "rolled back" }))).toEqual([]);
+
       for (const id of [exclusive.value.id, mergeable.value.id]) {
         expect(await backend.db.one(app.posts.select("$createdBy").where({ id }))).toMatchObject({
           $createdBy: { account: account.id, identity: account.identity },
