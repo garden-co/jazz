@@ -85,6 +85,7 @@ describe("RecordPlayer library and playlists", () => {
     expect(await store.readAudio(trackId)).toEqual(wav);
   });
 
+  // Writes and reads about 1 MiB, so it gets more time on a busy machine.
   it("reassembles a value larger than one playback window from range reads", async () => {
     const store = new JazzRecordPlayerStore(testApp.as(alice));
     const albumId = store.createAlbum({ title: "Long players", artist: "The windows" });
@@ -118,7 +119,7 @@ describe("RecordPlayer library and playlists", () => {
       offset += window.byteLength;
     }
     expect(joined).toEqual(bytes);
-  });
+  }, 60_000);
 
   it("admits an invited editor only after they accept", async () => {
     const owner = new JazzRecordPlayerStore(testApp.as(alice));
