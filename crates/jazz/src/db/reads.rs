@@ -518,18 +518,55 @@ where
     ///
     /// Typed client facades are pinned to that schema even when a catalogue
     /// snapshot advances or rolls back the separate current-write pointer.
+    ///
+    /// The client calls this beside other node operations on the same
+    /// executor. Installing the prepared plans needs the node, and an
+    /// asynchronous node operation (a runtime tick reading large-value
+    /// chunks, for example) may be suspended while holding it, so this waits
+    /// for the lock where a synchronous borrow would panic as a reentrant use.
     #[cfg(feature = "runtime")]
-    pub(crate) fn prepare_query_for_open_schema(
+    pub(crate) async fn prepare_query_for_open_schema_async(
         &self,
         query: &Query,
     ) -> Result<PreparedQuery, Error> {
         self.ensure_open_schema_admitted()?;
-        self.prepare_query_bound_for_schema(
-            query,
-            BTreeMap::new(),
-            &self.schema,
-            self.schema_version_id,
-        )
+        let shape = query.validate_with_schema_version(&self.schema, self.schema_version_id)?;
+        let binding = shape.bind(BTreeMap::new())?;
+        let mut node = self.node.node.lock().await;
+        let (local_plan, global_plan) =
+            if should_install_prepared_plan(&shape) && !node.uses_schema_projected_read(&shape) {
+                (
+                    Some(
+                        node.prepared_query_plan(
+                            &shape,
+                            &binding,
+                            DurabilityTier::Local,
+                            AuthorSubject::SYSTEM,
+                        )
+                        .await?,
+                    ),
+                    Some(
+                        node.prepared_query_plan(
+                            &shape,
+                            &binding,
+                            DurabilityTier::Global,
+                            AuthorSubject::SYSTEM,
+                        )
+                        .await?,
+                    ),
+                )
+            } else {
+                (None, None)
+            };
+        let groove_runtime_token = node.groove_runtime_token();
+        Ok(PreparedQuery {
+            request_identity_claims: None,
+            shape,
+            binding,
+            local_plan,
+            global_plan,
+            groove_runtime_token,
+        })
     }
 
     fn prepare_query_bound_for_schema(

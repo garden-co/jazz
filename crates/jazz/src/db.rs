@@ -1815,7 +1815,7 @@ where
     node: Rc<Node<S>>,
     row_id_source: Rc<RefCell<Box<dyn RowIdSource>>>,
     row_id_source_guarantees_fresh: bool,
-    next_now_ms: Rc<Cell<u64>>,
+    next_now_ms: Rc<WriteClock>,
     /// Set only on the private clone owned by one queued mutation operation.
     reserved_tx_id: Option<TxId>,
     /// True only for a future accepted while the shared owner was Open. Such
@@ -1931,6 +1931,48 @@ impl StreamingValueUploadCleanupTicket {
 pub(super) struct UpstreamUploadDestination {
     remote_node: [u8; 16],
     link_identity: AuthorSubject,
+}
+
+/// Physical-millisecond source for writes whose caller supplies no time.
+///
+/// Linear history stamps every plain column with
+/// `min(tx physical ms, seq physical ms)` (SPEC 4.6), so an application
+/// runtime must tick its HLC from the wall clock: a per-runtime counter
+/// restarts near zero on every open and is not comparable across writers, so
+/// a later write would lose last-writer-wins to an earlier one from a runtime
+/// that merely counted further. Hosts that supply their own time on every
+/// write (the TypeScript runtime passes `Date.now()`, the native relay its
+/// host clock) never consult this. The deterministic counter remains the
+/// default for embedders and tests that need reproducible transaction ids;
+/// `Db::use_wall_clock_for_writes` selects the wall clock.
+struct WriteClock {
+    next_counter_ms: Cell<u64>,
+    wall: Cell<bool>,
+}
+
+impl Default for WriteClock {
+    fn default() -> Self {
+        Self {
+            next_counter_ms: Cell::new(1),
+            wall: Cell::new(false),
+        }
+    }
+}
+
+impl WriteClock {
+    fn next_now_ms(&self) -> u64 {
+        if self.wall.get() {
+            return web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
+                .ok()
+                .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
+                .unwrap_or(0)
+                .min(crate::time::HLC_MAX_PHYSICAL_MS);
+        }
+        let next = self.next_counter_ms.get();
+        self.next_counter_ms.set(next + 1);
+        next
+    }
 }
 
 pub(crate) trait UploadRetryClock {
