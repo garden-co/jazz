@@ -41,6 +41,9 @@ export function UploadDialog({
   const [progress, setProgress] = useState<UploadProgress>();
   const [error, setError] = useState<string>();
   const [createdAlbumId, setCreatedAlbumId] = useState<string>();
+  // Files already written; a retry resumes from the first one that failed.
+  const [writtenCount, setWrittenCount] = useState(0);
+  const [startOrdinal, setStartOrdinal] = useState<number>();
   const isUploading = progress !== undefined;
   const canSubmit = files.length > 0 && (album || title.trim()) && !isUploading;
 
@@ -52,6 +55,8 @@ export function UploadDialog({
     setProgress(undefined);
     setError(undefined);
     setCreatedAlbumId(undefined);
+    setWrittenCount(0);
+    setStartOrdinal(undefined);
   }
 
   async function submit() {
@@ -71,7 +76,18 @@ export function UploadDialog({
             : undefined,
         });
       if (!album) setCreatedAlbumId(albumId);
-      await uploadTracks(store, albumId, files, album ? nextOrdinal : 1, setProgress);
+      // Fixed at the first attempt: the album's live track count grows as we write.
+      const start = startOrdinal ?? (album ? nextOrdinal : 1);
+      setStartOrdinal(start);
+      const firstOrdinal = start + writtenCount;
+      await uploadTracks(
+        store,
+        albumId,
+        files.slice(writtenCount),
+        firstOrdinal,
+        setProgress,
+        (index) => setWrittenCount(writtenCount + index + 1),
+      );
       reset();
       onUploaded(albumId);
     } catch (cause) {
@@ -124,9 +140,12 @@ export function UploadDialog({
                 mode="dropzone"
                 description="MP3 and WebM start playing while they stream; other formats play once read."
                 value={files}
-                onChange={(value) =>
-                  setFiles(value ? (Array.isArray(value) ? value : [value]) : [])
-                }
+                onChange={(value) => {
+                  setFiles(value ? (Array.isArray(value) ? value : [value]) : []);
+                  // A new selection starts over (the album, if created, is kept).
+                  setWrittenCount(0);
+                  setStartOrdinal(undefined);
+                }}
               />
               {progress && (
                 <ProgressBar

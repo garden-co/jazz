@@ -85,6 +85,41 @@ describe("RecordPlayer library and playlists", () => {
     expect(await store.readAudio(trackId)).toEqual(wav);
   });
 
+  it("reassembles a value larger than one playback window from range reads", async () => {
+    const store = new JazzRecordPlayerStore(testApp.as(alice));
+    const albumId = store.createAlbum({ title: "Long players", artist: "The windows" });
+    const size = 2 * AUDIO_WINDOW_BYTES + 12_345;
+    const bytes = new Uint8Array(size);
+    for (let i = 0; i < size; i++) bytes[i] = (i * 31 + (i >> 9)) & 0xff;
+    const trackId = await store.createTrackWithAudio(
+      { albumId, title: "Three windows", ordinal: 1, durationMs: 1_000 },
+      (async function* () {
+        for (let from = 0; from < size; from += 64 * 1024)
+          yield bytes.slice(from, from + 64 * 1024);
+      })(),
+      { mimeType: "application/octet-stream", byteLength: size },
+    );
+
+    const windows: Uint8Array[] = [];
+    for (let from = 0; from < size; from += AUDIO_WINDOW_BYTES) {
+      const window = await store.readAudioRange(
+        trackId,
+        from,
+        Math.min(size, from + AUDIO_WINDOW_BYTES),
+      );
+      expect(window?.byteLength).toBe(Math.min(AUDIO_WINDOW_BYTES, size - from));
+      windows.push(window!);
+    }
+    expect(windows).toHaveLength(3);
+    const joined = new Uint8Array(size);
+    let offset = 0;
+    for (const window of windows) {
+      joined.set(window, offset);
+      offset += window.byteLength;
+    }
+    expect(joined).toEqual(bytes);
+  });
+
   it("admits an invited editor only after they accept", async () => {
     const owner = new JazzRecordPlayerStore(testApp.as(alice));
     const bobDb = testApp.as(bob);

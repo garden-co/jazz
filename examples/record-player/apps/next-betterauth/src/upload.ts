@@ -55,6 +55,7 @@ export async function uploadTracks(
   files: File[],
   firstOrdinal: number,
   onProgress: (progress: UploadProgress) => void,
+  onTrackWritten: (index: number) => void = () => {},
 ): Promise<void> {
   const totalBytes = files.reduce((sum, file) => sum + file.size, 0);
   let done = 0;
@@ -70,6 +71,7 @@ export async function uploadTracks(
       { mimeType: file.type || "application/octet-stream", byteLength: file.size },
     );
     done += file.size;
+    onTrackWritten(index);
   }
 }
 
