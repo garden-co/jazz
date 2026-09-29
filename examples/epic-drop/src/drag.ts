@@ -7,7 +7,10 @@ export type DropPayload =
 
 const ITEM_TYPE = "application/x-epic-drop-item";
 
-export function setDraggedItem(event: React.DragEvent, item: { kind: "file" | "folder"; id: string }) {
+export function setDraggedItem(
+  event: React.DragEvent,
+  item: { kind: "file" | "folder"; id: string },
+) {
   event.dataTransfer.setData(ITEM_TYPE, JSON.stringify(item));
   event.dataTransfer.effectAllowed = "move";
 }

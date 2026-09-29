@@ -17,7 +17,12 @@ async function openRemoteDb(label: string): Promise<Db> {
   const db = await createDb({
     appId: APP_ID,
     serverUrl,
-    account: await prepareTestAccount(createAccountManager, APP_ID, serverUrl, generateAuthSecret()),
+    account: await prepareTestAccount(
+      createAccountManager,
+      APP_ID,
+      serverUrl,
+      generateAuthSecret(),
+    ),
     driver: { type: "persistent", dbName: `epic-drop-${label}-${crypto.randomUUID()}` },
   });
   dbs.push(db);
@@ -38,7 +43,8 @@ function pattern(length: number): Uint8Array {
 }
 
 async function* chunks(bytes: Uint8Array, size: number) {
-  for (let offset = 0; offset < bytes.length; offset += size) yield bytes.slice(offset, offset + size);
+  for (let offset = 0; offset < bytes.length; offset += size)
+    yield bytes.slice(offset, offset + size);
 }
 
 describe("EpicDrop download and preview", () => {
@@ -64,7 +70,9 @@ describe("EpicDrop download and preview", () => {
     const first = await readFileRange(db, file, 0, 64 * 1024);
     expect(first).toEqual(bytes.subarray(0, 64 * 1024));
     const middle = await readFileRange(db, file, 100_000, 100_016);
-    expect(new TextDecoder().decode(middle)).toBe(new TextDecoder().decode(bytes.subarray(100_000, 100_016)));
+    expect(new TextDecoder().decode(middle)).toBe(
+      new TextDecoder().decode(bytes.subarray(100_000, 100_016)),
+    );
     // Ranges past the end are clamped to the file, as the preview's "Show more" relies on.
     const tail = await readFileRange(db, file, bytes.length - 10, bytes.length + 64 * 1024);
     expect(tail).toEqual(bytes.subarray(bytes.length - 10));
@@ -103,7 +111,9 @@ describe("EpicDrop download and preview", () => {
     await expect(bob.all(app.folders, { tier: "global" })).resolves.toEqual([]);
 
     // A forged code is rejected by the server.
-    await expect(redeemInvite(bob, { ...invite, code: crypto.randomUUID() }, bobId)).rejects.toThrow();
+    await expect(
+      redeemInvite(bob, { ...invite, code: crypto.randomUUID() }, bobId),
+    ).rejects.toThrow();
 
     await redeemInvite(bob, parsed!, bobId);
     const folders = await bob.all(app.folders, { tier: "global" });

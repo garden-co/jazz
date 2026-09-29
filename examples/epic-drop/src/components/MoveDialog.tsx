@@ -25,16 +25,26 @@ export function MoveDialog({ item, index, onMove, onClose }: MoveDialogProps) {
     : [];
   React.useEffect(() => setTarget(undefined), [item?.id]);
   return (
-    <Dialog isOpen={item !== undefined} onOpenChange={(open) => !open && onClose()} width={440} purpose="form">
+    <Dialog
+      isOpen={item !== undefined}
+      onOpenChange={(open) => !open && onClose()}
+      width={440}
+      purpose="form"
+    >
       <VStack gap={4}>
-        <DialogHeader title={`Move ${item?.name ?? ""}`} onOpenChange={(open) => !open && onClose()} />
+        <DialogHeader
+          title={`Move ${item?.name ?? ""}`}
+          onOpenChange={(open) => !open && onClose()}
+        />
         <Selector
           label="Destination folder"
           placeholder="Choose a folder"
           hasSearch={targets.length > 8}
           emptyText="No other folders you can edit"
           options={[
-            ...(item?.kind === "folder" && current ? [{ value: TOP_LEVEL, label: "Top level" }] : []),
+            ...(item?.kind === "folder" && current
+              ? [{ value: TOP_LEVEL, label: "Top level" }]
+              : []),
             ...targets.map((folder) => ({ value: folder.id, label: index.label(folder) })),
           ]}
           value={target}

@@ -23,9 +23,7 @@ export function JoinDialog({ invite, userId, onJoined, onClose }: JoinDialogProp
     <Dialog isOpen={invite !== undefined} onOpenChange={(open) => !open && onClose()} width={440}>
       <VStack gap={4}>
         <DialogHeader title="Join a shared folder" onOpenChange={(open) => !open && onClose()} />
-        <Text>
-          Someone invited you to {access} a folder. It will appear under Shared with me.
-        </Text>
+        <Text>Someone invited you to {access} a folder. It will appear under Shared with me.</Text>
         {error && (
           <Banner
             status="error"

@@ -51,14 +51,21 @@ export function ShareDialog({ folder, userId, onClose }: ShareDialogProps) {
       maxHeight="90dvh"
     >
       <VStack gap={5}>
-        <DialogHeader title={`Share ${folder?.name ?? ""}`} onOpenChange={(open) => !open && onClose()} />
+        <DialogHeader
+          title={`Share ${folder?.name ?? ""}`}
+          onOpenChange={(open) => !open && onClose()}
+        />
         <VStack gap={3}>
           <Heading level={3}>Invite with a link</Heading>
           <Text color="secondary">
             Anyone with the link can join with this access. Subfolders and files are shared too.
           </Text>
           <HStack gap={2} vAlign="center" wrap="wrap">
-            <SegmentedControl label="Access" value={role} onChange={(value) => setRole(value as FolderRole)}>
+            <SegmentedControl
+              label="Access"
+              value={role}
+              onChange={(value) => setRole(value as FolderRole)}
+            >
               <SegmentedControlItem value="viewer" label={ROLE_LABEL.viewer} />
               <SegmentedControlItem value="editor" label={ROLE_LABEL.editor} />
             </SegmentedControl>

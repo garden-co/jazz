@@ -18,7 +18,9 @@ export function DropTarget({ children, isDisabled, onDrop }: DropTargetProps) {
       onDragOver={(event) => {
         if (!isDroppable(event)) return;
         event.preventDefault();
-        event.dataTransfer.dropEffect = event.dataTransfer.types.includes("Files") ? "copy" : "move";
+        event.dataTransfer.dropEffect = event.dataTransfer.types.includes("Files")
+          ? "copy"
+          : "move";
         setIsOver(true);
       }}
       onDragLeave={() => setIsOver(false)}

@@ -85,7 +85,9 @@ describe("EpicDrop folder sharing", () => {
 
     await bobDb.expectDenied((db) => db.insert(app.folderMembers, membership("guessed", "viewer")));
     // A viewer code cannot be upgraded to editor access.
-    await bobDb.expectDenied((db) => db.insert(app.folderMembers, membership("view-code", "editor")));
+    await bobDb.expectDenied((db) =>
+      db.insert(app.folderMembers, membership("view-code", "editor")),
+    );
     // An invite for Demos does not open another folder.
     await bobDb.expectDenied((db) =>
       db.insert(app.folderMembers, membership("view-code", "viewer", mixes.id)),
@@ -192,8 +194,6 @@ describe("EpicDrop folder sharing", () => {
     );
 
     await as(alice).delete(app.folderMembers, membership!.id).wait({ tier: "global" });
-    await expect(as(bob).all(app.files.where({ id: file.id }).select("name"))).resolves.toEqual(
-      [],
-    );
+    await expect(as(bob).all(app.files.where({ id: file.id }).select("name"))).resolves.toEqual([]);
   });
 });

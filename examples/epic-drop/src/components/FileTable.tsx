@@ -49,7 +49,13 @@ const comparators = {
 };
 
 /** Folders first, then files; each group sorted by the chosen column. */
-export function FileTable({ entries, canEdit, canShare, onAction, onDropOnFolder }: FileTableProps) {
+export function FileTable({
+  entries,
+  canEdit,
+  canShare,
+  onAction,
+  onDropOnFolder,
+}: FileTableProps) {
   const isNarrow = useMediaQuery("(max-width: 720px)");
   const { sortConfig, applySort } = useTableSortableState<Entry, SortKey>({
     data: entries,
@@ -94,7 +100,9 @@ export function FileTable({ entries, canEdit, canShare, onAction, onDropOnFolder
             <Link isStandalone onClick={() => onAction(entry, "open")} maxLines={1}>
               {entry.name}
             </Link>
-            {entry.kind === "folder" && <Icon icon="chevronRight" size="sm" color="secondary" label="Folder" />}
+            {entry.kind === "folder" && (
+              <Icon icon="chevronRight" size="sm" color="secondary" label="Folder" />
+            )}
           </HStack>
         );
         return entry.kind === "folder" && canEdit ? (
@@ -126,7 +134,8 @@ export function FileTable({ entries, canEdit, canShare, onAction, onDropOnFolder
             header: "Modified",
             sortable: true,
             width: pixel(152),
-            renderCell: (entry) => (entry.modified ? <Timestamp value={entry.modified.getTime()} format="auto" /> : null),
+            renderCell: (entry) =>
+              entry.modified ? <Timestamp value={entry.modified.getTime()} format="auto" /> : null,
           },
           { key: "owner", header: "Owner", sortable: true, width: proportional(1) },
         ] satisfies TableColumn<Entry>[])),

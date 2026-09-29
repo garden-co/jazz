@@ -33,7 +33,13 @@ export const TEXT_PAGE_BYTES = 64 * 1024;
 /** Binary previews show the first bytes as hex. */
 export const HEX_PREVIEW_BYTES = 512;
 
-export function PreviewPanel({ file, headingLevel = 2 }: { file: PreviewFile; headingLevel?: 2 | 3 }) {
+export function PreviewPanel({
+  file,
+  headingLevel = 2,
+}: {
+  file: PreviewFile;
+  headingLevel?: 2 | 3;
+}) {
   const db = useDb();
   const kind = previewKind(file.content_type);
   return (
@@ -81,7 +87,13 @@ type LoadState =
  * Images, audio, video and PDFs render from a Blob URL. The browser seeks
  * inside that Blob, so the whole value is read once rather than per seek.
  */
-function MediaPreview({ file, kind }: { file: PreviewFile; kind: "image" | "audio" | "video" | "pdf" }) {
+function MediaPreview({
+  file,
+  kind,
+}: {
+  file: PreviewFile;
+  kind: "image" | "audio" | "video" | "pdf";
+}) {
   const db = useDb();
   const [state, setState] = React.useState<LoadState>({ status: "idle" });
   const load = React.useCallback(() => {
@@ -117,10 +129,13 @@ function MediaPreview({ file, kind }: { file: PreviewFile; kind: "image" | "audi
     case "error":
       return <Banner status="error" title="Preview unavailable" description={state.message} />;
     case "ready":
-      if (kind === "image") return <img className="preview-media" src={state.url} alt={file.name} />;
+      if (kind === "image")
+        return <img className="preview-media" src={state.url} alt={file.name} />;
       if (kind === "audio") return <audio className="preview-media" src={state.url} controls />;
       if (kind === "video") return <video className="preview-media" src={state.url} controls />;
-      return <iframe className="preview-media preview-document" src={state.url} title={file.name} />;
+      return (
+        <iframe className="preview-media preview-document" src={state.url} title={file.name} />
+      );
   }
 }
 
@@ -201,8 +216,8 @@ function HexPreview({ file }: { file: PreviewFile }) {
   return (
     <VStack gap={2}>
       <Text type="supporting" color="secondary">
-        No preview for this type. The first {formatBytes(Math.min(HEX_PREVIEW_BYTES, file.size_bytes))}{" "}
-        are shown below.
+        No preview for this type. The first{" "}
+        {formatBytes(Math.min(HEX_PREVIEW_BYTES, file.size_bytes))} are shown below.
       </Text>
       <CodeBlock code={dump} size="sm" maxHeight="40vh" />
     </VStack>

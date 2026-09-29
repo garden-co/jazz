@@ -168,7 +168,12 @@ export function FileBrowser() {
   }
 
   function handleAction(entry: Entry, action: EntryAction) {
-    const target: Target = { kind: entry.kind, id: entry.id, name: entry.name, folderId: folder?.id };
+    const target: Target = {
+      kind: entry.kind,
+      id: entry.id,
+      name: entry.name,
+      folderId: folder?.id,
+    };
     switch (action) {
       case "open":
         if (entry.kind === "folder") openFolder(entry.id);
@@ -239,19 +244,28 @@ export function FileBrowser() {
           {
             label: "Rename folder",
             onClick: () =>
-              setDialog({ type: "rename", target: { kind: "folder", id: folder.id, name: folder.name } }),
+              setDialog({
+                type: "rename",
+                target: { kind: "folder", id: folder.id, name: folder.name },
+              }),
           },
           {
             label: "Move folder",
             onClick: () =>
-              setDialog({ type: "move", target: { kind: "folder", id: folder.id, name: folder.name } }),
+              setDialog({
+                type: "move",
+                target: { kind: "folder", id: folder.id, name: folder.name },
+              }),
           },
           { type: "divider" as const },
           {
             label: "Delete folder",
             variant: "destructive" as const,
             onClick: () =>
-              setDialog({ type: "delete", target: { kind: "folder", id: folder.id, name: folder.name } }),
+              setDialog({
+                type: "delete",
+                target: { kind: "folder", id: folder.id, name: folder.name },
+              }),
           },
         ]
       : [];
@@ -283,10 +297,7 @@ export function FileBrowser() {
           </StackItem>
           <HStack gap={2} vAlign="center">
             {index.isMine(folder) && (
-              <Button
-                label="Share"
-                onClick={() => setDialog({ type: "share", folder })}
-              />
+              <Button label="Share" onClick={() => setDialog({ type: "share", folder })} />
             )}
             {canEdit && canNest && (
               <Button
@@ -295,7 +306,12 @@ export function FileBrowser() {
               />
             )}
             {folderMenu.length > 0 && (
-              <MoreMenu label="Folder actions" alignment="end" presentation="adaptive" items={folderMenu} />
+              <MoreMenu
+                label="Folder actions"
+                alignment="end"
+                presentation="adaptive"
+                items={folderMenu}
+              />
             )}
           </HStack>
         </HStack>
@@ -320,7 +336,9 @@ export function FileBrowser() {
         <FileTable
           entries={entries}
           canEdit={canEdit}
-          canShare={(entry) => entry.kind === "folder" && index.byId.get(entry.id)?.owner_id === userId}
+          canShare={(entry) =>
+            entry.kind === "folder" && index.byId.get(entry.id)?.owner_id === userId
+          }
           onAction={handleAction}
           onDropOnFolder={handleDrop}
         />
