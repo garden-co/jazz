@@ -12,7 +12,12 @@ import {
 } from "./websocket.js";
 import { BrowserWorkerTransportPump } from "./browser-worker-transport.js";
 import { NativeRuntimeAdapter, type Transport } from "./native-runtime-adapter.js";
-import { type TxId, type WriteReceipt } from "../client.js";
+import {
+  JazzClient,
+  PersistedWriteRejectedError,
+  type TxId,
+  type WriteReceipt,
+} from "../client.js";
 
 const previousWebSocket = globalThis.WebSocket;
 const TEST_RUNTIME_AUTHOR = new TextEncoder().encode('["urn:jazz:test","runtime"]');
@@ -246,6 +251,61 @@ describe("NativeRuntimeAdapter server transport", () => {
       transactionId: await committedTxId(inserted),
       code: "write_rejected",
       reason: "queued write was denied",
+    });
+  });
+
+  it("surfaces a native local exclusive conflict as PersistedWriteRejectedError", async () => {
+    const conflictedWrite = {
+      ...fakeWrite(),
+      wait: async () => {
+        throw Object.assign(
+          new Error(
+            "(transaction_conflict): row visible parent changed since transaction write was staged",
+          ),
+          { code: "transaction_conflict" },
+        );
+      },
+    };
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({ commitTransaction: () => conflictedWrite, tick: () => undefined }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const openTransactionId = runtime.beginTransaction(
+      "exclusive",
+      "00000000-0000-0000-0000-000000000013" as never,
+    );
+    const txId = runtime.commitTransaction(openTransactionId);
+
+    await expect(runtime.waitForTransaction(txId, "local")).rejects.toMatchObject({
+      kind: "rejected",
+      transactionId: txId,
+      code: "transaction_conflict",
+      reason: "row visible parent changed since transaction write was staged",
+    });
+
+    const client = JazzClient.connectWithRuntime(runtime as never, {
+      appId: "test-app",
+      schema: {},
+    });
+    const error = await client.waitForExclusiveTransaction(txId).then(
+      () => undefined,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(PersistedWriteRejectedError);
+    expect(error).toMatchObject({
+      transactionId: txId,
+      code: "transaction_conflict",
+      reason: "row visible parent changed since transaction write was staged",
     });
   });
 

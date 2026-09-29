@@ -4857,8 +4857,38 @@ function rejectedWaitError(
   /** An Error-compatible diagnostic for direct native callers. */
   message: string;
 } | null {
+  if (isCoreTransactionConflict(error)) return transactionConflictRejection(transactionId, error);
   if (!isCoreWriteRejection(error)) return null;
   return queuedWriteRejection(transactionId, error);
+}
+
+/**
+ * A queued exclusive commit that fails its local serializability check settles
+ * its reserved transaction with core `TransactionConflict`. Surface it as the
+ * same structured rejection an authority rejection produces, keeping the
+ * `transaction_conflict` code so callers can tell a local conflict from an
+ * authority `exclusive_conflict`.
+ */
+function transactionConflictRejection(
+  transactionId: TxId,
+  error: unknown,
+): {
+  kind: "rejected";
+  transactionId: TxId;
+  code: string;
+  reason: string;
+  message: string;
+} {
+  const message = errorMessage(error);
+  const rejection = {
+    kind: "rejected" as const,
+    transactionId,
+    code: "transaction_conflict",
+    reason: /^\(transaction_conflict\):\s*(.*)$/s.exec(message)?.[1] || message,
+    message,
+  };
+  Object.defineProperty(rejection, "message", { enumerable: false });
+  return rejection;
 }
 
 function queuedWriteRejection(
@@ -4957,6 +4987,11 @@ function rejectionReason(message: string): string {
   if (reason === null) return message;
   if (reason.includes("AuthorizationDenied")) return "Write rejected by server authorization";
   return reason || "Write rejected";
+}
+
+/** Whether a native error is a core `TransactionConflict` error, decided by its stable core code. */
+function isCoreTransactionConflict(error: unknown): boolean {
+  return nativeCoreErrorCode(error) === "transaction_conflict";
 }
 
 /** Whether a native error is a core `WriteRejected` error, decided by its stable core code. */
