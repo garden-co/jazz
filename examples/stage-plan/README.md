@@ -32,6 +32,10 @@ pnpm dev
 `pnpm dev` starts a local Jazz server through the Vite plugin. The first time
 you open the app, it creates your crew profile and a demo show,
 "The Late Lanterns: album launch", with the same eight tasks every time.
+If the server rejects part of the demo while the tab is open, a banner offers
+**Save the rest**. If that happens after the tab has closed, the next time
+the chief opens the show the app restores their membership and the invite,
+but not the board: the missing tasks stay missing.
 
 To see sync and permissions with two people, open the app in a second browser
 profile (or a private window). On the demo show, open **Crew**, copy the

@@ -20,6 +20,9 @@ import { ShowPage } from "./ShowPage.js";
 // One bootstrap per account, even when React mounts effects twice.
 const bootstraps = new Map<string, ReturnType<typeof setUpAccount>>();
 
+/** How long "Save the rest" may take before the banner comes back. */
+const RETRY_TIMEOUT_MS = 20_000;
+
 /** The server rejected part of the demo show; the person can finish it. */
 type UnsavedDemo = { isSaving: boolean; retry: () => void };
 
@@ -61,17 +64,27 @@ function useSetup(route: Route): { me?: Me; setup: Setup } {
         setSetup({ status: "ready" });
         return;
       }
+      const showBanner = () => {
+        if (!cancelled) setSetup({ status: "ready", unsavedDemo: { isSaving: false, retry } });
+      };
       const retry = () => {
         setSetup({ status: "ready", unsavedDemo: { isSaving: true, retry } });
-        resumeDemoShow(db, me, demo.showId).then(
-          (next) => watchDemo(me, next),
-          (error) => {
-            console.error("Could not finish the demo show", error);
-            if (!cancelled) setSetup({ status: "ready", unsavedDemo: { isSaving: false, retry } });
-          },
-        );
+        // Server reads and acks wait while the server is unreachable, so stop
+        // showing "Saving" after a while and offer the button again. If the
+        // attempt finishes later, it still clears the banner.
+        const giveUp = setTimeout(showBanner, RETRY_TIMEOUT_MS);
+        resumeDemoShow(db, me, demo.showId)
+          .then((next) => watchDemo(me, next))
+          .then(
+            () => clearTimeout(giveUp),
+            (error) => {
+              clearTimeout(giveUp);
+              console.error("Could not finish the demo show", error);
+              showBanner();
+            },
+          );
       };
-      setSetup({ status: "ready", unsavedDemo: { isSaving: false, retry } });
+      showBanner();
     };
 
     bootstrap.then(

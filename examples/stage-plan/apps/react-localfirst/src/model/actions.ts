@@ -97,15 +97,20 @@ export async function ensureChiefSetup(db: Db, me: Me, showId: string) {
     db.all(app.showInvites.where({ showId }), { tier: LOCAL_OR_SERVER }),
   ]);
   if (membership && invites.length > 0) return [];
+  // The invite code may already be out in a copied link, and an upsert would
+  // replace it. So a missing invite is only written once the server confirms
+  // it has none; offline, this waits for the connection instead of guessing.
+  const needsInvite =
+    invites.length === 0 &&
+    (await db.all(app.showInvites.where({ showId }), { tier: "remote" })).length === 0;
+  if (membership && !needsInvite) return [];
   const [membershipId, inviteId] = await Promise.all([
     chiefMembershipId(showId, me.account),
     firstInviteId(showId),
   ]);
   const setup = await db.transaction((tx) => {
     if (!membership) tx.upsert(app.showCrew, membershipId, chiefMembership(showId, me));
-    if (invites.length === 0) {
-      tx.upsert(app.showInvites, inviteId, { showId, code: newInviteCode() });
-    }
+    if (needsInvite) tx.upsert(app.showInvites, inviteId, { showId, code: newInviteCode() });
   });
   return [setup] as WriteResult<unknown>[];
 }
