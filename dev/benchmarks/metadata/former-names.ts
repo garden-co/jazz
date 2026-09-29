@@ -169,8 +169,8 @@ export const formerBenchmarks: ReadonlyMap<string, FormerBenchmark> = new Map([
 
   // Smaller points of cases that stay.
   ["poster_shop_open_canvas[512]", dropped("poster_shop_open_canvas[4096]")],
-  ["world_tour_member_calendar_window[128]", dropped("world_tour_member_calendar_window[1024]")],
-  ["world_tour_public_calendar_window[128]", dropped("world_tour_public_calendar_window[1024]")],
+  ["world_tour_member_calendar_window[128]", dropped("world_tour_member_calendar_window[4096]")],
+  ["world_tour_public_calendar_window[128]", dropped("world_tour_public_calendar_window[4096]")],
   ...sized(
     ["big_label_artist_load", "big_label_catalog_load"],
     [512, 4096],
