@@ -1,4 +1,4 @@
-import { definePermissions, type RowContext } from "jazz-tools/permissions";
+import { definePermissions, type RowContext, type RowRefValue } from "jazz-tools/permissions";
 import { permissions as betterAuthPermissions } from "./schema-better-auth/schema";
 import { app, type Reaction, type Room } from "./schema";
 
@@ -8,11 +8,11 @@ const bandChatPermissions = definePermissions(
     const me = session.user.account;
     const isMember = (room: RowContext<Room>) =>
       policy.roomMembers.exists.where({ roomId: room.id, memberAuthor: me });
-    const isMemberOf = (roomId: unknown) =>
+    const isMemberOf = (roomId: RowRefValue) =>
       policy.roomMembers.exists.where({ roomId, memberAuthor: me });
     // Admission is explicit about the creator rather than inheriting "may
     // update the room": members may also bump the room's last activity.
-    const isCreatorOf = (roomId: unknown) =>
+    const isCreatorOf = (roomId: RowRefValue) =>
       policy.rooms.exists.where({ id: roomId, "$createdBy.account": me });
     const canMutateReaction = (reaction: RowContext<Reaction>) =>
       allOf([
