@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { mintLocalFirstToken, verifyLocalFirstIdentityProof } from "jazz-napi";
 import { localFirstSessionFromToken } from "../backend/request-auth.js";
 import { ANONYMOUS_JWT_ISSUER, LOCAL_FIRST_JWT_ISSUER } from "../runtime/client-session.js";
-import type { AuthMode, Session } from "../runtime/context.js";
+import type { Session } from "../runtime/context.js";
 import type { WasmSchema } from "../drivers/types.js";
 import type { CompiledPermissions } from "../permissions/index.js";
 import { deploy } from "../dev/catalogue.js";
