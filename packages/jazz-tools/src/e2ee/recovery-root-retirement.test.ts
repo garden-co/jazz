@@ -120,19 +120,37 @@ it("retires one recovery root with an epoch rotation and preserves other authori
       (device) => device.id !== creator!.id,
     )!;
     await owner.e2ee.devices.approve(secondDevice.id).wait();
+    const recoveryMemberClient = await open();
+    const recoveryMember = (await recoveryMemberClient.e2ee.devices.list()).find(
+      (device) => device.state === "pending",
+    )!;
+    await recoveryMemberClient.e2ee.recovery.use(compromised.material).wait();
+    expect(await recoveryMemberClient.e2ee.devices.list()).toContainEqual(
+      expect.objectContaining({ id: recoveryMember.id, state: "active" }),
+    );
     const before = await owner.e2ee.recovery.status(compromised.material);
+    expect(before.account.activeDeviceIds).toContain(recoveryMember.id);
 
+    const historicalDeliveries = await owner.all(deviceRequestApp.__e2ee_recovery_deliveries, {
+      tier: "edge",
+    });
+    expect(historicalDeliveries.some((delivery) => delivery.rootId === compromisedRootId)).toBe(
+      true,
+    );
+    expect(historicalDeliveries.some((delivery) => delivery.rootId === retainedRootId)).toBe(true);
     await owner.e2ee.recovery.revoke(compromisedRootId).wait();
 
     const after = await owner.e2ee.recovery.status(retained.material);
     expect(after.account.epochId).not.toBe(before.account.epochId);
     expect(after.account.activeDeviceIds).toEqual(before.account.activeDeviceIds);
+    expect(after.account.activeDeviceIds).toContain(recoveryMember.id);
     expect(after.account.recoveryRootIds).toEqual([retainedRootId]);
     expect(after.account.validatedRootId).toBe(retainedRootId);
 
     const deliveries = await owner.all(deviceRequestApp.__e2ee_recovery_deliveries, {
       tier: "edge",
     });
+    expect(deliveries).toEqual(expect.arrayContaining(historicalDeliveries));
     expect(
       deliveries.some(
         (delivery) =>
@@ -156,7 +174,7 @@ it("retires one recovery root with an epoch rotation and preserves other authori
     const compromisedRecord = JSON.parse(compromised.material) as {
       signingPrivateKey: number[];
     };
-    const recoveringStore = JSON.parse((await stores[2]!.store.read())!) as {
+    const recoveringStore = JSON.parse((await stores[stores.length - 1]!.store.read())!) as {
       devices: { id: string; signingPrivateKey: number[] }[];
     };
     const recoveringDeviceKey = Uint8Array.from(
