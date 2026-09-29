@@ -43,8 +43,8 @@ const webkitIndexedDbReceipt = fs.readFileSync(
   "utf8",
 );
 const codspeedWorkflow = fs.readFileSync(path.join(root, ".github/workflows/codspeed.yml"), "utf8");
-const routeSubscriptionCurve = fs.readFileSync(
-  path.join(root, "crates/jazz/benches/route_subscription_curve.rs"),
+const bandChatWalltime = fs.readFileSync(
+  path.join(root, "examples/band-chat/benchmarks/benches/walltime.rs"),
   "utf8",
 );
 const realisticWorkflow = fs.readFileSync(
@@ -1561,7 +1561,7 @@ test("CodSpeed baselines every main merge and runs only for benchmark-labeled PR
   }, /label gate/);
 });
 
-test("CodSpeed retains the route subscription binding-scale wall-time receipt", () => {
+test("CodSpeed measures route fan-out through BandChat's live-rooms case", () => {
   const document = parse(codspeedWorkflow);
   const plan = document.jobs["native-workloads-plan"];
   const measure = document.jobs["native-workloads-walltime"];
@@ -1577,27 +1577,25 @@ test("CodSpeed retains the route subscription binding-scale wall-time receipt", 
     { encoding: "utf8" },
   ).stdout;
   assert.ok(
-    JSON.parse(matrix).includes("route-subscription"),
-    "route subscription wall-time workload must remain present",
+    JSON.parse(matrix).includes("band-chat"),
+    "BandChat wall-time workload (owner of route fan-out) must remain present",
   );
   // Features are selected at `cargo codspeed build` time. `run` only executes
-  // that copied target; cargo-codspeed rejects Cargo feature flags there, which
-  // once left this receipt reporting no walltime benchmarks.
+  // that copied target; cargo-codspeed rejects Cargo feature flags there.
   const args = (action) =>
     spawnSync(
       "node",
-      [path.join(root, "dev/benchmarks/codspeed-artifact.mjs"), action, "route-subscription"],
+      [path.join(root, "dev/benchmarks/codspeed-artifact.mjs"), action, "band-chat"],
       { encoding: "utf8" },
     ).stdout.trim();
   assert.equal(
     args("build-args"),
-    "--package jazz --bench route_subscription_curve --features testing",
+    "--package jazz-example-band-chat-benchmark --bench walltime --features jazz-benchmark-guard/mimalloc",
   );
-  assert.equal(args("run-args"), "--package jazz --bench route_subscription_curve");
+  assert.equal(args("run-args"), "--package jazz-example-band-chat-benchmark --bench walltime");
   assert.doesNotMatch(JSON.stringify(measure), /--features|JAZZ_ROUTE_CURVE_ROUTES/);
-  assert.match(routeSubscriptionCurve, /#\[divan::bench\(args = \[ROUTE_BENCH_BINDINGS\]/);
-  assert.match(routeSubscriptionCurve, /fn attach_route_bindings/);
-  assert.match(routeSubscriptionCurve, /fn matching_write_fanout/);
+  assert.match(bandChatWalltime, /#\[divan::bench\(args = \[ROOMS_OPEN\]/);
+  assert.match(bandChatWalltime, /fn band_chat_new_message_rooms_open/);
 });
 
 test("React Native artifact builds are explicit same-repository label opt-ins", () => {
@@ -1841,11 +1839,7 @@ test("CodSpeed measures every example benchmark suite in wall-clock mode", () =>
     }).stdout.trim();
   for (const [workload, benchmarkPackage, benches] of [
     ["big-label", "jazz-example-big-label-benchmark", ["ingest_walltime", "loads"]],
-    [
-      "w1",
-      "jazz-example-benchmark-w1",
-      ["reads_memory_walltime", "reads_rocksdb_walltime", "ahead_current"],
-    ],
+    ["stage-plan", "jazz-example-stage-plan-benchmark", ["walltime"]],
   ]) {
     for (const action of ["build-args", "run-args"]) {
       const line = args(action, workload);
@@ -1857,10 +1851,10 @@ test("CodSpeed measures every example benchmark suite in wall-clock mode", () =>
   assert.throws(
     () =>
       assert.match(
-        args("build-args", "w1").replace(" --bench ahead_current", ""),
-        /--bench ahead_current(?: |$)/,
+        args("build-args", "big-label").replace(" --bench loads", ""),
+        /--bench loads(?: |$)/,
       ),
-    /ahead_current/,
+    /loads/,
   );
 });
 

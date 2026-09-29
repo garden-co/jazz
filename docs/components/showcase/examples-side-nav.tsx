@@ -2,11 +2,14 @@
 
 import { useEffect, useState } from "react";
 import { SideNav, SideNavItem, SideNavSection } from "@astryxdesign/core/SideNav";
-import { heroExamples } from "@/lib/showcase/catalogue";
+import { heroExamples, moreBenchmarkSections } from "@/lib/showcase/catalogue";
 
 const sections = [
   { title: "Examples", items: heroExamples.map((e) => ({ id: e.id, label: e.title })) },
-  { title: "Benchmarks", items: [{ id: "benchmarks", label: "More benchmarks" }] },
+  {
+    title: "More benchmarks",
+    items: moreBenchmarkSections.map((section) => ({ id: section.id, label: section.title })),
+  },
 ];
 const ids = sections.flatMap((s) => s.items.map((i) => i.id));
 

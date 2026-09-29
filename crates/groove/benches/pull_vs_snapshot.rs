@@ -38,8 +38,13 @@
 //! Before measuring, every engine's output is checked for multiset equality
 //! against the others for a sample of users (benchmark validity, INV-PERF-2).
 //!
+//! CodSpeed (the Engine section of the examples page) measures only the IVM
+//! engines (`prepared_warm`, `prepared_cold`) at 5,000 users. The full sweep,
+//! including the reference engines, runs with `GROOVE_BENCH_SWEEP=1`:
+//!
 //! ```text
 //! cargo bench -p groove --bench pull_vs_snapshot
+//! GROOVE_BENCH_SWEEP=1 cargo bench -p groove --bench pull_vs_snapshot
 //! ```
 
 use std::cell::Cell;
@@ -65,7 +70,26 @@ const TOP_K: usize = 20;
 fn main() {
     jazz_benchmark_guard::refuse_contaminated_measurement();
     verify_engines_agree();
-    divan::main();
+    if sweep() {
+        divan::Divan::from_args().run_ignored().main();
+    } else {
+        divan::main();
+    }
+}
+
+/// CodSpeed measures only Groove's IVM (prepared) engines at the larger table
+/// size. `GROOVE_BENCH_SWEEP=1` also runs the smaller size and the reference
+/// engines (`snapshot`, `pull`), which are `#[ignore]`d otherwise.
+fn sweep() -> bool {
+    std::env::var_os("GROOVE_BENCH_SWEEP").is_some()
+}
+
+fn ivm_user_counts() -> Vec<u64> {
+    if sweep() {
+        USER_COUNTS.to_vec()
+    } else {
+        vec![USER_COUNTS[USER_COUNTS.len() - 1]]
+    }
 }
 
 type Rows = Vec<Vec<Value>>;
@@ -422,21 +446,23 @@ macro_rules! scenario_benches {
             use super::*;
 
             #[divan::bench(args = USER_COUNTS)]
+            #[ignore]
             fn snapshot(bencher: divan::Bencher, users: u64) {
                 bench_snapshot(bencher, $scenario, users);
             }
 
-            #[divan::bench(args = USER_COUNTS)]
+            #[divan::bench(args = ivm_user_counts())]
             fn prepared_warm(bencher: divan::Bencher, users: u64) {
                 bench_prepared(bencher, $scenario, users);
             }
 
-            #[divan::bench(args = USER_COUNTS)]
+            #[divan::bench(args = ivm_user_counts())]
             fn prepared_cold(bencher: divan::Bencher, users: u64) {
                 bench_prepared_cold(bencher, $scenario, users);
             }
 
             #[divan::bench(args = USER_COUNTS)]
+            #[ignore]
             fn pull(bencher: divan::Bencher, users: u64) {
                 bench_pull(bencher, $scenario, users);
             }

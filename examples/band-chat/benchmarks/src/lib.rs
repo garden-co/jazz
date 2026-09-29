@@ -4,6 +4,8 @@
 //! than importing application runtime or fixture helpers.
 
 mod fast_resume;
+pub mod live_rooms;
+pub mod membership_room;
 
 pub use fast_resume::{FastResumeFixture, FastResumeReceipt};
 

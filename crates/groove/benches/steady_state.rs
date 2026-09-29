@@ -34,8 +34,13 @@
 //! measuring, every engine replays the same write sequence and must reach the
 //! same caches as the others (benchmark validity, INV-PERF-2).
 //!
+//! CodSpeed (the Engine section of the examples page) measures only `ivm` at
+//! 100 subscribers. The full sweep, including the reference engines, runs with
+//! `GROOVE_BENCH_SWEEP=1`:
+//!
 //! ```text
 //! cargo bench -p groove --bench steady_state
+//! GROOVE_BENCH_SWEEP=1 cargo bench -p groove --bench steady_state
 //! ```
 
 use std::cell::RefCell;
@@ -68,7 +73,26 @@ fn main() {
         return;
     }
     verify_engines_agree();
-    divan::main();
+    if sweep() {
+        divan::Divan::from_args().run_ignored().main();
+    } else {
+        divan::main();
+    }
+}
+
+/// CodSpeed measures only Groove's IVM engine at the larger subscriber count.
+/// `GROOVE_BENCH_SWEEP=1` also runs the smaller count and the reference
+/// engines (SQLite, pull, snapshot), which are `#[ignore]`d otherwise.
+fn sweep() -> bool {
+    std::env::var_os("GROOVE_BENCH_SWEEP").is_some()
+}
+
+fn ivm_subscriber_counts() -> Vec<u64> {
+    if sweep() {
+        SUBSCRIBER_COUNTS.to_vec()
+    } else {
+        vec![SUBSCRIBER_COUNTS[SUBSCRIBER_COUNTS.len() - 1]]
+    }
 }
 
 /// Diagnostic, not a benchmark: split the `ivm` engine's per-write time into
@@ -887,22 +911,25 @@ macro_rules! workload_benches {
         mod $module {
             use super::*;
 
-            #[divan::bench(args = SUBSCRIBER_COUNTS)]
+            #[divan::bench(args = ivm_subscriber_counts())]
             fn ivm(bencher: divan::Bencher, subs: u64) {
                 bench(bencher, EngineKind::Ivm, $workload, subs);
             }
 
             #[divan::bench(args = SUBSCRIBER_COUNTS)]
+            #[ignore]
             fn sqlite_touched(bencher: divan::Bencher, subs: u64) {
                 bench(bencher, EngineKind::SqliteTouched, $workload, subs);
             }
 
             #[divan::bench(args = SUBSCRIBER_COUNTS)]
+            #[ignore]
             fn sqlite_all(bencher: divan::Bencher, subs: u64) {
                 bench(bencher, EngineKind::SqliteAll, $workload, subs);
             }
 
             #[divan::bench(args = SUBSCRIBER_COUNTS)]
+            #[ignore]
             fn pull_touched(bencher: divan::Bencher, subs: u64) {
                 bench(bencher, EngineKind::PullTouched, $workload, subs);
             }
@@ -911,6 +938,7 @@ macro_rules! workload_benches {
             // 10-subscriber case already shows that, and 100 subscribers would
             // cost seconds per iteration on the hosted runner.
             #[divan::bench(args = [SUBSCRIBER_COUNTS[0]])]
+            #[ignore]
             fn snapshot_touched(bencher: divan::Bencher, subs: u64) {
                 bench(bencher, EngineKind::SnapshotTouched, $workload, subs);
             }

@@ -14,7 +14,7 @@ const reads = {
 };
 
 export const bandChatBenchmarks: BenchmarkMetadata[] = [];
-for (const messages of [1024, 4096]) {
+for (const messages of [4096]) {
   bandChatBenchmarks.push(
     {
       ...reads,
@@ -44,22 +44,9 @@ for (const messages of [1024, 4096]) {
         explanation: "One unread-room list per iteration, however many rooms it returns.",
       },
     },
-    {
-      ...reads,
-      name: `band_chat_author_history[${messages}]`,
-      title: "BandChat · a member's messages",
-      description: "Show every message one member has written, newest first.",
-      fixture: fixture(messages),
-      includes: [`One prepared read returning ${messages / 32} messages, sent-at order`],
-      work: {
-        count: 1,
-        unit: "histories/s",
-        explanation: `One full author history (${messages / 32} messages) per iteration.`,
-      },
-    },
   );
 }
-for (const messages of [100, 1000, 10000]) {
+for (const messages of [100, 10000]) {
   bandChatBenchmarks.push({
     name: `band_chat_caught_up_fast_resume[${messages}]`,
     title: "BandChat · reconnect when already up to date",
@@ -84,3 +71,68 @@ for (const messages of [100, 1000, 10000]) {
     source,
   });
 }
+
+const room = (messages: number) =>
+  `32 members, 64 rooms (odd rooms public), 4 members per room, ${messages.toLocaleString("en-US")} messages of which a quarter are in the opened private room; settled before timing.`;
+const roomStorage = "In-memory Jazz database; in-process authority, no network";
+bandChatBenchmarks.push(
+  {
+    name: "band_chat_open_room[10000]",
+    title: "BandChat · open a private room",
+    description:
+      "A member opens a private room: the newest 21 messages with their senders, newest first, through the membership read policy (the room is public or the reader is a member). A policy-protected ordered page currently loads the room's full visible history before trimming to 21 (#1733), so this grows with the room's size rather than the page's.",
+    fixture: room(10000),
+    storage: roomStorage,
+    includes: ["subscribe_for_identity opening, runtime ticks and the first published page"],
+    excludes: [
+      "Schema compilation, seeding and query preparation",
+      "Attachments, network and subscription teardown",
+    ],
+    work: {
+      count: 1,
+      unit: "rooms opened/s",
+      explanation: "One room opening per iteration, returning a 21-message page.",
+    },
+    source,
+  },
+  {
+    name: "band_chat_send_100[10000]",
+    title: "BandChat · send messages",
+    description:
+      "A member sends 100 messages into the room they have open. Each is a standalone write that the in-process authority checks against the insert policy (member of the room, sending as their own profile) and accepts, and that then appears at the top of the open page.",
+    fixture: `${room(10000)} The room is already open before timing.`,
+    storage: roomStorage,
+    includes: [
+      "Message insert, authority insert-policy check and acceptance",
+      "Runtime ticks until the open page shows each message",
+    ],
+    excludes: ["Room opening, seeding and network"],
+    work: {
+      count: 100,
+      unit: "messages sent/s",
+      explanation: "100 messages, each sent, accepted and shown before the next.",
+    },
+    source,
+  },
+  {
+    name: "band_chat_new_message_rooms_open[100]",
+    title: "BandChat · a new message while 100 rooms are open",
+    description:
+      "100 members each keep a different room open: one prepared query shape with 100 bindings, all hydrated. One new message lands in the busy room; its view gains the message and drops its oldest shown one, every other view stays quiet.",
+    fixture:
+      "1,001 rooms; the busy room holds 1,000 messages, every other room one. Views show the newest 100 messages of their room.",
+    storage: "In-memory Jazz database",
+    includes: [
+      "One matching message write and the resulting maintained work",
+      "Draining every open view and asserting the delta",
+    ],
+    excludes: ["Seeding, opening and hydrating the 100 views, and teardown"],
+    work: {
+      count: 1,
+      unit: "messages delivered/s",
+      explanation:
+        "One write per iteration. The 100 open views are load context, NOT 100 writes or 100 delivered deltas.",
+    },
+    source,
+  },
+);

@@ -29,6 +29,8 @@ import {
 import {
   heroBenchmarkNames,
   heroExamples,
+  moreBenchmarkSections,
+  placeBenchmark,
   type HeroExample,
   type Lookup,
 } from "@/lib/showcase/catalogue";
@@ -58,6 +60,27 @@ function useSummaries() {
     return byName;
   }, [data]);
   return { data, error, summaries };
+}
+
+type Entry = { bench: Benchmark; summary: MetricSummary };
+
+/**
+ * Every current benchmark that is not a metric card, keyed by the hero example
+ * or "More benchmarks" section that owns it. Retired names are left out.
+ */
+function useGroups(summaries: Summaries) {
+  return useMemo(() => {
+    const grouped = new Map<string, Entry[]>();
+    for (const [name, entry] of summaries) {
+      if (heroBenchmarkNames.has(name)) continue;
+      const place = placeBenchmark(name, getBenchmarkMetadata(name)?.source);
+      if (!place) continue;
+      grouped.set(place, [...(grouped.get(place) ?? []), entry]);
+    }
+    for (const entries of grouped.values())
+      entries.sort((a, b) => a.bench.name.localeCompare(b.bench.name));
+    return grouped;
+  }, [summaries]);
 }
 
 function MetricCard({
@@ -208,11 +231,13 @@ function Placeholder({ title, body }: { title: string; body: string }) {
 function Hero({
   example,
   summaries,
+  others,
   lookup,
   loading,
 }: {
   example: HeroExample;
   summaries: Summaries;
+  others: Entry[];
   lookup: Lookup;
   loading: boolean;
 }) {
@@ -270,6 +295,12 @@ function Hero({
             ))}
           </Grid>
         )}
+        {others.length > 0 && (
+          <VStack gap={2}>
+            <Heading level={4}>All {example.title} benchmarks</Heading>
+            <BenchmarkTable entries={others} />
+          </VStack>
+        )}
         <Grid columns={{ minWidth: 280, max: 2 }} gap={3}>
           <Placeholder
             title="What it costs to run"
@@ -285,49 +316,84 @@ function Hero({
   );
 }
 
-const suites: [prefix: string, label: string][] = [
-  ["crates/jazz/", "Core engine"],
-  ["examples/benchmarks/w1/", "Team task board (W1)"],
-  ["examples/policy-scoped-documents/", "Policy-scoped documents"],
-  ["examples/todo-client-localfirst-ts/", "Todos"],
-  ["examples/big-label/", "BigLabel"],
-  ["examples/permissioned-resources/", "Permissioned resources"],
-  ["examples/band-chat/", "BandChat"],
-  ["examples/world-tour/", "World Tour"],
-  ["examples/wequencer/", "Wequencer"],
-  ["examples/poster-shop/", "PosterShop"],
-  ["examples/record-player/", "RecordPlayer"],
-  ["examples/chat-react/", "Chat"],
-  ["examples/auth-simple-chat/", "Auth chat"],
-  ["examples/epic-drop/", "EpicDrop"],
-  ["examples/jamazon-warehouse/", "Jamazon Warehouse"],
-  ["examples/music-agent/", "MusicAgent"],
-];
-const otherSuite = "Other benchmarks";
-
-function suiteOf(name: string): string {
-  const source = getBenchmarkMetadata(name)?.source;
-  return suites.find(([prefix]) => source?.startsWith(prefix))?.[1] ?? otherSuite;
+function BenchmarkTable({ entries }: { entries: Entry[] }) {
+  return (
+    <Table density="compact" verticalAlign="top">
+      <TableHeader>
+        <TableRow>
+          <TableHeaderCell>Benchmark</TableHeaderCell>
+          <TableHeaderCell>Median</TableHeaderCell>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {entries.map(({ bench, summary }) => {
+          const metadata = getBenchmarkMetadata(bench.name);
+          const previous = summary.history.at(-2);
+          const time = displayedTime(summary.headline.median, true);
+          return (
+            <TableRow key={bench.id}>
+              <TableCell>
+                <VStack gap={0.5}>
+                  <Text display="block">{metadata?.title ?? bench.name.replaceAll("_", " ")}</Text>
+                  <Text type="code" color="secondary" display="block" className="break-all">
+                    {bench.name}
+                  </Text>
+                </VStack>
+              </TableCell>
+              <TableCell>
+                <WithHistory
+                  benchmarkId={bench.id}
+                  name={bench.name}
+                  summary={summary}
+                  label={bench.name}
+                  alignment="end"
+                >
+                  <div
+                    className="benchmark-median"
+                    tabIndex={0}
+                    role="group"
+                    aria-label={`${bench.name}: ${time}. Focus for history.`}
+                  >
+                    <VStack gap={0.5}>
+                      <Text weight="medium" hasTabularNumbers display="block">
+                        {time}
+                        {previous && (
+                          <>
+                            {" "}
+                            <Change
+                              previous={previous.point.median}
+                              current={summary.headline.median}
+                            />
+                          </>
+                        )}
+                      </Text>
+                      <Text type="supporting" display="block">
+                        {metadata
+                          ? `${formatThroughput(summary.headline.median, metadata, true)} · `
+                          : ""}
+                        {summary.basis === "release" ? summary.label : "main"}
+                      </Text>
+                    </VStack>
+                  </div>
+                </WithHistory>
+              </TableCell>
+            </TableRow>
+          );
+        })}
+      </TableBody>
+    </Table>
+  );
 }
 
-function MiscBenchmarks({ summaries, loading }: { summaries: Summaries; loading: boolean }) {
-  const groups = useMemo(() => {
-    const grouped = new Map<string, { bench: Benchmark; summary: MetricSummary }[]>();
-    for (const [name, entry] of summaries) {
-      if (heroBenchmarkNames.has(name)) continue;
-      const suite = suiteOf(name);
-      grouped.set(suite, [...(grouped.get(suite) ?? []), entry]);
-    }
-    const order = [...suites.map(([, label]) => label), otherSuite];
-    return [...grouped.entries()].sort(([a], [b]) => order.indexOf(a) - order.indexOf(b));
-  }, [summaries]);
+function MoreBenchmarks({ groups, loading }: { groups: Map<string, Entry[]>; loading: boolean }) {
   return (
     <VStack as="section" id="benchmarks" gap={6} className="scroll-mt-24">
       <VStack gap={2}>
         <Heading level={2}>More benchmarks</Heading>
         <Text as="p" color="secondary" display="block" className="max-w-3xl">
-          Every other wallclock benchmark we track, grouped by the workload it belongs to. Hover,
-          focus or tap a number for its history.
+          Every example above owns the benchmarks of what it does best. These are the rest: an
+          anonymized adopter workload, and the engine work no product owns. Hover, focus or tap a
+          number for its history.
         </Text>
         {loading && (
           <Text type="supporting" display="block">
@@ -335,77 +401,15 @@ function MiscBenchmarks({ summaries, loading }: { summaries: Summaries; loading:
           </Text>
         )}
       </VStack>
-      {groups.map(([suite, entries]) => (
-        <VStack key={suite} gap={2}>
-          <Heading level={3}>{suite}</Heading>
-          <Table density="compact" verticalAlign="top">
-            <TableHeader>
-              <TableRow>
-                <TableHeaderCell>Benchmark</TableHeaderCell>
-                <TableHeaderCell>Median</TableHeaderCell>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {entries
-                .sort((a, b) => a.bench.name.localeCompare(b.bench.name))
-                .map(({ bench, summary }) => {
-                  const metadata = getBenchmarkMetadata(bench.name);
-                  const previous = summary.history.at(-2);
-                  const time = displayedTime(summary.headline.median, true);
-                  return (
-                    <TableRow key={bench.id}>
-                      <TableCell>
-                        <VStack gap={0.5}>
-                          <Text display="block">
-                            {metadata?.title ?? bench.name.replaceAll("_", " ")}
-                          </Text>
-                          <Text type="code" color="secondary" display="block" className="break-all">
-                            {bench.name}
-                          </Text>
-                        </VStack>
-                      </TableCell>
-                      <TableCell>
-                        <WithHistory
-                          benchmarkId={bench.id}
-                          name={bench.name}
-                          summary={summary}
-                          label={bench.name}
-                          alignment="end"
-                        >
-                          <div
-                            className="benchmark-median"
-                            tabIndex={0}
-                            role="group"
-                            aria-label={`${bench.name}: ${time}. Focus for history.`}
-                          >
-                            <VStack gap={0.5}>
-                              <Text weight="medium" hasTabularNumbers display="block">
-                                {time}
-                                {previous && (
-                                  <>
-                                    {" "}
-                                    <Change
-                                      previous={previous.point.median}
-                                      current={summary.headline.median}
-                                    />
-                                  </>
-                                )}
-                              </Text>
-                              <Text type="supporting" display="block">
-                                {metadata
-                                  ? `${formatThroughput(summary.headline.median, metadata, true)} · `
-                                  : ""}
-                                {summary.basis === "release" ? summary.label : "main"}
-                              </Text>
-                            </VStack>
-                          </div>
-                        </WithHistory>
-                      </TableCell>
-                    </TableRow>
-                  );
-                })}
-            </TableBody>
-          </Table>
+      {moreBenchmarkSections.map((section) => (
+        <VStack key={section.id} id={section.id} gap={2} className="scroll-mt-24">
+          <Heading level={3}>{section.title}</Heading>
+          <Text as="p" color="secondary" display="block" className="max-w-3xl">
+            {section.description}
+          </Text>
+          {(groups.get(section.id)?.length ?? 0) > 0 && (
+            <BenchmarkTable entries={groups.get(section.id) ?? []} />
+          )}
         </VStack>
       ))}
     </VStack>
@@ -420,6 +424,7 @@ export function Showcase() {
     return seconds === undefined ? null : estimatedSeconds(seconds);
   };
   const released = [...summaries.values()].some((entry) => entry.summary.basis === "release");
+  const groups = useGroups(summaries);
 
   return (
     <div className="mx-auto w-full max-w-[1120px] px-4 pb-24 pt-10 sm:px-8">
@@ -456,11 +461,17 @@ export function Showcase() {
         {heroExamples.map((example) => (
           <VStack key={example.id} gap={10}>
             <Divider />
-            <Hero example={example} summaries={summaries} lookup={lookup} loading={loading} />
+            <Hero
+              example={example}
+              summaries={summaries}
+              others={groups.get(example.id) ?? []}
+              lookup={lookup}
+              loading={loading}
+            />
           </VStack>
         ))}
         <Divider />
-        <MiscBenchmarks summaries={summaries} loading={loading} />
+        <MoreBenchmarks groups={groups} loading={loading} />
       </VStack>
     </div>
   );

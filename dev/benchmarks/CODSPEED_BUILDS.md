@@ -1,12 +1,11 @@
 # CodSpeed native benchmark build handoff
 
 Every CodSpeed walltime workload compiles on Blacksmith ARM64 Ubuntu 22.04,
-then runs on the existing `codspeed-macro` machines. The eighteen workloads are the
-thirteen native examples (todo, permissioned resources, policy-scoped documents,
-BandChat, WorldTour, Chat, auth Chat, PosterShop, RecordPlayer, Wequencer,
-EpicDrop, Jamazon warehouse, MusicAgent), BigLabel (ingest and loads), W1 (memory, RocksDB and
-ahead-current), route subscription, the Groove IVM experiment and maintained
-selective hydration. `workloadSpecs` in `codspeed-artifact.mjs` is the one
+then runs on the existing `codspeed-macro` machines. The thirteen workloads are the
+hero examples (StagePlan, BandChat, BandBook, WorldTour, Wequencer, PosterShop,
+RecordPlayer, EpicDrop, Jamazon warehouse, MusicAgent, and BigLabel with its
+ingest and loads benches), the anonymized permissioned-resources adopter
+workload, and the Groove IVM engine experiment. `workloadSpecs` in `codspeed-artifact.mjs` is the one
 table of each workload's package, benches, build-time features, measurement
 thread stack and timeout. The workflow's plan job reads its `matrix` and
 `measure` output, and the build and measurement jobs read `build-args` and
@@ -67,11 +66,11 @@ thread stack and timeout. The workflow's plan job reads its `matrix` and
 
 ## Examples and failure behavior
 
-A todo build seals `target/codspeed/walltime/jazz-example-todo-benchmark/walltime`
+A StagePlan build seals `target/codspeed/walltime/jazz-example-stage-plan-benchmark/walltime`
 and the Cargo CodSpeed CLI. The consumer checks out the same workflow SHA,
 downloads only the named artifact from this workflow, verifies it and runs the
 original `cargo codspeed run` command. It never compiles a fallback executable.
-A W1 build seals both `reads_memory_walltime` and `reads_rocksdb_walltime`; a
+A BigLabel build seals both `ingest_walltime` and `loads`; a
 bundle missing either, or sealed for another workload, is rejected.
 
 Rerunning a producer replaces its bundle for the same source/run; a failed

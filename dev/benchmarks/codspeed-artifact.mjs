@@ -23,17 +23,17 @@ const nativeExample = (name) => ({
   minStack: nativeStack,
   timeout: 20,
 });
+// Hero examples in the docs page's order, then the anonymized adopter
+// workload and the engine suite. Each hero example owns the areas it measures;
+// see dev/EXAMPLES_AND_BENCHMARKS_PROGRAM.md.
 const workloadSpecs = {
-  todo: nativeExample("todo"),
-  "permissioned-resources": nativeExample("permissioned-resources"),
-  "policy-scoped-documents": nativeExample("policy-scoped-documents"),
+  "stage-plan": { ...nativeExample("stage-plan"), timeout: 40 },
   "band-chat": nativeExample("band-chat"),
+  "band-book": nativeExample("band-book"),
   "world-tour": nativeExample("world-tour"),
-  chat: nativeExample("chat"),
-  "auth-chat": nativeExample("auth-chat"),
+  wequencer: nativeExample("wequencer"),
   "poster-shop": nativeExample("poster-shop"),
   "record-player": nativeExample("record-player"),
-  wequencer: nativeExample("wequencer"),
   "epic-drop": nativeExample("epic-drop"),
   "jamazon-warehouse": nativeExample("jamazon-warehouse"),
   "music-agent": nativeExample("music-agent"),
@@ -44,33 +44,13 @@ const workloadSpecs = {
     minStack: null,
     timeout: 25,
   },
-  w1: {
-    package: "jazz-example-benchmark-w1",
-    benches: ["reads_memory_walltime", "reads_rocksdb_walltime", "ahead_current"],
-    features: null,
-    minStack: null,
-    timeout: 40,
-  },
-  "route-subscription": {
-    package: "jazz",
-    benches: ["route_subscription_curve"],
-    features: "testing",
-    minStack: null,
-    timeout: 25,
-  },
+  "permissioned-resources": nativeExample("permissioned-resources"),
   "groove-ivm": {
     package: "groove",
     benches: ["pull_vs_snapshot", "steady_state"],
     features: null,
     minStack: null,
     timeout: 40,
-  },
-  "selective-hydration": {
-    package: "jazz",
-    benches: ["selective_global_hydration"],
-    features: "testing",
-    minStack: null,
-    timeout: 35,
   },
 };
 export const workloads = Object.keys(workloadSpecs);

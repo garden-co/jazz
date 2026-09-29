@@ -6,7 +6,7 @@ No production runtime code was changed for this investigation.
 
 ## Workload and boundaries
 
-`examples/todo-client-localfirst-ts/benchmarks/src/lib.rs` creates a synthetic `tasks` table
+`examples/stage-plan/benchmarks/src/tasks/mod.rs` (formerly the todo example benchmark) creates a synthetic `tasks` table
 with `title` and `done`. It seeds one transaction, drops/reopens the worker,
 sends a Local query snapshot to a fresh in-memory foreground, updates 90% of
 rows in one foreground transaction, uploads the commit to the worker, returns
@@ -33,12 +33,12 @@ rejects that size up front. Larger logical workloads require multiple batches.
 ## Reproduce
 
 ```sh
-cargo build -p jazz-example-todo-benchmark --bin todo-profile --profile perf
+cargo build -p jazz-example-stage-plan-benchmark --bin stage-plan-tasks-profile --profile perf
 # Run the profiling binary below.
-JAZZ_BATCH_ROWS=150,750,1500,3000 target/perf/todo-profile
+JAZZ_BATCH_ROWS=150,750,1500,3000 target/perf/stage-plan-tasks-profile
 JAZZ_BATCH_ROWS=1500 JAZZ_BATCH_UPDATE_PERCENT=50 \
-  target/perf/todo-profile
-cargo test -p jazz-example-todo-benchmark --lib
+  target/perf/stage-plan-tasks-profile
+cargo test -p jazz-example-stage-plan-benchmark --lib tasks::
 ```
 
 Build once, run repeatedly. The first native dependency build is a cold cost;
@@ -51,7 +51,7 @@ On Linux, collect attribution separately from ordinary timings:
 ```sh
 perf record --clockid mono -e task-clock -F 999 \
   --call-graph dwarf,16384 -o /tmp/local-batch.perf -- \
-  env JAZZ_BATCH_ROWS=1500 target/perf/todo-profile
+  env JAZZ_BATCH_ROWS=1500 target/perf/stage-plan-tasks-profile
 perf script --no-inline --ns -i /tmp/local-batch.perf \
   -F comm,pid,tid,time,event,ip,sym,dso
 ```

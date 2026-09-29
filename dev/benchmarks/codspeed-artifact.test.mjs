@@ -31,16 +31,16 @@ test("benchmark artifact handoff fails closed on stale or corrupted executables"
   const dir = await mkdtemp(path.join(os.tmpdir(), "jazz-codspeed-artifact-"));
   process.chdir(dir);
   try {
-    const { binaries, bundle } = artifactPaths("todo");
+    const { binaries, bundle } = artifactPaths("stage-plan");
     const binary = binaries.walltime;
     await mkdir(path.dirname(binary), { recursive: true });
     await writeFile(binary, "benchmark fixture");
     await writeFile("cli", "CLI fixture");
-    const reset = () => seal("todo", identity, "cli");
+    const reset = () => seal("stage-plan", identity, "cli");
     const manifestFile = path.join(bundle, "manifest.json");
     await t.test("matching bundle and retry in the same run are accepted", async () => {
       const manifest = await reset();
-      assert.deepEqual(await verify("todo", identity), manifest);
+      assert.deepEqual(await verify("stage-plan", identity), manifest);
       assert.equal(manifest.format, "jazz-codspeed-benchmark-artifact-v2");
       assert.equal(manifest.contract.profile, "bench");
       assert.deepEqual(manifest.contract.sourcePaths, {
@@ -49,7 +49,7 @@ test("benchmark artifact handoff fails closed on stale or corrupted executables"
       });
       assert.equal(manifest.contract.features, "jazz-benchmark-guard/mimalloc");
       assert.equal(manifest.files.walltime.length, 64);
-      assert.deepEqual(await verify("todo", identity), manifest);
+      assert.deepEqual(await verify("stage-plan", identity), manifest);
     });
     for (const [key, value] of [
       ["source", "b".repeat(40)],
@@ -58,7 +58,7 @@ test("benchmark artifact handoff fails closed on stale or corrupted executables"
     ]) {
       await t.test(`reject ${key} mismatch`, async () => {
         await reset();
-        await assert.rejects(verify("todo", { ...identity, [key]: value }), /mismatch/);
+        await assert.rejects(verify("stage-plan", { ...identity, [key]: value }), /mismatch/);
       });
     }
     for (const [key, value] of [
@@ -69,31 +69,31 @@ test("benchmark artifact handoff fails closed on stale or corrupted executables"
       await t.test(`reject wrong ${key}`, async () => {
         const manifest = await reset();
         await writeFile(manifestFile, JSON.stringify({ ...manifest, [key]: value }));
-        await assert.rejects(verify("todo", identity));
+        await assert.rejects(verify("stage-plan", identity));
       });
     }
     for (const name of ["walltime", "cargo-codspeed"]) {
       await t.test(`reject modified ${name}`, async () => {
         await reset();
         await writeFile(path.join(bundle, name), "corruption");
-        await assert.rejects(verify("todo", identity), /hash mismatch/);
+        await assert.rejects(verify("stage-plan", identity), /hash mismatch/);
       });
     }
     await t.test("reject the previous relative-path artifact contract", async () => {
       const manifest = await reset();
       manifest.contract = { ...manifest.contract, sourcePaths: "workspace-relative" };
       await writeFile(manifestFile, JSON.stringify(manifest));
-      await assert.rejects(verify("todo", identity), /build contract mismatch/);
+      await assert.rejects(verify("stage-plan", identity), /build contract mismatch/);
     });
     await t.test("reject extra, absent and symlinked files", async () => {
       await reset();
       await writeFile(path.join(bundle, "unexpected"), "extra");
-      await assert.rejects(verify("todo", identity));
+      await assert.rejects(verify("stage-plan", identity));
       await rm(path.join(bundle, "unexpected"));
       await rm(path.join(bundle, "walltime"));
-      await assert.rejects(verify("todo", identity));
+      await assert.rejects(verify("stage-plan", identity));
       await symlink(path.resolve(binary), path.join(bundle, "walltime"));
-      await assert.rejects(verify("todo", identity), /regular file/);
+      await assert.rejects(verify("stage-plan", identity), /regular file/);
     });
     await t.test("reject arbitrary workload paths", () => {
       for (const name of ["../../escape", "constructor", "__proto__"]) {
@@ -112,32 +112,28 @@ test("multi-bench workloads seal and install every bench executable", async () =
   const dir = await mkdtemp(path.join(os.tmpdir(), "jazz-codspeed-artifact-multi-"));
   process.chdir(dir);
   try {
-    const { binaries, bundle } = artifactPaths("w1");
+    const { binaries, bundle } = artifactPaths("big-label");
     assert.deepEqual(binaries, {
-      ahead_current: "target/codspeed/walltime/jazz-example-benchmark-w1/ahead_current",
-      reads_memory_walltime:
-        "target/codspeed/walltime/jazz-example-benchmark-w1/reads_memory_walltime",
-      reads_rocksdb_walltime:
-        "target/codspeed/walltime/jazz-example-benchmark-w1/reads_rocksdb_walltime",
+      ingest_walltime: "target/codspeed/walltime/jazz-example-big-label-benchmark/ingest_walltime",
+      loads: "target/codspeed/walltime/jazz-example-big-label-benchmark/loads",
     });
     for (const binary of Object.values(binaries)) {
       await mkdir(path.dirname(binary), { recursive: true });
       await writeFile(binary, binary);
     }
     await writeFile("cli", "CLI fixture");
-    const manifest = await seal("w1", identity, "cli");
+    const manifest = await seal("big-label", identity, "cli");
     assert.deepEqual(Object.keys(manifest.files).sort(), [
-      "ahead_current",
       "cargo-codspeed",
-      "reads_memory_walltime",
-      "reads_rocksdb_walltime",
+      "ingest_walltime",
+      "loads",
     ]);
     assert.equal(manifest.contract.features, null);
-    assert.deepEqual(await verify("w1", identity), manifest);
+    assert.deepEqual(await verify("big-label", identity), manifest);
     // A bundle sealed for one workload never verifies as another.
     await assert.rejects(verify("groove-ivm", identity));
-    await rm(path.join(bundle, "reads_rocksdb_walltime"));
-    await assert.rejects(verify("w1", identity));
+    await rm(path.join(bundle, "loads"));
+    await assert.rejects(verify("big-label", identity));
   } finally {
     process.chdir(previous);
     await rm(dir, { recursive: true, force: true });
@@ -151,24 +147,19 @@ test("each workload builds and runs exactly what it measured on the macro runner
   const native = (name) =>
     `--package jazz-example-${name}-benchmark --bench walltime --features jazz-benchmark-guard/mimalloc`;
   const previous = {
-    todo: native("todo"),
-    "permissioned-resources": native("permissioned-resources"),
-    "policy-scoped-documents": native("policy-scoped-documents"),
+    "stage-plan": native("stage-plan"),
     "band-chat": native("band-chat"),
+    "band-book": native("band-book"),
     "world-tour": native("world-tour"),
-    chat: native("chat"),
-    "auth-chat": native("auth-chat"),
+    wequencer: native("wequencer"),
     "poster-shop": native("poster-shop"),
     "record-player": native("record-player"),
-    wequencer: native("wequencer"),
     "epic-drop": native("epic-drop"),
     "jamazon-warehouse": native("jamazon-warehouse"),
     "music-agent": native("music-agent"),
     "big-label": "--package jazz-example-big-label-benchmark --bench ingest_walltime --bench loads",
-    w1: "--package jazz-example-benchmark-w1 --bench reads_memory_walltime --bench reads_rocksdb_walltime --bench ahead_current",
-    "route-subscription": "--package jazz --bench route_subscription_curve --features testing",
+    "permissioned-resources": native("permissioned-resources"),
     "groove-ivm": "--package groove --bench pull_vs_snapshot --bench steady_state",
-    "selective-hydration": "--package jazz --bench selective_global_hydration --features testing",
   };
   assert.deepEqual(workloads, Object.keys(previous));
   for (const [workload, args] of Object.entries(previous)) {
@@ -273,25 +264,21 @@ test("measurement keeps each workload's former thread stack and timeout", () => 
   // the others ran with the default stack under their own job limits.
   const stack = "4194304";
   assert.deepEqual(measureSettings(), {
-    todo: { min_stack: stack, timeout: 20 },
-    "permissioned-resources": { min_stack: stack, timeout: 20 },
-    "policy-scoped-documents": { min_stack: stack, timeout: 20 },
+    "stage-plan": { min_stack: stack, timeout: 40 },
     "band-chat": { min_stack: stack, timeout: 20 },
+    "band-book": { min_stack: stack, timeout: 20 },
     "world-tour": { min_stack: stack, timeout: 20 },
-    chat: { min_stack: stack, timeout: 20 },
-    "auth-chat": { min_stack: stack, timeout: 20 },
+    wequencer: { min_stack: stack, timeout: 20 },
     "poster-shop": { min_stack: stack, timeout: 20 },
     "record-player": { min_stack: stack, timeout: 20 },
-    wequencer: { min_stack: stack, timeout: 20 },
     "epic-drop": { min_stack: stack, timeout: 20 },
     "jamazon-warehouse": { min_stack: stack, timeout: 20 },
     "music-agent": { min_stack: stack, timeout: 20 },
     "big-label": { min_stack: "", timeout: 25 },
-    w1: { min_stack: "", timeout: 40 },
-    "route-subscription": { min_stack: "", timeout: 25 },
+    "permissioned-resources": { min_stack: stack, timeout: 20 },
     "groove-ivm": { min_stack: "", timeout: 40 },
-    "selective-hydration": { min_stack: "", timeout: 35 },
   });
+
   const cli = (action) =>
     execFileSync("node", [path.join(root, "dev/benchmarks/codspeed-artifact.mjs"), action], {
       encoding: "utf8",
@@ -364,7 +351,7 @@ test("compiler cache restores across revisions while isolating compatible worklo
   const prefix = cache.match(/          restore-keys: \|\n            (.+)/)[1];
   const render = (template, overrides = {}) => {
     const values = {
-      "matrix.workload": "todo",
+      "matrix.workload": "stage-plan",
       "runner.os": "Linux",
       "runner.arch": "ARM64",
       "github.sha": "source-a",
@@ -380,7 +367,7 @@ test("compiler cache restores across revisions while isolating compatible worklo
   assert.notEqual(oldKey, nextKey, "each source can save new workspace outputs");
   assert.ok(oldKey.startsWith(nextPrefix), "next source must restore previous source outputs");
   for (const change of [
-    { "matrix.workload": "policy-scoped-documents" },
+    { "matrix.workload": "band-book" },
     { "runner.os": "macOS" },
     { "runner.arch": "X64" },
     { lockHash: "lock-b" },

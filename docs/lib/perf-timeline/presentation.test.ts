@@ -14,7 +14,7 @@ test("estimates divide time by exactly five and always carry an asterisk", () =>
   assert.equal(displayedTime(0.005, true), "1 ms*");
 });
 test("estimated throughput is five times measured, with distinct labeling", () => {
-  const meta = getBenchmarkMetadata("sequential_insert_1350_rocksdb")!;
+  const meta = getBenchmarkMetadata("stage_plan_add_task_1350")!;
   assert.equal(formatThroughput(6, meta), "225 inserts/s");
   assert.equal(formatThroughput(6, meta, true), "1,125 inserts/s*");
   assert.equal(formatThroughput(0, meta), "—");
