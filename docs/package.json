@@ -17,7 +17,7 @@
   },
   "dependencies": {
     "@astryxdesign/core": "0.6.3",
-    "@garden-co/design": "github:garden-co/design#322de9bbdadad4b240b1be74de5a061872876930",
+    "@garden-co/design": "github:garden-co/design#e40d6ff2e79debe4aac4df8b54601708ee8b304c",
     "@vercel/analytics": "^2.0.1",
     "feed": "^5.2.1",
     "fumadocs-core": "16.6.2",
