@@ -886,7 +886,7 @@ where
 
     /// Ordinary `Db::open` nodes are Local receivers. Only the structurally
     /// separate history-complete path acts as the Core fate authority.
-    fn receives_commits_as_local(&self) -> bool {
+    pub(super) fn receives_commits_as_local(&self) -> bool {
         self.receives_commits_as_local
     }
 

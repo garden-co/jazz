@@ -34,7 +34,10 @@ where
             .await
     }
 
-    async fn transaction_is_exclusive(&self, id: OpenTransactionId) -> Result<bool, Error> {
+    pub(super) async fn transaction_is_exclusive(
+        &self,
+        id: OpenTransactionId,
+    ) -> Result<bool, Error> {
         self.lock_for_transaction_operation(id)
             .await?
             .transaction_is_exclusive(id)

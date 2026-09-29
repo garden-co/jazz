@@ -2,4 +2,4 @@
 "jazz-tools": patch
 ---
 
-An exclusive transaction can no longer commit on top of a row the server already deleted or changed. Before, a backend could read a revoked row from its local replica (for example a deleted invite), and a retry after `exclusive_conflict` could be accepted anyway. Rows returned by queries inside an exclusive transaction are now checked row by row on the server.
+Exclusive transactions no longer act on stale data. Reads inside an exclusive transaction now fetch the server's rows for their snapshot first, so a backend sees rows it had never received (for example someone else's redemption of a single-use invite). A row the server already deleted, such as a revoked invite, can no longer be committed on: the server now checks every row the transaction read, including on retries after `exclusive_conflict`.

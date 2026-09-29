@@ -475,9 +475,28 @@ where
                 (Err(error), _) | (Ok(_), Err(error)) => Err(error),
             };
         }
-        let coverage = if require_coverage {
+        // A partial node holds no node-wide history below its exclusive
+        // snapshot's `global_base`: that cut advances with any authority
+        // receipt. Its exclusive reads must therefore hydrate through the
+        // authority at the frozen snapshot and wait for that binding's receipt
+        // (INV-TX-13), whatever tier the caller asked for. Otherwise a missing
+        // or already-deleted row is read from whatever the replica happens to
+        // hold, and the authority validates the predicate against a cut the
+        // reader never had (garden-co/jazz#3694).
+        let exclusive_snapshot_read = match open_tx {
+            Some(open_tx) if self.node.receives_commits_as_local() => {
+                self.transaction_is_exclusive(open_tx).await?
+                    && opts.propagation == Propagation::Full
+            }
+            _ => false,
+        };
+        let coverage = if require_coverage || exclusive_snapshot_read {
+            let mut coverage_opts = opts.clone();
+            if exclusive_snapshot_read {
+                coverage_opts.tier = coverage_opts.tier.max(DurabilityTier::Global);
+            }
             let attachment = self
-                .attach_query_with_opts_async(&prepared, opts.clone(), open_tx, author)
+                .attach_query_with_opts_async(&prepared, coverage_opts, open_tx, author)
                 .await?;
             Some(SerializedReadCoverage {
                 attachment: Some(attachment),

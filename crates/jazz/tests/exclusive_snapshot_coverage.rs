@@ -1,0 +1,379 @@
+//! Reads inside an exclusive transaction on a partial client hydrate through
+//! the authority at the transaction's frozen snapshot (INV-TX-13), whatever
+//! tier the caller asked for (garden-co/jazz#3694).
+//!
+//! A partial client's snapshot cut advances with any authority receipt, so
+//! without that hydration an exclusive read evaluates whatever the replica
+//! happens to hold: a row it never received reads as absent, and a row the
+//! authority already deleted still reads as present. Each test drives a Core
+//! shell and real clients over queued wire transports, with the reads issued
+//! through the same serialized entry point the language bindings use.
+#![cfg(feature = "runtime")]
+
+use std::cell::RefCell;
+use std::collections::{BTreeMap, VecDeque};
+use std::future::Future;
+use std::pin::pin;
+use std::rc::Rc;
+use std::task::{Context, Poll, Waker};
+
+mod common;
+
+use jazz::db::{
+    Db, DbConfig, DbIdentity, ExclusiveTxOps, ReadOpts, SerializedReadResult, WireTransportAdapter,
+    block_on,
+};
+use jazz::groove::records::Value;
+use jazz::groove::storage::TestStorage;
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
+use jazz::query::{Query, col, eq, lit};
+use jazz::schema::JazzSchema;
+use jazz::serving::{InMemoryServerShell, InMemoryServerShellConfig, NodeRole, ServerSession};
+use jazz::tools::{ColumnType, OpenTransactionId, SchemaBuilder, TableSchemaBuilder};
+use jazz::tx::{DurabilityTier, TxId};
+use jazz::wire::{TransportError, WireTransport};
+
+use common::compile_schema;
+
+const MAX_TURNS: usize = 200;
+
+fn schema() -> JazzSchema {
+    use jazz::tools::test_support::AllowAll;
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(TableSchemaBuilder::new("invites").column("code", ColumnType::Text))
+            .table(TableSchemaBuilder::new("members").column("code", ColumnType::Text))
+            .allow_all()
+            .build(),
+    )
+}
+
+fn identity(byte: u8, author: AuthorSubject) -> DbIdentity {
+    DbIdentity {
+        node: NodeUuid::from_bytes([byte; 16]),
+        author,
+    }
+}
+
+#[derive(Clone, Default)]
+struct QueuedWireTransport {
+    queues: Rc<RefCell<(VecDeque<Vec<u8>>, VecDeque<Vec<u8>>)>>,
+}
+
+impl WireTransport for QueuedWireTransport {
+    fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
+        self.queues.borrow_mut().1.push_back(frame);
+        Ok(())
+    }
+
+    fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+        self.queues.borrow_mut().0.pop_front()
+    }
+}
+
+struct Client {
+    db: Db,
+    wire: QueuedWireTransport,
+    session: ServerSession,
+}
+
+/// One Core and its connected clients, pumped in lockstep.
+struct Net {
+    core: RefCell<InMemoryServerShell>,
+    clients: Vec<Client>,
+}
+
+impl Net {
+    fn new(clients: &[u8]) -> Self {
+        let schema = schema();
+        let mut core = InMemoryServerShell::start(
+            InMemoryServerShellConfig::new(schema.clone(), identity(0xc0, AuthorSubject::SYSTEM))
+                .with_role(NodeRole::Core),
+        )
+        .unwrap();
+        let clients = clients
+            .iter()
+            .map(|&byte| {
+                let author = AuthorSubject::for_test_bytes([byte; 16]);
+                let cfs = schema.column_families();
+                let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+                let db = block_on(Db::open(DbConfig::new(
+                    schema.clone(),
+                    TestStorage::new(&refs),
+                    identity(byte, author),
+                )))
+                .unwrap();
+                let wire = QueuedWireTransport::default();
+                block_on(
+                    db.connect_upstream(Box::new(WireTransportAdapter::current(wire.clone()))),
+                );
+                let session = core.accept_subscriber_session(author).unwrap();
+                Client { db, wire, session }
+            })
+            .collect();
+        Self {
+            core: RefCell::new(core),
+            clients,
+        }
+    }
+
+    fn db(&self, index: usize) -> &Db {
+        &self.clients[index].db
+    }
+
+    fn pump(&self) {
+        let mut core = self.core.borrow_mut();
+        for client in &self.clients {
+            block_on(client.db.tick()).unwrap();
+            let outbound = client
+                .wire
+                .queues
+                .borrow_mut()
+                .1
+                .drain(..)
+                .collect::<Vec<_>>();
+            core.receive_frames(client.session, outbound).unwrap();
+        }
+        core.tick().unwrap();
+        for client in &self.clients {
+            for frame in core.take_frames(client.session).unwrap() {
+                client.wire.queues.borrow_mut().0.push_back(frame.into());
+            }
+            block_on(client.db.tick()).unwrap();
+        }
+    }
+
+    /// Poll `future` the way bindings re-poll a pending native operation,
+    /// pumping every endpoint in between.
+    fn drive<T>(&self, future: impl Future<Output = T>) -> T {
+        let mut future = pin!(future);
+        let mut context = Context::from_waker(Waker::noop());
+        for _ in 0..MAX_TURNS {
+            if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
+                return output;
+            }
+            self.pump();
+        }
+        panic!("operation did not complete within {MAX_TURNS} turns");
+    }
+
+    /// One-shot read through the binding entry point, with the binding's own
+    /// coverage choice: only an explicit Global read asks for coverage.
+    fn read(
+        &self,
+        client: usize,
+        query: &Query,
+        tier: DurabilityTier,
+        open_tx: Option<OpenTransactionId>,
+    ) -> Vec<RowUuid> {
+        let db = self.db(client);
+        let bytes = postcard::to_allocvec(query).unwrap();
+        let read = db.all_serialized_query(
+            &bytes,
+            ReadOpts {
+                tier,
+                ..ReadOpts::default()
+            },
+            open_tx,
+            None,
+            None,
+            tier >= DurabilityTier::Global,
+            || false,
+            |attachment| db.detach_query(attachment),
+        );
+        let SerializedReadResult::Rows(rows) = self.drive(read).expect("read") else {
+            panic!("expected plain rows");
+        };
+        rows.iter().map(|row| row.row_uuid()).collect()
+    }
+
+    fn settle(&self, client: usize, tx_id: TxId) -> Result<TxId, jazz::db::Error> {
+        self.drive(
+            self.db(client)
+                .wait_for_transaction(tx_id, DurabilityTier::Global),
+        )
+    }
+
+    fn create_invite(&self, client: usize, code: &str) -> RowUuid {
+        let write = block_on(
+            self.db(client)
+                .insert("invites", cells(code), Default::default()),
+        )
+        .unwrap();
+        self.settle(client, write.mergeable_tx_id())
+            .expect("invite settles");
+        write.row_uuid()
+    }
+
+    fn revoke(&self, client: usize, invite: RowUuid) {
+        let write = block_on(
+            self.db(client)
+                .delete("invites", invite, Default::default()),
+        )
+        .unwrap();
+        self.settle(client, write.mergeable_tx_id())
+            .expect("revocation settles");
+    }
+
+    /// Advance `client`'s known authority cut with a receipt for an unrelated
+    /// query, without delivering anything about invites.
+    fn unrelated_receipt(&self, client: usize) {
+        self.read(
+            client,
+            &Query::from("members"),
+            DurabilityTier::Global,
+            None,
+        );
+    }
+
+    /// The invite-link recipe at the default (local) read tier: check the
+    /// invite inside an exclusive transaction, add a membership only if it
+    /// exists, and report whether the server accepted the commit.
+    fn redeem(&self, client: usize, code: &str) -> Redeem {
+        let db = self.db(client);
+        self.unrelated_receipt(client);
+        let open = OpenTransactionId::new();
+        block_on(db.begin_exclusive(open)).unwrap();
+        if self
+            .read(
+                client,
+                &invite_query(code),
+                DurabilityTier::Local,
+                Some(open),
+            )
+            .is_empty()
+        {
+            db.abandon_transaction_handle(open).ok();
+            return Redeem::Invalid;
+        }
+        self.drive(
+            db.exclusive_tx_ref(open)
+                .insert("members", cells(code), Default::default()),
+        )
+        .unwrap();
+        let tx_id = self.drive(db.commit_exclusive_handle(open)).unwrap();
+        match self.settle(client, tx_id) {
+            Ok(_) => Redeem::Joined,
+            Err(_) => Redeem::Conflict,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Redeem {
+    Invalid,
+    Joined,
+    Conflict,
+}
+
+fn cells(code: &str) -> BTreeMap<String, Value> {
+    BTreeMap::from([("code".to_owned(), Value::String(code.to_owned()))])
+}
+
+fn invite_query(code: &str) -> Query {
+    Query::from("invites").filter(eq(col("code"), lit(code)))
+}
+
+const OWNER: usize = 0;
+const BACKEND: usize = 1;
+
+/// A backend that never received an invite still sees it: the exclusive read
+/// hydrates at its snapshot even though the cut already covers the invite.
+#[test]
+fn exclusive_read_sees_an_invite_the_backend_never_received() {
+    let net = Net::new(&[0x0a, 0x0b]);
+    let invite = net.create_invite(OWNER, "abc");
+    net.unrelated_receipt(BACKEND);
+
+    let open = OpenTransactionId::new();
+    block_on(net.db(BACKEND).begin_exclusive(open)).unwrap();
+    assert_eq!(
+        net.read(
+            BACKEND,
+            &invite_query("abc"),
+            DurabilityTier::Local,
+            Some(open)
+        ),
+        vec![invite]
+    );
+}
+
+/// garden-co/jazz#3694: an invite revoked before the backend's cut must never
+/// add a member, on any attempt.
+///
+/// The backend still holds the invite: a snapshot receipt does not yet
+/// revalidate extra local inputs, so the read sees the stale row and the
+/// authority rejects it by its row proof. Reading it as absent needs that
+/// revalidation (#3696).
+#[test]
+fn revoked_invite_never_adds_a_member() {
+    let net = Net::new(&[0x0a, 0x0b]);
+    let invite = net.create_invite(OWNER, "abc");
+    assert_eq!(net.redeem(BACKEND, "abc"), Redeem::Joined);
+
+    net.revoke(OWNER, invite);
+    for _ in 0..3 {
+        assert_ne!(net.redeem(BACKEND, "abc"), Redeem::Joined);
+    }
+    assert_eq!(
+        net.read(OWNER, &Query::from("members"), DurabilityTier::Global, None)
+            .len(),
+        1,
+        "only the redemption before the revocation added a member"
+    );
+}
+
+/// The revocation lands between the exclusive read and the commit: the read
+/// saw a live invite, so the authority must reject the membership.
+#[test]
+fn revocation_after_the_read_rejects_the_redemption() {
+    let net = Net::new(&[0x0a, 0x0b]);
+    let invite = net.create_invite(OWNER, "abc");
+    net.unrelated_receipt(BACKEND);
+    let db = net.db(BACKEND);
+    let open = OpenTransactionId::new();
+    block_on(db.begin_exclusive(open)).unwrap();
+    assert_eq!(
+        net.read(
+            BACKEND,
+            &invite_query("abc"),
+            DurabilityTier::Local,
+            Some(open)
+        ),
+        vec![invite]
+    );
+
+    net.revoke(OWNER, invite);
+
+    net.drive(
+        db.exclusive_tx_ref(open)
+            .insert("members", cells("abc"), Default::default()),
+    )
+    .unwrap();
+    let tx_id = net.drive(db.commit_exclusive_handle(open)).unwrap();
+    assert!(net.settle(BACKEND, tx_id).is_err());
+    assert!(
+        net.read(OWNER, &Query::from("members"), DurabilityTier::Global, None)
+            .is_empty()
+    );
+}
+
+/// A single-use invite redeemed on one backend cannot be redeemed again on a
+/// second backend whose cut already covers the first redemption.
+#[test]
+fn a_redemption_on_another_backend_is_seen_as_taken() {
+    let net = Net::new(&[0x0a, 0x0b, 0x0c]);
+    net.create_invite(OWNER, "abc");
+    assert_eq!(net.redeem(BACKEND, "abc"), Redeem::Joined);
+    net.unrelated_receipt(2);
+
+    // "Only if nobody has redeemed it": the second backend must see the
+    // first redemption, which it never received.
+    let open = OpenTransactionId::new();
+    block_on(net.db(2).begin_exclusive(open)).unwrap();
+    let taken = Query::from("members").filter(eq(col("code"), lit("abc")));
+    assert_eq!(
+        net.read(2, &taken, DurabilityTier::Local, Some(open)).len(),
+        1
+    );
+}
