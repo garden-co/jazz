@@ -21,7 +21,7 @@ import { Heading, Text } from "@astryxdesign/core/Text";
 import { useAll } from "jazz-tools/react";
 import { useState } from "react";
 import { formatCents } from "@/src/format";
-import { consoleQueries, warehouseQueries } from "@/src/warehouse";
+import { consoleQueries, ORDER_STATUS, warehouseQueries } from "@/src/warehouse";
 import { useScope } from "./console";
 import { Page } from "./page";
 
@@ -191,9 +191,16 @@ function OrderDetails({
 }
 
 export function StatusBadge({ status }: { status: string }) {
-  return status === "delivered" ? (
-    <Badge variant="success" label="Delivered" />
-  ) : (
-    <Badge variant="warning" label="Pending" />
-  );
+  switch (status) {
+    case ORDER_STATUS.delivered:
+      return <Badge variant="success" label="Delivered" />;
+    case ORDER_STATUS.draft:
+      // A checkout that reserved stock but was interrupted before placing the
+      // order. Resubmitting its request key places it.
+      return <Badge variant="info" label="Reserved" />;
+    case ORDER_STATUS.cancelled:
+      return <Badge variant="neutral" label="Cancelled" />;
+    default:
+      return <Badge variant="warning" label="Pending" />;
+  }
 }

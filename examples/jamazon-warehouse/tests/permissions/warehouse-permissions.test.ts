@@ -7,6 +7,7 @@ import { app, REORDER_LEVEL_CAP } from "../../schema.js";
 import {
   deliverBatch,
   InsufficientStockError,
+  ORDER_STATUS,
   purchase,
   recordPayment,
 } from "../../src/warehouse.js";
@@ -132,6 +133,8 @@ describe("warehouse ownership covers operational rows (#1899)", () => {
     const operator = actor("staffed-operator");
     const east = await buildWarehouse(manager, "east");
     await staff(manager, east.warehouse.id, operator);
+    // A handover goes to someone already staffed on the warehouse.
+    await staff(manager, east.warehouse.id, nextManager, "Next manager");
 
     await manager.db.update(app.stock, east.stock.id, { on_hand: 6 }).wait({ tier: "global" });
     await manager.db
@@ -144,6 +147,21 @@ describe("warehouse ownership covers operational rows (#1899)", () => {
     );
     await nextManager.db.update(app.stock, east.stock.id, { on_hand: 8 }).wait({ tier: "global" });
     await operator.db.update(app.stock, east.stock.id, { on_hand: 9 }).wait({ tier: "global" });
+  });
+
+  it("refuses to hand a warehouse to a stranger", async () => {
+    const manager = actor("handing-manager");
+    const stranger = actor("stranger");
+    const east = await buildWarehouse(manager, "east");
+
+    await manager.db.expectDenied((db) =>
+      db.update(app.warehouses, east.warehouse.id, { operator_id: stranger.account }),
+    );
+    // The manager keeps full authority, including over the warehouse row.
+    await manager.db
+      .update(app.warehouses, east.warehouse.id, { region: "still-east" })
+      .wait({ tier: "global" });
+    await stranger.db.expectDenied((db) => db.update(app.stock, east.stock.id, { on_hand: 0 }));
   });
 
   it("revokes an operator who leaves the warehouse", async () => {
@@ -338,6 +356,82 @@ describe("stock contention", () => {
     const [stock] = await manager.db.all(app.stock.where({ id: east.stock.id }).limit(1), {
       tier: "global",
     });
+    expect(stock?.on_hand).toBe(3);
+  });
+
+  it("reserves a draft, then places its lines and payment against the committed order", async () => {
+    const manager = actor("two-phase-manager");
+    const operator = actor("two-phase-operator");
+    const east = await buildWarehouse(manager, "east");
+    await staff(manager, east.warehouse.id, operator);
+
+    const receipt = await purchase(asDb(operator.db), {
+      warehouseId: east.warehouse.id,
+      districtId: east.district.id,
+      customerId: east.customer.id,
+      lines: [{ itemId: east.item.id, quantity: 3 }],
+      idempotencyKey: "two-phase",
+    });
+
+    const read = { tier: "global" } as const;
+    const [order] = await manager.db.all(app.orders.where({ id: receipt.orderId }).limit(1), read);
+    expect(order).toMatchObject({
+      status: ORDER_STATUS.pending,
+      total_cents: 3_000,
+      order_number: 1,
+    });
+    expect(
+      await manager.db.all(app.order_lines.where({ order_id: receipt.orderId }).limit(5), read),
+    ).toMatchObject([{ warehouse_id: east.warehouse.id, item_id: east.item.id, quantity: 3 }]);
+    expect(
+      await manager.db.all(app.payments.where({ order_id: receipt.orderId }).limit(5), read),
+    ).toMatchObject([{ customer_id: east.customer.id, amount_cents: 3_000 }]);
+    const [stock] = await manager.db.all(app.stock.where({ id: east.stock.id }).limit(1), read);
+    expect(stock?.on_hand).toBe(2);
+    const [customer] = await manager.db.all(
+      app.customers.where({ id: east.customer.id }).limit(1),
+      read,
+    );
+    expect(customer?.balance_cents).toBe(-3_000);
+  });
+
+  it("places a draft left by an interrupted checkout when the request is resubmitted", async () => {
+    const manager = actor("recovering-manager");
+    const east = await buildWarehouse(manager, "east");
+    // Phase one landed but phase two never ran: a reserved draft, with stock
+    // and balance already taken, and no lines or payment yet.
+    await manager.db.update(app.stock, east.stock.id, { on_hand: 3 }).wait({ tier: "global" });
+    await manager.db
+      .update(app.customers, east.customer.id, { balance_cents: -2_000 })
+      .wait({ tier: "global" });
+    await manager.db
+      .update(app.districts, east.district.id, { next_order_number: 2 })
+      .wait({ tier: "global" });
+    const draft = await manager.db
+      .insert(app.orders, {
+        warehouse_id: east.warehouse.id,
+        district_id: east.district.id,
+        customer_id: east.customer.id,
+        order_number: 1,
+        status: ORDER_STATUS.draft,
+        total_cents: 2_000,
+        idempotency_key: "interrupted",
+      })
+      .wait({ tier: "global" });
+
+    const receipt = await purchase(asDb(manager.db), {
+      warehouseId: east.warehouse.id,
+      districtId: east.district.id,
+      customerId: east.customer.id,
+      lines: [{ itemId: east.item.id, quantity: 2 }],
+      idempotencyKey: "interrupted",
+    });
+    expect(receipt).toMatchObject({ orderId: draft.id, orderNumber: 1, totalCents: 2_000 });
+
+    const read = { tier: "global" } as const;
+    const [order] = await manager.db.all(app.orders.where({ id: draft.id }).limit(1), read);
+    expect(order?.status).toBe(ORDER_STATUS.pending);
+    const [stock] = await manager.db.all(app.stock.where({ id: east.stock.id }).limit(1), read);
     expect(stock?.on_hand).toBe(3);
   });
 

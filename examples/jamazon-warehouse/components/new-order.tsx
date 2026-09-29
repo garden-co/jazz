@@ -21,6 +21,7 @@ import { useAll, useDb } from "jazz-tools/react";
 import { useState, type FormEvent } from "react";
 import { formatCents, newRequestKey } from "@/src/format";
 import {
+  CheckoutCancelledError,
   consoleQueries,
   InsufficientStockError,
   MAX_ORDER_LINES,
@@ -221,6 +222,7 @@ export function NewOrder() {
               itemName={itemName}
               retry={() => void submit()}
               retrying={submitting}
+              startOver={startOver}
             />
           )}
           <HStack gap={3} vAlign="center" wrap="wrap">
@@ -246,11 +248,13 @@ function FailureBanner({
   itemName,
   retry,
   retrying,
+  startOver,
 }: {
   error: unknown;
   itemName: (itemId: string) => string;
   retry: () => void;
   retrying: boolean;
+  startOver: () => void;
 }) {
   if (error instanceof InsufficientStockError) {
     return (
@@ -261,11 +265,21 @@ function FailureBanner({
       />
     );
   }
+  if (error instanceof CheckoutCancelledError) {
+    return (
+      <Banner
+        status="error"
+        title={`Order ${error.orderNumber} was cancelled`}
+        description="The authority rejected this order after reserving it, so its stock and balance were returned. Start a new order to try again."
+        endContent={<Button label="Start over" size="sm" onClick={startOver} />}
+      />
+    );
+  }
   return (
     <Banner
       status="error"
       title="The order was not confirmed"
-      description={`${error instanceof Error ? error.message : String(error)}. Retrying reuses this request's key, so it can't place the order twice.`}
+      description={`${error instanceof Error ? error.message : String(error)}. Retrying reuses this request's key, so it finishes this order instead of placing a second one.`}
       endContent={<Button label="Retry" size="sm" isLoading={retrying} onClick={retry} />}
     />
   );

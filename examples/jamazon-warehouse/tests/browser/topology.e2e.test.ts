@@ -552,6 +552,14 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
           {
             name: "transfer warehouse authority and reject the revoked operator",
             run: async () => {
+              // A handover goes to someone already staffed on the warehouse.
+              await owner
+                .insert(app.warehouse_operators, {
+                  warehouse_id: warehouse.id,
+                  account_id: nextOperatorAccount,
+                  name: "Next operator",
+                })
+                .wait({ tier: "global" });
               await owner
                 .update(app.warehouses, warehouse.id, { operator_id: nextOperatorAccount })
                 .wait({ tier: "global" });

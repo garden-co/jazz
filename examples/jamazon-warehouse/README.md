@@ -8,11 +8,10 @@ What an operator does in the console:
 
 - **Dashboard**: orders entered today, pending deliveries and low-stock items for the warehouse,
   plus the next orders to deliver in the selected district. Every number updates live.
-- **New order** (TPC-C "new order"): pick a customer and up to 15 item lines. The whole order is
-  one exclusive transaction: stock for every line, the district's order counter, the customer's
-  balance, the order, its lines and the payment hand-off are accepted together or not at all.
-  Each attempt carries a request key, so a retry (or "submit the same request again") returns the
-  first receipt instead of taking stock twice.
+- **New order** (TPC-C "new order"): pick a customer and up to 15 item lines. Checkout is two
+  exclusive transactions (see [Two-phase checkout](#two-phase-checkout)). Each attempt carries a
+  request key, so a retry (or "submit the same request again") returns the first receipt instead
+  of taking stock twice.
 - **Pending orders**: the district's delivery queue, oldest first, one bounded page.
 - **Delivery** (TPC-C "delivery"): one exclusive batch delivers the oldest pending order in every
   district.
@@ -49,14 +48,35 @@ configuration. A deployment sets `NEXT_PUBLIC_APP_ORIGIN`, `NEXT_PUBLIC_JAZZ_APP
 `NEXT_PUBLIC_JAZZ_SERVER_URL`, `BACKEND_SECRET` and `BETTER_AUTH_SECRET`; the secrets are
 required as soon as the origin is not local.
 
+## Two-phase checkout
+
+`purchase()` in `src/warehouse.ts` runs in two exclusive transactions:
+
+1. **Reserve.** Stock for every line, the district's order counter, the customer's balance and a
+   `draft` order are accepted together or not at all. This is where two operators racing for the
+   last units are decided: one reserves, the other re-reads stock and gets "Insufficient stock".
+2. **Place.** The order's lines and the payment hand-off are written against the now-committed
+   order, and the order becomes `pending`, which puts it in the delivery queue.
+
+It is two-phase because a permission `exists` check only sees committed rows (INV-RLS-9 in the
+Jazz authorization spec). The policies that prove a line or a payment belongs to an order of its
+own warehouse can't see an order staged in the same transaction, so the order has to be committed
+first.
+
+If the authority rejects the second phase, the draft is cancelled and its stock and balance are
+returned. If the second phase is interrupted any other way (a lost connection, say), the draft
+stays visible as "Reserved" in order status and never enters the delivery queue; resubmitting
+the same request key places it.
+
 ## Permissions
 
 `permissions.ts` answers two questions for every operational row:
 
 - **Who may write it** ([#1899](https://github.com/garden-co/jazz/issues/1899)): the manager of
   the row's own warehouse (`warehouses.operator_id`) or an operator staffed on that warehouse
-  (`warehouse_operators`). Transferring a warehouse revokes the former manager's operational
-  writes too; an operator who leaves loses them immediately.
+  (`warehouse_operators`). A manager can hand the warehouse only to someone already staffed on
+  it, and the handover revokes the former manager's operational writes too; an operator who
+  leaves loses them immediately.
 - **What it may reference** ([#1898](https://github.com/garden-co/jazz/issues/1898)): a
   customer's district, an order's district and customer, a line's order and stocked item, a
   payment's customer and order, and a delivery's order all belong to the row's own warehouse
@@ -83,8 +103,9 @@ makes that candidate set complete.
 
 - `pnpm --dir examples/jamazon-warehouse test` runs `schema.test.ts` (indexes, bounded reads,
   seed consistency) and `tests/permissions` against a local Jazz server: operator staffing,
-  transfer revocation, the cross-warehouse rejections, the two-operator stock race, retried
-  checkout and delivery batches.
+  handover and revocation, the cross-warehouse rejections, the two-operator stock race, the
+  two-phase checkout (including placing an interrupted draft), retried checkout and delivery
+  batches.
 - `pnpm --dir examples/jamazon-warehouse test:browser` runs the browser topology receipt: a
   duplicated and dropped checkout hand-off, reconnect, persistent reopen and ownership transfer.
 
