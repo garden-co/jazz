@@ -46,6 +46,18 @@ export function newInviteCode() {
 export type ShowInput = Pick<Show, "name" | "venue" | "date" | "doors">;
 
 /**
+ * Stable ids for the chief's membership and a show's first invite. Every
+ * write of these rows, including a repair from another tab, lands on the same
+ * row instead of adding a second one.
+ */
+export function chiefMembershipId(showId: string, account: string) {
+  return nameBasedId(`stage-plan/chief/${showId}/${account}`);
+}
+export function firstInviteId(showId: string) {
+  return nameBasedId(`stage-plan/first-invite/${showId}`);
+}
+
+/**
  * Creates a show with the creator as crew chief and a first invite code.
  *
  * The show is its own write, before the membership and invite: their
@@ -59,23 +71,25 @@ export type ShowInput = Pick<Show, "name" | "venue" | "date" | "doors">;
 export async function createShow(db: Db, me: Me, input: ShowInput) {
   const showWrite = db.insert(app.shows, { ...input, chiefAccount: me.account });
   const show = showWrite.value;
+  const [membershipId, inviteId] = await Promise.all([
+    chiefMembershipId(show.id, me.account),
+    firstInviteId(show.id),
+  ]);
   const setup = await db.transaction((tx) => {
-    tx.insert(app.showCrew, {
-      showId: show.id,
-      crewId: me.profile.id,
-      account: me.account,
-      role: "chief",
-    });
-    tx.insert(app.showInvites, { showId: show.id, code: newInviteCode() });
+    tx.upsert(app.showCrew, membershipId, chiefMembership(show.id, me));
+    tx.upsert(app.showInvites, inviteId, { showId: show.id, code: newInviteCode() });
   });
   return { show, writes: [showWrite, setup] as WriteResult<unknown>[] };
 }
 
+function chiefMembership(showId: string, me: Me) {
+  return { showId, crewId: me.profile.id, account: me.account, role: "chief" as const };
+}
+
 /**
- * Re-adds the chief's membership and invite when either is missing, for
- * example because the server rejected that write. The check includes writes
- * that haven't synced yet, so it doesn't add a second membership, and it
- * works offline.
+ * Re-adds the chief's membership and first invite when either is missing,
+ * for example because the server rejected that write. The rows have stable
+ * ids, so repairs from two tabs write the same rows.
  */
 export async function ensureChiefSetup(db: Db, me: Me, showId: string) {
   const [membership, invites] = await Promise.all([
@@ -83,18 +97,46 @@ export async function ensureChiefSetup(db: Db, me: Me, showId: string) {
     db.all(app.showInvites.where({ showId }), { tier: LOCAL_OR_SERVER }),
   ]);
   if (membership && invites.length > 0) return [];
+  const [membershipId, inviteId] = await Promise.all([
+    chiefMembershipId(showId, me.account),
+    firstInviteId(showId),
+  ]);
   const setup = await db.transaction((tx) => {
-    if (!membership) {
-      tx.insert(app.showCrew, {
-        showId,
-        crewId: me.profile.id,
-        account: me.account,
-        role: "chief",
-      });
+    if (!membership) tx.upsert(app.showCrew, membershipId, chiefMembership(showId, me));
+    if (invites.length === 0) {
+      tx.upsert(app.showInvites, inviteId, { showId, code: newInviteCode() });
     }
-    if (invites.length === 0) tx.insert(app.showInvites, { showId, code: newInviteCode() });
   });
   return [setup] as WriteResult<unknown>[];
+}
+
+/**
+ * Takes someone off a show's crew. Their tasks go back to nobody in the same
+ * transaction, because tasks may only be assigned to crew.
+ */
+export async function removeFromCrew(db: Db, member: ShowCrew) {
+  const assigned = await db.all(
+    app.tasks.where({ showId: member.showId, assigneeId: member.crewId }),
+  );
+  return db.transaction((tx) => {
+    for (const task of assigned) tx.update(app.tasks, task.id, { assigneeId: null });
+    tx.delete(app.showCrew, member.id);
+  });
+}
+
+/** A name-based (version 5) UUID, so the same name always gives the same id. */
+async function nameBasedId(name: string) {
+  const namespace = hexBytes("6f9d1c8e2b4a4e7d9c3a5b1e8f2d7a64");
+  const bytes = new Uint8Array([...namespace, ...new TextEncoder().encode(name)]);
+  const hash = new Uint8Array(await crypto.subtle.digest("SHA-1", bytes)).slice(0, 16);
+  hash[6] = (hash[6]! & 0x0f) | 0x50;
+  hash[8] = (hash[8]! & 0x3f) | 0x80;
+  const hex = [...hash].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function hexBytes(hex: string) {
+  return Uint8Array.from(hex.match(/../g)!, (pair) => parseInt(pair, 16));
 }
 
 export function updateShow(db: Db, showId: string, input: ShowInput) {

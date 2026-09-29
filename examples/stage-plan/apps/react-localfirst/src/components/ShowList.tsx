@@ -46,12 +46,14 @@ export function ShowList() {
               <ClickableCard key={show.id} label={show.name} href={href.show(show.id)} padding={5}>
                 <VStack gap={3}>
                   <VStack gap={1}>
-                    <HStack gap={2} vAlign="center" justify="between">
-                      <Heading level={2} maxLines={1}>
-                        {show.name}
-                      </Heading>
-                      {show.chiefAccount === me.account && <Badge label="Chief" variant="info" />}
-                    </HStack>
+                    <Heading level={3} maxLines={2}>
+                      {show.name}
+                    </Heading>
+                    {show.chiefAccount === me.account && (
+                      <HStack>
+                        <Badge label="Chief" variant="info" />
+                      </HStack>
+                    )}
                     <Text color="secondary">
                       {show.venue} · {formatShowDate(show.date)} · doors {show.doors}
                     </Text>

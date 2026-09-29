@@ -50,9 +50,10 @@ export function AppTopNav({ route, me }: { route: Route; me?: Me }) {
 
 /**
  * Pauses syncing to show local-first behaviour: edits keep working while
- * offline and reach the crew once you switch back. Jazz has no public
- * connection-status API yet, so the switch shows what it asked for, and the
- * browser's own network state.
+ * offline and reach the crew once you switch back. The switch says whether
+ * syncing is on, not whether the server is reachable: Jazz has no public
+ * connection-status API yet, and the browser only reports whether there is a
+ * network at all.
  */
 function SyncSwitch() {
   const db = useDb();
@@ -65,7 +66,7 @@ function SyncSwitch() {
   );
   return (
     <Switch
-      label={hasNetwork ? "Online" : "No network"}
+      label={hasNetwork ? "Sync" : "Sync (no network)"}
       size="sm"
       value={hasNetwork && !isPaused}
       isDisabled={!hasNetwork || isSwitching}

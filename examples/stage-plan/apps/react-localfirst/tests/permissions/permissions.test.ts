@@ -2,7 +2,7 @@ import { createPolicyTestApp, type PolicyTestApp } from "jazz-tools/testing";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { app } from "../../schema.js";
 import permissions from "../../permissions.js";
-import { joinShow } from "../../src/model/actions.js";
+import { ensureChiefSetup, joinShow, removeFromCrew } from "../../src/model/actions.js";
 import { DEMO_SHOW, resumeDemoShow, seedDemoShow } from "../../src/model/seed.js";
 
 /**
@@ -140,7 +140,7 @@ describe("StagePlan permissions", () => {
       .insert(app.crew, { account: chiefAccount, name: "Chiara" })
       .wait({ tier: "global" });
 
-    const writes = await seedDemoShow(chief, { account: chiefAccount, profile });
+    const { writes } = await seedDemoShow(chief, { account: chiefAccount, profile });
     await Promise.all(writes.map((write) => write.wait({ tier: "global" })));
 
     await expectCompleteDemoShow(chief);
@@ -153,13 +153,42 @@ describe("StagePlan permissions", () => {
       .wait({ tier: "global" });
     const me = { account: chiefAccount, profile };
     // Only the show itself reached the server.
-    await chief.insert(app.shows, { ...DEMO_SHOW, chiefAccount }).wait({ tier: "global" });
+    const show = await chief
+      .insert(app.shows, { ...DEMO_SHOW, chiefAccount })
+      .wait({ tier: "global" });
 
-    const resumed = await resumeDemoShow(chief, me);
-    await Promise.all(resumed.map((write) => write.wait({ tier: "global" })));
+    const resumed = await resumeDemoShow(chief, me, show.id);
+    await Promise.all(resumed.writes.map((write) => write.wait({ tier: "global" })));
     await expectCompleteDemoShow(chief);
 
-    await expect(resumeDemoShow(chief, me)).resolves.toEqual([]);
+    const again = await resumeDemoShow(chief, me, show.id);
+    expect(again.writes).toEqual([]);
+  });
+
+  it("lands repairs of the chief's membership from two tabs on one row", async () => {
+    const tabA = testApp.as(session("chiara", chiefAccount));
+    const tabB = testApp.as(session("chiara", chiefAccount));
+    const profile = await tabA
+      .insert(app.crew, { account: chiefAccount, name: "Chiara" })
+      .wait({ tier: "global" });
+    const me = { account: chiefAccount, profile };
+    const show = await tabA
+      .insert(app.shows, { ...DEMO_SHOW, chiefAccount })
+      .wait({ tier: "global" });
+
+    const [a, b] = await Promise.all([
+      ensureChiefSetup(tabA, me, show.id),
+      ensureChiefSetup(tabB, me, show.id),
+    ]);
+    await Promise.all([...a, ...b].map((write) => write.wait({ tier: "global" })));
+
+    const global = { tier: "global" } as const;
+    await expect(tabA.all(app.showCrew.where({ showId: show.id }), global)).resolves.toHaveLength(
+      1,
+    );
+    await expect(
+      tabA.all(app.showInvites.where({ showId: show.id }), global),
+    ).resolves.toHaveLength(1);
   });
 
   it("stops outsiders from writing to a show they are not on", async () => {
@@ -299,6 +328,28 @@ describe("StagePlan permissions", () => {
         body: "Pretending to be the chief",
       }),
     );
+  });
+
+  it("unassigns a member's tasks when they leave, so the crew can keep editing them", async () => {
+    const ctx = await setUpShow();
+    const membership = await joinAsCrew(ctx);
+    await ctx.chief
+      .update(app.tasks, ctx.task.id, { assigneeId: ctx.crewProfile.id })
+      .wait({ tier: "global" });
+    await ctx.chief.all(app.tasks.where({ showId: ctx.show.id }), { tier: "global" });
+
+    const removal = await removeFromCrew(ctx.chief, membership);
+    await removal.wait({ tier: "global" });
+    await expect(
+      ctx.chief.one(app.tasks.where({ id: ctx.task.id }), { tier: "global" }),
+    ).resolves.toMatchObject({ assigneeId: null });
+
+    await ctx.chief
+      .update(app.tasks, ctx.task.id, { title: "Load-in at the dock" })
+      .wait({ tier: "global" });
+    await expect(
+      ctx.chief.one(app.tasks.where({ id: ctx.task.id }), { tier: "global" }),
+    ).resolves.toMatchObject({ assigneeId: null, title: "Load-in at the dock" });
   });
 
   it("keeps the show, its invite and its crew list in the chief's hands", async () => {

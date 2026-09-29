@@ -48,16 +48,28 @@ export default s.definePermissions(app, ({ policy, session, anyOf, allOf, allowe
       ]),
     ]),
   );
-  // Once the server has accepted a membership, the joiner clears the invite
-  // code from it, so other crew can't read the code. That's the only change
-  // allowed: same row, same show, same profile, still crew.
+  // Two updates, each keeping the row on the same show and profile:
+  // - once the server has accepted a membership, the joiner clears its invite
+  //   code, so other crew can't read the code;
+  // - the chief rewrites their own membership when a repair from another tab
+  //   lands on the same row (it has a stable id).
   policy.showCrew.allowUpdate
-    .whereOld({ account: me, role: "crew" })
+    .whereOld({ account: me })
     .whereNew((member) =>
       allOf([
-        { account: me, role: "crew", inviteCode: { isNull: true } },
+        { account: me, inviteCode: { isNull: true } },
         isMyProfile(member.crewId),
-        policy.showCrew.exists.where({ id: member.id, showId: member.showId }),
+        anyOf([
+          allOf([
+            { role: "crew" },
+            policy.showCrew.exists.where({ id: member.id, showId: member.showId, role: "crew" }),
+          ]),
+          allOf([
+            { role: "chief" },
+            isChief(member.showId),
+            policy.showCrew.exists.where({ id: member.id, showId: member.showId }),
+          ]),
+        ]),
       ]),
     );
   // Members leave on their own; the chief can remove anyone.
@@ -68,6 +80,15 @@ export default s.definePermissions(app, ({ policy, session, anyOf, allOf, allowe
   policy.showInvites.allowRead.where((invite) => isChief(invite.showId));
   policy.showInvites.allowInsert.where((invite) => isChief(invite.showId));
   policy.showInvites.allowDelete.where((invite) => isChief(invite.showId));
+  // A repair of the first invite from another tab rewrites the same row.
+  policy.showInvites.allowUpdate
+    .whereOld((invite) => isChief(invite.showId))
+    .whereNew((invite) =>
+      allOf([
+        isChief(invite.showId),
+        policy.showInvites.exists.where({ id: invite.id, showId: invite.showId }),
+      ]),
+    );
 
   // --- tasks: any crew member edits; the chief or the task's creator deletes ---
   // A task is assigned to nobody or to someone on the show's crew.

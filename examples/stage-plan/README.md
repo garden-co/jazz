@@ -36,7 +36,7 @@ you open the app, it creates your crew profile and a demo show,
 To see sync and permissions with two people, open the app in a second browser
 profile (or a private window). On the demo show, open **Crew**, copy the
 invite link and open it in the other profile. Moves, comments and assignments
-now show up on both sides as they happen. Turn **Online** off in the top bar
+now show up on both sides as they happen. Turn **Sync** off in the top bar
 to edit offline; the changes reach the other profile when you turn it back on.
 
 ## Who can do what

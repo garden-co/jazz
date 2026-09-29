@@ -51,17 +51,20 @@ const DEMO_COMMENT = "Channel 7 crackles. Swapping the DI box before soundcheck.
 
 type Writes = WriteResult<unknown>[];
 
+/** A demo show and the writes that made or repaired it. */
+export type DemoShow = { showId: string; writes: Writes };
+
 /**
  * Makes sure an account has a crew profile and gives a new account the demo
  * show, unless it arrived through an invite link. Only local reads and
- * writes, so it works offline. Returns the writes it made, so the caller can
- * check that the server accepted them.
+ * writes, so it works offline. Returns the demo show's writes, so the caller
+ * can check that the server accepted them.
  */
 export async function setUpAccount(db: Db, account: string, { withDemo }: { withDemo: boolean }) {
   const { profile, isNew } = await ensureProfile(db, account);
   const me = { account, profile };
-  const writes = isNew && withDemo ? await seedDemoShow(db, me) : [];
-  return { me, isNew, writes };
+  const demo = isNew && withDemo ? await seedDemoShow(db, me) : undefined;
+  return { me, demo };
 }
 
 /**
@@ -70,37 +73,34 @@ export async function setUpAccount(db: Db, account: string, { withDemo }: { with
  * writes, never on rows in its own transaction
  * (https://github.com/garden-co/jazz/issues/3755).
  */
-export async function seedDemoShow(db: Db, me: Me): Promise<Writes> {
+export async function seedDemoShow(db: Db, me: Me): Promise<DemoShow> {
   const created = await createShow(db, me, DEMO_SHOW);
   const board = await writeBoard(db, me, created.show.id);
   const comment = await addComment(db, me, board.lineCheck, DEMO_COMMENT);
-  return [...created.writes, ...board.writes, comment];
+  return { showId: created.show.id, writes: [...created.writes, ...board.writes, comment] };
 }
 
 /**
- * Finishes a demo show that was only partly saved, for example because the
- * server rejected one of its writes. The show's activity log records which steps already ran,
- * so tasks you delete later don't come back.
+ * Finishes a demo show after the server rejected some of its writes. Call it
+ * only once every write of the earlier attempt has settled: it reads the
+ * server's copy to see what's missing, and the show's activity log records
+ * which steps went through.
  */
-export async function resumeDemoShow(db: Db, me: Me): Promise<Writes> {
-  const show = await db.one(app.shows.where({ chiefAccount: me.account, name: DEMO_SHOW.name }), {
-    tier: "local-first-unless-empty",
-  });
-  if (!show) return [];
-  const writes = await ensureChiefSetup(db, me, show.id);
-  const log = await db.all(app.activity.where({ showId: show.id }), {
-    tier: "local-first-unless-empty",
-  });
+export async function resumeDemoShow(db: Db, me: Me, showId: string): Promise<DemoShow> {
+  const server = { tier: "remote" } as const;
+  const show = await db.one(app.shows.where({ id: showId }), server);
+  if (!show) return seedDemoShow(db, me);
+
+  const writes = await ensureChiefSetup(db, me, showId);
+  const log = await db.all(app.activity.where({ showId }), server);
   if (log.length === 0) {
-    const board = await writeBoard(db, me, show.id);
+    const board = await writeBoard(db, me, showId);
     writes.push(...board.writes, await addComment(db, me, board.lineCheck, DEMO_COMMENT));
   } else if (!log.some((entry) => entry.kind === "commented")) {
-    const lineCheck = await db.one(app.tasks.where({ showId: show.id, title: "Line check" }), {
-      tier: "local-first-unless-empty",
-    });
+    const lineCheck = await db.one(app.tasks.where({ showId, title: "Line check" }), server);
     if (lineCheck) writes.push(await addComment(db, me, lineCheck, DEMO_COMMENT));
   }
-  return writes;
+  return { showId, writes };
 }
 
 /** The demo board: eight tasks, each with its "created" activity. */

@@ -10,7 +10,7 @@ import { HStack, VStack } from "@astryxdesign/core/Stack";
 import { Heading, Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { app, type Show } from "../../schema.js";
-import { rotateInvite, type CrewMember } from "../model/actions.js";
+import { removeFromCrew, rotateInvite, type CrewMember } from "../model/actions.js";
 import { useMe } from "../model/me.js";
 import { href, navigate } from "../router.js";
 
@@ -46,7 +46,7 @@ export function CrewPanel({ show, crew }: { show: Show; crew: CrewMember[] }) {
                         variant="ghost"
                         size="sm"
                         icon={<Icon icon="close" size="sm" />}
-                        onClick={() => db.delete(app.showCrew, member.id)}
+                        onClick={() => void removeFromCrew(db, member)}
                       />
                     )}
                   </HStack>
@@ -62,7 +62,7 @@ export function CrewPanel({ show, crew }: { show: Show; crew: CrewMember[] }) {
             label="Leave this show"
             variant="destructive"
             onClick={() => {
-              db.delete(app.showCrew, myMembership.id);
+              void removeFromCrew(db, myMembership);
               navigate(href.shows());
             }}
           />
