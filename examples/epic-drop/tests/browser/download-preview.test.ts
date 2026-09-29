@@ -102,8 +102,8 @@ describe("EpicDrop download and preview", () => {
     });
     await upload.wait({ tier: "global" });
 
-    const invite = createInvite(alice, demos.value.id, "viewer");
-    await alice.all(app.folderInvites, { tier: "global" });
+    const { invite, write } = createInvite(alice, demos.value, "viewer");
+    await write.wait({ tier: "global" });
     const parsed = parseInviteHash(new URL(inviteLink(invite, "https://drop.test/")).hash);
     expect(parsed).toEqual(invite);
 

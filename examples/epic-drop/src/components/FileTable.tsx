@@ -35,10 +35,14 @@ export type EntryAction = "open" | "download" | "rename" | "move" | "share" | "d
 
 interface FileTableProps {
   entries: Entry[];
-  canEdit: boolean;
+  /** Rename and move. */
+  canEdit: (entry: Entry) => boolean;
+  canDelete: (entry: Entry) => boolean;
+  canShare: (entry: Entry) => boolean;
+  /** Whether files and items may be dropped on a folder row. */
+  canDropOn: (folderId: string) => boolean;
   /** Fewer columns, for narrow screens or beside the preview panel. */
   isCompact?: boolean;
-  canShare: (entry: Entry) => boolean;
   onAction: (entry: Entry, action: EntryAction) => void;
   onDropOnFolder: (folderId: string, payload: DropPayload) => void;
 }
@@ -54,8 +58,10 @@ const comparators = {
 export function FileTable({
   entries,
   canEdit,
-  isCompact,
+  canDelete,
   canShare,
+  canDropOn,
+  isCompact,
   onAction,
   onDropOnFolder,
 }: FileTableProps) {
@@ -77,7 +83,7 @@ export function FileTable({
   const dragPlugin = React.useMemo<TablePlugin<Entry>>(
     () => ({
       transformBodyRow: (props, item) =>
-        canEdit
+        canEdit(item)
           ? {
               ...props,
               htmlProps: {
@@ -108,7 +114,7 @@ export function FileTable({
             )}
           </HStack>
         );
-        return entry.kind === "folder" && canEdit ? (
+        return entry.kind === "folder" && canDropOn(entry.id) ? (
           <DropTarget onDrop={(payload) => onDropOnFolder(entry.id, payload)}>{name}</DropTarget>
         ) : (
           name
@@ -153,7 +159,11 @@ export function FileTable({
           size="sm"
           alignment="end"
           presentation="adaptive"
-          items={menuItems(entry, canEdit, canShare(entry), (action) => onAction(entry, action))}
+          items={menuItems(
+            entry,
+            { edit: canEdit(entry), delete: canDelete(entry), share: canShare(entry) },
+            (action) => onAction(entry, action),
+          )}
         />
       ),
     },
@@ -174,19 +184,22 @@ export function FileTable({
 
 function menuItems(
   entry: Entry,
-  canEdit: boolean,
-  canShare: boolean,
+  may: { edit: boolean; delete: boolean; share: boolean },
   run: (action: EntryAction) => void,
 ): DropdownMenuOption[] {
   const items: DropdownMenuOption[] = [
     { label: entry.kind === "folder" ? "Open" : "Preview", onClick: () => run("open") },
   ];
   if (entry.kind === "file") items.push({ label: "Download", onClick: () => run("download") });
-  if (canShare) items.push({ label: "Share", onClick: () => run("share") });
-  if (canEdit) {
+  if (may.share) items.push({ label: "Share", onClick: () => run("share") });
+  if (may.edit) {
     items.push(
       { label: "Rename", onClick: () => run("rename") },
       { label: "Move", onClick: () => run("move") },
+    );
+  }
+  if (may.delete) {
+    items.push(
       { type: "divider" },
       { label: "Delete", variant: "destructive", onClick: () => run("delete") },
     );

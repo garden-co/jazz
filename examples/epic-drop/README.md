@@ -11,7 +11,8 @@ invite links. It runs as a Vite and React single-page app on an anonymous local-
   Each upload shows its progress and can be cancelled; a cancelled upload leaves no file behind.
 - Sort the file table by name, type, size, modified time or owner.
 - Rename, move (drag a row onto a folder, or use the Move dialog) and delete files and folders.
-  Deleting asks for confirmation.
+  Deleting asks for confirmation. Editors of a shared folder rename, move and delete what is inside
+  it; only a folder's owner moves the folder itself.
 - Preview files. Images, audio, video and PDFs play from a Blob, so audio and video are seekable.
   Text files show their first 64 KB and load more on request. Anything else shows its first
   512 bytes as hex.
@@ -37,10 +38,22 @@ invite links. It runs as a Vite and React single-page app on an anonymous local-
   with, only the member and the folder owner can read it. The code travels in the URL fragment, so
   it stays out of server logs.
 - **Inherited access.** A folder is readable by its owner, by its members and by anyone who can read
-  its parent; editing follows the same shape with editor members. Inheritance uses
+  its parent; editing its contents follows the same shape with editor members. Inheritance uses
   `allowedTo.read("parent", { maxDepth: 8 })`, so a share reaches eight levels of subfolders, and
   the app stops offering "New folder" at that depth. Files follow their folder. Uploads are stamped
   with the uploader, and neither renames nor moves can change an owner.
+- **Moving and deleting folders.** Only a folder's owner changes its parent; editors rename it in
+  place. Otherwise an editor could move a shared folder under one of their own and share it on.
+  Deleting a folder takes its owner or someone who can edit its parent, so an invite to a folder
+  never lets you delete the folder itself. A folder's delete is one transaction with its subfolders,
+  files and sharing rows, so the server accepts or rejects the whole tree.
+- **Names.** A profile's row id is the account id, written with `upsert`, so tabs never create two.
+  Names are visible across a membership (owners see members, members see the owner) through
+  reverse relations, and anyone else shows a generated name.
+- **What the UI offers.** Buttons, menu items, drop targets and move destinations come from
+  `db.canInsert`, `db.canUpdate` and `db.canDelete` (`src/use-browser-advice.ts`), not from a copy
+  of the rules. While an answer is pending, the user's own folders count as editable so the app
+  works offline; the sync server decides every write either way.
 
 ## Run and test
 
@@ -53,8 +66,9 @@ cargo test -p jazz-example-epic-drop-benchmark
 `pnpm test` runs two suites:
 
 - `tests/permissions` checks the sharing rules against a local Jazz server: private by default,
-  joining only with a live invite of the same folder and role, read-only viewers, editors who
-  cannot take over ownership or manage access, and revocation.
+  joining only with a live invite of the same folder, role and owner, read-only viewers, editors
+  who cannot take over ownership, manage access, move a shared folder under their own or delete it,
+  names visible only across a membership, and revocation.
 - `tests/browser` covers multi-chunk upload with a metadata-only listing, a cancelled upload that
   publishes nothing before a clean retry, file and folder authority for moves, whole-value
   download, range previews (including ranges clamped at the end of a file), and a second account
@@ -74,7 +88,11 @@ documents each case for the examples page.
   would need range reads behind an HTTP-style range source, such as a service worker.
 - `size_bytes` is a 32-bit integer, so files over 2 GB are refused before upload.
 - Invite links are bearer capabilities. Revoking a link stops new joins; removing a member ends
-  their access.
+  their access. Anyone who can read a file can also copy it elsewhere; permissions stop moves, not
+  copies.
+- Names of other members (for example a fellow editor who uploaded a file) are not visible to
+  each other, only to the owner. Recursive reverse inheritance with `maxDepth`, which would allow
+  "anyone who can read a folder this account owns", is not supported by the server yet.
 - A folder moved into its own subfolder is prevented by the app, not by a permission rule.
 - Large-value relay between browsers that use the persistent worker is tracked in
   [#1978](https://github.com/garden-co/jazz/issues/1978); remote chunk withholding in

@@ -4,13 +4,17 @@ const role = () => s.enum("viewer", "editor");
 
 const schema = {
   // A display name for an anonymous local-first account, so members and file
-  // owners read as people rather than account ids.
+  // owners read as people rather than account ids. The row id is the account
+  // id, so each account has exactly one profile. The reverse relations let
+  // permissions show a name only to the other side of a membership.
   profiles: s.table(
     {
-      user_id: s.uuid(),
       name: s.string(),
     },
-    {},
+    {
+      memberships: s.reverse("folderMembers", "user"),
+      hostedMemberships: s.reverse("folderMembers", "folderOwner"),
+    },
   ),
   folders: s.table(
     {
@@ -34,8 +38,15 @@ const schema = {
         // The invite code this member redeemed. Permissions check it against a
         // live invite with the same folder and role at write time.
         invite_code: s.string(),
+        // The folder's owner, checked at join. It lets members and owner see
+        // each other's names without making every profile public.
+        folder_owner_id: s.uuid(),
       },
-      { folder: s.rel("folders", "folder_id") },
+      {
+        folder: s.rel("folders", "folder_id"),
+        user: s.rel("profiles", "user_id"),
+        folderOwner: s.rel("profiles", "folder_owner_id"),
+      },
     )
     .indexOnly(["folder_id", "user_id"]),
   // Invite codes are bearer capabilities. Only the folder owner can read them.

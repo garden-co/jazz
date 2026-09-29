@@ -1,16 +1,11 @@
 import type { Db } from "jazz-tools";
-import { app, MAX_FOLDER_DEPTH, type FolderRole } from "../schema.js";
+import { app, MAX_FOLDER_DEPTH } from "../schema.js";
 
 export interface Folder {
   id: string;
   name: string;
   owner_id: string;
   parent_id?: string | null;
-}
-
-export interface Membership {
-  folder_id: string;
-  role: FolderRole;
 }
 
 export class FolderIndex {
@@ -21,7 +16,6 @@ export class FolderIndex {
   constructor(
     folders: readonly Folder[],
     private readonly userId: string | undefined,
-    private readonly memberships: readonly Membership[],
   ) {
     for (const folder of folders) this.byId.set(folder.id, folder);
     const byName = (a: Folder, b: Folder) => a.name.localeCompare(b.name);
@@ -65,20 +59,9 @@ export class FolderIndex {
     return folder.owner_id === this.userId;
   }
 
-  /** Mirrors the edit rule in permissions.ts, walking up the visible tree. */
-  canEdit(folderId: string | undefined): boolean {
-    return this.path(folderId).some(
-      (folder) =>
-        folder.owner_id === this.userId ||
-        this.memberships.some((m) => m.folder_id === folder.id && m.role === "editor"),
-    );
-  }
-
-  roleIn(folderId: string | undefined): "owner" | FolderRole | undefined {
-    const path = this.path(folderId);
-    if (path.some((folder) => folder.owner_id === this.userId)) return "owner";
-    if (this.canEdit(folderId)) return "editor";
-    return path.length > 0 ? "viewer" : undefined;
+  /** Whether the caller owns this folder or one above it. */
+  isInOwnTree(folderId: string | undefined): boolean {
+    return this.path(folderId).some((folder) => this.isMine(folder));
   }
 
   /** Levels of subfolders below a folder, 0 for a leaf. */
@@ -88,11 +71,12 @@ export class FolderIndex {
   }
 
   /**
-   * Folders a file or folder may be moved into: editable, not the folder
+   * Folders a file or folder could structurally move into: not the folder
    * itself or one of its subfolders, and shallow enough that inherited access
-   * still reaches the moved subtree.
+   * still reaches the moved subtree. Whether the caller may move there is
+   * Jazz's call; see `useAdvice`.
    */
-  moveTargets(movingFolderId?: string): Folder[] {
+  moveCandidates(movingFolderId?: string): Folder[] {
     const excluded = new Set<string>();
     let height = -1;
     if (movingFolderId) {
@@ -101,7 +85,7 @@ export class FolderIndex {
       height = this.height(movingFolderId);
     }
     return [...this.byId.values()]
-      .filter((folder) => !excluded.has(folder.id) && this.canEdit(folder.id))
+      .filter((folder) => !excluded.has(folder.id))
       .filter((folder) => this.depth(folder.id) + 1 + height <= MAX_FOLDER_DEPTH)
       .sort((a, b) => this.label(a).localeCompare(this.label(b)));
   }
@@ -113,19 +97,25 @@ export class FolderIndex {
   }
 }
 
-/** Delete a folder with its subfolders and files. Files go first, leaves before parents. */
+/**
+ * Delete a folder with its subfolders and files as one transaction, so the
+ * sync server accepts or rejects the whole tree. Files go first, leaves
+ * before parents, and sharing rows while the caller still owns their folder.
+ */
 export async function deleteFolderTree(db: Db, index: FolderIndex, folderId: string) {
   const folders = [index.byId.get(folderId)!, ...index.descendants(folderId)];
   const ids = folders.map((folder) => folder.id);
-  const files = await db.all(app.files.where({ folder_id: { in: ids } }).select("id"));
-  for (const file of files) db.delete(app.files, file.id);
-  // Sharing rows go while the caller still owns the folder they belong to.
   const owned = folders.filter((folder) => index.isMine(folder)).map((folder) => folder.id);
-  if (owned.length > 0) {
-    const invites = await db.all(app.folderInvites.where({ folder_id: { in: owned } }));
-    for (const invite of invites) db.delete(app.folderInvites, invite.id);
-    const members = await db.all(app.folderMembers.where({ folder_id: { in: owned } }));
-    for (const member of members) db.delete(app.folderMembers, member.id);
-  }
-  for (const folder of folders.reverse()) db.delete(app.folders, folder.id);
+  const [files, invites, members] = await Promise.all([
+    db.all(app.files.where({ folder_id: { in: ids } }).select("id")),
+    owned.length > 0 ? db.all(app.folderInvites.where({ folder_id: { in: owned } })) : [],
+    owned.length > 0 ? db.all(app.folderMembers.where({ folder_id: { in: owned } })) : [],
+  ]);
+  const result = await db.transaction((tx) => {
+    for (const file of files) tx.delete(app.files, file.id);
+    for (const invite of invites) tx.delete(app.folderInvites, invite.id);
+    for (const member of members) tx.delete(app.folderMembers, member.id);
+    for (const folder of [...folders].reverse()) tx.delete(app.folders, folder.id);
+  });
+  return result;
 }

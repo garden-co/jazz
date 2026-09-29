@@ -6,6 +6,7 @@ import permissions from "../../permissions.js";
 const alice = "00000000-0000-4000-8000-00000000000a";
 const bob = "00000000-0000-4000-8000-00000000000b";
 const carol = "00000000-0000-4000-8000-00000000000c";
+const dave = "00000000-0000-4000-8000-00000000000d";
 
 function as(account: string) {
   return testApp.as({
@@ -61,6 +62,7 @@ async function join(account: string, folderId: string, role: "viewer" | "editor"
       user_id: account,
       role,
       invite_code: role === "viewer" ? "view-code" : "edit-code",
+      folder_owner_id: alice,
     }),
   );
 }
@@ -81,6 +83,7 @@ describe("EpicDrop folder sharing", () => {
       user_id: bob,
       role,
       invite_code: code,
+      folder_owner_id: alice,
     });
 
     await bobDb.expectDenied((db) => db.insert(app.folderMembers, membership("guessed", "viewer")));
@@ -91,6 +94,10 @@ describe("EpicDrop folder sharing", () => {
     // An invite for Demos does not open another folder.
     await bobDb.expectDenied((db) =>
       db.insert(app.folderMembers, membership("view-code", "viewer", mixes.id)),
+    );
+    // The stated folder owner must be the real one.
+    await bobDb.expectDenied((db) =>
+      db.insert(app.folderMembers, { ...membership("view-code", "viewer"), folder_owner_id: bob }),
     );
     // Nobody can join on someone else's behalf.
     await bobDb.expectDenied((db) =>
@@ -187,6 +194,71 @@ describe("EpicDrop folder sharing", () => {
     await as(bob).expectDenied((db) =>
       db.update(app.files, file.id, { folder_id: carolsFolder.id }),
     );
+  });
+
+  it("does not let an editor re-share a folder by moving it under their own", async () => {
+    const { demos, mixes } = await seedSharedTree();
+    await join(bob, demos.id, "editor");
+    // Bob owns a folder he shares with Dave.
+    const bobs = await testApp.seed((db) =>
+      db.insert(app.folders, { name: "Bob's", owner_id: bob }),
+    );
+    await testApp.seed((db) =>
+      db.insert(app.folderInvites, { folder_id: bobs.id, code: "dave-code", role: "viewer" }),
+    );
+    await testApp.seed((db) =>
+      db.insert(app.folderMembers, {
+        folder_id: bobs.id,
+        user_id: dave,
+        role: "viewer",
+        invite_code: "dave-code",
+        folder_owner_id: bob,
+      }),
+    );
+    const bobDb = as(bob);
+
+    await bobDb.expectDenied((db) => db.update(app.folders, demos.id, { parent_id: bobs.id }));
+    await bobDb.expectDenied((db) => db.update(app.folders, mixes.id, { parent_id: bobs.id }));
+    await bobDb.expectDenied((db) => db.update(app.folders, mixes.id, { parent_id: null }));
+    await expect(as(dave).all(app.folders.where({ id: demos.id }))).resolves.toEqual([]);
+
+    // Editors still rename in place, at the top level and below it.
+    await bobDb.update(app.folders, demos.id, { name: "Demos 2026" }).wait({ tier: "global" });
+    await bobDb.update(app.folders, mixes.id, { name: "Final mixes" }).wait({ tier: "global" });
+
+    // The owner moves folders within what she can edit.
+    const aliceDb = as(alice);
+    await aliceDb.update(app.folders, mixes.id, { parent_id: null }).wait({ tier: "global" });
+    await aliceDb.update(app.folders, mixes.id, { parent_id: demos.id }).wait({ tier: "global" });
+  });
+
+  it("lets only the owner or a parent editor delete a folder", async () => {
+    const { demos, mixes } = await seedSharedTree();
+    await join(bob, demos.id, "editor");
+    const bobDb = as(bob);
+    await bobDb.expectDenied((db) => db.delete(app.folders, demos.id));
+    // Mixes sits inside a folder Bob edits, like any other contents.
+    await bobDb.delete(app.folders, mixes.id).wait({ tier: "global" });
+    await as(alice).delete(app.folders, demos.id).wait({ tier: "global" });
+  });
+
+  it("shows a name only to people who share a folder with its account", async () => {
+    const { demos } = await seedSharedTree();
+    await as(alice).upsert(app.profiles, alice, { name: "Alice" }).wait({ tier: "global" });
+    await expect(
+      as(carol).upsert(app.profiles, alice, { name: "Not Alice" }).wait({ tier: "global" }),
+    ).rejects.toThrow(/denied/);
+    await expect(as(carol).all(app.profiles.where({ id: alice }))).resolves.toEqual([]);
+    await expect(as(alice).all(app.profiles.where({ id: alice }))).resolves.toMatchObject([
+      { name: "Alice" },
+    ]);
+
+    await as(bob).upsert(app.profiles, bob, { name: "Bob" }).wait({ tier: "global" });
+    await join(bob, demos.id, "viewer");
+    const [owner] = await as(bob).all(app.profiles.where({ id: alice }));
+    expect(owner?.name).toBe("Alice");
+    const [member] = await as(alice).all(app.profiles.where({ id: bob }));
+    expect(member?.name).toBe("Bob");
   });
 
   it("revokes access when the owner removes a member", async () => {

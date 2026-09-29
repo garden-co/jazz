@@ -1,6 +1,7 @@
 import * as React from "react";
 import { useAll, useDb } from "jazz-tools/react";
 import { Avatar } from "@astryxdesign/core/Avatar";
+import { Banner } from "@astryxdesign/core/Banner";
 import { Badge } from "@astryxdesign/core/Badge";
 import { Button } from "@astryxdesign/core/Button";
 import { Dialog, DialogHeader } from "@astryxdesign/core/Dialog";
@@ -19,7 +20,7 @@ import { useNames } from "../profiles.js";
 const ROLE_LABEL: Record<FolderRole, string> = { viewer: "Can view", editor: "Can edit" };
 
 interface ShareDialogProps {
-  folder: { id: string; name: string } | undefined;
+  folder: { id: string; name: string; owner_id: string } | undefined;
   userId: string | undefined;
   onClose: () => void;
 }
@@ -40,8 +41,12 @@ export function ShareDialog({ folder, userId, onClose }: ShareDialogProps) {
   );
   const [role, setRole] = React.useState<FolderRole>("viewer");
   const [link, setLink] = React.useState<string>();
+  const [failed, setFailed] = React.useState(false);
   const { copy, isCopied } = useClipboard();
-  React.useEffect(() => setLink(undefined), [folderId]);
+  React.useEffect(() => {
+    setLink(undefined);
+    setFailed(false);
+  }, [folderId]);
 
   return (
     <Dialog
@@ -72,14 +77,30 @@ export function ShareDialog({ folder, userId, onClose }: ShareDialogProps) {
             <Button
               label="Create link"
               variant="primary"
-              onClick={() => {
-                if (!folderId) return;
-                const next = inviteLink(createInvite(db, folderId, role));
+              clickAction={async () => {
+                if (!folder) return;
+                setFailed(false);
+                const { invite, write } = createInvite(db, folder, role);
+                try {
+                  // The link only works once the sync server has the invite.
+                  await write.wait({ tier: "global" });
+                } catch {
+                  setFailed(true);
+                  return;
+                }
+                const next = inviteLink(invite);
                 setLink(next);
                 void copy(next);
               }}
             />
           </HStack>
+          {failed && (
+            <Banner
+              status="error"
+              title="The link was not created"
+              description="Check that you are online, then try again."
+            />
+          )}
           {link && (
             <HStack gap={2} vAlign="end">
               <StackItem size="fill">

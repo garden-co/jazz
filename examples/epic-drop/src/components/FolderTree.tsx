@@ -10,12 +10,21 @@ interface FolderTreeProps {
   roots: readonly Folder[];
   index: FolderIndex;
   selectedId: string | undefined;
+  canDropOn: (folderId: string) => boolean;
   onSelect: (folderId: string) => void;
   onDrop: (folderId: string, payload: DropPayload) => void;
 }
 
 /** A folder tree whose rows are drop targets for dragged files and folders. */
-export function FolderTree({ label, roots, index, selectedId, onSelect, onDrop }: FolderTreeProps) {
+export function FolderTree({
+  label,
+  roots,
+  index,
+  selectedId,
+  canDropOn,
+  onSelect,
+  onDrop,
+}: FolderTreeProps) {
   const openPath = new Set(index.path(selectedId).map((folder) => folder.id));
   const toItem = (folder: Folder): TreeListItemData => {
     const children = index.children.get(folder.id);
@@ -23,7 +32,7 @@ export function FolderTree({ label, roots, index, selectedId, onSelect, onDrop }
       id: folder.id,
       label: (
         <DropTarget
-          isDisabled={!index.canEdit(folder.id)}
+          isDisabled={!canDropOn(folder.id)}
           onDrop={(payload) => onDrop(folder.id, payload)}
         >
           {folder.name}

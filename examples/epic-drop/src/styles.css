@@ -6,12 +6,6 @@ body {
   background: var(--color-background-body);
 }
 
-.plain-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
 /* Tree rows and folder rows accept dropped files and app items. */
 .drop-target {
   display: inline-flex;
