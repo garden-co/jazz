@@ -1,3 +1,4 @@
+import permissions from "@/permissions";
 import { app } from "@/schema";
 import type { JazzClient } from "jazz-tools/backend";
 import { createRequire as createRequireFromModule } from "node:module";
@@ -23,6 +24,7 @@ declare global {
 export async function backendJazzClient(): Promise<JazzClient> {
   const pending = (globalThis.__jamazonBackendSession ??= createJazzSession({
     app,
+    permissions,
     appId: jazzAppId,
     driver: { type: "memory" },
     serverUrl: jazzServerUrl,

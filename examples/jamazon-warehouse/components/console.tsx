@@ -1,7 +1,9 @@
 "use client";
 
 import { AppShell } from "@astryxdesign/core/AppShell";
+import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
+import { Center } from "@astryxdesign/core/Center";
 import { Selector } from "@astryxdesign/core/Selector";
 import { SideNav, SideNavItem, SideNavSection } from "@astryxdesign/core/SideNav";
 import { VStack } from "@astryxdesign/core/Stack";
@@ -15,7 +17,7 @@ import type { District, Warehouse } from "@/schema";
 import { authClient, operatorToken } from "@/src/lib/auth-client";
 import { consoleQueries } from "@/src/warehouse";
 import { JoinWarehouse } from "./join-warehouse";
-import { Loading } from "./providers";
+import { Loading } from "./loading";
 
 export interface Scope {
   accountId: string;
@@ -63,6 +65,7 @@ export async function bootstrap(warehouseId?: string): Promise<void> {
 export function Console({ children }: { children: ReactNode }) {
   const accountId = useSession()?.user.account ?? undefined;
   const [prepared, setPrepared] = useState<"pending" | "ready" | Error>("pending");
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     let cancelled = false;
     bootstrap().then(
@@ -72,12 +75,31 @@ export function Console({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [attempt]);
 
   const memberships = useAll(accountId ? consoleQueries.membershipsOf(accountId) : undefined);
   const warehouses = useAll(consoleQueries.warehouses);
 
-  if (prepared instanceof Error) throw prepared;
+  if (prepared instanceof Error) {
+    return (
+      <Center minHeight="100dvh" padding={4}>
+        <Banner
+          status="error"
+          title="The console could not open"
+          description={prepared.message}
+          endContent={
+            <Button
+              label="Try again"
+              onClick={() => {
+                setPrepared("pending");
+                setAttempt(attempt + 1);
+              }}
+            />
+          }
+        />
+      </Center>
+    );
+  }
   if (prepared === "pending" || !accountId || !memberships.data || !warehouses.data) {
     return <Loading />;
   }
