@@ -11,7 +11,8 @@
     "test": "vitest run",
     "test:browser": "vitest run --config vitest.config.browser.ts",
     "test:browser:focused": "node scripts/test-browser-focused.mjs",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@astryxdesign/core": "0.6.3",
