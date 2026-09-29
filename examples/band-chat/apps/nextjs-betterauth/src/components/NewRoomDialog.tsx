@@ -39,6 +39,12 @@ export function NewRoomDialog({
       // Both writes are local-first: the room is usable before the server
       // confirms them. The creator's own membership is the bootstrap step
       // the room policy allows only for the creator.
+      //
+      // They are deliberately two writes, not one transaction: the membership
+      // policy's `exists` check on the room only sees committed rows (INV-RLS-9
+      // in the Jazz authorization spec), so a membership staged in the same
+      // transaction as its room would be rejected. If the membership write is
+      // rejected, the creator can still read the room and add themselves.
       const room = db.insert(app.rooms, { name: trimmed }).value;
       db.insert(app.roomMembers, {
         roomId: room.id,

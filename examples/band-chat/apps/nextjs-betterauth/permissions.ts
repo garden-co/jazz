@@ -42,6 +42,8 @@ const bandChatPermissions = definePermissions(
     policy.rooms.allowInsert.always();
     // The creator may rename the room. Any member may record new activity, but
     // an `exists` check against the stored row keeps the name unchanged.
+    // `lastActivityAt` itself is not bounded: a member may write any time,
+    // including a future one (documented in the README).
     policy.rooms.allowUpdate
       .whereOld((room) => anyOf([{ "$createdBy.account": me }, isMember(room)]))
       .whereNew((room) =>
@@ -55,7 +57,9 @@ const bandChatPermissions = definePermissions(
     policy.roomMembers.allowRead.where(allowedTo.read("room"));
     // Only the room creator can admit members. In particular, no rule permits an
     // identity to insert its own membership into someone else's room. A named
-    // profile must belong to the admitted account.
+    // profile must belong to the admitted account. A pending join request is
+    // not required: the creator may also add someone directly, which makes
+    // that profile readable by the room's members (see the README).
     policy.roomMembers.allowInsert.where((member) =>
       allOf([
         isCreatorOf(member.roomId),

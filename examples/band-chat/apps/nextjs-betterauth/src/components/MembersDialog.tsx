@@ -46,10 +46,16 @@ export function MembersDialog({
   const known = directory.others.filter((profile) => !memberAuthors.has(profile.author));
   const pending = requests.filter((request) => !memberAuthors.has(request.requester));
 
+  // Admission and clearing the request commit together. Both policies check
+  // only the committed room, profile and request, never each other.
   function admit(memberAuthor: string, memberProfileId: string) {
-    db.insert(app.roomMembers, { roomId, memberAuthor, memberProfileId });
-    for (const request of requests)
-      if (request.requester === memberAuthor) db.delete(app.joinRequests, request.id);
+    void db
+      .transaction((tx) => {
+        tx.insert(app.roomMembers, { roomId, memberAuthor, memberProfileId });
+        for (const request of requests)
+          if (request.requester === memberAuthor) tx.delete(app.joinRequests, request.id);
+      })
+      .catch((error: unknown) => console.error("Could not admit member", error));
   }
 
   return (

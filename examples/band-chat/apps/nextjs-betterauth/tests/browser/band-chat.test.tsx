@@ -288,4 +288,28 @@ it("creates a local room, sends and reacts to a message, and applies client-side
       ),
     "oversized attachment should be rejected by the picker",
   );
+
+  // An accepted file streams into its own message and renders as a download chip.
+  Object.defineProperty(attachment, "files", {
+    configurable: true,
+    value: [new File(["Opening: Blue in Green"], "setlist.txt", { type: "text/plain" })],
+  });
+  await act(async () => attachment.dispatchEvent(new Event("change", { bubbles: true })));
+  await preview(element).getByRole("button", { name: "Send", exact: true }).click();
+  await waitFor(
+    () =>
+      [...element.querySelectorAll("[data-message-id]")].some((message) =>
+        hasText(message as HTMLElement, "setlist.txt"),
+      ),
+    "sent attachment should render in the timeline",
+    15_000,
+  );
+
+  // A sketch is posted as its own message with a shared drawing surface.
+  await preview(element).getByRole("button", { name: "Sketch", exact: true }).click();
+  await waitFor(
+    () => element.querySelector("[data-message-id] svg.sketch-surface") !== null,
+    "sketch should render in the timeline",
+    15_000,
+  );
 });

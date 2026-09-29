@@ -51,33 +51,40 @@ export function Composer({
     setFiles((current) => [...current, ...accepted]);
   }
 
+  // The draft and pending files are cleared only once they are written, so a
+  // failed send keeps what the person typed and any files not yet sent.
   async function send(value: string) {
     const body = value.trim();
-    if (!body && files.length === 0) return;
+    if ((!body && files.length === 0) || isSending) return;
     const outgoing = files;
     setSending(true);
-    setText("");
-    setFiles([]);
     setError(null);
     try {
       const base = { roomId, senderId: profileId };
       if (outgoing.length === 0) {
-        db.insert(app.messages, { ...base, text: body });
-      } else {
-        // Each file becomes its own message; the text rides on the first one.
-        // Bytes stream into the row instead of being copied through memory.
-        for (const [index, { file }] of outgoing.entries()) {
-          await db.insertStreaming(app.messages, {
-            ...base,
-            text: index === 0 ? body : "",
-            attachmentName: file.name,
-            attachmentType: file.type,
-            attachmentSize: file.size,
-            attachment: file.stream(),
-          });
-        }
+        // The message and the room's new activity commit together. Members
+        // may record activity on the room; the policy keeps its name fixed.
+        await db.transaction((tx) => {
+          tx.insert(app.messages, { ...base, text: body });
+          tx.update(app.rooms, roomId, { lastActivityAt: new Date() });
+        });
+        setText("");
+        return;
       }
-      // Members may record activity on the room; the policy keeps its name fixed.
+      // Each file becomes its own message; the text rides on the first one.
+      // Bytes stream into the row instead of being copied through memory.
+      for (const [index, { key, file }] of outgoing.entries()) {
+        await db.insertStreaming(app.messages, {
+          ...base,
+          text: index === 0 ? body : "",
+          attachmentName: file.name,
+          attachmentType: file.type,
+          attachmentSize: file.size,
+          attachment: file.stream(),
+        });
+        if (index === 0) setText("");
+        setFiles((current) => current.filter((item) => item.key !== key));
+      }
       db.update(app.rooms, roomId, { lastActivityAt: new Date() });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -124,6 +131,9 @@ export function Composer({
         }
         sendButton={<ChatSendButton isDisabled={!canSend} onSend={() => void send(text)} />}
       />
+      {/* A plain hidden input: the composer's Attach button opens it and the
+          drawer above lists the chosen files, so a visible FileInput field
+          would duplicate both. */}
       <input
         ref={fileInput}
         type="file"

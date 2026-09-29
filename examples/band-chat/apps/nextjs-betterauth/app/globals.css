@@ -34,25 +34,6 @@ body {
   overflow-wrap: anywhere;
 }
 
-/* Inline image attachments open in a lightbox. */
-.attachment-image {
-  display: block;
-  padding: 0;
-  border: 0;
-  background: none;
-  cursor: zoom-in;
-  max-inline-size: min(100%, 20rem);
-}
-
-.attachment-image img {
-  display: block;
-  inline-size: 100%;
-  block-size: auto;
-  max-block-size: 20rem;
-  object-fit: cover;
-  border-radius: var(--radius-container);
-}
-
 .attachment-audio {
   max-inline-size: 100%;
 }

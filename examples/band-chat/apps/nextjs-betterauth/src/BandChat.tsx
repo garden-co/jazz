@@ -57,9 +57,13 @@ function Loading({ label }: { label: string }) {
 }
 
 function Workspace({ author, ...props }: BandChatProps & { author: string }) {
-  const { data: myProfiles } = useAll(app.profiles.where({ author }));
+  const { data: myProfiles } = useAll(
+    app.profiles.where({ author }).orderBy("$createdAt", "asc").limit(1),
+  );
   if (!myProfiles) return <Loading label="Loading your profile…" />;
   // Profile creation is an explicit first-run action, never a read side effect.
+  // It writes one row per account (see lib/ids.ts); the oldest wins should an
+  // older install have left more than one.
   const profile = myProfiles[0];
   if (!profile)
     return <ProfileSetup author={author} defaultDisplayName={props.defaultDisplayName} />;

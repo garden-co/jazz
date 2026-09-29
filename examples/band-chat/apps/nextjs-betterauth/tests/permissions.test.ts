@@ -174,14 +174,18 @@ describe("BandChat room admission and authorship", () => {
         memberProfileId: strangerProfile.id,
       }),
     );
-    const guestMembership = await owner
-      .insert(app.roomMembers, {
+    // The app admits and clears the request in one transaction.
+    const admission = await owner.transaction((tx) => {
+      const member = tx.insert(app.roomMembers, {
         roomId: room.id,
         memberAuthor: guestAuthor,
         memberProfileId: guestProfile.id,
-      })
-      .wait({ tier: "global" });
-    await owner.delete(app.joinRequests, request.id).wait({ tier: "global" });
+      });
+      tx.delete(app.joinRequests, request.id);
+      return member;
+    });
+    const guestMembership = await admission.wait({ tier: "global" });
+    expect(await owner.all(app.joinRequests)).toEqual([]);
 
     // Co-members see each other's profiles.
     expect((await guest.all(app.profiles)).map((profile) => profile.displayName).sort()).toEqual([
@@ -226,14 +230,18 @@ describe("BandChat room admission and authorship", () => {
     const canvas = await guest
       .insert(app.canvases, { roomId: room.id, title: "Stage plot" })
       .wait({ tier: "global" });
-    await guest
-      .insert(app.messages, {
+    // As in the app: the committed canvas first, then its message and the
+    // room's activity in one transaction.
+    const posting = await guest.transaction((tx) => {
+      tx.insert(app.messages, {
         roomId: room.id,
         senderId: guestProfile.id,
         text: "",
         canvasId: canvas.id,
-      })
-      .wait({ tier: "global" });
+      });
+      tx.update(app.rooms, room.id, { lastActivityAt: new Date() });
+    });
+    await posting.wait({ tier: "global" });
     await owner
       .insert(app.strokes, {
         canvasId: canvas.id,
@@ -266,8 +274,15 @@ describe("BandChat room admission and authorship", () => {
     );
     expect(await stranger.all(app.strokes)).toEqual([]);
 
-    // A member may leave on their own; afterwards they can no longer draw.
-    await guest.delete(app.roomMembers, guestMembership.id).wait({ tier: "global" });
+    // A member may leave on their own, dropping their private read markers in
+    // the same transaction; afterwards they can no longer draw.
+    const guestMarkers = await guest.all(app.readMarkers);
+    const leaving = await guest.transaction((tx) => {
+      for (const marker of guestMarkers) tx.delete(app.readMarkers, marker.id);
+      tx.delete(app.roomMembers, guestMembership.id);
+    });
+    await leaving.wait({ tier: "global" });
+    expect(await guest.all(app.readMarkers)).toEqual([]);
     await guest.expectDenied((db) =>
       db.insert(app.strokes, {
         canvasId: canvas.id,

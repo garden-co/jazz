@@ -33,7 +33,11 @@ describe("configuration fails closed", () => {
 
   it("treats a non-loopback origin as a deployment in development too", () => {
     expect(() =>
-      check({ NODE_ENV: "development", NEXT_PUBLIC_APP_ORIGIN: "https://chat.example", ...secrets }),
+      check({
+        NODE_ENV: "development",
+        NEXT_PUBLIC_APP_ORIGIN: "https://chat.example",
+        ...secrets,
+      }),
     ).toThrow(/deployments must set NEXT_PUBLIC_JAZZ_APP_ID, NEXT_PUBLIC_JAZZ_SERVER_URL/);
   });
 

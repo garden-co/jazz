@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, type FormEvent } from "react";
+import { useState, type FormEvent } from "react";
 import { useDb } from "jazz-tools/react";
 import {
   Avatar,
@@ -10,6 +10,7 @@ import {
   Center,
   Dialog,
   DialogHeader,
+  FileInput,
   Heading,
   HStack,
   Text,
@@ -18,6 +19,7 @@ import {
 } from "@astryxdesign/core";
 import { app, type Profile } from "../../schema";
 import { avatarFromFile } from "../lib/attachments";
+import { profileId } from "../lib/ids";
 import { useObjectUrl } from "../lib/use-object-url";
 
 interface ProfileDraft {
@@ -33,7 +35,6 @@ function ProfileFields({
   draft: ProfileDraft;
   onChange: (draft: ProfileDraft) => void;
 }) {
-  const fileInput = useRef<HTMLInputElement>(null);
   const [error, setError] = useState<string | null>(null);
   const src = useObjectUrl(draft.avatar, draft.avatarType);
 
@@ -50,10 +51,16 @@ function ProfileFields({
 
   return (
     <VStack gap={4}>
-      <HStack gap={3} vAlign="center">
+      <HStack gap={3} vAlign="end">
         <Avatar name={draft.displayName || "?"} src={src} size="xl" tooltip={false} />
-        <HStack gap={2} wrap="wrap">
-          <Button label="Choose photo" size="sm" onClick={() => fileInput.current?.click()} />
+        <VStack gap={2}>
+          <FileInput
+            label="Profile photo"
+            placeholder="Choose photo"
+            accept="image/png,image/jpeg,image/webp,image/gif"
+            value={null}
+            onChange={(file) => void pick(Array.isArray(file) ? file[0] : (file ?? undefined))}
+          />
           {draft.avatar ? (
             <Button
               label="Remove photo"
@@ -62,18 +69,7 @@ function ProfileFields({
               onClick={() => onChange({ ...draft, avatar: null, avatarType: null })}
             />
           ) : null}
-        </HStack>
-        <input
-          ref={fileInput}
-          type="file"
-          accept="image/png,image/jpeg,image/webp,image/gif"
-          aria-label="Profile photo"
-          hidden
-          onChange={(event) => {
-            void pick(event.target.files?.[0]);
-            event.target.value = "";
-          }}
-        />
+        </VStack>
       </HStack>
       <TextInput
         label="Display name"
@@ -105,12 +101,14 @@ export function ProfileSetup({
   });
   const [error, setError] = useState<string | null>(null);
 
-  function save(event: FormEvent<HTMLFormElement>) {
+  async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const displayName = draft.displayName.trim();
     if (!displayName) return;
     try {
-      db.insert(app.profiles, {
+      // One profile per account: the id is derived from the account, so two
+      // tabs finishing setup at once write the same row.
+      db.upsert(app.profiles, await profileId(author), {
         author,
         displayName,
         avatar: draft.avatar ?? undefined,
@@ -132,7 +130,7 @@ export function ProfileSetup({
           </Text>
         </VStack>
         <Card width="100%">
-          <form onSubmit={save}>
+          <form onSubmit={(event) => void save(event)}>
             <VStack gap={4}>
               <ProfileFields draft={draft} onChange={setDraft} />
               {error ? (

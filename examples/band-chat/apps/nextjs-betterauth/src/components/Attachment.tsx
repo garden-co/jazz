@@ -1,16 +1,45 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useAll, useDb } from "jazz-tools/react";
-import { Skeleton, Token, useLightbox } from "@astryxdesign/core";
+import { Skeleton, Thumbnail, Token, useLightbox } from "@astryxdesign/core";
 import { app } from "../../schema";
 import { downloadBytes, formatBytes, isAudioType, isImageType } from "../lib/attachments";
 import { useObjectUrl } from "../lib/use-object-url";
 import type { MessageSummary } from "./RoomView";
 
-/** Reads one message's attachment bytes, only while the attachment is on screen. */
-function useAttachmentBytes(messageId: string): Uint8Array | undefined {
-  const { data } = useAll(app.messages.where({ id: messageId }).select("attachment"));
+/**
+ * True once the element has come near the viewport, and from then on. The
+ * timeline renders up to a page of messages, so attachment bytes are fetched
+ * only for attachments someone scrolls to, never for the whole page on mount.
+ */
+function useNearViewport<T extends Element>() {
+  const ref = useRef<T>(null);
+  const [isNear, setNear] = useState(false);
+  useEffect(() => {
+    const element = ref.current;
+    if (isNear || !element) return;
+    if (typeof IntersectionObserver === "undefined") {
+      setNear(true);
+      return;
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) setNear(true);
+      },
+      { rootMargin: "200px" },
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [isNear]);
+  return [ref, isNear] as const;
+}
+
+/** One message's attachment bytes, queried only once `isEnabled` turns true. */
+function useAttachmentBytes(messageId: string, isEnabled: boolean): Uint8Array | undefined {
+  const { data } = useAll(
+    isEnabled ? app.messages.where({ id: messageId }).select("attachment") : undefined,
+  );
   return data?.[0]?.attachment ?? undefined;
 }
 
@@ -21,33 +50,43 @@ export function Attachment({ message }: { message: MessageSummary }) {
 }
 
 function ImageAttachment({ message }: { message: MessageSummary }) {
-  const bytes = useAttachmentBytes(message.id);
+  const [ref, isNear] = useNearViewport<HTMLDivElement>();
+  const bytes = useAttachmentBytes(message.id, isNear);
   const src = useObjectUrl(bytes, message.attachmentType);
   const name = message.attachmentName ?? "Image";
   const lightbox = useLightbox({ media: { src: src ?? "", alt: name, caption: name } });
-  if (!src) return <Skeleton width={240} height={160} />;
   return (
-    <>
-      <button type="button" className="attachment-image" onClick={() => lightbox.open()}>
-        <img src={src} alt={name} />
-      </button>
+    <div ref={ref}>
+      <Thumbnail
+        src={src}
+        alt={name}
+        label={name}
+        isLoading={!src}
+        onClick={src ? () => lightbox.open() : undefined}
+      />
       {lightbox.element}
-    </>
+    </div>
   );
 }
 
 function AudioAttachment({ message }: { message: MessageSummary }) {
-  const bytes = useAttachmentBytes(message.id);
+  const [ref, isNear] = useNearViewport<HTMLDivElement>();
+  const bytes = useAttachmentBytes(message.id, isNear);
   const src = useObjectUrl(bytes, message.attachmentType);
-  if (!src) return <Skeleton width={240} height={40} />;
   return (
-    // eslint-disable-next-line jsx-a11y/media-has-caption -- user-shared audio has no captions
-    <audio
-      className="attachment-audio"
-      controls
-      src={src}
-      aria-label={message.attachmentName ?? "Audio"}
-    />
+    <div ref={ref}>
+      {src ? (
+        // eslint-disable-next-line jsx-a11y/media-has-caption -- user-shared audio has no captions
+        <audio
+          className="attachment-audio"
+          controls
+          src={src}
+          aria-label={message.attachmentName ?? "Audio"}
+        />
+      ) : (
+        <Skeleton width={240} height={40} />
+      )}
+    </div>
   );
 }
 

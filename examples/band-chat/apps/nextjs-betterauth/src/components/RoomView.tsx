@@ -33,7 +33,8 @@ import type { RoomSummary } from "./RoomNav";
 import { SketchCanvas } from "./SketchCanvas";
 
 // The newest page of a room's history. Attachment bytes are not selected here:
-// each attachment loads its own bytes only when it is shown or downloaded.
+// an image or audio attachment loads its bytes once it scrolls near the
+// viewport, and a file attachment only when it is downloaded.
 const HISTORY_PAGE = 200;
 // Consecutive messages from one sender within this window share a group.
 const GROUP_WINDOW_MS = 5 * 60 * 1000;
@@ -103,19 +104,34 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
   function leave() {
     const mine = members.find((member) => member.memberAuthor === author);
     if (!mine) return;
-    for (const marker of markers) db.delete(app.readMarkers, marker.id);
-    db.delete(app.roomMembers, mine.id);
+    // Leaving and dropping this reader's private markers commit together.
+    void db
+      .transaction((tx) => {
+        for (const marker of markers) tx.delete(app.readMarkers, marker.id);
+        tx.delete(app.roomMembers, mine.id);
+      })
+      .catch((error: unknown) => console.error("Could not leave the room", error));
   }
 
   function startSketch() {
+    // The canvas is its own write: the message policy checks that the canvas
+    // exists in this room, and `exists` checks only see committed rows
+    // (INV-RLS-9 in the Jazz authorization spec). The message and the room's
+    // activity then commit together. If that transaction is rejected, the
+    // canvas is left without a message; it is readable only by room members
+    // and holds no strokes.
     const canvas = db.insert(app.canvases, { roomId, title: "Sketch" }).value;
-    db.insert(app.messages, {
-      roomId,
-      senderId: directory.me.id,
-      text: "",
-      canvasId: canvas.id,
-    });
-    db.update(app.rooms, roomId, { lastActivityAt: new Date() });
+    void db
+      .transaction((tx) => {
+        tx.insert(app.messages, {
+          roomId,
+          senderId: directory.me.id,
+          text: "",
+          canvasId: canvas.id,
+        });
+        tx.update(app.rooms, roomId, { lastActivityAt: new Date() });
+      })
+      .catch((error: unknown) => console.error("Could not start a sketch", error));
   }
 
   const menuItems = [

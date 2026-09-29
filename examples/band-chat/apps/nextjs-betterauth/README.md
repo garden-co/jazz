@@ -22,9 +22,12 @@ product slice, not another generic Todo tutorial.
   and is the only identity that admits or removes others. A room link
   (`?join=<room id>`) does not grant anything: it lets a signed-in person _ask_ to
   join by writing a `joinRequests` row that only they and the room creator can
-  read. The creator admits a request, or adds someone they already share a room
-  with. A guest cannot add themself, and a membership may only name a profile
-  owned by the admitted account. Members may leave on their own. Secure,
+  read. The creator admits a request, or adds directly anyone whose profile they
+  can already read (someone they share another room with). The policy does not
+  require a pending request: the creator is trusted to choose members, and
+  adding someone makes their profile readable by the room's members. A guest
+  cannot add themself, and a membership may only name a profile owned by the
+  admitted account. Members may leave on their own. Secure,
   revocable bearer invite capabilities belong to
   [#1954](https://github.com/garden-co/jazz/issues/1954).
 - **Profile visibility follows relationships.** A profile is readable by its
@@ -38,12 +41,16 @@ product slice, not another generic Todo tutorial.
   authority; it does not erase rows already retained locally.
 - **Unread state.** `rooms.lastActivityAt` is a denormalized carrier that any
   member may bump (an `exists` check against the stored row keeps the name
-  creator-only). Each reader keeps a private `readMarkers` row per room; a room
+  creator-only). The value is not bounded by the policy: a member can write any
+  time, including a future one, which keeps the room at the top of everyone's
+  list. Opening the room still clears it, because a read marker never lags the
+  room's activity. Each reader keeps a private `readMarkers` row per room; a room
   is unread when its activity is newer than the marker, and only unread rooms pay
   for a bounded count query.
 - **Attachments** stream into the message row with `db.insertStreaming`. The
-  room timeline selects message metadata only; each attachment reads its own
-  bytes when it is shown or downloaded. The picker accepts images, audio, text
+  room timeline selects message metadata only. An image or audio attachment
+  reads its bytes once it scrolls near the viewport, and any other file only
+  when it is downloaded. The picker accepts images, audio, text
   and PDF up to 10 MB. That limit is client-side UX validation only, not a Jazz
   authorization, security, or storage limit: `s.bytes()` has no size
   constraint, so an actor otherwise allowed to insert a message can write a
