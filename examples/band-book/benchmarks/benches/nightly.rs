@@ -1,8 +1,8 @@
-//! BandBook page-list policy sweep that is NOT measured on CodSpeed: the
-//! remaining policy/page/scale combinations of the former policy-scoped
-//! documents suite, under their former names. CodSpeed (`walltime`) measures
-//! the three policies and one live list at 100,000 pages. Compiled by the
-//! nightly benchmark API check; run with
+//! BandBook page-list policy sweep measured by the nightly CodSpeed run on
+//! main, not on every merge: the remaining policy/page/scale combinations of
+//! the former policy-scoped documents suite, under their former names, so
+//! their CodSpeed history continues. The per-merge suite (`walltime`) measures
+//! the three policies and one live list at 100,000 pages. Run locally with
 //! `cargo bench -p jazz-example-band-book-benchmark --bench nightly`.
 
 use jazz_example_band_book_benchmark::{Fixture, Page, Policy, QUERY_OWNER, user};

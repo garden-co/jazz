@@ -23,13 +23,37 @@ const nativeExample = (name) => ({
   minStack: nativeStack,
   timeout: 20,
 });
+
+// Two suites share this table. `merge` (pull requests with the `benchmark`
+// label and every main merge) measures each workload's `benches`. `nightly`
+// (the scheduled run on main, or a manual dispatch) also measures its
+// `nightly` extras: more bench targets of the same package, built with the
+// same features, and environment for the run command. Nightly names are
+// ordinary CodSpeed names, so each keeps its own history across nightly runs.
+// JAZZ_CODSPEED_SUITE selects the suite; unset means `merge`.
+export const suites = ["merge", "nightly"];
+export function currentSuite(env = process.env) {
+  const suite = env.JAZZ_CODSPEED_SUITE || "merge";
+  assert.ok(suites.includes(suite), `unknown suite: ${suite}`);
+  return suite;
+}
+
 // Hero examples in the docs page's order, then the anonymized adopter
 // workload and the engine suite. Each hero example owns the areas it measures;
 // see dev/EXAMPLES_AND_BENCHMARKS_PROGRAM.md.
 const workloadSpecs = {
-  "stage-plan": { ...nativeExample("stage-plan"), timeout: 40 },
+  "stage-plan": {
+    ...nativeExample("stage-plan"),
+    timeout: 40,
+    // Former W1 diagnostics: scaling points and memory twins.
+    nightly: { benches: ["nightly"], env: {}, timeout: 40 },
+  },
   "band-chat": nativeExample("band-chat"),
-  "band-book": nativeExample("band-book"),
+  "band-book": {
+    ...nativeExample("band-book"),
+    // The rest of the policy sweep: the other arms and the 10k table.
+    nightly: { benches: ["nightly"], env: {}, timeout: 20 },
+  },
   "world-tour": nativeExample("world-tour"),
   wequencer: nativeExample("wequencer"),
   "poster-shop": nativeExample("poster-shop"),
@@ -51,6 +75,9 @@ const workloadSpecs = {
     features: null,
     minStack: null,
     timeout: 40,
+    // The reference engines (SQLite, pull plans, snapshot re-runs) and the
+    // smaller sizes, from the same executables.
+    nightly: { benches: [], env: { GROOVE_BENCH_SWEEP: "1" }, timeout: 40 },
   },
 };
 export const workloads = Object.keys(workloadSpecs);
@@ -60,11 +87,17 @@ export const workloads = Object.keys(workloadSpecs);
 // directory (cargo-codspeed replaces only that package's executables, and each
 // build keeps its own features, so nothing is unified across workloads), and
 // the measurement job runs the workloads one after another under a single
-// CodSpeed session. Groups balance measurement time on the macro runner.
+// CodSpeed session. A group's packages enable the same `jazz` features, so
+// its build compiles the Jazz stack once: `testing` plus
+// `transport-compression-zstd` (docs-and-access), `testing` (stage-plan,
+// live-apps, files-and-ops) or none (public-apps). StagePlan, the longest
+// measurement, has its own job.
 const workloadGroups = {
-  "tasks-and-docs": ["stage-plan", "band-book", "permissioned-resources"],
-  "live-apps": ["band-chat", "world-tour", "wequencer", "poster-shop", "record-player"],
-  "files-and-ops": ["epic-drop", "jamazon-warehouse", "music-agent", "big-label"],
+  "stage-plan": ["stage-plan"],
+  "docs-and-access": ["band-book", "permissioned-resources"],
+  "live-apps": ["band-chat", "wequencer", "record-player"],
+  "files-and-ops": ["epic-drop", "music-agent", "big-label"],
+  "public-apps": ["world-tour", "poster-shop", "jamazon-warehouse"],
   engine: ["groove-ivm"],
 };
 export const groups = Object.keys(workloadGroups);
@@ -91,25 +124,34 @@ const baseContract = {
   sourcePaths: { kind: "measurement-workspace-absolute", root: measurementWorkspace },
 };
 
-function spec(workload) {
+// A workload as the given suite builds and measures it.
+function spec(workload, suite = currentSuite()) {
   assert.ok(Object.hasOwn(workloadSpecs, workload), "unknown workload");
-  return workloadSpecs[workload];
+  assert.ok(suites.includes(suite), `unknown suite: ${suite}`);
+  const { nightly, ...base } = workloadSpecs[workload];
+  if (suite !== "nightly" || !nightly) return { ...base, env: {} };
+  return {
+    ...base,
+    benches: [...base.benches, ...nightly.benches],
+    env: nightly.env,
+    timeout: base.timeout + nightly.timeout,
+  };
 }
 
-export function contractFor(workload) {
-  const { package: pkg, benches, features } = spec(workload);
-  return { ...baseContract, package: pkg, benches, features };
+export function contractFor(workload, suite = currentSuite()) {
+  const { package: pkg, benches, features } = spec(workload, suite);
+  return { ...baseContract, suite, package: pkg, benches, features };
 }
 
 // Per-workload measurement settings for the macro runner. An empty
 // RUST_MIN_STACK is unset to Rust std: the default thread stack.
-export function measureSettings() {
+export function measureSettings(suite = currentSuite()) {
   return Object.fromEntries(
     workloads.map((w) => [
       w,
       {
         min_stack: workloadSpecs[w].minStack ? String(workloadSpecs[w].minStack) : "",
-        timeout: workloadSpecs[w].timeout,
+        timeout: spec(w, suite).timeout,
       },
     ]),
   );
@@ -117,19 +159,19 @@ export function measureSettings() {
 
 // Per-group measurement job settings: the group's workloads run in sequence,
 // so its timeout is the sum of theirs.
-export function groupMeasureSettings() {
+export function groupMeasureSettings(suite = currentSuite()) {
   return Object.fromEntries(
     groups.map((group) => [
       group,
-      { timeout: groupWorkloads(group).reduce((sum, w) => sum + workloadSpecs[w].timeout, 0) },
+      { timeout: groupWorkloads(group).reduce((sum, w) => sum + spec(w, suite).timeout, 0) },
     ]),
   );
 }
 
 // Arguments after `cargo codspeed build -m walltime` / `cargo codspeed run -m walltime`.
 // Features are chosen at build time only; cargo-codspeed rejects them on `run`.
-export function buildArgs(workload) {
-  const { package: pkg, benches, features } = spec(workload);
+export function buildArgs(workload, suite = currentSuite()) {
+  const { package: pkg, benches, features } = spec(workload, suite);
   return [
     "--package",
     pkg,
@@ -138,20 +180,26 @@ export function buildArgs(workload) {
   ];
 }
 
-export function runArgs(workload) {
-  const { package: pkg, benches } = spec(workload);
+export function runArgs(workload, suite = currentSuite()) {
+  const { package: pkg, benches } = spec(workload, suite);
   return ["--package", pkg, ...benches.flatMap((bench) => ["--bench", bench])];
 }
 
 // One shell command that measures a group's workloads in order, each with its
-// own measurement thread stack (none: Rust std's default), stopping at the
-// first failure. The CodSpeed action runs it as a single session.
-export function runCommand(group) {
+// own measurement thread stack (none: Rust std's default) and the suite's
+// environment, stopping at the first failure. The CodSpeed action runs it as
+// a single session.
+export function runCommand(group, suite = currentSuite()) {
   return groupWorkloads(group)
     .map((workload) => {
-      const { minStack } = workloadSpecs[workload];
-      const env = minStack ? `RUST_MIN_STACK=${minStack} ` : "env -u RUST_MIN_STACK ";
-      return `${env}cargo codspeed run -m walltime ${runArgs(workload).join(" ")}`;
+      const { minStack, env } = spec(workload, suite);
+      const stack = minStack ? `RUST_MIN_STACK=${minStack} ` : "env -u RUST_MIN_STACK ";
+      const extra = Object.entries(env).map(([key, value]) => {
+        assert.match(key, /^[A-Z_][A-Z0-9_]*$/);
+        assert.match(value, /^[\w.-]+$/);
+        return `${key}=${value} `;
+      });
+      return `${stack}${extra.join("")}cargo codspeed run -m walltime ${runArgs(workload, suite).join(" ")}`;
     })
     .join(" && ");
 }
@@ -216,8 +264,8 @@ async function digest(file) {
   return hash.digest("hex");
 }
 
-export function artifactPaths(workload) {
-  const { package: pkg, benches } = spec(workload);
+export function artifactPaths(workload, suite = currentSuite()) {
+  const { package: pkg, benches } = spec(workload, suite);
   return {
     binaries: Object.fromEntries(
       benches.map((bench) => [bench, `target/codspeed/walltime/${pkg}/${bench}`]),
@@ -229,36 +277,36 @@ export function artifactPaths(workload) {
 // Exported for filesystem contract tests; the CLI always obtains its own context
 // and checks the real host. Hashes catch stale/corrupt artifacts, not a hostile
 // workflow author who can also change this verifier.
-function bundleFiles(workload) {
-  return [...spec(workload).benches, "cargo-codspeed"].sort();
+function bundleFiles(workload, suite = currentSuite()) {
+  return [...new Set([...spec(workload, suite).benches, "cargo-codspeed"])].sort();
 }
 
-export async function seal(workload, identity, cli) {
+export async function seal(workload, identity, cli, suite = currentSuite()) {
   validateContext(identity);
-  const { binaries, bundle } = artifactPaths(workload);
+  const { binaries, bundle } = artifactPaths(workload, suite);
   await mkdir(bundle, { recursive: true });
   for (const [bench, binary] of Object.entries(binaries)) {
     await copyFile(binary, path.join(bundle, bench));
   }
   await copyFile(cli, path.join(bundle, "cargo-codspeed"));
   const files = {};
-  for (const name of bundleFiles(workload)) {
+  for (const name of bundleFiles(workload, suite)) {
     files[name] = await digest(path.join(bundle, name));
   }
-  const manifest = { format, ...identity, workload, contract: contractFor(workload), files };
+  const manifest = { format, ...identity, workload, contract: contractFor(workload, suite), files };
   await writeFile(path.join(bundle, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
   return manifest;
 }
 
-export async function verify(workload, identity) {
+export async function verify(workload, identity, suite = currentSuite()) {
   validateContext(identity);
-  const { bundle } = artifactPaths(workload);
-  const expected = bundleFiles(workload);
+  const { bundle } = artifactPaths(workload, suite);
+  const expected = bundleFiles(workload, suite);
   assert.deepEqual((await readdir(bundle)).sort(), [...expected, "manifest.json"].sort());
   const manifest = JSON.parse(await readFile(path.join(bundle, "manifest.json"), "utf8"));
   assert.equal(manifest.format, format, "unsupported manifest version");
   assert.equal(manifest.workload, workload, "wrong workload");
-  assert.deepEqual(manifest.contract, contractFor(workload), "build contract mismatch");
+  assert.deepEqual(manifest.contract, contractFor(workload, suite), "build contract mismatch");
   for (const key of ["source", "run", "compiler"]) {
     assert.equal(manifest[key], identity[key], `${key} mismatch`);
   }
@@ -304,6 +352,10 @@ async function main() {
     console.log(JSON.stringify(groups));
     return;
   }
+  if (action === "suite") {
+    console.log(currentSuite());
+    return;
+  }
   if (action === "group-measure") {
     console.log(JSON.stringify(groupMeasureSettings()));
     return;
@@ -323,7 +375,7 @@ async function main() {
   const { binaries, bundle } = artifactPaths(workload);
   assert.ok(
     ["seal", "install"].includes(action),
-    "usage: codspeed-artifact.mjs seal|install|build-args|run-args WORKLOAD | group-workloads|run-command GROUP | rustflags | matrix | measure | groups | group-measure",
+    "usage: codspeed-artifact.mjs seal|install|build-args|run-args WORKLOAD | group-workloads|run-command GROUP | rustflags | matrix | measure | groups | group-measure | suite (JAZZ_CODSPEED_SUITE=merge|nightly)",
   );
   await platform();
   const identity = context();

@@ -38,7 +38,8 @@ Scaling sweeps that explain a cost but do not need a receipt on every PR keep
 their former W1 names: bounded activity page (profile S, 9,000 RocksDB, and the
 memory sweep), comments scaling, indexed update without a subscription, point
 subscribe without a policy, the 900-row policy attach and resubscribe. The
-benchmark smoke gate compiles them; run them with
+nightly CodSpeed run measures them on main; the benchmark smoke gate compiles
+them on every PR; run them locally with
 `cargo bench -p jazz-example-stage-plan-benchmark --bench nightly`.
 
 Dropped because a CodSpeed case above measures the same operation: the

@@ -21,8 +21,8 @@ divan.workspace = true
 name = "walltime"
 harness = false
 
-# Former W1 scaling points and memory twins: compiled by the nightly benchmark
-# API check, runnable locally, not measured on CodSpeed.
+# Former W1 scaling points and memory twins: measured by the nightly CodSpeed
+# run only (dev/benchmarks/codspeed-artifact.mjs).
 [[bench]]
 name = "nightly"
 harness = false

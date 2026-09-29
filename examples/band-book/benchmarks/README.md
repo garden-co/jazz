@@ -15,9 +15,10 @@ inherited-organization policy, one-shot and live.
 | `band_book_workspace_pages_live[100000]`         | `subscribe_owner_or_org_policy_org_page50[100000]` | First published page of a live workspace view     |
 
 All other former cases, and the four above at 10,000 rows, keep their former
-names in the `nightly` bench target: compiled in CI and runnable locally, but
-not measured on CodSpeed. The workload is unchanged, so their history is
-comparable; the renamed CodSpeed cases start a new history.
+names in the `nightly` bench target, which the nightly CodSpeed run measures
+on main (not merges or PRs). The workload is unchanged, so their CodSpeed
+history continues under the same names; the renamed per-merge cases start a
+new history.
 
 ## Workload
 
@@ -63,7 +64,7 @@ independent single-column indexes as a matched control. Compare `single` and
 default results within revision 3; the requested page size alone does not
 prove bounded scan work.
 
-CodSpeed runs the 100k table scale (the `nightly` target also has 10k), three
+CodSpeed runs the 100k table scale on every merge (the `nightly` target, measured nightly, also has 10k), three
 samples of one first query each, with mimalloc and RocksDB WalNoSync. Each input reopens the seeded store
 and prepares the query outside the timer. Only `all_for_identity` execution and
 result construction are measured. Teardown, seed transactions, public query

@@ -39,8 +39,9 @@
 //! against the others for a sample of users (benchmark validity, INV-PERF-2).
 //!
 //! CodSpeed (the Engine section of the examples page) measures only the IVM
-//! engines (`prepared_warm`, `prepared_cold`) at 5,000 users. The full sweep,
-//! including the reference engines, runs with `GROOVE_BENCH_SWEEP=1`:
+//! engines (`prepared_warm`, `prepared_cold`) at 5,000 users on every merge.
+//! The full sweep, including the reference engines, runs with
+//! `GROOVE_BENCH_SWEEP=1`, which the nightly CodSpeed run sets:
 //!
 //! ```text
 //! cargo bench -p groove --bench pull_vs_snapshot

@@ -16,10 +16,13 @@ owns (engine internals such as Groove's IVM) and the anonymized adopter
 workload (`examples/permissioned-resources`) live outside the hero apps.
 
 Cases that are useful as diagnostics but do not need a CodSpeed receipt on
-every PR go in a separate `benches/nightly.rs` target. It is compiled by
-`dev/gates/benchmark-smoke.sh --compile-ci` and can be run locally with
-`cargo bench -p <package> --bench nightly`, but it is not in the CodSpeed
-workload table.
+every PR go in a separate `benches/nightly.rs` target, listed as the
+workload's `nightly` extra in `dev/benchmarks/codspeed-artifact.mjs`. The
+scheduled nightly CodSpeed run (`.github/workflows/codspeed.yml`, or a manual
+dispatch with `suite: nightly`) measures them on main, so each keeps its own
+CodSpeed history; merges and `benchmark`-labelled PRs do not.
+`dev/gates/benchmark-smoke.sh --compile-ci` compiles them on every PR, and
+`cargo bench -p <package> --bench nightly` runs them locally.
 
 ## Add an app benchmark variant
 

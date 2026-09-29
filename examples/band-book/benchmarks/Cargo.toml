@@ -20,7 +20,8 @@ divan.workspace = true
 name = "walltime"
 harness = false
 
-# The rest of the policy sweep: compiled nightly, not measured on CodSpeed.
+# The rest of the policy sweep: measured by the nightly CodSpeed run only
+# (dev/benchmarks/codspeed-artifact.mjs).
 [[bench]]
 name = "nightly"
 harness = false

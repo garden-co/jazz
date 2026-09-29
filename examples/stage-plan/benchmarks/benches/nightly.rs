@@ -1,8 +1,7 @@
-//! StagePlan board scaling sweeps that are NOT measured on CodSpeed. Each keeps
-//! its former W1 function name so older local receipts stay comparable. The
-//! CodSpeed suite (`walltime`) measures one point of each area; these extra
-//! points explain how a cost scales. The nightly benchmark API check compiles
-//! this target; run it with:
+//! StagePlan board scaling sweeps measured by the nightly CodSpeed run on main,
+//! not on every merge. Each keeps its former W1 function name, so its CodSpeed
+//! history continues. The per-merge suite (`walltime`) measures one point of
+//! each area; these extra points explain how a cost scales. Run locally with:
 //!
 //! ```sh
 //! cargo bench -p jazz-example-stage-plan-benchmark --bench nightly
