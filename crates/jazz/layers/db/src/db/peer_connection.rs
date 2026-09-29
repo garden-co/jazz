@@ -286,6 +286,7 @@ pub(super) fn dispatch_admitted_subscriber_message<'a, S>(
     session_claim_binding: (AuthorSubject, BTreeMap<String, Value>),
     local_fate_routes: &'a LocalFateRoutes,
     downstream_fates: &'a PendingDownstreamFates,
+    progress_waker: Option<&'a Waker>,
     message: SyncMessage,
 ) -> Pin<Box<dyn Future<Output = Result<PublicationOutcome<Vec<SyncMessage>>, Error>> + 'a>>
 where
@@ -319,10 +320,11 @@ where
                     .await?;
                 if same_scope_author {
                     state
-                        .record_scope_relay_authored_pending_versions(
+                        .record_scope_relay_authored_pending_versions_with_progress(
                             &tx,
                             &versions,
                             session_claim_binding.0,
+                            progress_waker,
                         )
                         .await?;
                 }
@@ -2750,6 +2752,7 @@ where
                                         &self.coverage_refresh_generations,
                                         &self.subscriber_dirty_epoch,
                                         &self.scheduler,
+                                        progress_waker.as_ref(),
                                         self.connection_epoch,
                                     )
                                     .await?;
@@ -2801,6 +2804,7 @@ where
                                         &self.coverage_refresh_generations,
                                         &self.subscriber_dirty_epoch,
                                         &self.scheduler,
+                                        progress_waker.as_ref(),
                                         self.connection_epoch,
                                     )
                                     .await?;
@@ -2830,6 +2834,7 @@ where
                                         &self.coverage_refresh_generations,
                                         &self.subscriber_dirty_epoch,
                                         &self.scheduler,
+                                        progress_waker.as_ref(),
                                         self.connection_epoch,
                                     )
                                     .await?;
@@ -2856,9 +2861,10 @@ where
                                     // served to this durable foreground scope without a fresh
                                     // policy check. A stale/fallback repair may populate the
                                     // local cache, but never grants durable disclosure authority.
-                                    node.record_scope_relay_authoritative_repair_payloads(
+                                    node.record_scope_relay_authoritative_repair_payloads_with_progress(
                                         &applied_bundles,
                                         repair.authority_receipt_eligible,
+                                        progress_waker.as_ref(),
                                     )
                                     .await?;
                                 }
@@ -3346,6 +3352,7 @@ where
                                         &self.coverage_refresh_generations,
                                         &self.subscriber_dirty_epoch,
                                         &self.scheduler,
+                                        progress_waker.as_ref(),
                                         self.connection_epoch,
                                     )
                                     .await?;
@@ -3652,6 +3659,7 @@ where
                                         &self.coverage_refresh_generations,
                                         &self.subscriber_dirty_epoch,
                                         &self.scheduler,
+                                        progress_waker.as_ref(),
                                         self.connection_epoch,
                                     )
                                     .await?;
@@ -3714,6 +3722,7 @@ where
                             &self.coverage_refresh_generations,
                             &self.subscriber_dirty_epoch,
                             &self.scheduler,
+                            progress_waker.as_ref(),
                             self.connection_epoch,
                         )
                         .await?;
@@ -5349,6 +5358,7 @@ where
                                 ),
                                 &self.local_fate_routes,
                                 &self.downstream_fates,
+                                progress_waker.as_ref(),
                                 other,
                             )
                             .await?
@@ -6205,6 +6215,7 @@ async fn apply_pending_authority_view_updates<S>(
     coverage_refresh_generations: &CoverageRefreshGenerations,
     subscriber_dirty_epoch: &Rc<Cell<u64>>,
     scheduler: &SharedTickScheduler,
+    progress_waker: Option<&Waker>,
     connection_epoch: u64,
 ) -> Result<(), Error>
 where
@@ -6363,7 +6374,10 @@ where
                     .unwrap_or_default();
                 node_ref.record_authoritative_settled_through(authoritative_cut);
                 node_ref
-                    .record_scope_relay_authoritative_bundles(&ledger_bundles)
+                    .record_scope_relay_authoritative_bundles_with_progress(
+                        &ledger_bundles,
+                        progress_waker,
+                    )
                     .await?;
             }
             Err(error @ crate::node::Error::InvalidAuthoritySourceClosure { .. }) => {

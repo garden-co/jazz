@@ -33,6 +33,12 @@ type SeedWrite<T> = {
 
 /** @internal */
 export async function settlePolicySeed<T>(write: SeedWrite<T>): Promise<T> {
+  if (typeof (write as { wait?: unknown } | null | undefined)?.wait !== "function") {
+    throw new TypeError(
+      "PolicyTestApp.seed: the callback must return the write result itself " +
+        "(for example `(db) => db.insert(table, data)`), not its `.value`.",
+    );
+  }
   return write.wait({ tier: "local" });
 }
 

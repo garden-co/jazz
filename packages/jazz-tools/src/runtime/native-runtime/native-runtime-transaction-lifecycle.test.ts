@@ -1042,7 +1042,11 @@ it("does not emit onMutationError when an active wait handles the rejection", as
     payload: new Uint8Array(),
     wait: async () => {
       await nextWriteStateChange();
-      if (rejected) throw new Error("WriteRejected: AuthorizationDenied");
+      if (rejected) {
+        throw Object.assign(new Error("WriteRejected: AuthorizationDenied"), {
+          code: "write_rejected",
+        });
+      }
     },
     writeState: () => ({}),
   };

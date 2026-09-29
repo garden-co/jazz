@@ -51,8 +51,11 @@ current coverage of every scenario.
   shape/binding counts) are hard regression signals; timings are directional
   ratios.
 - **JSONL + retention.** Every retained line carries `scenario`, `driver`,
-  `seed`, `profile`, `git_sha`, `git_dirty`, `hostname`, and knobs, under
-  `benchmarks/results/jazz` (`INV-BENCH-4`).
+  `seed`, `profile`, `git_sha`, `git_dirty`, `git_status_available`, `hostname`,
+  and knobs, under `benchmarks/results/jazz` (`INV-BENCH-4`). Status is
+  available only when `git status --porcelain` succeeds and its stdout is valid
+  UTF-8; unavailable status is conservatively reported as dirty. HEAD resolution
+  is independent of status availability.
 
   **Implementation status (current retained format).** The named fields are
   the current JSONL schema; they are the present implementation of the
@@ -281,10 +284,12 @@ Landed capabilities were retired from the gate list; git history is the record.
   `s9_durable_execution.rs`, `jazz/benches/sync.rs`, `jazz/benches/validation.rs`,
   and `groove/benches/{micro,scenario}.rs`.
 - **Output and retention.** `jazz-sim/src/lib.rs::metadata_fields` emits
-  `scenario`, `driver`, `seed`, `profile`, `git_sha`, `git_dirty`, and
-  `hostname`; `emit_json_line` appends to `benchmarks/results/jazz/<scenario>.jsonl`
-  when `JAZZ_BENCH_RETAIN=1`. Legacy `scripts/bench_run.py` enriches groove
-  scenario JSONL with `git_sha`, `git_dirty`, and host metadata.
+  `scenario`, `driver`, `seed`, `profile`, `git_sha`, `git_dirty`,
+  `git_status_available`, and `hostname`; `emit_json_line` appends to
+  `benchmarks/results/jazz/<scenario>.jsonl` when `JAZZ_BENCH_RETAIN=1`.
+  Jazz benchmark process metadata also records `git_status_available`.
+  Legacy `scripts/bench_run.py` enriches groove scenario JSONL with `git_sha`,
+  `git_dirty`, and host metadata.
 - **Bytes/token accounting.** Several benches have local helpers:
   `view_update_bytes` / `bytes_floor` in S1/S2/S3/S9, stream bytes/token in
   `s5_durable_stream.rs`, and storage tree walkers in S5/S9. This is useful but

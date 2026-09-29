@@ -125,10 +125,25 @@ describe("NativeRuntimeAdapter server transport", () => {
   it.each([
     [
       "transport mentioning a nested rejection",
-      new Error("Protocol: upstream reported WriteRejected: quoted peer diagnostic"),
+      Object.assign(
+        new Error("Protocol: upstream reported WriteRejected: quoted peer diagnostic"),
+        {
+          code: "protocol",
+        },
+      ),
     ],
-    ["not-observed", new Error("NotObserved: transaction is not resident")],
-    ["schema", new Error("Schema: invalid authored branch value")],
+    // Only the core code classifies a rejection; rejection-shaped text alone does not.
+    ["uncoded rejection-shaped text", new Error("WriteRejected: no core code")],
+    [
+      "not-observed",
+      Object.assign(new Error("NotObserved: transaction is not resident"), {
+        code: "not_observed",
+      }),
+    ],
+    [
+      "schema",
+      Object.assign(new Error("Schema: invalid authored branch value"), { code: "schema" }),
+    ],
     ["cancellation", Object.assign(new Error("operation cancelled"), { name: "AbortError" })],
     ["unknown", new Error("unknown lifecycle failure")],
   ])("preserves %s lifecycle errors from native write waits", async (_kind, nativeError) => {
@@ -199,7 +214,9 @@ describe("NativeRuntimeAdapter server transport", () => {
     const write = {
       ...fakeWrite(),
       wait: async () => {
-        throw new Error("WriteRejected: queued write was denied");
+        throw Object.assign(new Error("WriteRejected: queued write was denied"), {
+          code: "write_rejected",
+        });
       },
     };
     const runtime = new NativeRuntimeAdapter(
@@ -338,6 +355,79 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(terminal).not.toHaveBeenCalled();
     await runtime.close();
   });
+
+  it.each([
+    [
+      "a coverage timeout Error (NAPI)",
+      new Error("NotObserved: Timed out waiting for query coverage"),
+    ],
+    ["a coverage timeout string (WASM)", "NotObserved: Timed out waiting for query coverage"],
+    ["an unrelated read failure", new Error("PermissionDenied: read rejected")],
+  ])(
+    "keeps reconnecting after a local read's background refresh fails with %s",
+    async (_case, failure) => {
+      const sockets: FakeWebSocket[] = [];
+      globalThis.WebSocket = class extends FakeWebSocket {
+        constructor(url: string) {
+          super(url);
+          sockets.push(this);
+        }
+      } as unknown as typeof WebSocket;
+      const transports: FakeTransport[] = [];
+      let refreshes = 0;
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: () =>
+            fakeDb({
+              connectUpstream: () => {
+                const transport = new FakeTransport([]);
+                transports.push(transport);
+                return transport;
+              },
+              tick: () => undefined,
+              all: (_query: object, opts: { tier?: string }) => {
+                if (opts.tier !== "global") return emptyRows();
+                refreshes += 1;
+                return {
+                  poll: () => {
+                    throw failure;
+                  },
+                  cancel: () => undefined,
+                };
+              },
+            }),
+          openBrowser: async () => {
+            throw new Error("not used");
+          },
+        } as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+      const terminal = vi.fn();
+      runtime.onServerTransportError(terminal);
+      runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+      await runtime.waitForUpstreamServerConnection();
+      await expect(
+        runtime.query(JSON.stringify({ table: "todos" }), null, "local"),
+      ).resolves.toEqual([]);
+      for (let turn = 0; turn < 5 && refreshes === 0; turn += 1) await waitForServerPumpTimer();
+      await waitForServerPumpTimer();
+      expect(refreshes).toBe(1);
+      expect(terminal).not.toHaveBeenCalled();
+      expect(transports[0]!.closed).toBe(false);
+
+      // The failed refresh must not have poisoned retry: a later real drop reconnects.
+      sockets[0]!.emitServerClose();
+      await runtime.waitForUpstreamServerConnection();
+      expect(sockets).toHaveLength(2);
+      expect(transports).toHaveLength(2);
+      expect(terminal).not.toHaveBeenCalled();
+      await runtime.close();
+    },
+  );
 
   it("reconnects after a negotiated Core reports its account registry temporarily unavailable", async () => {
     const sockets: FakeWebSocket[] = [];
@@ -2869,6 +2959,12 @@ function isClientHelloBatch(data: Uint8Array): boolean {
     return false;
   }
 }
+function emptyRows(): Uint8Array {
+  const writer = new PostcardWriter();
+  writer.vec(() => undefined, 0);
+  return writer.finish();
+}
+
 function fakeDb<T extends object>(
   db: T,
 ): T & { setTickScheduler(callback: (urgency: "immediate" | "deferred") => void): void } {

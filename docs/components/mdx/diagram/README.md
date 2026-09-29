@@ -37,7 +37,6 @@ A sequence diagram (pure data, no import needed):
 
 ```mdx
 <Sequence
-  eyebrow="Provider sign-in"
   description="An external JWT provider connecting to a Jazz server."
   participants={[
     { id: "browser", label: "Browser" },
@@ -59,7 +58,6 @@ the git-graph fork/merge look:
 
 ```mdx
 <Graph
-  eyebrow="Row version history"
   description="One device edits linearly; concurrent edits branch then reconcile."
   direction="LR"
   converge
@@ -106,7 +104,6 @@ participants a diagram has.
 
 ```ts
 type SequenceProps = {
-  eyebrow: string;
   description: ReactNode;
   participants: Participant[];
   steps: SequenceStep[];
@@ -141,7 +138,6 @@ scale-to-fit, and an optional definition-drawn animated overlay.
 
 ```ts
 type GraphProps = {
-  eyebrow: string;
   description: ReactNode;
   direction: "TD" | "LR";
   nodes: GraphNode[];
@@ -369,6 +365,6 @@ left unmapped. To extract the engine, drop that block; the defaults take over.
 | `kit.tsx`                             | Composable node parts.                                            |
 | `geometry.ts`                         | Pure routing/anchor maths.                                        |
 | `styles.tsx`                          | `--diagram-*` defaults + portable CSS via `<style precedence>`.   |
-| `frame.tsx`                           | Shared diagram chrome (eyebrow, description, card).               |
+| `frame.tsx`                           | Shared diagram chrome (description, card).                        |
 | `trace-anim.ts`                       | Low-level path draw / dot tracking primitives.                    |
 | `*.test.ts`                           | Pure-function specs.                                              |

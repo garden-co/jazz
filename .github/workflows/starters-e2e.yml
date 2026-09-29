@@ -21,7 +21,7 @@ on:
   workflow_dispatch:
     inputs:
       starter:
-        description: "Single starter to run (omit for all twelve)"
+        description: "Single starter to run (omit for all of them)"
         required: false
         type: string
 
@@ -40,7 +40,8 @@ jobs:
     # always allowed (handy for testing a starter in isolation).
     if: ${{ github.event_name == 'workflow_dispatch' || github.head_ref == 'changeset-release/release' }}
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 25
+    # A cold `build:core` alone takes ~23 minutes on this runner.
+    timeout-minutes: 40
     steps:
       - name: Validate workflow_dispatch starter
         if: ${{ github.event_name == 'workflow_dispatch' }}
@@ -48,7 +49,7 @@ jobs:
           STARTER_FILTER: ${{ github.event.inputs.starter }}
         run: |
           case "$STARTER_FILTER" in
-            ""|next-betterauth|next-localfirst|next-hybrid|sveltekit-betterauth|sveltekit-localfirst|sveltekit-hybrid|react-betterauth|react-localfirst|react-hybrid|ts-betterauth|ts-localfirst|ts-hybrid)
+            ""|next-betterauth|next-localfirst|next-hybrid|sveltekit-betterauth|sveltekit-localfirst|sveltekit-hybrid|react-betterauth|react-localfirst|react-hybrid|ts-betterauth|ts-localfirst|ts-hybrid|ts-effect-localfirst|ts-effect-betterauth)
               ;;
             *)
               echo "::error::Unknown starter '$STARTER_FILTER'"
@@ -165,6 +166,8 @@ jobs:
           - ts-betterauth
           - ts-localfirst
           - ts-hybrid
+          - ts-effect-localfirst
+          - ts-effect-betterauth
         cancel_reopen_subscription_probe: [false]
         include:
           - starter: ts-betterauth
