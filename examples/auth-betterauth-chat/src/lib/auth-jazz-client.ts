@@ -1,5 +1,4 @@
 import { app } from "../../schema";
-import permissions from "../../permissions";
 import type { JazzClient } from "jazz-tools/backend";
 
 // This is a workaround to resolve correctly NAPI modules in the monorepo
@@ -22,7 +21,6 @@ declare global {
 export async function authJazzClient(): Promise<JazzClient> {
   const pending = (globalThis.__authBetterAuthChatJazzSession ??= createJazzSession({
     app,
-    permissions,
     appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID!,
     driver: { type: "memory" },
     serverUrl: process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!,

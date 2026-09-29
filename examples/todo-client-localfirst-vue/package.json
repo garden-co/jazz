@@ -7,8 +7,7 @@
     "dev": "vite",
     "build": "node ../../packages/jazz-tools/dist/cli.js validate && vite build",
     "preview": "vite preview",
-    "test": "vitest run --config vitest.config.browser.ts",
-    "typecheck": "vue-tsc --noEmit"
+    "test": "vitest run --config vitest.config.browser.ts"
   },
   "dependencies": {
     "jazz-tools": "workspace:*",

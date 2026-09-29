@@ -35,7 +35,7 @@ type JazzBrowserCommandHandlers = {
 
 const jazzBrowserCommands = {
   jazzBrowserTopologyLog,
-  jazzServerInfo: async (_context, appId) => jazzServerInfo(appId),
+  jazzServerInfo: async (_context, appId, schema) => jazzServerInfo(appId, schema),
   jazzServerStop: async (_context, serverUrl) => stopJazzServerByUrl(serverUrl),
   jazzServerBlockNetwork: async ({ context }, serverUrl) =>
     blockJazzServerNetwork(context, serverUrl),

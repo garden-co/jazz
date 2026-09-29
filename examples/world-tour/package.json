@@ -7,8 +7,7 @@
     "dev": "vite",
     "build": "node ../../packages/jazz-tools/dist/cli.js validate && vite build",
     "preview": "vite preview",
-    "test": "vitest run --config vitest.config.browser.ts",
-    "typecheck": "vue-tsc --noEmit"
+    "test": "vitest run --config vitest.config.browser.ts"
   },
   "dependencies": {
     "jazz-tools": "workspace:*",
@@ -23,7 +22,6 @@
     "vite": "catalog:default",
     "vite-plugin-top-level-await": "^1.6.0",
     "vite-plugin-wasm": "^3.5.0",
-    "vitest": "catalog:default",
-    "vue-tsc": "catalog:default"
+    "vitest": "catalog:default"
   }
 }

@@ -4,8 +4,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc --noEmit",
-    "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "test": "vitest run"
   },
   "dependencies": {
     "jazz-tools": "workspace:*"

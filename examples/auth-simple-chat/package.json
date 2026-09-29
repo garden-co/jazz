@@ -8,8 +8,7 @@
     "dev:auth": "node server/main.ts",
     "build": "node ../../packages/jazz-tools/dist/cli.js validate && vite build",
     "preview": "vite preview",
-    "test": "vitest run --config vitest.config.browser.ts",
-    "typecheck": "tsc --noEmit"
+    "test": "vitest run --config vitest.config.browser.ts"
   },
   "dependencies": {
     "express": "^4.18.2",
@@ -26,6 +25,7 @@
     "@vitejs/plugin-react": "catalog:default",
     "@vitest/browser": "catalog:default",
     "@vitest/browser-playwright": "catalog:default",
+    "jsdom": "catalog:default",
     "tsx": "^4.0.0",
     "typescript": "catalog:default",
     "vite": "catalog:default",

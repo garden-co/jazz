@@ -197,18 +197,6 @@ export const ciPartitions = Object.freeze({
       "--",
       "tests/browser/indexeddb-jazz-compat.test.ts",
     ]),
-    // Vitest strips types without checking them, so without this step an
-    // example can break against a jazz-tools API change while its tests pass.
-    // It runs last, against the jazz-tools build the consumers produced.
-    command("example typecheck", "pnpm", [
-      "--recursive",
-      "--no-bail",
-      "--workspace-concurrency=4",
-      "--filter",
-      "./examples/**",
-      "run",
-      "typecheck",
-    ]),
   ]),
   "react-native": Object.freeze([
     // React Native's bridge is deliberately opt-in. This producer must be

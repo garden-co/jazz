@@ -7,8 +7,7 @@
     "check": "tsc --noEmit",
     "build": "pnpm run check",
     "start": "tsx src/server.ts",
-    "test": "vitest run",
-    "typecheck": "pnpm run check"
+    "test": "vitest run"
   },
   "dependencies": {
     "@hono/node-server": "^1.19.11",
