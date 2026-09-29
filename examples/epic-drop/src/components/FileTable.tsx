@@ -54,6 +54,7 @@ const comparators = {
 export function FileTable({
   entries,
   canEdit,
+  isCompact,
   canShare,
   onAction,
   onDropOnFolder,
