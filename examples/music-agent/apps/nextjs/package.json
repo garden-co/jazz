@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "next dev",
-    "build": "jazz-tools validate && next build",
+    "build": "env NEXT_PUBLIC_APP_ORIGIN=http://127.0.0.1:3000 BACKEND_SECRET=music-agent-build-backend-secret BETTER_AUTH_SECRET=music-agent-build-better-auth-secret-0123456789 sh -c 'jazz-tools validate && next build'",
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"

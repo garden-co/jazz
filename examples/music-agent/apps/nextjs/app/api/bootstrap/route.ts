@@ -2,6 +2,7 @@ import { after } from "next/server";
 import { accountRegistryUrl } from "jazz-tools";
 import { resolveRequestSession } from "jazz-tools/backend";
 import { runTurn } from "@/src/agent/runner";
+import { appOrigin } from "@/src/lib/app-origin";
 import { auth } from "@/src/lib/auth";
 import { bootstrapWorkspace } from "@/src/server/bootstrap";
 
@@ -13,13 +14,12 @@ export async function POST(request: Request) {
   if (!session?.user) return Response.json({ error: "sign in required" }, { status: 401 });
   const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID ?? "music-agent-local";
   const serverUrl = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL ?? "http://127.0.0.1:4200";
-  const origin = process.env.NEXT_PUBLIC_APP_ORIGIN ?? "http://127.0.0.1:3000";
   const jazzSession = await resolveRequestSession(request, {
     appId,
     accountRegistry: accountRegistryUrl(serverUrl, appId),
-    jwksUrl: `${origin}/api/auth/jwks`,
-    jwtIssuer: origin,
-    jwtAudience: origin,
+    jwksUrl: `${appOrigin}/api/auth/jwks`,
+    jwtIssuer: appOrigin,
+    jwtAudience: appOrigin,
   });
   if (jazzSession.user_id !== session.user.id)
     return Response.json({ error: "session identity mismatch" }, { status: 401 });
