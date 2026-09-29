@@ -5,6 +5,7 @@ import { useAll, useDb } from "jazz-tools/react";
 import {
   AvatarGroup,
   Badge,
+  Banner,
   Button,
   ChatLayout,
   ChatMessage,
@@ -75,7 +76,8 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
   );
   const messages = useMemo(() => [...newestFirst].reverse(), [newestFirst]);
   const { data: reactions = [] } = useAll(app.reactions.where({ roomId }));
-  const { data: members = [] } = useAll(app.roomMembers.where({ roomId }));
+  const { data: loadedMembers } = useAll(app.roomMembers.where({ roomId }));
+  const members = loadedMembers ?? [];
   const { data: requests = [] } = useAll(
     isCreator ? app.joinRequests.where({ roomId }) : undefined,
   );
@@ -83,6 +85,9 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
   const markers = loadedMarkers ?? [];
   const [isMembersOpen, setMembersOpen] = useState(false);
   const [isRenameOpen, setRenameOpen] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const reportFailure = (action: string) => (cause: unknown) =>
+    setActionError(`${action}: ${cause instanceof Error ? cause.message : String(cause)}`);
 
   useMarkRead({
     roomId,
@@ -105,33 +110,46 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
     const mine = members.find((member) => member.memberAuthor === author);
     if (!mine) return;
     // Leaving and dropping this reader's private markers commit together.
-    void db
-      .transaction((tx) => {
-        for (const marker of markers) tx.delete(app.readMarkers, marker.id);
-        tx.delete(app.roomMembers, mine.id);
-      })
-      .catch((error: unknown) => console.error("Could not leave the room", error));
+    setActionError(null);
+    db.transaction((tx) => {
+      for (const marker of markers) tx.delete(app.readMarkers, marker.id);
+      tx.delete(app.roomMembers, mine.id);
+    })
+      .then((result) => result.wait({ tier: "global" }))
+      .catch(reportFailure("Could not leave the room"));
+  }
+
+  // A creator whose own membership write was rejected (see NewRoomDialog) can
+  // still read the room; this puts them back in.
+  const isMember = members.some((member) => member.memberAuthor === author);
+  function rejoin() {
+    setActionError(null);
+    db.insert(app.roomMembers, { roomId, memberAuthor: author, memberProfileId: directory.me.id })
+      .wait({ tier: "global" })
+      .catch(reportFailure("Could not join the room"));
   }
 
   function startSketch() {
     // The canvas is its own write: the message policy checks that the canvas
     // exists in this room, and `exists` checks only see committed rows
-    // (INV-RLS-9 in the Jazz authorization spec). The message and the room's
-    // activity then commit together. If that transaction is rejected, the
-    // canvas is left without a message; it is readable only by room members
-    // and holds no strokes.
+    // (INV-RLS-9; garden-co/jazz#3755). Once a transaction's own rows are
+    // visible to its `exists` checks, the canvas, its message and the room's
+    // activity become one transaction. Until then, if the second write is
+    // rejected, the canvas is left without a message; only members can read
+    // it and it holds no strokes.
+    setActionError(null);
     const canvas = db.insert(app.canvases, { roomId, title: "Sketch" }).value;
-    void db
-      .transaction((tx) => {
-        tx.insert(app.messages, {
-          roomId,
-          senderId: directory.me.id,
-          text: "",
-          canvasId: canvas.id,
-        });
-        tx.update(app.rooms, roomId, { lastActivityAt: new Date() });
-      })
-      .catch((error: unknown) => console.error("Could not start a sketch", error));
+    db.transaction((tx) => {
+      tx.insert(app.messages, {
+        roomId,
+        senderId: directory.me.id,
+        text: "",
+        canvasId: canvas.id,
+      });
+      tx.update(app.rooms, roomId, { lastActivityAt: new Date() });
+    })
+      .then((result) => result.wait({ tier: "global" }))
+      .catch(reportFailure("Could not start a sketch"));
   }
 
   const menuItems = [
@@ -178,6 +196,23 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
         <MoreMenu label="Room options" size="sm" alignment="end" items={menuItems} />
       </HStack>
       <Divider />
+      {isCreator && loadedMembers && !isMember ? (
+        <Banner
+          status="warning"
+          title="You are not a member of this room yet"
+          container="section"
+          collapsible={false}
+          endContent={<Button label="Join room" size="sm" onClick={rejoin} />}
+        />
+      ) : null}
+      {actionError ? (
+        <Banner
+          status="error"
+          title={actionError}
+          container="section"
+          onDismiss={() => setActionError(null)}
+        />
+      ) : null}
       <StackItem size="fill" className="room-chat">
         <ChatLayout
           composer={

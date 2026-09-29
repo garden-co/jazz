@@ -62,8 +62,7 @@ function Workspace({ author, ...props }: BandChatProps & { author: string }) {
   );
   if (!myProfiles) return <Loading label="Loading your profile…" />;
   // Profile creation is an explicit first-run action, never a read side effect.
-  // It writes one row per account (see lib/ids.ts); the oldest wins should an
-  // older install have left more than one.
+  // Two tabs finishing setup at once can create two profiles; the oldest wins.
   const profile = myProfiles[0];
   if (!profile)
     return <ProfileSetup author={author} defaultDisplayName={props.defaultDisplayName} />;

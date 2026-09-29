@@ -19,7 +19,6 @@ import {
 } from "@astryxdesign/core";
 import { app, type Profile } from "../../schema";
 import { avatarFromFile } from "../lib/attachments";
-import { profileId } from "../lib/ids";
 import { useObjectUrl } from "../lib/use-object-url";
 
 interface ProfileDraft {
@@ -101,14 +100,15 @@ export function ProfileSetup({
   });
   const [error, setError] = useState<string | null>(null);
 
-  async function save(event: FormEvent<HTMLFormElement>) {
+  function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const displayName = draft.displayName.trim();
     if (!displayName) return;
     try {
-      // One profile per account: the id is derived from the account, so two
-      // tabs finishing setup at once write the same row.
-      db.upsert(app.profiles, await profileId(author), {
+      // Two tabs finishing setup at once can create two profiles; the app
+      // uses the oldest (see BandChat.tsx). A deterministic id would avoid the
+      // duplicate, but anyone who knows the account id could claim it first.
+      db.insert(app.profiles, {
         author,
         displayName,
         avatar: draft.avatar ?? undefined,
@@ -130,7 +130,7 @@ export function ProfileSetup({
           </Text>
         </VStack>
         <Card width="100%">
-          <form onSubmit={(event) => void save(event)}>
+          <form onSubmit={save}>
             <VStack gap={4}>
               <ProfileFields draft={draft} onChange={setDraft} />
               {error ? (

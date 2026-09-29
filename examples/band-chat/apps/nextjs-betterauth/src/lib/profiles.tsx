@@ -10,8 +10,6 @@ export interface ProfileDirectory {
   me: Profile;
   byId: Map<string, Profile>;
   byAuthor: Map<string, Profile>;
-  /** Every profile this account may read, other than its own. */
-  others: Profile[];
 }
 
 const DirectoryContext = createContext<ProfileDirectory | null>(null);
@@ -31,10 +29,7 @@ export function ProfileDirectoryProvider({ me, children }: { me: Profile; childr
       if (!byAuthor.has(profile.author) || profile.id === me.id)
         byAuthor.set(profile.author, profile);
     }
-    const others = [...byAuthor.values()]
-      .filter((profile) => profile.author !== me.author)
-      .sort((a, b) => a.displayName.localeCompare(b.displayName));
-    return { me, byId, byAuthor, others };
+    return { me, byId, byAuthor };
   }, [profiles, me]);
   return <DirectoryContext.Provider value={directory}>{children}</DirectoryContext.Provider>;
 }

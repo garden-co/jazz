@@ -240,7 +240,7 @@ it("negotiates persistent browser workers and renders the owner, join-request, m
   await act(async () =>
     [...guestRow.querySelectorAll("button")].find((button) => hasText(button, "Remove"))!.click(),
   );
-  // Once removed, the guest moves from the member list to "People you know".
+  // Once removed, the guest leaves the member list.
   await waitFor(
     () =>
       ![...(openDialog().element() as HTMLElement).querySelectorAll("li")].some(

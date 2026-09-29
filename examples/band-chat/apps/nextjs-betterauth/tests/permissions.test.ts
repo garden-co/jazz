@@ -43,7 +43,11 @@ describe("BandChat room admission and authorship", () => {
       .wait({ tier: "global" });
 
     await owner
-      .insert(app.roomMembers, { roomId: room.id, memberAuthor: ownerAuthor })
+      .insert(app.roomMembers, {
+        roomId: room.id,
+        memberAuthor: ownerAuthor,
+        memberProfileId: ownerProfile.id,
+      })
       .wait({ tier: "global" });
     const sameSubjectFromAnotherIssuer = testApp.as({
       issuer: "https://other-provider.example",
@@ -70,8 +74,31 @@ describe("BandChat room admission and authorship", () => {
     await guest.expectDenied((db) =>
       db.insert(app.roomMembers, { roomId: room.id, memberAuthor: guestAuthor }),
     );
+    // Knowing an account id is not enough: the creator admits the guest's own
+    // profile after the guest asks to join.
+    await owner.expectDenied((db) =>
+      db.insert(app.roomMembers, { roomId: room.id, memberAuthor: guestAuthor }),
+    );
+    await owner.expectDenied((db) =>
+      db.insert(app.roomMembers, {
+        roomId: room.id,
+        memberAuthor: guestAuthor,
+        memberProfileId: guestProfile.id,
+      }),
+    );
+    await guest
+      .insert(app.joinRequests, {
+        roomId: room.id,
+        requester: guestAuthor,
+        profileId: guestProfile.id,
+      })
+      .wait({ tier: "global" });
     const membership = await owner
-      .insert(app.roomMembers, { roomId: room.id, memberAuthor: guestAuthor })
+      .insert(app.roomMembers, {
+        roomId: room.id,
+        memberAuthor: guestAuthor,
+        memberProfileId: guestProfile.id,
+      })
       .wait({ tier: "global" });
     const guestMessage = await guest
       .insert(app.messages, { roomId: room.id, senderId: guestProfile.id, text: "legitimate" })
@@ -164,6 +191,19 @@ describe("BandChat room admission and authorship", () => {
     expect(await stranger.all(app.joinRequests)).toEqual([]);
     // Asking is not admission.
     await guest.expectDenied((db) =>
+      db.insert(app.roomMembers, { roomId: room.id, memberAuthor: guestAuthor }),
+    );
+    // Without a request or a shared room, the creator cannot read a profile,
+    // so cannot add it, even with the matching account id.
+    await owner.expectDenied((db) =>
+      db.insert(app.roomMembers, {
+        roomId: room.id,
+        memberAuthor: strangerAuthor,
+        memberProfileId: strangerProfile.id,
+      }),
+    );
+    // A membership must name a profile.
+    await owner.expectDenied((db) =>
       db.insert(app.roomMembers, { roomId: room.id, memberAuthor: guestAuthor }),
     );
     // The admitted profile must belong to the admitted account.

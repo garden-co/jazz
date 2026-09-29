@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useDb } from "jazz-tools/react";
 import {
   Badge,
+  Banner,
   Button,
   Dialog,
   DialogHeader,
@@ -20,8 +21,8 @@ import { roomLink } from "../lib/url-state";
 
 /**
  * Admission stays with the room creator. A room link only lets someone *ask*
- * to join; the creator admits requests or adds people they already share a
- * room with. Anyone may leave; only the creator removes others.
+ * to join, and the creator admits requests. Anyone may leave; only the
+ * creator removes others.
  */
 export function MembersDialog({
   isOpen,
@@ -43,19 +44,22 @@ export function MembersDialog({
   const db = useDb();
   const directory = useDirectory();
   const memberAuthors = new Set(members.map((member) => member.memberAuthor));
-  const known = directory.others.filter((profile) => !memberAuthors.has(profile.author));
   const pending = requests.filter((request) => !memberAuthors.has(request.requester));
+  const [error, setError] = useState<string | null>(null);
 
   // Admission and clearing the request commit together. Both policies check
   // only the committed room, profile and request, never each other.
   function admit(memberAuthor: string, memberProfileId: string) {
-    void db
-      .transaction((tx) => {
-        tx.insert(app.roomMembers, { roomId, memberAuthor, memberProfileId });
-        for (const request of requests)
-          if (request.requester === memberAuthor) tx.delete(app.joinRequests, request.id);
-      })
-      .catch((error: unknown) => console.error("Could not admit member", error));
+    setError(null);
+    db.transaction((tx) => {
+      tx.insert(app.roomMembers, { roomId, memberAuthor, memberProfileId });
+      for (const request of requests)
+        if (request.requester === memberAuthor) tx.delete(app.joinRequests, request.id);
+    })
+      .then((result) => result.wait({ tier: "global" }))
+      .catch((cause: unknown) =>
+        setError(`Could not admit them: ${cause instanceof Error ? cause.message : String(cause)}`),
+      );
   }
 
   return (
@@ -65,6 +69,9 @@ export function MembersDialog({
         onOpenChange={onOpenChange}
       />
       <VStack gap={6} padding={4}>
+        {error ? (
+          <Banner status="error" title={error} container="section" collapsible={false} />
+        ) : null}
         {isCreator ? <InviteLink roomId={roomId} /> : null}
         {isCreator && pending.length > 0 ? (
           <List header={<SectionTitle>Asking to join</SectionTitle>} hasDividers>
@@ -128,20 +135,6 @@ export function MembersDialog({
             );
           })}
         </List>
-        {isCreator && known.length > 0 ? (
-          <List header={<SectionTitle>People you know</SectionTitle>} hasDividers>
-            {known.map((profile) => (
-              <ListItem
-                key={profile.id}
-                startContent={<ProfileAvatar profile={profile} size="md" />}
-                label={profile.displayName}
-                endContent={
-                  <Button label="Add" size="sm" onClick={() => admit(profile.author, profile.id)} />
-                }
-              />
-            ))}
-          </List>
-        ) : null}
       </VStack>
     </Dialog>
   );

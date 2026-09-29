@@ -22,18 +22,16 @@ product slice, not another generic Todo tutorial.
   and is the only identity that admits or removes others. A room link
   (`?join=<room id>`) does not grant anything: it lets a signed-in person _ask_ to
   join by writing a `joinRequests` row that only they and the room creator can
-  read. The creator admits a request, or adds directly anyone whose profile they
-  can already read (someone they share another room with). The policy does not
-  require a pending request: the creator is trusted to choose members, and
-  adding someone makes their profile readable by the room's members. A guest
-  cannot add themself, and a membership may only name a profile owned by the
-  admitted account. Members may leave on their own. Secure,
+  read. The creator admits that request; there is no other way in. Every
+  membership names the admitted account's own profile, and the policy requires
+  either the creator's own account or a join request from the admitted account
+  for that room, so knowing someone's account id is not enough to put them in
+  a room. A guest cannot add themself. Members may leave on their own. Secure,
   revocable bearer invite capabilities belong to
   [#1954](https://github.com/garden-co/jazz/issues/1954).
 - **Profile visibility follows relationships.** A profile is readable by its
   owner, by co-members, by anyone who can read a message it sent, and by a room
-  creator reviewing its join request. The "people you know" picker is simply
-  every readable profile.
+  creator reviewing its join request.
 - A message must reference a profile owned by `session.user.account`. Profiles,
   memberships, and row provenance store that enrolled account UUID. The
   external issuer and subject remain account identity metadata, never
@@ -80,6 +78,13 @@ Configuration fails closed. Local defaults apply only to a non-production
 process on a loopback origin; a production build or start must set every value
 listed in `.env.example`, or it refuses to start (`src/lib/config.mjs`,
 `tests/config.test.ts`).
+
+A deployed Jazz server must verify BandChat's tokens the way `withJazz` does
+locally: JWKS at `<NEXT_PUBLIC_APP_ORIGIN>/api/auth/jwks`, JWT issuer equal to
+`NEXT_PUBLIC_APP_ORIGIN`, and JWT audience `band-chat` (`--jwt-issuer` /
+`--jwt-audience`, or `JAZZ_JWT_ISSUER` / `JAZZ_JWT_AUDIENCE`). Otherwise it
+rejects every sign-in with 401. The browser and backend share one Jazz
+environment (`NEXT_PUBLIC_JAZZ_ENV`, else `prod` in production, else `dev`).
 
 ## Checks
 

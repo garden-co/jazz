@@ -42,9 +42,11 @@ export function NewRoomDialog({
       //
       // They are deliberately two writes, not one transaction: the membership
       // policy's `exists` check on the room only sees committed rows (INV-RLS-9
-      // in the Jazz authorization spec), so a membership staged in the same
-      // transaction as its room would be rejected. If the membership write is
-      // rejected, the creator can still read the room and add themselves.
+      // in the Jazz authorization spec; garden-co/jazz#3755), so a membership
+      // staged in the same transaction as its room would be rejected. Once
+      // #3755 is fixed they become one transaction. Until then, if the
+      // membership write is rejected, the creator still sees the room (they
+      // can read it as its creator) and the room view offers them "Join room".
       const room = db.insert(app.rooms, { name: trimmed }).value;
       db.insert(app.roomMembers, {
         roomId: room.id,

@@ -56,18 +56,29 @@ const bandChatPermissions = definePermissions(
 
     policy.roomMembers.allowRead.where(allowedTo.read("room"));
     // Only the room creator can admit members. In particular, no rule permits an
-    // identity to insert its own membership into someone else's room. A named
-    // profile must belong to the admitted account. A pending join request is
-    // not required: the creator may also add someone directly, which makes
-    // that profile readable by the room's members (see the README).
+    // identity to insert its own membership into someone else's room.
+    //
+    // Every membership names the admitted account's own profile, and that
+    // account must be the creator or have asked to join this room. Knowing an account id is therefore not enough to put someone in
+    // a room. The admission may delete the request in the same transaction:
+    // the check sees the committed request (INV-RLS-9).
+    //
+    // Adding people the creator already shares another room with, without a
+    // request, would need `allowedTo.read("memberProfile")` here, which is
+    // denied even when the creator can read the profile (reported upstream).
     policy.roomMembers.allowInsert.where((member) =>
       allOf([
         isCreatorOf(member.roomId),
+        { memberProfileId: { isNull: false } },
+        policy.profiles.exists.where({
+          id: member.memberProfileId,
+          author: member.memberAuthor,
+        }),
         anyOf([
-          { memberProfileId: { isNull: true } },
-          policy.profiles.exists.where({
-            id: member.memberProfileId,
-            author: member.memberAuthor,
+          { memberAuthor: me },
+          policy.joinRequests.exists.where({
+            roomId: member.roomId,
+            requester: member.memberAuthor,
           }),
         ]),
       ]),
