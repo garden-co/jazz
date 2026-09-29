@@ -135,7 +135,6 @@ fn main() {
                         "recover_catalogue_state": open.recover_catalogue_state.as_micros(),
                         "recover_global_times": open.recover_global_times.as_micros(),
                         "recover_pending_and_rejected": open.recover_pending_and_rejected.as_micros(),
-                        "recover_unclean_close": open.recover_unclean_close.as_micros(),
                         "recover_known_state": open.recover_known_state.as_micros(),
                         "rebuild_ahead_current": open.rebuild_ahead_current.as_micros(),
                         "finalize_catalogue": open.finalize_catalogue.as_micros(),
