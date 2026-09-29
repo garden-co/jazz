@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { Copy, RefreshCw, UserMinus } from "lucide-react";
 import { useAll, useDb } from "jazz-tools/react";
 import { Avatar } from "@astryxdesign/core/Avatar";
 import { Badge } from "@astryxdesign/core/Badge";
@@ -46,7 +45,7 @@ export function CrewPanel({ show, crew }: { show: Show; crew: CrewMember[] }) {
                         label={`Remove ${name} from the crew`}
                         variant="ghost"
                         size="sm"
-                        icon={<Icon icon={UserMinus} size="sm" />}
+                        icon={<Icon icon="close" size="sm" />}
                         onClick={() => db.delete(app.showCrew, member.id)}
                       />
                     )}
@@ -95,7 +94,7 @@ function InviteLink({ show }: { show: Show }) {
         <HStack gap={2}>
           <Button
             label={copied ? "Copied" : "Copy link"}
-            icon={<Icon icon={Copy} size="sm" />}
+            icon={<Icon icon="copy" size="sm" />}
             isDisabled={!link}
             clickAction={async () => {
               await navigator.clipboard.writeText(link);
@@ -105,7 +104,6 @@ function InviteLink({ show }: { show: Show }) {
           <Button
             label="New link"
             variant="ghost"
-            icon={<Icon icon={RefreshCw} size="sm" />}
             onClick={() => {
               setCopied(false);
               void rotateInvite(

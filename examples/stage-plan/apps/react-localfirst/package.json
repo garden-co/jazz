@@ -16,7 +16,6 @@
     "@astryxdesign/core": "0.6.3",
     "@garden-co/design": "github:garden-co/design#fe96522c2484b894380fab7f0217b76ee4bda3a2",
     "jazz-tools": "workspace:*",
-    "lucide-react": "^0.563.0",
     "react": "19.2.4",
     "react-dom": "19.2.4"
   },

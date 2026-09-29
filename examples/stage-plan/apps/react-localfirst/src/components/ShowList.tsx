@@ -1,12 +1,10 @@
 import { useState } from "react";
-import { Plus } from "lucide-react";
 import { useAll, useDb } from "jazz-tools/react";
 import { Badge } from "@astryxdesign/core/Badge";
 import { Button } from "@astryxdesign/core/Button";
 import { ClickableCard } from "@astryxdesign/core/ClickableCard";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
 import { Grid } from "@astryxdesign/core/Grid";
-import { Icon } from "@astryxdesign/core/Icon";
 import { ProgressBar } from "@astryxdesign/core/ProgressBar";
 import { HStack, VStack } from "@astryxdesign/core/Stack";
 import { Heading, Text } from "@astryxdesign/core/Text";
@@ -29,12 +27,7 @@ export function ShowList() {
   );
 
   const newShowButton = (
-    <Button
-      label="New show"
-      variant="primary"
-      icon={<Icon icon={Plus} size="sm" />}
-      onClick={() => setCreating(true)}
-    />
+    <Button label="New show" variant="primary" onClick={() => setCreating(true)} />
   );
 
   return (

@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { Search, Trash2 } from "lucide-react";
 import { useAll, useDb } from "jazz-tools/react";
 import { Button } from "@astryxdesign/core/Button";
 import { CheckboxInput } from "@astryxdesign/core/CheckboxInput";
@@ -65,7 +64,7 @@ export function Checklist() {
             label="Filter"
             isLabelHidden
             placeholder="Filter as you type"
-            startIcon={Search}
+            startIcon={<Icon icon="search" size="sm" />}
             value={search}
             onChange={setSearch}
             hasClear
@@ -106,7 +105,7 @@ export function Checklist() {
                     label={`Delete ${item.title}`}
                     variant="ghost"
                     size="sm"
-                    icon={<Icon icon={Trash2} size="sm" />}
+                    icon={<Icon icon="close" size="sm" />}
                     onClick={() => db.delete(app.checklistItems, item.id)}
                   />
                 }

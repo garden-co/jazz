@@ -1,10 +1,8 @@
 import { useState } from "react";
-import { Pencil } from "lucide-react";
 import { useAll, useDb, useOne } from "jazz-tools/react";
 import { Badge } from "@astryxdesign/core/Badge";
 import { Button } from "@astryxdesign/core/Button";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
-import { Icon } from "@astryxdesign/core/Icon";
 import { HStack } from "@astryxdesign/core/Stack";
 import { Tab, TabList } from "@astryxdesign/core/TabList";
 import { app } from "../../schema.js";
@@ -60,13 +58,7 @@ export function ShowPage({ showId, tab, taskId }: ShowPageProps) {
       actions={
         <HStack gap={2} vAlign="center">
           <Badge label={isChief ? "Crew chief" : "Crew"} variant={isChief ? "info" : "neutral"} />
-          {isChief && (
-            <Button
-              label="Edit show"
-              icon={<Icon icon={Pencil} size="sm" />}
-              onClick={() => setEditing(true)}
-            />
-          )}
+          {isChief && <Button label="Edit show" onClick={() => setEditing(true)} />}
         </HStack>
       }
     >
