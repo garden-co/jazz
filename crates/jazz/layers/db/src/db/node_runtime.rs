@@ -3577,8 +3577,52 @@ where
             }
         }
         Box::pin(self.advance_runtime_deletion_discoveries()).await?;
+        let held_before = self.held_row_checks.borrow().rows.len();
         self.advance_held_row_checks().await;
+        // Release waiting streams in this same turn, not one turn later (the
+        // pass above ran before this turn's answers were polled): those whose
+        // held rows are all answered, and, while no upstream authority is
+        // admitted, every probing stream, since no probe can be routed at all.
+        // Released rows stay in `HeldRowChecks` and are probed once an
+        // upstream is admitted (INV-SYNC-48).
+        let routable = self.admitted_upstream_authority.borrow().is_some();
+        let held_after = self.held_row_checks.borrow().rows.len();
+        if held_after < held_before || (!routable && held_after > 0) {
+            self.release_probing_streams(routable);
+        }
         Ok(())
+    }
+
+    /// Mark `Probing` streams as `Done` so they refresh and settle on the next
+    /// owner turn: every one when `routable` is false, otherwise those whose
+    /// held rows the authority has all answered.
+    fn release_probing_streams(&self, routable: bool) {
+        let live = self.subscriptions.borrow().clone();
+        let mut released = false;
+        for weak in live {
+            let Some(owner) = weak.upgrade() else {
+                continue;
+            };
+            let mut state = owner.borrow_mut();
+            if state.closed.get() {
+                continue;
+            }
+            let DeletionReconciliation::Probing { rows, .. } = &state.deletion_reconciliation
+            else {
+                continue;
+            };
+            let resolved = !routable || {
+                let checks = self.held_row_checks.borrow();
+                rows.iter().all(|row| !checks.rows.contains_key(row))
+            };
+            if resolved {
+                state.deletion_reconciliation = DeletionReconciliation::Done;
+                released = true;
+            }
+        }
+        if released {
+            self.mark_local_subscriptions_dirty();
+        }
     }
 
     /// Finish discoveries whose stream closed or stopped waiting. These no
