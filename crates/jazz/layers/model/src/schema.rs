@@ -888,6 +888,24 @@ impl ColumnSchema {
         self.default = Some(value);
         self
     }
+
+    /// Whether this is a nullable JSON column. Its published storage type is
+    /// the bare `StoredScalar(Json)`: one nullable slot records presence, and
+    /// there is no separate slot for the column's own nullability.
+    pub fn is_nullable_json(&self) -> bool {
+        self.large_value_kind == LargeValueSemanticKind::Json
+            && matches!(self.column_type, GrooveColumnType::Nullable(_))
+    }
+
+    /// Lower a newly authored logical cell to its storage value without
+    /// changing the published JSON descriptor. A present nullable JSON value
+    /// is stored bare; SQL NULL is left to the caller's validation (#2733).
+    pub fn storage_value(&self, value: Value) -> Value {
+        match value {
+            Value::Nullable(Some(value)) if self.is_nullable_json() => *value,
+            value => value,
+        }
+    }
 }
 
 fn contains_internal_storage_type(column_type: &GrooveColumnType) -> bool {

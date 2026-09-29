@@ -3947,7 +3947,11 @@ pub(super) fn history_values_from_parts(
     ];
     for column in &table.columns {
         values.push(Value::Nullable(
-            version.cells.get(&column.name).cloned().map(Box::new),
+            version
+                .cells
+                .get(&column.name)
+                .cloned()
+                .map(|value| Box::new(column.storage_value(value))),
         ));
     }
     values.push(authored_column_ids_value(version.authored_columns.as_ref()));
@@ -4669,8 +4673,12 @@ pub(super) fn nullable_value(value: Value) -> Result<Option<Value>, Error> {
 }
 
 pub(super) fn validate_cell_value(column: &ColumnSchema, value: &Value) -> Result<(), Error> {
-    records::RecordDescriptor::new([("cell", crate::schema::storage_column_type(column))])
-        .create(std::slice::from_ref(value))?;
+    records::RecordDescriptor::new([("cell", crate::schema::storage_column_type(column))]).create(
+        std::slice::from_ref(match value {
+            Value::Nullable(Some(value)) if column.is_nullable_json() => value.as_ref(),
+            value => value,
+        }),
+    )?;
     Ok(())
 }
 
