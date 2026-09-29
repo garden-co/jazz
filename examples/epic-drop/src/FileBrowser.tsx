@@ -14,6 +14,7 @@ import { Icon } from "@astryxdesign/core/Icon";
 import { IconButton } from "@astryxdesign/core/IconButton";
 import { Layout, LayoutContent, LayoutPanel } from "@astryxdesign/core/Layout";
 import { MoreMenu } from "@astryxdesign/core/MoreMenu";
+import { Spinner } from "@astryxdesign/core/Spinner";
 import { SideNav, SideNavSection } from "@astryxdesign/core/SideNav";
 import { HStack, StackItem, VStack } from "@astryxdesign/core/Stack";
 import { Heading, Text } from "@astryxdesign/core/Text";
@@ -53,7 +54,7 @@ export function FileBrowser() {
   const profile = useEnsureProfile(userId);
   const isWide = useMediaQuery("(min-width: 1100px)");
 
-  const { data: folders = [] } = useAll(app.folders);
+  const { data: folders = [], isLoading: foldersLoading } = useAll(app.folders);
   const { data: memberships = [] } = useAll(
     userId ? app.folderMembers.where({ user_id: userId }) : undefined,
   );
@@ -334,6 +335,8 @@ export function FileBrowser() {
         />
       )}
     </VStack>
+  ) : foldersLoading ? (
+    <Spinner label="Loading folders" />
   ) : folderId ? (
     <EmptyState
       headingLevel={1}

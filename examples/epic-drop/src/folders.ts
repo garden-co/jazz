@@ -119,5 +119,13 @@ export async function deleteFolderTree(db: Db, index: FolderIndex, folderId: str
   const ids = folders.map((folder) => folder.id);
   const files = await db.all(app.files.where({ folder_id: { in: ids } }).select("id"));
   for (const file of files) db.delete(app.files, file.id);
+  // Sharing rows go while the caller still owns the folder they belong to.
+  const owned = folders.filter((folder) => index.isMine(folder)).map((folder) => folder.id);
+  if (owned.length > 0) {
+    const invites = await db.all(app.folderInvites.where({ folder_id: { in: owned } }));
+    for (const invite of invites) db.delete(app.folderInvites, invite.id);
+    const members = await db.all(app.folderMembers.where({ folder_id: { in: owned } }));
+    for (const member of members) db.delete(app.folderMembers, member.id);
+  }
   for (const folder of folders.reverse()) db.delete(app.folders, folder.id);
 }
