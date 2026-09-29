@@ -6,4 +6,4 @@ Exclusive transactions no longer act on stale data. The server now checks an exc
 
 Exclusive transactions can now be prepared offline: reads answer from local data, the commit is stored locally, and the server accepts it once it syncs if everything the transaction read still holds.
 
-**Upgrade clients that use exclusive transactions.** Servers now require the row records that alpha.58 clients send with each exclusive read. An exclusive transaction from an older client whose query read returned any rows is rejected with `exclusive_conflict` on every attempt, until the client is upgraded.
+**Upgrade clients that use exclusive transactions.** Servers now require the row records that alpha.58 clients send with each exclusive read. An exclusive transaction from an older client is rejected with `exclusive_conflict` whenever one of its queries, table reads or counts matches any rows on the server, on every attempt, until the client is upgraded. Reads of a single row by id are unaffected.

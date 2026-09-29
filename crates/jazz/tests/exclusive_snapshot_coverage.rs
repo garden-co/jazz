@@ -26,7 +26,7 @@ use jazz::db::{
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::query::{Query, col, eq, lit};
+use jazz::query::{ArraySubquery, ArraySubqueryRequirement, Query, col, eq, lit};
 use jazz::schema::JazzSchema;
 use jazz::serving::{InMemoryServerShell, InMemoryServerShellConfig, NodeRole, ServerSession};
 use jazz::tools::{ColumnType, OpenTransactionId, SchemaBuilder, TableSchemaBuilder};
@@ -182,10 +182,7 @@ impl Net {
             || false,
             |attachment| db.detach_query(attachment),
         );
-        let SerializedReadResult::Rows(rows) = self.drive(read).expect("read") else {
-            panic!("expected plain rows");
-        };
-        rows.iter().map(|row| row.row_uuid()).collect()
+        root_rows(query, self.drive(read).expect("read"))
     }
 
     /// Poll a one-shot local exclusive read without pumping anything,
@@ -216,10 +213,7 @@ impl Net {
             polled = read.as_mut().poll(&mut context);
         }
         match polled {
-            Poll::Ready(Ok(SerializedReadResult::Rows(rows))) => {
-                Some(rows.iter().map(|row| row.row_uuid()).collect())
-            }
-            Poll::Ready(Ok(_)) => panic!("expected plain rows"),
+            Poll::Ready(Ok(result)) => Some(root_rows(query, result)),
             Poll::Ready(Err(error)) => panic!("read failed: {error:?}"),
             Poll::Pending => None,
         }
@@ -365,6 +359,19 @@ enum Redeem {
     Invalid,
     Joined,
     Conflict,
+}
+
+/// The rows a read returned from its root table.
+fn root_rows(query: &Query, result: SerializedReadResult) -> Vec<RowUuid> {
+    match result {
+        SerializedReadResult::Rows(rows) => rows.iter().map(|row| row.row_uuid()).collect(),
+        SerializedReadResult::Relation(snapshot) => snapshot
+            .rows
+            .iter()
+            .filter(|row| row.table() == query.table)
+            .map(|row| row.row_uuid())
+            .collect(),
+    }
 }
 
 fn cells(code: &str) -> BTreeMap<String, Value> {
@@ -747,4 +754,125 @@ fn a_second_backend_cannot_redeem_through_the_rust_api() {
 #[test]
 fn a_second_backend_cannot_redeem_through_a_whole_table_read() {
     assert_second_backend_cannot_redeem_through_the_rust_api(true);
+}
+
+/// How a redemption checks that nobody else redeemed the invite, in the same
+/// query that reads the invite.
+#[derive(Clone, Copy, Debug)]
+enum RedemptionCheck {
+    /// Invites joined to their redemptions.
+    Join,
+    /// Invites with at least one redemption, as a correlated relation.
+    Relation,
+}
+
+fn redeemed_invite_query(code: &str, check: RedemptionCheck) -> Query {
+    match check {
+        RedemptionCheck::Join => invite_query(code).join_via_column("members", "code", "code", []),
+        RedemptionCheck::Relation => invite_query(code).array_subquery(ArraySubquery {
+            requirement: ArraySubqueryRequirement::AtLeastOne,
+            ..ArraySubquery::new("redemptions", "members", "code", "code")
+        }),
+    }
+}
+
+/// Redeem `code` on `client` inside one exclusive transaction: read the
+/// invite on its own, then read it through its redemptions, and add a member
+/// only if the invite is live and has none. `between` runs after the reads
+/// and before the commit.
+fn redeem_unless_redeemed(
+    net: &Net,
+    client: usize,
+    code: &str,
+    check: RedemptionCheck,
+    offline: bool,
+    between: impl FnOnce(),
+) -> Redeem {
+    let db = net.db(client);
+    let hint = if offline {
+        RemoteLinkHint::NoServer
+    } else {
+        RemoteLinkHint::Live
+    };
+    db.set_remote_link_hint(hint);
+    let open = OpenTransactionId::new();
+    block_on(db.begin_exclusive(open)).unwrap();
+    let read = |query: &Query| {
+        if offline {
+            net.read_while(client, query, open, hint)
+                .expect("offline read")
+        } else {
+            net.read(client, query, DurabilityTier::Local, Some(open))
+        }
+    };
+    let live = !read(&invite_query(code)).is_empty();
+    let redeemed = !read(&redeemed_invite_query(code, check)).is_empty();
+    if !live || redeemed {
+        db.abandon_transaction_handle(open).ok();
+        return Redeem::Invalid;
+    }
+    between();
+    net.drive(
+        db.exclusive_tx_ref(open)
+            .insert("members", cells(code), Default::default()),
+    )
+    .unwrap();
+    let tx_id = net.drive(db.commit_exclusive_handle(open)).unwrap();
+    db.set_remote_link_hint(RemoteLinkHint::Live);
+    match net.settle(client, tx_id) {
+        Ok(_) => Redeem::Joined,
+        Err(_) => Redeem::Conflict,
+    }
+}
+
+/// A plain read proves the invite row, and a second read of the same invite
+/// through its redemptions finds none on a backend that never received the
+/// first redemption. The row proof from the plain read must not stand in for
+/// the redemptions the second read depended on.
+fn assert_offline_redemption_check_sees_the_first_redemption(check: RedemptionCheck) {
+    let net = Net::new(&[0x0a, 0x0b, 0x0c]);
+    net.create_invite(OWNER, "abc");
+    net.read(BACKEND, &invite_query("abc"), DurabilityTier::Global, None);
+    assert_eq!(
+        redeem_unless_redeemed(&net, BACKEND, "abc", check, false, || {}),
+        Redeem::Joined
+    );
+    // The second backend holds the invite, and its cut covers the first
+    // redemption, which it never received.
+    net.read(2, &invite_query("abc"), DurabilityTier::Global, None);
+
+    assert_eq!(
+        redeem_unless_redeemed(&net, 2, "abc", check, true, || {}),
+        Redeem::Conflict
+    );
+    assert_eq!(net.members(), 1, "the invite was redeemed only once");
+}
+
+#[test]
+fn offline_join_redemption_check_sees_the_first_redemption() {
+    assert_offline_redemption_check_sees_the_first_redemption(RedemptionCheck::Join);
+}
+
+#[test]
+fn offline_relation_redemption_check_sees_the_first_redemption() {
+    assert_offline_redemption_check_sees_the_first_redemption(RedemptionCheck::Relation);
+}
+
+/// Online, a redemption that lands after the join read and before the commit
+/// conflicts the second redemption.
+#[test]
+fn join_redemption_check_conflicts_with_a_concurrent_redemption() {
+    let net = Net::new(&[0x0a, 0x0b, 0x0c]);
+    net.create_invite(OWNER, "abc");
+    net.read(BACKEND, &invite_query("abc"), DurabilityTier::Global, None);
+    net.read(2, &invite_query("abc"), DurabilityTier::Global, None);
+
+    let outcome = redeem_unless_redeemed(&net, 2, "abc", RedemptionCheck::Join, false, || {
+        assert_eq!(
+            redeem_unless_redeemed(&net, BACKEND, "abc", RedemptionCheck::Join, false, || {}),
+            Redeem::Joined
+        );
+    });
+    assert_eq!(outcome, Redeem::Conflict);
+    assert_eq!(net.members(), 1, "the invite was redeemed only once");
 }

@@ -3541,7 +3541,6 @@ where
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<RelationSnapshot, Error> {
         let identity = self.transaction_query_identity(tx_id, identity, authorization_mode)?;
-        let predicate_len = self.open_tx(tx_id)?.predicate_reads.len();
         let program = self
             .compile_open_tx_query_program(
                 tx_id,
@@ -3574,7 +3573,6 @@ where
             binding_values: binding.values().clone(),
         };
         let open_tx = self.open_tx_mut(tx_id)?;
-        open_tx.predicate_reads.truncate(predicate_len);
         open_tx.predicate_reads.push(predicate_read);
         if shape.query().aggregate.is_none() {
             // Prove every row the relation returns, root and included alike.
@@ -3613,7 +3611,6 @@ where
     ) -> Result<Vec<CurrentRow>, Error> {
         let identity = self.transaction_query_identity(tx_id, identity, authorization_mode)?;
         let query = shape.query();
-        let predicate_len = self.open_tx(tx_id)?.predicate_reads.len();
         let table = self.table_in_schema(&query.table, shape.schema_version())?;
         let program = self
             .compile_open_tx_query_program(
@@ -3648,7 +3645,6 @@ where
             binding_values: binding.values().clone(),
         };
         let open_tx = self.open_tx_mut(tx_id)?;
-        open_tx.predicate_reads.truncate(predicate_len);
         open_tx.predicate_reads.push(predicate_read);
         if query.aggregate.is_none() {
             let root_rows = rows
