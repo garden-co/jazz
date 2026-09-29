@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { promoteInspectorDeployment } from "./promote-inspector-deployment.mjs";
+import {
+  preflightInspectorProject,
+  promoteInspectorDeployment,
+} from "./promote-inspector-deployment.mjs";
 
 const env = {
   VERCEL_ORG_ID: "team_test",
@@ -144,7 +147,10 @@ for (const changes of [
 }
 test("fails when promotion target does not converge", async () => {
   const { options } = harness({ polls: [project, project] });
-  await assert.rejects(promoteInspectorDeployment(options), /Timed out/);
+  await assert.rejects(
+    promoteInspectorDeployment(options),
+    /Timed out .* to dpl_test\. Last observed: production target none .*lastAliasRequest=none/,
+  );
 });
 test("fails on terminal alias failure", async () => {
   const { options } = harness({
@@ -221,7 +227,10 @@ for (const target of [
   });
 test("matching target with stale domain alias never succeeds", async () => {
   const { options } = harness({ aliasDeployment: "dpl_old" });
-  await assert.rejects(promoteInspectorDeployment(options), /Timed out/);
+  await assert.rejects(
+    promoteInspectorDeployment(options),
+    /Timed out[\s\S]*domain inspector\.example\.test points at dpl_old/,
+  );
 });
 test("partial domain list fails closed", async () => {
   const { options } = harness({ pagination: { next: 123 } });
@@ -251,3 +260,50 @@ for (const jobStatus of ["failed", "skipped"]) {
     assert.equal(calls.filter((call) => call.method === "POST").length, 1);
   });
 }
+
+function preflightHarness(response) {
+  const calls = [];
+  return {
+    calls,
+    options: {
+      env,
+      log() {},
+      fetchImpl: async (url, init) => {
+        calls.push({ url, method: init.method });
+        return {
+          ok: response.status < 400,
+          status: response.status,
+          json: async () => response.body,
+        };
+      },
+    },
+  };
+}
+test("preflight reads only the scoped project", async () => {
+  const { calls, options } = preflightHarness({ status: 200, body: project });
+  await preflightInspectorProject(options);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].method, "GET");
+  const url = new URL(calls[0].url);
+  assert.equal(url.pathname, "/v9/projects/prj_test");
+  assert.equal(url.searchParams.get("teamId"), "team_test");
+});
+test("preflight names the secret to fix on 403", async () => {
+  const { options } = preflightHarness({ status: 403, body: {} });
+  await assert.rejects(
+    preflightInspectorProject(options),
+    /VERCEL_INSPECTOR_TOKEN cannot read the Inspector project .*\(403\)/,
+  );
+});
+test("preflight rejects a project from another team", async () => {
+  const { options } = preflightHarness({
+    status: 200,
+    body: { ...project, accountId: "team_other" },
+  });
+  await assert.rejects(preflightInspectorProject(options), /does not belong/);
+});
+test("preflight names a missing secret", async () => {
+  const { options } = preflightHarness({ status: 200, body: project });
+  options.env = { ...env, VERCEL_TOKEN: "" };
+  await assert.rejects(preflightInspectorProject(options), /Missing VERCEL_TOKEN/);
+});

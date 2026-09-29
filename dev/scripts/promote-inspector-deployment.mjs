@@ -1,6 +1,49 @@
 import { setTimeout as sleepTimer } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 
+const RUNBOOK = "See packages/inspector/README.md, 'Staging a release on Vercel'.";
+
+// Read-only: proves the token can read the configured project in the configured
+// team before a release depends on it.
+export async function preflightInspectorProject({
+  env = process.env,
+  fetchImpl = globalThis.fetch,
+  log = console.log,
+  requestTimeoutMs = 10_000,
+} = {}) {
+  for (const key of ["VERCEL_ORG_ID", "VERCEL_PROJECT_ID", "VERCEL_TOKEN"]) {
+    if (!env[key])
+      throw new Error(`Missing ${key}. Configure the matching VERCEL_INSPECTOR_* GitHub secret.`);
+  }
+  const team = new URLSearchParams({ teamId: env.VERCEL_ORG_ID });
+  const response = await fetchImpl(
+    `https://api.vercel.com/v9/projects/${encodeURIComponent(env.VERCEL_PROJECT_ID)}?${team}`,
+    {
+      method: "GET",
+      headers: { Authorization: `Bearer ${env.VERCEL_TOKEN}` },
+      signal: AbortSignal.timeout(requestTimeoutMs),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(
+      `VERCEL_INSPECTOR_TOKEN cannot read the Inspector project in VERCEL_INSPECTOR_ORG_ID (${response.status}). ` +
+        `Give the token access to that team and project, or fix the project/team IDs. ${RUNBOOK}`,
+    );
+  }
+  let project;
+  try {
+    project = await response.json();
+  } catch {
+    throw new Error("Vercel GET request returned invalid JSON.");
+  }
+  if (project.id !== env.VERCEL_PROJECT_ID || project.accountId !== env.VERCEL_ORG_ID) {
+    throw new Error(
+      `VERCEL_INSPECTOR_PROJECT_ID does not belong to VERCEL_INSPECTOR_ORG_ID. ${RUNBOOK}`,
+    );
+  }
+  log("Inspector Vercel token can read the configured project and team.");
+}
+
 // The same promotion endpoint used by Vercel CLI, scoped without user/team discovery.
 export async function promoteInspectorDeployment({
   env = process.env,
@@ -85,9 +128,18 @@ export async function promoteInspectorDeployment({
   // target state and each verified production domain instead of requiring it.
   // API contracts: https://vercel.com/docs/rest-api/projects/retrieve-project-domains-by-project-by-id-or-name
   // and https://vercel.com/docs/rest-api/aliases/get-an-alias
+  // Ids and states only, so a timeout says what production still points at.
+  let lastObserved = "nothing observed";
   async function productionIsVerified(current, { beforePromotion = false } = {}) {
     const target = current.targets?.production;
     const alias = current.lastAliasRequest;
+    lastObserved = [
+      `production target ${target?.id ?? "none"}`,
+      `substate=${target?.readySubstate ?? "unknown"}`,
+      `aliasAssigned=${target?.aliasAssigned ?? "unknown"}`,
+      `aliasError=${target?.aliasError?.code ?? (target?.aliasError ? "yes" : "none")}`,
+      `lastAliasRequest=${alias ? `${alias.toDeploymentId}:${alias.jobStatus}` : "none"}`,
+    ].join(" ");
     if (
       alias?.toDeploymentId === deployment.id &&
       ["failed", "skipped"].includes(alias.jobStatus)
@@ -134,11 +186,14 @@ export async function promoteInspectorDeployment({
         assigned.alias !== domain.name ||
         assigned.deploymentId !== deployment.id ||
         assigned.redirect
-      )
+      ) {
+        lastObserved = `domain ${domain.name} points at ${assigned.deploymentId ?? "nothing"}`;
         return false;
+      }
     }
     // Domains may take time to move, and the target may change while checking.
     const confirmed = await request(projectPath);
+    lastObserved = `production target moved to ${confirmed.targets?.production?.id ?? "none"}`;
     return (
       !confirmed.rollingRelease &&
       confirmed.id === project.id &&
@@ -164,11 +219,16 @@ export async function promoteInspectorDeployment({
     }
     if (attempt + 1 < attempts) await sleep(Math.min(delayMs, Math.max(0, deadline - Date.now())));
   }
-  throw new Error("Timed out verifying inspector production target after promotion.");
+  throw new Error(
+    `Timed out verifying inspector production target after promotion to ${deployment.id}. ` +
+      `Last observed: ${lastObserved}. ${RUNBOOK}`,
+  );
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  promoteInspectorDeployment().catch((error) => {
+  const run =
+    process.argv[2] === "preflight" ? preflightInspectorProject : promoteInspectorDeployment;
+  run().catch((error) => {
     console.error(error.message);
     process.exitCode = 1;
   });

@@ -108,7 +108,9 @@ this document or public receipts.
 - Verify every expected npm package/version, native payload, dependency and dist-tag
   using registry reads and installation. Confirm the source tag matches the exact
   released source. Build artifacts alone are not proof of npm publication.
-- Promote the verified docs and Inspector deployments.
+- Promote the verified docs deployment. The publisher stages and promotes the
+  Inspector itself; if its Inspector jobs fail, follow the manual recovery in
+  `packages/inspector/README.md` ("Staging a release on Vercel").
 - Treat Cloud activation as two explicit operations: selecting the new catalog
   default for newly created apps, and upgrading existing eligible tenants through
   a controlled fleet rollout. Have infra confirm the exact version and image digest
@@ -186,8 +188,10 @@ For the alpha55 transition:
    equality; a workflow-only change still invalidates reuse. Record expected SHA
    and version before approving publication. No production deployment, package
    publication, source tag or release publication belongs to this setup operation.
-5. Configure docs and Inspector staging to build the `release` candidate, with
-   automatic production-domain assignment disabled. These Vercel settings are
+5. Configure docs staging to build the `release` candidate, and keep automatic
+   production-domain assignment disabled for docs and Inspector. The publisher
+   stages the Inspector from the tested prebuilt artifact, not from Vercel's Git
+   integration. These Vercel settings are
    external to the build-only `docs.yml`. Record deployment IDs and source SHAs.
    Inspector promotion defaults to `release` and requires an explicit exact SHA;
    it must find that SHA's staged deployment, never the newest `main` deployment.

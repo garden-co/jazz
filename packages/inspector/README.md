@@ -72,7 +72,17 @@ output file (including Vercel routing) to the actual checked-out Git HEAD, not
 `GITHUB_SHA` (which can identify a synthetic PR merge in preview workflows). It avoids another
 native compilation on Vercel.
 
-Run **Stage Inspector production** with the successful package-build run ID,
+A real publish of `publish-jazz-tools-alpha.yml` does this end to end after npm
+publication. It stages `inspector-prebuilt` from the tested release-preview run
+when the publisher reused that run's artifacts, otherwise from its own build of
+the same SHA, and hands the staged deployment URL straight to the promotion job.
+Vercel's Git integration never builds `release`, so nothing waits on it. An
+earlier **Check Inspector Vercel access** job, which also runs in candidate
+dry-runs, reads the project with the Inspector token and names the secret to fix
+if it can't. An Inspector failure never marks npm publication as failed.
+
+To recover by hand, run the same two workflows yourself. Run **Stage Inspector
+production** with the successful package-build run ID,
 deployment SHA, and branch. The workflow checks the artifact run's repository and
 success, proves its source tree equals the deployment SHA's tree, and checks the
 deployment branch still points to that SHA using an explicit `refs/heads` lookup
@@ -80,8 +90,11 @@ deployment branch still points to that SHA using an explicit `refs/heads` lookup
 verified preview artifact only when the entire source tree (including package
 versions) is identical. It verifies every downloaded output hash, then deploys with `--prebuilt
 --prod --skip-domain`. This does not assign production domains. Run **Promote
-inspector production** with that same SHA and branch after staging acceptance;
-it resolves and promotes those exact bytes without rebuilding. Do not use a
+inspector production** with that same SHA and branch after staging acceptance,
+passing the staged deployment URL from the staging log (or leaving it empty to
+resolve it by branch and SHA); it promotes those exact bytes without rebuilding.
+If verification times out, the error names what the production target and each
+domain alias still point at. Do not use a
 preview-to-production source redeploy, which can change install/build settings.
 The prebuilt artifact requires no Git checkout or Vercel-side install step.
 
