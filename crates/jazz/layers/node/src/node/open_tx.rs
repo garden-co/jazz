@@ -462,6 +462,11 @@ where
         }
         self.open_tx_mut(tx_id)?.record_row_reads(table, proofs);
         sort_current_rows(&mut current);
+        // A query's source scan is not a read of the whole table: the query
+        // records its own predicate read and proves the rows it returns.
+        if !prove_returned_rows {
+            return Ok(current);
+        }
         let schema = self
             .catalogue
             .catalogue_schemas

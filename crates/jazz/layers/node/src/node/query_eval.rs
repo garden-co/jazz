@@ -3577,14 +3577,18 @@ where
         open_tx.predicate_reads.truncate(predicate_len);
         open_tx.predicate_reads.push(predicate_read);
         if shape.query().aggregate.is_none() {
-            let table = shape.query().table.as_str();
-            let root_rows = snapshot.rows[..snapshot.root_count.min(snapshot.rows.len())]
-                .iter()
-                .filter(|row| row.table() == table)
-                .map(CurrentRow::row_uuid)
-                .collect::<Vec<_>>();
-            self.record_tx_query_row_reads(tx_id, shape.schema_version(), table, root_rows)
-                .await?;
+            // Prove every row the relation returns, root and included alike.
+            let mut returned = BTreeMap::<String, Vec<RowUuid>>::new();
+            for row in &snapshot.rows {
+                returned
+                    .entry(row.table().to_owned())
+                    .or_default()
+                    .push(row.row_uuid());
+            }
+            for (table, rows) in returned {
+                self.record_tx_query_row_reads(tx_id, shape.schema_version(), &table, rows)
+                    .await?;
+            }
         } else {
             self.record_tx_aggregate_input_reads(
                 tx_id,
