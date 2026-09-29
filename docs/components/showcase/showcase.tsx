@@ -65,11 +65,14 @@ function MetricCard({
   entry,
   lookup,
   loading,
+  reserveUnitLine,
 }: {
   metric: HeroExample["metrics"][number];
   entry: { bench: Benchmark; summary: MetricSummary } | undefined;
   lookup: Lookup;
   loading: boolean;
+  /** Keep an empty unit line so cards in a row line up when some have a unit. */
+  reserveUnitLine: boolean;
 }) {
   if (!entry)
     return (
@@ -122,10 +125,16 @@ function MetricCard({
             >
               {time}
             </Text>
-            {metric.per && (
+            {metric.per ? (
               <Text color="secondary" display="block">
                 per {metric.per.unit}
               </Text>
+            ) : (
+              reserveUnitLine && (
+                <Text color="secondary" display="block" aria-hidden>
+                  {"\u00a0"}
+                </Text>
+              )
             )}
           </VStack>
           <Text type="supporting" hasTabularNumbers display="block">
@@ -256,6 +265,7 @@ function Hero({
                 entry={summaries.get(metric.benchmark)}
                 lookup={lookup}
                 loading={loading}
+                reserveUnitLine={example.metrics.some((m) => m.per)}
               />
             ))}
           </Grid>
