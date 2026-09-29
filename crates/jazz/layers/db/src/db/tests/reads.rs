@@ -5005,6 +5005,53 @@ fn version_bearing_current_source_preserves_provenance_timestamps() {
     assert_eq!(row.raw_field("user_done"), None);
 }
 
+/// A session-dependent read policy binds its claim as a prepared route, so the
+/// one-shot read installs a routed terminal. That terminal must still publish
+/// the complete materialization row: selecting only `$createdAt` and
+/// `$updatedAt` must not leave the row with a partial provenance tuple that
+/// the public projection then drops.
+#[test]
+fn session_policy_read_retains_selected_provenance() {
+    use crate::binding_codec::{RowDescriptorFieldName, row_batches};
+
+    let schema = owner_read_schema();
+    let db = open_db(0xd4, AuthorSubject::SYSTEM, &schema);
+    let alice = AuthorSubject::for_test_bytes([0xa4; 16]);
+    db.set_test_provider_claims(alice, test_provider_claims(alice));
+    let id = row(0xa4);
+    db.insert(
+        "todos",
+        cells("alice", false, alice),
+        InsertOptions {
+            row_id: Some(id),
+            updated_at_ms: Some(1_234),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let prepared = db
+        .prepare_query(
+            &db.table("todos")
+                .select(["title", "$createdAt", "$updatedAt"]),
+        )
+        .unwrap();
+    let rows = block_on(db.all_for_identity(&prepared, ReadOpts::default(), alice)).unwrap();
+    assert_eq!(row_ids(&rows), vec![id]);
+    assert_eq!(rows[0].raw_field("$createdAt"), Some(Value::U64(1_234)));
+    assert_eq!(rows[0].raw_field("$updatedAt"), Some(Value::U64(1_234)));
+    let batches = row_batches(&rows).expect("policy-read rows encode for the native binding");
+    for name in ["$createdAt", "$updatedAt"] {
+        assert!(
+            batches[0].descriptor.iter().any(|field| matches!(
+                field.name,
+                RowDescriptorFieldName::ResultField { name: published } if published == name
+            )),
+            "selected provenance {name} reaches the native binding",
+        );
+    }
+}
+
 /// The native descriptor is only observable at the binding boundary, so this
 /// exercises a public subscription and then checks its encoded carrier.
 #[test]
