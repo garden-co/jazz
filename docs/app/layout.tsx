@@ -27,7 +27,8 @@ export default function Layout({ children }: LayoutProps<"/">) {
   return (
     <html lang="en" suppressHydrationWarning>
       <body className="flex min-h-screen flex-col">
-        <RootProvider>{children}</RootProvider>
+        {/* Site search is the Astryx command palette in the top nav. */}
+        <RootProvider search={{ enabled: false }}>{children}</RootProvider>
         <Analytics />
       </body>
     </html>

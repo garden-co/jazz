@@ -3059,13 +3059,11 @@ export class NativeRuntimeAdapter implements Runtime {
       );
     };
 
-    void refresh().catch((error: unknown) => {
-      if (this.closed || this.ownerRuntime.closed) return;
-      if (error instanceof Error && error.message === "Timed out waiting for query coverage") {
-        return;
-      }
-      this.handleServerTransportError(error);
-    });
+    // Best effort: the foreground read has already answered. Only the carrier
+    // and the pump decide that the server transport has failed; a refresh
+    // failure (a coverage timeout, a rejected read) must never become the
+    // terminal transport error, or the next real drop is not retried (#3692).
+    void refresh().catch(() => undefined);
   }
 
   admitLocalFirstSession(session: Session, token: string, appId: string): void {

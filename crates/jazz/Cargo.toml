@@ -203,6 +203,16 @@ name = "route_subscription_curve"
 harness = false
 required-features = ["testing"]
 
+[[bench]]
+name = "accepted_fate_replay"
+harness = false
+required-features = ["testing"]
+
+[[bench]]
+name = "local_blob_reads"
+harness = false
+required-features = ["testing"]
+
 [[test]]
 name = "legacy_benchmark_smoke"
 required-features = ["testing"]
