@@ -2530,3 +2530,242 @@ fn exclusive_table_read_conflicts_when_a_returned_row_was_deleted_before_the_cla
     };
     assert_eq!(fate, Fate::Rejected(RejectionReason::ExclusiveConflict));
 }
+
+/// Todos readable only while they have a member, plus a table any exclusive
+/// transaction can write.
+fn member_visible_todos_schema() -> JazzSchema {
+    build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_select(public_outer_exists(
+                        "members",
+                        "owner",
+                        "id",
+                        [],
+                    ))),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("members")
+                    .fk_column("owner", "todos")
+                    .column("user", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("audit")
+                    .column("title", PublicColumnType::Text)
+                    .policies(public_all_policies()),
+            ),
+    )
+}
+
+fn todo_member_cells(owner: RowUuid) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("owner".to_owned(), Value::Uuid(owner.0)),
+        ("user".to_owned(), Value::String("member".to_owned())),
+    ])
+}
+
+/// garden-co/jazz#3694: an exclusive read behind a membership read policy
+/// records the rows it returned, not the membership table. The authority
+/// re-runs the read under the same policy, so a membership change conflicts
+/// exactly when it changes what the reader sees.
+fn exclusive_policy_read_fate(
+    read_all_open: bool,
+    change: impl FnOnce(&mut NodeState, &mut NodeState),
+) -> Fate {
+    exclusive_policy_read_fate_with(
+        if read_all_open { PolicyRead::AllOpen } else { PolicyRead::Point },
+        change,
+    )
+}
+
+#[derive(Clone, Copy, Debug)]
+enum PolicyRead {
+    Point,
+    AllOpen,
+    JoinedFromAudit,
+}
+
+fn exclusive_policy_read_fate_with(
+    read: PolicyRead,
+    change: impl FnOnce(&mut NodeState, &mut NodeState),
+) -> Fate {
+    let schema = member_visible_todos_schema();
+    let (_client_dir, mut client) = open_node_with_schema(node(1), schema.clone());
+    let (_other_dir, mut other) = open_node_with_schema(node(2), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
+    let reader = user(0x51);
+    for (todo, title) in [(row(1), "visible"), (row(2), "hidden"), (row(3), "done")] {
+        commit_mergeable_global(
+            &mut client,
+            &mut core,
+            MergeableCommit::new("todos", todo, 10).cells(title_cells(title)),
+        );
+    }
+    commit_mergeable_global(
+        &mut client,
+        &mut core,
+        MergeableCommit::new("members", row(0x61), 11).cells(todo_member_cells(row(1))),
+    );
+    for (entry, title) in [(row(0x81), "visible"), (row(0x82), "hidden")] {
+        commit_mergeable_global(
+            &mut client,
+            &mut core,
+            MergeableCommit::new("audit", entry, 11).cells(title_cells(title)),
+        );
+    }
+    commit_mergeable_global(
+        &mut client,
+        &mut core,
+        MergeableCommit::new("members", row(0x63), 12).cells(todo_member_cells(row(3))),
+    );
+
+    let shape = match read {
+        PolicyRead::AllOpen => {
+            Query::from("todos").filter(ne(col("title"), lit(Value::String("done".to_owned()))))
+        }
+        PolicyRead::Point => Query::from("todos").filter(eq(col("id"), lit(Value::Uuid(row(1).0)))),
+        PolicyRead::JoinedFromAudit => Query::from("audit").join_via_column("todos", "title", "title", []),
+    }
+    .validate(&schema)
+    .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let open = OpenTransactionId::new();
+    client.open_exclusive_for_identity(open, reader).unwrap();
+    let rows = client
+        .tx_query_for_identity(open, &shape, &binding, reader)
+        .unwrap();
+    if !matches!(read, PolicyRead::JoinedFromAudit) {
+        assert_eq!(
+            rows.iter().map(CurrentRow::row_uuid).collect::<Vec<_>>(),
+            vec![row(1)]
+        );
+        assert_eq!(
+            client.open_tx(open).unwrap().row_reads.len(),
+            1,
+            "the membership table is not recorded"
+        );
+    }
+
+    change(&mut other, &mut core);
+    client
+        .tx_write(open, "audit", row(0x71), title_cells("redeemed"), None)
+        .unwrap();
+    let (_tx_id, unit) = client.commit_exclusive_settled(open, reader, 20).unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let SyncMessage::FateUpdate { fate, .. } = fate else {
+        panic!("expected fate update");
+    };
+    fate
+}
+
+#[test]
+fn exclusive_policy_read_conflicts_when_the_membership_is_revoked() {
+    let fate = exclusive_policy_read_fate(false, |other, core| {
+        commit_mergeable_global(
+            other,
+            core,
+            MergeableCommit::new("members", row(0x61), 15).deletion(DeletionEvent::Deleted),
+        );
+    });
+    assert_eq!(fate, Fate::Rejected(RejectionReason::ExclusiveConflict));
+}
+
+#[test]
+fn exclusive_policy_read_conflicts_when_a_grant_reveals_a_matching_row() {
+    let fate = exclusive_policy_read_fate(true, |other, core| {
+        commit_mergeable_global(
+            other,
+            core,
+            MergeableCommit::new("members", row(0x62), 15).cells(todo_member_cells(row(2))),
+        );
+    });
+    assert_eq!(fate, Fate::Rejected(RejectionReason::ExclusiveConflict));
+}
+
+#[test]
+fn exclusive_policy_read_ignores_membership_changes_it_cannot_see() {
+    for read_all_open in [false, true] {
+        let fate = exclusive_policy_read_fate(read_all_open, |other, core| {
+            // Another member of the visible todo, and a revoked membership of
+            // a todo neither read returns.
+            commit_mergeable_global(
+                other,
+                core,
+                MergeableCommit::new("members", row(0x64), 15).cells(todo_member_cells(row(1))),
+            );
+            commit_mergeable_global(
+                other,
+                core,
+                MergeableCommit::new("members", row(0x63), 16).deletion(DeletionEvent::Deleted),
+            );
+        });
+        assert_eq!(fate, Fate::Accepted, "read_all_open={read_all_open}");
+    }
+}
+
+/// Rows of a joined policy-protected table the reader cannot see never enter
+/// the read set, so an unchanged join commits, and the rows it can see are
+/// validated like any other read.
+#[test]
+fn exclusive_join_into_a_policy_protected_table_commits_while_unchanged() {
+    for read in [PolicyRead::Point, PolicyRead::AllOpen, PolicyRead::JoinedFromAudit] {
+        let fate = exclusive_policy_read_fate_with(read, |_, _| {});
+        assert_eq!(fate, Fate::Accepted, "{read:?}");
+    }
+}
+
+#[test]
+fn exclusive_join_into_a_policy_protected_table_conflicts_when_access_is_revoked() {
+    let fate = exclusive_policy_read_fate_with(PolicyRead::JoinedFromAudit, |other, core| {
+        commit_mergeable_global(
+            other,
+            core,
+            MergeableCommit::new("members", row(0x61), 15).deletion(DeletionEvent::Deleted),
+        );
+    });
+    assert_eq!(fate, Fate::Rejected(RejectionReason::ExclusiveConflict));
+}
+
+/// The read set of a point read behind a membership policy stays one row,
+/// however many memberships exist.
+#[test]
+fn exclusive_policy_read_set_does_not_grow_with_the_policy_table() {
+    let schema = member_visible_todos_schema();
+    let (_dir, mut node) = open_node_with_schema(node(1), schema.clone());
+    let reader = user(0x51);
+    node.commit_mergeable_settled(
+        MergeableCommit::new("todos", row(1), 10).cells(title_cells("visible")),
+    )
+    .unwrap();
+    for member in 0..500_u16 {
+        let mut bytes = [0x60; 16];
+        bytes[..2].copy_from_slice(&member.to_be_bytes());
+        node.commit_mergeable_settled(
+            MergeableCommit::new("members", RowUuid::from_bytes(bytes), 11 + u64::from(member))
+                .cells(todo_member_cells(row(1))),
+        )
+        .unwrap();
+    }
+    let shape = Query::from("todos")
+        .filter(eq(col("id"), lit(Value::Uuid(row(1).0))))
+        .validate(&schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let open = OpenTransactionId::new();
+    node.open_exclusive_for_identity(open, reader).unwrap();
+    assert_eq!(
+        node.tx_query_for_identity(open, &shape, &binding, reader)
+            .unwrap()
+            .len(),
+        1
+    );
+    let open_tx = node.open_tx(open).unwrap();
+    assert_eq!(open_tx.row_reads.len(), 1);
+    assert_eq!(open_tx.predicate_reads.len(), 1);
+}

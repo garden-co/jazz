@@ -161,6 +161,7 @@ where
                 row_reads: Vec::new(),
                 absent_reads: Vec::new(),
                 predicate_reads: Vec::new(),
+                visible_table_reads: BTreeSet::new(),
                 writes: Vec::new(),
                 user_metadata_json: None,
             },
@@ -339,14 +340,28 @@ where
             .await
     }
 
+    /// Note that a query read `table` beyond its root through the reader's
+    /// read policy. Its rows are proven once the query finishes, as the rows
+    /// the reader can see, so rows the reader cannot see never enter the
+    /// read set.
+    pub(super) fn defer_tx_visible_table_read(
+        &mut self,
+        tx_id: OpenTransactionId,
+        schema_version: SchemaVersionId,
+        table: &str,
+    ) -> Result<(), Error> {
+        self.open_tx_mut(tx_id)?
+            .visible_table_reads
+            .insert((schema_version, table.to_owned()));
+        Ok(())
+    }
+
     /// Read transaction rows through a registered schema view, optionally
     /// retaining root rows whose deletion register wins.
     ///
-    /// A query's root source needs no read of its own: the query records its
-    /// predicate read and proves the rows it returns. Any other source (an
-    /// included, joined or policy table) is read as a whole table, proving
-    /// every row it scanned, so a change there conflicts
-    /// (garden-co/jazz#3694).
+    /// `record_table_read` records the scan as a read of the whole table,
+    /// proving every row it returned (garden-co/jazz#3694); query source
+    /// resolution decides which sources need it.
     pub async fn tx_current_rows_in_schema_with_options(
         &mut self,
         tx_id: OpenTransactionId,
@@ -2060,6 +2075,9 @@ pub(super) struct OpenTransaction {
     pub(super) absent_reads: Vec<AbsentRead>,
     /// Predicate reads recorded by the transaction.
     pub(super) predicate_reads: Vec<PredicateRead>,
+    /// Policy-filtered tables a query read beyond its root, still to be
+    /// recorded as reads of the rows the reader can see (garden-co/jazz#3694).
+    pub(super) visible_table_reads: BTreeSet<(SchemaVersionId, String)>,
     /// Pending writes staged by the transaction.
     pub(super) writes: Vec<PendingWrite>,
     /// Optional application metadata.
