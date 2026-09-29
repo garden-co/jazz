@@ -1,4 +1,5 @@
 use super::*;
+use crate::records::ValueType;
 
 /// Validate application-selected physical names before an open or live schema
 /// admission can make a Groove storage mutation. Groove itself adds
@@ -25,12 +26,35 @@ pub(super) fn validate_application_storage_names(schema: &DatabaseSchema) -> Res
     Ok(())
 }
 
+fn is_supported_direct_store_key_type(value_type: &ValueType) -> bool {
+    match value_type {
+        ValueType::String | ValueType::Bytes => true,
+        ValueType::Tuple(members) => members.iter().all(is_supported_direct_store_tuple_member),
+        _ => is_supported_direct_store_tuple_member(value_type),
+    }
+}
+
+fn is_supported_direct_store_tuple_member(value_type: &ValueType) -> bool {
+    match value_type {
+        ValueType::U8
+        | ValueType::U16
+        | ValueType::U32
+        | ValueType::U64
+        | ValueType::I32
+        | ValueType::I64
+        | ValueType::Bool
+        | ValueType::Uuid => true,
+        ValueType::Tuple(members) => members.iter().all(is_supported_direct_store_tuple_member),
+        _ => false,
+    }
+}
+
 pub(super) fn validate_durable_key_schema(schema: &DatabaseSchema) -> Result<(), Error> {
     for store in &schema.direct_record_stores {
         if store
             .key
             .iter()
-            .any(|(_, value_type)| value_type.contains_record())
+            .any(|(_, value_type)| !is_supported_direct_store_key_type(value_type))
         {
             return Err(Error::InvalidDirectRecordStoreKey(store.name.clone()));
         }
