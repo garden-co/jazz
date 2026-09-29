@@ -1087,6 +1087,23 @@ where
         }
     }
 
+    /// Chunk staging must not retain the node while waiting for a lifecycle
+    /// guard owned by an earlier local publication: settling that publication
+    /// also needs the node. Recheck under the acquired guard so another writer
+    /// cannot publish between draining the queue and starting staging.
+    pub(super) async fn lock_for_large_value_staging(
+        &self,
+    ) -> Result<futures::lock::MutexGuard<'_, NodeState<S>>, Error> {
+        loop {
+            let node = self.node.lock().await;
+            if !self.has_pending_local_publications() {
+                return Ok(node);
+            }
+            drop(node);
+            self.settle_local_publications().await?;
+        }
+    }
+
     pub(super) async fn settle_local_publications(&self) -> Result<(), Error> {
         futures::future::poll_fn(|cx| self.poll_local_publication_settlement(cx)).await
     }

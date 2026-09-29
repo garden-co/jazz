@@ -34,6 +34,24 @@ where
             .await
     }
 
+    async fn lock_for_transaction_commit(
+        &self,
+        open_tx_id: OpenTransactionId,
+    ) -> Result<futures::lock::MutexGuard<'_, NodeState<S>>, Error> {
+        loop {
+            let node = self.lock_for_transaction_operation(open_tx_id).await?;
+            if !self.node.has_pending_local_publications()
+                || !node.transaction_needs_large_value_staging(open_tx_id)?
+            {
+                return Ok(node);
+            }
+            drop(node);
+            self.node.settle_local_publications().await?;
+            // Reacquire through the normal admission/tombstone checks after
+            // suspension; cancellation must not revive an abandoned handle.
+        }
+    }
+
     pub(super) async fn transaction_is_exclusive(
         &self,
         id: OpenTransactionId,
@@ -735,7 +753,7 @@ where
         open_tx_id: OpenTransactionId,
     ) -> Result<TxId, Error> {
         let published = self
-            .lock_for_transaction_operation(open_tx_id)
+            .lock_for_transaction_commit(open_tx_id)
             .await?
             .commit_mergeable_open(open_tx_id, || self.next_now_ms())
             .await?;
@@ -779,7 +797,7 @@ where
             TxKind::Mergeable,
             Box::pin(async move {
                 let published = db
-                    .lock_for_transaction_operation(open_tx_id)
+                    .lock_for_transaction_commit(open_tx_id)
                     .await?
                     .commit_mergeable_open_at(open_tx_id, tx_id, || now_ms)
                     .await?;
@@ -1537,7 +1555,7 @@ where
         open_tx_id: OpenTransactionId,
     ) -> Result<TxId, Error> {
         let (published, unit) = self
-            .lock_for_transaction_operation(open_tx_id)
+            .lock_for_transaction_commit(open_tx_id)
             .await?
             .commit_exclusive_bound(open_tx_id, self.next_now_ms())
             .await?;
@@ -1569,7 +1587,7 @@ where
             TxKind::Exclusive,
             Box::pin(async move {
                 let (published, unit) = db
-                    .lock_for_transaction_operation(open_tx_id)
+                    .lock_for_transaction_commit(open_tx_id)
                     .await?
                     .commit_exclusive_bound_at(open_tx_id, tx_id)
                     .await?;
@@ -1594,7 +1612,7 @@ where
         author: AuthorSubject,
     ) -> Result<TxId, Error> {
         let (published, unit) = self
-            .lock_for_transaction_operation(open_tx_id)
+            .lock_for_transaction_commit(open_tx_id)
             .await?
             .commit_exclusive(open_tx_id, author, self.next_now_ms())
             .await?;

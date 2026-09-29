@@ -52,6 +52,21 @@ describe("SharedWorker bridge with IndexedDB", () => {
   const { ctx, track, trackSubscription, untrack, shutdownDbAndWorker } =
     useSharedWorkerBridgeHarness();
 
+  it("uploads concurrent large values through persistent browser storage", async () => {
+    const server = await publishSyncServerSchemaAndPermissions("pending-large-values");
+    const db = await createSyncedDb(ctx, "pending-large-values", generateAuthSecret(), server);
+    await db.insert(todos, { title: "warmup", done: false }).wait({ tier: "global" });
+    const bodies = ["a".repeat(512 * 1024), "b".repeat(512 * 1024)];
+    const writes = bodies.map((title) => db.insert(todos, { title, done: false }));
+    await withTimeout(
+      Promise.all(writes.map((write) => write.wait({ tier: "global" }))),
+      30_000,
+      "both large browser writes settle",
+    );
+    const rows = await db.all(todos, { tier: "global" });
+    for (const title of bodies) expect(rows.some((row) => row.title === title)).toBe(true);
+  }, 60_000);
+
   // -------------------------------------------------------------------------
   // 5. Durable insert resolves at local tier
   // -------------------------------------------------------------------------
