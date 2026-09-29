@@ -127,6 +127,15 @@ describe("BigLabel roles at the Jazz edge", () => {
         teamId: seeded.foreignTeam.id,
       }),
     );
+    // Per-person release roles stay admin-only, even for editors of the release.
+    await editor.expectDenied((db) =>
+      db.insert(app.releaseAssignments, {
+        organizationId: seeded.org.id,
+        releaseId: seeded.release.id,
+        membershipId: seeded.editorMembership.id,
+        role: "owner",
+      }),
+    );
     await admin.expectDenied((db) =>
       db.insert(app.releases, {
         organizationId: seeded.org.id,

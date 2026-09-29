@@ -141,24 +141,26 @@ const tenantPermissions = definePermissions(app, ({ policy, session, allowedTo, 
       ]),
     );
   policy.teamAssignments.allowDelete.where(allowedTo.delete("team"));
+  // Per-person release roles (such as "owner") grant accountability, so only
+  // admins hand them out, even though editors may edit the release itself.
   policy.releaseAssignments.allowRead.where(allowedTo.read("release"));
   policy.releaseAssignments.allowInsert.where((row) =>
     allOf([
-      allowedTo.insert("release"),
+      admin(row.organizationId),
       releaseMatchesAssignment(row),
       membershipMatchesAssignment(row),
     ]),
   );
   policy.releaseAssignments.allowUpdate
-    .whereOld(allowedTo.update("release"))
+    .whereOld((row) => admin(row.organizationId))
     .whereNew((row) =>
       allOf([
-        allowedTo.update("release"),
+        admin(row.organizationId),
         releaseMatchesAssignment(row),
         membershipMatchesAssignment(row),
       ]),
     );
-  policy.releaseAssignments.allowDelete.where(allowedTo.delete("release"));
+  policy.releaseAssignments.allowDelete.where((row) => admin(row.organizationId));
 
   // Editors staff releases with teams; the team must belong to the same tenant.
   policy.releaseTeams.allowRead.where((row) => member(row.organizationId));
