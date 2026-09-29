@@ -73,16 +73,12 @@ fn main() {
         return;
     }
     verify_engines_agree();
-    if sweep() {
-        divan::Divan::from_args().run_ignored().main();
-    } else {
-        divan::main();
-    }
+    divan::main();
 }
 
 /// CodSpeed measures only Groove's IVM engine at the larger subscriber count.
 /// `GROOVE_BENCH_SWEEP=1` also runs the smaller count and the reference
-/// engines (SQLite, pull, snapshot), which are `#[ignore]`d otherwise.
+/// engines (SQLite, pull, snapshot), which are skipped otherwise.
 fn sweep() -> bool {
     std::env::var_os("GROOVE_BENCH_SWEEP").is_some()
 }
@@ -916,20 +912,17 @@ macro_rules! workload_benches {
                 bench(bencher, EngineKind::Ivm, $workload, subs);
             }
 
-            #[divan::bench(args = SUBSCRIBER_COUNTS)]
-            #[ignore]
+            #[divan::bench(args = SUBSCRIBER_COUNTS, ignore = !sweep())]
             fn sqlite_touched(bencher: divan::Bencher, subs: u64) {
                 bench(bencher, EngineKind::SqliteTouched, $workload, subs);
             }
 
-            #[divan::bench(args = SUBSCRIBER_COUNTS)]
-            #[ignore]
+            #[divan::bench(args = SUBSCRIBER_COUNTS, ignore = !sweep())]
             fn sqlite_all(bencher: divan::Bencher, subs: u64) {
                 bench(bencher, EngineKind::SqliteAll, $workload, subs);
             }
 
-            #[divan::bench(args = SUBSCRIBER_COUNTS)]
-            #[ignore]
+            #[divan::bench(args = SUBSCRIBER_COUNTS, ignore = !sweep())]
             fn pull_touched(bencher: divan::Bencher, subs: u64) {
                 bench(bencher, EngineKind::PullTouched, $workload, subs);
             }
@@ -937,8 +930,7 @@ macro_rules! workload_benches {
             // Groove's snapshot rerun is O(table) per touched subscriber; the
             // 10-subscriber case already shows that, and 100 subscribers would
             // cost seconds per iteration on the hosted runner.
-            #[divan::bench(args = [SUBSCRIBER_COUNTS[0]])]
-            #[ignore]
+            #[divan::bench(args = [SUBSCRIBER_COUNTS[0]], ignore = !sweep())]
             fn snapshot_touched(bencher: divan::Bencher, subs: u64) {
                 bench(bencher, EngineKind::SnapshotTouched, $workload, subs);
             }

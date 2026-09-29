@@ -70,16 +70,12 @@ const TOP_K: usize = 20;
 fn main() {
     jazz_benchmark_guard::refuse_contaminated_measurement();
     verify_engines_agree();
-    if sweep() {
-        divan::Divan::from_args().run_ignored().main();
-    } else {
-        divan::main();
-    }
+    divan::main();
 }
 
 /// CodSpeed measures only Groove's IVM (prepared) engines at the larger table
 /// size. `GROOVE_BENCH_SWEEP=1` also runs the smaller size and the reference
-/// engines (`snapshot`, `pull`), which are `#[ignore]`d otherwise.
+/// engines (`snapshot`, `pull`), which are skipped otherwise.
 fn sweep() -> bool {
     std::env::var_os("GROOVE_BENCH_SWEEP").is_some()
 }
@@ -445,8 +441,7 @@ macro_rules! scenario_benches {
         mod $module {
             use super::*;
 
-            #[divan::bench(args = USER_COUNTS)]
-            #[ignore]
+            #[divan::bench(args = USER_COUNTS, ignore = !sweep())]
             fn snapshot(bencher: divan::Bencher, users: u64) {
                 bench_snapshot(bencher, $scenario, users);
             }
@@ -461,8 +456,7 @@ macro_rules! scenario_benches {
                 bench_prepared_cold(bencher, $scenario, users);
             }
 
-            #[divan::bench(args = USER_COUNTS)]
-            #[ignore]
+            #[divan::bench(args = USER_COUNTS, ignore = !sweep())]
             fn pull(bencher: divan::Bencher, users: u64) {
                 bench_pull(bencher, $scenario, users);
             }
