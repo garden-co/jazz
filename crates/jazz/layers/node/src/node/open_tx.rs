@@ -327,7 +327,9 @@ where
     ) -> Result<Vec<CurrentRow>, Error> {
         let schema_version = self.catalogue.active_schema.schema;
         let table_schema = self.table(table)?.clone();
-        self.tx_current_rows_with_table(tx_id, schema_version, table, table_schema, false)
+        // A direct table read proves each row it returns; see
+        // `record_tx_query_row_reads` (garden-co/jazz#3694).
+        self.tx_current_rows_with_table(tx_id, schema_version, table, table_schema, false, true)
             .await
     }
 
@@ -339,7 +341,9 @@ where
         table: &str,
     ) -> Result<Vec<CurrentRow>, Error> {
         let table_schema = self.table_in_schema(table, schema_version)?;
-        self.tx_current_rows_with_table(tx_id, schema_version, table, table_schema, false)
+        // A direct table read proves each row it returns; see
+        // `record_tx_query_row_reads` (garden-co/jazz#3694).
+        self.tx_current_rows_with_table(tx_id, schema_version, table, table_schema, false, true)
             .await
     }
 
@@ -353,8 +357,17 @@ where
         include_deleted: bool,
     ) -> Result<Vec<CurrentRow>, Error> {
         let table_schema = self.table_in_schema(table, schema_version)?;
-        self.tx_current_rows_with_table(tx_id, schema_version, table, table_schema, include_deleted)
-            .await
+        // Query sources scan the whole table; the query records proofs for
+        // the rows it actually returns.
+        self.tx_current_rows_with_table(
+            tx_id,
+            schema_version,
+            table,
+            table_schema,
+            include_deleted,
+            false,
+        )
+        .await
     }
 
     async fn tx_current_rows_with_table(
@@ -364,30 +377,13 @@ where
         table: &str,
         table_schema: TableSchema,
         include_deleted: bool,
+        prove_returned_rows: bool,
     ) -> Result<Vec<CurrentRow>, Error> {
         let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
+        let mut proofs = Vec::new();
         let mut snapshot_rows = self
             .snapshot_rows_in_schema(schema_version, table, &snapshot)
             .await?;
-        {
-            // Same per-row proof as `record_tx_query_row_reads`, taken from
-            // the snapshot rows already resolved here (garden-co/jazz#3694).
-            let open_tx = self.open_tx_mut(tx_id)?;
-            for (row_uuid, snapshot_row) in &snapshot_rows {
-                let Some(version) = snapshot_row.read_version else {
-                    continue;
-                };
-                if !open_tx.row_reads.iter().any(|read| {
-                    read.table == table && read.row_uuid == *row_uuid && read.version == version
-                }) {
-                    open_tx.row_reads.push(RowRead {
-                        table: table.to_owned(),
-                        row_uuid: *row_uuid,
-                        version,
-                    });
-                }
-            }
-        }
         let mut rows = snapshot_rows.keys().copied().collect::<BTreeSet<_>>();
         rows.extend(
             self.open_tx(tx_id)?
@@ -404,6 +400,7 @@ where
                 None => self.snapshot_row_from_winners(schema_version, table, None, None)?,
             };
             let snapshot_provenance = snapshot_row.provenance.clone();
+            let read_version = snapshot_row.read_version;
             let open_tx = self.open_tx(tx_id)?;
             let provisional_author = open_tx.provisional_author;
             let pending_writes = open_tx
@@ -466,6 +463,21 @@ where
                     current_row_from_positional_cells(&table_schema, row_uuid, &cells)?
                 };
                 current.push(if deleted { row.into_deleted() } else { row });
+                if prove_returned_rows && let Some(version) = read_version {
+                    proofs.push((row_uuid, version));
+                }
+            }
+        }
+        let open_tx = self.open_tx_mut(tx_id)?;
+        for (row_uuid, version) in proofs {
+            if !open_tx.row_reads.iter().any(|read| {
+                read.table == table && read.row_uuid == row_uuid && read.version == version
+            }) {
+                open_tx.row_reads.push(RowRead {
+                    table: table.to_owned(),
+                    row_uuid,
+                    version,
+                });
             }
         }
         sort_current_rows(&mut current);
