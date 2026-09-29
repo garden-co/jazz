@@ -46,6 +46,7 @@ const scalarApp = s.defineApp({
       nullableBytes: s.bytes().optional(),
       metadata: s.json(),
       tags: s.array(s.string()),
+      nullableTags: s.array(s.string()).optional(),
     },
     {},
   ),
@@ -579,6 +580,14 @@ describe("translateQuery", () => {
     expect(
       translatedConditions(scalarApp.filters.where({ nullableBytes: { isNull: false } })),
     ).toEqual([{ IsNotNull: { column: { column: "nullableBytes" } } }]);
+  });
+  it("lowers nullable Array null checks", () => {
+    expect(
+      translatedConditions(scalarApp.filters.where({ nullableTags: { isNull: true } })),
+    ).toEqual([{ IsNull: { column: { column: "nullableTags" } } }]);
+    expect(
+      translatedConditions(scalarApp.filters.where({ nullableTags: { isNull: false } })),
+    ).toEqual([{ IsNotNull: { column: { column: "nullableTags" } } }]);
   });
 
   it("lowers direct JSON objects as one equality", () => {
