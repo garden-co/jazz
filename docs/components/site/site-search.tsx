@@ -5,7 +5,11 @@ import { useRouter } from "next/navigation";
 import { Search } from "lucide-react";
 import { Button } from "@astryxdesign/core/Button";
 import { IconButton } from "@astryxdesign/core/IconButton";
-import { CommandPalette, CommandPaletteInput } from "@astryxdesign/core/CommandPalette";
+import {
+  CommandPalette,
+  CommandPaletteInput,
+  useCommandPaletteContext,
+} from "@astryxdesign/core/CommandPalette";
 import { Icon } from "@astryxdesign/core/Icon";
 import { Kbd } from "@astryxdesign/core/Kbd";
 import { Text } from "@astryxdesign/core/Text";
@@ -61,6 +65,26 @@ function Marked({ text }: { text: string }) {
       part
     ),
   );
+}
+
+/**
+ * Search input that highlights the first result whenever a search commits, so
+ * Enter opens it without an ArrowDown first. Astryx `CommandPalette` leaves the
+ * highlight at -1 after each search and has no option for this yet; this uses
+ * only its public context and belongs in garden-co/design once it exports one.
+ */
+function SearchInput() {
+  const palette = useCommandPaletteContext();
+  const items = palette?.selectableItems;
+  const hasQuery = (palette?.search ?? "") !== "";
+  const setHighlightedIndex = palette?.setHighlightedIndex;
+
+  useEffect(() => {
+    if (!items || !setHighlightedIndex || !hasQuery) return;
+    setHighlightedIndex(items.findIndex((item) => !item.disabled));
+  }, [items, hasQuery, setHighlightedIndex]);
+
+  return <CommandPaletteInput placeholder="Search the docs" />;
 }
 
 /** Search trigger styled as a field, for the end of the desktop top nav. */
