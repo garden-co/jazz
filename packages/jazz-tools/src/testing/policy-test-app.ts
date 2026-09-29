@@ -19,20 +19,18 @@ export type PolicyTestAppOptions = {
 /**
  * Session accepted by {@link PolicyTestApp.as}.
  *
- * Local-first sessions always use Jazz's reserved local-first issuer at
- * runtime, so `issuer` is omitted for `authMode: "local-first"`. Their
- * `user_id` names the guest device: the test app derives a local-first key
- * from it and acts with that key's verified subject and founding account,
- * exactly like a real local-first client (see {@link PolicyTestApp.accountFor}).
+ * `issuer` may be omitted for `authMode: "local-first"`: the test app then
+ * acts as a real local-first guest. It derives a local-first key from
+ * `user_id` and uses that key's verified subject and founding account (see
+ * {@link PolicyTestApp.accountFor}). An explicit external issuer keeps the
+ * trusted `forSession` semantics: the session is that issuer's principal
+ * acting for `account_id`, whatever `authMode` says.
  */
 export type PolicyTestSession =
-  | (Omit<Session, "issuer" | "authMode"> & {
-      authMode: Exclude<AuthMode, "local-first">;
-      issuer: string;
-    })
+  | Session
   | (Omit<Session, "issuer" | "authMode"> & {
       authMode: "local-first";
-      issuer?: typeof LOCAL_FIRST_JWT_ISSUER;
+      issuer?: undefined;
     });
 type ExpectLike = (value: unknown) => {
   not: {
@@ -113,16 +111,7 @@ const LOCAL_FIRST_TOKEN_TTL_SECONDS = 3600;
  * The native runtime then admits it through the same proof check, so no
  * reserved-issuer check is bypassed.
  */
-function localFirstPolicySession(
-  appId: string,
-  session: Extract<PolicyTestSession, { authMode: "local-first" }>,
-): Session {
-  if (session.issuer !== undefined && session.issuer !== LOCAL_FIRST_JWT_ISSUER) {
-    throw new Error(
-      `PolicyTestApp.as: local-first sessions use issuer "${LOCAL_FIRST_JWT_ISSUER}"; ` +
-        `omit \`issuer\` instead of passing "${session.issuer}".`,
-    );
-  }
+function localFirstPolicySession(appId: string, session: PolicyTestSession): Session {
   if (session.account_id !== undefined) {
     throw new Error(
       "PolicyTestApp.as: local-first sessions own the founding account derived from their key; " +
@@ -218,8 +207,15 @@ export class PolicyTestApp {
   }
 
   private policySession(session: PolicyTestSession): Session {
-    if (session.authMode !== "local-first") return withPolicyTestAccount(session as Session);
-    return localFirstPolicySession(this.server.appId, session);
+    // Only a session with no issuer, or the reserved local-first issuer, is a
+    // real local-first guest. Other sessions are trusted `forSession` actors.
+    if (
+      session.authMode === "local-first" &&
+      (session.issuer === undefined || session.issuer === LOCAL_FIRST_JWT_ISSUER)
+    ) {
+      return localFirstPolicySession(this.server.appId, session);
+    }
+    return withPolicyTestAccount(session as Session);
   }
 
   /**

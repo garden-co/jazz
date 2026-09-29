@@ -96,7 +96,8 @@ The returned `PolicyTestApp` provides:
 
 To test as a local-first guest, pass `authMode: "local-first"` and leave out `issuer` and
 `account_id`. The test app derives a local-first key from `user_id` and acts exactly like a real
-local-first client with that key, including its own account.
+local-first client with that key, including its own account. A session with an explicit external
+`issuer` is still used as given: it acts as that issuer's user for its `account_id`.
 
 For read policies, assert on returned rows directly. Denied reads are filtered out rather than
 throwing.
