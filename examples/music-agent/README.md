@@ -1,32 +1,116 @@
 # MusicAgent
 
-MusicAgent is a deliberately provider-free LLM harness example. It records a
-conversation, streams a long assistant turn, records tool invocations, and
-keeps uploaded audio attachments as bytes. Its deterministic fake agent makes
-the complete flow useful in tests and demos without an API key.
+MusicAgent is an LLM agent for a band's booking agent. You chat with it about
+venues, tour dates and setlists. It streams its replies token by token, calls
+tools against the workspace's booking data, keeps audio attachments (a rough
+mix for the pitch), lets you regenerate a reply as a new branch, and keeps
+generating on the server when you close the tab. If the server dies halfway
+through a reply, the reply is marked interrupted and you can resume it.
 
 The family is split by concern:
 
-- `apps/ts-localfirst/` is the small application built on the `create-jazz`
-  TypeScript local-first shape.
+- `apps/nextjs/` is the full app: Next.js, Better Auth and the Astryx chat
+  components with the Jazz theme.
+- `apps/ts-localfirst/` is a small headless TypeScript library with the same
+  transcript shape and a provider-free agent, tested against a real Jazz
+  runtime.
 - `benchmarks/` is a self-contained native benchmark model. It measures the
-  append, range-read, and materialization shapes that make an agent transcript
+  append, range-read and materialization shapes that make an agent transcript
   different from an ordinary chat timeline.
 
-The application intentionally uses the public typed `Db` API for schema,
-queries, and streaming writes. The lower-level range/append methods are public
-on `JazzClient`, but are not yet promoted through typed `Db`; this example does
-not reach through `Db` internals to work around that gap.
-
-Run the app checks with:
+## Run the app
 
 ```sh
-pnpm --dir examples/music-agent/apps/ts-localfirst test
-pnpm --dir examples/music-agent/apps/ts-localfirst build
+pnpm install
+pnpm build:ci            # builds the Jazz runtime and jazz-tools once
+cd examples/music-agent/apps/nextjs
+pnpm dev                 # starts Next.js and a local Jazz server
 ```
 
-Run benchmark correctness checks with:
+Open <http://127.0.0.1:3000>, create an account and the first conversation
+seeds itself: a request with an attached rough mix, answered live by the agent.
+Open the same account in a second browser window to watch replies stream into
+both.
+
+### Choosing the agent
+
+| `MUSIC_AGENT_PROVIDER` | What answers                                                                                                                                            |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `scripted` (default)   | A deterministic scripted agent. No API key, same reply every time. Replies are labelled "Scripted agent". Use it for demos and tests.                   |
+| `anthropic`            | Claude, through the official `@anthropic-ai/sdk` with streaming and tool use. Needs `ANTHROPIC_API_KEY`; `ANTHROPIC_MODEL` overrides the default model. |
+
+Both providers use the same three tools, backed by the seeded Jazz data:
+`find_venues`, `check_calendar` and `draft_setlist`.
+
+## How it works
+
+**The browser writes, the server answers.** The browser inserts the user's turn
+and any audio into Jazz itself (`insertStreaming` for the file), then calls
+`POST /api/turns`. That route checks ownership, queues an assistant turn and
+returns immediately; the reply is generated after the response with Next's
+`after()`. The browser never receives the reply from that request. It watches
+the turn's row, like every other open client.
+
+**Streaming is a large-value append.** The runner
+(`src/agent/runner.ts`) batches tokens for a few milliseconds and writes each
+batch as a page-relative splice at the end of the turn's `body`:
+
+```ts
+db.update(
+  app.turns,
+  turnId,
+  {},
+  {
+    applyDiffs: {
+      body: { within: { from: end, to: end }, splices: [{ at: 0, delete: 0, insert }] },
+    },
+  },
+);
+```
+
+No write resends the whole reply, and every subscribed client sees it grow.
+Tool calls are rows of their own, written as `running` and then updated with
+their result, so they show up in `ChatToolCalls` while they run.
+
+**Durable execution.** The server writes with backend authority; permissions
+let a client write only its own user turns and attachments, never an agent
+reply. A running turn records which server process owns it (`runnerId`) and a
+heartbeat every 3 seconds. `instrumentation.ts` starts a sweeper when the server
+boots: a `streaming` turn whose heartbeat is older than 15 seconds lost its
+process and is marked `interrupted` (in an exclusive transaction, so two
+servers never disagree). The conversation then offers **Resume**, which claims
+the turn again and continues in place, or **Regenerate**. The scripted agent is
+deterministic, so resuming replays it and skips what was already written; Claude
+is shown its partial reply and asked to continue.
+
+**Branches.** Turns form a tree through `parentId`. Regenerating adds a sibling
+reply under the same user turn; the conversation's `headTurnId` says which leaf
+is shown, and the arrows under a reply switch between siblings. Older answers
+are never overwritten.
+
+**Audio attachments are read in ranges.** The inline player is the browser's
+audio element pointed at `/api/attachments/[id]`. That route answers HTTP range
+requests with a typed partial selection of the `bytes` column:
+
+```ts
+db.one(app.attachments.where({ id }).select({ payload: { from: start, to: end } }));
+```
+
+so seeking in a long recording reads only the page it needs. List views select
+attachment metadata only and never load the bytes.
+
+## Checks
 
 ```sh
+pnpm --dir examples/music-agent/apps/nextjs typecheck
+pnpm --dir examples/music-agent/apps/nextjs test
+pnpm --dir examples/music-agent/apps/nextjs build
+pnpm --dir examples/music-agent/apps/ts-localfirst test
+pnpm --dir examples/music-agent/apps/ts-localfirst typecheck
 cargo test -p jazz-example-music-agent-benchmark
 ```
+
+The Next.js tests run the agent runner, tools and recovery against a local Jazz
+server with the app's real schema and permissions. The library tests run the
+same scenarios on an in-memory store and on Jazz, including a second client
+watching an assistant turn grow append by append.
