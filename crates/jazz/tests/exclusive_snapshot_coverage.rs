@@ -268,19 +268,69 @@ impl Net {
     /// invite inside an exclusive transaction, add a membership only if it
     /// exists, and report whether the server accepted the commit.
     fn redeem(&self, client: usize, code: &str) -> Redeem {
+        self.redeem_via(client, code, InviteCheck::Binding)
+    }
+
+    /// Whether `code` names a live invite, read inside `open` the way
+    /// `check` reads it.
+    fn invite_is_live(
+        &self,
+        client: usize,
+        code: &str,
+        open: OpenTransactionId,
+        check: InviteCheck,
+    ) -> bool {
+        let db = self.db(client);
+        match check {
+            InviteCheck::Binding => !self
+                .read(
+                    client,
+                    &invite_query(code),
+                    DurabilityTier::Local,
+                    Some(open),
+                )
+                .is_empty(),
+            InviteCheck::BindingCount => {
+                let bytes = postcard::to_allocvec(&invite_query(code).count()).unwrap();
+                let read = db.all_serialized_query(
+                    &bytes,
+                    ReadOpts::default(),
+                    Some(open),
+                    None,
+                    None,
+                    false,
+                    || false,
+                    |attachment| db.detach_query(attachment),
+                );
+                let SerializedReadResult::Rows(rows) = self.drive(read).expect("count") else {
+                    panic!("expected plain rows");
+                };
+                rows[0].cell_at(0) != Some(Value::U64(0))
+            }
+            InviteCheck::RustApi => {
+                let prepared = db.prepare_query(&invite_query(code)).unwrap();
+                !self
+                    .drive(db.exclusive_tx_ref(open).all_prepared(&prepared))
+                    .expect("read")
+                    .is_empty()
+            }
+            InviteCheck::RustWholeTable => self
+                .drive(db.exclusive_tx_ref(open).all("invites"))
+                .expect("read")
+                .iter()
+                .any(|row| {
+                    !row.is_deleted() && row.cell_at(0) == Some(Value::String(code.to_owned()))
+                }),
+        }
+    }
+
+    /// [`Self::redeem`] with the invite read the way `check` reads it.
+    fn redeem_via(&self, client: usize, code: &str, check: InviteCheck) -> Redeem {
         let db = self.db(client);
         self.unrelated_receipt(client);
         let open = OpenTransactionId::new();
         block_on(db.begin_exclusive(open)).unwrap();
-        if self
-            .read(
-                client,
-                &invite_query(code),
-                DurabilityTier::Local,
-                Some(open),
-            )
-            .is_empty()
-        {
+        if !self.invite_is_live(client, code, open, check) {
             db.abandon_transaction_handle(open).ok();
             return Redeem::Invalid;
         }
@@ -295,6 +345,19 @@ impl Net {
             Err(_) => Redeem::Conflict,
         }
     }
+}
+
+/// How the invite-link recipe reads the invite inside its transaction.
+#[derive(Clone, Copy, Debug)]
+enum InviteCheck {
+    /// A filtered query through the binding entry point.
+    Binding,
+    /// A filtered count through the binding entry point.
+    BindingCount,
+    /// A filtered query through the Rust transaction API.
+    RustApi,
+    /// A whole-table read through the Rust transaction API.
+    RustWholeTable,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -542,4 +605,135 @@ fn offline_exclusive_commit_from_a_genesis_snapshot_is_allowed() {
     .unwrap();
     net.drive(db.commit_exclusive_handle(open))
         .expect("a genesis snapshot needs no hydration");
+}
+
+/// garden-co/jazz#3696: every way of reading the invite inside an exclusive
+/// transaction must refuse a revoked invite the backend still holds, not only
+/// a filtered row query through the binding entry point.
+fn assert_revoked_invite_never_adds_a_member(check: InviteCheck) {
+    let net = Net::new(&[0x0a, 0x0b]);
+    let invite = net.create_invite(OWNER, "abc");
+    // The backend holds the invite before any redemption, whichever way it
+    // reads it.
+    net.read(BACKEND, &invite_query("abc"), DurabilityTier::Global, None);
+    assert_eq!(net.redeem_via(BACKEND, "abc", check), Redeem::Joined);
+
+    net.revoke(OWNER, invite);
+    for _ in 0..3 {
+        assert_ne!(net.redeem_via(BACKEND, "abc", check), Redeem::Joined);
+    }
+    assert_eq!(
+        net.members(),
+        1,
+        "only the redemption before the revocation added a member"
+    );
+}
+
+#[test]
+fn revoked_invite_never_adds_a_member_when_counted() {
+    assert_revoked_invite_never_adds_a_member(InviteCheck::BindingCount);
+}
+
+#[test]
+fn revoked_invite_never_adds_a_member_through_the_rust_api() {
+    assert_revoked_invite_never_adds_a_member(InviteCheck::RustApi);
+}
+
+#[test]
+fn revoked_invite_never_adds_a_member_through_a_whole_table_read() {
+    assert_revoked_invite_never_adds_a_member(InviteCheck::RustWholeTable);
+}
+
+/// The backend still holds the invite, but the owner marked it used (it no
+/// longer matches the filter) before the backend's cut.
+#[test]
+fn invite_used_up_before_the_cut_never_adds_a_member() {
+    let net = Net::new(&[0x0a, 0x0b]);
+    let invite = net.create_invite(OWNER, "abc");
+    assert_eq!(net.redeem(BACKEND, "abc"), Redeem::Joined);
+
+    let write =
+        block_on(
+            net.db(OWNER)
+                .update("invites", invite, cells("used"), Default::default()),
+        )
+        .unwrap();
+    net.settle(OWNER, write.mergeable_tx_id())
+        .expect("update settles");
+    for _ in 0..3 {
+        assert_ne!(net.redeem(BACKEND, "abc"), Redeem::Joined);
+    }
+    assert_eq!(net.members(), 1);
+}
+
+/// The never-received half of #3694 through the Rust transaction API: a
+/// second backend must see the first backend's redemption.
+fn assert_redemption_on_another_backend_is_seen(whole_table: bool) {
+    let net = Net::new(&[0x0a, 0x0b, 0x0c]);
+    net.create_invite(OWNER, "abc");
+    net.read(BACKEND, &invite_query("abc"), DurabilityTier::Global, None);
+    assert_eq!(net.redeem(BACKEND, "abc"), Redeem::Joined);
+    net.unrelated_receipt(2);
+
+    let db = net.db(2);
+    let open = OpenTransactionId::new();
+    block_on(db.begin_exclusive(open)).unwrap();
+    let taken = if whole_table {
+        net.drive(db.exclusive_tx_ref(open).all("members"))
+            .unwrap()
+            .into_iter()
+            .filter(|row| !row.is_deleted())
+            .count()
+    } else {
+        let prepared = db
+            .prepare_query(&Query::from("members").filter(eq(col("code"), lit("abc"))))
+            .unwrap();
+        net.drive(db.exclusive_tx_ref(open).all_prepared(&prepared))
+            .unwrap()
+            .len()
+    };
+    assert_eq!(taken, 1, "the second backend must see the first redemption");
+}
+
+/// The absence guard of a single-use invite read through the Rust API: a
+/// second backend must not redeem it again.
+#[test]
+fn a_second_backend_cannot_redeem_through_the_rust_api() {
+    let net = Net::new(&[0x0a, 0x0b, 0x0c]);
+    net.create_invite(OWNER, "abc");
+    net.read(BACKEND, &invite_query("abc"), DurabilityTier::Global, None);
+    assert_eq!(net.redeem(BACKEND, "abc"), Redeem::Joined);
+    net.unrelated_receipt(2);
+
+    let db = net.db(2);
+    let open = OpenTransactionId::new();
+    block_on(db.begin_exclusive(open)).unwrap();
+    let prepared = db
+        .prepare_query(&Query::from("members").filter(eq(col("code"), lit("abc"))))
+        .unwrap();
+    let taken = !net
+        .drive(db.exclusive_tx_ref(open).all_prepared(&prepared))
+        .unwrap()
+        .is_empty();
+    if !taken {
+        net.drive(
+            db.exclusive_tx_ref(open)
+                .insert("members", cells("abc"), Default::default()),
+        )
+        .unwrap();
+        if let Ok(tx_id) = net.drive(db.commit_exclusive_handle(open)) {
+            let _ = net.settle(2, tx_id);
+        }
+    }
+    assert_eq!(net.members(), 1, "the invite was redeemed only once");
+}
+
+#[test]
+fn a_redemption_on_another_backend_is_seen_through_the_rust_api() {
+    assert_redemption_on_another_backend_is_seen(false);
+}
+
+#[test]
+fn a_redemption_on_another_backend_is_seen_through_a_whole_table_read() {
+    assert_redemption_on_another_backend_is_seen(true);
 }
