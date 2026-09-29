@@ -4,8 +4,6 @@ description: Jazz's approach to row-level security using relationship-based acce
 reviewedAt: "b29b48d1a"
 ---
 
-import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
-
 Permissions control who can read, insert, update, and delete rows. Jazz enforces them server-side using row-level policies defined in `permissions.ts`. Clients that fail a policy check have their writes rejected and their reads filtered.
 
 Jazz decides permissions per table:

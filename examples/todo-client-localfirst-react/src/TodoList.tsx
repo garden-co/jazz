@@ -2,13 +2,23 @@ import { useState } from "react";
 import { useDb, useAll, useSession } from "jazz-tools/react";
 import { toast } from "sonner";
 import { app } from "../schema.js";
-import { WriteResult } from "jazz-tools";
+import { PersistedWriteRejectedError, WriteHandle, WriteResult } from "jazz-tools";
 
 function notifyLocalWriteDurable(write: WriteResult<unknown>) {
   void write
     .wait({ tier: "local" })
     .then(() => window.dispatchEvent(new CustomEvent("todo-app:local-write-durable")))
     .catch(() => toast.error("Could not save this task locally"));
+}
+
+// The server authorizes writes after they are applied locally, so a permission
+// rejection only surfaces through a `global` wait (or `db.onMutationError`).
+function notifyIfRejected(write: WriteHandle<unknown, unknown>, message: string) {
+  void write.wait({ tier: "global" }).catch((error: unknown) => {
+    if (error instanceof PersistedWriteRejectedError) {
+      toast.error(message);
+    }
+  });
 }
 
 export function TodoList() {
@@ -81,10 +91,9 @@ export function TodoList() {
               type="checkbox"
               checked={todo.done}
               onChange={() => {
-                void Promise.resolve(db.update(app.todos, todo.id, { done: !todo.done })).catch(
-                  () => {
-                    toast.error("You don't have permission to update this task");
-                  },
+                notifyIfRejected(
+                  db.update(app.todos, todo.id, { done: !todo.done }),
+                  "You don't have permission to update this task",
                 );
               }}
               className="toggle"
@@ -94,9 +103,10 @@ export function TodoList() {
             <button
               className="delete-btn"
               onClick={() => {
-                void Promise.resolve(db.delete(app.todos, todo.id)).catch(() => {
-                  toast.error("You don't have permission to delete this task");
-                });
+                notifyIfRejected(
+                  db.delete(app.todos, todo.id),
+                  "You don't have permission to delete this task",
+                );
               }}
             >
               &times;

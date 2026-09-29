@@ -26,17 +26,7 @@ pub(super) fn queued_mutation_error_event(
     kind: TxKind,
     error: &Error,
 ) -> MutationErrorEvent {
-    let code = match error.code {
-        ErrorCode::Schema => "schema",
-        ErrorCode::Query => "query",
-        ErrorCode::WriteRejected => "write_rejected",
-        ErrorCode::TransactionConflict => "transaction_conflict",
-        ErrorCode::Storage => "storage",
-        ErrorCode::Protocol => "protocol",
-        ErrorCode::Backpressure => "backpressure",
-        ErrorCode::NotObserved => "not_observed",
-        ErrorCode::HistoricalReadRequiresServer => "historical_read_requires_server",
-    };
+    let code = error.code.as_str();
     mutation_error_event_with_details(
         TransactionId::from_committed_tx(tx_id),
         kind,

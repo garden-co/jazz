@@ -1,59 +1,43 @@
 import type { RawRun, Release } from "./model.ts";
 
-export function isAncestorComparison(status: string): boolean {
-  // Compare BASE=measured commit to HEAD=release: ahead/identical proves
-  // inclusion. Behind or diverged does not, regardless of commit dates.
-  return status === "ahead" || status === "identical";
+export function isVersionTag(name: string): boolean {
+  return /^v?\d+\.\d+\.\d+(?:[-+].+)?$/.test(name);
 }
 
-export async function resolveReleaseAncestors(
+/**
+ * Attribute each measured main commit to the oldest release that contains it.
+ *
+ * `tags` must be ordered oldest first. `containingTags(sha)` returns the names
+ * of every tag whose commit has `sha` as an ancestor (from a local git
+ * checkout), or null when that commit is unknown locally. Unknown commits stay
+ * unreleased with a visible warning; missing evidence never fabricates a
+ * release measurement.
+ */
+export function resolveReleaseAncestors(
   runs: RawRun[],
   tags: Release[],
-  compare: (commit: string, release: string) => Promise<string>,
-  limit = 40,
+  containingTags: (sha: string) => ReadonlySet<string> | null,
 ) {
   const included = new Map<string, string>();
   const warnings = new Set<string>();
-  const commits = [
-    ...new Set(
-      runs
-        .filter((run) => run.commit.branch?.name === "main" && run.results.some((r) => r.walltime))
-        .map((run) => run.commit.hash),
-    ),
-  ];
-  let next = 0,
-    requests = 0,
-    failed = false;
-  async function worker() {
-    while (next < commits.length && !failed) {
-      const sha = commits[next++];
-      for (const tag of tags) {
-        if (sha === tag.sha) {
-          included.set(sha, tag.name);
-          break;
-        }
-        if (failed) break;
-        if (requests++ >= limit) {
-          warnings.add(
-            "Release ancestry lookup reached its request budget; some main commits have unverified release status.",
-          );
-          return;
-        }
-        try {
-          if (isAncestorComparison(await compare(sha, tag.sha))) {
-            included.set(sha, tag.name);
-            break;
-          }
-        } catch {
-          failed = true;
-          warnings.add(
-            "GitHub release ancestry is temporarily unavailable; some main commits have unverified release status.",
-          );
-          break;
-        }
-      }
+  const commits = new Set(
+    runs
+      .filter((run) => run.commit.branch?.name === "main" && run.results.some((r) => r.walltime))
+      .map((run) => run.commit.hash),
+  );
+  for (const sha of commits) {
+    const exact = tags.find((tag) => tag.sha === sha);
+    if (exact) {
+      included.set(sha, exact.name);
+      continue;
     }
+    const containing = containingTags(sha);
+    if (!containing) {
+      warnings.add("Some measured main commits are missing from the release history checkout.");
+      continue;
+    }
+    const oldest = tags.find((tag) => containing.has(tag.name));
+    if (oldest) included.set(sha, oldest.name);
   }
-  await Promise.all(Array.from({ length: 3 }, worker));
   return { included, warnings: [...warnings] };
 }

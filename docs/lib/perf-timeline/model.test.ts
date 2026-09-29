@@ -241,7 +241,8 @@ test("benchmark identity, not display name, separates measurements", () => {
 test("formats seconds without confusing milliseconds or microseconds", () => {
   assert.equal(formatTime(42.154), "42.15 s");
   assert.equal(formatTime(0.042154), "42.15 ms");
-  assert.equal(formatTime(0.000042154), "42.15 µs");
+  assert.equal(formatTime(0.000042154), "0.0422 ms");
+  assert.equal(formatTime(0.0002963), "0.296 ms");
 });
 
 test("historical backfill places only approved receipts on release day with true provenance", () => {
