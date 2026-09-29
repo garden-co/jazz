@@ -13,7 +13,7 @@ name: Starters E2E
 # The `e2e` matrix then downloads those and runs the harness per starter,
 # so only `prepare` compiles Rust. That compile is the whole critical path
 # (each starter takes about a minute), so `prepare` runs on 16 vCPUs, restores
-# third-party Rust build outputs saved by default-branch runs, and skips the
+# third-party Rust build outputs saved by release-branch runs, and skips the
 # debug `jazz-tools` CLI binary that `build:core` also builds but no starter
 # uses. The WASM and NAPI artifacts are the same release builds as before.
 # Playwright browsers and the pnpm store are cached between jobs so the matrix
@@ -91,14 +91,15 @@ jobs:
       - name: Cache Rust build artifacts
         # Restores third-party crates (including the RocksDB C++ build).
         # Workspace crates are always rebuilt, so the packed artifacts still
-        # come from this tree. Only default-branch runs (the nightly dispatch)
-        # save; release PRs and branch dispatches read.
+        # come from this tree. Only runs on the release branch (the dispatch
+        # from changesets-release-pr) save; release PRs and other dispatches
+        # read.
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           prefix-key: starters-e2e-v1
           cache-on-failure: true
           cache-bin: false
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/release' }}
 
       # Same pinned, version-validated installer as the shipped package build,
       # so a cached wasm-pack can never outlive its pin.
