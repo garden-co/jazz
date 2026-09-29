@@ -44,8 +44,33 @@ describe("PosterShop studio preparation", () => {
       prepareStudio("user-1", getToken, null),
       prepareStudio("user-1", getToken, null),
     ]);
-    expect(first).toEqual({ ok: true, joinedCanvasId: null });
+    expect(first).toEqual({ ok: true, joinedCanvasId: null, inviteRejected: false });
     expect(second).toBe(first);
     expect(request).toHaveBeenCalledOnce();
+  });
+
+  it("turns an unknown, used or revoked invite into the user's own studio", async () => {
+    const invite = { canvasId: crypto.randomUUID(), token: crypto.randomUUID() };
+    const request = vi.fn(async (url: string) =>
+      url === "/api/join"
+        ? Response.json({ error: "invite not found" }, { status: 404 })
+        : Response.json({ ok: true }),
+    );
+    vi.stubGlobal("fetch", request);
+    const result = await prepareStudio("user-2", async () => "jwt", invite);
+    expect(result).toEqual({ ok: true, joinedCanvasId: null, inviteRejected: true });
+  });
+
+  it("keeps a transient join failure retryable", async () => {
+    const invite = { canvasId: crypto.randomUUID(), token: crypto.randomUUID() };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) =>
+        url === "/api/join"
+          ? Response.json({ error: "busy, retry" }, { status: 503 })
+          : Response.json({ ok: true }),
+      ),
+    );
+    expect(await prepareStudio("user-3", async () => "jwt", invite)).toEqual({ ok: false });
   });
 });

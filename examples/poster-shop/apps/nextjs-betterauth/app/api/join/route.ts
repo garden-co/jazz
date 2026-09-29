@@ -1,4 +1,5 @@
 import { redeemInvite } from "@/src/lib/join";
+import { authJazzClient } from "@/src/lib/auth-jazz-client";
 import { verifiedRequest } from "@/src/lib/request-account";
 import { BootstrapConflictError } from "@/src/lib/retry";
 
@@ -8,7 +9,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** The invite arrives in the body; links carry it in the URL fragment only. */
 export async function POST(request: Request) {
-  const caller = await verifiedRequest(request);
+  const caller = await verifiedRequest(await authJazzClient(), request);
   if (!caller) return Response.json({ error: "account required" }, { status: 401 });
   const body = (await request.json().catch(() => null)) as {
     canvasId?: unknown;

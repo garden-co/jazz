@@ -13,7 +13,7 @@ import {
   VStack,
 } from "@astryxdesign/core";
 import { useAll, useSession } from "jazz-tools/react";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { app } from "@/schema";
 import { AssetShelf } from "@/src/components/AssetShelf";
 import { CanvasSurface } from "@/src/components/CanvasSurface";
@@ -25,8 +25,15 @@ import { LayerPanel } from "@/src/components/LayerPanel";
 import { authClient } from "@/src/lib/auth-client";
 import { roleForActiveCanvas } from "@/src/lib/identity";
 
-export function PosterShopApp({ initialCanvasId }: { initialCanvasId?: string | null }) {
-  return <PosterStudio initialCanvasId={initialCanvasId ?? null} />;
+export function PosterShopApp({
+  initialCanvasId,
+  notice,
+}: {
+  initialCanvasId?: string | null;
+  /** Shown above the studio, for example when an invite link was not valid. */
+  notice?: ReactNode;
+}) {
+  return <PosterStudio initialCanvasId={initialCanvasId ?? null} notice={notice} />;
 }
 
 type SidePanel = "design" | "assets" | "history";
@@ -34,7 +41,13 @@ type SidePanel = "design" | "assets" | "history";
 /** The shell only reads canvas metadata and owns selection state. Child
  * surfaces keep independent Jazz subscriptions, so a cursor or asset update
  * cannot invalidate the shape renderer. */
-export function PosterStudio({ initialCanvasId }: { initialCanvasId: string | null }) {
+export function PosterStudio({
+  initialCanvasId,
+  notice,
+}: {
+  initialCanvasId: string | null;
+  notice?: ReactNode;
+}) {
   const session = useSession();
   const { data: authSession } = authClient.useSession();
   const { data: canvases } = useAll(app.canvases);
@@ -98,6 +111,7 @@ export function PosterStudio({ initialCanvasId }: { initialCanvasId: string | nu
           />
         </HStack>
       </HStack>
+      {notice}
       <div className="studio-grid">
         <aside className="studio-layers" aria-label="Layers">
           <LayerPanel

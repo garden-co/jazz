@@ -16,6 +16,8 @@ export const RETRYABLE_CONFLICT_CODES: ReadonlySet<string> = new Set([
  * binding's core error instead, an `Error` whose stable `code` property is
  * `transaction_conflict` (see jazz-tools native-error-code.ts), so that
  * documented shape is accepted as well. Error messages are never parsed.
+ * TODO: delete the `code` branch once garden-co/jazz#2713 lands and native
+ * conflicts settle as `PersistedWriteRejectedError`.
  */
 export function isRetryableConflict(error: unknown): boolean {
   if (error instanceof PersistedWriteRejectedError) return RETRYABLE_CONFLICT_CODES.has(error.code);

@@ -11,6 +11,7 @@ export default function Dashboard() {
   const [bootstrap, setBootstrap] = useState<"loading" | "ready" | "failed">("loading");
   const [attempt, setAttempt] = useState(0);
   const [joinedCanvasId, setJoinedCanvasId] = useState<string | null>(null);
+  const [inviteRejected, setInviteRejected] = useState(false);
   const userId = session?.user.id;
   useEffect(() => {
     if (!userId) return;
@@ -21,7 +22,10 @@ export default function Dashboard() {
       if (cancelled) return;
       if (result.ok && invite) {
         setJoinedCanvasId(result.joinedCanvasId);
-        // Drop the redeemed token from the address bar and history.
+        setInviteRejected(result.inviteRejected);
+        // Drop the token from the address bar and history, whether it was
+        // redeemed or turned out to be invalid. A transient failure keeps it
+        // so "Try again" can redeem it.
         window.history.replaceState(null, "", "/dashboard");
       }
       setBootstrap(result.ok ? "ready" : "failed");
@@ -56,5 +60,20 @@ export default function Dashboard() {
         </Center>
       </main>
     );
-  return <PosterShopApp initialCanvasId={joinedCanvasId} />;
+  return (
+    <PosterShopApp
+      initialCanvasId={joinedCanvasId}
+      notice={
+        inviteRejected ? (
+          <Banner
+            status="info"
+            title="This invite link is no longer valid"
+            description="It may have been used already or revoked. Ask the poster's admin for a new link. Meanwhile, here is your own studio."
+            isDismissable
+            onDismiss={() => setInviteRejected(false)}
+          />
+        ) : undefined
+      }
+    />
+  );
 }

@@ -34,7 +34,14 @@ export async function joinCanvasWithInvite(token: string, invite: InviteLink): P
   });
 }
 
-export type StudioPreparation = { ok: true; joinedCanvasId: string | null } | { ok: false };
+export type StudioPreparation =
+  | {
+      ok: true;
+      joinedCanvasId: string | null;
+      /** The link was unknown, already used or revoked: open the user's own studio. */
+      inviteRejected: boolean;
+    }
+  | { ok: false };
 
 // One preparation per user and invite at a time: React StrictMode mounts the
 // dashboard effect twice, and both mounts share this promise instead of
@@ -54,11 +61,14 @@ export function prepareStudio(
       if (!token) return { ok: false };
       const bootstrapped = await bootstrapPersonalCanvas(token);
       if (!bootstrapped.ok) return { ok: false };
-      if (!invite) return { ok: true, joinedCanvasId: null };
+      if (!invite) return { ok: true, joinedCanvasId: null, inviteRejected: false };
       const joined = await joinCanvasWithInvite(token, invite);
+      // 400/404 are final answers about the link; retrying cannot help.
+      if (joined.status === 400 || joined.status === 404)
+        return { ok: true, joinedCanvasId: null, inviteRejected: true };
       if (!joined.ok) return { ok: false };
       const { canvasId } = (await joined.json()) as { canvasId: string };
-      return { ok: true, joinedCanvasId: canvasId };
+      return { ok: true, joinedCanvasId: canvasId, inviteRejected: false };
     })()
       .catch((): StudioPreparation => ({ ok: false }))
       .finally(() => inFlight.delete(key));
