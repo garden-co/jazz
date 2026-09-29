@@ -335,9 +335,9 @@ export default function HomePage() {
         <div className="home-container">
           <SectionHeader id="how-it-works" title="One database, from the client to the cloud" />
           <Figure
-            className="home-figure-wide mt-12"
+            className="home-figure-wide mt-6"
             number={1}
-            caption="Every box runs the same Rust database engine: as WebAssembly in the browser, as a native module in React Native and Node, and as the sync server in Jazz Cloud. A query behaves the same wherever it runs."
+            caption="Jazz uses the same Rust database engine core everywhere: as WebAssembly in the browser, as a native module in React Native and Node, and as the sync server in Jazz Cloud."
           >
             <StackDiagram />
           </Figure>
@@ -362,7 +362,7 @@ export default function HomePage() {
               apply locally at once and sync in the background.
             </Text>
           </SectionHeader>
-          <div className="home-code-grid mt-12">
+          <div className="home-code-grid mt-6">
             <CodeWindow
               files={[
                 { name: "OpenTodos.tsx", language: "tsx", code: componentCode },
@@ -415,7 +415,7 @@ export default function HomePage() {
               The hard parts of shared, live data, handled once instead of in every app.
             </span>
           </Heading>
-          <div className="mt-12">
+          <div className="mt-6">
             {features.map((feature, index) => (
               <article key={feature.id} className="home-feature">
                 <div className="home-feature-text">
@@ -492,7 +492,7 @@ export default function HomePage() {
               app or your users. Global infrastructure, billed in predictable units.
             </Text>
           </SectionHeader>
-          <div className="home-meters mt-12">
+          <div className="home-meters mt-6">
             {pricingMeters.map((meter) => (
               <div key={meter.name} className="home-meter">
                 <Text as="p" display="block" type="label" color="secondary">
