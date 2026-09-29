@@ -401,8 +401,8 @@ it("uses the compact canonical byte vocabulary for the foreground NativeDb slice
 
 it("decodes a core operation error with its stable code beside the unchanged reason", () => {
   const relay = loadRelay(null);
-  const code = [...new TextEncoder().encode("not_observed")];
-  const reason = [...new TextEncoder().encode("NotObserved: oops")];
+  const code = Array.from("not_observed", (char) => char.charCodeAt(0));
+  const reason = Array.from("NotObserved: oops", (char) => char.charCodeAt(0));
 
   expect(
     relay.decodeNativeForegroundResponse(
