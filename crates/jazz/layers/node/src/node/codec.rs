@@ -2104,6 +2104,28 @@ pub(super) struct StoredTransaction {
 }
 
 impl StoredTransaction {
+    /// Merge incoming status without undoing an already known outcome,
+    /// global time, or durability. Used for both transaction ingestion
+    /// and standalone fate updates.
+    pub(super) fn reconcile_fate(
+        &mut self,
+        fate: Fate,
+        global_time: Option<GlobalTime>,
+        durability: Option<DurabilityTier>,
+    ) -> Result<(), Error> {
+        if let (Some(current), Some(next)) = (self.global_time, global_time)
+            && next < current
+        {
+            return Err(Error::NonMonotoneState("global seq cannot move backwards"));
+        }
+        self.fate = next_fate(&self.fate, fate)?;
+        self.global_time = global_time.or(self.global_time);
+        if let Some(durability) = durability {
+            self.durability = self.durability.max(durability);
+        }
+        Ok(())
+    }
+
     pub(super) fn to_record(&self) -> TransactionRecord {
         TransactionRecord {
             tx_id: self.tx.tx_id,
@@ -4635,6 +4657,7 @@ pub(super) fn positional_cells_from_map(
                 .get(&column.name)
                 .cloned()
                 .map(|value| {
+                    let value = column.storage_value(value);
                     validate_cell_value(column, &value)?;
                     Ok(value)
                 })

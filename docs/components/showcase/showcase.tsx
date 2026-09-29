@@ -65,11 +65,14 @@ function MetricCard({
   entry,
   lookup,
   loading,
+  reserveUnitLine,
 }: {
   metric: HeroExample["metrics"][number];
   entry: { bench: Benchmark; summary: MetricSummary } | undefined;
   lookup: Lookup;
   loading: boolean;
+  /** Keep an empty unit line so cards in a row line up when some have a unit. */
+  reserveUnitLine: boolean;
 }) {
   if (!entry)
     return (
@@ -110,21 +113,30 @@ function MetricCard({
           <Text type="supporting" display="block">
             {metric.label}
           </Text>
-          <Text
-            size="2xl"
-            weight="medium"
-            hasTabularNumbers
-            display="block"
-            className="metric-headline whitespace-nowrap"
-          >
-            {time}
-            {metric.per && (
-              <Text color="secondary" weight="normal">
-                {" "}
+          {/* The unit gets its own line: beside the number it clipped in
+            narrow cards. */}
+          <VStack gap={0}>
+            <Text
+              size="2xl"
+              weight="medium"
+              hasTabularNumbers
+              display="block"
+              className="metric-headline whitespace-nowrap"
+            >
+              {time}
+            </Text>
+            {metric.per ? (
+              <Text color="secondary" display="block">
                 per {metric.per.unit}
               </Text>
+            ) : (
+              reserveUnitLine && (
+                <Text color="secondary" display="block" aria-hidden>
+                  {"\u00a0"}
+                </Text>
+              )
             )}
-          </Text>
+          </VStack>
           <Text type="supporting" hasTabularNumbers display="block">
             {basisText(summary)}
             {previous && (
@@ -253,6 +265,7 @@ function Hero({
                 entry={summaries.get(metric.benchmark)}
                 lookup={lookup}
                 loading={loading}
+                reserveUnitLine={example.metrics.some((m) => m.per)}
               />
             ))}
           </Grid>

@@ -4,17 +4,29 @@ name: Starters E2E
 # changesets release PR if any starter fails to scaffold, install, build, or
 # pass its Playwright suite against the production build.
 #
-# Trigger: a changesets-managed release pull request targeting `release`, plus
-# manual dispatch for ad-hoc runs. Ordinary pull requests are skipped.
+# Trigger: a changesets-managed release pull request targeting `release` (in
+# practice changesets-release-pr dispatches this workflow on
+# `changeset-release/release`, because the bot's PR events stop at
+# action_required), plus manual dispatch for ad-hoc runs. Ordinary pull
+# requests are skipped. The nightly does not run it.
 #
-# Shape: the `prepare` job builds the workspace once and packs the three
-# workspace tarballs (jazz-tools, jazz-napi, jazz-wasm) plus the runtime
-# artifacts the harness needs (jazz-tools/dist, jazz-napi index + .node).
-# The `e2e` matrix then downloads those and runs the harness per starter,
-# skipping the ~10-minute `build:core` step entirely. Playwright browsers
-# and the pnpm store are cached between jobs so the matrix doesn't repeat
-# the 280 MB chromium download or the lockfile resolution per runner.
-
+# Shape: the `prepare` job produces the three package tarballs (jazz-tools,
+# jazz-napi, jazz-wasm) plus the runtime artifacts the harness needs
+# (jazz-tools/dist, jazz-napi loader + linux-x64 .node). The `e2e` matrix then
+# downloads those and runs the harness per starter.
+#
+# Where the packages come from:
+# - Release runs (the Version Packages head) do not build. They wait for the
+#   release preview run on the same commit and download its assembled
+#   packages: the exact bytes publish-jazz-tools-alpha.yml later publishes
+#   (it reuses the same preview artifacts), including the Linux NAPI binary
+#   built on the pinned AL2023 image. Starters therefore finish a few minutes
+#   after the preview instead of duplicating its Rust build.
+# - Manual dispatches build release WASM and NAPI from their own tree on 16
+#   vCPUs (`build:starters-e2e`, i.e. build:core without the debug CLI binary
+#   no starter uses). A dispatch can instead test a given preview run's
+#   packages with `preview_run_id`.
+#
 on:
   pull_request:
     branches: [release]
@@ -22,6 +34,10 @@ on:
     inputs:
       starter:
         description: "Single starter to run (omit for all of them)"
+        required: false
+        type: string
+      preview_run_id:
+        description: "Test this release preview run's packages instead of building (optional)"
         required: false
         type: string
 
@@ -39,9 +55,15 @@ jobs:
     # On PR events, only fire on the changesets release PR. Manual dispatch is
     # always allowed (handy for testing a starter in isolation).
     if: ${{ github.event_name == 'workflow_dispatch' || github.head_ref == 'changeset-release/release' }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    # A cold `build:core` alone takes ~23 minutes on this runner.
-    timeout-minutes: 40
+    # Reusing the preview only waits and downloads, so it needs no build runner;
+    # its timeout covers waiting for a preview that has just been dispatched.
+    runs-on: ${{ (github.ref == 'refs/heads/changeset-release/release' || github.head_ref == 'changeset-release/release' || (github.event_name == 'workflow_dispatch' && inputs.preview_run_id != '')) && 'blacksmith-4vcpu-ubuntu-2404' || 'blacksmith-16vcpu-ubuntu-2404' }}
+    timeout-minutes: ${{ (github.ref == 'refs/heads/changeset-release/release' || github.head_ref == 'changeset-release/release' || (github.event_name == 'workflow_dispatch' && inputs.preview_run_id != '')) && 70 || 30 }}
+    permissions:
+      actions: read
+      contents: read
+    env:
+      REUSE_PREVIEW: ${{ github.ref == 'refs/heads/changeset-release/release' || github.head_ref == 'changeset-release/release' || (github.event_name == 'workflow_dispatch' && inputs.preview_run_id != '') }}
     steps:
       - name: Validate workflow_dispatch starter
         if: ${{ github.event_name == 'workflow_dispatch' }}
@@ -57,9 +79,20 @@ jobs:
               ;;
           esac
 
+      - name: Validate workflow_dispatch preview run
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.preview_run_id != '' }}
+        env:
+          PREVIEW_RUN_ID: ${{ inputs.preview_run_id }}
+        run: |
+          if [[ ! "$PREVIEW_RUN_ID" =~ ^[0-9]+$ ]]; then
+            echo "::error::preview_run_id must be a workflow run ID, got '$PREVIEW_RUN_ID'"
+            exit 1
+          fi
+
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        if: env.REUSE_PREVIEW != 'true'
         with:
           toolchain: 1.93.1
           targets: wasm32-unknown-unknown
@@ -84,14 +117,65 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      - name: Install Rust prerequisites
-        run: pnpm run ensure:rust-toolchain
+      # Same pinned, version-validated installer as the shipped package build.
+      - uses: ./.github/actions/install-rust-tool
+        if: env.REUSE_PREVIEW != 'true'
+        with:
+          tool: wasm-pack@0.13.1
 
-      - name: Build core workspace
-        run: pnpm run build:core
+      - name: Build release artifacts and packages
+        if: env.REUSE_PREVIEW != 'true'
+        run: pnpm run build:starters-e2e
 
       - name: Verify starter package artifact hand-off
+        if: env.REUSE_PREVIEW != 'true'
         run: node dev/artifacts/verify-starter-e2e-artifacts.mjs
+
+      - name: Wait for the release preview of this commit
+        id: preview
+        if: env.REUSE_PREVIEW == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          HEAD_BRANCH: ${{ github.head_ref || github.ref_name }}
+          PREVIEW_RUN_ID: ${{ inputs.preview_run_id }}
+        run: node dev/scripts/await-release-preview.mjs
+
+      - name: Download the release preview's packages
+        if: env.REUSE_PREVIEW == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: pkg-jazz-tools
+          path: packages/jazz-tools
+          run-id: ${{ steps.preview.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - if: env.REUSE_PREVIEW == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: pkg-jazz-wasm
+          path: crates/jazz-wasm
+          run-id: ${{ steps.preview.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - if: env.REUSE_PREVIEW == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: pkg-jazz-napi
+          path: crates/jazz-napi
+          run-id: ${{ steps.preview.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Restore executable permissions on CLI binaries
+        # Artifact downloads drop the mode bits; publish restores them the same way.
+        if: env.REUSE_PREVIEW == 'true'
+        run: |
+          chmod 755 \
+            packages/jazz-tools/bin/native/jazz-tools-darwin-arm64 \
+            packages/jazz-tools/bin/native/jazz-tools-darwin-x64 \
+            packages/jazz-tools/bin/native/jazz-tools-linux-arm64 \
+            packages/jazz-tools/bin/native/jazz-tools-linux-x64
 
       - name: Pack workspace tarballs
         # Mirrors PACKAGES_TO_PACK in run-starter.ts. The harness picks these up
@@ -105,6 +189,17 @@ jobs:
             (cd "$dir" && pnpm pack --pack-destination "$GITHUB_WORKSPACE/_e2e-state/tarballs")
           done
           ls -la "$GITHUB_WORKSPACE/_e2e-state/tarballs"
+
+      - name: Verify packed preview jazz-napi and stage its Linux binary
+        # The same packed-payload check publish runs. The scaffolded apps cannot
+        # install the unpublished @garden-co/jazz-napi-* platform packages, so
+        # the harness copies this binary into them after checking that its
+        # fingerprint matches the packed loader.
+        if: env.REUSE_PREVIEW == 'true'
+        run: |
+          node dev/artifacts/verify-packed-napi.mjs "$(ls "$GITHUB_WORKSPACE"/_e2e-state/tarballs/jazz-napi-*.tgz)"
+          cp crates/jazz-napi/npm/linux-x64-gnu/jazz-napi.linux-x64-gnu.node crates/jazz-napi/
+          node -e 'require("./crates/jazz-napi")'
 
       - name: Cache Playwright browsers
         # Same key in the matrix below — prepare populates, matrix restores.
