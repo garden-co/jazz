@@ -201,18 +201,6 @@ type PendingNativePermissionAdvice = {
   cancel(): void;
 };
 
-const QUERY_COVERAGE_TIMEOUT = "Timed out waiting for query coverage";
-
-/**
- * Native bindings report core errors as `<code>: <message>` (`NotObserved: ...`).
- * NAPI throws an `Error`; the WASM binding throws the bare string.
- */
-function isQueryCoverageTimeout(error: unknown): boolean {
-  const message =
-    error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
-  return message === QUERY_COVERAGE_TIMEOUT || message === `NotObserved: ${QUERY_COVERAGE_TIMEOUT}`;
-}
-
 function isPendingNativeRead(value: unknown): value is PendingNativeRead {
   return typeof (value as PendingNativeRead | null)?.poll === "function";
 }
@@ -3070,13 +3058,11 @@ export class NativeRuntimeAdapter implements Runtime {
       );
     };
 
-    void refresh().catch((error: unknown) => {
-      if (this.closed || this.ownerRuntime.closed) return;
-      // The foreground read has already answered. A background refresh that
-      // outlives its coverage deadline is not a transport failure.
-      if (isQueryCoverageTimeout(error)) return;
-      this.handleServerTransportError(error);
-    });
+    // Best effort: the foreground read has already answered. Only the carrier
+    // and the pump decide that the server transport has failed; a refresh
+    // failure (a coverage timeout, a rejected read) must never become the
+    // terminal transport error, or the next real drop is not retried (#3692).
+    void refresh().catch(() => undefined);
   }
 
   admitLocalFirstSession(session: Session, token: string, appId: string): void {

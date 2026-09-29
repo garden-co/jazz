@@ -340,11 +340,15 @@ describe("NativeRuntimeAdapter server transport", () => {
   });
 
   it.each([
-    ["an Error (NAPI)", new Error("NotObserved: Timed out waiting for query coverage")],
-    ["a string (WASM)", "NotObserved: Timed out waiting for query coverage"],
+    [
+      "a coverage timeout Error (NAPI)",
+      new Error("NotObserved: Timed out waiting for query coverage"),
+    ],
+    ["a coverage timeout string (WASM)", "NotObserved: Timed out waiting for query coverage"],
+    ["an unrelated read failure", new Error("PermissionDenied: read rejected")],
   ])(
-    "keeps the server transport when a local read's background coverage refresh times out as %s",
-    async (_binding, timeout) => {
+    "keeps reconnecting after a local read's background refresh fails with %s",
+    async (_case, failure) => {
       const sockets: FakeWebSocket[] = [];
       globalThis.WebSocket = class extends FakeWebSocket {
         constructor(url: string) {
@@ -352,21 +356,24 @@ describe("NativeRuntimeAdapter server transport", () => {
           sockets.push(this);
         }
       } as unknown as typeof WebSocket;
-      const transport = new FakeTransport([]);
+      const transports: FakeTransport[] = [];
       let refreshes = 0;
       const runtime = new NativeRuntimeAdapter(
         {
           openMemory: () =>
             fakeDb({
-              connectUpstream: () => transport,
+              connectUpstream: () => {
+                const transport = new FakeTransport([]);
+                transports.push(transport);
+                return transport;
+              },
               tick: () => undefined,
               all: (_query: object, opts: { tier?: string }) => {
                 if (opts.tier !== "global") return emptyRows();
                 refreshes += 1;
-                // The native bindings report core errors as `<code>: <message>`.
                 return {
                   poll: () => {
-                    throw timeout;
+                    throw failure;
                   },
                   cancel: () => undefined,
                 };
@@ -393,8 +400,14 @@ describe("NativeRuntimeAdapter server transport", () => {
       await waitForServerPumpTimer();
       expect(refreshes).toBe(1);
       expect(terminal).not.toHaveBeenCalled();
-      expect(transport.closed).toBe(false);
-      expect(sockets).toHaveLength(1);
+      expect(transports[0]!.closed).toBe(false);
+
+      // The failed refresh must not have poisoned retry: a later real drop reconnects.
+      sockets[0]!.emitServerClose();
+      await runtime.waitForUpstreamServerConnection();
+      expect(sockets).toHaveLength(2);
+      expect(transports).toHaveLength(2);
+      expect(terminal).not.toHaveBeenCalled();
       await runtime.close();
     },
   );
