@@ -1,5 +1,6 @@
 import { app } from "../../schema";
 import permissions from "../../permissions";
+import { assertConfiguration, jazzServer } from "./config.mjs";
 import type { JazzClient } from "jazz-tools/backend";
 import { createRequire as createRequireFromModule } from "node:module";
 
@@ -20,15 +21,16 @@ declare global {
 
 /** Share one session owner across concurrent auth/bootstrap calls and Next reloads. */
 export async function authJazzClient(): Promise<JazzClient> {
+  // Throws (fails closed) when the app, sync server or backend secret is unset.
+  const { backendSecret } = assertConfiguration();
+  const { appId, serverUrl } = jazzServer();
   const pending = (globalThis.__bandChatAuthSession ??= createJazzSession({
     app,
     permissions,
-    appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID!,
+    appId,
     driver: { type: "memory" },
-    serverUrl: process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!,
-    initial: {
-      backendSecret: process.env.BACKEND_SECRET ?? "band-chat-development-backend-secret",
-    },
+    serverUrl,
+    initial: { backendSecret },
     env: process.env.NODE_ENV === "production" ? "prod" : "dev",
     tier: "global",
   }));

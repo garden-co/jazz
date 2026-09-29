@@ -26,11 +26,31 @@ export function useBandChatLifecycle(): AuthActions {
   return actions;
 }
 export function JazzProvider({ children }: React.PropsWithChildren) {
-  const {
-    session: jazz,
-    error,
-    retry,
-  } = useJazzSessionOwner({ appId: APP_ID!, serverUrl: SERVER_URL! });
+  // Fail closed: `withJazz` sets both in development; deployments set them.
+  if (!APP_ID || !SERVER_URL)
+    return (
+      <StatusScreen>
+        <Banner
+          status="error"
+          collapsible={false}
+          title="BandChat is not configured"
+          description="Set NEXT_PUBLIC_JAZZ_APP_ID and NEXT_PUBLIC_JAZZ_SERVER_URL."
+        />
+      </StatusScreen>
+    );
+  return (
+    <ConfiguredJazzProvider appId={APP_ID} serverUrl={SERVER_URL}>
+      {children}
+    </ConfiguredJazzProvider>
+  );
+}
+
+function ConfiguredJazzProvider({
+  appId,
+  serverUrl,
+  children,
+}: React.PropsWithChildren<{ appId: string; serverUrl: string }>) {
+  const { session: jazz, error, retry } = useJazzSessionOwner({ appId, serverUrl });
   if (error)
     return (
       <StatusScreen>

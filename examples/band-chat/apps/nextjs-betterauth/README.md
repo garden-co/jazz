@@ -58,12 +58,18 @@ product slice, not another generic Todo tutorial.
 ## Setup
 
 ```sh
-cp .env.example .env
 pnpm dev
 ```
 
-`withJazz` supplies public Jazz app/server configuration in development. Set a
-real `BETTER_AUTH_SECRET` and `BACKEND_SECRET` before any shared deployment.
+`pnpm dev` needs no configuration. It serves http://127.0.0.1:3000, `withJazz`
+supplies a local Jazz app and sync server, and local `BACKEND_SECRET` and
+`BETTER_AUTH_SECRET` values are generated into the git-ignored
+`.env.development.local`. No secret is checked in.
+
+Configuration fails closed. Local defaults apply only to a non-production
+process on a loopback origin; a production build or start must set every value
+listed in `.env.example`, or it refuses to start (`src/lib/config.mjs`,
+`tests/config.test.ts`).
 
 ## Checks
 

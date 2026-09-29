@@ -4,13 +4,16 @@ import { bearer, jwt } from "better-auth/plugins";
 import { jazzAdapter } from "jazz-tools/better-auth-adapter";
 import { app } from "../../schema";
 import { authJazzClient } from "./auth-jazz-client";
+import { assertConfiguration } from "./config.mjs";
 
-const appOrigin = process.env.NEXT_PUBLIC_APP_ORIGIN ?? "http://127.0.0.1:3000";
+// Fails closed: no fallback secret, and a deployment must name its origin.
+const config = assertConfiguration();
+const appOrigin = config.origin;
 
 export const auth = betterAuth({
   baseURL: appOrigin,
   trustedOrigins: [appOrigin],
-  secret: process.env.BETTER_AUTH_SECRET ?? "band-chat-development-secret",
+  secret: config.betterAuthSecret,
   database: jazzAdapter({
     db: async () => (await authJazzClient()).db,
     schema: app.wasmSchema,
