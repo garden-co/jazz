@@ -3457,6 +3457,22 @@ where
         Ok((content_parents, deletion_parents))
     }
 
+    /// Why a client-local UPDATE found no preimage. A row this replica never
+    /// received cannot be staged against, and saying so discloses nothing the
+    /// replica does not already hold. A resident row that the client query
+    /// still hides stays a read denial.
+    async fn client_update_target_missing(
+        &self,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<Error, Error> {
+        Ok(if self.local_current_row(table, row).await?.is_none() {
+            update_target_not_loaded("UPDATE", table, row)
+        } else {
+            read_for_write_denied("UPDATE", table)
+        })
+    }
+
     async fn local_row_for_client_identity(
         &self,
         table: &str,
@@ -3551,10 +3567,12 @@ where
         identity: AuthorSubject,
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row).await?;
-        let existing = self
+        let Some(existing) = self
             .local_row_for_client_identity(table, row, identity)
             .await?
-            .ok_or_else(|| read_for_write_denied("UPDATE", table))?;
+        else {
+            return Err(self.client_update_target_missing(table, row).await?);
+        };
         let tx_id = self
             .node
             .node
@@ -3632,22 +3650,26 @@ where
             // the cells it inherits. SYSTEM and policy-free tables are
             // unconditionally visible, so that query cannot change the answer.
             // Preserve indirect descriptors by reading the physical winner.
+            // With nothing able to hide the row, absence only means this
+            // replica has not loaded it.
             let (mut cells, parent) = {
                 let mut node = self.node.node.lock().await;
                 let (cells, parent) = node
                     .current_physical_cells_and_winner_in_schema(self.schema_version_id, table, row)
                     .await?
-                    .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
+                    .ok_or_else(|| update_target_not_loaded("partial UPDATE", table, row))?;
                 (cells, Some(parent))
             };
             let authored_columns = patch.keys().cloned().collect();
             cells.extend(patch);
             return Ok((cells, parent, authored_columns));
         }
-        let existing = self
+        let Some(existing) = self
             .local_row_for_client_identity(table, row, identity)
             .await?
-            .ok_or_else(|| read_for_write_denied("UPDATE", table))?;
+        else {
+            return Err(self.client_update_target_missing(table, row).await?);
+        };
         let (mut cells, parent) = {
             let mut node = self.node.node.lock().await;
             let cells = node

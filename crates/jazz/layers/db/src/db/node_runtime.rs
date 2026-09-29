@@ -266,6 +266,9 @@ where
     pub(super) relay_upstream_subscription_owners: RelayUpstreamSubscriptionOwners,
     pub(super) pending_relay_subscription_rejections: PendingRelaySubscriptionRejections,
     pub(super) connections: RefCell<Vec<Rc<LocalMutex<PeerConnection<S>>>>>,
+    /// Synchronous detaches that found a peer or the node owned by a suspended
+    /// operation. The next tick detaches them once those owners are released.
+    pending_detaches: RefCell<Vec<Rc<LocalMutex<PeerConnection<S>>>>>,
     pub(super) scheduler: SharedTickScheduler,
     /// Remote reachability for `EmptyOpening::AwaitRemote` reads.
     pub(super) remote_link: Rc<RemoteLinkTracker>,
@@ -413,6 +416,7 @@ where
             relay_upstream_subscription_owners: Rc::new(RefCell::new(BTreeMap::new())),
             pending_relay_subscription_rejections: Rc::new(RefCell::new(BTreeMap::new())),
             connections: RefCell::new(Vec::new()),
+            pending_detaches: RefCell::new(Vec::new()),
             scheduler: Rc::clone(&scheduler),
             remote_link: Rc::new(RemoteLinkTracker::new(scheduler)),
             query_runtime_wake_pending: Arc::new(AtomicBool::new(false)),
@@ -1612,6 +1616,7 @@ where
         self.subscription_runtime_retired.set(true);
         self.subscriptions.borrow_mut().clear();
         self.connections.borrow_mut().clear();
+        self.pending_detaches.borrow_mut().clear();
         self.upstream_subscriptions.borrow_mut().clear();
         self.pending_subscription_finalizations.borrow_mut().clear();
         self.latest_coverage_subscriptions.borrow_mut().clear();
@@ -2828,18 +2833,71 @@ where
     }
 
     /// Detach a previously attached peer connection from this node.
+    ///
+    /// A host can close a transport while a suspended operation (a tick or a
+    /// read awaiting storage) still owns that peer, a sibling peer or the node.
+    /// Such a detach is completed by the next tick instead of re-entering the
+    /// suspended owner; the connection is reported as detached either way.
     pub fn detach_connection(&self, connection: &Rc<LocalMutex<PeerConnection<S>>>) -> bool {
-        if !self
-            .connections
+        if self
+            .pending_detaches
             .borrow()
             .iter()
-            .any(|candidate| Rc::ptr_eq(candidate, connection))
+            .any(|pending| Rc::ptr_eq(pending, connection))
         {
             return false;
         }
-        let connection_ref = connection.borrow_mut();
-        let node = self.node.borrow_mut();
-        self.detach_connection_with_guards(connection, connection_ref, node, None)
+        if let Some(detached) = self.try_detach_connection_now(connection) {
+            return detached;
+        }
+        self.pending_detaches
+            .borrow_mut()
+            .push(Rc::clone(connection));
+        self.schedule_tick(TickUrgency::Immediate);
+        true
+    }
+
+    /// Detach with every owner taken by `try_lock`, or `None` when a suspended
+    /// operation still owns the node or a registered peer.
+    fn try_detach_connection_now(
+        &self,
+        connection: &Rc<LocalMutex<PeerConnection<S>>>,
+    ) -> Option<bool> {
+        let peers = self.connections.borrow().clone();
+        if !peers.iter().any(|peer| Rc::ptr_eq(peer, connection)) {
+            return Some(false);
+        }
+        let mut guards = peers
+            .iter()
+            .map(|peer| Some((Rc::as_ptr(peer) as usize, peer.try_lock()?)))
+            .collect::<Option<PeerOwnerGuards<'_, S>>>()?;
+        let node = self.node.try_lock()?;
+        let target = guards
+            .remove(&(Rc::as_ptr(connection) as usize))
+            .expect("registered detach target");
+        Some(self.detach_connection_with_guards(connection, target, node, Some(guards)))
+    }
+
+    /// Complete queued synchronous detaches without awaiting an owner.
+    ///
+    /// A poll-once host (NAPI) drops a tick that returns pending, so awaiting
+    /// the owner here would lose the queue. A detach whose owner is still held
+    /// stays queued and retries on a later tick.
+    fn drain_pending_detaches(&self) {
+        let pending = self.pending_detaches.borrow().clone();
+        if pending.is_empty() {
+            return;
+        }
+        let finished = pending
+            .into_iter()
+            .filter(|connection| self.try_detach_connection_now(connection).is_some())
+            .collect::<Vec<_>>();
+        let mut queued = self.pending_detaches.borrow_mut();
+        queued.retain(|pending| !finished.iter().any(|done| Rc::ptr_eq(done, pending)));
+        if !queued.is_empty() {
+            drop(queued);
+            self.schedule_tick(TickUrgency::Deferred);
+        }
     }
 
     async fn acquire_peer_inventory(
@@ -3204,6 +3262,7 @@ where
         // boundary, before any connection tick can observe stale readiness.
         self.mark_subscriber_connections_dirty_after_query_runtime_wake();
         self.remote_link.on_tick();
+        self.drain_pending_detaches();
         self.drain_transaction_abandonments().await?;
         self.drain_subscription_finalizations().await?;
         let mut stats = DbTickStats::default();
