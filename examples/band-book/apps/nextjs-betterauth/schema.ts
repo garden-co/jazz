@@ -60,7 +60,7 @@ const schema = {
         account: s.uuid(),
         role: s.enum("editor", "viewer"),
       },
-      { page: s.rel("pages", "pageId") },
+      { workspace: s.rel("workspaces", "workspaceId"), page: s.rel("pages", "pageId") },
     )
     .indexOnly(["pageId", "account"]),
   // Blocks are ordered by a fractional `position` inside their parent block
@@ -79,6 +79,7 @@ const schema = {
         attachmentId: s.uuid().optional(),
       },
       {
+        workspace: s.rel("workspaces", "workspaceId"),
         page: s.rel("pages", "pageId"),
         parentBlock: s.rel("blocks", "parentBlockId"),
         attachment: s.rel("attachments", "attachmentId"),
@@ -98,7 +99,7 @@ const schema = {
         byteLength: s.int(),
         bytes: s.bytes(),
       },
-      { page: s.rel("pages", "pageId") },
+      { workspace: s.rel("workspaces", "workspaceId"), page: s.rel("pages", "pageId") },
     )
     .indexOnly(["pageId"]),
   // Database properties of an issue. The title and body live on the issue's
@@ -114,7 +115,11 @@ const schema = {
         assignee: s.uuid().optional(),
         labels: s.array(s.string()),
       },
-      { page: s.rel("pages", "pageId"), database: s.rel("pages", "databaseId") },
+      {
+        workspace: s.rel("workspaces", "workspaceId"),
+        page: s.rel("pages", "pageId"),
+        database: s.rel("pages", "databaseId"),
+      },
     )
     .indexOnly(["databaseId", "status"]),
   // An invite is a bearer capability. Only people who may share its scope can
