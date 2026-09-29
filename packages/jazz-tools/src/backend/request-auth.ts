@@ -83,7 +83,18 @@ function readHeader(request: RequestLike, name: string): string | undefined {
   }
 
   const record = headers as Record<string, string | string[] | undefined>;
-  const raw = record[name] ?? record[lower];
+  let raw: string | string[] | undefined;
+  let matched = false;
+  for (const key of Object.keys(record)) {
+    if (key.toLowerCase() !== lower) {
+      continue;
+    }
+    if (matched) {
+      return undefined;
+    }
+    matched = true;
+    raw = record[key];
+  }
   if (Array.isArray(raw)) {
     return raw[0];
   }
