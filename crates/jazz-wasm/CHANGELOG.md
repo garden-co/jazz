@@ -2,10 +2,6 @@
 
 ## 2.0.0-alpha.56
 
-### Patch Changes
-
-- [PR #3740](https://github.com/garden-co/jazz/pull/3740): Serialize terminal payload layouts as plain objects in WASM and hydrate root terminal payloads with their root descriptors.
-
 ## 2.0.0-alpha.55
 
 ### Patch Changes
