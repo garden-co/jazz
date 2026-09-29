@@ -19,6 +19,7 @@ import {
   readdir,
   rename,
   rm,
+  rmdir,
   unlink,
   writeFile,
 } from "node:fs/promises";
@@ -1209,6 +1210,25 @@ async function createMigrationUnlocked(
   };
 }
 
+const MIGRATION_LOCK_OWNER_RECORD =
+  /^owner-([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.json$/i;
+
+function migrationLockOwnerRecordName(token: string): string {
+  return `owner-${token}.json`;
+}
+
+/**
+ * Serialize migration generation across processes.
+ *
+ * `mkdir(lockDir)` is the no-replace compare-and-set that acquires the lock.
+ * Each lock instance holds exactly one owner record whose file name carries
+ * that instance's random token, so a path to the record identifies one lock
+ * instance, not whichever lock currently sits at `lockDir`. Release and
+ * stale-lock recovery both start by removing that token-named record, which
+ * fails with ENOENT if the instance they mean is already gone, so neither can
+ * ever remove a lock that another generator acquired later. An ownerless lock
+ * directory is never removed by anyone else, so the following rmdir is safe.
+ */
 async function withMigrationDirectoryLock<T>(
   storage: MigrationStorage,
   operation: () => Promise<T>,
@@ -1216,13 +1236,13 @@ async function withMigrationDirectoryLock<T>(
   const migrationsDir = storage.migrationsDir;
   await assertNoSymlinkComponents(migrationsDir);
   const lockDir = join(migrationsDir, ".jazz-create-migration.lock");
-  const ownerPath = join(lockDir, "owner.json");
   const owner: MigrationLockOwner = {
     version: 1,
     pid: process.pid,
     hostname: hostname(),
     token: randomUUID(),
   };
+  const ownerPath = join(lockDir, migrationLockOwnerRecordName(owner.token));
   const deadline = Date.now() + 10_000;
   let unknownOwnerSince: number | null = null;
   for (;;) {
@@ -1245,12 +1265,20 @@ async function withMigrationDirectoryLock<T>(
         if ((validationError as NodeJS.ErrnoException).code === "ENOENT") continue;
         throw validationError;
       }
-      let existing: MigrationLockOwner | null = null;
-      let existingText = "";
+      let existing: MigrationLockOwner;
+      let existingPath: string;
       try {
-        await assertNoSymlinkComponents(ownerPath);
-        existingText = await readFile(ownerPath, "utf8");
-        existing = parseMigrationLockOwner(existingText);
+        const [record, ...extra] = await readdir(lockDir);
+        const recordToken = record ? MIGRATION_LOCK_OWNER_RECORD.exec(record)?.[1] : undefined;
+        if (!record || !recordToken || extra.length > 0) {
+          throw new Error("expected exactly one owner record");
+        }
+        existingPath = join(lockDir, record);
+        await assertNoSymlinkComponents(existingPath);
+        existing = parseMigrationLockOwner(await readFile(existingPath, "utf8"));
+        if (existing.token !== recordToken) {
+          throw new Error("owner record name does not match its token");
+        }
       } catch {
         if (!(await pathExists(lockDir))) continue;
         unknownOwnerSince ??= Date.now();
@@ -1267,37 +1295,39 @@ async function withMigrationDirectoryLock<T>(
       }
       unknownOwnerSince = null;
       await signalMigrationLockContentionForTest();
-      if (
-        existing?.version === 1 &&
-        existing.hostname === hostname() &&
-        Number.isSafeInteger(existing.pid) &&
-        existing.pid > 0 &&
-        !processIsAlive(existing.pid)
-      ) {
-        const quarantine = `${lockDir}.recovery-${owner.token}`;
+      await pauseMigrationPublicationForTest("lock-observed");
+      if (existing.hostname === hostname() && !processIsAlive(existing.pid)) {
+        // The lock we observed may have been released and replaced by a live
+        // generator since we read it. Claim the observed instance by its
+        // token-named record, never by the shared lock path: if that instance
+        // is gone, this rename fails and we re-inspect whatever is there now.
+        const claimed = `${lockDir}.recovery-${owner.token}.json`;
         try {
-          await rename(lockDir, quarantine);
-        } catch (quarantineError) {
-          if ((quarantineError as NodeJS.ErrnoException).code === "ENOENT") continue;
-          throw quarantineError;
+          await rename(existingPath, claimed);
+        } catch (claimError) {
+          if ((claimError as NodeJS.ErrnoException).code === "ENOENT") continue;
+          throw claimError;
         }
-        await assertNoSymlinkComponents(quarantine);
-        await assertNoSymlinkComponents(join(quarantine, "owner.json"));
-        const quarantinedOwner = await readFile(join(quarantine, "owner.json"), "utf8");
-        if (quarantinedOwner !== existingText) {
-          throw new Error(`Quarantined migration lock owner did not match: ${quarantine}`);
+        // The claimed instance is now ownerless. Its owner is dead and every
+        // other recoverer's claim fails with ENOENT, so nobody else can remove
+        // it and no generator can mkdir over it: lockDir is still exactly the
+        // instance we observed, and it is empty.
+        try {
+          await rmdir(lockDir);
+        } catch (removeError) {
+          // Something unexpected is inside the lock; hand the record back so
+          // the lock stays attributable and fails closed rather than ownerless.
+          await rename(claimed, existingPath).catch(() => undefined);
+          throw removeError;
         }
-        await pauseMigrationPublicationForTest("lock-quarantined");
-        await rm(quarantine, { recursive: true });
         await syncDirectory(migrationsDir);
+        await pauseMigrationPublicationForTest("lock-quarantined");
+        await rm(claimed, { force: true });
         continue;
       }
       if (Date.now() >= deadline) {
-        const detail = existing
-          ? `owner pid=${existing.pid} host=${existing.hostname}`
-          : "owner metadata is missing or invalid";
         throw new Error(
-          `Timed out waiting for another migration generator to release ${lockDir}; ${detail}`,
+          `Timed out waiting for another migration generator to release ${lockDir}; owner pid=${existing.pid} host=${existing.hostname}`,
         );
       }
       await new Promise((resolve) => setTimeout(resolve, 10));
@@ -1308,9 +1338,14 @@ async function withMigrationDirectoryLock<T>(
     await recoverMigrationPublication(storage);
     return await operation();
   } finally {
-    const current = await readFile(ownerPath, "utf8").catch(() => "");
-    if (current === `${JSON.stringify(owner)}\n`) {
-      await rm(lockDir, { recursive: true, force: true });
+    // Release only our own instance: once our record is gone the directory is
+    // an ownerless lock nobody else may remove, so rmdir cannot hit a newer one.
+    const released = await unlink(ownerPath).then(
+      () => true,
+      () => false,
+    );
+    if (released) {
+      await rmdir(lockDir).catch(() => undefined);
       await syncDirectory(migrationsDir);
     }
   }

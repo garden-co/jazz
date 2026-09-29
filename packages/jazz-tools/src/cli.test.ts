@@ -97,7 +97,12 @@ async function fileExists(path: string): Promise<boolean> {
 function spawnMigrationCreate(
   root: string,
   migrationsDir: string,
-  pauseAt: "lock-held" | "lock-quarantined" | "between-publications" | "journaled",
+  pauseAt:
+    | "lock-held"
+    | "lock-observed"
+    | "lock-quarantined"
+    | "between-publications"
+    | "journaled",
   marker: string,
   releaseMarker?: string,
 ) {
@@ -1049,7 +1054,7 @@ describe("cli migrations", () => {
     const externalLock = join(migrationsDir, ".jazz-create-migration.lock");
     await mkdir(externalLock);
     await writeFile(
-      join(externalLock, "owner.json"),
+      join(externalLock, "owner-00000000-0000-4000-8000-000000000001.json"),
       `${JSON.stringify({ version: 1, pid: process.pid, hostname: hostname(), token: "00000000-0000-4000-8000-000000000001" })}\n`,
     );
 
@@ -1144,7 +1149,7 @@ describe("cli migrations", () => {
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
     await mkdir(lockDir, { recursive: true });
     await writeFile(
-      join(lockDir, "owner.json"),
+      join(lockDir, "owner-00000000-0000-4000-8000-000000000002.json"),
       `${JSON.stringify({ version: 1, pid: 2_147_483_647, hostname: hostname(), token: "00000000-0000-4000-8000-000000000002" })}\n`,
     );
 
@@ -1155,6 +1160,51 @@ describe("cli migrations", () => {
     const result = await createCatalogueMigration({ schemaDir: root, migrationsDir });
     expect(result.status).toBe("initial-snapshot");
     expect(await fileExists(lockDir)).toBe(false);
+  });
+
+  it("never quarantines a live lock that replaced the stale owner it observed", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const lockDir = join(migrationsDir, ".jazz-create-migration.lock");
+    const marker = join(root, "lock-observed.marker");
+    const releaseMarker = join(root, "lock-observed.release");
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await mkdir(lockDir, { recursive: true });
+    await writeFile(
+      join(lockDir, "owner-00000000-0000-4000-8000-000000000004.json"),
+      `${JSON.stringify({ version: 1, pid: 2_147_483_647, hostname: hostname(), token: "00000000-0000-4000-8000-000000000004" })}\n`,
+    );
+
+    const child = spawnMigrationCreate(root, migrationsDir, "lock-observed", marker, releaseMarker);
+    const exited = new Promise<number | null>((resolve) => child.once("close", resolve));
+    try {
+      // The recoverer has read the dead owner but not yet acted on it. Now the
+      // stale lock is released and a live generator acquires a fresh one.
+      await waitForCrashMarker(marker, child);
+      await rm(lockDir, { recursive: true });
+      const liveOwnerPath = join(lockDir, "owner-00000000-0000-4000-8000-000000000005.json");
+      const liveOwner = `${JSON.stringify({ version: 1, pid: process.pid, hostname: hostname(), token: "00000000-0000-4000-8000-000000000005" })}\n`;
+      await mkdir(lockDir);
+      await writeFile(liveOwnerPath, liveOwner);
+      await writeFile(releaseMarker, "release");
+
+      // The recoverer must keep waiting on the live lock instead of stealing it.
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(child.exitCode).toBeNull();
+      expect(await readFile(liveOwnerPath, "utf8")).toBe(liveOwner);
+      expect((await readdir(migrationsDir)).filter((name) => name.includes(".recovery-"))).toEqual(
+        [],
+      );
+
+      await rm(lockDir, { recursive: true });
+      expect(await exited).toBe(0);
+    } finally {
+      await killChild(child);
+    }
+    expect(await fileExists(lockDir)).toBe(false);
+    expect(
+      (await readdir(join(migrationsDir, "snapshots"))).filter((name) => name.endsWith(".json")),
+    ).toHaveLength(1);
   });
 
   it.each([false, true])(
@@ -1186,22 +1236,36 @@ describe("cli migrations", () => {
       { version: 1, pid: "2147483647", hostname: hostname(), token: validToken },
       { version: 1, pid: deadPid, hostname: "", token: validToken },
       { version: 2, pid: deadPid, hostname: hostname(), token: validToken },
+      // A record whose content names a different lock instance than its file.
+      {
+        version: 1,
+        pid: deadPid,
+        hostname: hostname(),
+        token: "00000000-0000-4000-8000-000000000009",
+      },
+    ];
+    const validOwner = { version: 1, pid: deadPid, hostname: hostname(), token: validToken };
+    const malformedRecords = [
+      ...malformedOwners.map((owner) => ({ name: `owner-${validToken}.json`, owner })),
+      // Records that are not the single token-named owner record of a lock.
+      { name: "owner.json", owner: validOwner },
+      { name: `owner-${validToken.toUpperCase()}-extra.json`, owner: validOwner },
     ];
 
     await Promise.all(
-      malformedOwners.map(async (malformedOwner) => {
+      malformedRecords.map(async ({ name, owner: malformedOwner }) => {
         const { root } = await createWorkspace();
         const migrationsDir = join(root, "migrations");
         const lockDir = join(migrationsDir, ".jazz-create-migration.lock");
         const ownerText = `${JSON.stringify(malformedOwner)}\n`;
         await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
         await mkdir(lockDir, { recursive: true });
-        await writeFile(join(lockDir, "owner.json"), ownerText);
+        await writeFile(join(lockDir, name), ownerText);
 
         await expect(createCatalogueMigration({ schemaDir: root, migrationsDir })).rejects.toThrow(
           "owner metadata is missing, invalid, or unsafe",
         );
-        expect(await readFile(join(lockDir, "owner.json"), "utf8")).toBe(ownerText);
+        expect(await readFile(join(lockDir, name), "utf8")).toBe(ownerText);
         expect(await fileExists(join(migrationsDir, "snapshots"))).toBe(false);
       }),
     );
