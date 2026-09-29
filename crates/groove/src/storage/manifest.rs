@@ -222,6 +222,21 @@ impl StorageEpochManifest {
         if found.epoch != self.epoch {
             return Err(invalid("unsupported storage epoch"));
         }
+        if found.required_codecs != self.required_codecs {
+            return Err(Error::UnsupportedStorageCodecs {
+                epoch: found.epoch,
+                missing: self
+                    .required_codecs
+                    .difference(&found.required_codecs)
+                    .cloned()
+                    .collect(),
+                unknown: found
+                    .required_codecs
+                    .difference(&self.required_codecs)
+                    .cloned()
+                    .collect(),
+            });
+        }
         if found != *self {
             return Err(invalid(
                 "storage manifest is inconsistent with this adapter",
@@ -512,6 +527,42 @@ mod tests {
         let mut corrupt = expected.encode().unwrap();
         corrupt[0] = b'X';
         assert!(expected.admit_existing(&corrupt).is_err());
+    }
+    /// A canonical root written with another codec inventory is refused with
+    /// the typed error that names both sides' versioned family IDs.
+    #[test]
+    fn codec_inventory_mismatch_names_missing_and_unknown_families() {
+        let old_profile = StorageCodecProfile::groove_epoch_1()
+            .with_additional_codecs(["app.row.v1"])
+            .unwrap();
+        let new_profile = StorageCodecProfile::groove_epoch_1()
+            .with_additional_codecs(["app.row.v2"])
+            .unwrap();
+        let parameters = BTreeMap::from([("key-order".into(), b"unsigned-lexicographic".to_vec())]);
+        let old_root = StorageEpochManifest::epoch_1_with_codec_profile(
+            "memory",
+            1,
+            parameters.clone(),
+            &old_profile,
+        )
+        .unwrap()
+        .encode()
+        .unwrap();
+        let current =
+            StorageEpochManifest::epoch_1_with_codec_profile("memory", 1, parameters, &new_profile)
+                .unwrap();
+        match current.admit(Some(&old_root)) {
+            Err(Error::UnsupportedStorageCodecs {
+                epoch,
+                missing,
+                unknown,
+            }) => {
+                assert_eq!(epoch, 1);
+                assert_eq!(missing, vec!["app.row.v2".to_owned()]);
+                assert_eq!(unknown, vec!["app.row.v1".to_owned()]);
+            }
+            other => panic!("expected a typed codec-inventory refusal, got {other:?}"),
+        }
     }
     #[test]
     fn planted_unknown_epoch_cannot_be_accepted() {

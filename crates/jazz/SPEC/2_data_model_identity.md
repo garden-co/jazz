@@ -278,6 +278,30 @@ SYSTEM capability is not persisted as a row author. Node-local aliases live in `
 
 ### 2.7.1 Settled history layout and canonical receipts
 
+**Linear-history storage boundary (2026-09-29).** A node root that holds row
+history (Core, relay and client stores on every adapter) declares the codec
+family `jazz.history-version-current.v2` in its storage manifest, in addition
+to the shared Jazz epoch-one profile. That family is the linear row-state
+layout: one history record per accepted transaction holding the row state after
+Core's merge, keyed `(branch_key, row_uuid, tx_time, tx_node_id)` with index
+`by_tx`; a global-current record per row with `global_time` (the row's seq) and
+index `by_seq (branch_key, global_time, row_uuid)`; an ahead overlay keyed
+`(branch_key, row_uuid)` with its `ahead_shadow` copy; `_deletion` as an
+ordinary nullable cell; and, after `authored_columns`, one hidden `U48` stamp
+per LWW column then `_ts__deletion` (SPEC 4 §4.6). It has no `parents`, no
+register tables, no shared deletion history, no `jazz_merge_heads`, no
+`jazz_global_changes` and no parked parent edges. A root written by the DAG
+layout (`jazz.history-version-current.v1`, alpha.54 to alpha.57) lacks the v2
+family, so opening it fails at the manifest check, before any record is
+decoded, with the typed `groove::storage::Error::UnsupportedStorageCodecs`,
+which names the codec IDs the root lacks and the ones this build does not know.
+There is no migration: whether old stores are refused, discarded and resynced,
+or converted is an open question below. Auxiliary roots that hold no row
+history (the server's account registry and catalogue-entry store) keep the
+epoch-one profile unchanged. The paragraphs of this section and §2.8 that still
+describe `parents`, the deletion register tables and `jazz_global_changes`
+specify the retired v1 layout.
+
 The authoritative identity of one immutable row version is exactly
 `(PhysicalTableId, BranchKey, RowUuid, Layer, TxId)`. `Layer` is either content
 or deletion; it is part of the identity even though a deletion is physically
@@ -557,3 +581,4 @@ and sync machinery.
 
 - 🔶 [#1758](https://github.com/garden-co/jazz/issues/1758) — Canonical authorship and node identity.
 - 🔶 [#1777](https://github.com/garden-co/jazz/issues/1777) — Mixed-version descriptors and visible-row encoding.
+- 🔶 [#3281](https://github.com/garden-co/jazz/issues/3281) — Stores written by the DAG history layout (`jazz.history-version-current.v1`) are refused at open. Should Core and relays convert them, and should clients discard and resync (losing unsynced pending writes) instead of surfacing the refusal?

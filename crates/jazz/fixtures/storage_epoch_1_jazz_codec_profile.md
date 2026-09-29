@@ -37,3 +37,25 @@ The pre-freeze #2578 cleanup removes the two dormant result codec IDs. The
 required-family count changes from 14 to 12; source payload codecs remain
 unchanged. Old roots advertising those retired families fail real current
 manifest admission. No compatibility profile is selected to bypass this check.
+
+## Node-root profile (linear row-state history, 2026-09-29)
+
+A root that stores Jazz rows (Core, relay and client node stores on RocksDB,
+SQLite and IndexedDB) opens with `node_storage_codec_profile()`: the epoch-one
+base above plus `jazz.history-version-current.v2`, the linear row-state
+history layout (SPEC 2 §2.7.1). Roots that hold no row history (the server
+account registry and catalogue-entry store) keep the base profile unchanged.
+
+- codec registry, in canonical order: the base list with
+  `jazz.history-version-current.v2` inserted after
+  `jazz.catalogue.write-pointer.v1` (13 families)
+- SHA-256 of the committed canonical `JSM1` bytes (adapter sample `memory`,
+  `key-order=unsigned-lexicographic`):
+  `1153be8475ab6fd239d109e376663220d349fa9ac1f034b77cbdc8bc38f0631a`
+- receipt: `storage_codec_profile::tests::node_profile_has_a_pinned_manifest_receipt_and_refuses_base_only_roots`
+
+A node root written by the DAG layout (alpha.54 to alpha.57) declares only the
+base profile. Manifest admission refuses it with the typed
+`groove::storage::Error::UnsupportedStorageCodecs { epoch: 1, missing:
+["jazz.history-version-current.v2"], unknown: [...] }` before any ordinary key
+is decoded or written (`tests/storage_format_refusal.rs`). No migration exists.

@@ -2256,6 +2256,20 @@ pub enum Error {
     ColumnFamilyNotFound(String),
     #[error("invalid storage layout: {0}")]
     InvalidStorageLayout(String),
+    /// An existing root's manifest is canonical but declares a different
+    /// codec-family inventory than the opening build requires. Codec IDs
+    /// carry their format version (`name.vN`), so the two lists name exactly
+    /// which formats the root was written with and which this build reads.
+    /// Raised by manifest admission before any ordinary key is decoded.
+    #[error(
+        "unsupported storage format: this epoch-{epoch} root lacks codec families {missing:?} \
+         required by this build and declares {unknown:?} that this build does not read"
+    )]
+    UnsupportedStorageCodecs {
+        epoch: u16,
+        missing: Vec<String>,
+        unknown: Vec<String>,
+    },
     #[error("invalid storage key: {0}")]
     InvalidStorageKey(String),
     #[error("conditional mutations require a direct storage boundary")]
