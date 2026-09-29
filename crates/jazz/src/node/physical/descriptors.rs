@@ -1171,6 +1171,55 @@ fn merge_physical_value_type(
     }
 }
 
+/// Whether `name` is one of the hidden per-column LWW stamp fields
+/// (`_ts_<cell>`, SPEC 4.6) of a row-state layout, logical or physical.
+pub(super) fn is_stamp_field(name: &str) -> bool {
+    name.starts_with(crate::schema::STAMP_FIELD_PREFIX)
+}
+
+/// The read-side view of a current row-state descriptor: every field except
+/// the hidden stamp fields. Stamps are storage-internal (SPEC 4.6): merges
+/// read them from the physical records, and no row handed to a query,
+/// subscription or host carries them.
+pub(super) fn without_stamp_fields(
+    descriptor: &records::RecordDescriptor,
+) -> records::RecordDescriptor {
+    records::RecordDescriptor::new_with_fields(
+        descriptor
+            .fields()
+            .iter()
+            .filter(|field| !field.name.as_deref().is_some_and(is_stamp_field))
+            .cloned(),
+    )
+}
+
+/// The logical current-row read descriptor of `table`: its global-current
+/// storage layout without the storage-internal stamp fields.
+pub(super) fn current_read_descriptor(table: &TableSchema) -> records::RecordDescriptor {
+    without_stamp_fields(&table.global_current_storage_table().record_schema())
+}
+
+/// The physical current-row read descriptor used by winner selection: the
+/// physical current layout without the storage-internal stamp fields.
+fn physical_current_read_descriptor(
+    table: &TableSchema,
+    mapping: &TablePhysicalMapping,
+) -> Result<records::RecordDescriptor, Error> {
+    Ok(without_stamp_fields(&physical_current_descriptor(table, mapping)?))
+}
+
+/// Physical field names of the current read descriptor, aligned with
+/// `current_read_descriptor`.
+pub(super) fn physical_current_read_field_names(
+    table: &TableSchema,
+    mapping: &TablePhysicalMapping,
+) -> Result<Vec<String>, Error> {
+    Ok(physical_current_field_names(table, mapping)?
+        .into_iter()
+        .filter(|name| !is_stamp_field(name))
+        .collect())
+}
+
 fn physical_current_descriptor(
     table: &TableSchema,
     mapping: &TablePhysicalMapping,

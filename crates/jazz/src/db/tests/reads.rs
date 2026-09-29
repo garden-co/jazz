@@ -5053,6 +5053,72 @@ fn subscription_opening_retains_selected_created_at_in_native_carrier() {
     block_on(subscription.close()).unwrap();
 }
 
+/// Per-column LWW stamps are storage-internal (SPEC 4.6). The host row
+/// grammar has no stamp field kind, so the native carrier is the only place
+/// a leak is observable: every public read path of a stamped row must publish
+/// a descriptor free of stamp fields.
+#[test]
+fn row_reads_never_publish_storage_internal_column_stamps() {
+    use crate::binding_codec::{RowDescriptorFieldName, row_batches};
+
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+    let id = row(0x7c);
+    db.insert(
+        "todos",
+        doctest_support::todo_cells("stamped", false),
+        crate::db::InsertOptions {
+            row_id: Some(id),
+            updated_at_ms: Some(4_321),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.update(
+        "todos",
+        id,
+        BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        Default::default(),
+    )
+    .unwrap();
+
+    let assert_unstamped = |rows: &[CurrentRow], path: &str| {
+        assert!(!rows.is_empty(), "{path} returns the row");
+        for batch in row_batches(rows).expect("rows encode for the native binding") {
+            for field in &batch.descriptor {
+                let name = match field.name {
+                    RowDescriptorFieldName::StoredColumn { output_name, .. } => output_name,
+                    RowDescriptorFieldName::ResultField { name }
+                    | RowDescriptorFieldName::HiddenMetadata { name } => name,
+                };
+                assert!(
+                    !name.starts_with("_ts_") && field.value_type != ValueType::U48,
+                    "{path} publishes stamp field {name}: {:?}",
+                    field.value_type
+                );
+            }
+        }
+    };
+
+    let current = block_on(db.local_current_row("todos", id))
+        .unwrap()
+        .expect("row is locally current");
+    assert_unstamped(std::slice::from_ref(&current), "local current row");
+
+    let query = db.table("todos");
+    let prepared = db.prepare_query(&query).unwrap();
+    let rows = block_on(db.all(&prepared, ReadOpts::default())).unwrap();
+    assert_unstamped(&rows, "query");
+
+    let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    let SubscriptionEvent::Delta { added, .. } = block_on(subscription.next_event()).unwrap()
+    else {
+        panic!("expected opening subscription delta");
+    };
+    let rows = added.into_iter().map(|row| row.row).collect::<Vec<_>>();
+    assert_unstamped(&rows, "subscription");
+    block_on(subscription.close()).unwrap();
+}
+
 #[test]
 fn db_at_reads_historical_cut_and_partial_requires_server() {
     let schema = schema();

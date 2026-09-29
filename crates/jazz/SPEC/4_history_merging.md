@@ -330,6 +330,13 @@ target cell's stamp from the source field that supplies the cell (including a
 lens `Rename`/`Copy`); a target cell the source does not carry, carries only as
 a lens default, or carries as a merge-strategy column projects stamp `0`.
 
+Stamps are **storage-internal**. Only history projections (which feed merges
+and the wire `col_stamps`) carry them; merges read the stored records
+directly. Current-row read projections, physical current-winner projections,
+and so every row delivered to a query, subscription, relay or host, omit the
+stamp fields entirely. The host row grammar therefore never sees a `U48`
+field.
+
 An **unstamped** image (an uploaded or pending local patch, a query witness,
 or a payload whose stamps are unknown) stores `0` in every slot, which is
 exactly how a merge treats it.
