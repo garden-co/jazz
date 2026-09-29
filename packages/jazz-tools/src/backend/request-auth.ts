@@ -1,3 +1,4 @@
+import { verifyLocalFirstIdentityProof as verifyNativeLocalFirstIdentityProof } from "jazz-napi";
 import { withAuthRequestDeadline } from "../runtime/auth-request-deadline.js";
 import { requestAccountRegistry, readAccountAssignment } from "../accounts/registry-client.js";
 import {
@@ -19,6 +20,7 @@ import {
   type JwtPayload,
 } from "../runtime/client-session.js";
 import type { Session } from "../runtime/context.js";
+import { localFirstAccountId } from "../accounts/local-first.js";
 import type { BackendJwtPublicKey } from "./create-jazz-context.js";
 
 // Only verified requests that completed account admission receive this capability.
@@ -83,7 +85,18 @@ function readHeader(request: RequestLike, name: string): string | undefined {
   }
 
   const record = headers as Record<string, string | string[] | undefined>;
-  const raw = record[name] ?? record[lower];
+  let raw: string | string[] | undefined;
+  let matched = false;
+  for (const key of Object.keys(record)) {
+    if (key.toLowerCase() !== lower) {
+      continue;
+    }
+    if (matched) {
+      return undefined;
+    }
+    matched = true;
+    raw = record[key];
+  }
   if (Array.isArray(raw)) {
     return raw[0];
   }
@@ -466,6 +479,41 @@ async function verifyExternalJwt(
   );
 }
 
+function localFirstSessionFromVerifiedProof(payload: JwtPayload, verifiedUserId: string): Session {
+  const session = internalSessionFromVerifiedReservedJwtPayload(payload, "local-first");
+  if (!session) {
+    throw new Error("Invalid JWT payload");
+  }
+  if (session.user_id !== verifiedUserId) {
+    throw new Error("Invalid local-first identity proof");
+  }
+  return session;
+}
+
+/**
+ * Build the session `resolveRequestSession` produces for a local-first bearer
+ * token, for trusted in-process harnesses that cannot await registry
+ * admission (the policy test app). It always uses the native verifier.
+ *
+ * The account is the registry's deterministic founding account for the
+ * verified subject, and native admission re-verifies the token against that
+ * exact account on every ingress, so this grants nothing a forged token could
+ * use.
+ *
+ * @internal
+ */
+export function localFirstSessionFromToken(token: string, appId: string): Session {
+  const payload = requireJwtPayload(token);
+  const verified = verifyNativeLocalFirstIdentityProof(token, appId);
+  if (payload.iss !== LOCAL_FIRST_JWT_ISSUER || !verified.ok || !verified.id) {
+    throw new Error("Invalid local-first identity proof");
+  }
+  const session = localFirstSessionFromVerifiedProof(payload, verified.id);
+  session.account_id = localFirstAccountId(appId, session.user_id);
+  localFirstProofs.set(session, { token, appId });
+  return session;
+}
+
 export async function resolveRequestSession(
   request: RequestLike,
   config: BackendRequestAuthConfig,
@@ -505,14 +553,7 @@ export async function resolveRequestSession(
     }
 
     const verifiedUserId = await verifyLocalFirstIdentityProof(token, config.appId);
-    const session = internalSessionFromVerifiedReservedJwtPayload(payload, "local-first");
-    if (!session) {
-      throw new Error("Invalid JWT payload");
-    }
-    if (session.user_id !== verifiedUserId) {
-      throw new Error("Invalid local-first identity proof");
-    }
-    const admitted = await admit(session);
+    const admitted = await admit(localFirstSessionFromVerifiedProof(payload, verifiedUserId));
     localFirstProofs.set(admitted, { token, appId: config.appId });
     return admitted;
   }
