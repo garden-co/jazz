@@ -289,24 +289,17 @@ async function retryConflicts<T>(run: () => Promise<T>): Promise<T> {
   }
 }
 
-function isRetryableConflict(error: unknown): boolean {
-  const code = conflictCode(error);
-  return code !== undefined && RETRYABLE_CONFLICTS.has(code);
-}
-
-function conflictCode(error: unknown): string | undefined {
+/**
+ * A conflict that re-running the transaction can resolve: a local
+ * `transaction_conflict` (another write in this runtime got there first), an
+ * authority `exclusive_conflict`, or a `cascade_rejected` follow-on.
+ */
+export function isRetryableConflict(error: unknown): boolean {
   // The backend client is loaded outside the Next bundle (see backend.ts), so
   // its error class can be a different copy from the one imported here; the
   // name check covers that case.
-  if (
+  const rejected =
     error instanceof PersistedWriteRejectedError ||
-    (error instanceof Error && error.name === "PersistedWriteRejectedError")
-  )
-    return (error as PersistedWriteRejectedError).code;
-  // Workaround for core gap https://github.com/garden-co/jazz/issues/2713:
-  // with the native runtime, a conflict detected while the client ticks is
-  // thrown from `wait()` as a plain Error "(code): reason" rather than a
-  // PersistedWriteRejectedError. Delete this fallback when #2713 lands.
-  const match = error instanceof Error ? /^\((\w+)\): /.exec(error.message) : null;
-  return match?.[1];
+    (error instanceof Error && error.name === "PersistedWriteRejectedError");
+  return rejected && RETRYABLE_CONFLICTS.has((error as PersistedWriteRejectedError).code);
 }

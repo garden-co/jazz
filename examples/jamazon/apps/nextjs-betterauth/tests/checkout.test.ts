@@ -1,10 +1,11 @@
-import type { Db } from "jazz-tools";
+import { PersistedWriteRejectedError, type Db } from "jazz-tools";
 import type { PolicyTestApp, TestDb } from "jazz-tools/testing";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { app } from "../schema";
 import { PRODUCTS } from "../src/catalogue/catalogue";
 import { ids, uuidV5 } from "../src/lib/ids";
 import {
+  isRetryableConflict,
   placeOrder,
   recordPayment,
   settlePayment,
@@ -192,5 +193,22 @@ describe("deterministic ids", () => {
     expect(uuidV5("www.example.com", "6ba7b810-9dad-11d1-80b4-00c04fd430c8")).toBe(
       "2ed6657d-e927-568b-95e1-2665a8aea6a2",
     );
+  });
+});
+
+describe("conflict retries", () => {
+  const rejection = (code: string) =>
+    new PersistedWriteRejectedError("tx" as never, code, "concurrent write");
+
+  it("retry local and authority exclusive conflicts", () => {
+    expect(isRetryableConflict(rejection("transaction_conflict"))).toBe(true);
+    expect(isRetryableConflict(rejection("exclusive_conflict"))).toBe(true);
+    expect(isRetryableConflict(rejection("cascade_rejected"))).toBe(true);
+  });
+
+  it("do not retry other rejections or untyped errors", () => {
+    expect(isRetryableConflict(rejection("policy_denied"))).toBe(false);
+    expect(isRetryableConflict(new Error("(transaction_conflict): not typed"))).toBe(false);
+    expect(isRetryableConflict("exclusive_conflict")).toBe(false);
   });
 });
