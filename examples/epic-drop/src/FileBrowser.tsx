@@ -1,5 +1,4 @@
 import * as React from "react";
-import { FolderPlus, Share2, X } from "lucide-react";
 import { useAll, useDb, useSession } from "jazz-tools/react";
 import { AlertDialog } from "@astryxdesign/core/AlertDialog";
 import { AppShell } from "@astryxdesign/core/AppShell";
@@ -50,7 +49,7 @@ type DialogState =
 export function FileBrowser() {
   const db = useDb();
   const showToast = useToast();
-  const userId = useSession()?.user.account;
+  const userId = useSession()?.user.account ?? undefined;
   const profile = useEnsureProfile(userId);
   const isWide = useMediaQuery("(min-width: 1100px)");
 
@@ -192,7 +191,6 @@ export function FileBrowser() {
       topContent={
         <Button
           label="New folder"
-          icon={<Icon icon={FolderPlus} size="sm" />}
           width="100%"
           isDisabled={!userId}
           onClick={() => setDialog({ type: "new-folder", parentId: null })}
@@ -286,14 +284,12 @@ export function FileBrowser() {
             {index.isMine(folder) && (
               <Button
                 label="Share"
-                icon={<Icon icon={Share2} size="sm" />}
                 onClick={() => setDialog({ type: "share", folder })}
               />
             )}
             {canEdit && canNest && (
               <Button
                 label="New folder"
-                icon={<Icon icon={FolderPlus} size="sm" />}
                 onClick={() => setDialog({ type: "new-folder", parentId: folder.id })}
               />
             )}
@@ -354,7 +350,6 @@ export function FileBrowser() {
         <Button
           label="New folder"
           variant="primary"
-          icon={<Icon icon={FolderPlus} size="sm" />}
           isDisabled={!userId}
           onClick={() => setDialog({ type: "new-folder", parentId: null })}
         />
@@ -370,7 +365,7 @@ export function FileBrowser() {
             label="Close preview"
             variant="ghost"
             size="sm"
-            icon={<Icon icon={X} size="sm" />}
+            icon={<Icon icon="close" size="sm" />}
             onClick={() => setPreviewId(undefined)}
           />
         </HStack>

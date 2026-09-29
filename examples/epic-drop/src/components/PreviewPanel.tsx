@@ -1,10 +1,8 @@
 import * as React from "react";
-import { Download } from "lucide-react";
 import { useDb } from "jazz-tools/react";
 import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
 import { CodeBlock } from "@astryxdesign/core/CodeBlock";
-import { Icon } from "@astryxdesign/core/Icon";
 import { MetadataList, MetadataListItem } from "@astryxdesign/core/MetadataList";
 import { Spinner } from "@astryxdesign/core/Spinner";
 import { HStack, VStack } from "@astryxdesign/core/Stack";
@@ -64,7 +62,6 @@ export function PreviewPanel({ file, headingLevel = 2 }: { file: PreviewFile; he
         <Button
           label="Download"
           variant="primary"
-          icon={<Icon icon={Download} size="sm" />}
           clickAction={async () => {
             saveBlob(await readFileBlob(db, file.id, file.content_type), file.name);
           }}

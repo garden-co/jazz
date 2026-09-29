@@ -1,5 +1,4 @@
 import * as React from "react";
-import { File as FileIcon, Folder as FolderIcon } from "lucide-react";
 import { HStack } from "@astryxdesign/core/Stack";
 import { Icon } from "@astryxdesign/core/Icon";
 import { Link } from "@astryxdesign/core/Link";
@@ -92,10 +91,10 @@ export function FileTable({ entries, canEdit, canShare, onAction, onDropOnFolder
       renderCell: (entry) => {
         const name = (
           <HStack gap={2} vAlign="center">
-            <Icon icon={entry.kind === "folder" ? FolderIcon : FileIcon} size="sm" color="secondary" />
             <Link isStandalone onClick={() => onAction(entry, "open")} maxLines={1}>
               {entry.name}
             </Link>
+            {entry.kind === "folder" && <Icon icon="chevronRight" size="sm" color="secondary" label="Folder" />}
           </HStack>
         );
         return entry.kind === "folder" && canEdit ? (

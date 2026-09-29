@@ -5,10 +5,13 @@ const role = () => s.enum("viewer", "editor");
 const schema = {
   // A display name for an anonymous local-first account, so members and file
   // owners read as people rather than account ids.
-  profiles: s.table({
-    user_id: s.uuid(),
-    name: s.string(),
-  }),
+  profiles: s.table(
+    {
+      user_id: s.uuid(),
+      name: s.string(),
+    },
+    {},
+  ),
   folders: s.table(
     {
       name: s.string(),
