@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { ArrowDown, ArrowUp, Play, Share2, Trash2 } from "lucide-react";
+import { Play, Share2, Trash2 } from "lucide-react";
 import { useAll } from "jazz-tools/react";
 import { Badge } from "@astryxdesign/core/Badge";
 import { Button } from "@astryxdesign/core/Button";
@@ -227,7 +227,7 @@ function PlaylistDetail({ playlist }: { playlist: PlaylistSummary }) {
                           label="Move up"
                           variant="ghost"
                           size="sm"
-                          icon={<Icon icon={ArrowUp} size="sm" />}
+                          icon={<Icon icon="arrowUp" size="sm" />}
                           isDisabled={index === 0}
                           onClick={() => move(index, -1)}
                         />
@@ -235,7 +235,7 @@ function PlaylistDetail({ playlist }: { playlist: PlaylistSummary }) {
                           label="Move down"
                           variant="ghost"
                           size="sm"
-                          icon={<Icon icon={ArrowDown} size="sm" />}
+                          icon={<Icon icon="arrowDown" size="sm" />}
                           isDisabled={index === rows.length - 1}
                           onClick={() => move(index, 1)}
                         />

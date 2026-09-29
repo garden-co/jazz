@@ -1,7 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import { Copy } from "lucide-react";
 import { useAll } from "jazz-tools/react";
 import { Button } from "@astryxdesign/core/Button";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
@@ -53,7 +52,7 @@ export function Invitations({ onAccepted }: { onAccepted(): void }) {
             label={copied ? "Copied" : "Copy"}
             variant="secondary"
             size="sm"
-            icon={<Icon icon={Copy} size="sm" />}
+            icon={<Icon icon="copy" size="sm" />}
             isDisabled={!me}
             onClick={() => {
               if (!me) return;
