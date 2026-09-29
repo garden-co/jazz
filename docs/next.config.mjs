@@ -76,8 +76,8 @@ const config = {
     return webpackConfig;
   },
   async redirects() {
-    // The examples & benchmarks page subsumes the old perf timeline. Next keeps
-    // the query string, so ?benchmark=… still opens that benchmark's history.
+    // The examples & benchmarks page subsumes the old perf timeline. Old
+    // ?benchmark=… links land on the page; the query is ignored.
     return [{ source: "/perf-timeline", destination: "/examples", permanent: false }];
   },
   async rewrites() {

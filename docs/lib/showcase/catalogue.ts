@@ -40,9 +40,12 @@ export type HeroExample = {
   plannedMetrics?: string;
 };
 
+// Interpretations get the /5 estimate, so every time and rate they print
+// carries the page's "*" marker. Ratios need none: the divisor cancels out.
+const t = (seconds: number) => `${formatTime(seconds)}*`;
 const rate = (count: number, seconds: number) =>
-  Math.round(count / seconds).toLocaleString("en-US");
-const each = (count: number, seconds: number) => formatTime(seconds / count);
+  `${Math.round(count / seconds).toLocaleString("en-US")}*`;
+const each = (count: number, seconds: number) => t(seconds / count);
 // A 60 Hz frame. Only used to phrase a result that is already below it.
 const frame = 1 / 60;
 
@@ -75,26 +78,26 @@ export const heroExamples: HeroExample[] = [
         label: "Add a todo",
         per: { count: 1350, unit: "insert" },
         interpret: (s) =>
-          `Each insert is its own durable transaction, persisted and delivered back to the live list${s / 1350 < frame ? " well inside one 60 fps frame" : ""}. Averaged over 1,350 inserts in a row (${formatTime(s)} total).`,
+          `Each insert is its own durable transaction, persisted and delivered back to the live list${s / 1350 < frame ? " well inside one 60 fps frame" : ""}. Averaged over 1,350 inserts in a row (${t(s)} total).`,
       },
       {
         benchmark: "sequential_update_1350_rocksdb",
         label: "Check off a todo",
         per: { count: 1350, unit: "update" },
         interpret: (s) =>
-          `Each check-off is its own transaction, persisted and delivered back to the live list. Averaged over 1,350 updates in a row (${formatTime(s)} total).`,
+          `Each check-off is its own transaction, persisted and delivered back to the live list. Averaged over 1,350 updates in a row (${t(s)} total).`,
       },
       {
         benchmark: "batch_update_1350_rocksdb",
         label: "Bulk edit 1,350 todos",
         interpret: (s) =>
-          `Changing 1,350 rows in one transaction takes ${formatTime(s)}, about ${rate(1350, s)} rows per second.`,
+          `Changing 1,350 rows in one transaction takes ${t(s)}, about ${rate(1350, s)} rows per second.`,
       },
       {
         benchmark: "reopen_1500_rocksdb",
         label: "Reopen with 1,500 todos",
         interpret: (s) =>
-          `Opening the app again and showing all 1,500 stored todos takes ${formatTime(s)}, including the fixed cost of opening storage.`,
+          `Opening the app again and showing all 1,500 stored todos takes ${t(s)}, including the fixed cost of opening storage.`,
       },
     ],
   },
@@ -113,8 +116,21 @@ export const heroExamples: HeroExample[] = [
     video: null,
     plannedVideo:
       "Walkthrough capture is planned: two people chatting, reacting and drawing together.",
-    metrics: [],
-    plannedMetrics: "This example has no benchmark variant yet.",
+    metrics: [
+      {
+        benchmark: "chat_open_chat[10000]",
+        label: "Open a chat",
+        interpret: (s) =>
+          `A member opens a private chat and sees its newest 21 messages, with their senders, in ${t(s)}, with 10,000 messages in the app. Today this grows with the chat's whole history, not just the page.`,
+      },
+      {
+        benchmark: "chat_send_100[10000]",
+        label: "Send a message",
+        per: { count: 100, unit: "message" },
+        interpret: (s) =>
+          `Each message is checked against the chat's insert policy, accepted and shown at the top of the open chat before the next one is sent. Averaged over 100 messages (${t(s)} total).`,
+      },
+    ],
   },
   {
     id: "band-chat",
@@ -138,15 +154,15 @@ export const heroExamples: HeroExample[] = [
         benchmark: "band_chat_timeline_second_page[4096]",
         label: "Scroll back in a room",
         interpret: (s) =>
-          `Loading the second page of a busy room (25 messages, newest first) takes ${formatTime(s)}, with 4,096 messages across 256 rooms. Today this grows with the whole message table, not just the page (#1962).`,
+          `Loading the second page of a busy room (25 messages, newest first) takes ${t(s)}, with 4,096 messages across 256 rooms. Today this grows with the whole message table, not just the page.`,
       },
       {
         benchmark: "band_chat_caught_up_fast_resume[10000]",
         label: "Reconnect when up to date",
         interpret: (s, lookup) => {
           const small = lookup("band_chat_caught_up_fast_resume[100]");
-          const scale = small ? ` With 100 messages it takes ${formatTime(small)}.` : "";
-          return `A client that has already seen all 10,000 messages reconnects in ${formatTime(s)}: the server confirms it is current without resending any message.${scale}`;
+          const scale = small ? ` With 100 messages it takes ${t(small)}.` : "";
+          return `A client that has already seen all 10,000 messages reconnects in ${t(s)}: the server confirms it is current without resending any message.${scale}`;
         },
       },
     ],
@@ -170,7 +186,7 @@ export const heroExamples: HeroExample[] = [
         benchmark: "world_tour_public_calendar_window[4096]",
         label: "Open the public calendar",
         interpret: (s) =>
-          `A fan's next three weeks (confirmed stops only, each with its venue) load in ${formatTime(s)} from a tour of 4,096 stops. Today this grows with the whole tour, not just the window (#1962).`,
+          `The first 12 stops of a fan's next three weeks (confirmed stops only, each with its venue) load in ${t(s)} from a tour of 4,096 stops. Today this grows with the whole tour, not just the window.`,
       },
     ],
   },
@@ -196,13 +212,13 @@ export const heroExamples: HeroExample[] = [
         benchmark: "wequencer_open_pattern",
         label: "Open a pattern",
         interpret: (s) =>
-          `Opening a 16-track, 64-step pattern (17 live subscriptions, 1,024 pads) until every one has its first result takes ${formatTime(s)}.`,
+          `Opening a 16-track, 64-step pattern (17 live subscriptions, 1,024 pads) until every one has its first result takes ${t(s)}.`,
       },
       {
         benchmark: "wequencer_toggle_pad",
         label: "Toggle a pad",
         interpret: (s) =>
-          `Flipping one pad on a live grid, until that track's subscription delivers the change, takes ${formatTime(s)}. Syncing it to bandmates isn't included.`,
+          `Flipping one pad on a live grid, until that track's subscription delivers the change, takes ${t(s)}. Syncing it to bandmates isn't included.`,
       },
     ],
   },
@@ -228,19 +244,19 @@ export const heroExamples: HeroExample[] = [
         benchmark: "poster_shop_open_canvas[4096]",
         label: "Open a poster",
         interpret: (s) =>
-          `Opening a 4,096-shape poster, with its shapes, layers, cursors, asset shelf and checkpoints each subscribed live, takes ${formatTime(s)} until all five have their first result.`,
+          `Opening a 4,096-shape poster, with its shapes, layers, cursors, asset shelf and checkpoints each subscribed live, takes ${t(s)} until all five have their first result.`,
       },
       {
         benchmark: "poster_shop_add_shape[4096]",
         label: "Draw a shape",
         interpret: (s) =>
-          `Adding one shape to that live canvas, until the canvas subscription delivers it, takes ${formatTime(s)}. Today this grows with the number of shapes on the canvas (#2086).`,
+          `Adding one shape to that live canvas, until the canvas subscription delivers it, takes ${t(s)}. Today this grows with the number of shapes on the canvas.`,
       },
       {
         benchmark: "poster_shop_move_cursor[4096]",
         label: "A collaborator's cursor moves",
         interpret: (s) =>
-          `A cursor update reaches the live cursor subscription in ${formatTime(s)}, without waking the 4,096-shape canvas.`,
+          `A cursor update reaches the live cursor subscription in ${t(s)}, without waking the 4,096-shape canvas.`,
       },
     ],
   },
@@ -266,19 +282,19 @@ export const heroExamples: HeroExample[] = [
         benchmark: "record_player_open_coverflow[4096]",
         label: "Open the library",
         interpret: (s) =>
-          `Opening CoverFlow (a 20-album shelf plus the focused album's tracks) from a 4,096-track library takes ${formatTime(s)}, without loading any audio.`,
+          `Opening CoverFlow (a 20-album shelf plus the focused album's tracks) from a 4,096-track library takes ${t(s)}, without loading any audio.`,
       },
       {
         benchmark: "record_player_open_playlist[4096]",
         label: "Open a long playlist",
         interpret: (s) =>
-          `Opening the visible 16 entries of a 4,096-track playlist, in playlist order, takes ${formatTime(s)}.`,
+          `Opening the visible 16 entries of a 4,096-track playlist, in playlist order, takes ${t(s)}.`,
       },
       {
         benchmark: "record_player_add_to_playlist[4096]",
         label: "Add a track",
         interpret: (s) =>
-          `Inserting a track into the visible part of that live playlist, until the window delivers it, takes ${formatTime(s)}.`,
+          `Inserting a track into the visible part of that live playlist, until the window delivers it, takes ${t(s)}.`,
       },
     ],
   },
@@ -295,8 +311,26 @@ export const heroExamples: HeroExample[] = [
     sources: [{ label: "App and benchmarks", path: "examples/epic-drop" }],
     video: null,
     plannedVideo: "Walkthrough capture is planned: uploading and browsing files.",
-    metrics: [],
-    plannedMetrics: "Its benchmark variant exists but doesn't run on CodSpeed yet.",
+    metrics: [
+      {
+        benchmark: "epic_drop_upload_4mb",
+        label: "Upload a 4 MiB file",
+        interpret: (s) =>
+          `Streaming a 4 MiB file into a folder until it is stored locally takes ${t(s)}, about ${rate(4, s)} MiB per second.`,
+      },
+      {
+        benchmark: "epic_drop_folder_listing_100_files",
+        label: "List a folder",
+        interpret: (s) =>
+          `Listing a folder of 100 files by name, with each file's type and size, takes ${t(s)}. Today this still grows with the size of the files, not just their number.`,
+      },
+      {
+        benchmark: "epic_drop_seek_64mb",
+        label: "Seek in a large file",
+        interpret: (s) =>
+          `Reading 64 KiB from the middle of a 64 MiB file, as a media player does when you scrub, takes ${t(s)}. Today this grows with the whole file's size.`,
+      },
+    ],
   },
   {
     id: "jamazon-warehouse",
@@ -311,8 +345,21 @@ export const heroExamples: HeroExample[] = [
     sources: [{ label: "App and benchmarks", path: "examples/jamazon-warehouse" }],
     video: null,
     plannedVideo: "Walkthrough capture is planned: checkout and the live stock console.",
-    metrics: [],
-    plannedMetrics: "Its benchmark variant exists but doesn't run on CodSpeed yet.",
+    metrics: [
+      {
+        benchmark: "jamazon_checkout_100",
+        label: "Check out",
+        per: { count: 100, unit: "checkout" },
+        interpret: (s) =>
+          `Each checkout is one transaction that reads and updates stock, the district's order counter and the customer's balance, then records the order and its payment. Averaged over 100 checkouts in a row (${t(s)} total). Today this grows with order history.`,
+      },
+      {
+        benchmark: "jamazon_pending_orders_10k",
+        label: "Load pending orders",
+        interpret: (s) =>
+          `The console's first page, the district's 20 oldest pending orders, loads in ${t(s)} from a history of 10,000 orders. Today this grows with order history, not just the page.`,
+      },
+    ],
   },
   {
     id: "music-agent",
@@ -330,8 +377,27 @@ export const heroExamples: HeroExample[] = [
     ],
     video: null,
     plannedVideo: "Walkthrough capture is planned: one agent conversation with a tool call.",
-    metrics: [],
-    plannedMetrics: "Its benchmark variant exists but doesn't run on CodSpeed yet.",
+    metrics: [
+      {
+        benchmark: "music_agent_stream_reply_1000_chunks",
+        label: "Stream a reply",
+        per: { count: 1000, unit: "chunk" },
+        interpret: (s) =>
+          `Each streamed chunk is appended to a long reply and stored locally. Averaged over 1,000 chunks (${t(s)} total). Today each append grows with the reply's size.`,
+      },
+      {
+        benchmark: "music_agent_open_transcript_200_turns",
+        label: "Open a conversation",
+        interpret: (s) =>
+          `Reading a 200-turn conversation in order, including a 128 KiB streamed reply, takes ${t(s)}.`,
+      },
+      {
+        benchmark: "music_agent_reopen_transcript_200_turns",
+        label: "Reopen after a restart",
+        interpret: (s) =>
+          `Reopening storage after an app restart and reading the same conversation takes ${t(s)}, including the fixed cost of opening the database.`,
+      },
+    ],
   },
   {
     id: "task-board",
@@ -353,18 +419,18 @@ export const heroExamples: HeroExample[] = [
         benchmark: "query_board_profile_s_rocksdb",
         label: "Open a project board",
         interpret: (s) =>
-          `Filtering and ordering a project's tasks from 3,000 on disk takes ${formatTime(s)}.`,
+          `Filtering and ordering a project's tasks from 3,000 on disk takes ${t(s)}.`,
       },
       {
         benchmark: "query_task_detail_profile_s_rocksdb",
         label: "Open a task",
-        interpret: (s) => `Loading a task's detail view (two queries) takes ${formatTime(s)}.`,
+        interpret: (s) => `Loading a task's detail view (two queries) takes ${t(s)}.`,
       },
       {
         benchmark: "subscription_fanout_memory[(600, 60)]",
         label: "Dashboard with 60 live lists",
         interpret: (s) =>
-          `Opening one overview plus 60 permissioned board lists until all have settled takes ${formatTime(s)}, about ${each(61, s)} per subscription.`,
+          `Opening one overview plus 60 permissioned board lists until all have settled takes ${t(s)}, about ${each(61, s)} per subscription.`,
       },
     ],
   },
@@ -387,13 +453,13 @@ export const heroExamples: HeroExample[] = [
         benchmark: "big_label_label_load[4096]",
         label: "Open a label's releases",
         interpret: (s) =>
-          `A label page loads all 512 of its releases, newest first, in ${formatTime(s)}, out of 4,096 releases across 8 labels.`,
+          `A label page loads all 512 of its releases, newest first, in ${t(s)}, out of 4,096 releases across 8 labels.`,
       },
       {
         benchmark: "ingest_walltime_10k",
         label: "Import 10,000 releases",
         interpret: (s) =>
-          `Ten batches of 1,000 releases are inserted in ${formatTime(s)}, about ${rate(10000, s)} rows per second.`,
+          `Ten batches of 1,000 releases are inserted in ${t(s)}, about ${rate(10000, s)} rows per second.`,
       },
       {
         benchmark: "ingest_walltime_100k",
@@ -403,7 +469,7 @@ export const heroExamples: HeroExample[] = [
           const scaling = small
             ? ` (${(s / small).toFixed(1)}× the 10k import for 10× the rows)`
             : "";
-          return `A hundred batches of 1,000 take ${formatTime(s)}${scaling}.`;
+          return `A hundred batches of 1,000 take ${t(s)}${scaling}.`;
         },
       },
     ],
@@ -427,7 +493,7 @@ export const heroExamples: HeroExample[] = [
         benchmark: "first_sync_local_relay_27518_rocksdb",
         label: "First sync, 27,518 rows",
         interpret: (s) =>
-          `A new device goes from empty to a settled view of 27,518 authorized rows across 39 subscriptions in ${formatTime(s)}, about ${rate(27518, s)} rows per second.`,
+          `A new device goes from empty to a settled view of 27,518 authorized rows across 39 subscriptions in ${t(s)}, about ${rate(27518, s)} rows per second.`,
       },
     ],
   },
@@ -452,16 +518,16 @@ export const heroExamples: HeroExample[] = [
         interpret: (s, lookup) => {
           const free = lookup("policy_free_org_page50[100000]");
           const overhead = free
-            ? ` The same page without a policy takes ${formatTime(free)}, so authorization adds ${Math.round((s / free - 1) * 100)}%.`
+            ? ` The same page without a policy takes ${t(free)}, so authorization adds ${Math.round((s / free - 1) * 100)}%.`
             : "";
-          return `The first 50 of an organization's documents load in ${formatTime(s)}.${overhead}`;
+          return `The first 50 of an organization's documents load in ${t(s)}.${overhead}`;
         },
       },
       {
         benchmark: "subscribe_owner_or_org_policy_org_page50[100000]",
         label: "Live organization page",
         interpret: (s) =>
-          `Subscribing to the same permissioned page and receiving its first result takes ${formatTime(s)}.`,
+          `Subscribing to the same permissioned page and receiving its first result takes ${t(s)}.`,
       },
     ],
   },

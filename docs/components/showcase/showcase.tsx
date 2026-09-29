@@ -103,6 +103,7 @@ function MetricCard({
       <Card
         className="metric-card h-full"
         tabIndex={0}
+        role="group"
         aria-label={`${metric.label}: ${headline}. Focus for history.`}
       >
         <VStack gap={1}>
@@ -167,9 +168,11 @@ function Video({ example }: { example: HeroExample }) {
         playsInline
         preload="metadata"
       />
-      <Text as="p" type="supporting" display="block">
-        {example.video.caption}
-      </Text>
+      <figcaption>
+        <Text type="supporting" display="block">
+          {example.video.caption}
+        </Text>
+      </figcaption>
     </VStack>
   );
 }
@@ -281,6 +284,11 @@ const suites: [prefix: string, label: string][] = [
   ["examples/wequencer/", "Wequencer"],
   ["examples/poster-shop/", "PosterShop"],
   ["examples/record-player/", "RecordPlayer"],
+  ["examples/chat-react/", "Chat"],
+  ["examples/auth-simple-chat/", "Auth chat"],
+  ["examples/epic-drop/", "EpicDrop"],
+  ["examples/jamazon-warehouse/", "Jamazon Warehouse"],
+  ["examples/music-agent/", "MusicAgent"],
 ];
 const otherSuite = "Other benchmarks";
 
@@ -354,6 +362,7 @@ function MiscBenchmarks({ summaries, loading }: { summaries: Summaries; loading:
                           <div
                             className="benchmark-median"
                             tabIndex={0}
+                            role="group"
                             aria-label={`${bench.name}: ${time}. Focus for history.`}
                           >
                             <VStack gap={0.5}>
@@ -403,17 +412,25 @@ export function Showcase() {
     <div className="mx-auto w-full max-w-[1120px] px-4 pb-24 pt-10 sm:px-8">
       <VStack gap={10}>
         <VStack as="header" gap={4} className="max-w-3xl">
-          <Heading level={1}>Real apps, measured on every commit</Heading>
+          <Heading level={1}>Real apps, measured on every merge</Heading>
           <Text as="p" type="large" color="secondary" display="block">
-            Each example is a working app in the Jazz repository. The numbers under it come from
-            benchmarks of that same workload, run in CI on CodSpeed. We show the latest released
-            numbers; hover any of them for how they changed across releases.
+            Each example lives in the Jazz repository, most of them as working apps. The numbers
+            under it come from benchmarks of that same workload, run on CodSpeed as changes merge to
+            main. We show the latest released numbers; hover any of them for how they changed across
+            releases.
           </Text>
           {error && <Banner status="error" title={error} />}
           {data && !released && (
             <Banner
               status="info"
               title="Release attribution is unavailable right now, so these are the latest measurements on main."
+            />
+          )}
+          {data && data.warnings.length > 0 && (
+            <Banner
+              status="warning"
+              title="Some benchmark data may be out of date"
+              description={data.warnings.join(" ")}
             />
           )}
           <Text as="p" type="supporting" display="block">
