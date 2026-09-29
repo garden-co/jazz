@@ -22,6 +22,9 @@ const localFirstServerWaitQueryExecutionOptions: QueryExecutionOptions = {
   tier: "local-first",
   firstLoadRemoteWaitMs: 2_000,
 };
+// @ts-expect-error Only local-first reads wait for the server on their first load.
+const remoteFirstLoadWait: QueryExecutionOptions = { tier: "remote", firstLoadRemoteWaitMs: 2_000 };
+const defaultTierFirstLoadWait: QueryExecutionOptions = { firstLoadRemoteWaitMs: 2_000 };
 const removedLocalFirstUnlessEmptyTier: QueryExecutionOptions = {
   // @ts-expect-error local-first-unless-empty was removed; use local-first with firstLoadRemoteWaitMs.
   tier: "local-first-unless-empty",
@@ -54,6 +57,8 @@ const internalLocalOnlyTier: QueryExecutionOptions = {
 void canonicalQueryExecutionOptions;
 void remoteQueryExecutionOptions;
 void localFirstServerWaitQueryExecutionOptions;
+void remoteFirstLoadWait;
+void defaultTierFirstLoadWait;
 void removedLocalFirstUnlessEmptyTier;
 void removedGlobalReadTier;
 void removedQueryExecutionOptions;
