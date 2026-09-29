@@ -95,7 +95,7 @@ function CartRow({
         <ProductArt art={product.art} hue={product.hue} label="" />
       </div>
       <VStack gap={3} width="100%">
-        <HStack gap={3} justify="space-between" wrap="wrap">
+        <HStack gap={3} justify="between" wrap="wrap">
           <VStack gap={1}>
             <Link href={`/product/${product.slug}`} as={NextLink} weight="medium">
               {product.name}

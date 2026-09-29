@@ -275,7 +275,10 @@ async function retryConflicts<T>(run: () => Promise<T>): Promise<T> {
       return await run();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (attempt >= 20 || !/exclusive_conflict|transaction_conflict|cascade_rejected/.test(message))
+      if (
+        attempt >= 20 ||
+        !/exclusive_conflict|transaction_conflict|cascade_rejected/.test(message)
+      )
         throw error;
     }
   }

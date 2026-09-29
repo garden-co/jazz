@@ -38,7 +38,11 @@ export function PaymentPanel({ order, payment }: { order: Order; payment?: Payme
       <VStack gap={4}>
         <Heading level={2}>Payment</Heading>
         {payment.status === "failed" && payment.failureReason && (
-          <Banner status="error" title="Payment failed" description={`${payment.failureReason} You can try again.`} />
+          <Banner
+            status="error"
+            title="Payment failed"
+            description={`${payment.failureReason} You can try again.`}
+          />
         )}
         {payment.provider === "stripe" && payment.clientSecret ? (
           <Elements stripe={stripe()} options={{ clientSecret: payment.clientSecret }}>
@@ -79,9 +83,17 @@ function SandboxPayment({ order }: { order: Order }) {
         title="Sandbox payments"
         description="This store runs with the sandbox payment provider. No card is charged and no card details are collected: choose how the pretend card processor should answer."
       />
-      <RadioList label="Sandbox card" value={outcome} onChange={(v) => setOutcome(v as typeof outcome)}>
+      <RadioList
+        label="Sandbox card"
+        value={outcome}
+        onChange={(v) => setOutcome(v as typeof outcome)}
+      >
         <RadioListItem value="approve" label="Approve" description="The payment succeeds." />
-        <RadioListItem value="decline" label="Decline" description="The card is declined, so you can retry." />
+        <RadioListItem
+          value="decline"
+          label="Decline"
+          description="The card is declined, so you can retry."
+        />
       </RadioList>
       {error && <Banner status="error" title="Something went wrong" description={error} />}
       <Button

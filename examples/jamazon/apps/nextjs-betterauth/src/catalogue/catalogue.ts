@@ -23,7 +23,11 @@ export type SeedProduct = {
 };
 
 export const CATEGORIES: SeedCategory[] = [
-  { slug: "guitars", name: "Guitars", blurb: "Electric, acoustic and everything with six strings." },
+  {
+    slug: "guitars",
+    name: "Guitars",
+    blurb: "Electric, acoustic and everything with six strings.",
+  },
   { slug: "basses", name: "Basses", blurb: "Four, five and fretless." },
   { slug: "keys", name: "Keys and synths", blurb: "Stage pianos, synthesizers and controllers." },
   { slug: "drums", name: "Drums", blurb: "Kits, snares and cymbals." },
@@ -117,7 +121,8 @@ export const PRODUCTS: SeedProduct[] = [
     category: "accessories",
     priceCents: 18900,
     summary: "Warm, modulated repeats up to 900 ms.",
-    description: "Digital delay voiced like a worn tape loop, with tap tempo and a wow and flutter knob.",
+    description:
+      "Digital delay voiced like a worn tape loop, with tap tempo and a wow and flutter knob.",
     specs: [
       ["Delay time", "40–900 ms"],
       ["Controls", "Time, repeats, mix, wobble"],
@@ -176,7 +181,8 @@ export const PRODUCTS: SeedProduct[] = [
     category: "guitars",
     priceCents: 42900,
     summary: "Small-bodied solid spruce acoustic.",
-    description: "A couch and campfire guitar with a surprisingly big voice. Slotted headstock, solid top.",
+    description:
+      "A couch and campfire guitar with a surprisingly big voice. Slotted headstock, solid top.",
     specs: [
       ["Top", "Solid spruce"],
       ["Back and sides", "Mahogany"],
@@ -194,7 +200,8 @@ export const PRODUCTS: SeedProduct[] = [
     category: "guitars",
     priceCents: 97900,
     summary: "27 in scale for tuning down to B.",
-    description: "Longer scale, heavier strings and a dark humbucker for low tunings that stay tight.",
+    description:
+      "Longer scale, heavier strings and a dark humbucker for low tunings that stay tight.",
     specs: [
       ["Scale", "27 in"],
       ["Tuning", "B to B"],
@@ -214,7 +221,8 @@ export const PRODUCTS: SeedProduct[] = [
     category: "basses",
     priceCents: 94900,
     summary: "Two single coils and a slim neck.",
-    description: "The classic growl. Blend the pickups for a hollow, vocal tone or solo the bridge for bite.",
+    description:
+      "The classic growl. Blend the pickups for a hollow, vocal tone or solo the bridge for bite.",
     specs: [
       ["Strings", "4"],
       ["Scale", "34 in"],
@@ -270,7 +278,8 @@ export const PRODUCTS: SeedProduct[] = [
     category: "keys",
     priceCents: 179900,
     summary: "Hammer-action keys and sampled grand, electric and organ.",
-    description: "A gig-ready piano with split and layer, a clear front panel and balanced outputs.",
+    description:
+      "A gig-ready piano with split and layer, a clear front panel and balanced outputs.",
     specs: [
       ["Keys", "88, graded hammer action"],
       ["Polyphony", "256"],
@@ -288,7 +297,8 @@ export const PRODUCTS: SeedProduct[] = [
     category: "keys",
     priceCents: 64900,
     summary: "Two oscillators, ladder filter, 32-step sequencer.",
-    description: "Fat basslines and squelchy leads, with patch points for when you want to go further.",
+    description:
+      "Fat basslines and squelchy leads, with patch points for when you want to go further.",
     specs: [
       ["Voices", "1"],
       ["Oscillators", "2 + sub"],
@@ -345,7 +355,8 @@ export const PRODUCTS: SeedProduct[] = [
     category: "drums",
     priceCents: 119900,
     summary: "18 in kick, 12 and 14 in toms, 14 in snare.",
-    description: "Small sizes that sing. Maple shells, vintage-style lugs and a tone that loves brushes.",
+    description:
+      "Small sizes that sing. Maple shells, vintage-style lugs and a tone that loves brushes.",
     specs: [
       ["Shells", "Maple, 6 ply"],
       ["Kick", "18 × 14 in"],
@@ -381,7 +392,8 @@ export const PRODUCTS: SeedProduct[] = [
     category: "drums",
     priceCents: 32900,
     summary: "Hand-hammered, dry and complex.",
-    description: "Clear stick definition with a trashy wash underneath. Works as a crash when you lean on it.",
+    description:
+      "Clear stick definition with a trashy wash underneath. Works as a crash when you lean on it.",
     specs: [
       ["Size", "21 in"],
       ["Alloy", "B20 bronze"],

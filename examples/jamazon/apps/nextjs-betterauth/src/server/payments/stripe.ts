@@ -22,7 +22,8 @@ export function stripeProvider(secretKey: string): PaymentProvider {
     if (init.idempotencyKey) headers.set("idempotency-key", init.idempotencyKey);
     const response = await fetch(`${STRIPE_API}${path}`, { ...init, headers });
     const body = (await response.json()) as PaymentIntent & { error?: { message?: string } };
-    if (!response.ok) throw new Error(body.error?.message ?? `Stripe request failed (${response.status})`);
+    if (!response.ok)
+      throw new Error(body.error?.message ?? `Stripe request failed (${response.status})`);
     return body;
   }
   return {

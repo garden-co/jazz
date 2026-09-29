@@ -6,7 +6,14 @@ import { EmptyState } from "@astryxdesign/core/EmptyState";
 import { Link } from "@astryxdesign/core/Link";
 import { Skeleton } from "@astryxdesign/core/Skeleton";
 import { VStack } from "@astryxdesign/core/Stack";
-import { Table, TableBody, TableCell, TableHeader, TableHeaderCell, TableRow } from "@astryxdesign/core/Table";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHeader,
+  TableHeaderCell,
+  TableRow,
+} from "@astryxdesign/core/Table";
 import { Heading, Text } from "@astryxdesign/core/Text";
 import { Timestamp } from "@astryxdesign/core/Timestamp";
 import { useAll } from "jazz-tools/react";
@@ -62,7 +69,10 @@ export function OrderHistory() {
                     <Timestamp value={order.placedAt.getTime()} format="date" />
                   </TableCell>
                   <TableCell>
-                    <Badge variant={STATUS_BADGE[order.status]} label={STATUS_LABEL[order.status]} />
+                    <Badge
+                      variant={STATUS_BADGE[order.status]}
+                      label={STATUS_LABEL[order.status]}
+                    />
                   </TableCell>
                   <TableCell>
                     <Text hasTabularNumbers>{formatMoney(order.totalCents)}</Text>

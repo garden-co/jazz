@@ -81,7 +81,7 @@ export function useShopper(): Shopper {
 }
 
 function ShopperProvider({ children }: { children: ReactNode }) {
-  const db = useDb<Db>();
+  const db = useDb();
   const session = useSession();
   const { sessionActions: actions, account: handle } = useJazzAuth();
   const { data: auth, isPending } = authClient.useSession();
@@ -121,7 +121,8 @@ function ShopperProvider({ children }: { children: ReactNode }) {
       signUp: (name, email, password) =>
         changeAccount(async () => {
           const result = await authClient.signUp.email({ name, email, password });
-          if (result.error) throw new Error(result.error.message ?? "Could not create the account.");
+          if (result.error)
+            throw new Error(result.error.message ?? "Could not create the account.");
           // Linking keeps the guest's Jazz account, and with it the cart.
           await actions.linkJWT({ getToken });
         }),
@@ -144,11 +145,7 @@ async function getToken() {
 }
 
 /** Stash the guest's cart, then switch; the new account claims it on mount. */
-async function switchToAccount(
-  db: Db,
-  guestAccount: string,
-  login: () => Promise<void>,
-) {
+async function switchToAccount(db: Db, guestAccount: string, login: () => Promise<void>) {
   const lines = await readGuestCart(db, guestAccount);
   stashGuestCart(lines);
   try {

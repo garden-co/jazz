@@ -17,8 +17,7 @@ export const ids = {
   cart: (account: string) => uuidV5(`cart:${account}`),
   cartLine: (cartId: string, productId: string) => uuidV5(`cart-line:${cartId}:${productId}`),
   /** Scoped by account, so one shopper's key can never address another's order. */
-  order: (account: string, idempotencyKey: string) =>
-    uuidV5(`order:${account}:${idempotencyKey}`),
+  order: (account: string, idempotencyKey: string) => uuidV5(`order:${account}:${idempotencyKey}`),
   orderLine: (orderId: string, productId: string) => uuidV5(`order-line:${orderId}:${productId}`),
   orderEvent: (orderId: string, status: string) => uuidV5(`order-event:${orderId}:${status}`),
   payment: (orderId: string) => uuidV5(`payment:${orderId}`),

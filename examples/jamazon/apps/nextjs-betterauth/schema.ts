@@ -2,7 +2,18 @@ import { schema as s } from "jazz-tools";
 import { schema as betterAuthSchema } from "./schema-better-auth/schema";
 
 /** Token hues used by the generated product illustrations. */
-export const HUES = ["gray", "blue", "cyan", "green", "orange", "pink", "purple", "red", "teal", "yellow"] as const;
+export const HUES = [
+  "gray",
+  "blue",
+  "cyan",
+  "green",
+  "orange",
+  "pink",
+  "purple",
+  "red",
+  "teal",
+  "yellow",
+] as const;
 /** The illustration drawn for a product; see src/components/ProductArt.tsx. */
 export const ART = [
   "guitar",
@@ -60,10 +71,7 @@ const schema = {
   // Stock lives beside the product so an order changes one small row, not
   // the catalogue entry every shopper is subscribed to.
   stock: s
-    .table(
-      { productId: s.uuid(), onHand: s.int() },
-      { product: s.rel("products", "productId") },
-    )
+    .table({ productId: s.uuid(), onHand: s.int() }, { product: s.rel("products", "productId") })
     .indexOnly(["productId"]),
 
   // ── Carts: private to one shopper account, editable offline ───────────

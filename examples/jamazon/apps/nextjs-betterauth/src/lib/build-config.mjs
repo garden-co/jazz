@@ -40,7 +40,8 @@ export function usesLocalDefaults(config = readBuildConfig()) {
  */
 export function paymentProvider(config = readBuildConfig()) {
   const provider =
-    config.paymentProvider ?? (usesLocalDefaults(config) ? LOCAL_DEFAULTS.paymentProvider : undefined);
+    config.paymentProvider ??
+    (usesLocalDefaults(config) ? LOCAL_DEFAULTS.paymentProvider : undefined);
   if (!provider) throw new Error("Jamazon nonlocal configuration requires PAYMENT_PROVIDER");
   if (!PROVIDERS.includes(provider))
     throw new Error(`PAYMENT_PROVIDER must be one of ${PROVIDERS.join(", ")}; got ${provider}`);

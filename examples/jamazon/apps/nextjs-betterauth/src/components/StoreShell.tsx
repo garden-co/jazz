@@ -3,12 +3,10 @@
 import { AppShell } from "@astryxdesign/core/AppShell";
 import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
-import { Icon } from "@astryxdesign/core/Icon";
 import { SideNav, SideNavItem, SideNavSection } from "@astryxdesign/core/SideNav";
 import { HStack } from "@astryxdesign/core/Stack";
 import { TopNav, TopNavHeading } from "@astryxdesign/core/TopNav";
 import { useAll } from "jazz-tools/react";
-import { ShoppingCart } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
@@ -57,7 +55,6 @@ function TopBarActions() {
         size="lg"
         href="/cart"
         as={Link}
-        icon={<Icon icon={ShoppingCart} size="sm" />}
       />
     </HStack>
   );
@@ -110,7 +107,7 @@ function OfflineBanner() {
   return (
     <Banner
       status="info"
-      container="page"
+      container="section"
       title="You're offline"
       description="Browsing and your cart keep working on this device and sync when you reconnect. Placing an order needs a connection."
     />

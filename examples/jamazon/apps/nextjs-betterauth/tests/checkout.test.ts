@@ -159,9 +159,9 @@ describe("checkout", () => {
       placeOrder(backend, { account: ada.account, idempotencyKey: crypto.randomUUID() }),
     ).rejects.toThrow(/changed since you reviewed/);
     // Eve replaying Ada's key reaches Eve's (empty) cart, never Ada's order.
-    await expect(placeOrder(backend, { account: eve.account, idempotencyKey: key })).rejects.toThrow(
-      /empty/,
-    );
+    await expect(
+      placeOrder(backend, { account: eve.account, idempotencyKey: key }),
+    ).rejects.toThrow(/empty/);
     expect(ids.order(eve.account, key)).not.toBe(ids.order(ada.account, key));
   });
 
@@ -178,9 +178,9 @@ describe("checkout", () => {
         quantity: picks.onHand + 1,
       })
       .wait({ tier: "global" });
-    await expect(placeOrder(backend, { account: ada.account, idempotencyKey: key })).rejects.toThrow(
-      /left in stock/,
-    );
+    await expect(
+      placeOrder(backend, { account: ada.account, idempotencyKey: key }),
+    ).rejects.toThrow(/left in stock/);
     expect(await onHand("JAM-003")).toBe(picks.onHand);
     expect(await ada.db.all(app.orders, { tier: "global" })).toEqual([]);
   });

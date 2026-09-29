@@ -21,7 +21,7 @@ import { shippingCents } from "./pricing";
 export type CartItem = { line: CartLine; product: Product; stock?: Stock };
 
 export function useCart(account: string) {
-  const db = useDb<Db>();
+  const db = useDb();
   const cartId = ids.cart(account);
   const { data: carts } = useAll(app.carts.where({ id: cartId }));
   const { data: lines } = useAll(app.cartLines.where({ cartId }));

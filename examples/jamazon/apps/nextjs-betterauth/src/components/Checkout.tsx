@@ -26,11 +26,16 @@ import { OrderSummary } from "./OrderSummary";
 import { Page } from "./Page";
 import { useShopper } from "./StoreProviders";
 
-type Address = Pick<
-  Cart,
-  "shipName" | "shipLine1" | "shipLine2" | "shipCity" | "shipPostcode" | "shipCountry"
+type Address = Partial<
+  Pick<Cart, "shipName" | "shipLine1" | "shipLine2" | "shipCity" | "shipPostcode" | "shipCountry">
 >;
-const REQUIRED: (keyof Address)[] = ["shipName", "shipLine1", "shipCity", "shipPostcode", "shipCountry"];
+const REQUIRED: (keyof Address)[] = [
+  "shipName",
+  "shipLine1",
+  "shipCity",
+  "shipPostcode",
+  "shipCountry",
+];
 
 /**
  * Checkout is two steps over the synced cart row: shipping details, then a
@@ -95,10 +100,14 @@ function ShippingStep({ cart }: { cart: CartState }) {
     const timer = setTimeout(() => {
       const saved = cart.cart ? pickAddress(cart.cart) : {};
       const changed = Object.fromEntries(
-        Object.entries(draft).filter(([k, v]) => (v?.trim() || null) !== (saved[k as keyof Address] ?? null)),
+        Object.entries(draft).filter(
+          ([k, v]) => (v?.trim() || null) !== (saved[k as keyof Address] ?? null),
+        ),
       );
       if (Object.keys(changed).length)
-        updateCheckout(Object.fromEntries(Object.entries(changed).map(([k, v]) => [k, v?.trim() || null])));
+        updateCheckout(
+          Object.fromEntries(Object.entries(changed).map(([k, v]) => [k, v?.trim() || null])),
+        );
     }, 600);
     return () => clearTimeout(timer);
   }, [draft]);
@@ -175,7 +184,7 @@ function ShippingStep({ cart }: { cart: CartState }) {
 
 function ReviewStep({ cart }: { cart: CartState }) {
   const shopper = useShopper();
-  const db = useDb<Db>();
+  const db = useDb();
   const router = useRouter();
   const [placing, setPlacing] = useState(false);
   const [error, setError] = useState<string>();
@@ -199,7 +208,7 @@ function ReviewStep({ cart }: { cart: CartState }) {
       <VStack gap={6}>
         <Card padding={5}>
           <VStack gap={4}>
-            <HStack gap={2} justify="space-between" vAlign="center">
+            <HStack gap={2} justify="between" vAlign="center">
               <Heading level={2}>Ship to</Heading>
               <Button
                 label="Edit"
@@ -209,7 +218,14 @@ function ReviewStep({ cart }: { cart: CartState }) {
             </HStack>
             <MetadataList columns="single">
               <MetadataListItem label="Address">
-                {[current.shipName, current.shipLine1, current.shipLine2, current.shipCity, current.shipPostcode, current.shipCountry]
+                {[
+                  current.shipName,
+                  current.shipLine1,
+                  current.shipLine2,
+                  current.shipCity,
+                  current.shipPostcode,
+                  current.shipCountry,
+                ]
                   .filter(Boolean)
                   .join(", ")}
               </MetadataListItem>
@@ -222,7 +238,7 @@ function ReviewStep({ cart }: { cart: CartState }) {
             <VStack gap={2}>
               {cart.items.map(({ line, product }) => (
                 <Fragment key={line.id}>
-                  <HStack gap={3} justify="space-between">
+                  <HStack gap={3} justify="between">
                     <Text>
                       {line.quantity} × {product.name}
                     </Text>
@@ -253,7 +269,13 @@ function ReviewStep({ cart }: { cart: CartState }) {
             <Text type="supporting" color="secondary">
               Sign in or create an account to place the order. Your cart comes with you.
             </Text>
-            <Button label="Sign in to order" size="lg" width="100%" href="/sign-in?next=/checkout" as={NextLink} />
+            <Button
+              label="Sign in to order"
+              size="lg"
+              width="100%"
+              href="/sign-in?next=/checkout"
+              as={NextLink}
+            />
           </VStack>
         )}
         <Text type="supporting" color="secondary">
@@ -276,7 +298,8 @@ function pickAddress(cart: Cart): Address {
  * already made instead of making a second one.
  */
 async function submitOrder(db: Db, cartId: string, idempotencyKey: string): Promise<string> {
-  if (!navigator.onLine) throw new Error("You're offline. Your cart is saved; place the order once you're back online.");
+  if (!navigator.onLine)
+    throw new Error("You're offline. Your cart is saved; place the order once you're back online.");
   await withTimeout(
     db.update(app.carts, cartId, { checkoutKey: idempotencyKey }).wait({ tier: "global" }),
     15_000,

@@ -20,12 +20,19 @@ const strings = ids.product("JAM-001");
 
 describe("catalogue", () => {
   it("is readable by guests and shoppers, and writable by neither", async () => {
-    const guest = testApp.as({ user_id: "guest", claims: {}, authMode: "local-first" });
+    const guest = testApp.as({
+      issuer: "urn:jazz:local-first",
+      user_id: "guest",
+      claims: {},
+      authMode: "local-first",
+    });
     const alice = shopper(testApp, "alice");
     for (const db of [guest, alice.db]) {
       const products = await db.all(app.products.where({ id: strings }), { tier: "global" });
       expect(products.map((p) => p.sku)).toEqual(["JAM-001"]);
-      expect(await db.all(app.stock.where({ productId: strings }), { tier: "global" })).toHaveLength(1);
+      expect(
+        await db.all(app.stock.where({ productId: strings }), { tier: "global" }),
+      ).toHaveLength(1);
     }
     const [stock] = await alice.db.all(app.stock.where({ productId: strings }), { tier: "global" });
     await alice.db.expectDenied((db) => db.update(app.stock, stock!.id, { onHand: 9999 }));
@@ -43,7 +50,11 @@ describe("carts", () => {
     const cartId = ids.cart(alice.account);
     await alice.db.upsert(app.carts, cartId, { shopper: alice.account }).wait({ tier: "global" });
     await alice.db
-      .upsert(app.cartLines, ids.cartLine(cartId, strings), { cartId, productId: strings, quantity: 2 })
+      .upsert(app.cartLines, ids.cartLine(cartId, strings), {
+        cartId,
+        productId: strings,
+        quantity: 2,
+      })
       .wait({ tier: "global" });
 
     expect(await mallory.db.all(app.carts.where({ id: cartId }), { tier: "global" })).toEqual([]);
@@ -62,7 +73,9 @@ describe("carts", () => {
     const bob = shopper(testApp, "bob");
     const aliceCart = ids.cart(alice.account);
     const bobCart = ids.cart(bob.account);
-    await alice.db.upsert(app.carts, aliceCart, { shopper: alice.account }).wait({ tier: "global" });
+    await alice.db
+      .upsert(app.carts, aliceCart, { shopper: alice.account })
+      .wait({ tier: "global" });
     await bob.db.upsert(app.carts, bobCart, { shopper: bob.account }).wait({ tier: "global" });
     const line = await alice.db
       .insert(app.cartLines, { cartId: aliceCart, productId: strings, quantity: 1 })
@@ -107,12 +120,20 @@ describe("orders", () => {
     await testApp.seed((db) =>
       db.insert(
         app.payments,
-        { orderId, provider: "sandbox", providerRef: "sandbox_k", status: "requires_payment", amountCents: 3000 },
+        {
+          orderId,
+          provider: "sandbox",
+          providerRef: "sandbox_k",
+          status: "requires_payment",
+          amountCents: 3000,
+        },
         { id: ids.payment(orderId) },
       ),
     );
 
-    expect(await alice.db.all(app.orders.where({ id: orderId }), { tier: "global" })).toHaveLength(1);
+    expect(await alice.db.all(app.orders.where({ id: orderId }), { tier: "global" })).toHaveLength(
+      1,
+    );
     expect(await alice.db.all(app.payments.where({ orderId }), { tier: "global" })).toHaveLength(1);
     expect(await mallory.db.all(app.orders.where({ id: orderId }), { tier: "global" })).toEqual([]);
     expect(await mallory.db.all(app.payments.where({ orderId }), { tier: "global" })).toEqual([]);

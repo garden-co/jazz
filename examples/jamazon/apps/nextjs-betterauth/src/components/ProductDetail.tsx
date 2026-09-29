@@ -29,7 +29,9 @@ export function ProductDetail({ slug }: { slug: string }) {
   const { data: categories } = useAll(
     product ? app.categories.where({ id: product.categoryId }) : undefined,
   );
-  const { data: stockRows } = useAll(product ? app.stock.where({ productId: product.id }) : undefined);
+  const { data: stockRows } = useAll(
+    product ? app.stock.where({ productId: product.id }) : undefined,
+  );
   const [quantity, setQuantity] = useState(1);
 
   if (products === undefined)
@@ -106,7 +108,8 @@ export function ProductDetail({ slug }: { slug: string }) {
             </HStack>
             {inCart > 0 && (
               <Text color="secondary">
-                {inCart} in your cart. <Link href="/cart" as={NextLink}>
+                {inCart} in your cart.{" "}
+                <Link href="/cart" as={NextLink}>
                   View cart
                 </Link>
               </Text>

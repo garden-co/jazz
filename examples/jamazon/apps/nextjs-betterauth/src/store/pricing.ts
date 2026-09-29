@@ -1,11 +1,13 @@
 import type { ShippingMethod } from "@/schema";
 
 /** Shared by the checkout UI (estimates) and the backend (the charged total). */
-export const SHIPPING: Record<ShippingMethod, { label: string; description: string; cents: number }> =
-  {
-    standard: { label: "Standard", description: "3–5 working days", cents: 500 },
-    express: { label: "Express", description: "Next working day", cents: 1500 },
-  };
+export const SHIPPING: Record<
+  ShippingMethod,
+  { label: string; description: string; cents: number }
+> = {
+  standard: { label: "Standard", description: "3–5 working days", cents: 500 },
+  express: { label: "Express", description: "Next working day", cents: 1500 },
+};
 
 /** Standard shipping is free from this subtotal. */
 export const FREE_STANDARD_FROM_CENTS = 15000;

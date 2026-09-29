@@ -9,7 +9,14 @@ import { MetadataList, MetadataListItem } from "@astryxdesign/core/MetadataList"
 import { Skeleton } from "@astryxdesign/core/Skeleton";
 import { HStack, VStack } from "@astryxdesign/core/Stack";
 import { Step, Stepper } from "@astryxdesign/core/Stepper";
-import { Table, TableBody, TableCell, TableHeader, TableHeaderCell, TableRow } from "@astryxdesign/core/Table";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHeader,
+  TableHeaderCell,
+  TableRow,
+} from "@astryxdesign/core/Table";
 import { Heading, Text } from "@astryxdesign/core/Text";
 import { Timestamp } from "@astryxdesign/core/Timestamp";
 import { useAll } from "jazz-tools/react";
@@ -105,11 +112,20 @@ export function OrderView({ orderId }: { orderId: string }) {
             </Table>
             <MetadataList columns="single">
               <MetadataListItem label="Ship to">
-                {[order.shipName, order.shipLine1, order.shipLine2, order.shipCity, order.shipPostcode, order.shipCountry]
+                {[
+                  order.shipName,
+                  order.shipLine1,
+                  order.shipLine2,
+                  order.shipCity,
+                  order.shipPostcode,
+                  order.shipCountry,
+                ]
                   .filter(Boolean)
                   .join(", ")}
               </MetadataListItem>
-              <MetadataListItem label="Shipping">{SHIPPING[order.shippingMethod].label}</MetadataListItem>
+              <MetadataListItem label="Shipping">
+                {SHIPPING[order.shippingMethod].label}
+              </MetadataListItem>
             </MetadataList>
           </VStack>
           <OrderSummary
@@ -130,7 +146,8 @@ const STAGES: { status: OrderStatus; label: string }[] = [
 ];
 
 function OrderTimeline({ order, events }: { order: Order; events: OrderEvent[] }) {
-  const reached = order.status === "payment_failed" ? 1 : STAGES.findIndex((s) => s.status === order.status) + 1;
+  const reached =
+    order.status === "payment_failed" ? 1 : STAGES.findIndex((s) => s.status === order.status) + 1;
   const eventFor = (status: OrderStatus) =>
     events.find((e) => e.status === status) ??
     (status === "paid" && order.status === "payment_failed"
@@ -148,7 +165,13 @@ function OrderTimeline({ order, events }: { order: Order; events: OrderEvent[] }
               step={index}
               label={failed ? "Payment failed" : stage.label}
               status={failed ? "error" : index < reached ? "success" : undefined}
-              description={event ? formatTime(event.at) : index === reached ? nextHint(order.status) : undefined}
+              description={
+                event
+                  ? formatTime(event.at)
+                  : index === reached
+                    ? nextHint(order.status)
+                    : undefined
+              }
             />
           );
         })}

@@ -8,7 +8,6 @@ import { VStack } from "@astryxdesign/core/Stack";
 import { Heading, Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { useAll } from "jazz-tools/react";
-import { Search } from "lucide-react";
 import { useState } from "react";
 import { app } from "@/schema";
 import { ProductCard } from "./ProductCard";
@@ -39,7 +38,8 @@ export function Catalogue({ categorySlug }: { categorySlug?: string }) {
         <VStack gap={2}>
           <Heading level={1}>{title || " "}</Heading>
           <Text color="secondary">
-            {category?.blurb ?? "Instruments, studio gear and accessories, shipped from our own warehouse."}
+            {category?.blurb ??
+              "Instruments, studio gear and accessories, shipped from our own warehouse."}
           </Text>
         </VStack>
         <TextInput
@@ -48,7 +48,7 @@ export function Catalogue({ categorySlug }: { categorySlug?: string }) {
           placeholder={category ? `Search ${category.name.toLowerCase()}` : "Search the store"}
           value={search}
           onChange={setSearch}
-          startIcon={<Icon icon={Search} size="sm" />}
+          startIcon={<Icon icon="search" size="sm" />}
           hasClear
           size="lg"
         />
@@ -62,7 +62,9 @@ export function Catalogue({ categorySlug }: { categorySlug?: string }) {
           <EmptyState
             title={term ? `Nothing matches "${search.trim()}"` : "No products yet"}
             description={
-              term ? "Try a shorter word, or search all products." : "The catalogue is still loading."
+              term
+                ? "Try a shorter word, or search all products."
+                : "The catalogue is still loading."
             }
           />
         ) : (

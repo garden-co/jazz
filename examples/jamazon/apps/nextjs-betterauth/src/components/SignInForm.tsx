@@ -31,8 +31,8 @@ export function SignInForm() {
           <VStack gap={4}>
             <Heading level={1}>Signed in</Heading>
             <Text>
-              You're signed in as {shopper.name ?? shopper.email}. Your cart and orders sync to every
-              device you sign in on.
+              You're signed in as {shopper.name ?? shopper.email}. Your cart and orders sync to
+              every device you sign in on.
             </Text>
             <Button label="Continue shopping" onClick={() => router.push(safeNext(next))} />
             <Button label="Sign out" variant="secondary" onClick={() => void shopper.signOut()} />

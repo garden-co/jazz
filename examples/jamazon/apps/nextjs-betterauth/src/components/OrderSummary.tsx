@@ -27,7 +27,7 @@ export function OrderSummary({
           value={shippingCents === 0 ? "Free" : formatMoney(shippingCents)}
         />
         <Divider />
-        <HStack gap={2} justify="space-between">
+        <HStack gap={2} justify="between">
           <Text weight="semibold">Total</Text>
           <Text weight="semibold" hasTabularNumbers>
             {formatMoney(subtotalCents + shippingCents)}
@@ -41,7 +41,7 @@ export function OrderSummary({
 
 function Row({ label, value }: { label: string; value: string }) {
   return (
-    <HStack gap={2} justify="space-between">
+    <HStack gap={2} justify="between">
       <Text color="secondary">{label}</Text>
       <Text hasTabularNumbers>{value}</Text>
     </HStack>

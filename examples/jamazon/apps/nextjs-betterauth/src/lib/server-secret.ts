@@ -4,6 +4,7 @@ export function serverSecret(name: "BACKEND_SECRET" | "BETTER_AUTH_SECRET", loca
   const config = assertBuildConfiguration();
   const configured = process.env[name];
   if (configured) return configured;
-  if (!usesLocalDefaults(config)) throw new Error(`${name} must be configured for nonlocal Jamazon`);
+  if (!usesLocalDefaults(config))
+    throw new Error(`${name} must be configured for nonlocal Jamazon`);
   return localFallback;
 }
