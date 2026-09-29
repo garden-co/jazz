@@ -803,7 +803,6 @@ where
     #[doc(hidden)]
     pub async fn close(&mut self) -> Result<(), Error> {
         self.database.flush().await?;
-        self.persist_clean_close_marker().await?;
         self.database.close().await?;
         Ok(())
     }
