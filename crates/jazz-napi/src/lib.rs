@@ -307,8 +307,8 @@ type NapiDbInner = Rc<RefCell<Option<NapiDbInnerStorage>>>;
 
 #[derive(Clone)]
 enum NapiDbInnerStorage {
-    Memory(Rc<CoreDb<CoreMemoryStorage>>),
-    Persistent(Rc<CoreDb<CoreRocksDbStorage>>),
+    Memory(Rc<CoreDb>),
+    Persistent(Rc<CoreDb>),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -712,14 +712,8 @@ impl StreamingOwnerLifecycle {
     }
 }
 enum NapiWrite {
-    Memory {
-        db: Rc<CoreDb<CoreMemoryStorage>>,
-        write: WriteHandle<CoreMemoryStorage>,
-    },
-    Persistent {
-        db: Rc<CoreDb<CoreRocksDbStorage>>,
-        write: WriteHandle<CoreRocksDbStorage>,
-    },
+    Memory { db: Rc<CoreDb>, write: WriteHandle },
+    Persistent { db: Rc<CoreDb>, write: WriteHandle },
 }
 
 #[derive(Clone, Default)]
@@ -797,8 +791,9 @@ impl CoreTickScheduler for NapiTickScheduler {
     }
 
     fn drops_pending_ticks(&self) -> bool {
-        // `tick` polls `Db::tick` once through `core_poll_once` and drops it
-        // if it is still pending.
+        // `tick` drives `Db::tick` through `core_poll_once`, which drops it
+        // while it still waits on outside progress (cooperative yields are
+        // polled again in the same turn).
         true
     }
 
@@ -860,11 +855,11 @@ impl PendingNativeSubscription {
     }
 
     #[napi]
-    pub fn poll(&self) -> napi::Result<Option<Subscription>> {
+    pub fn poll(&self) -> js::Result<Option<Subscription>> {
         let Some(mut future) = self.future.borrow_mut().take() else {
-            return Err(napi::Error::from_reason(
-                "subscription opening is complete or cancelled",
-            ));
+            return Err(
+                napi::Error::from_reason("subscription opening is complete or cancelled").into(),
+            );
         };
         let wake = self
             .wake
@@ -873,7 +868,7 @@ impl PendingNativeSubscription {
             .unwrap_or_else(|| Waker::noop().clone());
         let mut context = Context::from_waker(&wake);
         match future.as_mut().poll(&mut context) {
-            Poll::Ready(result) => result.map(Some),
+            Poll::Ready(result) => Ok(result.map(Some)?),
             Poll::Pending => {
                 *self.future.borrow_mut() = Some(future);
                 Ok(None)
@@ -1097,8 +1092,8 @@ impl PendingNativeSubscriptionBatch {
 #[napi]
 impl PendingNativeRead {
     #[napi]
-    pub fn poll(&self) -> napi::Result<Option<Uint8Array>> {
-        self.poll_once()
+    pub fn poll(&self) -> js::Result<Option<Uint8Array>> {
+        self.poll_once().map_err(BindingError::from)
     }
 
     #[napi]
@@ -1113,8 +1108,8 @@ impl PendingNativeRead {
 #[napi]
 impl PendingNativePermissionAdvice {
     #[napi]
-    pub fn poll(&self) -> napi::Result<Option<String>> {
-        self.poll_once()
+    pub fn poll(&self) -> js::Result<Option<String>> {
+        self.poll_once().map_err(BindingError::from)
     }
 
     #[napi]
@@ -1163,8 +1158,93 @@ fn permission_advice_for_js(advice: CorePermissionAdvice) -> String {
     .to_owned()
 }
 
-fn napi_error(error: impl std::fmt::Display) -> napi::Error {
-    napi::Error::from_reason(error.to_string())
+/// Convert a Rust error into a `napi::Error` with its unchanged `Display` text.
+///
+/// A core [`jazz::db::Error`] additionally records its stable
+/// [`jazz::db::ErrorCode::as_str`] code. The code rides inside the
+/// `napi::Error` until an exported method returns it as a [`BindingError`],
+/// which throws it as the JavaScript `error.code`.
+fn napi_error(error: impl std::fmt::Display + 'static) -> napi::Error {
+    match (&error as &dyn std::any::Any).downcast_ref::<jazz::db::Error>() {
+        Some(core) => napi_core_error(core),
+        None => napi::Error::from_reason(error.to_string()),
+    }
+}
+
+/// Prefix of the private `cause` that carries a core error code from where the
+/// core error is converted to the exported method that throws it. It never
+/// reaches JavaScript: [`BindingError`] strips it.
+const CORE_ERROR_CODE_CARRIER: &str = "\u{0}jazz-core-error-code:";
+
+fn napi_core_error(error: &jazz::db::Error) -> napi::Error {
+    let mut napi_error = napi::Error::from_reason(error.to_string());
+    napi_error.set_cause(napi::Error::from_reason(format!(
+        "{CORE_ERROR_CODE_CARRIER}{}",
+        error.code.as_str()
+    )));
+    napi_error
+}
+
+/// The JavaScript `error.code` of an error thrown by an exported method.
+///
+/// napi-rs throws an `Error<S>` with `code` set to `S::as_ref()`. A core error
+/// uses its stable core code (for example `not_observed`); every other error
+/// keeps the napi status name napi-rs has always used (`GenericFailure`).
+pub struct JsErrorCode(String);
+
+impl AsRef<str> for JsErrorCode {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The error type of exported methods: a `napi::Error` whose JavaScript
+/// `code` is the core error code when there is one.
+pub struct BindingError(napi::Error<JsErrorCode>);
+
+impl From<napi::Error> for BindingError {
+    fn from(mut error: napi::Error) -> Self {
+        let carried = error.cause.as_ref().and_then(|cause| {
+            cause
+                .reason
+                .strip_prefix(CORE_ERROR_CODE_CARRIER)
+                .map(str::to_owned)
+        });
+        let (code, cause) = match carried {
+            Some(code) => (code, None),
+            None => (error.status.as_ref().to_owned(), error.cause.take()),
+        };
+        let mut coded = napi::Error::new(JsErrorCode(code), std::mem::take(&mut error.reason));
+        coded.cause = cause;
+        Self(coded)
+    }
+}
+
+impl From<BindingError> for JsError<JsErrorCode> {
+    fn from(error: BindingError) -> Self {
+        JsError::from(error.0)
+    }
+}
+
+impl std::ops::Deref for BindingError {
+    type Target = napi::Error<JsErrorCode>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for BindingError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+/// `js::Result` is the return type of exported methods that can throw a core
+/// error. napi-derive recognises a return type whose last path segment is
+/// `Result`, so the alias keeps that name.
+mod js {
+    pub type Result<T> = std::result::Result<T, super::BindingError>;
 }
 
 #[napi(js_name = "Transport")]
@@ -1241,7 +1321,7 @@ pub struct SubscriptionInvalidAuthoritySourceClosureReason {
 #[napi(object)]
 pub struct SubscriptionTerminalOperation {
     #[napi(js_name = "root_key")]
-    pub root_key: Vec<u32>,
+    pub root_key: Uint8Array,
     pub path: Vec<SubscriptionTerminalPathSegment>,
     pub edit: SubscriptionTerminalEdit,
 }
@@ -1255,7 +1335,7 @@ pub struct SubscriptionTerminalCollectionPathSegment {
 #[napi(object)]
 pub struct SubscriptionTerminalKeyPathSegment {
     #[napi(js_name = "Key")]
-    pub key: Vec<u32>,
+    pub key: Uint8Array,
 }
 
 #[napi(object)]
@@ -1267,8 +1347,8 @@ pub struct SubscriptionTerminalInsertEdit {
 #[napi(object)]
 pub struct SubscriptionTerminalInsert {
     pub index: f64,
-    pub key: Vec<u32>,
-    pub value: Vec<u32>,
+    pub key: Uint8Array,
+    pub value: Uint8Array,
 }
 
 #[napi(object)]
@@ -1279,8 +1359,8 @@ pub struct SubscriptionTerminalUpdateEdit {
 
 #[napi(object)]
 pub struct SubscriptionTerminalUpdate {
-    pub key: Vec<u32>,
-    pub value: Vec<u32>,
+    pub key: Uint8Array,
+    pub value: Uint8Array,
 }
 
 #[napi(object)]
@@ -1291,7 +1371,7 @@ pub struct SubscriptionTerminalRemoveEdit {
 
 #[napi(object)]
 pub struct SubscriptionTerminalRemove {
-    pub key: Vec<u32>,
+    pub key: Uint8Array,
 }
 
 #[napi(object)]
@@ -1302,7 +1382,7 @@ pub struct SubscriptionTerminalMoveEdit {
 
 #[napi(object)]
 pub struct SubscriptionTerminalMove {
-    pub key: Vec<u32>,
+    pub key: Uint8Array,
     pub index: f64,
 }
 
@@ -1332,12 +1412,12 @@ pub type SubscriptionTerminalEdit = Either4<
 
 enum NapiTransportInner {
     Memory {
-        db: Rc<CoreDb<CoreMemoryStorage>>,
-        connection: Option<Rc<LocalMutex<CorePeerConnection<CoreMemoryStorage>>>>,
+        db: Rc<CoreDb>,
+        connection: Option<Rc<LocalMutex<CorePeerConnection>>>,
     },
     Persistent {
-        db: Rc<CoreDb<CoreRocksDbStorage>>,
-        connection: Option<Rc<LocalMutex<CorePeerConnection<CoreRocksDbStorage>>>>,
+        db: Rc<CoreDb>,
+        connection: Option<Rc<LocalMutex<CorePeerConnection>>>,
     },
     Closed,
 }
@@ -1368,13 +1448,13 @@ impl NapiTransportInner {
 
 enum NapiSubscription {
     Memory {
-        db: Rc<CoreDb<CoreMemoryStorage>>,
+        db: Rc<CoreDb>,
         stream: SubscriptionStream,
         pending_events: VecDeque<CoreSubscriptionEvent>,
         pending_batch: Option<PendingNativeSubscriptionBatch>,
     },
     Persistent {
-        db: Rc<CoreDb<CoreRocksDbStorage>>,
+        db: Rc<CoreDb>,
         stream: SubscriptionStream,
         pending_events: VecDeque<CoreSubscriptionEvent>,
         pending_batch: Option<PendingNativeSubscriptionBatch>,
@@ -1432,15 +1512,15 @@ impl Write {
     }
 
     #[napi(js_name = "writeState")]
-    pub fn write_state(&self) -> napi::Result<serde_json::Value> {
+    pub fn write_state(&self) -> js::Result<serde_json::Value> {
         let Some(write) = &self.inner else {
-            return Err(napi::Error::from_reason("write state is unavailable"));
+            return Err(napi::Error::from_reason("write state is unavailable").into());
         };
         let state = match write {
             NapiWrite::Memory { write, .. } => core_block_on(write.write_state()),
             NapiWrite::Persistent { write, .. } => core_block_on(write.write_state()),
         }
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        .map_err(napi_error)?;
         Ok(core_write_state_to_json(&state))
     }
 
@@ -1450,7 +1530,7 @@ impl Write {
         env: Env,
         tier: String,
         observe_only: Option<bool>,
-    ) -> napi::Result<PromiseRaw<'static, ()>> {
+    ) -> js::Result<PromiseRaw<'static, ()>> {
         self.wait_promise(
             env,
             jazz::db::WriteWaitOptions {
@@ -1458,6 +1538,7 @@ impl Write {
                 observe_only: observe_only.unwrap_or(false),
             },
         )
+        .map_err(BindingError::from)
     }
 
     #[napi]
@@ -1469,20 +1550,18 @@ impl Write {
 #[napi]
 impl Transport {
     #[napi(js_name = "routeAuxiliaryWireFrame")]
-    pub fn route_auxiliary_wire_frame(
-        &self,
-        frame: Uint8Array,
-    ) -> napi::Result<Option<Uint8Array>> {
+    pub fn route_auxiliary_wire_frame(&self, frame: Uint8Array) -> js::Result<Option<Uint8Array>> {
         core_block_on(
             self.auxiliary_pump
                 .route_incoming_wire_frame(frame.to_vec()),
         )
         .map(|frame| frame.map(Uint8Array::new))
         .map_err(napi::Error::from_reason)
+        .map_err(BindingError::from)
     }
 
     #[napi(js_name = "recvAuxiliaryWireFrames")]
-    pub fn recv_auxiliary_wire_frames(&self) -> napi::Result<Vec<Uint8Array>> {
+    pub fn recv_auxiliary_wire_frames(&self) -> js::Result<Vec<Uint8Array>> {
         let mut frames = Vec::new();
         while let Some(frame) = self
             .auxiliary_pump
@@ -1502,13 +1581,14 @@ impl Transport {
     }
 
     #[napi(js_name = "expireAuxiliaryReceive")]
-    pub fn expire_auxiliary_receive(&self) -> napi::Result<()> {
+    pub fn expire_auxiliary_receive(&self) -> js::Result<()> {
         self.auxiliary_pump
             .expire_incomplete_receive()
             .map_err(|error| {
                 self.auxiliary_pump.disconnect();
                 napi::Error::from_reason(error)
             })
+            .map_err(BindingError::from)
     }
 
     #[napi(js_name = "auxiliaryOutboundReady")]
@@ -1540,10 +1620,12 @@ impl Transport {
     }
 
     #[napi]
-    pub fn tick(&self) -> napi::Result<u32> {
+    pub fn tick(&self) -> js::Result<u32> {
         match &self.inner {
-            NapiTransportInner::Memory { connection, .. } => core_tick_connection(connection),
-            NapiTransportInner::Persistent { connection, .. } => core_tick_connection(connection),
+            NapiTransportInner::Memory { connection, .. } => Ok(core_tick_connection(connection)?),
+            NapiTransportInner::Persistent { connection, .. } => {
+                Ok(core_tick_connection(connection)?)
+            }
             NapiTransportInner::Closed => Ok(0),
         }
     }
@@ -1574,7 +1656,7 @@ impl Subscription {
     #[napi(js_name = "readAll")]
     pub fn read_all(
         &mut self,
-    ) -> napi::Result<Either<Vec<SubscriptionEvent>, PendingNativeSubscriptionBatch>> {
+    ) -> js::Result<Either<Vec<SubscriptionEvent>, PendingNativeSubscriptionBatch>> {
         let subscription = self
             .inner
             .as_mut()
@@ -1606,7 +1688,7 @@ impl Subscription {
             },
             Err(error) => {
                 self.inner.take();
-                Err(error)
+                Err(error.into())
             }
         }
     }
@@ -1614,7 +1696,7 @@ impl Subscription {
     #[napi]
     pub fn drain(
         &mut self,
-    ) -> napi::Result<Either<Vec<SubscriptionEvent>, PendingNativeSubscriptionBatch>> {
+    ) -> js::Result<Either<Vec<SubscriptionEvent>, PendingNativeSubscriptionBatch>> {
         self.read_all()
     }
 
@@ -1760,7 +1842,7 @@ pub struct StreamingMutation {
 #[napi]
 impl StreamingMutation {
     #[napi]
-    pub fn push(&mut self, chunk: Uint8Array) -> napi::Result<()> {
+    pub fn push(&mut self, chunk: Uint8Array) -> js::Result<()> {
         self.lifecycle.ensure_stream_active(self.stream_id)?;
         let terminal = self
             .lifecycle
@@ -1771,7 +1853,7 @@ impl StreamingMutation {
             .ok_or_else(|| napi::Error::from_reason("streaming insert is closed"))?;
         let mut terminal = terminal.borrow_mut();
         if terminal.cleanup_only {
-            return Err(napi::Error::from_reason("streaming insert is closed"));
+            return Err(napi::Error::from_reason("streaming insert is closed").into());
         }
         let upload = terminal
             .upload
@@ -1792,11 +1874,11 @@ impl StreamingMutation {
         if result.is_err() {
             terminal.cleanup_only = true;
         }
-        result.map_err(|error| napi::Error::from_reason(error.to_string()))
+        result.map_err(napi_error).map_err(BindingError::from)
     }
 
     #[napi]
-    pub fn finish(&mut self) -> napi::Result<Write> {
+    pub fn finish(&mut self) -> js::Result<Write> {
         self.lifecycle.ensure_stream_active(self.stream_id)?;
         if self
             .lifecycle
@@ -1805,13 +1887,13 @@ impl StreamingMutation {
             .get(&self.stream_id)
             .is_some_and(|stream| stream.borrow().cleanup_only)
         {
-            return Err(napi::Error::from_reason("streaming insert is closed"));
+            return Err(napi::Error::from_reason("streaming insert is closed").into());
         }
         if self.cells.is_none() {
-            return Err(napi::Error::from_reason("streaming insert is closed"));
+            return Err(napi::Error::from_reason("streaming insert is closed").into());
         }
         let Some((storage, upload)) = self.lifecycle.take_stream(self.stream_id) else {
-            return Err(napi::Error::from_reason("streaming insert is closed"));
+            return Err(napi::Error::from_reason("streaming insert is closed").into());
         };
         let cells = self.cells.take().expect("checked above");
         match storage {
@@ -1829,8 +1911,9 @@ impl StreamingMutation {
                     self.head.clone(),
                     self.base.clone(),
                 ))
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
+                .map_err(napi_error)?,
+            )
+            .map_err(BindingError::from),
             NapiDbInnerStorage::Persistent(db) => core_write_persistent(
                 Rc::clone(&db),
                 core_block_on(db.finish_streaming_value_upload(
@@ -1845,13 +1928,14 @@ impl StreamingMutation {
                     self.head.clone(),
                     self.base.clone(),
                 ))
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
+                .map_err(napi_error)?,
+            )
+            .map_err(BindingError::from),
         }
     }
 
     #[napi]
-    pub fn abort(&mut self) -> napi::Result<bool> {
+    pub fn abort(&mut self) -> js::Result<bool> {
         self.cells.take();
         let Some((storage, upload)) = self.lifecycle.take_stream(self.stream_id) else {
             return Ok(false);
@@ -1864,7 +1948,7 @@ impl StreamingMutation {
                 core_block_on(db.abort_streaming_value_upload(upload))
             }
         }
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        .map_err(napi_error)?;
         Ok(true)
     }
 }
@@ -1940,7 +2024,7 @@ impl NapiDb {
         cells: Uint8Array,
         author: Option<Uint8Array>,
         claims: Option<JsonValue>,
-    ) -> napi::Result<Either<String, PendingNativePermissionAdvice>> {
+    ) -> js::Result<Either<String, PendingNativePermissionAdvice>> {
         let delegated_session =
             core_delegated_session_from_napi(author, claims, &self.author_admissions)?;
         self.request_permission_advice(
@@ -1950,6 +2034,7 @@ impl NapiDb {
             },
             delegated_session,
         )
+        .map_err(BindingError::from)
     }
 
     #[napi(js_name = "requestReadPermissionAdvice")]
@@ -1959,7 +2044,7 @@ impl NapiDb {
         row_id: Uint8Array,
         author: Option<Uint8Array>,
         claims: Option<JsonValue>,
-    ) -> napi::Result<Either<String, PendingNativePermissionAdvice>> {
+    ) -> js::Result<Either<String, PendingNativePermissionAdvice>> {
         let delegated_session =
             core_delegated_session_from_napi(author, claims, &self.author_admissions)?;
         self.request_permission_advice(
@@ -1969,6 +2054,7 @@ impl NapiDb {
             },
             delegated_session,
         )
+        .map_err(BindingError::from)
     }
 
     #[napi(js_name = "requestUpdatePermissionAdvice")]
@@ -1979,7 +2065,7 @@ impl NapiDb {
         patch: Uint8Array,
         author: Option<Uint8Array>,
         claims: Option<JsonValue>,
-    ) -> napi::Result<Either<String, PendingNativePermissionAdvice>> {
+    ) -> js::Result<Either<String, PendingNativePermissionAdvice>> {
         let delegated_session =
             core_delegated_session_from_napi(author, claims, &self.author_admissions)?;
         self.request_permission_advice(
@@ -1990,6 +2076,7 @@ impl NapiDb {
             },
             delegated_session,
         )
+        .map_err(BindingError::from)
     }
 
     #[napi(js_name = "requestDeletePermissionAdvice")]
@@ -1999,7 +2086,7 @@ impl NapiDb {
         row_id: Uint8Array,
         author: Option<Uint8Array>,
         claims: Option<JsonValue>,
-    ) -> napi::Result<Either<String, PendingNativePermissionAdvice>> {
+    ) -> js::Result<Either<String, PendingNativePermissionAdvice>> {
         let delegated_session =
             core_delegated_session_from_napi(author, claims, &self.author_admissions)?;
         self.request_permission_advice(
@@ -2009,6 +2096,7 @@ impl NapiDb {
             },
             delegated_session,
         )
+        .map_err(BindingError::from)
     }
 
     /// Admit a verified local-first account for this backend runtime only.
@@ -2018,16 +2106,18 @@ impl NapiDb {
         token: String,
         app_id: String,
         claimed_author: String,
-    ) -> napi::Result<()> {
+    ) -> js::Result<()> {
         self.require_trusted_backend()?;
         if self.inner.borrow().is_none() {
-            return Err(napi::Error::from_reason("database is closed"));
+            return Err(napi::Error::from_reason("database is closed").into());
         }
-        self.author_admissions.admit(CoreSelfSignedClientProof {
-            token,
-            app_id,
-            claimed_author,
-        })
+        self.author_admissions
+            .admit(CoreSelfSignedClientProof {
+                token,
+                app_id,
+                claimed_author,
+            })
+            .map_err(BindingError::from)
     }
 
     fn require_trusted_backend(&self) -> napi::Result<()> {
@@ -2041,7 +2131,7 @@ impl NapiDb {
         table: String,
         cells: Uint8Array,
         options: Option<InsertOptions>,
-    ) -> napi::Result<Write> {
+    ) -> js::Result<Write> {
         let cells = decode_core_cells(&cells)?;
         let options = core_insert_options_with_admissions(
             options,
@@ -2056,16 +2146,16 @@ impl NapiDb {
             NapiDbInnerStorage::Memory(db) => {
                 let write = db
                     .enqueue_insert(table, cells, options)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    .map_err(napi_error)?;
                 core_drive_direct_mutation_once(db, &write)?;
-                core_write_memory(Rc::clone(db), write)
+                core_write_memory(Rc::clone(db), write).map_err(BindingError::from)
             }
             NapiDbInnerStorage::Persistent(db) => {
                 let write = db
                     .enqueue_insert(table, cells, options)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    .map_err(napi_error)?;
                 core_drive_direct_mutation_once(db, &write)?;
-                core_write_persistent(Rc::clone(db), write)
+                core_write_persistent(Rc::clone(db), write).map_err(BindingError::from)
             }
         }
     }
@@ -2077,7 +2167,7 @@ impl NapiDb {
         table: String,
         cells: Uint8Array,
         options: Option<InsertOptions>,
-    ) -> napi::Result<Uint8Array> {
+    ) -> js::Result<Uint8Array> {
         let open_transaction_id = open_transaction_id
             .parse::<CoreOpenTransactionId>()
             .map_err(napi::Error::from_reason)?;
@@ -2113,7 +2203,7 @@ impl NapiDb {
         row_id: Uint8Array,
         patch: Uint8Array,
         options: Option<UpdateOptions>,
-    ) -> napi::Result<Write> {
+    ) -> js::Result<Write> {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let patch = decode_core_cells(&patch)?;
         let options = core_update_options_with_admissions(
@@ -2129,16 +2219,16 @@ impl NapiDb {
             NapiDbInnerStorage::Memory(db) => {
                 let write = db
                     .enqueue_update(table, row_id, patch, options)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    .map_err(napi_error)?;
                 core_drive_direct_mutation_once(db, &write)?;
-                core_write_memory(Rc::clone(db), write)
+                core_write_memory(Rc::clone(db), write).map_err(BindingError::from)
             }
             NapiDbInnerStorage::Persistent(db) => {
                 let write = db
                     .enqueue_update(table, row_id, patch, options)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    .map_err(napi_error)?;
                 core_drive_direct_mutation_once(db, &write)?;
-                core_write_persistent(Rc::clone(db), write)
+                core_write_persistent(Rc::clone(db), write).map_err(BindingError::from)
             }
         }
     }
@@ -2151,7 +2241,7 @@ impl NapiDb {
         row_id: Uint8Array,
         patch: Uint8Array,
         options: Option<UpdateOptions>,
-    ) -> napi::Result<()> {
+    ) -> js::Result<()> {
         let open_transaction_id = open_transaction_id
             .parse::<CoreOpenTransactionId>()
             .map_err(napi::Error::from_reason)?;
@@ -2191,7 +2281,7 @@ impl NapiDb {
         patch: Uint8Array,
         mutations: JsonValue,
         updated_at_ms: Option<f64>,
-    ) -> napi::Result<Write> {
+    ) -> js::Result<Write> {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let patch = decode_core_cells(&patch)?;
         let mutations: Vec<CoreLargeValueUpdate> =
@@ -2214,16 +2304,16 @@ impl NapiDb {
             NapiDbInnerStorage::Memory(db) => {
                 let write = db
                     .enqueue_large_value_update(table, row_id, patch, mutations, updated_at_ms)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    .map_err(napi_error)?;
                 core_drive_direct_mutation_once(db, &write)?;
-                core_write_memory(Rc::clone(db), write)
+                core_write_memory(Rc::clone(db), write).map_err(BindingError::from)
             }
             NapiDbInnerStorage::Persistent(db) => {
                 let write = db
                     .enqueue_large_value_update(table, row_id, patch, mutations, updated_at_ms)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    .map_err(napi_error)?;
                 core_drive_direct_mutation_once(db, &write)?;
-                core_write_persistent(Rc::clone(db), write)
+                core_write_persistent(Rc::clone(db), write).map_err(BindingError::from)
             }
         }
     }
@@ -2235,7 +2325,7 @@ impl NapiDb {
         row_id: Uint8Array,
         cells: Uint8Array,
         #[napi(ts_arg_type = "UpsertOptions | undefined | null")] options: Option<Unknown<'_>>,
-    ) -> napi::Result<Write> {
+    ) -> js::Result<Write> {
         // Reject an obsolete JavaScript shape before inspecting mutation bytes:
         // callers should get the actionable API error, and no malformed row
         // payload can mask a Root-target compatibility violation.
@@ -2254,16 +2344,16 @@ impl NapiDb {
             NapiDbInnerStorage::Memory(db) => {
                 let write = db
                     .enqueue_upsert(table, row_id, cells, options)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    .map_err(napi_error)?;
                 core_drive_direct_mutation_once(db, &write)?;
-                core_write_memory(Rc::clone(db), write)
+                core_write_memory(Rc::clone(db), write).map_err(BindingError::from)
             }
             NapiDbInnerStorage::Persistent(db) => {
                 let write = db
                     .enqueue_upsert(table, row_id, cells, options)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    .map_err(napi_error)?;
                 core_drive_direct_mutation_once(db, &write)?;
-                core_write_persistent(Rc::clone(db), write)
+                core_write_persistent(Rc::clone(db), write).map_err(BindingError::from)
             }
         }
     }
@@ -2276,7 +2366,7 @@ impl NapiDb {
         row_id: Uint8Array,
         cells: Uint8Array,
         #[napi(ts_arg_type = "UpsertOptions | undefined | null")] options: Option<Unknown<'_>>,
-    ) -> napi::Result<()> {
+    ) -> js::Result<()> {
         let open_transaction_id = open_transaction_id
             .parse::<CoreOpenTransactionId>()
             .map_err(napi::Error::from_reason)?;
@@ -2312,7 +2402,7 @@ impl NapiDb {
         table: String,
         row_id: Uint8Array,
         options: Option<DeleteOptions>,
-    ) -> napi::Result<Write> {
+    ) -> js::Result<Write> {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let options = core_delete_options_with_admissions(
             options,
@@ -2327,16 +2417,16 @@ impl NapiDb {
             NapiDbInnerStorage::Memory(db) => {
                 let write = db
                     .enqueue_delete(table, row_id, options)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    .map_err(napi_error)?;
                 core_drive_direct_mutation_once(db, &write)?;
-                core_write_memory(Rc::clone(db), write)
+                core_write_memory(Rc::clone(db), write).map_err(BindingError::from)
             }
             NapiDbInnerStorage::Persistent(db) => {
                 let write = db
                     .enqueue_delete(table, row_id, options)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    .map_err(napi_error)?;
                 core_drive_direct_mutation_once(db, &write)?;
-                core_write_persistent(Rc::clone(db), write)
+                core_write_persistent(Rc::clone(db), write).map_err(BindingError::from)
             }
         }
     }
@@ -2348,7 +2438,7 @@ impl NapiDb {
         table: String,
         row_id: Uint8Array,
         options: Option<DeleteOptions>,
-    ) -> napi::Result<()> {
+    ) -> js::Result<()> {
         let open_transaction_id = open_transaction_id
             .parse::<CoreOpenTransactionId>()
             .map_err(napi::Error::from_reason)?;
@@ -2383,7 +2473,7 @@ impl NapiDb {
         row_id: Uint8Array,
         cells: Option<Uint8Array>,
         options: Option<RestoreOptions>,
-    ) -> napi::Result<Write> {
+    ) -> js::Result<Write> {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let cells = cells.map(|cells| decode_core_cells(&cells)).transpose()?;
         let options = core_restore_options_with_admissions(
@@ -2399,16 +2489,16 @@ impl NapiDb {
             NapiDbInnerStorage::Memory(db) => {
                 let write = db
                     .enqueue_restore(table, row_id, cells, options)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    .map_err(napi_error)?;
                 core_drive_direct_mutation_once(db, &write)?;
-                core_write_memory(Rc::clone(db), write)
+                core_write_memory(Rc::clone(db), write).map_err(BindingError::from)
             }
             NapiDbInnerStorage::Persistent(db) => {
                 let write = db
                     .enqueue_restore(table, row_id, cells, options)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    .map_err(napi_error)?;
                 core_drive_direct_mutation_once(db, &write)?;
-                core_write_persistent(Rc::clone(db), write)
+                core_write_persistent(Rc::clone(db), write).map_err(BindingError::from)
             }
         }
     }
@@ -2421,7 +2511,7 @@ impl NapiDb {
         row_id: Uint8Array,
         cells: Option<Uint8Array>,
         options: Option<RestoreOptions>,
-    ) -> napi::Result<()> {
+    ) -> js::Result<()> {
         let open_transaction_id = open_transaction_id
             .parse::<CoreOpenTransactionId>()
             .map_err(napi::Error::from_reason)?;
@@ -2464,13 +2554,13 @@ impl NapiDb {
         updated_at_ms: Option<f64>,
         head: Option<JsonValue>,
         base: Option<JsonValue>,
-    ) -> napi::Result<StreamingMutation> {
+    ) -> js::Result<StreamingMutation> {
         let updated_at_ms = updated_at_ms
             .map(|value| checked_u64(value, "updatedAtMs"))
             .transpose()?;
         self.streaming.ensure_admitted(self.view_id)?;
         if self.inner.borrow().is_none() {
-            return Err(napi::Error::from_reason("database is closed"));
+            return Err(napi::Error::from_reason("database is closed").into());
         }
         let mutation = match mutation.as_deref().unwrap_or("insert") {
             "insert" => CoreStreamingMutationKind::Insert,
@@ -2479,20 +2569,23 @@ impl NapiDb {
             _ => {
                 return Err(napi::Error::from_reason(
                     "streaming mutation must be insert, update, or upsert",
-                ));
+                )
+                .into());
             }
         };
         if author.is_some() && attribution.is_some() {
             return Err(napi::Error::from_reason(
                 "streaming mutation identity cannot contain both author and attribution",
-            ));
+            )
+            .into());
         }
         if attribution.is_some() {
             self.require_trusted_backend()?;
             if head.is_some() || base.is_some() {
                 return Err(napi::Error::from_reason(
                     "backend-attributed streaming mutations do not support branch writes",
-                ));
+                )
+                .into());
             }
         }
         let identity = core_write_identity(
@@ -2506,7 +2599,8 @@ impl NapiDb {
         if base.is_some() && head.is_none() {
             return Err(napi::Error::from_reason(
                 "a streaming mutation branch base requires a branch head",
-            ));
+            )
+            .into());
         }
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let cells = decode_core_cells(&cells)?;
@@ -2518,12 +2612,12 @@ impl NapiDb {
             match db {
                 NapiDbInnerStorage::Memory(db) => (
                     db.begin_streaming_value_upload(&table, &cells, &column)
-                        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                        .map_err(napi_error)?,
                     NapiDbInnerStorage::Memory(Rc::clone(db)),
                 ),
                 NapiDbInnerStorage::Persistent(db) => (
                     db.begin_streaming_value_upload(&table, &cells, &column)
-                        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                        .map_err(napi_error)?,
                     NapiDbInnerStorage::Persistent(Rc::clone(db)),
                 ),
             }
@@ -2548,7 +2642,7 @@ impl NapiDb {
     }
 
     #[napi(factory, js_name = "openMemory")]
-    pub fn open_memory(schema: Uint8Array, config: Uint8Array) -> napi::Result<Self> {
+    pub fn open_memory(schema: Uint8Array, config: Uint8Array) -> js::Result<Self> {
         let (schema, config) = decode_core_open_args(&schema, &config)?;
         let identity = core_open_identity(&config, None)?;
         let refs = schema.column_families();
@@ -2575,7 +2669,7 @@ impl NapiDb {
     /// Open a deliberate backend runtime. Unlike the public raw-open entrypoint,
     /// this explicit ABI derives the canonical system author.
     #[napi(factory, js_name = "openMemoryAsBackend")]
-    pub fn open_memory_as_backend(schema: Uint8Array, config: Uint8Array) -> napi::Result<Self> {
+    pub fn open_memory_as_backend(schema: Uint8Array, config: Uint8Array) -> js::Result<Self> {
         let (schema, config) = decode_core_open_args(&schema, &config)?;
         let identity = core_open_backend_identity(&config)?;
         let refs = schema.column_families();
@@ -2610,7 +2704,7 @@ impl NapiDb {
         token: String,
         app_id: String,
         claimed_author: String,
-    ) -> napi::Result<Self> {
+    ) -> js::Result<Self> {
         let (schema, config) = decode_core_open_args(&schema, &config)?;
         let proof = CoreSelfSignedClientProof {
             token,
@@ -2644,7 +2738,7 @@ impl NapiDb {
         data_path: String,
         schema: Uint8Array,
         config: Uint8Array,
-    ) -> napi::Result<Self> {
+    ) -> js::Result<Self> {
         let (schema, config) = decode_core_open_args(&schema, &config)?;
         let identity = core_open_identity(&config, None)?;
         let storage = open_persistent_core_storage(data_path, &schema)?;
@@ -2670,7 +2764,7 @@ impl NapiDb {
         data_path: String,
         schema: Uint8Array,
         config: Uint8Array,
-    ) -> napi::Result<Self> {
+    ) -> js::Result<Self> {
         let (schema, config) = decode_core_open_args(&schema, &config)?;
         let identity = core_open_backend_identity(&config)?;
         let storage = open_persistent_core_storage(data_path, &schema)?;
@@ -2697,7 +2791,7 @@ impl NapiDb {
         token: String,
         app_id: String,
         claimed_author: String,
-    ) -> napi::Result<Self> {
+    ) -> js::Result<Self> {
         let (schema, config) = decode_core_open_args(&schema, &config)?;
         let proof = CoreSelfSignedClientProof {
             token,
@@ -2723,7 +2817,7 @@ impl NapiDb {
 
     /// Register and return a typed view backed by this same runtime owner.
     #[napi(js_name = "registerSchema")]
-    pub fn register_schema(&self, schema: Uint8Array) -> napi::Result<Self> {
+    pub fn register_schema(&self, schema: Uint8Array) -> js::Result<Self> {
         self.streaming.ensure_admitted(self.view_id)?;
         let schema = decode_public_schema(&schema)?;
         let db = self.inner.borrow();
@@ -2732,12 +2826,10 @@ impl NapiDb {
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         let view = match db {
             NapiDbInnerStorage::Memory(db) => NapiDbInnerStorage::Memory(Rc::new(
-                core_block_on(db.register_schema_view(schema))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                core_block_on(db.register_schema_view(schema)).map_err(napi_error)?,
             )),
             NapiDbInnerStorage::Persistent(db) => NapiDbInnerStorage::Persistent(Rc::new(
-                core_block_on(db.register_schema_view(schema))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                core_block_on(db.register_schema_view(schema)).map_err(napi_error)?,
             )),
         };
         let view_id = self.streaming.register_view()?;
@@ -2760,7 +2852,7 @@ impl NapiDb {
         kind: String,
         author: Option<Uint8Array>,
         attribution: Option<Uint8Array>,
-    ) -> napi::Result<()> {
+    ) -> js::Result<()> {
         let open_transaction_id = open_transaction_id
             .parse::<CoreOpenTransactionId>()
             .map_err(napi::Error::from_reason)?;
@@ -2777,13 +2869,12 @@ impl NapiDb {
             if author.is_some() {
                 return Err(napi::Error::from_reason(
                     "backend-attributed transactions cannot override backend admission identity",
-                ));
+                )
+                .into());
             }
         }
         if kind != "mergeable" && kind != "exclusive" {
-            return Err(napi::Error::from_reason(unknown_transaction_kind_message(
-                &kind,
-            )));
+            return Err(napi::Error::from_reason(unknown_transaction_kind_message(&kind)).into());
         }
         let db = self.inner.borrow();
         let db = db
@@ -2806,7 +2897,7 @@ impl NapiDb {
             NapiDbInnerStorage::Memory(db) => begin!(db, true),
             NapiDbInnerStorage::Persistent(db) => begin!(db, false),
         };
-        result.map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        result.map_err(napi_error)?;
         Ok(())
     }
 
@@ -2816,7 +2907,7 @@ impl NapiDb {
         &self,
         open_transaction_id: String,
         kind: Option<String>,
-    ) -> napi::Result<Write> {
+    ) -> js::Result<Write> {
         let open_transaction_id = open_transaction_id
             .parse::<CoreOpenTransactionId>()
             .map_err(napi::Error::from_reason)?;
@@ -2826,26 +2917,27 @@ impl NapiDb {
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         match (db, kind.as_deref().unwrap_or("mergeable")) {
             (NapiDbInnerStorage::Memory(db), "mergeable") => {
-                core_commit_tx_memory(db, open_transaction_id)
+                core_commit_tx_memory(db, open_transaction_id).map_err(BindingError::from)
             }
             (NapiDbInnerStorage::Persistent(db), "mergeable") => {
-                core_commit_tx_persistent(db, open_transaction_id)
+                core_commit_tx_persistent(db, open_transaction_id).map_err(BindingError::from)
             }
             (NapiDbInnerStorage::Memory(db), "exclusive") => {
-                core_commit_exclusive_tx_memory(db, open_transaction_id)
+                core_commit_exclusive_tx_memory(db, open_transaction_id).map_err(BindingError::from)
             }
             (NapiDbInnerStorage::Persistent(db), "exclusive") => {
                 core_commit_exclusive_tx_persistent(db, open_transaction_id)
+                    .map_err(BindingError::from)
             }
-            (_, kind) => Err(napi::Error::from_reason(unknown_transaction_kind_message(
-                kind,
-            ))),
+            (_, kind) => {
+                Err(napi::Error::from_reason(unknown_transaction_kind_message(kind)).into())
+            }
         }
     }
 
     /// Roll back an owner-wide open transaction by id.
     #[napi(js_name = "rollbackTransaction")]
-    pub fn rollback_transaction(&self, open_transaction_id: String) -> napi::Result<()> {
+    pub fn rollback_transaction(&self, open_transaction_id: String) -> js::Result<()> {
         let open_transaction_id = open_transaction_id
             .parse::<CoreOpenTransactionId>()
             .map_err(napi::Error::from_reason)?;
@@ -2859,7 +2951,8 @@ impl NapiDb {
                 db.abandon_transaction_handle(open_transaction_id)
             }
         }
-        .map_err(|error| napi::Error::from_reason(error.to_string()))
+        .map_err(napi_error)
+        .map_err(BindingError::from)
     }
 
     #[napi(
@@ -2933,7 +3026,7 @@ impl NapiDb {
         open_transaction_id: Option<String>,
         author: Option<Uint8Array>,
         claims: Option<JsonValue>,
-    ) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
+    ) -> js::Result<Either<Uint8Array, PendingNativeRead>> {
         let synchronous = opts
             .as_ref()
             .map(|opts| optional_json_bool_prop(opts, "sync"))
@@ -3021,8 +3114,10 @@ impl NapiDb {
                             })?
                             .map_err(napi_error)?
                     }))
+                    .map_err(BindingError::from)
                 } else {
                     native_covered_read_or_pending(future, Box::new(|| {}))
+                        .map_err(BindingError::from)
                 }
             }};
         }
@@ -3039,7 +3134,7 @@ impl NapiDb {
         #[napi(ts_arg_type = "Record<string, unknown> | undefined | null")] claims: Option<
             JsonValue,
         >,
-    ) -> napi::Result<()> {
+    ) -> js::Result<()> {
         let inner = self.inner.borrow();
         let db = inner
             .as_ref()
@@ -3067,7 +3162,7 @@ impl NapiDb {
         #[napi(ts_arg_type = "Record<string, unknown> | undefined | null")] claims: Option<
             JsonValue,
         >,
-    ) -> napi::Result<()> {
+    ) -> js::Result<()> {
         let author = self.author_admissions.resolve(&author)?;
         let claims = core_claims_from_json(author, claims)?;
         let db = self.inner.borrow();
@@ -3082,7 +3177,7 @@ impl NapiDb {
     }
 
     #[napi(js_name = "localCurrentRow")]
-    pub fn local_current_row(&self, table: String, row_id: Uint8Array) -> napi::Result<Uint8Array> {
+    pub fn local_current_row(&self, table: String, row_id: Uint8Array) -> js::Result<Uint8Array> {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let db = self.inner.borrow();
         let db = db
@@ -3094,11 +3189,12 @@ impl NapiDb {
                 core_block_on(db.local_current_row(&table, row_id))
             }
         }
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        .map_err(napi_error)?;
         let rows = row.into_iter().collect::<Vec<_>>();
         encode_core_rows(&rows)
             .map(Uint8Array::new)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))
+            .map_err(napi_error)
+            .map_err(BindingError::from)
     }
 
     #[napi(ts_return_type = "Subscription | PendingNativeSubscription")]
@@ -3111,7 +3207,7 @@ impl NapiDb {
         opts: Option<JsonValue>,
         author: Option<Uint8Array>,
         claims: Option<JsonValue>,
-    ) -> napi::Result<Either<Subscription, PendingNativeSubscription>> {
+    ) -> js::Result<Either<Subscription, PendingNativeSubscription>> {
         let opts = core_read_opts_from_json(opts)?;
         let trusted_client = self.trusted_backend;
         let explicit_author = author
@@ -3171,7 +3267,7 @@ impl NapiDb {
     }
 
     #[napi]
-    pub fn tick(&self) -> napi::Result<()> {
+    pub fn tick(&self) -> js::Result<()> {
         if self.streaming.cleanup_drain_blocks_tick() {
             return Ok(());
         }
@@ -3183,11 +3279,9 @@ impl NapiDb {
             NapiDbInnerStorage::Memory(db) => core_poll_once(db.tick()),
             NapiDbInnerStorage::Persistent(db) => core_poll_once(db.tick()),
         };
-        let result = completed
-            .unwrap_or(Ok(()))
-            .map_err(|error| napi::Error::from_reason(error.to_string()));
+        let result = completed.unwrap_or(Ok(())).map_err(napi_error);
         self.streaming.collect_completed();
-        result
+        result.map_err(BindingError::from)
     }
 
     /// Configure Jazz-owned upload ingress and unpublished-tree expiry limits.
@@ -3197,12 +3291,12 @@ impl NapiDb {
         incoming_bytes_per_window: f64,
         window_ms: f64,
         max_age_ms: Option<f64>,
-    ) -> napi::Result<()> {
+    ) -> js::Result<()> {
         let incoming_bytes_per_window =
             checked_u64(incoming_bytes_per_window, "incomingBytesPerWindow")?;
         let window_ms = checked_u64(window_ms, "windowMs")?;
         if window_ms < 1 {
-            return Err(napi::Error::from_reason("windowMs must be at least 1"));
+            return Err(napi::Error::from_reason("windowMs must be at least 1").into());
         }
         let max_age_ms = max_age_ms
             .map(|value| checked_u64(value, "maxAgeMs"))
@@ -3226,7 +3320,7 @@ impl NapiDb {
 
     /// Run one idempotent expiry pass; native hosts normally call this on a timer.
     #[napi(js_name = "evictExpiredStagedLargeValues")]
-    pub fn evict_expired_staged_large_values(&self) -> napi::Result<u32> {
+    pub fn evict_expired_staged_large_values(&self) -> js::Result<u32> {
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -3237,12 +3331,12 @@ impl NapiDb {
                 core_block_on(db.evict_expired_staged_large_values())
             }
         }
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        .map_err(napi_error)?;
         Ok(evicted.try_into().unwrap_or(u32::MAX))
     }
 
     #[napi(js_name = "setNonDurableClient")]
-    pub fn set_non_durable_client(&self) -> napi::Result<()> {
+    pub fn set_non_durable_client(&self) -> js::Result<()> {
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -3262,7 +3356,7 @@ impl NapiDb {
     /// `"attempting"` report as the start of a new attempt; until this is
     /// first called, reachability is derived from this runtime's own upstream.
     #[napi(js_name = "setRemoteLinkHint")]
-    pub fn set_remote_link_hint(&self, state: String) -> napi::Result<()> {
+    pub fn set_remote_link_hint(&self, state: String) -> js::Result<()> {
         let hint = CoreRemoteLinkHint::from_host_str(&state).ok_or_else(|| {
             napi::Error::from_reason(format!("unknown remote link state {state}"))
         })?;
@@ -3278,7 +3372,7 @@ impl NapiDb {
     }
 
     #[napi(js_name = "connectUpstream")]
-    pub fn connect_upstream(&self) -> napi::Result<Transport> {
+    pub fn connect_upstream(&self) -> js::Result<Transport> {
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -3328,25 +3422,26 @@ impl NapiDb {
         remote_epoch: BigInt,
         local_node: Buffer,
         local_epoch: BigInt,
-    ) -> napi::Result<Transport> {
+    ) -> js::Result<Transport> {
         let local_features = jazz::wire::current_wire_features();
         if protocol_version != jazz::wire::WIRE_PROTOCOL_VERSION {
             return Err(napi::Error::from_reason(format!(
                 "server negotiated wire protocol {protocol_version}, but this native binding supports only {}",
                 jazz::wire::WIRE_PROTOCOL_VERSION
-            )));
+            )).into());
         }
         let features = features as u64;
         let unsupported = features & !local_features;
         if unsupported != 0 {
             return Err(napi::Error::from_reason(format!(
                 "server negotiated wire features {features:#x}, but this native binding was not compiled with {unsupported:#x}"
-            )));
+            )).into());
         }
         if features & jazz::wire::FEATURE_SYNC_MESSAGE_PAYLOAD == 0 {
             return Err(napi::Error::from_reason(
                 "server did not negotiate required sync message payload frames",
-            ));
+            )
+            .into());
         }
         let remote_node: [u8; 16] = remote_node.as_ref().try_into().map_err(|_| {
             napi::Error::from_reason("server hello authority node must be 16 bytes")
@@ -3410,7 +3505,7 @@ impl NapiDb {
 
     /// Return the originating node clock before a host releases its memory runtime.
     #[napi(js_name = "foregroundTxTimeHighWater")]
-    pub fn foreground_tx_time_high_water(&self) -> napi::Result<BigInt> {
+    pub fn foreground_tx_time_high_water(&self) -> js::Result<BigInt> {
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -3426,7 +3521,7 @@ impl NapiDb {
 
     /// Merge a checked host-retained node clock before opening new local writes.
     #[napi(js_name = "seedForegroundTxTimeHighWater")]
-    pub fn seed_foreground_tx_time_high_water(&self, high_water: BigInt) -> napi::Result<()> {
+    pub fn seed_foreground_tx_time_high_water(&self, high_water: BigInt) -> js::Result<()> {
         let high_water = jazz::time::TxTime(authority_epoch_from_bigint(
             high_water,
             "node clock high-water",
@@ -3450,7 +3545,7 @@ impl NapiDb {
     pub fn wait_for_pending_writes(
         &self,
         tier: String,
-    ) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
+    ) -> js::Result<Either<Uint8Array, PendingNativeRead>> {
         let tier = core_durability_tier_from_str(&tier)?;
         let inner = self
             .inner
@@ -3469,9 +3564,10 @@ impl NapiDb {
             }
             Ok(Uint8Array::new(Vec::new()))
         }))
+        .map_err(BindingError::from)
     }
     #[napi(js_name = "__closePollable", skip_typescript)]
-    pub fn close(&self) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
+    pub fn close(&self) -> js::Result<Either<Uint8Array, PendingNativeRead>> {
         let lifecycle = Rc::clone(&self.streaming);
         let owns_runtime = self.owns_runtime;
         let view_id = self.view_id;
@@ -3481,7 +3577,8 @@ impl NapiDb {
                     result
                         .map(|()| Uint8Array::new(Vec::new()))
                         .map_err(napi::Error::from_reason)
-                }));
+                }))
+                .map_err(BindingError::from);
             }
             if matches!(
                 lifecycle.views.borrow().get(&view_id),
@@ -3499,7 +3596,8 @@ impl NapiDb {
                         }
                     })
                     .await
-                }));
+                }))
+                .map_err(BindingError::from);
             }
         }
         if lifecycle.state.get() == StreamingOwnerState::Closing {
@@ -3513,7 +3611,8 @@ impl NapiDb {
                     }
                 })
                 .await
-            }));
+            }))
+            .map_err(BindingError::from);
         }
         if lifecycle.state.get() == StreamingOwnerState::Closed {
             let result = lifecycle.close_result.borrow().clone().unwrap_or(Ok(()));
@@ -3521,7 +3620,8 @@ impl NapiDb {
                 result
                     .map(|()| Uint8Array::new(Vec::new()))
                     .map_err(napi::Error::from_reason)
-            }));
+            }))
+            .map_err(BindingError::from);
         }
         let inner = self.inner.borrow_mut().take();
         if owns_runtime {
@@ -3568,6 +3668,7 @@ impl NapiDb {
             }
             result.map(|()| Uint8Array::new(Vec::new()))
         }))
+        .map_err(BindingError::from)
     }
 }
 async fn close_owned_napi_runtime<S>(
@@ -3658,15 +3759,14 @@ fn open_persistent_core_storage(
 ) -> napi::Result<CoreRocksDbStorage> {
     let refs = schema.column_families();
     let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-    let codec_profile = node_storage_codec_profile()
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+    let codec_profile = node_storage_codec_profile().map_err(napi_error)?;
     CoreRocksDbStorage::open_with_durability_and_codec_profile(
         data_path,
         &refs,
         CoreRocksDbDurability::WalNoSync,
         &codec_profile,
     )
-    .map_err(|error| napi::Error::from_reason(error.to_string()))
+    .map_err(napi_error)
 }
 
 fn open_core_db<S>(
@@ -3675,7 +3775,7 @@ fn open_core_db<S>(
     config: CoreOpenDbConfig,
     identity: CoreDbIdentity,
     backend_attribution: bool,
-) -> napi::Result<CoreDb<S>>
+) -> napi::Result<CoreDb>
 where
     S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
 {
@@ -3693,9 +3793,8 @@ where
         } else {
             core_block_on(CoreDb::open_history_complete(db_config))
         }
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-        configure_initial_sync_flush_cadence(&db, initial_sync_flush_every)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        .map_err(napi_error)?;
+        configure_initial_sync_flush_cadence(&db, initial_sync_flush_every).map_err(napi_error)?;
         Ok(db)
     } else {
         let db = if backend_attribution {
@@ -3704,9 +3803,8 @@ where
         } else {
             core_block_on(CoreDb::open(db_config))
         }
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-        configure_initial_sync_flush_cadence(&db, initial_sync_flush_every)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        .map_err(napi_error)?;
+        configure_initial_sync_flush_cadence(&db, initial_sync_flush_every).map_err(napi_error)?;
         Ok(db)
     }
 }
@@ -3793,8 +3891,7 @@ fn checked_u64(value: f64, name: &str) -> napi::Result<u64> {
 fn core_author_id_from_bytes(bytes: &[u8]) -> napi::Result<CoreAuthorSubject> {
     let canonical = std::str::from_utf8(bytes)
         .map_err(|_| napi::Error::from_reason("author subject must be canonical UTF-8 JSON"))?;
-    CoreAuthorSubject::from_untrusted_canonical(canonical)
-        .map_err(|error| napi::Error::from_reason(error.to_string()))
+    CoreAuthorSubject::from_untrusted_canonical(canonical).map_err(napi_error)
 }
 
 fn core_delegated_session_from_napi(
@@ -3813,36 +3910,28 @@ fn core_delegated_session_from_napi(
         .transpose()
 }
 
-fn core_write_memory(
-    db: Rc<CoreDb<CoreMemoryStorage>>,
-    write: WriteHandle<CoreMemoryStorage>,
-) -> napi::Result<Write> {
+fn core_write_memory(db: Rc<CoreDb>, write: WriteHandle) -> napi::Result<Write> {
     let tx_id = write.mergeable_tx_id();
     let result = WriteResult {
         row_id: write.row_uuid(),
         tx_id,
     };
     Ok(Write {
-        payload: postcard::to_allocvec(&result)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+        payload: postcard::to_allocvec(&result).map_err(napi_error)?,
         row_id: result.row_id,
         tx_id: TransactionId::from_committed_tx(tx_id),
         inner: Some(NapiWrite::Memory { db, write }),
     })
 }
 
-fn core_write_persistent(
-    db: Rc<CoreDb<CoreRocksDbStorage>>,
-    write: WriteHandle<CoreRocksDbStorage>,
-) -> napi::Result<Write> {
+fn core_write_persistent(db: Rc<CoreDb>, write: WriteHandle) -> napi::Result<Write> {
     let tx_id = write.mergeable_tx_id();
     let result = WriteResult {
         row_id: write.row_uuid(),
         tx_id,
     };
     Ok(Write {
-        payload: postcard::to_allocvec(&result)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+        payload: postcard::to_allocvec(&result).map_err(napi_error)?,
         row_id: result.row_id,
         tx_id: TransactionId::from_committed_tx(tx_id),
         inner: Some(NapiWrite::Persistent { db, write }),
@@ -3915,17 +4004,39 @@ where
     let Some(stats) = core_poll_once(connection.tick()) else {
         return Ok(0);
     };
-    let stats = stats.map_err(|error| napi::Error::from_reason(error.to_string()))?;
+    let stats = stats.map_err(napi_error)?;
     Ok(stats.subscription_events as u32)
 }
 
+/// Drive `future` for one host turn and drop it if it is still waiting.
+///
+/// A future that yields cooperatively wakes itself before returning
+/// `Pending` (Groove evaluation yields between bounded operator turns). It
+/// expects to be polled again, and dropping it loses the work it holds, such as
+/// a received view update that was mid-apply. Such yields are polled again
+/// here in the same turn. Only a future waiting on outside progress, which
+/// has not woken itself, is dropped as before.
 fn core_poll_once<F: Future>(future: F) -> Option<F::Output> {
     let mut future = Box::pin(future);
-    let waker = futures::task::noop_waker();
+    let yielded = std::sync::Arc::new(SelfWake::default());
+    let waker = waker(yielded.clone());
     let mut context = Context::from_waker(&waker);
-    match future.as_mut().poll(&mut context) {
-        Poll::Ready(output) => Some(output),
-        Poll::Pending => None,
+    loop {
+        match future.as_mut().poll(&mut context) {
+            Poll::Ready(output) => return Some(output),
+            Poll::Pending if yielded.0.swap(false, Ordering::AcqRel) => continue,
+            Poll::Pending => return None,
+        }
+    }
+}
+
+/// Records whether a polled future woke itself.
+#[derive(Default)]
+struct SelfWake(std::sync::atomic::AtomicBool);
+
+impl ArcWake for SelfWake {
+    fn wake_by_ref(arc_self: &std::sync::Arc<Self>) {
+        arc_self.0.store(true, Ordering::Release);
     }
 }
 
@@ -3971,9 +4082,17 @@ fn finish_immediate_promise(
     if status != sys::Status::napi_ok {
         return;
     }
+    // `napi_create_error` sets the JavaScript `error.code` from this string.
+    let code = error.code.as_str();
+    let mut js_code = std::ptr::null_mut();
+    let status = unsafe {
+        sys::napi_create_string_utf8(env, code.as_ptr().cast(), code.len() as isize, &mut js_code)
+    };
+    if status != sys::Status::napi_ok {
+        js_code = std::ptr::null_mut();
+    }
     let mut js_error = std::ptr::null_mut();
-    let status =
-        unsafe { sys::napi_create_error(env, std::ptr::null_mut(), js_message, &mut js_error) };
+    let status = unsafe { sys::napi_create_error(env, js_code, js_message, &mut js_error) };
     let rejection = if status == sys::Status::napi_ok {
         js_error
     } else {
@@ -3991,45 +4110,42 @@ fn commit_timestamp_ms() -> napi::Result<u64> {
         .map_err(|_| napi::Error::from_reason("commit clock exceeds u64 milliseconds"))
 }
 
-fn core_commit_tx_memory(
-    db: &Rc<CoreDb<CoreMemoryStorage>>,
-    open_tx: CoreOpenTransactionId,
-) -> napi::Result<Write> {
+fn core_commit_tx_memory(db: &Rc<CoreDb>, open_tx: CoreOpenTransactionId) -> napi::Result<Write> {
     let write = db
         .enqueue_commit_mergeable_handle_at_ms(open_tx, commit_timestamp_ms()?)
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        .map_err(napi_error)?;
     db.drive_queued_mutation_once();
     core_write_memory(Rc::clone(db), write)
 }
 
 fn core_commit_tx_persistent(
-    db: &Rc<CoreDb<CoreRocksDbStorage>>,
+    db: &Rc<CoreDb>,
     open_tx: CoreOpenTransactionId,
 ) -> napi::Result<Write> {
     let write = db
         .enqueue_commit_mergeable_handle_at_ms(open_tx, commit_timestamp_ms()?)
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        .map_err(napi_error)?;
     core_write_persistent(Rc::clone(db), write)
 }
 
 fn core_commit_exclusive_tx_memory(
-    db: &Rc<CoreDb<CoreMemoryStorage>>,
+    db: &Rc<CoreDb>,
     open_tx: CoreOpenTransactionId,
 ) -> napi::Result<Write> {
     let write = db
         .enqueue_commit_exclusive_handle_at_ms(open_tx, commit_timestamp_ms()?)
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        .map_err(napi_error)?;
     db.drive_queued_mutation_once();
     core_write_memory(Rc::clone(db), write)
 }
 
 fn core_commit_exclusive_tx_persistent(
-    db: &Rc<CoreDb<CoreRocksDbStorage>>,
+    db: &Rc<CoreDb>,
     open_tx: CoreOpenTransactionId,
 ) -> napi::Result<Write> {
     let write = db
         .enqueue_commit_exclusive_handle_at_ms(open_tx, commit_timestamp_ms()?)
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        .map_err(napi_error)?;
     core_write_persistent(Rc::clone(db), write)
 }
 
@@ -4401,8 +4517,8 @@ fn core_subscription_event_to_napi(
             tier,
             ..
         } => {
-            let delta = encode_core_subscription_delta(added, updated, removed)
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+            let delta =
+                encode_core_subscription_delta(added, updated, removed).map_err(napi_error)?;
             let terminal_operations = terminal_operations
                 .iter()
                 .map(core_terminal_operation_to_napi)
@@ -4494,8 +4610,8 @@ mod test_fixture_export {
 
 /// Convert terminal edits without serde_json so binary subscription deltas keep
 /// their typed-array representation. Root descriptors retain the upstream
-/// postcard encoding; ordered keys and edit payloads retain their number-array
-/// representation for the existing TypeScript terminal consumer.
+/// postcard encoding; ordered keys and edit payloads cross as one `Uint8Array`
+/// each, not one N-API element per byte (#3369).
 fn core_terminal_operation_to_napi(
     operation: &jazz::groove::ivm::TerminalOperation,
 ) -> napi::Result<SubscriptionTerminalOperation> {
@@ -4516,7 +4632,7 @@ fn core_terminal_operation_to_napi(
                 })
             }
             TerminalPathSegment::Key(key) => Either::B(SubscriptionTerminalKeyPathSegment {
-                key: terminal_bytes_to_numbers(key),
+                key: terminal_bytes(key),
             }),
         })
         .collect();
@@ -4524,38 +4640,38 @@ fn core_terminal_operation_to_napi(
         TerminalEdit::Insert { index, key, value } => Either4::A(SubscriptionTerminalInsertEdit {
             insert: SubscriptionTerminalInsert {
                 index: *index as f64,
-                key: terminal_bytes_to_numbers(key),
-                value: terminal_bytes_to_numbers(value),
+                key: terminal_bytes(key),
+                value: terminal_bytes(value),
             },
         }),
         TerminalEdit::Update { key, value } => Either4::B(SubscriptionTerminalUpdateEdit {
             update: SubscriptionTerminalUpdate {
-                key: terminal_bytes_to_numbers(key),
-                value: terminal_bytes_to_numbers(value),
+                key: terminal_bytes(key),
+                value: terminal_bytes(value),
             },
         }),
         TerminalEdit::Remove { key } => Either4::C(SubscriptionTerminalRemoveEdit {
             remove: SubscriptionTerminalRemove {
-                key: terminal_bytes_to_numbers(key),
+                key: terminal_bytes(key),
             },
         }),
         TerminalEdit::Move { key, index } => Either4::D(SubscriptionTerminalMoveEdit {
             move_edit: SubscriptionTerminalMove {
-                key: terminal_bytes_to_numbers(key),
+                key: terminal_bytes(key),
                 index: *index as f64,
             },
         }),
     };
 
     Ok(SubscriptionTerminalOperation {
-        root_key: terminal_bytes_to_numbers(&operation.root_key),
+        root_key: terminal_bytes(&operation.root_key),
         path,
         edit,
     })
 }
 
-fn terminal_bytes_to_numbers(bytes: &[u8]) -> Vec<u32> {
-    bytes.iter().copied().map(u32::from).collect()
+fn terminal_bytes(bytes: &[u8]) -> Uint8Array {
+    Uint8Array::new(bytes.to_vec())
 }
 
 // ============================================================================
@@ -5033,6 +5149,27 @@ mod tests {
         encode_core_subscription_delta, requeue_retryable_subscription_batch,
         unknown_transaction_kind_message,
     };
+
+    /// Contract: a core error keeps its display text and gains its stable code
+    /// as the thrown JavaScript `error.code`; any other error keeps napi-rs's
+    /// `GenericFailure`. White-box because throwing needs a live Node
+    /// environment; `native-error-code.test.ts` covers the thrown object.
+    #[test]
+    fn binding_errors_carry_the_core_code_and_keep_the_message() {
+        let core = jazz::db::Error::new(jazz::db::ErrorCode::NotObserved, "not resident");
+        let thrown = crate::BindingError::from(crate::napi_error(core));
+        assert_eq!(thrown.status.as_ref(), "not_observed");
+        assert_eq!(thrown.reason, "NotObserved: not resident");
+        assert!(
+            thrown.cause.is_none(),
+            "the code carrier never reaches JavaScript"
+        );
+
+        let other = crate::BindingError::from(crate::napi_error("database is closed"));
+        assert_eq!(other.status.as_ref(), "GenericFailure");
+        assert_eq!(other.reason, "database is closed");
+        assert!(other.cause.is_none());
+    }
 
     #[test]
     fn failing_close_releases_scheduler_and_mutation_callback() {
@@ -7309,30 +7446,30 @@ mod tests {
         assert_eq!(payload.tier, "Global");
         assert_eq!(payload.terminal_operations.len(), 4);
         let insert = &payload.terminal_operations[0];
-        assert_eq!(insert.root_key, vec![0, 255]);
+        assert_eq!(insert.root_key.as_ref(), [0, 255]);
         assert!(matches!(
             insert.path.as_slice(),
             [Either::A(collection), Either::B(key)]
-                if collection.collection == "children" && key.key == vec![1, 254]
+                if collection.collection == "children" && key.key.as_ref() == [1, 254]
         ));
         assert!(matches!(
             &insert.edit,
             Either4::A(edit)
                 if edit.insert.index == 3.0
-                    && edit.insert.key == vec![2, 253]
-                    && edit.insert.value == (0_u32..=u8::MAX.into()).collect::<Vec<_>>()
+                    && edit.insert.key.as_ref() == [2, 253]
+                    && edit.insert.value.as_ref() == (0_u8..=u8::MAX).collect::<Vec<_>>()
         ));
         assert!(matches!(
             &payload.terminal_operations[1].edit,
-            Either4::B(edit) if edit.update.key == vec![5] && edit.update.value == vec![6]
+            Either4::B(edit) if edit.update.key.as_ref() == [5] && edit.update.value.as_ref() == [6]
         ));
         assert!(matches!(
             &payload.terminal_operations[2].edit,
-            Either4::C(edit) if edit.remove.key == vec![8]
+            Either4::C(edit) if edit.remove.key.as_ref() == [8]
         ));
         assert!(matches!(
             &payload.terminal_operations[3].edit,
-            Either4::D(edit) if edit.move_edit.key == vec![10] && edit.move_edit.index == 11.0
+            Either4::D(edit) if edit.move_edit.key.as_ref() == [10] && edit.move_edit.index == 11.0
         ));
     }
 

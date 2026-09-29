@@ -43,7 +43,7 @@ fn policy_bench_identity() -> AuthorSubject {
 
 /// Seeded W1 read fixture. Setup is deliberately outside measured closures.
 pub struct Fixture<S: OrderedKvStorage> {
-    db: Db<S>,
+    db: Db,
     board: PreparedQuery,
     comments: PreparedQuery,
     activity: PreparedQuery,
@@ -54,6 +54,8 @@ pub struct Fixture<S: OrderedKvStorage> {
     task_transition_row: RowUuid,
     activity_transition_matching: bool,
     activity_update_identity: WriteIdentity,
+    /// Which storage backend the fixture was built over; Db itself erases it.
+    storage: std::marker::PhantomData<fn() -> S>,
 }
 
 pub struct MaintainedActivityFixture<S: OrderedKvStorage> {
@@ -63,8 +65,8 @@ pub struct MaintainedActivityFixture<S: OrderedKvStorage> {
 
 /// Prepared byte-wire reconnect with one disconnected task update pending.
 pub struct ResumeFixture {
-    server: Db<MemoryStorage>,
-    client: Db<MemoryStorage>,
+    server: Db,
+    client: Db,
     subscription: SubscriptionStream,
     cursor: Option<ResumeCursor>,
     fresh_post_update_bytes: usize,
@@ -116,8 +118,8 @@ fn pump_aux(left: &PeerIoPump, right: &PeerIoPump) {
 // own accepted messages waiting for credits. Keep driving both real wire pumps
 // until the public write wait proves the authority has applied the frontier.
 fn pump_until_settled(
-    writer: &Db<MemoryStorage>,
-    server: &Db<MemoryStorage>,
+    writer: &Db,
+    server: &Db,
     writer_pump: &PeerIoPump,
     server_pump: &PeerIoPump,
     max_turns: usize,
@@ -697,6 +699,7 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
             task_transition_row: task_ids[0],
             activity_transition_matching: false,
             activity_update_identity,
+            storage: std::marker::PhantomData,
         };
         assert_eq!(fixture.board_count(), tasks.div_ceil(PROJECTS).min(200));
         assert_eq!(fixture.comments_count(), comments.div_ceil(tasks).min(200));
@@ -893,7 +896,7 @@ fn schema(policy_activity_updates: bool) -> JazzSchema {
 fn open_db<S: OrderedKvStorage + ReopenableStorage + 'static>(
     schema: JazzSchema,
     storage: S,
-) -> Db<S> {
+) -> Db {
     block_on(Db::open(DbConfig::new(
         schema,
         storage,
@@ -905,7 +908,7 @@ fn open_db<S: OrderedKvStorage + ReopenableStorage + 'static>(
     .expect("open W1 benchmark database")
 }
 
-fn open_memory_node(schema: JazzSchema, node: u8, history_complete: bool) -> Db<MemoryStorage> {
+fn open_memory_node(schema: JazzSchema, node: u8, history_complete: bool) -> Db {
     let families = schema.column_families();
     let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     let config = DbConfig::new(
@@ -960,8 +963,8 @@ fn byte_duplex(epoch: u64) -> (Box<dyn jazz::db::Transport>, Box<dyn jazz::db::T
     )
 }
 
-fn prepare_page<S: OrderedKvStorage + ReopenableStorage + 'static>(
-    db: &Db<S>,
+fn prepare_page(
+    db: &Db,
     table: &str,
     filter_column: &str,
     filter_value: RowUuid,
@@ -1010,7 +1013,7 @@ pub mod ahead_current {
 
     /// Pre-seeded candidate history for a single logical current row.
     pub struct AheadCurrentFixture {
-        core: NodeState<RocksDbStorage>,
+        core: NodeState,
         _directory: tempfile::TempDir,
         depth: usize,
         newest_tx: TxId,

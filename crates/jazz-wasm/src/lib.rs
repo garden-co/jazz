@@ -602,13 +602,13 @@ impl WasmStreamingMutation {
 
 enum WasmWriteInner {
     MemoryTx {
-        db: Rc<Db<MemoryStorage>>,
-        write: WriteHandle<MemoryStorage>,
+        db: Rc<Db>,
+        write: WriteHandle,
     },
     #[cfg(target_arch = "wasm32")]
     BrowserTx {
-        db: Rc<Db<BrowserStorage>>,
-        write: WriteHandle<BrowserStorage>,
+        db: Rc<Db>,
+        write: WriteHandle,
     },
 }
 
@@ -687,9 +687,9 @@ pub struct WasmDb {
 }
 
 enum WasmDbInner {
-    Memory(Rc<Db<MemoryStorage>>),
+    Memory(Rc<Db>),
     #[cfg(target_arch = "wasm32")]
-    Browser(Rc<Db<BrowserStorage>>),
+    Browser(Rc<Db>),
     Closed,
 }
 
@@ -734,13 +734,13 @@ pub struct WasmTransport {
 
 enum WasmTransportInner {
     Memory {
-        db: Rc<Db<MemoryStorage>>,
-        connection: Option<Rc<LocalMutex<PeerConnection<MemoryStorage>>>>,
+        db: Rc<Db>,
+        connection: Option<Rc<LocalMutex<PeerConnection>>>,
     },
     #[cfg(target_arch = "wasm32")]
     Browser {
-        db: Rc<Db<BrowserStorage>>,
-        connection: Option<Rc<LocalMutex<PeerConnection<BrowserStorage>>>>,
+        db: Rc<Db>,
+        connection: Option<Rc<LocalMutex<PeerConnection>>>,
     },
 }
 
@@ -959,16 +959,16 @@ impl WasmDbInner {
         })
     }
 
-    fn register_schema_view(&self, schema: JazzSchema) -> Result<Self, String> {
+    fn register_schema_view(&self, schema: JazzSchema) -> Result<Self, JsValue> {
         match self {
             Self::Memory(db) => Ok(Self::Memory(Rc::new(
-                block_on(db.register_schema_view(schema)).map_err(|error| error.to_string())?,
+                block_on(db.register_schema_view(schema)).map_err(to_js_error)?,
             ))),
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => Ok(Self::Browser(Rc::new(
-                block_on(db.register_schema_view(schema)).map_err(|error| error.to_string())?,
+                block_on(db.register_schema_view(schema)).map_err(to_js_error)?,
             ))),
-            Self::Closed => Err("WasmDb is closed".to_owned()),
+            Self::Closed => Err(JsValue::from_str("WasmDb is closed")),
         }
     }
 
@@ -1699,9 +1699,7 @@ impl WasmDb {
         let schema = decode_public_schema(&schema)?;
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(
-                self.open_inner()?
-                    .register_schema_view(schema)
-                    .map_err(to_js_error)?,
+                self.open_inner()?.register_schema_view(schema)?,
             ))),
             owns_runtime: false,
             non_durable_client: Rc::clone(&self.non_durable_client),
@@ -2917,7 +2915,7 @@ async fn open_db<S>(
     schema: JazzSchema,
     storage: S,
     config: WasmOpenDbConfig,
-) -> Result<Db<S>, jazz::db::Error>
+) -> Result<Db, jazz::db::Error>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
@@ -2947,7 +2945,7 @@ async fn open_scope_isolated_relay_db(
     storage: BrowserStorage,
     config: WasmOpenDbConfig,
     storage_owner: String,
-) -> Result<Db<BrowserStorage>, jazz::db::Error> {
+) -> Result<Db, jazz::db::Error> {
     let mut db_config = DbConfig::new(schema, storage, config.identity.into());
     if let Some(seed) = config.row_id_seed {
         db_config = db_config.with_id_source(SeededRowIdSource::new(seed));
@@ -2973,7 +2971,7 @@ async fn open_backend_db<S>(
     storage: S,
     config: WasmOpenDbConfig,
     identity: DbIdentity,
-) -> Result<Db<S>, jazz::db::Error>
+) -> Result<Db, jazz::db::Error>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
@@ -3179,10 +3177,7 @@ fn claim_value_from_json(value: serde_json::Value) -> Result<Option<Value>, JsVa
     .map_err(to_js_error)
 }
 
-fn wasm_write_memory(
-    db: Rc<Db<MemoryStorage>>,
-    write: WriteHandle<MemoryStorage>,
-) -> Result<WasmWrite, JsValue> {
+fn wasm_write_memory(db: Rc<Db>, write: WriteHandle) -> Result<WasmWrite, JsValue> {
     let tx_id = write.mergeable_tx_id();
     let result = WasmWriteResult {
         row_id: write.row_uuid(),
@@ -3197,10 +3192,7 @@ fn wasm_write_memory(
 }
 
 #[cfg(target_arch = "wasm32")]
-fn wasm_write_browser(
-    db: Rc<Db<BrowserStorage>>,
-    write: WriteHandle<BrowserStorage>,
-) -> Result<WasmWrite, JsValue> {
+fn wasm_write_browser(db: Rc<Db>, write: WriteHandle) -> Result<WasmWrite, JsValue> {
     let tx_id = write.mergeable_tx_id();
     let result = WasmWriteResult {
         row_id: write.row_uuid(),
@@ -3545,12 +3537,7 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
             set_prop(
                 &object,
                 "terminalOperations",
-                jazz::binding_codec::terminal_operations_to_json(&terminal_operations)
-                    .map_err(to_js_error)?
-                    .serialize(
-                        &serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true),
-                    )
-                    .map_err(to_js_error)?,
+                terminal_operations_to_js(&terminal_operations)?,
             )?;
             set_prop(&object, "reset", JsValue::from_bool(reset))?;
             set_prop(&object, "settled", JsValue::from_bool(settled))?;
@@ -3605,6 +3592,71 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
         }
     };
     Ok(object.into())
+}
+
+/// Build terminal operations in the JavaScript object shape, with every key and
+/// payload as one `Uint8Array` rather than a JSON number per byte (#3369). The
+/// producer-only root descriptor is omitted, as on every binding.
+fn terminal_operations_to_js(
+    operations: &[jazz::groove::ivm::TerminalOperation],
+) -> Result<JsValue, JsValue> {
+    use jazz::groove::ivm::{TerminalEdit, TerminalPathSegment};
+
+    fn bytes(value: &[u8]) -> JsValue {
+        js_sys::Uint8Array::from(value).into()
+    }
+    fn object(fields: &[(&str, JsValue)]) -> Result<JsValue, JsValue> {
+        let object = js_sys::Object::new();
+        for (name, value) in fields {
+            set_prop(&object, name, value.clone())?;
+        }
+        Ok(object.into())
+    }
+
+    let encoded = js_sys::Array::new_with_length(operations.len() as u32);
+    for (index, operation) in operations.iter().enumerate() {
+        let path = js_sys::Array::new_with_length(operation.path.len() as u32);
+        for (segment_index, segment) in operation.path.iter().enumerate() {
+            let segment = match segment {
+                TerminalPathSegment::Collection(collection) => {
+                    object(&[("Collection", JsValue::from_str(collection))])?
+                }
+                TerminalPathSegment::Key(key) => object(&[("Key", bytes(key))])?,
+            };
+            path.set(segment_index as u32, segment);
+        }
+        let edit = match &operation.edit {
+            TerminalEdit::Insert { index, key, value } => object(&[(
+                "Insert",
+                object(&[
+                    ("index", JsValue::from_f64(*index as f64)),
+                    ("key", bytes(key)),
+                    ("value", bytes(value)),
+                ])?,
+            )])?,
+            TerminalEdit::Update { key, value } => object(&[(
+                "Update",
+                object(&[("key", bytes(key)), ("value", bytes(value))])?,
+            )])?,
+            TerminalEdit::Remove { key } => object(&[("Remove", object(&[("key", bytes(key))])?)])?,
+            TerminalEdit::Move { key, index } => object(&[(
+                "Move",
+                object(&[
+                    ("key", bytes(key)),
+                    ("index", JsValue::from_f64(*index as f64)),
+                ])?,
+            )])?,
+        };
+        encoded.set(
+            index as u32,
+            object(&[
+                ("root_key", bytes(&operation.root_key)),
+                ("path", path.into()),
+                ("edit", edit),
+            ])?,
+        );
+    }
+    Ok(encoded.into())
 }
 
 fn set_prop(object: &js_sys::Object, name: &str, value: JsValue) -> Result<(), JsValue> {
@@ -3710,8 +3762,28 @@ fn call_controller_method(
     Ok(())
 }
 
-fn to_js_error(error: impl std::fmt::Display) -> JsValue {
-    JsValue::from_str(&error.to_string())
+/// Convert a Rust error into the value a binding rejects or throws with.
+///
+/// A core [`Error`] becomes a real JavaScript `Error` whose `message` is the
+/// unchanged `Display` text and whose `code` is the stable
+/// [`ErrorCode::as_str`] string, so callers classify it without matching the
+/// message. Every other error keeps its historical bare-string form.
+fn to_js_error(error: impl std::fmt::Display + 'static) -> JsValue {
+    match (&error as &dyn std::any::Any).downcast_ref::<Error>() {
+        Some(core) => core_error_to_js(core),
+        None => JsValue::from_str(&error.to_string()),
+    }
+}
+
+fn core_error_to_js(error: &Error) -> JsValue {
+    let js_error = js_sys::Error::new(&error.to_string());
+    // Setting a data property on a fresh ordinary object cannot fail.
+    let _ = js_sys::Reflect::set(
+        &js_error,
+        &JsValue::from_str("code"),
+        &JsValue::from_str(error.code.as_str()),
+    );
+    js_error.into()
 }
 
 fn bytes_to_js(bytes: Vec<u8>) -> Result<JsValue, JsValue> {
@@ -3726,9 +3798,42 @@ fn unknown_transaction_kind_message(kind: &str) -> String {
 mod dynamic_schema_view_tests {
     use super::*;
     use jazz::db::{DbConfig, DbIdentity, ExclusiveTxOps, MergeableTxOps};
+    use jazz::groove::records::{Error as RecordError, RecordDescriptor, ValueType};
     use jazz::tools::public_schema::{
         ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchema,
     };
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn variable_array_add_overflow_returns_invalid_offset_through_public_decoder() {
+        let descriptor =
+            RecordDescriptor::new([("items", ValueType::Array(Box::new(ValueType::String)))]);
+        let mut encoded = descriptor
+            .create(&[Value::Array(vec![Value::String("item".to_owned())])])
+            .expect("valid variable array encodes");
+        encoded[0..4].copy_from_slice(&(1_u32 << 30).to_le_bytes());
+
+        assert_eq!(
+            descriptor.get_idx(&encoded, 0),
+            Err(RecordError::InvalidOffset)
+        );
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn variable_array_multiplication_overflow_returns_invalid_offset_through_public_decoder() {
+        let descriptor =
+            RecordDescriptor::new([("items", ValueType::Array(Box::new(ValueType::String)))]);
+        let mut encoded = descriptor
+            .create(&[Value::Array(vec![Value::String("item".to_owned())])])
+            .expect("valid variable array encodes");
+        encoded[0..4].copy_from_slice(&u32::MAX.to_le_bytes());
+
+        assert_eq!(
+            descriptor.get_idx(&encoded, 0),
+            Err(RecordError::InvalidOffset)
+        );
+    }
 
     /// Every ordinary write option shares `write_timestamp_option`, so this
     /// boundary test protects insert, update, upsert, delete, and restore from

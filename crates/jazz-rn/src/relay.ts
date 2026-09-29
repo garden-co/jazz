@@ -206,7 +206,12 @@ export type NativeForegroundResponse =
   | { type: "unsubscribed"; closed: boolean }
   | { type: "closed"; closed: boolean }
   | { type: "pending"; operation: number }
-  | { type: "operationError"; reason: string }
+  | {
+      type: "operationError";
+      reason: string;
+      /** The stable core `ErrorCode` string when a core error caused the failure. */
+      code?: string;
+    }
   | { type: "cancelled"; cancelled: boolean }
   | { type: "transactionOpened"; transaction: number }
   | { type: "inserted"; rowId: Uint8Array }
@@ -675,6 +680,20 @@ export function decodeNativeForegroundResponse(bytes: Uint8Array): NativeForegro
     };
   if (tag === 22 && bytes.length === 2 && (bytes[1] === 0 || bytes[1] === 1))
     return { type: "streamingMutationAborted", aborted: bytes[1] === 1 };
+  if (tag === 25) {
+    // CodedOperationError: postcard code string, then the reason string.
+    let codeEnd = 1;
+    while (codeEnd < bytes.length && (bytes[codeEnd]! & 0x80) !== 0) codeEnd++;
+    if (codeEnd >= bytes.length) throw new Error("Malformed native operation error code");
+    const codeLength = decodeForegroundU64(bytes.subarray(1, codeEnd + 1), "error code length");
+    const next = codeEnd + 1 + codeLength;
+    if (next > bytes.length) throw new Error("Malformed native operation error code");
+    return {
+      type: "operationError",
+      code: decodeForegroundUtf8(bytes, codeEnd + 1, codeLength, "error code"),
+      reason: decodeForegroundString(bytes.subarray(next), "operation error"),
+    };
+  }
   if (
     tag === 16 &&
     bytes.length === 4 &&
@@ -868,6 +887,9 @@ function decodeForegroundSubscriptionEvents(
   return events;
 }
 
+// Bounded so `fromCharCode.apply` stays well under engine argument limits.
+const ASCII_DECODE_CHUNK = 8192;
+
 function decodeForegroundUtf8(
   bytes: Uint8Array,
   start: number,
@@ -877,6 +899,26 @@ function decodeForegroundUtf8(
   const slice = bytes.subarray(start, start + length);
   if (slice.byteLength !== length)
     throw new Error(`Jazz native foreground returned truncated ${label}`);
+  // Terminal operations arrive as JSON number arrays, so these payloads are
+  // almost always ASCII. ASCII is valid UTF-8 and maps byte-for-code-unit, so
+  // skip the per-byte `%xx` round trip below (#3369).
+  let ascii = true;
+  for (let index = 0; index < slice.length; index += 1) {
+    if (slice[index]! >= 0x80) {
+      ascii = false;
+      break;
+    }
+  }
+  if (ascii) {
+    let text = "";
+    for (let offset = 0; offset < slice.length; offset += ASCII_DECODE_CHUNK) {
+      text += String.fromCharCode.apply(
+        null,
+        slice.subarray(offset, offset + ASCII_DECODE_CHUNK) as unknown as number[],
+      );
+    }
+    return text;
+  }
   // React Native's configured TS lib deliberately does not promise
   // `TextDecoder`; `decodeURIComponent` is available in Hermes and gives us a
   // strict UTF-8 decode without adding a platform polyfill to this tiny ABI.

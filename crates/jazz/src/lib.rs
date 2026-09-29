@@ -38,7 +38,7 @@
 //!     TableSchemaBuilder,
 //! };
 //!
-//! fn open_node(node: NodeUuid, schema: JazzSchema) -> NodeState<MemoryStorage> {
+//! fn open_node(node: NodeUuid, schema: JazzSchema) -> NodeState {
 //!     let cfs = schema.column_families();
 //!     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
 //!     block_on(NodeState::new(node, schema, MemoryStorage::new(&refs).expect("valid memory storage families"))).unwrap()
@@ -108,389 +108,51 @@
 //! assert!(!block_on(core.row_history("todos", row)).unwrap().is_empty());
 //! ```
 
-// Legacy synchronous tests import these traits explicitly while the async API
-// migration is in progress. New async lifecycle tests intentionally do not:
-// they poll futures directly so suspension and ordering remain observable.
-#[cfg(test)]
-pub(crate) mod legacy_test_future {
-    use std::future::Future;
-
-    use crate::ids::{AuthorSubject, SchemaVersionId};
-    use crate::node::{Error, MergeableCommit, NodeState};
-    use crate::protocol::{CatalogueSnapshot, SyncMessage, VersionRecord};
-    use crate::time::{GlobalTime, TxTime};
-    use crate::tools::OpenTransactionId;
-    use crate::tx::{DurabilityTier, Fate, Transaction, TxId};
-    use groove::storage::{OrderedKvStorage, ReopenableStorage};
-
-    #[allow(clippy::wrong_self_convention)]
-    pub(crate) trait ResultFutureExt<T, E>: Future<Output = Result<T, E>> {
-        fn unwrap(self) -> T
-        where
-            Self: Sized,
-            E: std::fmt::Debug,
-        {
-            crate::db::block_on(self).unwrap()
-        }
-
-        fn expect(self, message: &str) -> T
-        where
-            Self: Sized,
-            E: std::fmt::Debug,
-        {
-            crate::db::block_on(self).expect(message)
-        }
-
-        fn unwrap_or_else<F>(self, op: F) -> T
-        where
-            Self: Sized,
-            F: FnOnce(E) -> T,
-        {
-            crate::db::block_on(self).unwrap_or_else(op)
-        }
-
-        fn unwrap_err(self) -> E
-        where
-            Self: Sized,
-            T: std::fmt::Debug,
-        {
-            crate::db::block_on(self).unwrap_err()
-        }
-
-        fn expect_err(self, message: &str) -> E
-        where
-            Self: Sized,
-            T: std::fmt::Debug,
-        {
-            crate::db::block_on(self).expect_err(message)
-        }
-
-        fn is_err(self) -> bool
-        where
-            Self: Sized,
-        {
-            crate::db::block_on(self).is_err()
-        }
-
-        fn is_ok(self) -> bool
-        where
-            Self: Sized,
-        {
-            crate::db::block_on(self).is_ok()
-        }
-    }
-
-    impl<F, T, E> ResultFutureExt<T, E> for F where F: Future<Output = Result<T, E>> {}
-
-    #[allow(clippy::wrong_self_convention)]
-    pub(crate) trait OptionFutureExt<T>: Future<Output = Option<T>> {
-        fn unwrap(self) -> T
-        where
-            Self: Sized,
-        {
-            crate::db::block_on(self).unwrap()
-        }
-
-        fn expect(self, message: &str) -> T
-        where
-            Self: Sized,
-        {
-            crate::db::block_on(self).expect(message)
-        }
-
-        fn is_none(self) -> bool
-        where
-            Self: Sized,
-        {
-            crate::db::block_on(self).is_none()
-        }
-    }
-
-    impl<F, T> OptionFutureExt<T> for F where F: Future<Output = Option<T>> {}
-
-    pub(crate) trait FutureResolveExt: Future {
-        fn resolve(self) -> Self::Output
-        where
-            Self: Sized,
-        {
-            crate::db::block_on(self)
-        }
-    }
-
-    impl<F> FutureResolveExt for F where F: Future {}
-
-    pub(crate) trait SettledNodeTestExt {
-        fn commit_mergeable_settled(&mut self, commit: MergeableCommit) -> Result<TxId, Error>;
-        fn commit_mergeable_unit_settled(
-            &mut self,
-            commit: MergeableCommit,
-        ) -> Result<(TxId, SyncMessage), Error>;
-        fn commit_mergeable_many_settled(
-            &mut self,
-            commits: Vec<MergeableCommit>,
-        ) -> Result<TxId, Error>;
-        fn commit_mergeable_in_schema_settled(
-            &mut self,
-            schema: SchemaVersionId,
-            commit: MergeableCommit,
-        ) -> Result<TxId, Error>;
-        fn commit_mergeable_at_settled(
-            &mut self,
-            commit: MergeableCommit,
-            made_at: TxTime,
-        ) -> Result<TxId, Error>;
-        fn commit_mergeable_open_settled<F>(
-            &mut self,
-            open: OpenTransactionId,
-            next_now_ms: F,
-        ) -> Result<TxId, Error>
-        where
-            F: FnMut() -> u64;
-        fn apply_trusted_catalogue_snapshot_settled(
-            &mut self,
-            snapshot: CatalogueSnapshot,
-        ) -> Result<(), Error>;
-        fn commit_exclusive_settled(
-            &mut self,
-            tx_id: OpenTransactionId,
-            author: AuthorSubject,
-            now_ms: u64,
-        ) -> Result<(TxId, SyncMessage), Error>;
-        fn apply_sync_message_settled(
-            &mut self,
-            message: SyncMessage,
-        ) -> Result<Vec<SyncMessage>, Error>;
-        /// Activate the permissions declared by an admitted fixture schema.
-        fn activate_catalogue_schema_settled(
-            &mut self,
-            pointer: crate::protocol::CurrentWriteSchema,
-        ) -> Result<(), Error>;
-        fn apply_trusted_catalogue_message_settled(
-            &mut self,
-            message: SyncMessage,
-        ) -> Result<Vec<SyncMessage>, Error>;
-        fn ingest_commit_unit_settled(
-            &mut self,
-            tx: Transaction,
-            versions: Vec<VersionRecord>,
-            now_ms: u64,
-        ) -> Result<Vec<SyncMessage>, Error>;
-        fn finalize_local_mergeable_commit_settled(&mut self, tx_id: TxId) -> Result<(), Error>;
-        fn transaction_state_settled(
-            &mut self,
-            tx_id: TxId,
-        ) -> Option<(Fate, Option<GlobalTime>, DurabilityTier)>;
-    }
-
-    impl<S> SettledNodeTestExt for NodeState<S>
-    where
-        S: OrderedKvStorage + ReopenableStorage,
-    {
-        fn commit_mergeable_settled(&mut self, commit: MergeableCommit) -> Result<TxId, Error> {
-            crate::db::block_on(async {
-                let published = self.commit_mergeable(commit).await?;
-                self.persist_and_settle_transaction(published).await
-            })
-        }
-
-        fn commit_mergeable_unit_settled(
-            &mut self,
-            commit: MergeableCommit,
-        ) -> Result<(TxId, SyncMessage), Error> {
-            crate::db::block_on(async {
-                let (published, unit) = self.commit_mergeable_unit(commit).await?;
-                let tx_id = self.persist_and_settle_transaction(published).await?;
-                Ok((tx_id, unit))
-            })
-        }
-
-        fn commit_mergeable_many_settled(
-            &mut self,
-            commits: Vec<MergeableCommit>,
-        ) -> Result<TxId, Error> {
-            crate::db::block_on(async {
-                let published = self.commit_mergeable_many(commits).await?;
-                self.persist_and_settle_transaction(published).await
-            })
-        }
-
-        fn commit_mergeable_in_schema_settled(
-            &mut self,
-            schema: SchemaVersionId,
-            commit: MergeableCommit,
-        ) -> Result<TxId, Error> {
-            crate::db::block_on(async {
-                let published = self.commit_mergeable_in_schema(schema, commit).await?;
-                self.persist_and_settle_transaction(published).await
-            })
-        }
-
-        fn commit_mergeable_at_settled(
-            &mut self,
-            commit: MergeableCommit,
-            made_at: TxTime,
-        ) -> Result<TxId, Error> {
-            crate::db::block_on(async {
-                let published = self.commit_mergeable_at(commit, made_at).await?;
-                self.persist_and_settle_transaction(published).await
-            })
-        }
-
-        fn commit_mergeable_open_settled<F>(
-            &mut self,
-            open: OpenTransactionId,
-            next_now_ms: F,
-        ) -> Result<TxId, Error>
-        where
-            F: FnMut() -> u64,
-        {
-            crate::db::block_on(async {
-                let published = self.commit_mergeable_open(open, next_now_ms).await?;
-                self.persist_and_settle_transaction(published).await
-            })
-        }
-
-        fn apply_trusted_catalogue_snapshot_settled(
-            &mut self,
-            snapshot: CatalogueSnapshot,
-        ) -> Result<(), Error> {
-            crate::db::block_on(async {
-                let outcome = self.apply_trusted_catalogue_snapshot(snapshot).await?;
-                self.persist_and_settle_outcome(outcome).await
-            })
-        }
-
-        fn commit_exclusive_settled(
-            &mut self,
-            tx_id: OpenTransactionId,
-            author: AuthorSubject,
-            now_ms: u64,
-        ) -> Result<(TxId, SyncMessage), Error> {
-            crate::db::block_on(async {
-                let (published, unit) = self.commit_exclusive(tx_id, author, now_ms).await?;
-                let tx_id = self.persist_and_settle_transaction(published).await?;
-                Ok((tx_id, unit))
-            })
-        }
-
-        fn apply_sync_message_settled(
-            &mut self,
-            message: SyncMessage,
-        ) -> Result<Vec<SyncMessage>, Error> {
-            crate::db::block_on(async {
-                let outcome = self.apply_sync_message(message).await?;
-                self.persist_and_settle_outcome(outcome).await
-            })
-        }
-
-        fn activate_catalogue_schema_settled(
-            &mut self,
-            pointer: crate::protocol::CurrentWriteSchema,
-        ) -> Result<(), Error> {
-            let schema = self
-                .catalogue_schemas()
-                .get(&pointer.schema)
-                .ok_or(Error::InvalidCatalogueUpdate(
-                    "fixture schema is not admitted",
-                ))?
-                .schema
-                .clone();
-            crate::db::block_on(self.activate_schema(pointer.revision, schema))
-        }
-
-        fn apply_trusted_catalogue_message_settled(
-            &mut self,
-            message: SyncMessage,
-        ) -> Result<Vec<SyncMessage>, Error> {
-            crate::db::block_on(async {
-                let outcome = self.apply_trusted_catalogue_message(message).await?;
-                self.persist_and_settle_outcome(outcome).await
-            })
-        }
-
-        fn ingest_commit_unit_settled(
-            &mut self,
-            tx: Transaction,
-            versions: Vec<VersionRecord>,
-            now_ms: u64,
-        ) -> Result<Vec<SyncMessage>, Error> {
-            crate::db::block_on(async {
-                let outcome = self.ingest_commit_unit(tx, versions, now_ms).await?;
-                self.persist_and_settle_outcome(outcome).await
-            })
-        }
-
-        fn finalize_local_mergeable_commit_settled(&mut self, tx_id: TxId) -> Result<(), Error> {
-            crate::db::block_on(async {
-                let outcome = self.finalize_local_mergeable_commit(tx_id).await?;
-                self.persist_and_settle_outcome(outcome).await
-            })
-        }
-
-        fn transaction_state_settled(
-            &mut self,
-            tx_id: TxId,
-        ) -> Option<(Fate, Option<GlobalTime>, DurabilityTier)> {
-            crate::db::block_on(self.transaction_state(tx_id))
-        }
-    }
-}
-
 /// Re-export of the underlying groove crate used for storage setup.
 pub use groove;
 
-/// Shared, fail-closed state for authority-issued authorization-scope receipts.
-pub mod account_registry;
-pub mod authorization_scope;
-/// Shared binary row payload contract for the NAPI and WASM bindings.
-pub mod binding_codec;
-/// Disabled-by-default counters used by the native cold-settle attribution bench.
-#[cfg(feature = "cold-settle-attribution")]
-pub mod cold_settle_attribution;
-/// High-level thread-affine database facade.
-pub mod db;
-/// Host-facing exclusive lifecycle for foreground transaction-node identities.
-pub mod foreground_node_lease;
 /// Poll ready-immediate database futures without an async runtime.
 pub use db::block_on;
-/// Wire-stable identifiers.
-pub mod ids;
-/// Storage-backed node implementation and local API.
-pub mod node;
-/// Independent semantic oracle used by tests and harnesses.
+pub use jazz_db::binding_codec;
+#[cfg(feature = "cold-settle-attribution")]
+pub use jazz_db::cold_settle_attribution;
+pub use jazz_db::db;
+pub use jazz_db::foreground_node_lease;
+pub use jazz_db::result_tree;
+pub use jazz_db::row;
+pub use jazz_model::model;
+pub use jazz_model::query;
+pub use jazz_model::row_input;
+pub use jazz_model::schema;
+pub use jazz_node::node;
+pub use jazz_node::peer;
+pub use jazz_protocol::authorization_scope;
+pub use jazz_protocol::protocol;
+pub use jazz_protocol::protocol_limits;
+pub use jazz_types::account_registry;
+pub use jazz_types::app_id;
+use jazz_types::debug_env;
+pub use jazz_types::identity;
+pub use jazz_types::ids;
+pub use jazz_types::local_executor;
+pub use jazz_types::object;
+pub use jazz_types::postcard_exact;
 #[cfg(any(test, feature = "testing"))]
-pub mod oracle;
-/// Per-peer sync state and metrics.
-pub mod peer;
-/// Simulation-first sync and local event messages.
-pub mod protocol;
-/// Protocol admission and semantic size limits.
-pub mod protocol_limits;
-/// Pure query AST, validation, canonicalization, and ids.
-pub mod query;
-/// Canonical recursive structured query-result boundary types.
-pub mod result_tree;
-/// Jazz schema and storage lowering.
-pub mod schema;
+pub use node::oracle;
 /// Platform-neutral client and server runtime APIs used by target shells.
 #[cfg(feature = "runtime")]
 pub mod serving;
-pub mod storage_codec_profile;
-#[cfg(test)]
-mod test_public_schema;
-/// Logical time and sequence counters.
-pub mod time;
+pub use jazz_protocol::storage_codec_profile;
+pub use jazz_types::time;
 /// Public runtime and data-model support APIs formerly provided by jazz-tools.
 // The tools API was a separate crate before consolidation and intentionally
 // retains its existing documentation policy.
 #[allow(missing_docs)]
 pub mod tools;
-/// Transaction, fate, and history vocabulary.
-pub mod tx;
-/// Versioned transport frames around the semantic sync protocol.
-pub mod wire;
+pub use jazz_model::tx;
+pub use jazz_protocol::wire;
 
 /// Bounded metadata-only delivery diagnostics for native acceptance failures.
 #[doc(hidden)]
 #[cfg(any(test, feature = "testing"))]
-pub mod delivery_diagnostics;
+pub use jazz_types::delivery_diagnostics;

@@ -51,8 +51,11 @@ current coverage of every scenario.
   shape/binding counts) are hard regression signals; timings are directional
   ratios.
 - **JSONL + retention.** Every retained line carries `scenario`, `driver`,
-  `seed`, `profile`, `git_sha`, `git_dirty`, `hostname`, and knobs, under
-  `benchmarks/results/jazz` (`INV-BENCH-4`).
+  `seed`, `profile`, `git_sha`, `git_dirty`, `git_status_available`, `hostname`,
+  and knobs, under `benchmarks/results/jazz` (`INV-BENCH-4`). Status is
+  available only when `git status --porcelain` succeeds and its stdout is valid
+  UTF-8; unavailable status is conservatively reported as dirty. HEAD resolution
+  is independent of status availability.
 
   **Implementation status (current retained format).** The named fields are
   the current JSONL schema; they are the present implementation of the
@@ -219,7 +222,7 @@ wired.
 | S1 SaaS              | distinct-shape sweep                                     | No                       | HARNESS: no distinct-shape phase emission was found in `jazz-sim/benches/s1_saas.rs`; groove has predecessor shape-sharing signals in `groove/benches/scenario.rs`, not the S1 fixture.                                                                                                                                                                                       |
 | S1 SaaS              | query churn                                              | No                       | HARNESS: the search-as-you-type binding/shape churn phase is specified but no emitted phase or harness code was found.                                                                                                                                                                                                                                                        |
 | S1 SaaS              | high-fan-out hydration                                   | Yes                      | `jazz-sim/benches/s1_saas.rs` emits `phase: high_fan_out_hydration`, bytes/floor, mid-hydration fate counters, maintained subscription view incremental/full-recompute/full-diff counters, and a harness-deterministic legacy-named `membership_history_scan_fallbacks` zero check; the latter is not claimed as a live serving counter.                                      |
-| S1 SaaS              | ordered/page queries                                     | Partial                  | FEATURE: query support exists in `jazz/src/query.rs` and node evaluation (`jazz/src/node/query_eval.rs`), but no S1 ordered-page phase is emitted and live IVM maintenance of order/limit has not been demonstrated by the phase.                                                                                                                                             |
+| S1 SaaS              | ordered/page queries                                     | Partial                  | FEATURE: query support exists in `jazz/layers/model/src/query.rs` and node evaluation (`jazz/layers/node/src/node/query_eval.rs`), but no S1 ordered-page phase is emitted and live IVM maintenance of order/limit has not been demonstrated by the phase.                                                                                                                    |
 | S1 SaaS              | aggregate milestone page                                 | Partial                  | FEATURE: aggregate query capability must be proven incrementally maintained for live subscriptions before the phase can be honest; no aggregate S1 phase is emitted.                                                                                                                                                                                                          |
 | S2 canvas            | live collaboration                                       | Yes                      | `jazz-sim/benches/s2_canvas.rs` emits `phase: live` for deterministic/threaded runs, coalescing, latency histograms via `hdrhistogram`, bytes/floor, merge counters, core tick, and spy/non-invite correctness.                                                                                                                                                               |
 | S2 canvas            | loading: current state only                              | Yes                      | `jazz-sim/benches/s2_canvas.rs` has `phase: db_surface_live` and current-row checks; `jazz/benches/cold_subscription.rs` is a focused current-row cold-load receipt.                                                                                                                                                                                                          |
@@ -281,10 +284,12 @@ Landed capabilities were retired from the gate list; git history is the record.
   `s9_durable_execution.rs`, `jazz/benches/sync.rs`, `jazz/benches/validation.rs`,
   and `groove/benches/{micro,scenario}.rs`.
 - **Output and retention.** `jazz-sim/src/lib.rs::metadata_fields` emits
-  `scenario`, `driver`, `seed`, `profile`, `git_sha`, `git_dirty`, and
-  `hostname`; `emit_json_line` appends to `benchmarks/results/jazz/<scenario>.jsonl`
-  when `JAZZ_BENCH_RETAIN=1`. Legacy `scripts/bench_run.py` enriches groove
-  scenario JSONL with `git_sha`, `git_dirty`, and host metadata.
+  `scenario`, `driver`, `seed`, `profile`, `git_sha`, `git_dirty`,
+  `git_status_available`, and `hostname`; `emit_json_line` appends to
+  `benchmarks/results/jazz/<scenario>.jsonl` when `JAZZ_BENCH_RETAIN=1`.
+  Jazz benchmark process metadata also records `git_status_available`.
+  Legacy `scripts/bench_run.py` enriches groove scenario JSONL with `git_sha`,
+  `git_dirty`, and host metadata.
 - **Bytes/token accounting.** Several benches have local helpers:
   `view_update_bytes` / `bytes_floor` in S1/S2/S3/S9, stream bytes/token in
   `s5_durable_stream.rs`, and storage tree walkers in S5/S9. This is useful but

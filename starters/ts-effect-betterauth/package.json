@@ -1,0 +1,31 @@
+{
+  "name": "ts-effect-betterauth",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch --env-file=.env server/dev.ts",
+    "prebuild": "node scripts/ensure-env.js",
+    "build": "tsc -p tsconfig.server.json && vite build && vite build --ssr server/index.ts --outDir server-dist",
+    "start": "node --env-file=.env server-dist/index.js",
+    "test": "vitest run",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.14.4",
+    "better-auth": "1.7.1",
+    "effect": "4.0.0-rc.118",
+    "hono": "^4.7.11",
+    "jazz-napi": "workspace:*",
+    "jazz-tools": "workspace:*"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "@types/node": "catalog:default",
+    "jsdom": "catalog:default",
+    "tsx": "^4.19.4",
+    "typescript": "catalog:default",
+    "vite": "catalog:default",
+    "vitest": "catalog:default"
+  }
+}

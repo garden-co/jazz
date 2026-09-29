@@ -82,7 +82,7 @@ fn write_only_schema() -> JazzSchema {
     )
 }
 
-fn open_db(node_byte: u8, author: AuthorSubject, schema: &JazzSchema) -> Db<TestStorage> {
+fn open_db(node_byte: u8, author: AuthorSubject, schema: &JazzSchema) -> Db {
     let refs = schema.column_families();
     let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open(DbConfig::new(
@@ -127,7 +127,7 @@ impl WireTransport for QueuedWireTransport {
 
 fn connect_client_to_core(
     core: &mut InMemoryServerShell,
-    client: &Db<TestStorage>,
+    client: &Db,
     client_wire: &QueuedWireTransport,
     identity: AuthorSubject,
 ) -> ServerSession {
@@ -138,7 +138,7 @@ fn connect_client_to_core(
 }
 
 fn pump_client_core(
-    client: &Db<TestStorage>,
+    client: &Db,
     wire: &QueuedWireTransport,
     core: &mut InMemoryServerShell,
     session: ServerSession,
@@ -152,7 +152,7 @@ fn pump_client_core(
     block_on(client.tick()).unwrap();
 }
 
-fn visible_titles(db: &Db<TestStorage>, tier: DurabilityTier) -> Vec<String> {
+fn visible_titles(db: &Db, tier: DurabilityTier) -> Vec<String> {
     let query = Query::from("todos");
     let prepared = db.prepare_query(&query).unwrap();
     block_on(db.all(
@@ -1019,7 +1019,7 @@ fn pending_edit_after_synced_rebase_keeps_synced_cells_across_added_column_linea
     block_on(alice.tick()).unwrap();
     let _held = alice_wire.drain_outbound();
 
-    let alice_row = |alice: &Db<TestStorage>| {
+    let alice_row = |alice: &Db| {
         let prepared = alice.prepare_query(&Query::from("todos")).unwrap();
         let rows = block_on(alice.all(&prepared, ReadOpts::default())).unwrap();
         assert_eq!(rows.len(), 1);

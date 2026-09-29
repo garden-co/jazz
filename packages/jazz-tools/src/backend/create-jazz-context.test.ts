@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { WasmSchema } from "../drivers/types.js";
 import type { CompiledPermissions } from "../permissions/index.js";
 import type { AppContext, Session } from "../runtime/context.js";
+import { SYSTEM_READ_SESSION } from "../runtime/system-identity.js";
 import { createJazzContext } from "./create-jazz-context.js";
 
 const mocks = vi.hoisted(() => {
@@ -371,6 +372,12 @@ describe("backend/create-jazz-context", () => {
     expect((requestDb as any).getRuntimeOperationContext()).toMatchObject({
       session,
       readSession: undefined,
+    });
+    // Attributed Dbs keep the user's session for provenance only; reads, in
+    // and out of transactions, use backend authority.
+    expect((attributedSessionDb as any).getRuntimeOperationContext()).toMatchObject({
+      session,
+      readSession: SYSTEM_READ_SESSION,
     });
 
     for (const scopedDb of [

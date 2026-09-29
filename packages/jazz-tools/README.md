@@ -17,10 +17,13 @@ For example, define tables rather than CoValues:
 import { schema as s } from "jazz-tools";
 
 export const app = s.defineApp({
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-  }),
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+    },
+    {},
+  ),
 });
 ```
 
@@ -108,34 +111,15 @@ this alpha: the default persistent configuration and the proposal-only
 has only been exercised by Node-based wiring tests, not Metro/Hermes or a device,
 and is not a supported persistence alternative.
 
-### Relation naming convention
+## Relations
 
-Relations use a bounded identifier convention, without generated application or
-library code. Scalar reference names strip a final `Id` or `_id`. A final `Ids`
-or `_ids` additionally pluralizes the remaining name. Names without these exact
-suffixes stay unchanged, including `status` and `analysis`. Reverse names remain
-`<sourceTable>Via<CapitalizedForwardName>`.
-
-Pluralization recognizes terminal `person/people`, `child/children`, `mouse/mice`,
-`goose/geese`, `tooth/teeth`, `foot/feet`, `analysis/analyses`, `status/statuses`,
-`alias/aliases`, and `bus/buses`. Equipment, news, information, software, data, media,
-series, species, fish, and sheep are invariant. These dictionary suffixes match
-lowercase, Titlecase, or UPPERCASE, preserving any prefix (`ownerPersonIds` →
-`ownerPeople`, `owner_person_ids` → `owner_people`). Existing dictionary plurals
-stay unchanged. Otherwise consonant + `y` becomes `ies`; `ss`, `sh`, `ch`, `x`,
-and `z` gain `es`; an existing final `s` stays; all other names gain `s`.
-Regular endings are uppercase only when the entire stem is uppercase. Empty
-stems stay empty (normal relation collision validation still applies). This is
-not a general English inflector: unusual words or mixed-case dictionary spellings
-follow the regular rules. Runtime aliases and literal TypeScript names use the
-same rules; a widened `string` remains `string`.
-
-This replaces the previous runtime English inflector and simpler TypeScript
-rules. Review include keys, reverse relation names, and permission hops when
-upgrading: names outside this convention may change. Stored column names,
-reference targets, schema hashes, and existing data are unchanged; no storage
-migration is involved. Ambiguous aliases and aliases that shadow another stored
-column continue to be rejected.
+Relations are declared explicitly in the second argument of
+`s.table(columns, relations)`; pass `{}` when a table has none. Store row IDs in
+UUID columns, name a forward relation with `s.rel(targetTable, localColumn)`, and
+name a reverse traversal with `s.reverse(sourceTable, forwardRelation)`. There is
+no suffix convention, generated code, or automatic reverse relation: a UUID column
+without a relation declaration stays an ordinary UUID column. See
+[Defining tables](https://jazz.tools/docs/schemas/defining-tables) for the full rules.
 
 ### Inferring relation APIs from authored schemas
 
@@ -147,11 +131,22 @@ relation file or build step is required:
 import { schema as s } from "jazz-tools";
 
 export const schema = s.defineSchema({
-  people: s.table({ name: s.string() }),
-  records: s.table({
-    personIds: s.array(s.ref("people")),
-    address: s.ref("people").optional(),
-  }),
+  people: s.table(
+    { name: s.string() },
+    {
+      records: s.reverse("records", "people"),
+    },
+  ),
+  records: s.table(
+    {
+      personIds: s.array(s.uuid()),
+      addressId: s.uuid().optional(),
+    },
+    {
+      people: s.rel("people", "personIds"),
+      address: s.rel("people", "addressId"),
+    },
+  ),
 });
 ```
 
@@ -166,9 +161,9 @@ export type RecordWithPeople = s.RowOf<typeof recordsWithPeople>;
 // people: Array<{ id: string; name: string }>
 // address: { id: string; name: string } | null
 
-export const peopleWithRecords = app.people.include({ recordsViaPeople: true });
+export const peopleWithRecords = app.people.include({ records: true });
 export const relatedPeople = app.records.hopTo("people");
-export const relatedRecords = app.people.hopTo("recordsViaPeople");
+export const relatedRecords = app.people.hopTo("records");
 ```
 
 ```ts
@@ -188,8 +183,8 @@ and `const app: s.App<AppSchema> = s.defineApp(definition)`.
 non-nullable scalar reference's included row from `Row | null` to `Row` and
 requires its match; nullable references such as `address` stay nullable. Required
 array includes require all referenced matches and remain arrays. Reverse includes
-remain arrays. These APIs infer their relation names directly from the authored
-schema, so there is no separate catalogue to generate, pass, or check for staleness.
+remain arrays. These APIs take their relation names directly from the explicit
+`s.rel` / `s.reverse` declarations in the authored schema, so there is no separate catalogue to generate, pass, or check for staleness.
 
 For a smaller typed surface, use
 `s.defineSliceableApp(schema).slice("records", "people")`. Only selected tables

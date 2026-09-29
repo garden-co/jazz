@@ -62,9 +62,12 @@ use jazz_native_transport::NativeWebSocketConnector;
 use jazz_storage_sqlite::{Durability as SqliteDurability, SqliteStorage};
 use thiserror::Error;
 
-/// The first public native-relay ABI. Future breaking command/wire changes
-/// receive a distinct version; no historical implementation number is public.
-pub const NATIVE_RELAY_ABI_V1: u16 = 1;
+/// The current native-relay ABI version. (The name is kept for the exported
+/// `jazz-rn` constant.) Breaking command/response changes bump the value:
+/// 1 was the first public ABI; 2 added `CodedOperationError` answers to
+/// existing commands, so a JS bundle and native build from different ABIs
+/// refuse to open rather than misread a failure.
+pub const NATIVE_RELAY_ABI_V1: u16 = 2;
 
 const FOREGROUND_WAKE_IMMEDIATE: u8 = 0;
 const FOREGROUND_WAKE_DEFERRED: u8 = 1;
@@ -682,6 +685,13 @@ pub enum ForegroundDbCommandResponse {
     },
     PermissionAdvice {
         advice: ForegroundPermissionAdvice,
+    },
+    /// An `OperationError` caused by a core `jazz::db::Error`, carrying its
+    /// stable `ErrorCode::as_str` code beside the unchanged reason text.
+    /// Introduced by ABI 2: every other failure still uses `OperationError`.
+    CodedOperationError {
+        code: String,
+        reason: String,
     },
 }
 
@@ -3445,7 +3455,7 @@ impl NativeRelayClient {
     /// across JSI/JNI/Swift boundaries.
     pub fn with_db<T: Send + 'static>(
         &self,
-        operation: impl FnOnce(&Db<MemoryStorage>) -> Result<T, RelayError> + Send + 'static,
+        operation: impl FnOnce(&Db) -> Result<T, RelayError> + Send + 'static,
     ) -> Result<T, RelayError> {
         let id = self.id;
         self.relay.run(move |worker| {
@@ -4955,7 +4965,7 @@ struct ConnectedClient {
     refreshed_claims: Option<BTreeMap<String, Value>>,
     retiring: bool,
     admitted_scope_advice: bool,
-    db: Rc<Db<MemoryStorage>>,
+    db: Rc<Db>,
     tick: Option<RelayTickFuture>,
     upstream_io: RelayPeerIo,
     served_io: Option<RelayPeerIo>,
@@ -4976,8 +4986,8 @@ struct ConnectedClient {
     next_foreground_handle: u64,
     // The core stores weak references for lifecycle ownership; retaining both
     // endpoints is what keeps the normal peer protocol connection alive.
-    _upstream: Rc<LocalMutex<PeerConnection<MemoryStorage>>>,
-    _served: Option<Rc<LocalMutex<PeerConnection<SqliteStorage>>>>,
+    _upstream: Rc<LocalMutex<PeerConnection>>,
+    _served: Option<Rc<LocalMutex<PeerConnection>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -5119,11 +5129,8 @@ type ForegroundOperationFuture =
     Pin<Box<dyn Future<Output = Result<ForegroundOperationResult, RelayError>> + 'static>>;
 
 type RelayTickFuture = Pin<Box<dyn Future<Output = Result<(), jazz::db::Error>>>>;
-type RelayAdmissionFuture = Pin<
-    Box<
-        dyn Future<Output = Result<Rc<LocalMutex<PeerConnection<SqliteStorage>>>, jazz::db::Error>>,
-    >,
->;
+type RelayAdmissionFuture =
+    Pin<Box<dyn Future<Output = Result<Rc<LocalMutex<PeerConnection>>, jazz::db::Error>>>>;
 
 /// A peer's chunk lane must progress even while its semantic tick or a
 /// foreground read owns the node. Retain both the endpoint and any suspended
@@ -5239,9 +5246,30 @@ enum ForegroundOperationResult {
 }
 
 enum ForegroundOperationPoll {
-    Pending { operation: u64 },
+    Pending {
+        operation: u64,
+    },
     Ready(ForegroundOperationResult),
-    Error { reason: String },
+    Error {
+        /// The stable core code when the failure is a core `jazz::db::Error`.
+        code: Option<&'static str>,
+        reason: String,
+    },
+}
+
+/// The response for a failed foreground operation. A core error keeps its
+/// display text as the reason and adds its stable code.
+fn foreground_operation_error(
+    code: Option<&'static str>,
+    reason: String,
+) -> ForegroundDbCommandResponse {
+    match code {
+        Some(code) => ForegroundDbCommandResponse::CodedOperationError {
+            code: code.to_owned(),
+            reason,
+        },
+        None => ForegroundDbCommandResponse::OperationError { reason },
+    }
 }
 
 fn foreground_operation_response(poll: ForegroundOperationPoll) -> ForegroundDbCommandResponse {
@@ -5274,9 +5302,7 @@ fn foreground_operation_response(poll: ForegroundOperationPoll) -> ForegroundDbC
                 tx_id: *tx_id.as_bytes(),
             }
         }
-        ForegroundOperationPoll::Error { reason } => {
-            ForegroundDbCommandResponse::OperationError { reason }
-        }
+        ForegroundOperationPoll::Error { code, reason } => foreground_operation_error(code, reason),
     }
 }
 
@@ -5294,9 +5320,10 @@ fn foreground_command_error(
         RelayError::QueueCapacityExceeded { .. } => Err(JazzNativeRelayStatus::Backpressure),
         // Preserve the core Error prefix consumed by the shared TS adapter's
         // rejection normalizer, exactly as NAPI and WASM do.
-        RelayError::Db(error) => Ok(ForegroundDbCommandResponse::OperationError {
-            reason: error.to_string(),
-        }),
+        RelayError::Db(error) => Ok(foreground_operation_error(
+            Some(error.code.as_str()),
+            error.to_string(),
+        )),
         error => Ok(ForegroundDbCommandResponse::OperationError {
             reason: error.to_string(),
         }),
@@ -5351,13 +5378,7 @@ impl ClosingForeground {
 type UpstreamTransition = Pin<
     Box<
         dyn Future<
-            Output = Result<
-                Option<(
-                    Rc<LocalMutex<PeerConnection<SqliteStorage>>>,
-                    NativeRelayWire,
-                )>,
-                RelayError,
-            >,
+            Output = Result<Option<(Rc<LocalMutex<PeerConnection>>, NativeRelayWire)>, RelayError>,
         >,
     >,
 >;
@@ -5369,13 +5390,13 @@ struct RelayWorker {
     drive_error: Option<RelayError>,
     #[cfg(test)]
     drive_turns: u64,
-    persistent: Rc<Db<SqliteStorage>>,
+    persistent: Rc<Db>,
     persistent_tick: Option<RelayTickFuture>,
     upstream_io: RelayPeerIo,
     pending_foreground_wakes: PendingForegroundWakes,
     foreground_wake_generations: BTreeMap<u64, Arc<AtomicU64>>,
     owner_wake_queued: Arc<AtomicBool>,
-    _upstream: Rc<LocalMutex<PeerConnection<SqliteStorage>>>,
+    _upstream: Rc<LocalMutex<PeerConnection>>,
     upstream_attached: bool,
     socket_generation: u64,
     socket_wire: Option<NativeRelayWire>,
@@ -6227,10 +6248,14 @@ impl RelayWorker {
         let mut context = Context::from_waker(&waker);
         match pending_operation.future.as_mut().poll(&mut context) {
             Poll::Ready(Ok(result)) => Ok(ForegroundOperationPoll::Ready(result)),
-            Poll::Ready(Err(error)) => Ok(ForegroundOperationPoll::Error {
-                reason: match error {
-                    RelayError::Db(error) => error.to_string(),
-                    error => error.to_string(),
+            Poll::Ready(Err(error)) => Ok(match error {
+                RelayError::Db(error) => ForegroundOperationPoll::Error {
+                    code: Some(error.code.as_str()),
+                    reason: error.to_string(),
+                },
+                error => ForegroundOperationPoll::Error {
+                    code: None,
+                    reason: error.to_string(),
                 },
             }),
             Poll::Pending => {
@@ -6325,7 +6350,7 @@ impl RelayWorker {
         &self,
         client: u64,
         transaction: u64,
-    ) -> Result<(Rc<Db<MemoryStorage>>, ForegroundTransaction), RelayError> {
+    ) -> Result<(Rc<Db>, ForegroundTransaction), RelayError> {
         let client = self.foreground_client(client)?;
         let transaction = client
             .transactions
@@ -11165,7 +11190,7 @@ mod tests {
                     )
                 })
                 .unwrap();
-            thread_local! { static CLOSED_DB: RefCell<std::rc::Weak<Db<MemoryStorage>>> = const { RefCell::new(std::rc::Weak::new()) }; }
+            thread_local! { static CLOSED_DB: RefCell<std::rc::Weak<Db>> = const { RefCell::new(std::rc::Weak::new()) }; }
             relay
                 .run(move |worker| {
                     CLOSED_DB.with(|weak| {
@@ -11191,7 +11216,7 @@ mod tests {
                 .start_foreground_read(query, "{}".into(), Some(tx))
                 .unwrap();
             assert!(matches!(pending, ForegroundOperationPoll::Pending { .. }));
-            thread_local! { static CLOSED_WRITE: RefCell<Option<Rc<jazz::db::WriteHandle<MemoryStorage>>>> = const { RefCell::new(None) }; }
+            thread_local! { static CLOSED_WRITE: RefCell<Option<Rc<jazz::db::WriteHandle>>> = const { RefCell::new(None) }; }
             if committed {
                 let tx_id = client.commit_foreground_transaction(tx).unwrap();
                 relay
@@ -11291,7 +11316,7 @@ mod tests {
         let id = client.id;
         let observed = Arc::new(AtomicBool::new(false));
         let receipt = Arc::clone(&observed);
-        thread_local! { static RETIRED_DB: RefCell<std::rc::Weak<Db<MemoryStorage>>> = const { RefCell::new(std::rc::Weak::new()) }; }
+        thread_local! { static RETIRED_DB: RefCell<std::rc::Weak<Db>> = const { RefCell::new(std::rc::Weak::new()) }; }
         relay
             .run(move |worker| {
                 let db = Rc::clone(&worker.foreground_client(id)?.db);
@@ -13177,20 +13202,27 @@ mod tests {
         // Rust coalesces pending signals until the owner flushes them. Keep
         // both wakes in one owner operation so its flush cannot race between
         // them; cross-operation callback coalescing belongs to the platform.
-        relay
-            .run(move |_| {
-                query_waker.wake_by_ref();
-                query_waker.wake_by_ref();
-                Ok(())
-            })
-            .unwrap();
+        // Count the callbacks inside that operation: once it returns, the
+        // drive turn the wake requested runs on the owner thread and queues
+        // its own callback, concurrently with this thread's assertions.
+        let storage_wake_callbacks = {
+            let reader_wake = Arc::clone(&reader_wake);
+            relay
+                .run(move |worker| {
+                    let before = reader_wake.queued();
+                    query_waker.wake_by_ref();
+                    query_waker.wake_by_ref();
+                    worker.flush_foreground_wakes();
+                    Ok(reader_wake.queued() - before)
+                })
+                .unwrap()
+        };
         assert!(
             reader_wake.wait_for_queued(1),
             "the storage wake must cross the native foreground callback"
         );
         assert_eq!(
-            reader_wake.queued(),
-            1,
+            storage_wake_callbacks, 1,
             "coalesced storage wakes queue one native owner callback"
         );
         // #3273: the owner consumes the wake in its own drive turn instead of
@@ -14337,8 +14369,14 @@ mod tests {
             admitted_scope,
         };
         for (request, expected) in [
-            (request(3, 2), JazzNativeRelayStatus::InvalidAbiRange),
-            (request(2, 2), JazzNativeRelayStatus::IncompatibleAbi),
+            (
+                request(NATIVE_RELAY_ABI_V1 + 2, NATIVE_RELAY_ABI_V1 + 1),
+                JazzNativeRelayStatus::InvalidAbiRange,
+            ),
+            (
+                request(NATIVE_RELAY_ABI_V1 + 1, NATIVE_RELAY_ABI_V1 + 1),
+                JazzNativeRelayStatus::IncompatibleAbi,
+            ),
         ] {
             let encoded = postcard::to_allocvec(&request).unwrap();
             let mut output = JazzNativeRelayBytes {
@@ -15792,7 +15830,7 @@ mod tests {
 
         // Invalid schema/cell input is a logical operation error rather than
         // a lifecycle failure, preserving the core error boundary for the
-        // shared adapter.
+        // shared adapter. Being a core error, it carries its stable code.
         let ForegroundDbCommandResponse::TransactionOpened { transaction } = response(
             foreground,
             ForegroundDbCommandRequest::BeginTransaction {
@@ -15801,18 +15839,22 @@ mod tests {
         ) else {
             panic!("begin must return a handle");
         };
-        assert!(matches!(
-            response(
-                foreground,
-                ForegroundDbCommandRequest::Insert {
-                    transaction,
-                    table: "missing_table".to_owned(),
-                    cells: encoded_title_cells("nope"),
-                    row_id: Some([0x73; 16]),
-                }
-            ),
-            ForegroundDbCommandResponse::OperationError { .. }
-        ));
+        let rejected_insert = response(
+            foreground,
+            ForegroundDbCommandRequest::Insert {
+                transaction,
+                table: "missing_table".to_owned(),
+                cells: encoded_title_cells("nope"),
+                row_id: Some([0x73; 16]),
+            },
+        );
+        assert_eq!(
+            rejected_insert,
+            ForegroundDbCommandResponse::CodedOperationError {
+                code: "schema".to_owned(),
+                reason: "Schema: unknown table missing_table".to_owned(),
+            }
+        );
         assert_eq!(
             response(
                 foreground,
@@ -16148,6 +16190,35 @@ mod tests {
         {
             assert_eq!(postcard::to_allocvec(&kind).unwrap(), vec![ordinal as u8]);
         }
+    }
+
+    #[test]
+    fn foreground_coded_operation_error_v1_byte_contract() {
+        // Response 25 is appended to V1: a core error's stable code, then the
+        // unchanged reason. Uncoded failures keep response 8.
+        let coded = ForegroundDbCommandResponse::CodedOperationError {
+            code: "not_observed".into(),
+            reason: "NotObserved: oops".into(),
+        };
+        let bytes = [
+            vec![25, 12],
+            b"not_observed".to_vec(),
+            vec![17],
+            b"NotObserved: oops".to_vec(),
+        ]
+        .concat();
+        assert_eq!(postcard::to_allocvec(&coded).unwrap(), bytes);
+        assert_eq!(
+            postcard::from_bytes::<ForegroundDbCommandResponse>(&bytes).unwrap(),
+            coded
+        );
+        assert_eq!(
+            postcard::to_allocvec(&ForegroundDbCommandResponse::OperationError {
+                reason: "oops".into()
+            })
+            .unwrap(),
+            vec![8, 4, 111, 111, 112, 115]
+        );
     }
 
     #[test]

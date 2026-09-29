@@ -608,6 +608,27 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
       ]);
     });
 
+    it("orders by a column it does not select", async () => {
+      // Insertion (row id) order differs from `integer` order.
+      const { value: c } = db.insert(app.table_with_defaults, { integer: 3, string: "c" });
+      const { value: a } = db.insert(app.table_with_defaults, { integer: 1, string: "a" });
+      const { value: d } = db.insert(app.table_with_defaults, { integer: 4, string: "d" });
+      const { value: b } = db.insert(app.table_with_defaults, { integer: 2, string: "b" });
+
+      const byInteger = app.table_with_defaults.select("string").orderBy("integer", "desc");
+
+      expect(await readAll(byInteger)).toEqual([
+        { id: d.id, string: "d" },
+        { id: c.id, string: "c" },
+        { id: b.id, string: "b" },
+        { id: a.id, string: "a" },
+      ]);
+      expect(await readAll(byInteger.offset(1).limit(2))).toEqual([
+        { id: c.id, string: "c" },
+        { id: b.id, string: "b" },
+      ]);
+    });
+
     it("filters nullable int columns with range and not-null predicates", async () => {
       db.insert(app.table_with_defaults, { nullableInteger: null });
       const { value: aliceTask } = db.insert(app.table_with_defaults, { nullableInteger: 5 });

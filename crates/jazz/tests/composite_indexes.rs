@@ -50,7 +50,7 @@ fn public_schema() -> Schema {
         .build()
 }
 
-fn open_rocks_db(path: &std::path::Path, schema: &JazzSchema) -> Db<RocksDbStorage> {
+fn open_rocks_db(path: &std::path::Path, schema: &JazzSchema) -> Db {
     let families = schema.column_families();
     let storage = RocksDbStorage::open(
         path,
@@ -68,7 +68,7 @@ fn open_rocks_db(path: &std::path::Path, schema: &JazzSchema) -> Db<RocksDbStora
     .unwrap()
 }
 
-fn insert_task(db: &Db<RocksDbStorage>, id: RowUuid, owner: &str, rank: i32, title: &str) {
+fn insert_task(db: &Db, id: RowUuid, owner: &str, rank: i32, title: &str) {
     block_on(db.insert(
         "tasks",
         BTreeMap::from([
@@ -86,7 +86,7 @@ fn insert_task(db: &Db<RocksDbStorage>, id: RowUuid, owner: &str, rank: i32, tit
 
 /// Titles of `owner`'s top two tasks by descending rank: the equality-prefix,
 /// ordered-page shape a `(owner, rank)` composite index is declared for.
-fn top_two_titles(db: &Db<RocksDbStorage>, schema: &JazzSchema, owner: &str) -> Vec<String> {
+fn top_two_titles(db: &Db, schema: &JazzSchema, owner: &str) -> Vec<String> {
     let query = db
         .prepare_query(
             &Query::from("tasks")
@@ -305,11 +305,7 @@ fn composite_index_row_order(path: &std::path::Path, schema: &JazzSchema) -> Vec
 /// Publish `composite` as the identity-lens descendant of `plain` and make it
 /// the write schema: the ordinary catalogue migration path for any schema
 /// change to an existing store.
-fn publish_composite_descendant(
-    db: &Db<RocksDbStorage>,
-    plain: &JazzSchema,
-    composite: &JazzSchema,
-) {
+fn publish_composite_descendant(db: &Db, plain: &JazzSchema, composite: &JazzSchema) {
     let target = SchemaVersion::new(composite.clone());
     let lens = MigrationLens::new(
         plain.version_id(),

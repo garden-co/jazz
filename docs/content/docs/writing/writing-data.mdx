@@ -63,10 +63,15 @@ Every framework provides a hook to access the database handle. In plain TypeScri
 
 Mutations are methods on the database handle. All three take a table as their first argument.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-crud-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts">
+      ../examples/docs/todo-effect/src/docs-snippets.ts#writing-crud-effect
     </include>
   </Tab>
   <Tab value="Rust">
@@ -82,9 +87,18 @@ Use `upsert(...)` when your app already knows the row ID and wants to create tha
 not exist, or update it if it does. Like `insert`, `update`, and `delete`, it applies locally first
 and returns a `MutationResult<void>` that can be awaited for durability.
 
-<include cwd lang="ts">
-  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-upsert-ts
-</include>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-upsert-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts">
+      ../examples/docs/todo-effect/src/docs-snippets.ts#writing-upsert-effect
+    </include>
+  </Tab>
+</Tabs>
 
 ### Restore a deleted row
 
@@ -93,9 +107,18 @@ Trying to insert, update or delete an already deleted row will fail. Use `restor
 Deleted rows are omitted from queries by default. Add `includeDeleted()` when you need to find a
 row before restoring it.
 
-<include cwd lang="ts">
-  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-restore-ts
-</include>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-restore-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts">
+      ../examples/docs/todo-effect/src/docs-snippets.ts#writing-restore-effect
+    </include>
+  </Tab>
+</Tabs>
 
 ### Partial updates and nullable fields
 
@@ -104,10 +127,15 @@ Omitted fields are left unchanged; explicitly passing `undefined` also leaves a 
 To clear a nullable column in TypeScript, pass `null`.
 Required fields cannot be set to `null`.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-nullable-update-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts">
+      ../examples/docs/todo-effect/src/docs-snippets.ts#writing-nullable-update-effect
     </include>
   </Tab>
   <Tab value="Rust">
@@ -190,10 +218,15 @@ Offline, only `local` can resolve. A `global` wait stays pending until the devic
 reconnects and Core accepts or rejects the queued write. Both choices apply the
 initial mutation locally and upload it when connected.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-durability-tier-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts">
+      ../examples/docs/todo-effect/src/docs-snippets.ts#writing-durability-tier-effect
     </include>
   </Tab>
   <Tab value="Rust">
@@ -216,17 +249,35 @@ A mutation can fail when you call it or while you wait:
 - If a server later rejects the mutation, an active `wait(...)` call rejects with
   `PersistedWriteRejectedError`.
 
-<include cwd lang="ts">
-  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-mutation-errors-ts
-</include>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-mutation-errors-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts">
+      ../examples/docs/todo-effect/src/docs-snippets.ts#writing-mutation-errors-effect
+    </include>
+  </Tab>
+</Tabs>
 
 Use `db.onMutationError(...)` as a fallback for rejected mutations without an active `wait(...)`.
 This includes mutations you did not wait for and mutations whose wait finished before a later
 rejection arrived.
 
-<include cwd lang="ts">
-  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-mutation-error-listener-ts
-</include>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-mutation-error-listener-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts">
+      ../examples/docs/todo-effect/src/docs-snippets.ts#writing-mutation-error-listener-effect
+    </include>
+  </Tab>
+</Tabs>
 
 `onMutationError` returns an unsubscribe function. Without a listener, Jazz logs the rejection and
 keeps it so that a listener registered later can receive it.

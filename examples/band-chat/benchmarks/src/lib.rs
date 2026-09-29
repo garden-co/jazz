@@ -24,7 +24,7 @@ const HOT_ROOM_MESSAGES: usize = 100;
 const TIMELINE_OFFSET: usize = 25;
 const TIMELINE_PAGE: usize = 25;
 
-type BenchDb = Db<MemoryStorage>;
+type BenchDb = Db;
 
 pub struct Fixture {
     db: BenchDb,

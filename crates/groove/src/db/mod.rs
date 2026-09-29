@@ -1341,8 +1341,8 @@ impl crate::chunks::ChunkInstallObserver for MetadataChunkInstallObserver {
 pub use crate::ivm::{
     CollectByField, GraphBuilder, InputSourceDelta, InputSourceId, InputSourceReplacement,
     IvmRuntimeError, MultisinkDeltas, MultisinkSubscription, PredicateExpr, PreparedShapeId,
-    ProjectField, PublicationUpdate, RoutedMultisinkTerminal, Subscription, SubscriptionError,
-    SubscriptionEvent, SubscriptionId, SubscriptionLifetime,
+    ProjectField, PublicationUpdate, RootIndirectValues, RoutedMultisinkTerminal, Subscription,
+    SubscriptionError, SubscriptionEvent, SubscriptionId, SubscriptionLifetime,
 };
 
 /// Schema-aware database facade over storage and IVM subscriptions.
@@ -1834,6 +1834,19 @@ pub enum Error {
 impl From<crate::storage::Error> for Error {
     fn from(error: crate::storage::Error) -> Self {
         Self::Storage(Box::new(error))
+    }
+}
+
+impl From<crate::large_values::ReachabilityError> for Error {
+    fn from(error: crate::large_values::ReachabilityError) -> Self {
+        match error {
+            crate::large_values::ReachabilityError::LargeValue(error) => {
+                crate::ivm::runtime::IvmRuntimeError::from(error).into()
+            }
+            crate::large_values::ReachabilityError::Chunk(error) => {
+                crate::ivm::runtime::IvmRuntimeError::from(error).into()
+            }
+        }
     }
 }
 

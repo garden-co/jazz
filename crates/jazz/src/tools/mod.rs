@@ -1,21 +1,18 @@
+// The data-model and identity modules below moved out of `tools` so the
+// lower layers no longer reach up into the public API module; they stay
+// reachable at their old `tools::` paths.
 #[doc(hidden)]
-pub mod admin_catalogue_row_format;
-pub mod app_id;
-pub mod identity;
-pub mod metadata;
+pub use crate::model::admin_catalogue_row_format;
+pub(crate) use crate::model::public_api;
+#[doc(hidden)]
+pub use crate::model::public_schema_convert;
+pub use crate::model::{metadata, policy_claims, public_schema, schema_lens, transaction};
+pub use crate::{app_id, identity};
 /// Target-shell factory boundary for native peer transports.
 pub mod native_transport_connector;
-mod object;
-pub mod policy_claims;
-pub(crate) mod public_api;
-pub mod public_schema;
-#[doc(hidden)]
-pub mod public_schema_convert;
-pub mod schema_lens;
 pub mod sync;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_support;
-pub mod transaction;
 
 pub mod transport_error;
 pub mod websocket_prelude_auth;
@@ -46,8 +43,7 @@ pub use transaction::OpenTransactionId;
 #[cfg(feature = "runtime")]
 pub use client::{JazzClient, JazzTransaction};
 
-pub(crate) use object::OutputOccurrenceId;
-pub use object::{BranchName, ObjectId, ResultKey};
+pub use crate::object::{BranchName, ObjectId, ResultKey};
 #[cfg(feature = "runtime")]
 pub use sync::ClientId;
 #[cfg(feature = "runtime")]
@@ -92,7 +88,7 @@ pub struct AppContext {
 impl AppContext {
     pub fn test(schema: Schema) -> AppContext {
         AppContext {
-            app_id: crate::tools::AppId::random(),
+            app_id: crate::app_id::AppId::random(),
             client_id: None,
             schema,
             server_url: String::new(),

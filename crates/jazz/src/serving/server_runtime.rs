@@ -1413,8 +1413,8 @@ impl ServerRuntimeHandle {
         revision: u64,
         schema: JazzSchema,
         permissions: std::collections::HashMap<
-            crate::tools::public_schema::TableName,
-            crate::tools::public_schema::TablePolicies,
+            crate::model::public_schema::TableName,
+            crate::model::public_schema::TablePolicies,
         >,
     ) -> Result<SchemaVersionId, String> {
         let activity_tx = self.inner.activity_tx.clone();

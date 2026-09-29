@@ -2039,11 +2039,17 @@ dependencies = [
  "hex",
  "insta",
  "internment",
+ "jazz",
  "jazz-benchmark-guard",
  "jazz-compression",
+ "jazz-db",
+ "jazz-engine",
+ "jazz-model",
+ "jazz-node",
+ "jazz-protocol",
  "jazz-storage-rocksdb",
  "jazz-storage-sqlite",
- "jazz-testkit",
+ "jazz-types",
  "jsonschema",
  "jsonwebtoken",
  "libc",
@@ -2118,6 +2124,58 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-db"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "bytes",
+ "futures",
+ "futures-channel",
+ "futures-core",
+ "groove",
+ "hex",
+ "jazz-benchmark-guard",
+ "jazz-engine",
+ "jazz-model",
+ "jazz-node",
+ "jazz-protocol",
+ "jazz-storage-rocksdb",
+ "jazz-types",
+ "postcard",
+ "serde",
+ "serde_json",
+ "stacker",
+ "tempfile",
+ "thiserror",
+ "tracing",
+ "uuid",
+ "web-time",
+]
+
+[[package]]
+name = "jazz-engine"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "groove",
+ "jazz-model",
+ "jazz-protocol",
+ "jazz-types",
+ "postcard",
+ "uuid",
+]
+
+[[package]]
+name = "jazz-example-auth-chat-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz",
+ "jazz-benchmark-guard",
+ "uuid",
+]
+
+[[package]]
 name = "jazz-example-band-chat-benchmark"
 version = "0.1.0"
 dependencies = [
@@ -2147,12 +2205,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-example-chat-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz",
+ "jazz-benchmark-guard",
+ "uuid",
+]
+
+[[package]]
 name = "jazz-example-epic-drop-benchmark"
 version = "0.1.0"
 dependencies = [
  "codspeed-divan-compat",
  "groove",
  "jazz",
+ "jazz-benchmark-guard",
 ]
 
 [[package]]
@@ -2161,6 +2230,7 @@ version = "0.1.0"
 dependencies = [
  "codspeed-divan-compat",
  "jazz",
+ "jazz-benchmark-guard",
 ]
 
 [[package]]
@@ -2170,6 +2240,7 @@ dependencies = [
  "codspeed-divan-compat",
  "groove",
  "jazz",
+ "jazz-benchmark-guard",
 ]
 
 [[package]]
@@ -2210,6 +2281,7 @@ version = "0.1.0"
 dependencies = [
  "codspeed-divan-compat",
  "jazz",
+ "jazz-benchmark-guard",
 ]
 
 [[package]]
@@ -2218,6 +2290,7 @@ version = "0.1.0"
 dependencies = [
  "codspeed-divan-compat",
  "jazz",
+ "jazz-benchmark-guard",
  "serde_json",
 ]
 
@@ -2241,6 +2314,7 @@ version = "0.1.0"
 dependencies = [
  "codspeed-divan-compat",
  "jazz",
+ "jazz-benchmark-guard",
 ]
 
 [[package]]
@@ -2259,6 +2333,25 @@ dependencies = [
  "groove",
  "jazz-storage-rocksdb",
  "tempfile",
+]
+
+[[package]]
+name = "jazz-model"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "blake3",
+ "groove",
+ "hex",
+ "internment",
+ "jazz-types",
+ "jsonschema",
+ "postcard",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "thiserror",
+ "uuid",
 ]
 
 [[package]]
@@ -2336,6 +2429,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-node"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "blake3",
+ "bytes",
+ "flate2",
+ "futures",
+ "groove",
+ "hex",
+ "jazz-benchmark-guard",
+ "jazz-engine",
+ "jazz-model",
+ "jazz-protocol",
+ "jazz-storage-rocksdb",
+ "jazz-storage-sqlite",
+ "jazz-types",
+ "postcard",
+ "rusqlite",
+ "rust-rocksdb",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tar",
+ "tempfile",
+ "thiserror",
+ "tracing",
+ "uuid",
+ "web-time",
+]
+
+[[package]]
 name = "jazz-otel"
 version = "0.1.0"
 dependencies = [
@@ -2356,6 +2482,27 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "jazz-protocol"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "groove",
+ "hex",
+ "jazz-compression",
+ "jazz-model",
+ "jazz-types",
+ "postcard",
+ "rand 0.8.5",
+ "rustc-hash",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "thiserror",
+ "uuid",
+ "web-time",
 ]
 
 [[package]]
@@ -2470,6 +2617,24 @@ dependencies = [
  "tokio",
  "uuid",
  "zstd",
+]
+
+[[package]]
+name = "jazz-types"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "ed25519-dalek",
+ "groove",
+ "internment",
+ "postcard",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "sha2 0.10.9",
+ "smallvec",
+ "thiserror",
+ "uuid",
 ]
 
 [[package]]
