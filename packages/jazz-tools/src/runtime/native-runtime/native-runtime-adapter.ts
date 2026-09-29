@@ -73,6 +73,7 @@ import {
 import { exactSignedI64 } from "./exact-integer.js";
 import { encodeSchema } from "./schema-codec.js";
 import { nativeRowFieldPlanCacheKey } from "./native-row-descriptor-key.js";
+import { nativeCoreErrorCode } from "./native-error-code.js";
 import {
   WebSocketCarrier,
   WIRE_PROTOCOL_VERSION,
@@ -4849,8 +4850,7 @@ function rejectedWaitError(
   /** An Error-compatible diagnostic for direct native callers. */
   message: string;
 } | null {
-  const message = errorMessage(error);
-  if (extractWriteRejectedReason(message) === null) return null;
+  if (!isCoreWriteRejection(error)) return null;
   return queuedWriteRejection(transactionId, error);
 }
 
@@ -4893,9 +4893,9 @@ function writeOrNormalizeRejection<T>(
   try {
     return write();
   } catch (error) {
-    const message = errorMessage(error);
-    const reason = extractWriteRejectedReason(message);
-    if (reason !== null) {
+    if (isCoreWriteRejection(error)) {
+      const message = errorMessage(error);
+      const reason = extractWriteRejectedReason(message) ?? message;
       throw new Error(`${operation} failed: WriteError("${reason}")`);
     }
     throw error;
@@ -4950,6 +4950,19 @@ function rejectionReason(message: string): string {
   if (reason === null) return message;
   if (reason.includes("AuthorizationDenied")) return "Write rejected by server authorization";
   return reason || "Write rejected";
+}
+
+/**
+ * Whether a native error is a core `WriteRejected` error.
+ *
+ * A binding error carries the stable core code, which decides. Only a value
+ * without a core code (for example a test double or a relayed payload that
+ * never had one) falls back to the stable Rust display prefix.
+ */
+function isCoreWriteRejection(error: unknown): boolean {
+  const code = nativeCoreErrorCode(error);
+  if (code !== undefined) return code === "write_rejected";
+  return extractWriteRejectedReason(errorMessage(error)) !== null;
 }
 
 /** Parse the exact stable Rust `Error` display prefix without matching quoted diagnostics. */

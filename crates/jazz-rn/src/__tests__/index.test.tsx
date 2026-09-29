@@ -399,6 +399,32 @@ it("uses the compact canonical byte vocabulary for the foreground NativeDb slice
   );
 });
 
+it("decodes a core operation error with its stable code beside the unchanged reason", () => {
+  const relay = loadRelay(null);
+  const code = [...new TextEncoder().encode("not_observed")];
+  const reason = [...new TextEncoder().encode("NotObserved: oops")];
+
+  expect(
+    relay.decodeNativeForegroundResponse(
+      Uint8Array.of(25, code.length, ...code, reason.length, ...reason),
+    ),
+  ).toEqual({ type: "operationError", code: "not_observed", reason: "NotObserved: oops" });
+  // An uncoded failure keeps response 8 and has no code.
+  expect(relay.decodeNativeForegroundResponse(Uint8Array.of(8, 4, 111, 111, 112, 115))).toEqual({
+    type: "operationError",
+    reason: "oops",
+  });
+  for (const malformed of [
+    Uint8Array.of(25),
+    Uint8Array.of(25, 3, 110, 111),
+    Uint8Array.of(25, 1, 110),
+    Uint8Array.of(25, 1, 110, 4, 111, 111, 112),
+    Uint8Array.of(25, 1, 110, 1, 111, 0),
+  ]) {
+    expect(() => relay.decodeNativeForegroundResponse(malformed)).toThrow(/malformed/i);
+  }
+});
+
 it("decodes canonical foreground handles through the JavaScript safe integer limit", () => {
   const relay = loadRelay(null);
   const corpus = [

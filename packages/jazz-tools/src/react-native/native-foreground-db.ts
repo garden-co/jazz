@@ -143,7 +143,7 @@ type ForegroundResponse =
   | { type: "unsubscribed"; closed: boolean }
   | { type: "closed"; closed: boolean }
   | { type: "pending"; operation: number }
-  | { type: "operationError"; reason: string }
+  | { type: "operationError"; reason: string; code?: string }
   | { type: "cancelled"; cancelled: boolean }
   | { type: "transactionOpened"; transaction: number }
   | { type: "inserted"; rowId: Uint8Array }
@@ -251,7 +251,7 @@ export class NativeForegroundDb {
       transaction,
     });
     if (response.type === "rows") return response.rows;
-    if (response.type === "operationError") throw new Error(response.reason);
+    if (response.type === "operationError") throw foregroundOperationError(response);
     if (response.type === "pending") return this.pendingRows(response.operation);
     return unexpected("all", response.type);
   }
@@ -260,7 +260,7 @@ export class NativeForegroundDb {
   // registration or hydration, to merge staged patches synchronously.
   localCurrentRow(table: string, rowId: Uint8Array): Uint8Array {
     const response = this.execute({ type: "localCurrentRow", table, rowId });
-    if (response.type === "operationError") throw new Error(response.reason);
+    if (response.type === "operationError") throw foregroundOperationError(response);
     if (response.type !== "rows") return unexpected("localCurrentRow", response.type);
     return response.rows;
   }
@@ -272,7 +272,7 @@ export class NativeForegroundDb {
       query,
       optionsJson: JSON.stringify(opts ?? {}),
     });
-    if (response.type === "operationError") throw new Error(response.reason);
+    if (response.type === "operationError") throw foregroundOperationError(response);
     if (response.type !== "subscribed") return unexpected("subscribe", response.type);
     return new NativeForegroundSubscription(response.subscription, this);
   }
@@ -282,7 +282,7 @@ export class NativeForegroundDb {
     this.runtime.tick();
     if (this.mutationErrorCallback) {
       const response = this.execute({ type: "drainMutationErrors" });
-      if (response.type === "operationError") throw new Error(response.reason);
+      if (response.type === "operationError") throw foregroundOperationError(response);
       if (response.type !== "mutationErrors")
         return unexpected("drainMutationErrors", response.type);
       const events = JSON.parse(response.eventsJson) as MutationErrorEvent[];
@@ -406,7 +406,7 @@ export class NativeForegroundDb {
   private requestPermissionAdvice(action: ForegroundPermissionAdviceAction) {
     let response = this.execute({ type: "permissionAdvice", action });
     if (response.type === "permissionAdvice") return response.advice;
-    if (response.type === "operationError") throw new Error(response.reason);
+    if (response.type === "operationError") throw foregroundOperationError(response);
     if (response.type !== "pending") return unexpected("permissionAdvice", response.type);
     const operation = response.operation;
     let completed = false;
@@ -417,7 +417,7 @@ export class NativeForegroundDb {
         response = this.execute({ type: "poll", operation });
         if (response.type === "pending") return null;
         completed = true;
-        if (response.type === "operationError") throw new Error(response.reason);
+        if (response.type === "operationError") throw foregroundOperationError(response);
         if (response.type !== "permissionAdvice")
           return unexpected("permissionAdvice", response.type);
         return response.advice;
@@ -441,7 +441,7 @@ export class NativeForegroundDb {
       this.tick();
       response = this.execute({ type: "poll", operation });
     }
-    if (response.type === "operationError") throw new Error(response.reason);
+    if (response.type === "operationError") throw foregroundOperationError(response);
     if (response.type !== "rows" || response.rows.length !== 0)
       return unexpected("waitForPendingWrites", response.type);
     return response.rows;
@@ -458,7 +458,7 @@ export class NativeForegroundDb {
       this.tick();
       response = this.execute({ type: "poll", operation });
     }
-    if (response.type === "operationError") throw new Error(response.reason);
+    if (response.type === "operationError") throw foregroundOperationError(response);
     if (response.type !== "transactionSettled")
       return unexpected("waitForTransaction", response.type);
   }
@@ -530,7 +530,7 @@ export class NativeForegroundDb {
       type: "commitTransaction",
       transaction: transaction.handle,
     });
-    if (response.type === "operationError") throw new Error(response.reason);
+    if (response.type === "operationError") throw foregroundOperationError(response);
     if (response.type !== "transactionCommitted")
       return unexpected("commitTransaction", response.type);
     this.transactions.delete(openTransactionId);
@@ -682,7 +682,7 @@ export class NativeForegroundDb {
 
   writeState(txId: Uint8Array): unknown {
     const response = this.execute({ type: "writeState", txId });
-    if (response.type === "operationError") throw new Error(response.reason);
+    if (response.type === "operationError") throw foregroundOperationError(response);
     if (response.type !== "writeState") return unexpected("writeState", response.type);
     return JSON.parse(response.stateJson);
   }
@@ -702,7 +702,7 @@ export class NativeForegroundDb {
       descriptorsJson: JSON.stringify(descriptors),
       updatedAtMs,
     });
-    if (response.type === "operationError") throw new Error(response.reason);
+    if (response.type === "operationError") throw foregroundOperationError(response);
     if (response.type !== "transactionCommitted")
       return unexpected("updateLargeValues", response.type);
     return nativeWrite(this, response.txId, rowId);
@@ -732,7 +732,7 @@ export class NativeForegroundDb {
       column,
       optionsJson: JSON.stringify({ updatedAtMs, head, base }),
     });
-    if (response.type === "operationError") throw new Error(response.reason);
+    if (response.type === "operationError") throw foregroundOperationError(response);
     if (response.type !== "streamingMutationOpened")
       return unexpected("beginStreamingMutation", response.type);
     const upload = response.upload;
@@ -747,14 +747,14 @@ export class NativeForegroundDb {
         const pushed = await this.completeMutationOperation(
           this.execute({ type: "pushStreamingMutation", upload, chunk }),
         );
-        if (pushed.type === "operationError") throw new Error(pushed.reason);
+        if (pushed.type === "operationError") throw foregroundOperationError(pushed);
         if (pushed.type !== "streamingMutationPushed")
           return unexpected("pushStreamingMutation", pushed.type);
       },
       finish: async (): Promise<NativeForegroundWrite> => {
         assertOpen();
         let finished = this.execute({ type: "finishStreamingMutation", upload });
-        if (finished.type === "operationError") throw new Error(finished.reason);
+        if (finished.type === "operationError") throw foregroundOperationError(finished);
         closed = true;
         while (finished.type === "pending") {
           const operation = finished.operation;
@@ -762,7 +762,7 @@ export class NativeForegroundDb {
           this.tick();
           finished = this.execute({ type: "poll", operation });
         }
-        if (finished.type === "operationError") throw new Error(finished.reason);
+        if (finished.type === "operationError") throw foregroundOperationError(finished);
         if (finished.type !== "transactionCommitted")
           return unexpected("finishStreamingMutation", finished.type);
         return nativeWrite(this, finished.txId, rowId);
@@ -770,10 +770,10 @@ export class NativeForegroundDb {
       abort: async (): Promise<boolean> => {
         if (closed || this.closed) return false;
         const admitted = this.execute({ type: "abortStreamingMutation", upload });
-        if (admitted.type === "operationError") throw new Error(admitted.reason);
+        if (admitted.type === "operationError") throw foregroundOperationError(admitted);
         closed = true;
         const aborted = await this.completeMutationOperation(admitted);
-        if (aborted.type === "operationError") throw new Error(aborted.reason);
+        if (aborted.type === "operationError") throw foregroundOperationError(aborted);
         if (aborted.type !== "streamingMutationAborted")
           return unexpected("abortStreamingMutation", aborted.type);
         return aborted.aborted;
@@ -821,7 +821,7 @@ export class NativeForegroundDb {
       cells,
       optionsJson: JSON.stringify(wireOptions),
     });
-    if (response.type === "operationError") throw new Error(response.reason);
+    if (response.type === "operationError") throw foregroundOperationError(response);
     if (response.type !== "mutationCommitted") return unexpected(mutation, response.type);
     return nativeWrite(this, response.txId, response.rowId);
   }
@@ -862,7 +862,7 @@ export class NativeForegroundDb {
       cells,
       optionsJson: JSON.stringify(wireOptions),
     });
-    if (response.type === "operationError") throw new Error(response.reason);
+    if (response.type === "operationError") throw foregroundOperationError(response);
     if (mutation === "insert" && response.type === "inserted") return response.rowId;
     if (mutation !== "insert" && response.type === "mutationStaged") return rowId!;
     return unexpected(mutation, response.type);
@@ -953,6 +953,15 @@ class NativeForegroundSubscription {
     this.closed = true;
     return this.db.unsubscribe(this.handle);
   }
+}
+
+/**
+ * The error a failed foreground operation throws: the unchanged reason text as
+ * the message, plus the stable core `code` when a core error caused it.
+ */
+function foregroundOperationError(response: { reason: string; code?: string }): Error {
+  const error = new Error(response.reason);
+  return response.code === undefined ? error : Object.assign(error, { code: response.code });
 }
 
 function unsupported(operation: string): never {

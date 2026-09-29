@@ -683,6 +683,13 @@ pub enum ForegroundDbCommandResponse {
     PermissionAdvice {
         advice: ForegroundPermissionAdvice,
     },
+    /// An `OperationError` caused by a core `jazz::db::Error`, carrying its
+    /// stable `ErrorCode::as_str` code beside the unchanged reason text.
+    /// Appended to V1: every other failure still uses `OperationError`.
+    CodedOperationError {
+        code: String,
+        reason: String,
+    },
 }
 
 /// One already-materialized subscription event.  The byte payload deliberately
@@ -5236,9 +5243,30 @@ enum ForegroundOperationResult {
 }
 
 enum ForegroundOperationPoll {
-    Pending { operation: u64 },
+    Pending {
+        operation: u64,
+    },
     Ready(ForegroundOperationResult),
-    Error { reason: String },
+    Error {
+        /// The stable core code when the failure is a core `jazz::db::Error`.
+        code: Option<&'static str>,
+        reason: String,
+    },
+}
+
+/// The response for a failed foreground operation. A core error keeps its
+/// display text as the reason and adds its stable code.
+fn foreground_operation_error(
+    code: Option<&'static str>,
+    reason: String,
+) -> ForegroundDbCommandResponse {
+    match code {
+        Some(code) => ForegroundDbCommandResponse::CodedOperationError {
+            code: code.to_owned(),
+            reason,
+        },
+        None => ForegroundDbCommandResponse::OperationError { reason },
+    }
 }
 
 fn foreground_operation_response(poll: ForegroundOperationPoll) -> ForegroundDbCommandResponse {
@@ -5271,9 +5299,7 @@ fn foreground_operation_response(poll: ForegroundOperationPoll) -> ForegroundDbC
                 tx_id: *tx_id.as_bytes(),
             }
         }
-        ForegroundOperationPoll::Error { reason } => {
-            ForegroundDbCommandResponse::OperationError { reason }
-        }
+        ForegroundOperationPoll::Error { code, reason } => foreground_operation_error(code, reason),
     }
 }
 
@@ -5291,9 +5317,10 @@ fn foreground_command_error(
         RelayError::QueueCapacityExceeded { .. } => Err(JazzNativeRelayStatus::Backpressure),
         // Preserve the core Error prefix consumed by the shared TS adapter's
         // rejection normalizer, exactly as NAPI and WASM do.
-        RelayError::Db(error) => Ok(ForegroundDbCommandResponse::OperationError {
-            reason: error.to_string(),
-        }),
+        RelayError::Db(error) => Ok(foreground_operation_error(
+            Some(error.code.as_str()),
+            error.to_string(),
+        )),
         error => Ok(ForegroundDbCommandResponse::OperationError {
             reason: error.to_string(),
         }),
@@ -6218,10 +6245,14 @@ impl RelayWorker {
         let mut context = Context::from_waker(&waker);
         match pending_operation.future.as_mut().poll(&mut context) {
             Poll::Ready(Ok(result)) => Ok(ForegroundOperationPoll::Ready(result)),
-            Poll::Ready(Err(error)) => Ok(ForegroundOperationPoll::Error {
-                reason: match error {
-                    RelayError::Db(error) => error.to_string(),
-                    error => error.to_string(),
+            Poll::Ready(Err(error)) => Ok(match error {
+                RelayError::Db(error) => ForegroundOperationPoll::Error {
+                    code: Some(error.code.as_str()),
+                    reason: error.to_string(),
+                },
+                error => ForegroundOperationPoll::Error {
+                    code: None,
+                    reason: error.to_string(),
                 },
             }),
             Poll::Pending => {
@@ -15790,7 +15821,7 @@ mod tests {
 
         // Invalid schema/cell input is a logical operation error rather than
         // a lifecycle failure, preserving the core error boundary for the
-        // shared adapter.
+        // shared adapter. Being a core error, it carries its stable code.
         let ForegroundDbCommandResponse::TransactionOpened { transaction } = response(
             foreground,
             ForegroundDbCommandRequest::BeginTransaction {
@@ -15799,18 +15830,22 @@ mod tests {
         ) else {
             panic!("begin must return a handle");
         };
-        assert!(matches!(
-            response(
-                foreground,
-                ForegroundDbCommandRequest::Insert {
-                    transaction,
-                    table: "missing_table".to_owned(),
-                    cells: encoded_title_cells("nope"),
-                    row_id: Some([0x73; 16]),
-                }
-            ),
-            ForegroundDbCommandResponse::OperationError { .. }
-        ));
+        let rejected_insert = response(
+            foreground,
+            ForegroundDbCommandRequest::Insert {
+                transaction,
+                table: "missing_table".to_owned(),
+                cells: encoded_title_cells("nope"),
+                row_id: Some([0x73; 16]),
+            },
+        );
+        assert_eq!(
+            rejected_insert,
+            ForegroundDbCommandResponse::CodedOperationError {
+                code: "schema".to_owned(),
+                reason: "Schema: unknown table missing_table".to_owned(),
+            }
+        );
         assert_eq!(
             response(
                 foreground,
@@ -16146,6 +16181,35 @@ mod tests {
         {
             assert_eq!(postcard::to_allocvec(&kind).unwrap(), vec![ordinal as u8]);
         }
+    }
+
+    #[test]
+    fn foreground_coded_operation_error_v1_byte_contract() {
+        // Response 25 is appended to V1: a core error's stable code, then the
+        // unchanged reason. Uncoded failures keep response 8.
+        let coded = ForegroundDbCommandResponse::CodedOperationError {
+            code: "not_observed".into(),
+            reason: "NotObserved: oops".into(),
+        };
+        let bytes = [
+            vec![25, 12],
+            b"not_observed".to_vec(),
+            vec![17],
+            b"NotObserved: oops".to_vec(),
+        ]
+        .concat();
+        assert_eq!(postcard::to_allocvec(&coded).unwrap(), bytes);
+        assert_eq!(
+            postcard::from_bytes::<ForegroundDbCommandResponse>(&bytes).unwrap(),
+            coded
+        );
+        assert_eq!(
+            postcard::to_allocvec(&ForegroundDbCommandResponse::OperationError {
+                reason: "oops".into()
+            })
+            .unwrap(),
+            vec![8, 4, 111, 111, 112, 115]
+        );
     }
 
     #[test]
