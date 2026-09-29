@@ -2,7 +2,8 @@ import permissions from "@/permissions";
 import { app } from "@/schema";
 import type { JazzClient } from "jazz-tools/backend";
 import { createRequire as createRequireFromModule } from "node:module";
-import { isLocalOrigin, jazzAppId, jazzServerUrl, serverSecret } from "./config";
+import { jazzAppId, jazzServerUrl, serverSecret } from "./config";
+import { jazzEnv } from "./jazz-env";
 
 const createRequire =
   process.getBuiltinModule?.("module")?.createRequire ?? createRequireFromModule;
@@ -29,7 +30,7 @@ export async function backendJazzClient(): Promise<JazzClient> {
     driver: { type: "memory" },
     serverUrl: jazzServerUrl,
     initial: { backendSecret: serverSecret("BACKEND_SECRET") },
-    env: isLocalOrigin ? "dev" : "prod",
+    env: jazzEnv,
     tier: "global",
   }));
   try {
