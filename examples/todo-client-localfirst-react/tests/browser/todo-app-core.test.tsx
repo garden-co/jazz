@@ -82,11 +82,11 @@ async function addTodoAndWaitForLocalDurability(el: HTMLDivElement, title: strin
 function TodosEdgeReadinessProbe({ onSettled }: { onSettled: (error: Error | null) => void }) {
   const db = useDb();
   useEffect(() => {
-    // An edge read of the same relation establishes the causal frontier that
+    // A remote read of the same relation establishes the causal frontier that
     // this browser canary is about. A disjoint sentinel only proved that a
     // websocket existed; it could resolve before the todo subscription had
     // been attached or replayed after a persistent-worker restart.
-    void db.all(app.todos, { tier: "global" }).then(
+    void db.all(app.todos, { tier: "remote" }).then(
       () => onSettled(null),
       (error: unknown) => onSettled(error instanceof Error ? error : new Error(String(error))),
     );

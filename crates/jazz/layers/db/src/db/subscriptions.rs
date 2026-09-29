@@ -1005,10 +1005,10 @@ where
         // tell a gated opening that the authority answered. While the gate is
         // armed it also holds `Global` witness coverage for the same read; the
         // witness's settled authority answer, relayed by the owner, is what
-        // may release an empty opening. The owner-local coverage still
-        // delivers a warm owner cache at once. The host link hint (the owner's
-        // server link) bounds the wait, and the witness is retired when the
-        // gate releases, leaving an ordinary local-first stream.
+        // may release the withheld opening. The host link hint (the owner's
+        // server link) and the read's timeout bound the wait, and the witness
+        // is retired when the gate releases, leaving an ordinary local-first
+        // stream.
         let mut opening_gate = opening_gate;
         let authority_witnessed = opts.propagation == Propagation::Full
             && self.node.upstream_durability_floor.get() == DurabilityTier::Local

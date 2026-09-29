@@ -4831,8 +4831,8 @@ struct SubscriptionState {
     /// This gates only opening; later disconnections retain the published view.
     pending_initial_owner_result: bool,
     /// Global coverage held only while a non-durable foreground's
-    /// local-first-unless-empty opening gate is armed: its settled authority
-    /// answer, relayed by the storage owner, is what may release an empty
+    /// first-load opening gate is armed: its settled authority answer,
+    /// relayed by the storage owner, is what may release the withheld
     /// opening. Retired as soon as the gate releases.
     authority_witness: Vec<UpstreamCoverageHandle>,
     sender: SubscriptionSender,
@@ -4853,11 +4853,9 @@ struct SubscriptionPublication {
     deferred: Option<SubscriptionPublicationSnapshot>,
     reset: bool,
     unresolved: BTreeSet<OutputOccurrenceId>,
-    /// Armed `FirstLoad::WaitForRemote` or `FirstLoad::AwaitRemote`
-    /// gate, cleared once it releases.
+    /// Armed `FirstLoad::WaitForRemote` gate, cleared once it releases.
     opening_gate: Option<OpeningGate>,
-    /// This stream is a gated (`WaitForRemote` or `AwaitRemote`) offset window
-    /// read as a
+    /// This stream is a gated (`WaitForRemote`) offset window read as a
     /// strict remote view, with a local-first fallback beside it.
     remote_window: bool,
     /// The remote window released unopened because its remote could no
@@ -5004,16 +5002,13 @@ impl SubscriptionSender {
         }
         if publication.opening_gate.is_some() {
             // Withhold the opening while it is unanswered (unsettled, or for a
-            // non-durable foreground its authority witness unanswered): any
-            // opening under a server-wait timeout, which releases the gate
-            // from outside at its deadline, and only an empty one under the
-            // deprecated local-first-unless-empty gate. The first answered
-            // (or, unless empty, non-empty) result releases the gate and
-            // opens with a canonical reset below.
+            // non-durable foreground its authority witness unanswered); the
+            // gate releases from outside at its deadline. The first answered
+            // result releases the gate and opens with a canonical reset below.
             if !publication.opened
-                && publication.opening_gate.is_some_and(|gate| {
-                    gate.awaits_answer(settled) && gate.withholds(snapshot.root_count)
-                })
+                && publication
+                    .opening_gate
+                    .is_some_and(|gate| gate.awaits_answer(settled))
             {
                 if let Some(gate) = publication.opening_gate.as_mut() {
                     gate.withheld = true;
@@ -5064,30 +5059,10 @@ impl SubscriptionSender {
         if terminal {
             let mut publication = self.publication.borrow_mut();
             publication.deferred = None;
-            // A rejection releases a withheld local-first-unless-empty
-            // opening: the caller sees the (empty) local result, then the
-            // rejection. A server-wait opening may be non-empty, so
-            // `SubscriptionState::send_rejection` publishes it beforehand.
-            if let Some(gate) = publication.opening_gate.take()
-                && gate.withheld
-                && gate.deadline.is_none()
-                && gate.route == OpeningRoute::LocalFirst
-                && !publication.opened
-                && publication.unresolved.is_empty()
-            {
-                publication.opened = true;
-                drop(publication);
-                let _ = self.sender.unbounded_send(SubscriptionEvent::Delta {
-                    reset: true,
-                    publishable: true,
-                    added: Vec::new(),
-                    updated: Vec::new(),
-                    removed: Vec::new(),
-                    terminal_operations: Vec::new(),
-                    settled: false,
-                    tier: self.requested_tier,
-                });
-            }
+            // A terminal event ends any first-load wait. A rejection's
+            // withheld opening was already published by
+            // `SubscriptionState::send_rejection`.
+            publication.opening_gate = None;
         } else if matches!(&event, SubscriptionEvent::Delta { .. }) {
             // Receipt-only transitions bypass `publish`; before a gated
             // stream has opened there is no published view to transition.

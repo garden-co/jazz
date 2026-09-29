@@ -73,6 +73,4 @@ query and require no JavaScript server URL. Local-first reads with a
 `firstLoadRemoteWaitMs` timeout never wait on the native socket while it is explicitly
 offline, down, or reconnecting; the first result waits for the server, at most
 for the timeout, only while it is connected or making its first connection, and
-falls back to the local result if the connection drops. The deprecated
-`ReadTier.LocalFirstUnlessEmpty` follows the same reachability rules for an
-empty result; replace it with `ReadTier.LocalFirst` plus `firstLoadRemoteWaitMs`.
+falls back to the local result if the connection drops.

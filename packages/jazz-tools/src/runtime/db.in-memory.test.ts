@@ -182,7 +182,7 @@ describe("createDb in-memory driver", () => {
       .upsert(largeValues.documents, inserted.id, { metadata: direct })
       .wait({ tier: "local" });
     await expect(
-      db.one(largeValues.documents.where({ id: inserted.id }), { tier: "local" }),
+      db.one(largeValues.documents.where({ id: inserted.id }), { tier: "local-first" }),
     ).resolves.toMatchObject({ metadata: direct });
 
     const transactional = { edits: [{ op: "set", at: "/ordinary", value: "transaction" }] };
@@ -191,7 +191,7 @@ describe("createDb in-memory driver", () => {
     });
     await committed.wait({ tier: "local" });
     await expect(
-      db.one(largeValues.documents.where({ id: inserted.id }), { tier: "local" }),
+      db.one(largeValues.documents.where({ id: inserted.id }), { tier: "local-first" }),
     ).resolves.toMatchObject({ metadata: transactional });
   });
 });

@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use jazz::query::Query;
+use jazz::query::{Query, col, eq, lit};
 use jazz::row_input;
 use jazz::tools::test_support::{disconnect_client, ordinary_rows};
 use jazz::tools::{
@@ -160,6 +160,130 @@ async fn a_disconnected_reader_does_not_wait() {
                 .expect("subscribe");
             let opening = first_delta(&mut stream, IMMEDIATE).await;
             assert_eq!(added_ids(&opening), local_only, "{opening:?}");
+        })
+        .await;
+}
+
+/// A reader whose local store holds nothing for the query opens on the
+/// server's rows rather than its empty local result, for the subscription and
+/// the one-shot alike.
+///
+/// ```text
+/// writer ──insert a, b──► server
+/// alice (empty store): subscribe (wait 60 s) ─► opening a, b
+/// bob   (empty store): one-shot  (wait 60 s) ─► a, b
+/// ```
+#[tokio::test(flavor = "current_thread")]
+async fn empty_local_result_waits_for_the_servers_rows() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = items_schema();
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
+            let writer = connect(&server, &schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaa711").await;
+            let expected = keys(&seed_remote(&writer, &["first", "second"]).await);
+
+            let alice = connect(&server, &schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaa712").await;
+            let mut stream = alice
+                .subscribe_local_first(Query::from("items"), WAIT)
+                .await
+                .expect("subscribe");
+            let opening = first_delta(&mut stream, REMOTE).await;
+            assert_eq!(
+                added_ids(&opening),
+                expected,
+                "the empty local opening is withheld until the server's rows arrive: {opening:?}"
+            );
+            assert!(opening.removed.is_empty() && opening.updated.is_empty());
+
+            let bob = connect(&server, &schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaa713").await;
+            let rows =
+                tokio::time::timeout(REMOTE, bob.query_local_first(Query::from("items"), WAIT))
+                    .await
+                    .expect("the server answers before the bound")
+                    .expect("one-shot succeeds");
+            assert_eq!(
+                ordinary_rows(rows)
+                    .into_iter()
+                    .map(|(id, _)| ResultKey::from(id))
+                    .collect::<BTreeSet<_>>(),
+                expected,
+                "the one-shot returns the server's rows"
+            );
+        })
+        .await;
+}
+
+/// The server answering "nothing matches" releases the opening as a settled
+/// empty result; neither read waits out its timeout for rows that will not
+/// come.
+///
+/// ```text
+/// alice: subscribe label = "absent" (wait 60 s) ─ server answers [] ─► settled empty opening
+/// alice: one-shot  label = "absent" (wait 60 s) ─ server answers [] ─► []
+/// ```
+#[tokio::test(flavor = "current_thread")]
+async fn an_empty_server_answer_releases_the_opening() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = items_schema();
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
+            let alice = connect(&server, &schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaa721").await;
+            let query = Query::from("items").filter(eq(col("label"), lit("absent")));
+            let mut stream = alice
+                .subscribe_local_first(query.clone(), WAIT)
+                .await
+                .expect("subscribe");
+            let opening = first_delta(&mut stream, REMOTE).await;
+            assert!(opening.is_empty(), "{opening:?}");
+            assert!(
+                !opening.pending,
+                "the empty opening carries the server's settled answer: {opening:?}"
+            );
+            let rows = tokio::time::timeout(REMOTE, alice.query_local_first(query, WAIT))
+                .await
+                .expect("the server answers before the bound")
+                .expect("one-shot succeeds");
+            assert!(rows.is_empty());
+        })
+        .await;
+}
+
+/// Without a configured server nothing can answer, so both reads are plain
+/// local-first at once. (A serverless native client publishes a subscription
+/// only from local changes, as for any local-first read, so the subscription
+/// is observed through its first local write.)
+///
+/// ```text
+/// alice (no server): one-shot (wait 60 s) ─► [] at once
+/// alice: subscribe (wait 60 s) ─ insert x ─► delta x at once
+/// ```
+#[tokio::test(flavor = "current_thread")]
+async fn a_reader_without_a_server_does_not_wait() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let alice = JazzClient::test_client(items_schema()).await;
+            let rows = tokio::time::timeout(
+                IMMEDIATE,
+                alice.query_local_first(Query::from("items"), WAIT),
+            )
+            .await
+            .expect("a serverless one-shot does not wait")
+            .expect("one-shot succeeds");
+            assert!(rows.is_empty());
+
+            let mut stream = alice
+                .subscribe_local_first(Query::from("items"), WAIT)
+                .await
+                .expect("subscribe");
+            let (id, _, _) = alice
+                .insert("items", row_input!("label" => "offline"))
+                .expect("insert local row");
+            let delta = first_delta(&mut stream, IMMEDIATE).await;
+            assert_eq!(added_ids(&delta), keys(&BTreeSet::from([id])), "{delta:?}");
         })
         .await;
 }

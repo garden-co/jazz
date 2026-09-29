@@ -30,7 +30,7 @@ beforeEach(async () => {
     await localAccountConfig(`transaction-preparation-${crypto.randomUUID()}`),
     source,
   );
-  await db.all(app.documents, { tier: "local" });
+  await db.all(app.documents, { tier: "local-first" });
 });
 afterEach(async () => {
   vi.restoreAllMocks();
@@ -59,13 +59,13 @@ it.each(["ready", "rejected", "cancelled"])(
     });
     const inserted = tx.insert(app.documents, { payload: new Uint8Array([6]) });
     expect(inserted).not.toBeInstanceOf(Promise);
-    const reading = tx.all(app.documents, { tier: "local" });
+    const reading = tx.all(app.documents, { tier: "local-first" });
     reading.catch(() => {});
     const earlyWait = outcome === "cancelled" ? undefined : tx.commit().wait();
     earlyWait?.catch(() => {});
     await started;
     expect(opening).not.toHaveBeenCalled();
-    expect(await db.all(app.documents, { tier: "local" })).toEqual([]);
+    expect(await db.all(app.documents, { tier: "local-first" })).toEqual([]);
     if (outcome === "cancelled") await tx.rollback();
     const wait = earlyWait ?? tx.commit().wait();
     wait.catch(() => {});
@@ -73,7 +73,7 @@ it.each(["ready", "rejected", "cancelled"])(
     if (outcome === "ready") {
       await wait;
       expect(await reading).toEqual([inserted]);
-      expect(await db.all(app.documents, { tier: "local" })).toEqual([inserted]);
+      expect(await db.all(app.documents, { tier: "local-first" })).toEqual([inserted]);
       expect(opening).toHaveBeenCalledTimes(1);
     } else {
       const message =
@@ -81,7 +81,7 @@ it.each(["ready", "rejected", "cancelled"])(
       await expect(wait).rejects.toThrow(message);
       await expect(reading).rejects.toThrow(message);
       if (outcome === "rejected") await tx.rollback();
-      expect(await db.all(app.documents, { tier: "local" })).toEqual([]);
+      expect(await db.all(app.documents, { tier: "local-first" })).toEqual([]);
       expect(opening).not.toHaveBeenCalled();
     }
   },
@@ -126,7 +126,7 @@ it("does not enter a discarded runtime after suspended admission", async () => {
     await ready;
   });
   tx.insert(app.documents, { payload: new Uint8Array([5]) });
-  const reading = tx.all(app.documents, { tier: "local" });
+  const reading = tx.all(app.documents, { tier: "local-first" });
   reading.catch(() => {});
   const wait = tx.commit().wait();
   wait.catch(() => {});
@@ -161,7 +161,7 @@ it.each(["selection", "logout"])(
       { appId, account: first, driver: { type: "memory" } },
       source,
     );
-    await db.all(app.documents, { tier: "local" });
+    await db.all(app.documents, { tier: "local-first" });
     const opening = vi.spyOn(
       source.client.getRuntime() as TransactionalRuntime,
       "beginTransaction",
@@ -205,9 +205,9 @@ it.each(["selection", "logout"])(
         await wait;
         expect(opening).toHaveBeenCalledTimes(1);
         expect(JSON.parse(opening.mock.calls[0]![2]!).account_id).toBe(first.id);
-        expect(await db.all(app.documents, { tier: "local" })).toEqual([oldRow]);
+        expect(await db.all(app.documents, { tier: "local-first" })).toEqual([oldRow]);
       }
-      expect(await replacement.all(app.documents, { tier: "local" })).toEqual([newRow]);
+      expect(await replacement.all(app.documents, { tier: "local-first" })).toEqual([newRow]);
     } finally {
       release();
       await replacement.shutdown();
@@ -229,12 +229,12 @@ it("does not delay an ordinary transaction beside suspended admission", async ()
     const ordinary = db.beginExclusiveTransaction();
     const row = ordinary.insert(app.documents, { payload: new Uint8Array([2]) });
     await ordinary.commit().wait();
-    expect(await db.all(app.documents, { tier: "local" })).toEqual([row]);
+    expect(await db.all(app.documents, { tier: "local-first" })).toEqual([row]);
   } finally {
     release();
   }
   await pending;
-  expect(await db.all(app.documents, { tier: "local" })).toHaveLength(2);
+  expect(await db.all(app.documents, { tier: "local-first" })).toHaveLength(2);
 });
 
 it("returns an inserted row immediately without overtaking earlier preparation", async () => {
@@ -257,7 +257,7 @@ it("returns an inserted row immediately without overtaking earlier preparation",
   documentId = inserted.id;
   expect(inserted).not.toBeInstanceOf(Promise);
   expect(inserted.payload).toEqual(new Uint8Array([3]));
-  const reading = tx.all(app.documents, { tier: "local" });
+  const reading = tx.all(app.documents, { tier: "local-first" });
   // Keep a failed preparation visible through both read and commit handles.
   const result = await Promise.allSettled([reading, tx.commit().wait()]);
   expect(result).toEqual([
@@ -277,7 +277,7 @@ it.each(
     await inserted.wait({ tier: "local" });
     const tx = kind === "exclusive" ? db.beginExclusiveTransaction() : db.beginTransaction();
     // Bind to the table before registering work at the logical-operation seam.
-    await tx.all(app.documents, { tier: "local" });
+    await tx.all(app.documents, { tier: "local-first" });
     const id = tx.openTransactionId();
     let release!: () => void;
     const ready = new Promise<void>((resolve) => {
@@ -299,13 +299,13 @@ it.each(
     else if (operation === "upsert") tx.upsert(app.documents, inserted.value.id, { payload });
     else tx.update(app.documents, inserted.value.id, { payload });
     payload[0] = 9;
-    const reading = tx.all(app.documents, { tier: "local" });
+    const reading = tx.all(app.documents, { tier: "local-first" });
     const committed = tx.commit();
     release();
     await committed.wait({ tier: "local" });
     const expected = operation === "delete" ? [] : [{ payload: new Uint8Array([2]) }];
     await expect(reading).resolves.toMatchObject(expected);
-    await expect(db.all(app.documents, { tier: "local" })).resolves.toMatchObject(expected);
+    await expect(db.all(app.documents, { tier: "local-first" })).resolves.toMatchObject(expected);
   },
 );
 
@@ -323,7 +323,7 @@ it("queues restoration with defaults and isolates returned and input bytes", asy
   restored.payload[0] = 7;
   await tx.commit().wait();
   await expect(
-    db.one(app.documents.where({ id: original.id }), { tier: "local" }),
+    db.one(app.documents.where({ id: original.id }), { tier: "local-first" }),
   ).resolves.toMatchObject({
     payload: new Uint8Array([5]),
     label: "untitled",

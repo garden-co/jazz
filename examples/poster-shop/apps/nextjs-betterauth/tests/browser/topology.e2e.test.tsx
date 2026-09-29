@@ -190,7 +190,7 @@ describe("PosterShop cross-topology recovery", () => {
                 (rows) => rows.length === 1,
                 "reader receives canvas layer",
                 15_000,
-                "global",
+                "remote",
               );
               ctx.trackSubscription(
                 reader.subscribe(
@@ -198,7 +198,7 @@ describe("PosterShop cross-topology recovery", () => {
                   (rows) => {
                     windowSnapshots.push(rows.map((row) => ({ id: row.id, zIndex: row.zIndex })));
                   },
-                  { tier: "global" },
+                  { tier: "remote" },
                 ),
               );
               await waitForCondition(
@@ -259,7 +259,7 @@ describe("PosterShop cross-topology recovery", () => {
                 .insert(app.shapes, shape(canvas.id, layer.id, 2))
                 .wait({ tier: "local" });
               expect(
-                (await owner.all(canvasQueries(canvas.id).shapes, { tier: "local" })).map(
+                (await owner.all(canvasQueries(canvas.id).shapes, { tier: "local-first" })).map(
                   (row) => row.id,
                 ),
               ).toContain(offlineShape.id);
@@ -283,7 +283,7 @@ describe("PosterShop cross-topology recovery", () => {
                 "independently connected peer did not receive the control write",
               );
               expect(
-                (await owner.all(canvasQueries(canvas.id).shapes, { tier: "local" })).map(
+                (await owner.all(canvasQueries(canvas.id).shapes, { tier: "local-first" })).map(
                   (row) => row.id,
                 ),
               ).not.toContain(connectedShapeId);
@@ -302,7 +302,9 @@ describe("PosterShop cross-topology recovery", () => {
           {
             name: "persistent reopen retains offline local state",
             run: async () => {
-              const reopened = await owner.all(canvasQueries(canvas.id).shapes, { tier: "local" });
+              const reopened = await owner.all(canvasQueries(canvas.id).shapes, {
+                tier: "local-first",
+              });
               expect(reopened.map((row) => [row.id, row.zIndex])).toContainEqual([
                 offlineShape.id,
                 2,
@@ -320,7 +322,7 @@ describe("PosterShop cross-topology recovery", () => {
                 (rows) => rows.length === 5,
                 "reader receives offline replay",
                 20_000,
-                "global",
+                "remote",
               );
               expect(shapes.map((row) => row.zIndex)).toEqual([0, 1, 2, 3, 4]);
               await waitForCondition(
@@ -332,12 +334,12 @@ describe("PosterShop cross-topology recovery", () => {
                 "reader bounded shape window did not receive the offline replay",
               );
               expect(
-                (await reader.all(queries.shapeWindow, { tier: "global" })).map(
+                (await reader.all(queries.shapeWindow, { tier: "remote" })).map(
                   (row) => row.zIndex,
                 ),
               ).toEqual([1, 2]);
               expect(
-                (await reader.all(queries.checkpoints, { tier: "global" })).map((row) => row.label),
+                (await reader.all(queries.checkpoints, { tier: "remote" })).map((row) => row.label),
               ).toEqual(["Approved"]);
             },
           },

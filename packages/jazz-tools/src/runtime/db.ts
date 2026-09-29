@@ -41,7 +41,6 @@ import {
   normalizeFirstLoadRemoteWaitMs,
   resolveEffectiveQueryExecutionOptions,
   resolveReadTier,
-  isLocalFirstUnlessEmptyTier,
   type RuntimeReadTier,
   type BranchSelector,
   type BranchView,
@@ -243,15 +242,6 @@ export interface DbDeltaSubscriptionCallbacks<T extends { id: string }> {
  * must not be able to select local-only propagation or a deferred own-write
  * overlay by adding private fields to an options object.
  */
-/**
- * Readiness to await before a read. The core Db gates a
- * local-first-unless-empty opening itself, so such a read needs only local
- * readiness and never blocks on the server transport.
- */
-function readinessTier(tier: RuntimeReadTier): DurabilityTier {
-  return tier === "local-first-unless-empty" ? "local" : tier;
-}
-
 function lowerPublicDbQueryOptions(options?: QueryOptions): InternalDbQueryOptions | undefined {
   if (!options) return undefined;
   const candidate = options as QueryOptions & {
@@ -2565,9 +2555,8 @@ export class Db {
     const client = this.getClient(query._schema);
     // A newly attached browser-worker follower learns the namespace-wide
     // connection state during its init handshake. The core read gate needs
-    // that state before it decides whether an empty result may wait.
-    const mayWaitForServer =
-      isLocalFirstUnlessEmptyTier(options?.tier) || (options?.firstLoadRemoteWaitMs ?? 0) > 0;
+    // that state before it decides whether the first load may wait.
+    const mayWaitForServer = (options?.firstLoadRemoteWaitMs ?? 0) > 0;
     const initialOfflineState = mayWaitForServer
       ? this.connection.initialExplicitOfflineState()
       : null;
@@ -2585,7 +2574,7 @@ export class Db {
       { ...this.config, defaultDurabilityTier: this.runtimeSource.defaultDurabilityTier },
       queryOptions,
     ).tier;
-    await this.ensureReady(readinessTier(effectiveTier));
+    await this.ensureReady(effectiveTier);
     const rows =
       context || usesRelationTraversal
         ? await client.queryInternal(
@@ -2957,18 +2946,13 @@ export class Db {
     // changes. Do not fabricate an empty opening or race it with a one-shot
     // cache read: that snapshot may be older than deltas already delivered.
     if (
-      this.connection.shouldDeferSubscriptionStart(
-        readinessTier(resolveReadTier(queryOptions.tier ?? "local")),
-      )
+      this.connection.shouldDeferSubscriptionStart(resolveReadTier(queryOptions.tier ?? "local"))
     ) {
       // The worker can only classify the initial authority-tier snapshot as
       // settled after its own server transport is attached. Delay native
       // subscription creation until that topology is ready; the native stream
       // then owns the settled-snapshot gate and remains the sole data source.
-      void this.ensureReady(
-        readinessTier(resolveReadTier(queryOptions.tier ?? "local")),
-        readyAbort.signal,
-      )
+      void this.ensureReady(resolveReadTier(queryOptions.tier ?? "local"), readyAbort.signal)
         .then(() => startNativeSubscription(initialSubscription))
         .catch((error: unknown) => {
           if (unsubscribed || readyAbort.signal.aborted || this.isShuttingDown) return;

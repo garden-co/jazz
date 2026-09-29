@@ -49,43 +49,22 @@ impl From<DurabilityTier> for DurabilityEncoding {
 /// local-first read may additionally wait a bounded time for the server's
 /// answer on its opening; see `JazzClient::query_local_first` and
 /// `JazzClient::subscribe_local_first`.
-///
-/// [`ReadTier::LocalFirstUnlessEmpty`] is deprecated and will be removed in
-/// the next breaking release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[allow(deprecated)]
 pub enum ReadTier {
     /// Read immediately from local knowledge.
     LocalFirst,
     /// Wait for the ordinary remote view.
     Remote,
-    /// Deprecated: use a local-first read with a server-wait timeout
-    /// (`JazzClient::query_local_first`, `JazzClient::subscribe_local_first`).
-    ///
-    /// Read like [`ReadTier::LocalFirst`], except that an empty local opening
-    /// waits for the first remote view while an upstream link is live.
-    ///
-    /// A non-empty local result is delivered immediately. An empty one is
-    /// withheld until the remote view first settles, the local result becomes
-    /// non-empty, or the upstream link is (or becomes) unavailable, whichever
-    /// comes first; it never waits without a live link. After its opening the
-    /// read behaves exactly like `LocalFirst`.
-    #[deprecated(
-        note = "use a local-first read with a server-wait timeout (JazzClient::query_local_first / subscribe_local_first); removed in the next breaking release"
-    )]
-    LocalFirstUnlessEmpty,
 }
 
 impl ReadTier {
     /// Lower this product-level choice to the legacy facade durability tier.
     ///
     /// This is intentionally read-only. Writes and write settlement keep using
-    /// [`DurabilityTier`] directly. `LocalFirstUnlessEmpty` lowers to the
-    /// local-first tier; its empty-opening gate is applied by the reader.
-    #[allow(deprecated)]
+    /// [`DurabilityTier`] directly.
     pub const fn legacy_durability_tier(self) -> DurabilityTier {
         match self {
-            Self::LocalFirst | Self::LocalFirstUnlessEmpty => DurabilityTier::Local,
+            Self::LocalFirst => DurabilityTier::Local,
             Self::Remote => DurabilityTier::GlobalServer,
         }
     }
@@ -142,28 +121,17 @@ mod tests {
     }
 
     /// The serialized read-tier encoding is not observable through the
-    /// client API, so it is pinned here: `LocalFirstUnlessEmpty` keeps the
-    /// postcard index 2 of the removed `RemoteIfPossible` variant, whose
-    /// textual name is rejected.
+    /// client API, so it is pinned here: only the two tiers decode, and the
+    /// removed tiers' names and postcard index 2 are rejected.
     #[test]
-    #[allow(deprecated)]
-    fn local_first_unless_empty_keeps_postcard_index_2_and_rejects_the_removed_name() {
-        for (tier, bytes) in [
-            (ReadTier::LocalFirst, vec![0]),
-            (ReadTier::Remote, vec![1]),
-            (ReadTier::LocalFirstUnlessEmpty, vec![2]),
-        ] {
+    fn only_the_two_read_tiers_decode() {
+        for (tier, bytes) in [(ReadTier::LocalFirst, vec![0]), (ReadTier::Remote, vec![1])] {
             assert_eq!(postcard::to_allocvec(&tier).unwrap(), bytes);
             assert_eq!(postcard::from_bytes::<ReadTier>(&bytes).unwrap(), tier);
         }
-        assert!(serde_json::from_str::<ReadTier>("\"RemoteIfPossible\"").is_err());
-        assert_eq!(
-            serde_json::to_string(&ReadTier::LocalFirstUnlessEmpty).unwrap(),
-            "\"LocalFirstUnlessEmpty\""
-        );
-        assert_eq!(
-            ReadTier::LocalFirstUnlessEmpty.legacy_durability_tier(),
-            DurabilityTier::Local
-        );
+        assert!(postcard::from_bytes::<ReadTier>(&[2]).is_err());
+        for removed in ["\"RemoteIfPossible\"", "\"LocalFirstUnlessEmpty\""] {
+            assert!(serde_json::from_str::<ReadTier>(removed).is_err());
+        }
     }
 }

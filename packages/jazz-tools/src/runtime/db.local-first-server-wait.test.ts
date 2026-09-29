@@ -96,3 +96,45 @@ it("does not wait for a server that is unreachable", async () => {
     if (!serverStopped) await server.stop();
   }
 }, 60_000);
+
+it("gives an empty client the server's rows as its first delivery", async () => {
+  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  const dbs: Awaited<ReturnType<typeof createDb>>[] = [];
+  try {
+    await deploy({
+      serverUrl: server.url,
+      appId: server.appId,
+      adminSecret: server.adminSecret,
+      schema: app,
+      permissions,
+    });
+    const writer = await createDb(await localAccountConfig(server.appId, server.url));
+    dbs.push(writer);
+    const written = writer.insert(app.entries, { title: "Already on the server" });
+    await written.wait({ tier: "global" });
+
+    const reader = await createDb(await localAccountConfig(server.appId, server.url));
+    dbs.push(reader);
+    const deliveries: string[][] = [];
+    const unsubscribe = reader.subscribe(
+      app.entries,
+      (rows) => deliveries.push(rows.map((row) => row.title)),
+      { tier: ReadTier.LocalFirst, firstLoadRemoteWaitMs: 30_000 },
+    );
+    await expect.poll(() => deliveries.length, { timeout: 10_000 }).toBeGreaterThan(0);
+    // No empty flash: the opening waited for the server's answer.
+    expect(deliveries[0]).toEqual(["Already on the server"]);
+    unsubscribe();
+
+    const fresh = await createDb(await localAccountConfig(server.appId, server.url));
+    dbs.push(fresh);
+    expect(
+      (
+        await fresh.all(app.entries, { tier: ReadTier.LocalFirst, firstLoadRemoteWaitMs: 30_000 })
+      ).map((row) => row.title),
+    ).toEqual(["Already on the server"]);
+  } finally {
+    for (const db of dbs) await db.shutdown();
+    await server.stop();
+  }
+}, 60_000);

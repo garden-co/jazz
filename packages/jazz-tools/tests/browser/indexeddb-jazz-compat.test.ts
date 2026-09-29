@@ -240,8 +240,8 @@ describe("browser Jazz storage compatibility corpus", () => {
       20_000,
       "corpus history update did not settle",
     );
-    expect(await db.all(app.documents, { tier: "global", branch: "main" })).toHaveLength(1);
-    expect(await db.all(app.documents, { tier: "global", branch: "draft" })).toHaveLength(1);
+    expect(await db.all(app.documents, { tier: "remote", branch: "main" })).toHaveLength(1);
+    expect(await db.all(app.documents, { tier: "remote", branch: "draft" })).toHaveLength(1);
     await db.shutdown();
     openDbs.splice(openDbs.indexOf(db), 1);
     await sleep(100);

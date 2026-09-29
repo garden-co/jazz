@@ -88,8 +88,8 @@ stale local snapshot would mislead them.
 
 See [Read tiers](/docs/reference/durability-tiers#read-tiers) for pending-write
 behavior and how subscriptions change between offline and online operation.
-The aliases `"local"` and `"global"` remain accepted for reads; write waits use
-`"local"` and `"global"`.
+These are the only read tiers. Write waits use the separate durability tiers `"local"` and
+`"global"`.
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
@@ -142,14 +142,14 @@ In Rust, use `client.query_local_first(query, Duration::from_millis(500))` and
 - Queries with an `offset` read the server's page while waiting, because a partly synced cache
   would apply the offset to the wrong rows. On timeout they show the cached page.
 - The default, `0`, is plain `"local-first"`. The option applies to local-first reads (including
-  the `"local"` alias and the browser default); `"remote"` ignores it.
+  the browser default); `"remote"` ignores it.
 
-<Callout type="warn" title="local-first-unless-empty is deprecated">
-  `"local-first-unless-empty"` (`ReadTier.LocalFirstUnlessEmpty`) still works as before but warns
-  once and will be removed in the next breaking release. Replace it with `"local-first"` plus a
-  `firstLoadRemoteWaitMs` of, for example, a few seconds. The old tier waited without a timeout, but
-  only when the local result was empty; `firstLoadRemoteWaitMs` also waits when the cache has data,
-  bounded by the timeout.
+<Callout type="warn" title="Removed read tiers">
+  Reads accept only `"local-first"` and `"remote"`. `"local-first-unless-empty"` was removed: use
+  `"local-first"` plus a `firstLoadRemoteWaitMs` of, for example, a few seconds. The old tier waited
+  without a timeout, but only when the local result was empty; `firstLoadRemoteWaitMs` also waits
+  when the cache has data, bounded by the timeout. The read names `"local"` and `"global"` were
+  removed too: use `"local-first"` and `"remote"`. Passing a removed name throws.
 </Callout>
 
 ### Own writes

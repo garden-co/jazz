@@ -3253,7 +3253,7 @@ impl NapiDb {
     /// Report what the host knows about the path to the authoritative server
     /// (`"none" | "attempting" | "live" | "failed"`; the TypeScript names
     /// `"connecting" | "connected" | "unavailable"` are accepted as aliases).
-    /// Drives only `local-first-unless-empty` reads. The core timestamps each
+    /// Drives only local-first reads that wait for the server on first load. The core timestamps each
     /// `"attempting"` report as the start of a new attempt; until this is
     /// first called, reachability is derived from this runtime's own upstream.
     #[napi(js_name = "setRemoteLinkHint")]
@@ -4050,7 +4050,7 @@ fn core_read_opts_from_json(value: Option<JsonValue>) -> napi::Result<CoreReadOp
         return Ok(opts);
     }
     if let Some(tier) = optional_json_string_prop(&value, "tier")? {
-        (opts.tier, opts.first_load) = core_read_tier_from_str(&tier)?;
+        opts.tier = core_read_tier_from_str(&tier)?;
     }
     if let Some(local_updates) = optional_json_string_prop(&value, "local_updates")? {
         opts.local_updates = match local_updates.as_str() {
@@ -4077,12 +4077,9 @@ fn core_read_opts_from_json(value: Option<JsonValue>) -> napi::Result<CoreReadOp
     if let Some(include_deleted) = optional_json_bool_prop(&value, "include_deleted")? {
         opts.include_deleted = include_deleted;
     }
-    // A local-first read's server-wait timeout. It applies only to a
-    // local-first read without another opening gate; `Remote` reads and the
-    // deprecated local-first-unless-empty tier ignore it.
+    // A local-first read's server-wait timeout. `Remote` reads ignore it.
     if let Some(timeout_ms) = optional_json_wait_ms_prop(&value, "first_load_remote_wait_ms")?
         && opts.tier == CoreDurabilityTier::Local
-        && opts.first_load == CoreFirstLoad::Deliver
     {
         opts.first_load = CoreFirstLoad::WaitForRemote { timeout_ms };
     }
@@ -4351,18 +4348,17 @@ fn core_durability_tier_from_str(tier: &str) -> napi::Result<CoreDurabilityTier>
 
 /// Read-only binding lowering. Write waits keep the durability-tier parser so
 /// `remote` names cannot accidentally become a write settlement tier.
-fn core_read_tier_from_str(tier: &str) -> napi::Result<(CoreDurabilityTier, CoreFirstLoad)> {
+fn core_read_tier_from_str(tier: &str) -> napi::Result<CoreDurabilityTier> {
     match tier {
-        "local-first" | "LocalFirst" => Ok((CoreDurabilityTier::Local, CoreFirstLoad::Deliver)),
-        // The core owns the local-first-unless-empty gate.
-        "local-first-unless-empty" | "LocalFirstUnlessEmpty" => {
-            Ok((CoreDurabilityTier::Local, CoreFirstLoad::AwaitRemote))
-        }
-        "remote-if-possible" | "RemoteIfPossible" => Err(napi::Error::from_reason(
-            "the remote-if-possible tier was removed; use local-first-unless-empty, or remote for server-confirmed reads",
+        "local-first" | "LocalFirst" => Ok(CoreDurabilityTier::Local),
+        "local-first-unless-empty" | "LocalFirstUnlessEmpty" => Err(napi::Error::from_reason(
+            "the local-first-unless-empty tier was removed; use local-first with first_load_remote_wait_ms",
         )),
-        "remote" | "Remote" => Ok((CoreDurabilityTier::Global, CoreFirstLoad::Deliver)),
-        _ => core_durability_tier_from_str(tier).map(|tier| (tier, CoreFirstLoad::Deliver)),
+        "remote-if-possible" | "RemoteIfPossible" => Err(napi::Error::from_reason(
+            "the remote-if-possible tier was removed; use local-first with first_load_remote_wait_ms, or remote for server-confirmed reads",
+        )),
+        "remote" | "Remote" => Ok(CoreDurabilityTier::Global),
+        _ => core_durability_tier_from_str(tier),
     }
 }
 
@@ -5301,30 +5297,19 @@ mod tests {
     fn read_tier_names_lower_to_existing_core_tiers() {
         assert_eq!(
             core_read_tier_from_str("local-first").expect("local-first read tier"),
-            (
-                jazz::tx::DurabilityTier::Local,
-                jazz::db::FirstLoad::Deliver
-            )
+            jazz::tx::DurabilityTier::Local
         );
         assert_eq!(
             core_read_tier_from_str("remote").expect("strict remote read tier"),
-            (
-                jazz::tx::DurabilityTier::Global,
-                jazz::db::FirstLoad::Deliver
-            )
+            jazz::tx::DurabilityTier::Global
         );
-        for name in ["remote-if-possible", "RemoteIfPossible"] {
+        for name in [
+            "remote-if-possible",
+            "RemoteIfPossible",
+            "local-first-unless-empty",
+            "LocalFirstUnlessEmpty",
+        ] {
             assert!(core_read_tier_from_str(name).is_err(), "{name} was removed");
-        }
-        for name in ["local-first-unless-empty", "LocalFirstUnlessEmpty"] {
-            assert_eq!(
-                core_read_tier_from_str(name).expect("local-first-unless-empty read tier"),
-                (
-                    jazz::tx::DurabilityTier::Local,
-                    jazz::db::FirstLoad::AwaitRemote
-                ),
-                "{name} reads local-first with the core empty-opening gate"
-            );
         }
         assert!(
             super::core_durability_tier_from_str("remote").is_err(),

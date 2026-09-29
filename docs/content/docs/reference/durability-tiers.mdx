@@ -42,7 +42,7 @@ New applications should use the two product read choices `"local-first"` and `"r
 
 A local-first read accepts an optional `firstLoadRemoteWaitMs` that bounds how long
 its first result may wait for the server. The default, `0`, is plain `"local-first"`. It applies to
-`"local-first"`, the `"local"` alias and the browser default; `"remote"` ignores it. In Rust, use
+`"local-first"` and the browser default; `"remote"` ignores it. In Rust, use
 `client.query_local_first(query, timeout)` and `client.subscribe_local_first(query, timeout)`.
 
 Only the initial load waits: a one-shot read, or a subscription's first callback. While the client
@@ -63,21 +63,24 @@ the wrong rows, so while waiting an offset window reads the server's page. If th
 first, it shows the cached page; a subscription then switches to the server's page when it
 arrives, so rows can shift at that moment.
 
-### Deprecated: `"local-first-unless-empty"`
+### Removed read tiers
 
-`"local-first-unless-empty"` (`ReadTier.LocalFirstUnlessEmpty`) is deprecated. It still works as
-before and warns once at runtime; it will be removed in the next breaking release. It behaves like
-`"local-first"`, except that an **empty** local result waits for the server's first answer while
-the server is reachable, without a time limit once connected; a non-empty local result is shown
-immediately. Replace it with `"local-first"` plus a `firstLoadRemoteWaitMs` of, for example, a few
-seconds. Note the difference: the new option also waits when the cache has data, but is always
-bounded by the timeout. `"remote-if-possible"` was removed in alpha.57 and throws.
+Reads accept only `"local-first"` and `"remote"`; any other name throws.
+
+- `"local-first-unless-empty"` (`ReadTier.LocalFirstUnlessEmpty`) was removed. It showed a
+  non-empty cache at once and made only an **empty** local result wait for the server, without a
+  time limit once connected. Use `"local-first"` plus a `firstLoadRemoteWaitMs` of, for example, a
+  few seconds. The new option also waits when the cache has data, but is always bounded by the
+  timeout.
+- The read names `"local"` and `"global"` (and the `"core"` alias) were removed. Use
+  `"local-first"` for `"local"` and `"remote"` for `"global"`. A `"remote"` read shows your own
+  pending writes once the server confirms them, where the old `"global"` read showed them at once.
+- `"remote-if-possible"` and `"edge"` were removed in alpha.57.
 
 Losing remote access does not erase cached data: local-first reads may still show it. An actual
 synced deletion, however, hides the row from local reads too.
 
-The read aliases `"local"` and `"global"` remain accepted. Prefer the read choices
-above for queries; write durability uses `wait({ tier: "local" | "global" })`.
+Write durability is separate and unchanged: it uses `wait({ tier: "local" | "global" })`.
 
 These options apply to:
 

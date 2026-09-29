@@ -615,19 +615,24 @@ describe("public read tiers", () => {
   it("lowers each new public tier to the existing native durability contract", () => {
     expect(resolveReadTier("local-first")).toBe("local");
     expect(resolveReadTier("remote")).toBe("global");
-    // The core Db gates the empty opening.
-    expect(resolveReadTier("local-first-unless-empty")).toBe("local-first-unless-empty");
     expect(resolveReadTier(ReadTier.LocalFirst)).toBe("local");
     expect(resolveReadTier(ReadTier.Remote)).toBe("global");
-    expect(resolveReadTier(ReadTier.LocalFirstUnlessEmpty)).toBe("local-first-unless-empty");
+    expect(Object.values(ReadTier)).toEqual(["local-first", "remote"]);
   });
 
-  it("rejects the removed remote-if-possible tier", () => {
-    expect("RemoteIfPossible" in ReadTier).toBe(false);
-    const removed = "remote-if-possible" as never;
-    expect(() => resolveReadTier(removed)).toThrow('The "remote-if-possible" tier was removed');
-    expect(() => publicQueryExecutionOptions({ tier: removed })).toThrow(
-      'The "remote-if-possible" tier was removed',
+  it.each(["remote-if-possible", "local-first-unless-empty", "local", "global", "core", "edge"])(
+    "rejects the removed %s read tier with a migration message",
+    (name) => {
+      const removed = name as never;
+      expect(() => publicQueryExecutionOptions({ tier: removed })).toThrow(
+        `The "${name}" ${name === "local" || name === "global" || name === "core" ? "read " : ""}tier was removed`,
+      );
+    },
+  );
+
+  it("rejects an unknown read tier", () => {
+    expect(() => publicQueryExecutionOptions({ tier: "fast" as never })).toThrow(
+      'Unknown read tier "fast"; expected "local-first" or "remote".',
     );
   });
 
@@ -642,7 +647,7 @@ describe("public read tiers", () => {
         '{"first_load_remote_wait_ms":500}',
       ],
       [
-        { tier: "local", firstLoadRemoteWaitMs: 250.9 },
+        { tier: "local-first", firstLoadRemoteWaitMs: 250.9 },
         "local",
         '{"first_load_remote_wait_ms":250}',
       ],
@@ -667,27 +672,7 @@ describe("public read tiers", () => {
     );
   });
 
-  it("warns once that the local-first-unless-empty tier is deprecated", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    try {
-      // A fresh module instance, so earlier tests cannot have spent the warning.
-      vi.resetModules();
-      const fresh = await import("./client.js");
-      expect(fresh.resolveReadTier(fresh.ReadTier.LocalFirstUnlessEmpty)).toBe(
-        "local-first-unless-empty",
-      );
-      fresh.resolveReadTier(fresh.ReadTier.LocalFirstUnlessEmpty);
-      fresh.resolveReadTier(fresh.ReadTier.LocalFirst);
-      const deprecations = warn.mock.calls.filter(([message]) =>
-        String(message).includes('"local-first-unless-empty" tier is deprecated'),
-      );
-      expect(deprecations).toHaveLength(1);
-    } finally {
-      warn.mockRestore();
-    }
-  });
-
-  it("keeps legacy read durability controls byte-for-byte compatible", () => {
+  it("keeps the runtime's internal durability read names byte-for-byte compatible", () => {
     for (const tier of ["local", "global"] as const) {
       expect(resolveReadTier(tier)).toBe(tier);
       expect(resolveEffectiveQueryExecutionOptions({}, { tier })).toMatchObject({
@@ -706,18 +691,11 @@ describe("public read tiers", () => {
       tier: "global",
       localUpdates: "deferred",
     });
-    expect(
-      resolveEffectiveQueryExecutionOptions({}, { tier: ReadTier.LocalFirstUnlessEmpty }),
-    ).toMatchObject({
-      tier: "local-first-unless-empty",
-      localUpdates: "immediate",
-    });
   });
 
   it.each([
     [ReadTier.LocalFirst, "local", undefined],
     [ReadTier.Remote, "global", JSON.stringify({ local_updates: "deferred" })],
-    [ReadTier.LocalFirstUnlessEmpty, "local-first-unless-empty", undefined],
   ] as const)(
     "keeps public %s reads full and derives their own-write policy",
     async (tier, nativeTier, expectedOptionsJson) => {
@@ -1084,7 +1062,7 @@ describe("JazzClient mutation error handling", () => {
 });
 
 it("rejects the removed edge read tier instead of silently choosing a local read", () => {
-  const legacy = "edge" as "global";
+  const legacy = "edge" as never;
   expect(() => resolveReadTier(legacy)).toThrow('The "edge" tier was removed');
   expect(() => publicQueryExecutionOptions({ tier: legacy })).toThrow(
     'The "edge" tier was removed',

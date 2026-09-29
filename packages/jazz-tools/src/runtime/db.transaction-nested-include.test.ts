@@ -45,10 +45,10 @@ it.each(["inline", "large"])(
         ...project.value,
         notesViaProject: [{ ...note.value, project: project.value }],
       };
-      expect(await db.one(query, { tier: "global" })).toEqual(expected);
+      expect(await db.one(query, { tier: "remote" })).toEqual(expected);
       const tx = db.beginTransaction();
       try {
-        expect(await tx.one(query, { tier: "local" })).toEqual(expected);
+        expect(await tx.one(query, { tier: "local-first" })).toEqual(expected);
       } finally {
         await tx.rollback();
       }
@@ -60,7 +60,7 @@ it.each(["inline", "large"])(
   60_000,
 );
 
-it.each(["local", "remote", "global"] as const)(
+it.each(["local-first", "remote"] as const)(
   "reads a reverse include of a JSON child inside an exclusive transaction (%s)",
   async (tier) => {
     const app = s.defineApp({
@@ -92,7 +92,7 @@ it.each(["local", "remote", "global"] as const)(
         .wait({ tier: "global" });
       const query = app.parent.where({ id: parent.id }).include({ childViaParent: app.child });
       const expected = { ...parent, childViaParent: [child] };
-      expect(await db.one(query, { tier: "global" })).toEqual(expected);
+      expect(await db.one(query, { tier: "remote" })).toEqual(expected);
       const write = await db.exclusiveTransaction((tx) => tx.one(query, { tier }));
       expect(await write.wait()).toEqual(expected);
     } finally {

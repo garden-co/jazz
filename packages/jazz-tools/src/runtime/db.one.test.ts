@@ -123,7 +123,7 @@ describe("Db.one", () => {
     const tx = db.beginTransaction();
 
     await tx.all(app.todos.where({ done: false }), {
-      tier: "local",
+      tier: "local-first",
       // JavaScript callers can supply these despite their absence from the
       // public type. They must not override transaction semantics.
       propagation: "local-only",

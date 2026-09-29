@@ -160,7 +160,7 @@ it("keeps canvas ordering and history markers behind the same membership boundar
   const ordered = await viewer.all(
     app.layers.where({ canvasId: canvas.id }).orderBy("zIndex", "asc"),
     {
-      tier: "global",
+      tier: "remote",
     },
   );
   expect(ordered.map((layer) => [layer.id, layer.zIndex])).toEqual([

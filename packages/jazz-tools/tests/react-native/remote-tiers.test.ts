@@ -99,10 +99,13 @@ it("resumes strict remote reads and Global write waits after native reconnect", 
         await db.disconnect();
         const write = db.insert(app.todos, { title: "offline queued", done: false });
         const row = await write.wait({ tier: "local" });
-        expect(await db.all(app.todos, { tier: ReadTier.LocalFirstUnlessEmpty })).toEqual([row]);
+        expect(
+          await db.all(app.todos, { tier: ReadTier.LocalFirst, firstLoadRemoteWaitMs: 60_000 }),
+        ).toEqual([row]);
         const fallback: unknown[][] = [];
         const stopFallback = db.subscribe(app.todos, (rows) => fallback.push(rows), {
-          tier: ReadTier.LocalFirstUnlessEmpty,
+          tier: ReadTier.LocalFirst,
+          firstLoadRemoteWaitMs: 60_000,
         });
         await expect.poll(() => fallback.at(-1)).toEqual([row]);
         stopFallback();
@@ -135,9 +138,9 @@ it("resumes strict remote reads and Global write waits after native reconnect", 
         const stoppedCount = strictSnapshots.length;
         await db.update(app.todos, row.id, { title: "after detach" }).wait({ tier: "global" });
         expect(strictSnapshots).toHaveLength(stoppedCount);
-        expect(await db.all(app.todos, { tier: ReadTier.LocalFirstUnlessEmpty })).toEqual([
-          { ...row, title: "after detach", done: true },
-        ]);
+        expect(
+          await db.all(app.todos, { tier: ReadTier.LocalFirst, firstLoadRemoteWaitMs: 60_000 }),
+        ).toEqual([{ ...row, title: "after detach", done: true }]);
       },
       {
         appId: server.appId,
@@ -201,11 +204,14 @@ it("keeps local work usable while remote read tiers recover from an established 
 
         // Local knowledge answers immediately during the outage; only a
         // strict remote read waits for the server to come back.
-        expect(await db.all(app.todos, { tier: ReadTier.LocalFirstUnlessEmpty })).toEqual([local]);
+        expect(
+          await db.all(app.todos, { tier: ReadTier.LocalFirst, firstLoadRemoteWaitMs: 60_000 }),
+        ).toEqual([local]);
         // An empty local result must not hang on the unreachable server.
         expect(
           await db.all(app.todos.where({ title: "not synced anywhere" }), {
-            tier: ReadTier.LocalFirstUnlessEmpty,
+            tier: ReadTier.LocalFirst,
+            firstLoadRemoteWaitMs: 60_000,
           }),
         ).toEqual([]);
         let strictSettled = false;

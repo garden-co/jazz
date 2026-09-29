@@ -99,7 +99,7 @@ export declare class NapiDb {
    * Report what the host knows about the path to the authoritative server
    * (`"none" | "attempting" | "live" | "failed"`; the TypeScript names
    * `"connecting" | "connected" | "unavailable"` are accepted as aliases).
-   * Drives only `local-first-unless-empty` reads. The core timestamps each
+   * Drives only local-first reads that wait for the server on first load. The core timestamps each
    * `"attempting"` report as the start of a new attempt; until this is
    * first called, reachability is derived from this runtime's own upstream.
    */

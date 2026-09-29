@@ -3428,16 +3428,12 @@ impl JazzClient {
         }
     }
 
-    #[allow(deprecated)]
     fn core_read_opts_for_read_tier(tier: ReadTier) -> CoreReadOpts {
         let mut opts = Self::core_read_opts(Some(tier.legacy_durability_tier()));
         opts.local_updates = match tier {
             ReadTier::Remote => CoreLocalUpdates::Deferred,
-            ReadTier::LocalFirst | ReadTier::LocalFirstUnlessEmpty => CoreLocalUpdates::Immediate,
+            ReadTier::LocalFirst => CoreLocalUpdates::Immediate,
         };
-        if tier == ReadTier::LocalFirstUnlessEmpty {
-            opts.first_load = CoreFirstLoad::AwaitRemote;
-        }
         opts
     }
 
@@ -4002,13 +3998,9 @@ impl JazzClient {
             .await
     }
 
-    /// Subscribe using a product-level read tier.
-    ///
-    /// `LocalFirstUnlessEmpty` (deprecated) passes the core `FirstLoad::AwaitRemote`
-    /// option through: the core stream withholds only an empty, unsettled
-    /// local opening while the server could answer, and then behaves exactly
-    /// like `LocalFirst`. An offset window is read as a strict remote view
-    /// while the server could answer.
+    /// Subscribe using a product-level read tier. For a local-first read
+    /// whose first load waits for the server, use
+    /// [`JazzClient::subscribe_local_first`].
     pub async fn subscribe_with_read_tier(
         &self,
         query: Query,
@@ -4032,38 +4024,10 @@ impl JazzClient {
         Ok(SubscriptionStream::new(rx, cancellation))
     }
 
-    /// One-shot query with read tier.
-    ///
-    /// `LocalFirstUnlessEmpty` uses the core one-shot rule: a non-empty local
-    /// result is returned as is; an empty one is replaced by the strict remote
-    /// result while the server could answer, falling back to the empty local
-    /// result (and dropping the pending remote read) if it cannot. An offset
-    /// window reads remote first while the server could answer.
-    #[allow(deprecated)]
+    /// One-shot query with read tier. For a local-first read that waits for
+    /// the server, use [`JazzClient::query_local_first`].
     pub async fn query(&self, query: Query, tier: ReadTier) -> Result<Vec<QueryResult>> {
-        let in_transaction = self
-            .write_context
-            .as_ref()
-            .is_some_and(|ctx| ctx.transaction_id.is_some());
-        if tier != ReadTier::LocalFirstUnlessEmpty || in_transaction {
-            return self
-                .query_with_opts(query, Self::core_read_opts_for_read_tier(tier))
-                .await;
-        }
-        let backend = self.db.backend()?;
-        let local_opts = Self::core_read_opts_for_read_tier(ReadTier::LocalFirst);
-        let mut remote_opts = Self::core_read_opts_for_read_tier(ReadTier::Remote);
-        remote_opts.local_updates = CoreLocalUpdates::Immediate;
-        let windowed = query.offset > 0;
-        let remote_query = query.clone();
-        backend
-            .0
-            .read_local_first_unless_empty(
-                windowed,
-                || self.query_with_opts(query, local_opts),
-                || self.query_with_opts(remote_query, remote_opts),
-                |rows: &Vec<QueryResult>| rows.is_empty(),
-            )
+        self.query_with_opts(query, Self::core_read_opts_for_read_tier(tier))
             .await
     }
 
@@ -4964,7 +4928,6 @@ mod tests {
     /// overlay bit is not independently observable without conflating it with
     /// remote transport timing. Write durability remains independent.
     #[test]
-    #[allow(deprecated)]
     fn read_tier_lowers_without_changing_write_durability() {
         assert_eq!(
             ReadTier::LocalFirst.legacy_durability_tier(),
@@ -4975,25 +4938,12 @@ mod tests {
             DurabilityTier::GlobalServer
         );
         assert_eq!(
-            ReadTier::LocalFirstUnlessEmpty.legacy_durability_tier(),
-            DurabilityTier::Local,
-            "the empty-opening gate is a read option, not a tier"
-        );
-        assert_eq!(
             JazzClient::core_read_opts_for_read_tier(ReadTier::LocalFirst).local_updates,
             CoreLocalUpdates::Immediate
         );
         assert_eq!(
             JazzClient::core_read_opts_for_read_tier(ReadTier::Remote).local_updates,
             CoreLocalUpdates::Deferred
-        );
-        assert_eq!(
-            JazzClient::core_read_opts_for_read_tier(ReadTier::LocalFirstUnlessEmpty).local_updates,
-            CoreLocalUpdates::Immediate
-        );
-        assert_eq!(
-            JazzClient::core_read_opts_for_read_tier(ReadTier::LocalFirstUnlessEmpty).first_load,
-            CoreFirstLoad::AwaitRemote
         );
         assert_eq!(
             core_legacy_read_tier(DurabilityTier::Local),

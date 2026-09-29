@@ -200,7 +200,7 @@ export abstract class ConnectionManager {
 
   /**
    * Keep the runtime's core read gate informed of {@link remoteLinkState}. The
-   * core decides whether an empty local-first-unless-empty opening may wait;
+   * core decides whether a local-first read's first load may wait;
    * this host only reports whether the server is being reached, reachable, or
    * not.
    */

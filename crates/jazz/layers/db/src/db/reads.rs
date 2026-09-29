@@ -258,11 +258,9 @@ where
     /// release callback lets a host defer attachment cleanup when dropping a
     /// pending operation while its runtime owner is already borrowed.
     ///
-    /// An [`FirstLoad::WaitForRemote`] request from a client-local read
+    /// A [`FirstLoad::WaitForRemote`] request from a client-local read
     /// outside a transaction applies the shared one-shot rule of
-    /// [`Db::read_local_first_within`], and a deprecated
-    /// [`FirstLoad::AwaitRemote`] request the rule of
-    /// [`Db::read_local_first_unless_empty`]: the local-first read runs with
+    /// [`Db::read_local_first_within`]: the local-first read runs with
     /// the caller's coverage requirement, and the strict remote read (Global
     /// tier, immediate local updates) always requires coverage. Each phase
     /// releases its own attachment through `release_coverage`.
@@ -294,7 +292,6 @@ where
             }
             _ => None,
         };
-        let await_remote = gated && first_load == FirstLoad::AwaitRemote;
         if let Some(timeout) = wait_timeout {
             let remote_opts = ReadOpts {
                 tier: DurabilityTier::Global,
@@ -302,7 +299,8 @@ where
                 ..opts.clone()
             };
             let remote_scope = request_scope.clone();
-            // Boxed for the same reason as the unless-empty read below.
+            // Boxed: the gated read nests two full one-shot reads, which would
+            // otherwise multiply this future's size and every host poll frame.
             return Box::pin(self.read_local_first_within(
                 timeout,
                 || {
@@ -332,63 +330,16 @@ where
             ))
             .await;
         }
-        if !await_remote {
-            return self
-                .all_serialized_query_once(
-                    query,
-                    opts,
-                    open_tx,
-                    request_scope,
-                    author,
-                    require_coverage,
-                    &coverage_expired,
-                    &release_coverage,
-                )
-                .await;
-        }
-        let windowed = crate::wire::decode_postcard_exact::<Query>(query)
-            .map_err(|error| Error::new(ErrorCode::Query, format!("decode query: {error}")))?
-            .offset
-            > 0;
-        let remote_opts = ReadOpts {
-            tier: DurabilityTier::Global,
-            local_updates: LocalUpdates::Immediate,
-            ..opts.clone()
-        };
-        let remote_scope = request_scope.clone();
-        // Boxed: the gated read nests two full one-shot reads, which would
-        // otherwise multiply this future's size and every host poll frame.
-        Box::pin(self.read_local_first_unless_empty(
-            windowed,
-            || {
-                self.all_serialized_query_once(
-                    query,
-                    opts,
-                    None,
-                    request_scope,
-                    None,
-                    require_coverage,
-                    &coverage_expired,
-                    &release_coverage,
-                )
-            },
-            || {
-                self.all_serialized_query_once(
-                    query,
-                    remote_opts,
-                    None,
-                    remote_scope,
-                    None,
-                    true,
-                    &coverage_expired,
-                    &release_coverage,
-                )
-            },
-            |result| match result {
-                SerializedReadResult::Rows(rows) => rows.is_empty(),
-                SerializedReadResult::Relation(snapshot) => snapshot.root_count == 0,
-            },
-        ))
+        self.all_serialized_query_once(
+            query,
+            opts,
+            open_tx,
+            request_scope,
+            author,
+            require_coverage,
+            &coverage_expired,
+            &release_coverage,
+        )
         .await
     }
 

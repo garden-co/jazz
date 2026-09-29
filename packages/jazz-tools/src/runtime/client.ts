@@ -364,36 +364,8 @@ export const ReadTier = {
   LocalFirst: "local-first",
   /** Current remote query scope, without pending local writes; waits offline. */
   Remote: "remote",
-  /**
-   * @deprecated Use `ReadTier.LocalFirst` with `firstLoadRemoteWaitMs` instead.
-   * This tier will be removed in the next breaking release.
-   *
-   * Local knowledge and pending writes, delivered immediately. Only when the
-   * local result is empty while the server is reachable (or still connecting)
-   * does the first delivery wait for the first remote answer. Offline,
-   * unconfigured, and failed connections deliver the local result at once.
-   */
-  LocalFirstUnlessEmpty: "local-first-unless-empty",
 } as const;
 export type ReadTier = (typeof ReadTier)[keyof typeof ReadTier];
-
-/** @internal True for the local-first-unless-empty tier. */
-export function isLocalFirstUnlessEmptyTier(
-  tier: unknown,
-): tier is typeof ReadTier.LocalFirstUnlessEmpty {
-  return tier === ReadTier.LocalFirstUnlessEmpty;
-}
-
-let warnedDeprecatedLocalFirstUnlessEmpty = false;
-
-/** @internal Warn once that the local-first-unless-empty tier is deprecated. */
-export function warnDeprecatedReadTier(tier: unknown): void {
-  if (!isLocalFirstUnlessEmptyTier(tier) || warnedDeprecatedLocalFirstUnlessEmpty) return;
-  warnedDeprecatedLocalFirstUnlessEmpty = true;
-  console.warn(
-    'The "local-first-unless-empty" tier is deprecated and will be removed in the next breaking release. Use ReadTier.LocalFirst with firstLoadRemoteWaitMs instead.',
-  );
-}
 
 /**
  * @internal A local-first read's server wait, or `undefined` for none.
@@ -408,21 +380,38 @@ export function normalizeFirstLoadRemoteWaitMs(value: unknown): number | undefin
   return ms > 0 ? ms : undefined;
 }
 
-const REMOVED_REMOTE_IF_POSSIBLE =
-  'The "remote-if-possible" tier was removed. Use ReadTier.LocalFirst with firstLoadRemoteWaitMs, or ReadTier.Remote for server-confirmed reads.';
+const REMOVED_READ_TIERS: Readonly<Record<string, string>> = {
+  edge: 'The "edge" tier was removed. Use ReadTier.Remote for server-confirmed reads.',
+  "remote-if-possible":
+    'The "remote-if-possible" tier was removed. Use ReadTier.LocalFirst with firstLoadRemoteWaitMs, or ReadTier.Remote for server-confirmed reads.',
+  "local-first-unless-empty":
+    'The "local-first-unless-empty" tier was removed. Use ReadTier.LocalFirst with firstLoadRemoteWaitMs.',
+  local:
+    'The "local" read tier was removed. Use ReadTier.LocalFirst ("local-first"); write waits keep "local".',
+  global:
+    'The "global" read tier was removed. Use ReadTier.Remote ("remote"); write waits keep "global".',
+  core: 'The "core" read tier was removed. Use ReadTier.Remote ("remote").',
+};
 
-/** @internal Throw the migration error for read tiers removed in alpha.57. */
+/**
+ * @internal Throw for anything but a product read tier. Read options accept
+ * only `ReadTier.LocalFirst` and `ReadTier.Remote`; removed names get a
+ * migration message.
+ */
 export function rejectRemovedReadTier(tier: unknown): void {
-  if (tier === "edge") {
-    throw new Error('The "edge" tier was removed. Use ReadTier.Remote for Core-confirmed reads.');
-  }
-  if (tier === "remote-if-possible") throw new Error(REMOVED_REMOTE_IF_POSSIBLE);
+  if (tier === undefined || tier === null || isPublicQueryReadTier(tier)) return;
+  const removed = typeof tier === "string" ? REMOVED_READ_TIERS[tier] : undefined;
+  throw new Error(
+    removed ?? `Unknown read tier ${JSON.stringify(tier)}; expected "local-first" or "remote".`,
+  );
 }
-/** @deprecated Read APIs also accept these legacy durability names unchanged. */
-export type LegacyReadDurabilityTier = DurabilityTier;
-export type QueryReadTier = ReadTier | LegacyReadDurabilityTier;
-/** @internal Inspector-only tier that never subscribes upstream. */
-type InternalQueryReadTier = QueryReadTier | "local-only";
+export type QueryReadTier = ReadTier;
+/**
+ * @internal Tiers internal callers may pass: the product tiers, the runtime
+ * durability names (for runtime defaults and framework internals), and the
+ * inspector-only tier that never subscribes upstream.
+ */
+type InternalQueryReadTier = QueryReadTier | DurabilityTier | "local-only";
 /**
  * Controls when a write is visible to subscriptions.
  *
@@ -464,7 +453,7 @@ export interface BranchView {
 }
 
 export interface QueryExecutionOptions {
-  /** Product read tier. @deprecated DurabilityTier values remain accepted with their old meaning. */
+  /** Read tier: `ReadTier.LocalFirst` or `ReadTier.Remote`. */
   tier?: QueryReadTier;
   /**
    * Local-first reads only: how long the initial load may
@@ -511,13 +500,7 @@ export function publicQueryExecutionOptions(
 
 /** @internal `local-only` is deliberately excluded from the product surface. */
 export function isPublicQueryReadTier(value: unknown): value is QueryReadTier {
-  return (
-    value === ReadTier.LocalFirst ||
-    value === ReadTier.Remote ||
-    value === ReadTier.LocalFirstUnlessEmpty ||
-    value === "local" ||
-    value === "global"
-  );
+  return value === ReadTier.LocalFirst || value === ReadTier.Remote;
 }
 
 /** @internal Low-level read controls that are not part of the product-facing query API. */
@@ -701,19 +684,15 @@ export function resolveEffectiveQueryExecutionOptions(
   };
 }
 
-/**
- * @internal Tier names the runtime bindings accept for reads. The core Db owns
- * the local-first-unless-empty opening gate, so that tier passes through.
- */
-export type RuntimeReadTier = DurabilityTier | "local-first-unless-empty";
+/** @internal Tier names the runtime bindings accept for reads. */
+export type RuntimeReadTier = DurabilityTier;
 
 /** @internal Lower product read choices to the runtime's read tiers. */
 export function resolveReadTier(tier: InternalQueryReadTier): RuntimeReadTier {
+  if (tier === "local-only" || tier === "local") return "local";
+  if (tier === "global") return "global";
   rejectRemovedReadTier(tier);
-  warnDeprecatedReadTier(tier);
-  if (tier === "local-only") return "local";
-  if (isLocalFirstUnlessEmptyTier(tier)) return "local-first-unless-empty";
-  return tier === ReadTier.LocalFirst ? "local" : tier === ReadTier.Remote ? "global" : tier;
+  return tier === ReadTier.LocalFirst ? "local" : "global";
 }
 
 function isBrowserRuntime(): boolean {

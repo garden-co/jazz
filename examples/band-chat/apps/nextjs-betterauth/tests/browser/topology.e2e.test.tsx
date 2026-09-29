@@ -108,7 +108,7 @@ describe("BandChat cross-topology recovery", () => {
                 (rooms) => rooms.length === 1,
                 "peer receives owner invitation",
                 15_000,
-                "global",
+                "remote",
               );
             },
           },
@@ -149,7 +149,7 @@ describe("BandChat cross-topology recovery", () => {
                 (messages) => messages.length === 1,
                 "peer observes the message before reacting to it",
                 15_000,
-                "global",
+                "remote",
               );
               await Promise.all([
                 owner!.db
@@ -187,7 +187,9 @@ describe("BandChat cross-topology recovery", () => {
               offlineMessageId = offline.value.id;
               expect(
                 (
-                  await owner!.db.all(app.messages.where({ roomId: roomId! }), { tier: "local" })
+                  await owner!.db.all(app.messages.where({ roomId: roomId! }), {
+                    tier: "local-first",
+                  })
                 ).some((message) => message.id === offlineMessageId),
               ).toBe(true);
             },
@@ -202,7 +204,7 @@ describe("BandChat cross-topology recovery", () => {
                 (rows) => rows.length === 4,
                 "peer receives concurrent and replayed messages exactly once",
                 20_000,
-                "global",
+                "remote",
               );
               expect(new Set(messages.map((message) => message.id))).toEqual(
                 new Set([ownerMessageId, peerMessageId, attachmentMessageId, offlineMessageId]),
@@ -217,7 +219,7 @@ describe("BandChat cross-topology recovery", () => {
                 (rows) => rows.length === 2,
                 "peer receives both member reactions",
                 15_000,
-                "global",
+                "remote",
               );
               expect(reactions.map((reaction) => reaction.emoji).sort()).toEqual(["🎸", "🔥"]);
             },
@@ -394,7 +396,7 @@ describe("BandChat cross-topology recovery", () => {
                 (messages) => messages.length === 2,
                 "peer receives two newest projected messages",
                 15_000,
-                "global",
+                "remote",
               );
               expect(rows.map((message) => message.text)).toEqual(["third", "second"]);
               const reaction = await peer!.db
@@ -420,7 +422,7 @@ describe("BandChat cross-topology recovery", () => {
                 })
                 .wait({ tier: "global" });
               expect(
-                (await peer!.db.all(window(), { tier: "local" })).map((row) => row.text),
+                (await peer!.db.all(window(), { tier: "local-first" })).map((row) => row.text),
               ).toEqual(["third", "second"]);
             },
             faultsAfter: [{ kind: "reconnect", target: "peer" }],
@@ -434,7 +436,7 @@ describe("BandChat cross-topology recovery", () => {
                 (messages) => messages.length === 2 && messages[0]?.text === "z after reconnect",
                 "peer reconnects with its exact bounded projection",
                 15_000,
-                "global",
+                "remote",
               );
               expect(rows.map((message) => message.text)).toEqual(["z after reconnect", "third"]);
               await owner!.db.delete(app.roomMembers, peerMembershipId!).wait({ tier: "global" });

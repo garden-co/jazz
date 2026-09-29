@@ -411,7 +411,7 @@ export async function waitForTodos(
   predicate: (rows: Todo[]) => boolean,
   label: string,
   timeoutMs = 15000,
-  tier?: "local" | "global",
+  tier?: "local-first" | "remote",
 ): Promise<Todo[]> {
   return waitForQuery(db, allTodos, predicate, label, timeoutMs, tier);
 }
@@ -421,7 +421,7 @@ export async function waitForCatalogueTodos(
   predicate: (rows: CatalogueTodo[]) => boolean,
   label: string,
   timeoutMs = 15_000,
-  tier?: "local" | "global",
+  tier?: "local-first" | "remote",
 ): Promise<CatalogueTodo[]> {
   return waitForQuery(db, allCatalogueTodos, predicate, label, timeoutMs, tier);
 }
@@ -574,7 +574,7 @@ export function useSharedWorkerBridgeHarness() {
     title: string,
     label: string,
     timeoutMs: number,
-    tier?: "local" | "global",
+    tier?: "local-first" | "remote",
   ): Promise<Record<string, unknown>[]> {
     try {
       return await waitForRemoteBrowserDbTitle({ id, title, timeoutMs, tier });

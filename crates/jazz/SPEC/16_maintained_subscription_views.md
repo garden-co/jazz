@@ -92,8 +92,7 @@ scope or delta predecessor. Local-first evaluates eligible local data plus
 pending writes. Remote waits for a fresh complete v2 supporting snapshot;
 local-first with a server wait is local-first and waits for that snapshot,
 at most until its deadline, only to replace its opening while a remote can
-answer; the deprecated local-first-unless-empty does the same for an empty
-opening only, without a deadline (ch. 13). Retaining native bytes does not prove remote membership.
+answer (ch. 13). Retaining native bytes does not prove remote membership.
 
 Local-current queries read retained Global-current and Ahead-current rows;
 they do not require a recovered node-wide read timestamp. Native transaction
@@ -321,9 +320,6 @@ answer may be published; it does not select another evaluator:
   first, while a remote can answer, and in reading an `offset > 0` window as
   the strict remote view (falling back to the local window at the deadline)
   (ch. 13);
-- deprecated `local-first-unless-empty` (`FirstLoad::AwaitRemote`) shares
-  that opening gate, but withholds only an empty first answer and has no
-  deadline (ch. 13);
 - a core `Global` read with immediate local updates (no longer a product tier)
   evaluates the exact authority inputs with pending edits/deletes applied to
   those inputs, plus eligible pending new inserts. An edit alone does not
@@ -385,8 +381,8 @@ Worked examples:
   enters the same local graph and its collector removes every affected root or
   descendant occurrence in a remote-scoped result. The client does not
   re-evaluate the hidden policy, and the authority sends no presentation-level
-  remove. Local-first (with or without a server wait) and the deprecated
-  local-first-unless-empty may still show the cached row.
+  remove. Local-first (with or without a server wait) may still show the
+  cached row.
 - **Cached Local-first open.** A client can show retained same-scope A plus a
   pending insert B. A new authority closure containing only C does not evict A
   from local-first knowledge. A `Global` read with immediate local updates
@@ -820,9 +816,8 @@ A later Local query applies its complete order/offset/limit to local current
 inputs, even if its numeric window is contained in a previously received remote
 page. For example, with only positions 8–27 cached, Local offset 8/limit 2 yields
 16–17. Use `remote` for authority-relative pagination. `local-first` with a
-server wait, and the deprecated `local-first-unless-empty`, read an
-`offset > 0` window as the strict remote view while a remote can answer (with
-a server wait, only until its deadline), and otherwise paginate locally like
+server wait reads an `offset > 0` window as the strict remote view while a
+remote can answer, only until its deadline, and otherwise paginates locally like
 `local-first` (ch. 13).
 Pending local rows participate in that local ordering normally; retained remote
 page coordinates must not silently change their rank.

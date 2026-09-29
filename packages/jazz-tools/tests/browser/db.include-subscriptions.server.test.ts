@@ -128,7 +128,7 @@ describe("websocket include subscriptions", () => {
     await ensureNativeRuntimeAdapterReady(observer);
 
     const org = await owner.insert(app.orgs, { name: "North" }).wait({ tier: "global" });
-    expect(await observer.all(app.orgs.where({ id: org.id }), { tier: "global" })).toMatchObject([
+    expect(await observer.all(app.orgs.where({ id: org.id }), { tier: "remote" })).toMatchObject([
       { id: org.id },
     ]);
     const write = await owner.exclusiveTransaction((transaction) => {
@@ -154,7 +154,7 @@ describe("websocket include subscriptions", () => {
         (rows) => {
           subscribedTodoIds = rows.map((row) => row.id);
         },
-        { tier: "global" },
+        { tier: "remote" },
       ),
     );
     let cancelledUpdates = 0;
@@ -163,15 +163,15 @@ describe("websocket include subscriptions", () => {
       () => {
         cancelledUpdates += 1;
       },
-      { tier: "global" },
+      { tier: "remote" },
     );
     cancelBeforeOpening();
 
     const [todos, checks, notes] = await withTimeout(
       Promise.all([
-        observer.all(app.todos.where({ org_id: org.id }), { tier: "global" }),
-        observer.all(app.user_checks.where({ todo_id: todo.id }), { tier: "global" }),
-        observer.all(app.check_notes.where({ user_check_id: check.id }), { tier: "global" }),
+        observer.all(app.todos.where({ org_id: org.id }), { tier: "remote" }),
+        observer.all(app.user_checks.where({ todo_id: todo.id }), { tier: "remote" }),
+        observer.all(app.check_notes.where({ user_check_id: check.id }), { tier: "remote" }),
       ]),
       20_000,
       "concurrent strict-global query coverage did not settle",
@@ -229,7 +229,7 @@ describe("websocket include subscriptions", () => {
         (rows) => {
           snapshots.push(rows as OrgWithDeepIncludes[]);
         },
-        { tier: "global" },
+        { tier: "remote" },
       ),
     );
     await waitForCondition(
@@ -359,14 +359,14 @@ describe("websocket include subscriptions", () => {
           .include({ org: true, user_check: true })
           .requireIncludes(),
         (rows) => includingSnapshots.push(rows as (typeof includingSnapshots)[number]),
-        { tier: "global" },
+        { tier: "remote" },
       ),
     );
     const refFiltered = ctx.trackSubscription(
       browser.subscribe(
         app.check_notes.where({ user_check_id: userCheck.id }),
         (rows) => refFilteredSnapshots.push(rows as (typeof refFilteredSnapshots)[number]),
-        { tier: "global" },
+        { tier: "remote" },
       ),
     );
     await waitForCondition(

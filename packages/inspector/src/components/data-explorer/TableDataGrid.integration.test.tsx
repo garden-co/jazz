@@ -231,7 +231,7 @@ describe("TableDataGrid real Db save retries", () => {
       { timeout: 10_000 },
     );
     await expect(
-      setup.db.all(inspectorSaveApp.todos.where({ title: "committed once" }), { tier: "global" }),
+      setup.db.all(inspectorSaveApp.todos.where({ title: "committed once" }), { tier: "remote" }),
     ).resolves.toEqual([
       expect.objectContaining({
         id: instrumented.insertIds[0],
@@ -260,7 +260,7 @@ describe("TableDataGrid real Db save retries", () => {
 
     await expect(
       setup.db.all(inspectorSaveApp.todos.where({ title: "updated after ambiguity" }), {
-        tier: "global",
+        tier: "remote",
       }),
     ).resolves.toEqual([
       expect.objectContaining({
@@ -317,7 +317,7 @@ describe("TableDataGrid real Db save retries", () => {
     );
 
     await expect(
-      setup.db.all(inspectorSaveApp.todos.where({ id: insertedId }), { tier: "global" }),
+      setup.db.all(inspectorSaveApp.todos.where({ id: insertedId }), { tier: "remote" }),
     ).resolves.toEqual([]);
     expect(instrumented.transactionCount()).toBe(2);
     expect(instrumented.insertIds).toEqual([insertedId]);
@@ -361,7 +361,7 @@ describe("TableDataGrid real Db save retries", () => {
     expect(instrumented.transactionCount()).toBe(2);
     expect(instrumented.insertIds).toEqual([expect.any(String), instrumented.insertIds[0]]);
     await expect(
-      setup.db.all(inspectorSaveApp.todos.where({ title: "retry same row" }), { tier: "global" }),
+      setup.db.all(inspectorSaveApp.todos.where({ title: "retry same row" }), { tier: "remote" }),
     ).resolves.toEqual([
       expect.objectContaining({
         id: instrumented.insertIds[0],
@@ -389,7 +389,7 @@ describe("TableDataGrid real Db save retries", () => {
 
     await waitFor(async () => {
       const rows = await setup.db.all(inspectorSaveApp.todos.where({ title: "explicit-null" }), {
-        tier: "global",
+        tier: "remote",
       });
       expect(rows).toHaveLength(1);
       expect(rows[0]!.textNumber).toBeNull();
@@ -415,7 +415,7 @@ describe("TableDataGrid real Db save retries", () => {
     );
     await expect(
       setup.db.all(inspectorSaveApp.todos.where({ title: "untouched-default" }), {
-        tier: "global",
+        tier: "remote",
       }),
     ).resolves.toEqual([
       expect.objectContaining({
@@ -447,7 +447,7 @@ describe("TableDataGrid real Db save retries", () => {
       { timeout: 10_000 },
     );
 
-    await expect(setup.db.all(inspectorSaveApp.todos, { tier: "global" })).resolves.toEqual(
+    await expect(setup.db.all(inspectorSaveApp.todos, { tier: "remote" })).resolves.toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           title: "exact bigint",
@@ -485,7 +485,7 @@ describe("TableDataGrid real Db save retries", () => {
       },
       { timeout: 10_000 },
     );
-    await expect(setup.db.all(inspectorSaveApp.todos, { tier: "global" })).resolves.toEqual(
+    await expect(setup.db.all(inspectorSaveApp.todos, { tier: "remote" })).resolves.toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           title: "nested bigint",
@@ -530,7 +530,7 @@ describe("TableDataGrid real Db save retries", () => {
     const query = new GenericQueryBuilder("todos", inspectorSaveApp.wasmSchema).where({
       [hydratedFilter.column]: hydratedFilter.value,
     });
-    const rows = await setup.db.all(query, { tier: "global" });
+    const rows = await setup.db.all(query, { tier: "remote" });
 
     expect(rows).toEqual([
       expect.objectContaining({
@@ -581,7 +581,7 @@ describe("TableDataGrid real Db save retries", () => {
 
     const query = latestQuery;
     if (!query) throw new Error("TableDataGrid did not issue a query");
-    const rows = await setup.db.all(query, { tier: "global" });
+    const rows = await setup.db.all(query, { tier: "remote" });
     expect(rows).toEqual([
       expect.objectContaining({
         title: "exact payload",

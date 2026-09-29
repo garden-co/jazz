@@ -32,9 +32,8 @@ durability. Sharding and distributed query execution are outside this change.
 Local-first reads use retained data and local edits. Remote reads require a
 fresh Core-confirmed supporting set. A local-first read with a server wait
 (`FirstLoad::WaitForRemote`) is local-first but may hold its opening, for
-at most the timeout, for the first remote view while a remote can answer; the
-deprecated local-first-unless-empty holds only an empty opening, without a
-timeout (ch. 13). No intermediate
+at most the timeout, for the first remote view while a remote can answer
+(ch. 13). No intermediate
 server can substitute a locally computed result for Core confirmation.
 
 Core supplies query supporting rows and handles extra-local-row reconciliation:
@@ -184,10 +183,8 @@ scope-isolated store; Local may continue to expose it (`INV-RLS-6`).
 Local semantics. A local-first read with a server wait
 (`FirstLoad::WaitForRemote { timeout_ms }`) is a Local read throughout;
 only its opening may wait for the first authority view, only while the link
-is live or within the attempt window, and never past its deadline. The
-deprecated `LocalFirstUnlessEmpty` (`FirstLoad::AwaitRemote`) follows the
-same rules but withholds only an empty opening and has no deadline. Under
-both, an `offset > 0` window reads the strict remote view, and a non-durable
+is live or within the attempt window, and never past its deadline. Under it,
+an `offset > 0` window reads the strict remote view, and a non-durable
 foreground holds an authority witness coverage while gated
 (ch. 13). The gate lives in the core `Db`; it never runs a second concurrent
 probe query.
