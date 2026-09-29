@@ -63,7 +63,7 @@ function Marked({ text }: { text: string }) {
   );
 }
 
-/** Search trigger styled as a field, for the centre of the desktop top nav. */
+/** Search trigger styled as a field, for the end of the desktop top nav. */
 export function SearchField({ onOpen }: { onOpen: () => void }) {
   return (
     <Button
