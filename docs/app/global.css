@@ -182,3 +182,294 @@ h6 {
 .docs-callout .astryx-code {
   font-size: inherit;
 }
+
+/* Homepage diagrams (components/home/diagrams.tsx): drawn with theme tokens
+   so they follow light and dark mode. Sizes are in SVG user units. */
+.home-diagram {
+  font-family: var(--font-family-body);
+}
+.home-diagram .dg-title,
+.home-diagram .dg-title-sm {
+  fill: var(--color-text-primary);
+  font-weight: var(--font-weight-medium);
+  font-size: 16px;
+}
+.home-diagram .dg-title-sm {
+  font-size: 14px;
+}
+.home-diagram .dg-sub,
+.home-diagram .dg-sub-sm {
+  fill: var(--color-text-secondary);
+  font-size: 14px;
+}
+.home-diagram .dg-sub-sm {
+  font-size: 13px;
+}
+.home-diagram .dg-code,
+.home-diagram .dg-code-strong {
+  font-family: var(--font-family-code);
+  fill: var(--color-text-secondary);
+  font-size: 13px;
+}
+.home-diagram .dg-code-strong {
+  fill: var(--color-text-primary);
+}
+.home-diagram .dg-node,
+.home-diagram .dg-row {
+  fill: var(--color-background-card);
+  stroke: var(--color-border);
+}
+.home-diagram .dg-node-strong {
+  fill: var(--color-background-card);
+  stroke: var(--color-border-emphasized);
+  stroke-width: 1.5;
+}
+.home-diagram .dg-row-kept {
+  fill: var(--color-background-card);
+  stroke: var(--color-accent);
+}
+.home-diagram .dg-band {
+  fill: var(--color-background-muted);
+  stroke: var(--color-border);
+}
+.home-diagram .dg-pill {
+  fill: var(--color-background-muted);
+}
+.home-diagram .dg-lane {
+  stroke: var(--color-border);
+  stroke-dasharray: 3 4;
+}
+.home-diagram .dg-lane-strong {
+  stroke: var(--color-border-emphasized);
+  stroke-width: 2;
+}
+.home-diagram .dg-link,
+.home-diagram .dg-link-accent {
+  fill: none;
+  stroke: var(--color-border-emphasized);
+  stroke-width: 1.5;
+}
+.home-diagram .dg-link-accent {
+  stroke: var(--color-accent);
+}
+.home-diagram .dg-link-dashed {
+  fill: none;
+  stroke: var(--color-accent);
+  stroke-width: 1.5;
+  stroke-dasharray: 5 4;
+}
+.home-diagram .dg-arrow-head {
+  fill: var(--color-border-emphasized);
+}
+.home-diagram .dg-arrow-head-accent,
+.home-diagram .dg-dot-accent {
+  fill: var(--color-accent);
+}
+.home-diagram .dg-dot {
+  fill: var(--color-text-secondary);
+}
+.home-diagram .dg-dot-hollow,
+.home-diagram .dg-dot-hollow-accent {
+  fill: var(--color-background-card);
+  stroke: var(--color-border-emphasized);
+  stroke-width: 2;
+}
+.home-diagram .dg-dot-hollow-accent {
+  stroke: var(--color-accent);
+}
+
+/* Site footer (components/site/site-footer.tsx). */
+.site-footer {
+  border-top: 1px solid var(--color-border);
+}
+.site-footer-base {
+  border-top: 1px solid var(--color-border);
+}
+.site-footer-link {
+  text-decoration: none;
+}
+.site-footer-link:hover {
+  text-decoration: underline;
+}
+.site-footer-maker {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-3);
+  color: var(--color-text-secondary);
+  transition: color 150ms;
+}
+.site-footer-maker:hover {
+  color: var(--color-text-primary);
+}
+
+/* Homepage sections below the hero (app/(home)/page.tsx). */
+.home-container {
+  margin-inline: auto;
+  width: 100%;
+  max-width: var(--fd-layout-width);
+  padding-inline: var(--spacing-4);
+}
+.home-section {
+  border-top: 1px solid var(--color-border);
+  padding-block: var(--spacing-12) calc(var(--spacing-12) * 1.5);
+}
+.home-anchor {
+  scroll-margin-top: 5rem;
+}
+.home-prose {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-3);
+  color: var(--color-text-secondary);
+  max-width: 38rem;
+}
+.home-prose p {
+  font-size: var(--text-body-size);
+  line-height: var(--text-body-leading);
+}
+.home-figure {
+  margin: 0;
+  padding: var(--spacing-6);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-container);
+  background-color: var(--color-background-card);
+}
+.home-facts,
+.home-meters {
+  display: grid;
+  gap: var(--spacing-8);
+}
+@media (min-width: 768px) {
+  .home-facts,
+  .home-meters {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+.home-fact,
+.home-meter {
+  border-top: 1px solid var(--color-border-emphasized);
+  padding-top: var(--spacing-4);
+}
+.home-feature {
+  display: grid;
+  gap: var(--spacing-8);
+  border-top: 1px solid var(--color-border);
+  padding-block: var(--spacing-10);
+}
+.home-feature:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+@media (min-width: 1024px) {
+  .home-feature {
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+    align-items: start;
+  }
+  .home-feature-text {
+    grid-column: span 5;
+  }
+  .home-feature-figure {
+    grid-column: 6 / span 7;
+  }
+}
+.home-code {
+  height: 100%;
+}
+@media (max-width: 767px) {
+  /* Keep diagram text legible on phones: scroll the figure sideways
+     instead of shrinking it. */
+  .home-figure {
+    padding: var(--spacing-4);
+    overflow-x: auto;
+  }
+  .home-figure > svg {
+    min-width: 34rem;
+  }
+  .home-figure-wide > svg {
+    min-width: 44rem;
+  }
+  .home-table table {
+    min-width: 34rem;
+  }
+}
+.home-figure-wide > svg {
+  max-width: 64rem;
+  margin-inline: auto;
+}
+.home-table {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-container);
+  overflow-x: auto;
+  background-color: var(--color-background-card);
+}
+.home-command {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-3);
+  padding: var(--spacing-2) var(--spacing-2) var(--spacing-2) var(--spacing-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-element);
+  background-color: var(--color-background-card);
+  font-family: var(--font-family-code);
+}
+.home-command-prompt {
+  color: var(--color-text-secondary);
+}
+
+/* Blog index and posts (app/(home)/blog). */
+.blog-list {
+  border-top: 1px solid var(--color-border-emphasized);
+}
+.blog-list-item {
+  position: relative;
+  display: grid;
+  gap: var(--spacing-2);
+  padding-block: var(--spacing-6);
+  border-bottom: 1px solid var(--color-border);
+}
+@media (min-width: 768px) {
+  .blog-list-item {
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+    gap: var(--spacing-8);
+  }
+  .blog-list-meta {
+    grid-column: span 3;
+  }
+  .blog-list-body {
+    grid-column: span 8;
+  }
+}
+.blog-list-link {
+  text-decoration: none;
+}
+.blog-list-link::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+}
+.blog-list-item:hover .blog-list-link {
+  text-decoration: underline;
+}
+.blog-post-header {
+  max-width: 52rem;
+}
+.blog-post-layout {
+  display: grid;
+  gap: var(--spacing-12);
+}
+@media (min-width: 1280px) {
+  .blog-post-layout {
+    grid-template-columns: minmax(0, 46rem) 15rem;
+    justify-content: space-between;
+  }
+  .blog-post-toc {
+    position: sticky;
+    top: 5rem;
+    align-self: start;
+  }
+}
+@media (max-width: 1279px) {
+  .blog-post-toc {
+    display: none;
+  }
+}
