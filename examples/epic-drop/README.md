@@ -100,6 +100,10 @@ documents each case for the examples page.
 - Invite links are bearer capabilities. Revoking a link stops new joins; removing a member ends
   their access. Permissions keep shared folders and files inside the owner's
   tree, but cannot stop someone who can read a file from downloading it and uploading a copy.
+- Move is offered after asking Jazz about one likely destination among the user's own folders
+  (`probeTarget` in `src/use-browser-advice.ts`). An editor who uploaded a file into a shared tree
+  but owns no folder there is not offered Move, although the policy lets them move their upload
+  between folders of that tree.
 - Names of other members (for example a fellow editor who uploaded a file) are not visible to
   each other, only to the owner. Recursive reverse inheritance with `maxDepth`, which would allow
   "anyone who can read a folder this account owns", is not supported by the server yet ("bounded
