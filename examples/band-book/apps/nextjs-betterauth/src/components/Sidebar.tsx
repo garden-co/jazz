@@ -48,7 +48,6 @@ export function Sidebar({
   return (
     <>
       <SideNav
-        label="Pages"
         header={
           <SideNavHeading
             heading={workspace.name}

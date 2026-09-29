@@ -1,7 +1,6 @@
 import { expect } from "vitest";
 import type { Db } from "jazz-tools";
-import { createJazzContext } from "jazz-tools/backend";
-import { deploy, startLocalJazzServer } from "jazz-tools/testing";
+import { createPolicyTestApp } from "jazz-tools/testing";
 import { app } from "../../schema.js";
 import permissions from "../../permissions.js";
 
@@ -11,29 +10,18 @@ import permissions from "../../permissions.js";
  * routes) and signed-in people.
  */
 export async function startAuthority() {
-  const backendSecret = "band-book-test-backend-secret";
-  const adminSecret = "band-book-test-admin-secret";
-  const server = await startLocalJazzServer({ backendSecret, adminSecret });
-  await deploy({
-    appId: server.appId,
-    serverUrl: server.url,
-    adminSecret,
-    schema: app,
-    permissions,
-  });
-  const context = createJazzContext({
-    appId: server.appId,
-    app,
-    permissions,
-    driver: { type: "memory" },
-    serverUrl: server.url,
-    backendSecret,
-    env: "test",
+  const testApp = await createPolicyTestApp(app, permissions, expect);
+  // `seed` hands its callback the backend Db. Keep it for the server-side
+  // helpers under test, which run their own exclusive transactions.
+  let backend: Db | undefined;
+  await testApp.seed((db) => {
+    backend = db;
+    return db.insert(app.workspaces, { name: "Authority warm-up" });
   });
   return {
-    backend: context.asBackend() as Db,
+    backend: backend!,
     as(subject: string, account: string, issuer = "https://band-book.test"): Db {
-      return context.forSession({
+      return testApp.as({
         issuer,
         user_id: subject,
         account_id: account,
@@ -41,17 +29,6 @@ export async function startAuthority() {
         authMode: "external",
       });
     },
-    async shutdown() {
-      await context.shutdown();
-      await server.stop();
-    },
+    shutdown: () => testApp.shutdown(),
   };
-}
-
-export async function expectRejected(write: {
-  wait(options: { tier: "global" }): Promise<unknown>;
-}) {
-  await expect(write.wait({ tier: "global" })).rejects.toThrow(
-    /AuthorizationDenied|Write rejected by server authorization/,
-  );
 }
