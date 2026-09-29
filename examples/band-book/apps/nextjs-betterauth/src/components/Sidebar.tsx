@@ -14,7 +14,7 @@ import {
   type DropdownMenuOption,
 } from "@astryxdesign/core";
 import { Plus } from "lucide-react";
-import { app, type Member, type Page, type Workspace } from "@/schema";
+import type { Member, Page, Workspace } from "@/schema";
 import { PAGE_TREE_MAX_DEPTH } from "@/src/lib/limits";
 import { createPage } from "@/src/lib/page-actions";
 import { MovePageDialog } from "./MovePageDialog";

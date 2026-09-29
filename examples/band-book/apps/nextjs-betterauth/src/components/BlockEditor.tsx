@@ -4,7 +4,6 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react"
 import { useAll, useDb } from "jazz-tools/react";
 import {
   Blockquote,
-  Button,
   CheckboxInput,
   Divider,
   DropdownMenu,
