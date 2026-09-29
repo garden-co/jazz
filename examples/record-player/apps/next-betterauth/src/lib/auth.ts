@@ -23,7 +23,10 @@ export const auth = betterAuth({
     jwt({
       jwks: { keyPairConfig: { alg: "ES256" } },
       jwt: {
+        // The Jazz server accepts a token only when both match its
+        // jwtIssuer and jwtAudience (next.config.ts).
         issuer: origin,
+        audience: origin,
         expirationTime: "15m",
         getSubject: ({ user }: { user: { id: string } }) => user.id,
       },

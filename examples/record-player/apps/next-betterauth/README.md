@@ -49,6 +49,11 @@ pnpm dev
 supplies the public app ID and server URL. Set real `BETTER_AUTH_SECRET` and
 `BACKEND_SECRET` values before any shared deployment.
 
+`NEXT_PUBLIC_APP_ORIGIN` is also the JWT issuer and audience. Better Auth signs
+tokens with both, and the Jazz server is told to expect both (`jwtIssuer` and
+`jwtAudience` next to `jwksUrl`). If they drift apart, sign-in still succeeds
+but account login fails with `invalid account credential`.
+
 Sign in with the pre-filled demo account (choose **Create account** the first
 time). An empty library offers **Add demo library**: three albums of short
 tones synthesised in the browser as WAV files (`src/demo-audio.ts`), so the

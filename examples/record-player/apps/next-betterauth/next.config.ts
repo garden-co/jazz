@@ -10,6 +10,13 @@ export default withJazz(
   {
     // Without BACKEND_SECRET in the environment, the development server
     // generates one and exposes it to the auth backend as BACKEND_SECRET.
-    server: { jwksUrl: `${appOrigin}/api/auth/jwks` },
+    // A JWKS URL alone is not enough: the server rejects external tokens
+    // unless the issuer and audience match what Better Auth emits
+    // (src/lib/auth.ts), and account login fails as `invalid account credential`.
+    server: {
+      jwksUrl: `${appOrigin}/api/auth/jwks`,
+      jwtIssuer: appOrigin,
+      jwtAudience: appOrigin,
+    },
   },
 );
