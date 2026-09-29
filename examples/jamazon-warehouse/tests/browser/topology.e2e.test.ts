@@ -543,9 +543,26 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
                 },
               );
               expect(allOrders).toHaveLength(21);
-              expect(allOrders).toMatchObject([
-                { order_number: 17, total_cents: 7_500 },
-                { order_number: 18, total_cents: 2_500 },
+              expect(allOrders.map((order) => order.order_number)).toEqual([
+                17,
+                18,
+                ...Array.from({ length: 19 }, (_, offset) => 100 + offset),
+              ]);
+              expect(allOrders.slice(0, 2)).toMatchObject([
+                {
+                  order_number: 17,
+                  total_cents: 7_500,
+                  status: "pending",
+                  idempotency_key: "checkout-17",
+                  customer_id: customer.id,
+                },
+                {
+                  order_number: 18,
+                  total_cents: 2_500,
+                  status: "pending",
+                  idempotency_key: "checkout-client-core-loss",
+                  customer_id: customer.id,
+                },
               ]);
             },
           },
