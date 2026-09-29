@@ -26,10 +26,11 @@ export default s.definePermissions(app, ({ policy, session, allowedTo, anyOf, al
   // manager-only metadata row is too, so the switcher can list warehouses.
   policy.warehouses.allowRead.always();
   policy.warehouses.allowInsert.where({ operator_id: session.user.account });
-  // Update authority belongs to the current manager. Using the old row is
-  // deliberate: it permits a manager to transfer a warehouse, after which the
-  // former manager is immediately revoked, including for operational rows.
-  policy.warehouses.allowUpdate.whereOld({ operator_id: session.user.account });
+  // Update authority belongs to the current manager. The new row is
+  // unconstrained on purpose: a manager may transfer the warehouse, after
+  // which the former manager is immediately revoked, operational rows included.
+  // (`whereOld` alone would apply the same condition to the new row too.)
+  policy.warehouses.allowUpdate.whereOld({ operator_id: session.user.account }).whereNew({});
 
   // Staffing: the manager (or the trusted server bootstrap, which has backend
   // authority) adds operators. An operator may leave; nobody edits a row.
