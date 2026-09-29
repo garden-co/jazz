@@ -28,8 +28,8 @@ pub fn activate() -> Option<HeapProfileDump> {
     // SAFETY: "prof.lg_sample" is documented as readable and returning size_t.
     let lg_sample: usize = unsafe { raw::read(b"prof.lg_sample\0") }.unwrap_or_default();
     tracing::info!(
-        "Heap profiling active, sampling every ~{} KiB allocated",
-        (1usize << lg_sample) / 1024
+        "Heap profiling active, sampling every ~{} bytes allocated",
+        1usize << lg_sample
     );
     Some(dump_heap_profile)
 }

@@ -94,7 +94,8 @@ jobs:
         if: matrix.arch == 'x64'
         run: |
           set -euo pipefail
-          ./dist/${{ matrix.output }} server 00000000-0000-0000-0000-000000000001 \
+          # Sample every allocation so startup allocations are always present.
+          MALLOC_CONF=lg_prof_sample:0 ./dist/${{ matrix.output }} server 00000000-0000-0000-0000-000000000001 \
             --in-memory --port 1625 --admin-secret heap-check \
             --diagnostics-listen 127.0.0.1:6060 --diagnostics-token heap-scrape \
             > server.log 2>&1 &

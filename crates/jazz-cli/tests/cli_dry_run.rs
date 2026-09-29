@@ -138,7 +138,17 @@ fn wait_for_successful_exit(child: &mut Child, timeout: Duration) {
 
 #[cfg(unix)]
 fn start_jazz_tools_server(data_dir: &Path, bound_port_file: &Path) -> (Child, u16) {
+    start_jazz_tools_server_with_env(data_dir, bound_port_file, &[])
+}
+
+#[cfg(unix)]
+fn start_jazz_tools_server_with_env(
+    data_dir: &Path,
+    bound_port_file: &Path,
+    env: &[(&str, &str)],
+) -> (Child, u16) {
     let mut child = jazz_tools_command()
+        .envs(env.iter().copied())
         .args([
             "server",
             "00000000-0000-0000-0000-000000000001",
@@ -1315,7 +1325,13 @@ fn jazz_tools_server_serves_a_symbolized_heap_profile_to_admins() {
     let temp_dir = tempfile::tempdir().expect("create server temp dir");
     let data_dir = temp_dir.path().join("data");
     let port_file = temp_dir.path().join("port");
-    let (mut server, port) = start_jazz_tools_server(&data_dir, &port_file);
+    // Sample every allocation so the profile deterministically contains the
+    // server's startup allocations; the shipped rate samples ~1 per 512 KiB.
+    let (mut server, port) = start_jazz_tools_server_with_env(
+        &data_dir,
+        &port_file,
+        &[("MALLOC_CONF", "lg_prof_sample:0")],
+    );
 
     let (status, _) = http_get(port, "/debug/pprof/heap", None);
     assert_eq!(status, 401);
