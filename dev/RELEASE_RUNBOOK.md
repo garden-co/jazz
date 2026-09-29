@@ -109,7 +109,8 @@ this document or public receipts.
   using registry reads and installation. Confirm the source tag matches the exact
   released source. Build artifacts alone are not proof of npm publication.
 - Promote the verified docs deployment. The publisher stages and promotes the
-  Inspector itself; if its Inspector jobs fail, follow the manual recovery in
+  Inspector itself; if its Inspector jobs fail, re-run the failed jobs on that
+  publisher run first, then follow the manual recovery in
   `packages/inspector/README.md` ("Staging a release on Vercel").
 - Treat Cloud activation as two explicit operations: selecting the new catalog
   default for newly created apps, and upgrading existing eligible tenants through

@@ -81,7 +81,15 @@ earlier **Check Inspector Vercel access** job, which also runs in candidate
 dry-runs, reads the project with the Inspector token and names the secret to fix
 if it can't. An Inspector failure never marks npm publication as failed.
 
-To recover by hand, run the same two workflows yourself. Run **Stage Inspector
+The access check also runs in the release preview, so a Vercel API error there
+turns "Release preview (alpha)" red and the publisher then rebuilds instead of
+reusing that preview's artifacts.
+
+If the publisher's Inspector jobs fail, first use **Re-run failed jobs** on that
+publisher run. That is the only route when the publisher used its own build: the
+artifact lives in a run that is now red, and manual staging admits only
+successful producer runs. When the publisher reused a preview run's artifacts,
+you can also run the same two workflows yourself. Run **Stage Inspector
 production** with the successful package-build run ID,
 deployment SHA, and branch. The workflow checks the artifact run's repository and
 success, proves its source tree equals the deployment SHA's tree, and checks the

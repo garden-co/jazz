@@ -261,7 +261,7 @@ for (const jobStatus of ["failed", "skipped"]) {
   });
 }
 
-function preflightHarness(response) {
+function preflightHarness(response, domainsResponse = { status: 200, body: { domains: [] } }) {
   const calls = [];
   return {
     calls,
@@ -270,23 +270,30 @@ function preflightHarness(response) {
       log() {},
       fetchImpl: async (url, init) => {
         calls.push({ url, method: init.method });
-        return {
-          ok: response.status < 400,
-          status: response.status,
-          json: async () => response.body,
-        };
+        const { status, body } = url.includes("/domains?") ? domainsResponse : response;
+        return { ok: status < 400, status, json: async () => body };
       },
     },
   };
 }
-test("preflight reads only the scoped project", async () => {
+test("preflight reads only the scoped project and its domains", async () => {
   const { calls, options } = preflightHarness({ status: 200, body: project });
   await preflightInspectorProject(options);
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].method, "GET");
-  const url = new URL(calls[0].url);
-  assert.equal(url.pathname, "/v9/projects/prj_test");
-  assert.equal(url.searchParams.get("teamId"), "team_test");
+  assert.deepEqual(
+    calls.map((c) => [c.method, new URL(c.url).pathname]),
+    [
+      ["GET", "/v9/projects/prj_test"],
+      ["GET", "/v9/projects/prj_test/domains"],
+    ],
+  );
+  for (const call of calls) assert.equal(new URL(call.url).searchParams.get("teamId"), "team_test");
+});
+test("preflight names a missing domain read", async () => {
+  const { options } = preflightHarness({ status: 200, body: project }, { status: 403, body: {} });
+  await assert.rejects(
+    preflightInspectorProject(options),
+    /cannot read the Inspector project domains .*\(403\)/,
+  );
 });
 test("preflight names the secret to fix on 403", async () => {
   const { options } = preflightHarness({ status: 403, body: {} });

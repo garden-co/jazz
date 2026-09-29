@@ -95,8 +95,9 @@ jobs:
           cp -R target/inspector-prebuilt/.vercel/output target/inspector-prebuilt/packages/inspector/.vercel/output
           cd target/inspector-prebuilt
           node --input-type=module -e 'import fs from "node:fs"; fs.writeFileSync(".vercel/project.json", JSON.stringify({orgId: process.env.VERCEL_ORG_ID, projectId: process.env.VERCEL_PROJECT_ID}));'
-          # The CLI prints only the deployment URL on stdout; progress goes to stderr.
-          DEPLOYMENT_URL=$(npx --yes vercel@latest deploy --prebuilt --prod --skip-domain --yes \
+          # Pinned to the CLI that staged alpha.57: its last stdout line is the bare
+          # deployment URL (progress goes to stderr). Re-check that before bumping.
+          DEPLOYMENT_URL=$(npx --yes vercel@60.1.3 deploy --prebuilt --prod --skip-domain --yes \
             --token="${VERCEL_TOKEN}" \
             --meta "githubCommitSha=${SOURCE_SHA}" --meta "githubCommitRef=${SOURCE_BRANCH}" \
             --meta "releaseSourceSha=${ARTIFACT_SHA}" | tail -n 1)

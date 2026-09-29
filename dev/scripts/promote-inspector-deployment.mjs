@@ -16,32 +16,37 @@ export async function preflightInspectorProject({
       throw new Error(`Missing ${key}. Configure the matching VERCEL_INSPECTOR_* GitHub secret.`);
   }
   const team = new URLSearchParams({ teamId: env.VERCEL_ORG_ID });
-  const response = await fetchImpl(
-    `https://api.vercel.com/v9/projects/${encodeURIComponent(env.VERCEL_PROJECT_ID)}?${team}`,
-    {
+  const projectUrl = `https://api.vercel.com/v9/projects/${encodeURIComponent(env.VERCEL_PROJECT_ID)}`;
+  // Promotion also reads the project's domains, so prove that read here too.
+  async function read(path, what) {
+    const response = await fetchImpl(`${projectUrl}${path}?${team}`, {
       method: "GET",
       headers: { Authorization: `Bearer ${env.VERCEL_TOKEN}` },
       signal: AbortSignal.timeout(requestTimeoutMs),
-    },
-  );
-  if (!response.ok) {
-    throw new Error(
-      `VERCEL_INSPECTOR_TOKEN cannot read the Inspector project in VERCEL_INSPECTOR_ORG_ID (${response.status}). ` +
-        `Give the token access to that team and project, or fix the project/team IDs. ${RUNBOOK}`,
-    );
+    });
+    if (!response.ok) {
+      throw new Error(
+        `VERCEL_INSPECTOR_TOKEN cannot read the Inspector ${what} in VERCEL_INSPECTOR_ORG_ID (${response.status}). ` +
+          `Give the token access to that team and project, or fix the project/team IDs. ${RUNBOOK}`,
+      );
+    }
+    try {
+      return await response.json();
+    } catch {
+      throw new Error("Vercel GET request returned invalid JSON.");
+    }
   }
-  let project;
-  try {
-    project = await response.json();
-  } catch {
-    throw new Error("Vercel GET request returned invalid JSON.");
-  }
+  const project = await read("", "project");
   if (project.id !== env.VERCEL_PROJECT_ID || project.accountId !== env.VERCEL_ORG_ID) {
     throw new Error(
       `VERCEL_INSPECTOR_PROJECT_ID does not belong to VERCEL_INSPECTOR_ORG_ID. ${RUNBOOK}`,
     );
   }
-  log("Inspector Vercel token can read the configured project and team.");
+  const domains = await read("/domains", "project domains");
+  if (!Array.isArray(domains.domains)) {
+    throw new Error("Inspector production domain list is malformed.");
+  }
+  log("Inspector Vercel token can read the configured project, team and domains.");
 }
 
 // The same promotion endpoint used by Vercel CLI, scoped without user/team discovery.
