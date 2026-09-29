@@ -9,7 +9,7 @@ import permissions from "../../permissions.js";
  * UI that hides a button.
  */
 
-let testApp: PolicyTestApp;
+let testApp: PolicyTestApp | undefined;
 const issuer = "https://band-book.test";
 const accounts = new Map<string, string>();
 
@@ -25,6 +25,7 @@ function accountFor(subject: string, identityIssuer = issuer): string {
 }
 
 function person(subject: string, identityIssuer = issuer): TestDb {
+  if (!testApp) throw new Error("The policy test app did not start");
   return testApp.as({
     issuer: identityIssuer,
     user_id: subject,
@@ -92,7 +93,11 @@ async function visibleTitles(db: TestDb, workspaceId: string): Promise<string[]>
 beforeEach(async () => {
   testApp = await createPolicyTestApp(app, permissions, expect);
 });
-afterEach(async () => testApp.shutdown());
+afterEach(async () => {
+  // Tolerate a setup that failed before the test app existed.
+  await testApp?.shutdown();
+  testApp = undefined;
+});
 
 describe("page grants", () => {
   it("reach every descendant of the granted page and nothing else", async () => {

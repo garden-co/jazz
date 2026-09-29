@@ -6,29 +6,37 @@ import { DEMO_PAGES, flattenSeedPages } from "../../src/lib/seed.js";
 import { startAuthority } from "./authority.js";
 
 type Authority = Awaited<ReturnType<typeof startAuthority>>;
-let authority: Authority;
+let authority: Authority | undefined;
+const auth = (): Authority => {
+  if (!authority) throw new Error("The local authority did not start");
+  return authority;
+};
 const global = { tier: "global" } as const;
 
 beforeEach(async () => {
   authority = await startAuthority();
 });
-afterEach(async () => authority.shutdown());
+afterEach(async () => {
+  // Tolerate a setup that failed before the authority existed.
+  await authority?.shutdown();
+  authority = undefined;
+});
 
 describe("first-open bootstrap", () => {
   it("creates one deterministic demo band, however often it is retried", async () => {
     const account = crypto.randomUUID();
-    const first = await ensureDemoWorkspace(authority.backend, account, "Ada");
+    const first = await ensureDemoWorkspace(auth().backend, account, "Ada");
     expect(first).toEqual({ workspaceId: seedId(account, "workspace"), created: true });
 
     // A retry after a lost response, and two tabs racing, change nothing.
     const [again, racing] = await Promise.all([
-      ensureDemoWorkspace(authority.backend, account, "Ada"),
-      ensureDemoWorkspace(authority.backend, account, "Ada"),
+      ensureDemoWorkspace(auth().backend, account, "Ada"),
+      ensureDemoWorkspace(auth().backend, account, "Ada"),
     ]);
     expect(again).toEqual({ workspaceId: first.workspaceId, created: false });
     expect(racing).toEqual({ workspaceId: first.workspaceId, created: false });
 
-    const ada = authority.as("ada", account);
+    const ada = auth().as("ada", account);
     const workspaces = await ada.all(app.workspaces, global);
     expect(workspaces.map((workspace) => workspace.id)).toEqual([first.workspaceId]);
     const members = await ada.all(app.members.where({ workspaceId: first.workspaceId }), global);
@@ -58,10 +66,10 @@ describe("first-open bootstrap", () => {
   it("gives different accounts separate bands", async () => {
     const ada = crypto.randomUUID();
     const bo = crypto.randomUUID();
-    const adaBand = await ensureDemoWorkspace(authority.backend, ada, "Ada");
-    const boBand = await ensureDemoWorkspace(authority.backend, bo, "Bo");
+    const adaBand = await ensureDemoWorkspace(auth().backend, ada, "Ada");
+    const boBand = await ensureDemoWorkspace(auth().backend, bo, "Bo");
     expect(adaBand.workspaceId).not.toBe(boBand.workspaceId);
-    const seenByBo = await authority
+    const seenByBo = await auth()
       .as("bo", bo)
       .all(app.pages.where({ workspaceId: adaBand.workspaceId }), global);
     expect(seenByBo).toEqual([]);
@@ -72,9 +80,9 @@ describe("invite links", () => {
   it("admit a guest to one page subtree, idempotently, until revoked", async () => {
     const owner = crypto.randomUUID();
     const guest = crypto.randomUUID();
-    const { workspaceId } = await ensureDemoWorkspace(authority.backend, owner, "Ada");
+    const { workspaceId } = await ensureDemoWorkspace(auth().backend, owner, "Ada");
     const song = seedId(owner, "page:harbour-lights");
-    const ownerDb = authority.as("ada", owner);
+    const ownerDb = auth().as("ada", owner);
     const invite = await ownerDb
       .insert(app.invites, {
         workspaceId,
@@ -85,14 +93,14 @@ describe("invite links", () => {
       })
       .wait(global);
 
-    expect(await redeemInvite(authority.backend, invite.token, guest, "Guest")).toEqual({
+    expect(await redeemInvite(auth().backend, invite.token, guest, "Guest")).toEqual({
       workspaceId,
       pageId: song,
     });
     // Opening the link again does not duplicate anything.
-    await redeemInvite(authority.backend, invite.token, guest, "Guest");
+    await redeemInvite(auth().backend, invite.token, guest, "Guest");
 
-    const guestDb = authority.as("guest", guest);
+    const guestDb = auth().as("guest", guest);
     const titles = (await guestDb.all(app.pages.where({ workspaceId }), global)).map(
       (page) => page.title,
     );
@@ -112,21 +120,21 @@ describe("invite links", () => {
         label: "Can view: Harbour lights",
       })
       .wait(global);
-    await redeemInvite(authority.backend, viewLink.token, guest, "Guest");
+    await redeemInvite(auth().backend, viewLink.token, guest, "Guest");
     const after = await guestDb.all(app.pageGrants.where({ account: guest }), global);
     expect(after.map((grant) => grant.role)).toEqual(["editor"]);
 
     await ownerDb.delete(app.invites, invite.id).wait(global);
     expect(
-      await redeemInvite(authority.backend, invite.token, crypto.randomUUID(), "Late"),
+      await redeemInvite(auth().backend, invite.token, crypto.randomUUID(), "Late"),
     ).toBeNull();
   });
 
   it("promote a guest to a band role with a band invite", async () => {
     const owner = crypto.randomUUID();
     const drummer = crypto.randomUUID();
-    const { workspaceId } = await ensureDemoWorkspace(authority.backend, owner, "Ada");
-    const invite = await authority
+    const { workspaceId } = await ensureDemoWorkspace(auth().backend, owner, "Ada");
+    const invite = await auth()
       .as("ada", owner)
       .insert(app.invites, {
         workspaceId,
@@ -136,8 +144,8 @@ describe("invite links", () => {
         label: "Band member",
       })
       .wait(global);
-    await redeemInvite(authority.backend, invite.token, drummer, "Drummer");
-    const drummerDb = authority.as("drummer", drummer);
+    await redeemInvite(auth().backend, invite.token, drummer, "Drummer");
+    const drummerDb = auth().as("drummer", drummer);
     const pages = await drummerDb.all(app.pages.where({ workspaceId }), global);
     expect(pages.length).toBe(flattenSeedPages(DEMO_PAGES).length);
     await drummerDb
