@@ -5353,15 +5353,11 @@ fn client_read_advice_is_unknown_even_when_a_local_winner_exists() {
         PermissionAdvice::Unknown
     );
     assert_eq!(
-        owner_db
-            .authorize_read_for_identity("todos", row, owner)
-            .unwrap(),
+        block_on(owner_db.authorize_read_for_identity("todos", row, owner)).unwrap(),
         PermissionAdvice::Allowed,
     );
     assert_eq!(
-        owner_db
-            .authorize_read_for_identity("todos", row, other)
-            .unwrap(),
+        block_on(owner_db.authorize_read_for_identity("todos", row, other)).unwrap(),
         PermissionAdvice::Denied,
     );
 }
