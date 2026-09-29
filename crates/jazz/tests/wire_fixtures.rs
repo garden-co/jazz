@@ -1526,12 +1526,12 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
                     Row {
                         row_id: todo_one_id,
                         deleted: false,
-                        raw: &todo_one,
+                        raw: std::borrow::Cow::Borrowed(&todo_one),
                     },
                     Row {
                         row_id: todo_two_id,
                         deleted: false,
-                        raw: &todo_two,
+                        raw: std::borrow::Cow::Borrowed(&todo_two),
                     },
                 ],
             },
@@ -1541,7 +1541,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
                 rows: vec![Row {
                     row_id: note_id,
                     deleted: false,
-                    raw: &note,
+                    raw: std::borrow::Cow::Borrowed(&note),
                 }],
             },
             // Batching is contiguous only: returning to `todos` after `notes`
@@ -1552,7 +1552,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
                 rows: vec![Row {
                     row_id: deleted_todo_id,
                     deleted: true,
-                    raw: &deleted_todo,
+                    raw: std::borrow::Cow::Borrowed(&deleted_todo),
                 }],
             },
         ],
@@ -1571,7 +1571,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
             rows: vec![Row {
                 row_id: todo_one_id,
                 deleted: false,
-                raw: &todo_one,
+                raw: std::borrow::Cow::Borrowed(&todo_one),
             }],
         }],
         updated: vec![RowBatch {
@@ -1580,7 +1580,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
             rows: vec![Row {
                 row_id: note_id,
                 deleted: false,
-                raw: &note,
+                raw: std::borrow::Cow::Borrowed(&note),
             }],
         }],
         removed: vec![RemovedRowPayload {
