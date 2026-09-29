@@ -104,7 +104,7 @@ pub fn schema_with_composite_indexes(policy: Policy, composite_indexes: bool) ->
         .expect("compile public document schema")
 }
 
-fn open(path: &Path, schema: &JazzSchema) -> Db<RocksDbStorage> {
+fn open(path: &Path, schema: &JazzSchema) -> Db {
     open_measured(path, schema).0
 }
 
@@ -114,7 +114,7 @@ struct OpenTimings {
     receipt: DbOpenReceipt,
 }
 
-fn open_measured(path: &Path, schema: &JazzSchema) -> (Db<RocksDbStorage>, OpenTimings) {
+fn open_measured(path: &Path, schema: &JazzSchema) -> (Db, OpenTimings) {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -324,7 +324,7 @@ impl Fixture {
 }
 
 pub struct Session {
-    db: Db<RocksDbStorage>,
+    db: Db,
     prepared: PreparedQuery,
     identity: AuthorSubject,
     pub reopen_us: u128,

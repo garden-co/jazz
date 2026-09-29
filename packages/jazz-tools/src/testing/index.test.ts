@@ -382,6 +382,21 @@ describe("createPolicyTestApp", () => {
     }
   }, 10_000);
 
+  it("rejects a seed callback that returns the inserted row instead of the write", async () => {
+    const policyTestApp = await createPolicyTestApp(testApp, testPermissions, expect);
+
+    try {
+      await expect(
+        policyTestApp.seed(
+          // @ts-expect-error: returning `.value` is the mistake the runtime check catches.
+          (db) => db.insert(testApp.todos, { title: "unwrapped", done: false }).value,
+        ),
+      ).rejects.toThrow(/must return the write result itself/);
+    } finally {
+      await policyTestApp.shutdown();
+    }
+  }, 10_000);
+
   it("limits backend SYSTEM bootstrap to the configured authority credential", async () => {
     const noCredential = await createPolicyTestApp(testApp, testPermissions, expect, {
       clientBackendSecret: null,

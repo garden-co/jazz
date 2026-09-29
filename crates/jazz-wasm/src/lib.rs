@@ -602,13 +602,13 @@ impl WasmStreamingMutation {
 
 enum WasmWriteInner {
     MemoryTx {
-        db: Rc<Db<MemoryStorage>>,
-        write: WriteHandle<MemoryStorage>,
+        db: Rc<Db>,
+        write: WriteHandle,
     },
     #[cfg(target_arch = "wasm32")]
     BrowserTx {
-        db: Rc<Db<BrowserStorage>>,
-        write: WriteHandle<BrowserStorage>,
+        db: Rc<Db>,
+        write: WriteHandle,
     },
 }
 
@@ -687,9 +687,9 @@ pub struct WasmDb {
 }
 
 enum WasmDbInner {
-    Memory(Rc<Db<MemoryStorage>>),
+    Memory(Rc<Db>),
     #[cfg(target_arch = "wasm32")]
-    Browser(Rc<Db<BrowserStorage>>),
+    Browser(Rc<Db>),
     Closed,
 }
 
@@ -734,13 +734,13 @@ pub struct WasmTransport {
 
 enum WasmTransportInner {
     Memory {
-        db: Rc<Db<MemoryStorage>>,
-        connection: Option<Rc<LocalMutex<PeerConnection<MemoryStorage>>>>,
+        db: Rc<Db>,
+        connection: Option<Rc<LocalMutex<PeerConnection>>>,
     },
     #[cfg(target_arch = "wasm32")]
     Browser {
-        db: Rc<Db<BrowserStorage>>,
-        connection: Option<Rc<LocalMutex<PeerConnection<BrowserStorage>>>>,
+        db: Rc<Db>,
+        connection: Option<Rc<LocalMutex<PeerConnection>>>,
     },
 }
 
@@ -2917,7 +2917,7 @@ async fn open_db<S>(
     schema: JazzSchema,
     storage: S,
     config: WasmOpenDbConfig,
-) -> Result<Db<S>, jazz::db::Error>
+) -> Result<Db, jazz::db::Error>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
@@ -2947,7 +2947,7 @@ async fn open_scope_isolated_relay_db(
     storage: BrowserStorage,
     config: WasmOpenDbConfig,
     storage_owner: String,
-) -> Result<Db<BrowserStorage>, jazz::db::Error> {
+) -> Result<Db, jazz::db::Error> {
     let mut db_config = DbConfig::new(schema, storage, config.identity.into());
     if let Some(seed) = config.row_id_seed {
         db_config = db_config.with_id_source(SeededRowIdSource::new(seed));
@@ -2973,7 +2973,7 @@ async fn open_backend_db<S>(
     storage: S,
     config: WasmOpenDbConfig,
     identity: DbIdentity,
-) -> Result<Db<S>, jazz::db::Error>
+) -> Result<Db, jazz::db::Error>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
@@ -3179,10 +3179,7 @@ fn claim_value_from_json(value: serde_json::Value) -> Result<Option<Value>, JsVa
     .map_err(to_js_error)
 }
 
-fn wasm_write_memory(
-    db: Rc<Db<MemoryStorage>>,
-    write: WriteHandle<MemoryStorage>,
-) -> Result<WasmWrite, JsValue> {
+fn wasm_write_memory(db: Rc<Db>, write: WriteHandle) -> Result<WasmWrite, JsValue> {
     let tx_id = write.mergeable_tx_id();
     let result = WasmWriteResult {
         row_id: write.row_uuid(),
@@ -3197,10 +3194,7 @@ fn wasm_write_memory(
 }
 
 #[cfg(target_arch = "wasm32")]
-fn wasm_write_browser(
-    db: Rc<Db<BrowserStorage>>,
-    write: WriteHandle<BrowserStorage>,
-) -> Result<WasmWrite, JsValue> {
+fn wasm_write_browser(db: Rc<Db>, write: WriteHandle) -> Result<WasmWrite, JsValue> {
     let tx_id = write.mergeable_tx_id();
     let result = WasmWriteResult {
         row_id: write.row_uuid(),
@@ -3786,9 +3780,42 @@ fn unknown_transaction_kind_message(kind: &str) -> String {
 mod dynamic_schema_view_tests {
     use super::*;
     use jazz::db::{DbConfig, DbIdentity, ExclusiveTxOps, MergeableTxOps};
+    use jazz::groove::records::{Error as RecordError, RecordDescriptor, ValueType};
     use jazz::tools::public_schema::{
         ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchema,
     };
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn variable_array_add_overflow_returns_invalid_offset_through_public_decoder() {
+        let descriptor =
+            RecordDescriptor::new([("items", ValueType::Array(Box::new(ValueType::String)))]);
+        let mut encoded = descriptor
+            .create(&[Value::Array(vec![Value::String("item".to_owned())])])
+            .expect("valid variable array encodes");
+        encoded[0..4].copy_from_slice(&(1_u32 << 30).to_le_bytes());
+
+        assert_eq!(
+            descriptor.get_idx(&encoded, 0),
+            Err(RecordError::InvalidOffset)
+        );
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn variable_array_multiplication_overflow_returns_invalid_offset_through_public_decoder() {
+        let descriptor =
+            RecordDescriptor::new([("items", ValueType::Array(Box::new(ValueType::String)))]);
+        let mut encoded = descriptor
+            .create(&[Value::Array(vec![Value::String("item".to_owned())])])
+            .expect("valid variable array encodes");
+        encoded[0..4].copy_from_slice(&u32::MAX.to_le_bytes());
+
+        assert_eq!(
+            descriptor.get_idx(&encoded, 0),
+            Err(RecordError::InvalidOffset)
+        );
+    }
 
     /// Every ordinary write option shares `write_timestamp_option`, so this
     /// boundary test protects insert, update, upsert, delete, and restore from

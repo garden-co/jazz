@@ -1306,11 +1306,24 @@ pub(super) fn diff_record_windows(
 /// Unbounded, zero-offset membership is the positive part of each weight.
 /// Compare first/final weights for touched records, not complete windows.
 /// This helper does not compute generic root positions or finite boundaries.
+#[cfg(test)]
 pub(super) fn update_unbounded_top_by_group(
     descriptor: RecordDescriptor,
     top_by: &TopByOp,
     group: &mut CollectByGroup,
     input: &[RecordDelta],
+) -> Result<Vec<RecordDelta>, IvmRuntimeError> {
+    update_unbounded_top_by_group_touching(descriptor, top_by, group, input, None)
+}
+
+/// [`update_unbounded_top_by_group`], also reporting each touched order key
+/// when a positions consumer will rank the changed rows.
+pub(super) fn update_unbounded_top_by_group_touching(
+    descriptor: RecordDescriptor,
+    top_by: &TopByOp,
+    group: &mut CollectByGroup,
+    input: &[RecordDelta],
+    mut touched_keys: Option<&mut Vec<CollectByOrderKey>>,
 ) -> Result<Vec<RecordDelta>, IvmRuntimeError> {
     let mut touched = BTreeMap::<CollectByOrderKey, (i64, i64)>::new();
     for delta in input {
@@ -1340,6 +1353,9 @@ pub(super) fn update_unbounded_top_by_group(
             } else {
                 added.push(delta);
             }
+        }
+        if let Some(keys) = touched_keys.as_deref_mut() {
+            keys.push(key.clone());
         }
         group.set(key, after);
     }

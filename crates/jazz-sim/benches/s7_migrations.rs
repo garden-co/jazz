@@ -109,11 +109,7 @@ pub fn smoke() {
     emit_lens_tax_metrics();
 }
 
-fn publish_chain(
-    core: &mut NodeState<RocksDbStorage>,
-    schemas: &[JazzSchema; 4],
-    lenses: &[MigrationLens],
-) {
+fn publish_chain(core: &mut NodeState, schemas: &[JazzSchema; 4], lenses: &[MigrationLens]) {
     // Non-genesis schemas are admitted only as ordered lineage bundles.  The
     // harness is the authority here, so it exercises the same trusted
     // catalogue ingress used by a core after the sequencer has ordered them.
@@ -140,7 +136,7 @@ fn publish_chain(
 }
 
 fn rows_for_schema(
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     schema: &JazzSchema,
 ) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
     let shape = Query::from("todos").validate(schema).unwrap();
@@ -157,9 +153,9 @@ fn rows_for_schema(
 
 struct ClientHarness {
     _dir: tempfile::TempDir,
-    db: Db<RocksDbStorage>,
+    db: Db,
     outbound: Rc<RefCell<Vec<SyncMessage>>>,
-    _upstream: Rc<futures::lock::Mutex<jazz::db::PeerConnection<RocksDbStorage>>>,
+    _upstream: Rc<futures::lock::Mutex<jazz::db::PeerConnection>>,
 }
 
 struct QueueTransport {
@@ -202,7 +198,7 @@ fn commit_client_mergeable(
         .expect("db client should upload mergeable commit unit")
 }
 
-fn deliver_client_unit(core: &mut NodeState<RocksDbStorage>, unit: SyncMessage) {
+fn deliver_client_unit(core: &mut NodeState, unit: SyncMessage) {
     assert!(matches!(&unit, SyncMessage::CommitUnit { .. }));
     apply_sync_message_settled(core, unit).unwrap();
 }
@@ -299,7 +295,7 @@ fn emit_lens_tax_metrics() {
 }
 
 fn measured_query_us(
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     schema: &JazzSchema,
     iterations: usize,
     expected_rows: usize,
@@ -319,7 +315,7 @@ fn measured_query_us(
 }
 
 fn measured_write_us(
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     schema: &JazzSchema,
     row_offset: u64,
     rows: usize,
@@ -456,10 +452,7 @@ fn schema_chain() -> ([JazzSchema; 4], Vec<MigrationLens>) {
     ([v1, v2, v3, v4], lenses)
 }
 
-fn open_node(
-    node_uuid: NodeUuid,
-    schema: JazzSchema,
-) -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
+fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, NodeState) {
     let temp_dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -495,7 +488,7 @@ fn open_db(
     node_uuid: NodeUuid,
     schema: JazzSchema,
     author: AuthorSubject,
-) -> (tempfile::TempDir, Db<RocksDbStorage>) {
+) -> (tempfile::TempDir, Db) {
     let dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();

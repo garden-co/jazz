@@ -253,6 +253,7 @@ const JAZZ_SIM_METRIC_EXCLUDE = new Set([
   "edits",
   "seed",
   "git_dirty",
+  "git_status_available",
   "final_doc_matched",
 ]);
 

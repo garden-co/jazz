@@ -45,7 +45,7 @@ enum CanonicalEvent {
     Closed,
 }
 
-type NamedMutation = (&'static str, Box<dyn Fn(&Db<RocksDbStorage>)>);
+type NamedMutation = (&'static str, Box<dyn Fn(&Db)>);
 
 fn row(seed: u64) -> RowUuid {
     let mut bytes = [0_u8; 16];
@@ -98,12 +98,7 @@ fn local_opts() -> ReadOpts {
     }
 }
 
-fn open_db(
-    dir: &tempfile::TempDir,
-    schema: &JazzSchema,
-    node_byte: u8,
-    seed: u64,
-) -> Db<RocksDbStorage> {
+fn open_db(dir: &tempfile::TempDir, schema: &JazzSchema, node_byte: u8, seed: u64) -> Db {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(dir.path(), &refs).expect("open rocks storage");
@@ -345,7 +340,7 @@ fn apply_subscription_event(snapshot: &mut RelationSnapshot, event: Subscription
 
 fn assert_one_shot_matches_subscription(
     schema: &JazzSchema,
-    db: &Db<RocksDbStorage>,
+    db: &Db,
     snapshot: &RelationSnapshot,
     label: &str,
 ) {
@@ -359,17 +354,13 @@ fn assert_one_shot_matches_subscription(
     );
 }
 
-fn apply_to_pair(
-    rebuild: &Db<RocksDbStorage>,
-    persisted_placeholder: &Db<RocksDbStorage>,
-    mutation: impl Fn(&Db<RocksDbStorage>),
-) {
+fn apply_to_pair(rebuild: &Db, persisted_placeholder: &Db, mutation: impl Fn(&Db)) {
     mutation(rebuild);
     mutation(persisted_placeholder);
 }
 
 fn next_event_after(
-    db: &Db<RocksDbStorage>,
+    db: &Db,
     stream: &mut jazz::db::SubscriptionStream,
     label: &str,
 ) -> SubscriptionEvent {

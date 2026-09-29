@@ -95,10 +95,15 @@ Use `await client.withAttribution(account)` or `await client.withAttributionForR
 
 Pass `req` to run queries as the authenticated user, with all permission policies applied.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts" meta='title="request-context.ts"'>
       ../examples/docs/todo-server-ts/src/request-context.ts#backend-request-handler-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts" meta='title="request-context.ts"'>
+      ../examples/docs/todo-effect/src/server.ts#backend-request-handler-effect
     </include>
   </Tab>
   <Tab value="Rust">
