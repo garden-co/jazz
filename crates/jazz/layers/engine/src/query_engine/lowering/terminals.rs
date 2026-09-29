@@ -1900,17 +1900,11 @@ fn retain_collect_slot_value(
                 slot.row_id_input, source.row_shape.row_uuid_field
             )))
         })?;
-    let value_type = if matches!(source_value_type, ValueType::Nullable(_)) {
-        source_value_type.clone()
-    } else {
-        ValueType::Nullable(Box::new(source_value_type.clone()))
-    };
-    // Derive the unwrapped type exactly as selected slot fields do. The anchor
-    // and association arms both key their outer wrapper off
-    // `value_type != output_value_type`; keeping the current-row presence
-    // wrapper here made the association arm wrap an already wrapped cell.
+    // Derive the unwrapped and input types exactly as selected slot fields do,
+    // so the anchor and association arms agree on the outer wrapper.
     let output_value_type =
         collect_unwrapped_output_type(source, &source_field, &source_value_type);
+    let value_type = collect_slot_input_type(source_value_type, &output_value_type);
     slot.fields.push(CollectFlatField {
         input: format!("{prefix}_{source_field}"),
         output: source_field.clone(),

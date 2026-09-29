@@ -4728,6 +4728,187 @@ fn assert_relation_snapshot_json_binding_hydration(child_json: bool) {
     );
 }
 
+/// Alice includes jobs whose nullable JSON `meta` was never set (#3662).
+/// The unset cell must not stall the include; the job still arrives.
+#[test]
+fn relation_snapshot_reverse_include_of_unset_nullable_json_child() {
+    assert_relation_snapshot_unset_nullable_json_include(false);
+}
+
+/// Alice includes each job's project, whose nullable JSON `meta` was never set (#3662).
+#[test]
+fn relation_snapshot_forward_include_of_unset_nullable_json_target() {
+    assert_relation_snapshot_unset_nullable_json_include(true);
+}
+
+/// Alice selects a project's unset nullable JSON `meta` alongside an include (#3662).
+#[test]
+fn relation_snapshot_selected_unset_nullable_json_root_with_include() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("projects")
+                    .column("name", PublicColumnType::Text)
+                    .nullable_column("meta", PublicColumnType::Json { schema: None }),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("jobs")
+                    .column("title", PublicColumnType::Text)
+                    .fk_column("projectId", "projects"),
+            ),
+    );
+    let db = open_db(0xc4, AuthorSubject::for_test_bytes([0xc4; 16]), &schema);
+    let project = db
+        .insert(
+            "projects",
+            BTreeMap::from([("name".into(), Value::String("p".into()))]),
+            Default::default(),
+        )
+        .unwrap()
+        .row_uuid();
+    let job = db
+        .insert(
+            "jobs",
+            BTreeMap::from([
+                ("title".into(), Value::String("j".into())),
+                ("projectId".into(), Value::Uuid(project.0)),
+            ]),
+            Default::default(),
+        )
+        .unwrap()
+        .row_uuid();
+    let query = Query::from("projects")
+        .select(["id", "meta"])
+        .array_subquery(ArraySubquery::new(
+            "jobsViaProject",
+            "jobs",
+            "projectId",
+            "id",
+        ));
+    let prepared = db.prepare_query(&query).unwrap();
+    let mut snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
+    block_on(db.hydrate_rows_for_binding(&mut snapshot.rows)).unwrap();
+    assert_eq!(
+        row_ids(&snapshot.rows[..snapshot.root_count]),
+        vec![project]
+    );
+    assert_eq!(
+        terminal_nested_values(&snapshot, project, "jobsViaProject", "row_uuid"),
+        vec![Value::Uuid(job.0)]
+    );
+
+    let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    let maintained = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+    assert_eq!(
+        row_ids(&maintained.rows[..maintained.root_count]),
+        vec![project]
+    );
+}
+
+fn assert_relation_snapshot_unset_nullable_json_include(forward: bool) {
+    let json = PublicColumnType::Json { schema: None };
+    let mut projects =
+        PublicTableSchemaBuilder::new("projects").column("name", PublicColumnType::Text);
+    let mut jobs = PublicTableSchemaBuilder::new("jobs")
+        .column("title", PublicColumnType::Text)
+        .fk_column("projectId", "projects");
+    if forward {
+        projects = projects.nullable_column("meta", json);
+    } else {
+        jobs = jobs.nullable_column("meta", json);
+    }
+    let schema =
+        build_public_db_test_schema(PublicSchemaBuilder::new().table(projects).table(jobs));
+    let db = open_db(0xc3, AuthorSubject::for_test_bytes([0xc3; 16]), &schema);
+    let project = db
+        .insert(
+            "projects",
+            BTreeMap::from([("name".into(), Value::String("p".into()))]),
+            Default::default(),
+        )
+        .unwrap()
+        .row_uuid();
+    let job = db
+        .insert(
+            "jobs",
+            BTreeMap::from([
+                ("title".into(), Value::String("j".into())),
+                ("projectId".into(), Value::Uuid(project.0)),
+            ]),
+            Default::default(),
+        )
+        .unwrap()
+        .row_uuid();
+
+    let (query, root, nested, arm) = if forward {
+        (
+            Query::from("jobs").array_subquery(ArraySubquery::new(
+                "project",
+                "projects",
+                "id",
+                "projectId",
+            )),
+            job,
+            project,
+            "project",
+        )
+    } else {
+        (
+            Query::from("projects").array_subquery(ArraySubquery::new(
+                "jobsViaProject",
+                "jobs",
+                "projectId",
+                "id",
+            )),
+            project,
+            job,
+            "jobsViaProject",
+        )
+    };
+    let prepared = db.prepare_query(&query).unwrap();
+    let mut snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
+    block_on(db.hydrate_rows_for_binding(&mut snapshot.rows)).unwrap();
+    assert_eq!(row_ids(&snapshot.rows), vec![root]);
+    assert_eq!(
+        terminal_nested_values(&snapshot, root, arm, "row_uuid"),
+        vec![Value::Uuid(nested.0)]
+    );
+    assert_eq!(
+        terminal_nested_values(&snapshot, root, arm, "meta"),
+        vec![Value::Nullable(None)]
+    );
+
+    // Bindings read includes through a maintained subscription, which must open.
+    let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    let maintained = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+    assert_eq!(
+        row_ids(&maintained.rows[..maintained.root_count]),
+        vec![root]
+    );
+    assert_eq!(
+        terminal_nested_values(&maintained, root, arm, "row_uuid"),
+        vec![Value::Uuid(nested.0)]
+    );
+
+    // Setting the JSON afterwards still reaches the included row.
+    db.update(
+        if forward { "projects" } else { "jobs" },
+        nested,
+        BTreeMap::from([("meta".to_owned(), Value::String("{\"a\":1}".to_owned()))]),
+        Default::default(),
+    )
+    .unwrap();
+    block_on(subscription.next_raw()).unwrap();
+    let mut snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
+    block_on(db.hydrate_rows_for_binding(&mut snapshot.rows)).unwrap();
+    assert_eq!(
+        terminal_nested_values(&snapshot, root, arm, "meta"),
+        vec![Value::Nullable(Some(Box::new(Value::String(
+            "{\"a\":1}".to_owned()
+        ))))]
+    );
+}
+
 #[test]
 fn relation_snapshot_reverse_array_reads_local_nullable_ref_child() {
     let schema = build_public_db_test_schema(

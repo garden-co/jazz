@@ -167,11 +167,41 @@ pub(super) fn collect_unwrapped_output_type(
         // The collector unwraps the current-row presence cell, not the
         // column's storage representation. Keep JSON cells and catalogue-bound
         // enums as emitted by the source; public-value hydration happens later.
-        .map(|_| match fallback {
-            ValueType::Nullable(inner) => inner.as_ref().clone(),
-            value_type => value_type.clone(),
+        .map(|column| {
+            let unwrapped = match fallback {
+                ValueType::Nullable(inner) => inner.as_ref().clone(),
+                value_type => value_type.clone(),
+            };
+            // Indirect JSON storage has a single null for both absence and
+            // application NULL, so its source cell has only the presence
+            // wrapper. A nullable column's output must still admit NULL.
+            if matches!(column.column_type, ValueType::Nullable(_))
+                && !matches!(unwrapped, ValueType::Nullable(_))
+            {
+                ValueType::Nullable(Box::new(unwrapped))
+            } else {
+                unwrapped
+            }
         })
         .unwrap_or_else(|| fallback.clone())
+}
+
+/// A collector child input carries one anchor wrapper around its logical
+/// output: anchor rows have no child and fill it with NULL. Current-row cells
+/// usually arrive with that presence wrapper already. Indirect JSON storage has
+/// a single null for absence and application NULL, so a nullable JSON cell
+/// arrives as exactly its logical output type and still needs the wrapper.
+pub(super) fn collect_slot_input_type(
+    source_value_type: ValueType,
+    output_value_type: &ValueType,
+) -> ValueType {
+    if matches!(source_value_type, ValueType::Nullable(_))
+        && &source_value_type != output_value_type
+    {
+        source_value_type
+    } else {
+        ValueType::Nullable(Box::new(source_value_type))
+    }
 }
 
 fn collect_slot_layouts(
@@ -234,12 +264,10 @@ fn collect_slot_layouts(
                     let is_row_id = source_field == source.row_shape.row_uuid_field;
                     let output_value_type =
                         collect_unwrapped_output_type(source, &source_field, &source_value_type);
-                    let value_type = if !is_row_id
-                        && !matches!(source_value_type, ValueType::Nullable(_))
-                    {
-                        ValueType::Nullable(Box::new(source_value_type))
-                    } else {
+                    let value_type = if is_row_id {
                         source_value_type
+                    } else {
+                        collect_slot_input_type(source_value_type, &output_value_type)
                     };
                     Ok(CollectFlatField {
                         input: format!("{prefix}_{source_field}"),
@@ -417,19 +445,19 @@ pub(super) fn lower_collect_slot_graphs(
     )
     .map_err(single_gap_report)?
     .graph;
-    let association = joined.clone().project_fields(collect_flat_projection(
-        layout,
-        Some(slot),
-        inherited_flat_fields,
-        None,
-        true,
-    )?);
     let child_source = resolved_sources.get(&slot.path.child).ok_or_else(|| {
         single_gap_report(UnsupportedReason::Runtime(format!(
             "collector child source {:?} was not resolved",
             slot.path.child
         )))
     })?;
+    let association = joined.clone().project_fields(collect_flat_projection(
+        layout,
+        Some((slot, child_source)),
+        inherited_flat_fields,
+        None,
+        true,
+    )?);
     let context = joined.project_fields(collect_child_context_projection(
         layout,
         slot,
@@ -464,7 +492,7 @@ pub(super) fn lower_collect_slot_graphs(
 
 fn collect_flat_projection(
     layout: &CollectLayout,
-    current_slot: Option<&CollectSlotLayout>,
+    current_slot: Option<(&CollectSlotLayout, &ResolvedSource)>,
     inherited_flat_fields: &BTreeSet<String>,
     root_source: Option<&ResolvedSource>,
     source_positions_are_stable: bool,
@@ -486,7 +514,10 @@ fn collect_flat_projection(
         })
         .collect::<Vec<_>>();
     for slot in collect_all_slots(&layout.slots) {
-        let is_current = current_slot.is_some_and(|current| current.path == slot.path);
+        let current_source = current_slot
+            .filter(|(current, _)| current.path == slot.path)
+            .map(|(_, source)| source);
+        let is_current = current_source.is_some();
         for field in &slot.fields {
             fields.push(
                 if is_current && slot.reference_array_input.as_ref() == Some(&field.input) {
@@ -494,29 +525,29 @@ fn collect_flat_projection(
                         left_field(field.source_field.as_ref().expect("reference source")),
                         &field.input,
                     )
-                } else if is_current {
-                    let source = right_field(
-                        field
-                            .source_field
-                            .as_ref()
-                            .expect("collector child fields retain their source field"),
-                    );
+                } else if let Some(child_source) = current_source {
+                    let source_field = field
+                        .source_field
+                        .as_ref()
+                        .expect("collector child fields retain their source field");
+                    let source = right_field(source_field);
                     if field.is_row_id {
                         ProjectField::renamed(source, &field.input)
                     } else {
                         // Anchor rows have no child, so collector child payload
-                        // fields are nullable. Preserve that descriptor on actual
-                        // child rows as well, rather than making the union depend
-                        // on whether this particular source column is nullable.
-                        if field.value_type == field.output_value_type {
-                            // A nullable application field needs a distinct outer
-                            // anchor wrapper when the current-row source does not
-                            // already carry one. CollectBy removes only that
-                            // wrapper, preserving an inner application NULL.
+                        // fields carry an outer anchor wrapper. Current-row
+                        // storage usually provides it already; a source whose
+                        // only nullable wrapper is the application NULL (indirect
+                        // JSON storage) needs a distinct one, which CollectBy
+                        // removes while preserving the inner NULL.
+                        let source_type = source_field_type(child_source, source_field);
+                        if source_type.is_some_and(|source_type| {
+                            matches!(source_type, ValueType::Nullable(_))
+                                && field.value_type
+                                    == ValueType::Nullable(Box::new(source_type.clone()))
+                        }) {
                             ProjectField::nullable(source, &field.input)
                         } else {
-                            // Current-row storage already carries the exact outer
-                            // wrapper required around the logical output type.
                             ProjectField::nullable_flat(source, &field.input)
                         }
                     }
@@ -554,7 +585,7 @@ fn collect_child_context_projection(
         .collect::<Vec<_>>();
     fields.extend(collect_flat_projection(
         layout,
-        Some(current_slot),
+        Some((current_slot, child_source)),
         inherited_flat_fields,
         None,
         true,
