@@ -12,7 +12,7 @@ import { ProfileDialog, ProfileSetup } from "./components/ProfileDialog";
 import { RoomNav, type RoomSummary } from "./components/RoomNav";
 import { RoomView } from "./components/RoomView";
 import { ProfileDirectoryProvider } from "./lib/profiles";
-import { useSearchParam } from "./lib/url-state";
+import { memoryStore, ParamStoreProvider, useSearchParam } from "./lib/url-state";
 
 export interface BandChatProps {
   /** Pre-fills the display name on first run (e.g. the Better Auth user name). */
@@ -28,12 +28,22 @@ export function BandChat(props: BandChatProps) {
 }
 
 /** Browser receipt entrypoint. The production dashboard never uses local-first auth here. */
-export function BandChatPreview({ config }: { config: DbConfig }) {
+export function BandChatPreview({
+  config,
+  initialParams,
+}: {
+  config: DbConfig;
+  /** Query-string state for this preview, e.g. `{ join: roomId }` for a room link. */
+  initialParams?: Record<string, string>;
+}) {
+  const [store] = useState(() => memoryStore(initialParams));
   return (
     <ThemeProvider>
-      <JazzProvider config={config} fallback={<Loading label="Opening local stage…" />}>
-        <BandChat />
-      </JazzProvider>
+      <ParamStoreProvider store={store}>
+        <JazzProvider config={config} fallback={<Loading label="Opening local stage…" />}>
+          <BandChat />
+        </JazzProvider>
+      </ParamStoreProvider>
     </ThemeProvider>
   );
 }
