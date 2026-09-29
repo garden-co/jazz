@@ -24,7 +24,9 @@ async function waitFor<T>(
       await new Promise((resolve) => setTimeout(resolve, 50));
     });
   }
-  throw new Error(`Timed out: ${message}`);
+  // Say what the page showed instead, so a failure explains itself.
+  const shown = document.body.innerText.replace(/\s+/g, " ").slice(0, 1500);
+  throw new Error(`Timed out: ${message} (${location.hash}). Page shows: ${shown}`);
 }
 
 function typeInto(input: HTMLInputElement | HTMLTextAreaElement, value: string) {
