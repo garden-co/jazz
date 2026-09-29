@@ -1,26 +1,94 @@
 # Jamazon Warehouse
 
-Jamazon Warehouse is a self-contained operations console for the fictional music-instrument
-storefront. Its schema and scenarios are deliberately TPC-C-shaped: warehouses, districts,
-stock, customers, orders, order lines, payments, and delivery work.
+Jamazon Warehouse is the operations console for a fictional music-instrument storefront. Its
+schema and workflows are deliberately TPC-C-shaped: warehouses, districts, stock, customers,
+orders, order lines, payments and deliveries. It is not a TPC-C compliance claim.
 
-The app is a reference for multi-row exclusive checkout, ordered and bounded operational reads,
-local-first retry, and idempotent external-effect handoff. It is not a TPC-C compliance claim.
-`benchmarks/` duplicates the schema/query shapes in a deterministic Divan fixture; its complete
-state reads are test receipts, not console APIs. `benchmarks/benches/walltime.rs` times 100
-checkouts, a retried checkout and the pending-order page on CodSpeed wall time;
-`benchmarks/metadata.ts` documents each case for the examples page.
+What an operator does in the console:
 
-Operational reads are intentionally public in this demo so a shared warehouse console can observe
-stock and orders. Writes are not public: every mutable child row follows its warehouse, order, or
-customer reference back to the warehouse operator; the global item catalogue is separately owned
-by its `operator_id`.
+- **Dashboard**: orders entered today, pending deliveries and low-stock items for the warehouse,
+  plus the next orders to deliver in the selected district. Every number updates live.
+- **New order** (TPC-C "new order"): pick a customer and up to 15 item lines. The whole order is
+  one exclusive transaction: stock for every line, the district's order counter, the customer's
+  balance, the order, its lines and the payment hand-off are accepted together or not at all.
+  Each attempt carries a request key, so a retry (or "submit the same request again") returns the
+  first receipt instead of taking stock twice.
+- **Pending orders**: the district's delivery queue, oldest first, one bounded page.
+- **Delivery** (TPC-C "delivery"): one exclusive batch delivers the oldest pending order in every
+  district.
+- **Payment** (TPC-C "payment"): credit a customer's balance, once per request key.
+- **Order status** (TPC-C "order status"): a customer's recent orders, or one order by number,
+  with its lines and deliveries.
+- **Stock level** (TPC-C "stock level"): items below their reorder level, with a one-click
+  receipt of new stock.
 
-Stock-level reads currently fetch complete warehouse candidates and apply `on_hand < reorder_level`
-in the fixture because Jazz does not yet lower field-to-field comparisons; [#1864](https://github.com/garden-co/jazz/issues/1864)
-tracks the indexed query path.
+## Running it
 
-The current browser scenario supplies deterministic test credentials directly so it can isolate
-Jazz topology behavior. A user-facing Next.js + Better Auth shell is intentionally not claimed
-yet; it will be added once it can exercise the same checkout flow rather than a parallel toy
-path.
+```sh
+pnpm install
+pnpm --dir examples/jamazon-warehouse dev
+```
+
+`pnpm dev` starts a local Jazz server through `withJazz` and pushes `schema.ts` and
+`permissions.ts` to it. Open <http://localhost:3000>, create an operator account and choose a
+warehouse. Open a second browser (or a private window) and sign up a second operator to watch the
+queue and stock change live in both.
+
+The first console open calls `POST /api/bootstrap`, which seeds the deterministic small profile
+once (`src/seed.ts`): two warehouses with three districts each, four customers per district, a
+16-item catalogue, stock for every item and five orders per district. Joining a warehouse goes
+through the same route, which verifies the operator's Better Auth session and Jazz account and
+then adds a `warehouse_operators` row with backend authority.
+
+To see stock contention, have both operators order 4 "Vintage tube amp" (5 on hand) at the same
+moment. The authority accepts one order; the other checkout re-reads stock and fails with
+"Insufficient stock", with nothing charged or taken.
+
+The local defaults in `src/lib/config.ts` make `pnpm dev` and `pnpm build` work without
+configuration. A deployment sets `NEXT_PUBLIC_APP_ORIGIN`, `NEXT_PUBLIC_JAZZ_APP_ID`,
+`NEXT_PUBLIC_JAZZ_SERVER_URL`, `BACKEND_SECRET` and `BETTER_AUTH_SECRET`; the secrets are
+required as soon as the origin is not local.
+
+## Permissions
+
+`permissions.ts` answers two questions for every operational row:
+
+- **Who may write it** ([#1899](https://github.com/garden-co/jazz/issues/1899)): the manager of
+  the row's own warehouse (`warehouses.operator_id`) or an operator staffed on that warehouse
+  (`warehouse_operators`). Transferring a warehouse revokes the former manager's operational
+  writes too; an operator who leaves loses them immediately.
+- **What it may reference** ([#1898](https://github.com/garden-co/jazz/issues/1898)): a
+  customer's district, an order's district and customer, a line's order and stocked item, a
+  payment's customer and order, and a delivery's order all belong to the row's own warehouse
+  (and district). A checkout therefore cannot combine rows from two warehouses, even for someone
+  who operates both. `purchase()` checks the same thing first, to give the operator a clear error.
+
+Stock may not go negative, and a reorder level may not exceed `REORDER_LEVEL_CAP`.
+
+Operational reads are public in this demo so any console can observe any warehouse; the switcher
+shows the other warehouse as view only.
+
+## Reads
+
+Every read the console subscribes to is ordered where it matters and bounded (`src/warehouse.ts`,
+checked by `schema.test.ts`). Dashboard counters read at most 500 rows and show "500+" beyond
+that, because Jazz has no count aggregate yet.
+
+The stock-level report can't compare `on_hand` with `reorder_level` in a query yet
+([#1864](https://github.com/garden-co/jazz/issues/1864)). It reads the indexed range
+`on_hand < REORDER_LEVEL_CAP` and filters in the console; the reorder-level cap in the permissions
+makes that candidate set complete.
+
+## Tests
+
+- `pnpm --dir examples/jamazon-warehouse test` runs `schema.test.ts` (indexes, bounded reads,
+  seed consistency) and `tests/permissions` against a local Jazz server: operator staffing,
+  transfer revocation, the cross-warehouse rejections, the two-operator stock race, retried
+  checkout and delivery batches.
+- `pnpm --dir examples/jamazon-warehouse test:browser` runs the browser topology receipt: a
+  duplicated and dropped checkout hand-off, reconnect, persistent reopen and ownership transfer.
+
+`benchmarks/` duplicates the schema and query shapes in a deterministic Divan fixture;
+`benchmarks/benches/walltime.rs` times 100 checkouts, a retried checkout and the pending-order
+page on CodSpeed wall time, and `benchmarks/metadata.ts` documents each case for the examples
+page.

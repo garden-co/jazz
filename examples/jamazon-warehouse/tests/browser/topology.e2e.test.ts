@@ -210,8 +210,7 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
                       warehouseId: warehouse.id,
                       districtId: district.id,
                       customerId: customer.id,
-                      itemId: item.id,
-                      quantity: 3,
+                      lines: [{ itemId: item.id, quantity: 3 }],
                       idempotencyKey: "checkout-17",
                     }),
                   );
@@ -292,8 +291,7 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
                     warehouseId: warehouse.id,
                     districtId: district.id,
                     customerId: customer.id,
-                    itemId: item.id,
-                    quantity: 1,
+                    lines: [{ itemId: item.id, quantity: 1 }],
                     idempotencyKey: "checkout-client-core-loss",
                   });
                   recoveredReceipt = await withTimeout(
@@ -481,8 +479,7 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
                   warehouseId: warehouse.id,
                   districtId: district.id,
                   customerId: customer.id,
-                  itemId: item.id,
-                  quantity: 8,
+                  lines: [{ itemId: item.id, quantity: 8 }],
                   idempotencyKey: "insufficient-stock",
                 }),
               ).rejects.toThrow("insufficient stock");
@@ -563,8 +560,16 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
                   .update(app.warehouses, warehouse.id, { region: "revoked-owner-write" })
                   .wait({ tier: "global" }),
               ).rejects.toThrow(/AuthorizationDenied|Write rejected/);
+              // #1899: warehouse ownership covers operational rows, so the
+              // transfer also revokes the former manager's stock writes.
+              await expect(
+                owner.update(app.stock, stock.id, { on_hand: 99 }).wait({ tier: "global" }),
+              ).rejects.toThrow(/AuthorizationDenied|Write rejected/);
               await nextOperator
                 .update(app.warehouses, warehouse.id, { region: "next-operator-write" })
+                .wait({ tier: "global" });
+              await nextOperator
+                .update(app.stock, stock.id, { on_hand: 7 })
                 .wait({ tier: "global" });
               await waitForQuery(
                 observer,
