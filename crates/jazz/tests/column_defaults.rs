@@ -41,6 +41,9 @@ fn schema() -> JazzSchema {
         ColumnDescriptor::new("label", ColumnType::Text).nullable(),
         ColumnDescriptor::new("rank", ColumnType::Integer).nullable(),
     ]);
+    let optional_json_only = RowDescriptor::new(vec![
+        ColumnDescriptor::new("metadata", ColumnType::Json { schema: None }).nullable(),
+    ]);
     let source = Schema::from([
         (
             TableName::new("events"),
@@ -49,6 +52,10 @@ fn schema() -> JazzSchema {
         (
             TableName::new("optional_only"),
             TableSchema::with_policies(optional_only, allow_all_policies()),
+        ),
+        (
+            TableName::new("optional_json_only"),
+            TableSchema::with_policies(optional_json_only, allow_all_policies()),
         ),
     ]);
     compile_schema(&source)
@@ -305,4 +312,58 @@ fn core_insert_with_some_optional_columns_leaves_the_rest_unauthored() {
     // Only an otherwise-empty insert authors explicit nulls; here the
     // omitted column stays unauthored and reads back as absent (null).
     assert_eq!(stored.get("label"), None);
+}
+
+#[test]
+fn core_restore_with_empty_content_yields_an_all_null_row() {
+    let db = open_db();
+
+    jazz::block_on(db.insert(
+        "optional_only",
+        cells([(
+            "label",
+            Value::Nullable(Some(Box::new(Value::String("before".to_owned())))),
+        )]),
+        jazz::db::InsertOptions {
+            row_id: Some(row(7)),
+            ..Default::default()
+        },
+    ))
+    .expect("insert row");
+    jazz::block_on(db.delete("optional_only", row(7), Default::default())).expect("delete row");
+    jazz::block_on(db.restore(
+        "optional_only",
+        row(7),
+        Some(BTreeMap::new()),
+        Default::default(),
+    ))
+    .expect("restore with empty content");
+
+    let stored = stored_row_in(&db, "optional_only", row(7));
+    assert_eq!(stored.get("label"), Some(&Value::Nullable(None)));
+    assert_eq!(stored.get("rank"), Some(&Value::Nullable(None)));
+}
+
+#[test]
+fn core_insert_with_every_optional_json_column_omitted_explains_the_gap() {
+    let db = open_db();
+
+    let error = jazz::block_on(db.insert(
+        "optional_json_only",
+        BTreeMap::new(),
+        jazz::db::InsertOptions {
+            row_id: Some(row(8)),
+            ..Default::default()
+        },
+    ))
+    .err()
+    .expect("an all-omitted insert into an optional-JSON-only table is not supported yet");
+    let message = error.message;
+    assert!(
+        message.contains("every column omitted is not supported yet")
+            && message.contains("`optional_json_only`")
+            && message.contains("all JSON")
+            && message.contains("#3007"),
+        "unexpected error: {message}"
+    );
 }
