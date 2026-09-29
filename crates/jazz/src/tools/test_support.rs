@@ -41,6 +41,13 @@ const DEFAULT_QUERY_TIMEOUT: Duration = Duration::from_secs(8);
 #[cfg(feature = "testing")]
 const DEFAULT_WAIT_TIMEOUT_MULTIPLIER: u32 = 8;
 
+/// Upper bound for a scaled wait. CI's nextest `jazz-ci` profile terminates a
+/// test after 180s. A wait that outlives that watchdog is killed before its
+/// panic can report which wait stalled and what it last observed, so a
+/// scaled wait must expire first, leaving headroom for the test's setup.
+#[cfg(feature = "testing")]
+const MAX_LOAD_TOLERANT_WAIT: Duration = Duration::from_secs(150);
+
 /// Sanctioned test-support reconnect control: mirrors the public client's
 /// upstream detach without clearing local known-state or pending writes.
 #[cfg(feature = "testing")]
@@ -62,7 +69,13 @@ fn load_tolerant_wait_timeout(timeout: Duration) -> Duration {
         .and_then(|value| value.parse::<u32>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_WAIT_TIMEOUT_MULTIPLIER);
-    timeout.checked_mul(multiplier).unwrap_or(timeout)
+    // Scaling never shortens the caller's own base timeout; it only stops
+    // the load-tolerance factor from pushing a wait past the CI watchdog.
+    timeout
+        .checked_mul(multiplier)
+        .unwrap_or(timeout)
+        .min(MAX_LOAD_TOLERANT_WAIT)
+        .max(timeout)
 }
 
 /// Re-runs a query until its rows satisfy the provided matcher or the timeout
