@@ -25,7 +25,7 @@ export async function GET() {
     }
     return Response.json(
       { error: "Benchmark history is temporarily unavailable. Try again in a moment." },
-      { status: 502 },
+      { status: 502, headers: { "Cache-Control": "public, s-maxage=60" } },
     );
   }
 }

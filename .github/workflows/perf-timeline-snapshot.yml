@@ -33,8 +33,6 @@ jobs:
       (github.event_name != 'release' || github.event.release.tag_name != 'perf-timeline-data')
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    env:
-      GH_TOKEN: ${{ github.token }}
     steps:
       # Full commit history and every tag, so release ancestry is answered by
       # local git instead of GitHub's compare API. Blobs are not needed.
@@ -44,10 +42,13 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
           filter: blob:none
+          persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: 24
       - name: Ensure the snapshot release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           gh release view "$SNAPSHOT_TAG" >/dev/null 2>&1 ||
             gh release create "$SNAPSHOT_TAG" --prerelease --latest=false \
@@ -55,11 +56,15 @@ jobs:
               --title "Benchmark timeline data" \
               --notes "Machine-updated data for the docs benchmark timeline. Not a Jazz release. Built by .github/workflows/perf-timeline-snapshot.yml."
       - name: Download the previous CodSpeed result cache
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: gh release download "$SNAPSHOT_TAG" --pattern codspeed-results.json --dir previous || true
       - name: Build the snapshot
         working-directory: docs
         run: node scripts/perf-timeline-snapshot.ts "$RUNNER_TEMP/snapshot" ../previous/codspeed-results.json
       - name: Upload the snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           gh release upload "$SNAPSHOT_TAG" --clobber \
             "$RUNNER_TEMP/snapshot/timeline.json" \

@@ -86,7 +86,8 @@ export async function buildSnapshot({
         fetchImpl,
         `query JazzWallclockRunResults { repository(owner: "garden-co", name: "jazz") { run(id: ${JSON.stringify(run.id)}) { results { id benchmark { id name } walltime { min median max } } } } }`,
       );
-      cache.runs[run.id] = { date: run.date, results: repository.run?.results ?? [] };
+      // A run CodSpeed cannot return yet is retried next build, never cached empty.
+      if (repository.run) cache.runs[run.id] = { date: run.date, results: repository.run.results };
     }
   };
   await Promise.all(Array.from({ length: concurrentResultQueries }, worker));

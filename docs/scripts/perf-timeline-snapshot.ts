@@ -38,7 +38,7 @@ if (!tags.length) throw new Error("No version tags found; fetch tags before buil
 function containingTags(sha: string): ReadonlySet<string> | null {
   if (!/^[0-9a-f]{40}$/.test(sha)) return null;
   try {
-    git("cat-file", "-e", `${sha}^{commit}`);
+    execFileSync("git", ["cat-file", "-e", `${sha}^{commit}`], { stdio: "ignore" });
   } catch {
     return null;
   }
