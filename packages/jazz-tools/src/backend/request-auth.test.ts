@@ -189,6 +189,111 @@ describe("backend request auth", () => {
     },
   );
 
+  it("resolves a bearer token from a mixed-case plain-record Authorization key", async () => {
+    const token = signHs256Jwt({ iss: "https://issuer.example", sub: "mixed-case-user" });
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          account: "00000000-0000-4000-8000-000000000012",
+          identity: { issuer: "https://issuer.example", subject: "mixed-case-user" },
+        }),
+      ),
+    );
+
+    await expect(
+      resolveRequestSession(
+        { headers: { Authorization: `Bearer ${token}` } },
+        {
+          appId: "app",
+          accountRegistry: "https://core.example/apps/app/accounts",
+          jwtPublicKey: { kty: "oct", kid: JWT_KID, alg: "HS256", k: base64Url(JWT_SECRET) },
+        },
+      ),
+    ).resolves.toMatchObject({ user_id: "mixed-case-user", authMode: "external" });
+  });
+
+  it("rejects conflicting case variants in plain-record authorization headers", async () => {
+    const lowerCaseToken = signHs256Jwt({
+      iss: "https://issuer.example",
+      sub: "lower-case-user",
+    });
+    const upperCaseToken = signHs256Jwt({
+      iss: "https://issuer.example",
+      sub: "upper-case-user",
+    });
+    const fetcher = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          account: "00000000-0000-4000-8000-000000000012",
+          identity: { issuer: "https://issuer.example", subject: "lower-case-user" },
+        }),
+      ),
+    );
+
+    await expect(
+      resolveRequestSession(
+        {
+          headers: {
+            authorization: `Bearer ${lowerCaseToken}`,
+            Authorization: `Bearer ${upperCaseToken}`,
+          },
+        },
+        {
+          appId: "app",
+          accountRegistry: "https://core.example/apps/app/accounts",
+          jwtPublicKey: { kty: "oct", kid: JWT_KID, alg: "HS256", k: base64Url(JWT_SECRET) },
+        },
+      ),
+    ).rejects.toThrow();
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("reads the method-provided authorization before plain-record headers exactly once", async () => {
+    const methodToken = signHs256Jwt({
+      iss: "https://issuer.example",
+      sub: "method-first-user",
+    });
+    const recordToken = signHs256Jwt({
+      iss: "https://issuer.example",
+      sub: "record-user",
+    });
+    const header = vi
+      .fn()
+      .mockReturnValueOnce(`Bearer ${methodToken}`)
+      .mockImplementation(() => {
+        throw new Error("request headers read twice");
+      });
+    const fetcher = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          account: "00000000-0000-4000-8000-000000000012",
+          identity: { issuer: "https://issuer.example", subject: "method-first-user" },
+        }),
+      ),
+    );
+
+    const session = await resolveRequestSession(
+      {
+        header,
+        headers: { authorization: `Bearer ${recordToken}` },
+      },
+      {
+        appId: "app",
+        accountRegistry: "https://core.example/apps/app/accounts",
+        jwtPublicKey: { kty: "oct", kid: JWT_KID, alg: "HS256", k: base64Url(JWT_SECRET) },
+      },
+    );
+
+    expect(session.user_id).toBe("method-first-user");
+    expect(header).toHaveBeenCalledTimes(1);
+    expect(fetcher).toHaveBeenCalledWith(
+      "https://core.example/apps/app/accounts/login",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: `Bearer ${methodToken}` }),
+      }),
+    );
+  });
+
   it.each(["identity_unassigned", "identity_revoked"])(
     "rejects registry %s without registering the external identity",
     async (code) => {

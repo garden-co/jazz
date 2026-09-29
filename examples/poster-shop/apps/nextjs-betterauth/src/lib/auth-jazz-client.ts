@@ -1,4 +1,5 @@
 import { app } from "@/schema";
+import permissions from "@/permissions";
 import type { JazzClient } from "jazz-tools/backend";
 import { createRequire as createRequireFromModule } from "node:module";
 import { configuredIssuer } from "./identity";
@@ -20,6 +21,7 @@ declare global {
 export async function authJazzClient(): Promise<JazzClient> {
   const pending = (globalThis.__posterShopAuthSession ??= createJazzSession({
     app,
+    permissions,
     // These explicit local defaults let Next evaluate auth routes during a
     // bare production build. Deployments replace both public values.
     appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID ?? "poster-shop-local",

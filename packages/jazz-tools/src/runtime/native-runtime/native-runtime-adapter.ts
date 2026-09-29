@@ -1970,7 +1970,7 @@ export class NativeRuntimeAdapter implements Runtime {
     for (;;) {
       this.throwServerTransportErrorForTier(tier);
       const observedServerWorkEpoch = this.serverTransportWorkEpoch;
-      void this.pumpServerTransport();
+      this.startServerPump();
       this.throwServerTransportErrorForTier(tier);
       const transportError = this.waitForServerTransportError(tier);
       const transportWork = this.waitForServerTransportWork(tier, observedServerWorkEpoch);
@@ -2605,7 +2605,7 @@ export class NativeRuntimeAdapter implements Runtime {
       throw new Error("Native runtime lacks graceful sync shutdown; rebuild its bindings");
     await this.flushLocalSettlements();
     this.throwServerTransportErrorForTier(tier);
-    void this.pumpServerTransport();
+    this.startServerPump();
     const failure = this.waitForServerTransportError(tier);
     try {
       const wait = this.awaitNativeRead(
@@ -2826,7 +2826,7 @@ export class NativeRuntimeAdapter implements Runtime {
         if (bytes !== null) return bytes;
         // Keep polling while a core pass waits for large-value chunks: the
         // read itself may be what lets that pass resume.
-        this.pumpServerTransport();
+        this.startServerPump();
         if (tier) this.throwServerTransportErrorForTier(tier);
         await sleep(0);
       }
@@ -3473,8 +3473,17 @@ export class NativeRuntimeAdapter implements Runtime {
     setTimeout(() => {
       this.serverPumpScheduled = false;
       if (this.closed) return;
-      void this.pumpServerTransport().catch((error) => this.handleServerTransportError(error));
+      this.startServerPump();
     }, SERVER_PUMP_DEBOUNCE_MS);
+  }
+
+  /** Run a pump without awaiting it. A failure becomes the connection's
+   * terminal error rather than an unhandled rejection that crashes Node. */
+  private startServerPump(): void {
+    const generation = this.serverConnectionGeneration;
+    void this.pumpServerTransport().catch((error) =>
+      this.handleServerTransportError(error, generation),
+    );
   }
 
   private notifyPeerTransportWork(requiresDistinctPass = false): void {
