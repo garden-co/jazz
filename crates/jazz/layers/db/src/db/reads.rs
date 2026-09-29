@@ -548,12 +548,25 @@ where
                 None => drop(hydration),
             }
         }
+        if coverage.is_none() && require_coverage {
+            let attachment = self
+                .attach_query_with_opts_async(&prepared, opts.clone(), open_tx, author)
+                .await?;
+            let required = SerializedReadCoverage {
+                attachment: Some(attachment),
+                release: Some(release_coverage),
+            };
+            self.wait_for_serialized_read_coverage(&required, coverage_expired)
+                .await?;
+            coverage = Some(required);
+        }
         // The read records each joined, included or related table as a read
         // of the whole table, which the authority validates against every
         // row the reader can see there. Hydrate those tables too, so rows
         // this replica never received do not make the read conflict.
         let mut table_coverage = Vec::new();
-        if coverage.is_some()
+        if exclusive_snapshot_read
+            && coverage.is_some()
             && let Some(open_tx) = open_tx
         {
             let tables = self
@@ -591,18 +604,6 @@ where
             }
         }
         let _table_coverage = table_coverage;
-        if coverage.is_none() && require_coverage {
-            let attachment = self
-                .attach_query_with_opts_async(&prepared, opts.clone(), open_tx, author)
-                .await?;
-            let required = SerializedReadCoverage {
-                attachment: Some(attachment),
-                release: Some(release_coverage),
-            };
-            self.wait_for_serialized_read_coverage(&required, coverage_expired)
-                .await?;
-            coverage = Some(required);
-        }
         let _coverage = coverage;
 
         if !prepared.shape().query().array_subqueries.is_empty() {

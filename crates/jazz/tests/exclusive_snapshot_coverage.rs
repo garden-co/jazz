@@ -907,3 +907,38 @@ fn join_commits_despite_unrelated_joined_rows() {
 fn relation_commits_despite_unrelated_related_rows() {
     assert_redemption_check_commits_despite_unrelated_redemptions(RedemptionCheck::Relation);
 }
+
+/// The same check with every read inside the transaction asking for the
+/// Global tier.
+#[test]
+fn global_tier_join_commits_despite_unrelated_joined_rows() {
+    let net = Net::new(&[0x0a, 0x0b, 0x0c]);
+    net.create_invite(OWNER, "abc");
+    net.create_invite(OWNER, "xyz");
+    net.read(BACKEND, &invite_query("xyz"), DurabilityTier::Global, None);
+    assert_eq!(net.redeem(BACKEND, "xyz"), Redeem::Joined);
+    net.read(2, &invite_query("abc"), DurabilityTier::Global, None);
+
+    let db = net.db(2);
+    let open = OpenTransactionId::new();
+    block_on(db.begin_exclusive(open)).unwrap();
+    let joined = redeemed_invite_query("abc", RedemptionCheck::Join);
+    assert_eq!(
+        net.read(2, &invite_query("abc"), DurabilityTier::Global, Some(open))
+            .len(),
+        1
+    );
+    assert!(
+        net.read(2, &joined, DurabilityTier::Global, Some(open))
+            .is_empty()
+    );
+    net.drive(
+        db.exclusive_tx_ref(open)
+            .insert("members", cells("abc"), Default::default()),
+    )
+    .unwrap();
+    let tx_id = net.drive(db.commit_exclusive_handle(open)).unwrap();
+    net.settle(2, tx_id)
+        .expect("nobody redeemed this invite, so the redemption commits");
+    assert_eq!(net.members(), 2);
+}
