@@ -59,6 +59,9 @@ where
         {
             return Err(Error::NonMonotoneState("global seq cannot move backwards"));
         }
+        let already_accepted = matches!(stored.fate, Fate::Accepted);
+        let previous_global_time = stored.global_time;
+        let previous_durability = stored.durability;
         stored.fate = next_fate(&stored.fate, fate)?;
         stored.global_time = global_time.or(stored.global_time);
         if let Some(durability) = durability {
@@ -71,6 +74,44 @@ where
         } else {
             Vec::new()
         };
+
+        if already_accepted
+            && stored.tx.kind == TxKind::Mergeable
+            && !stored.view_scoped_cardinality
+            && stored.global_time.is_some()
+            && stored.global_time == previous_global_time
+            && stored.durability == previous_durability
+            && advanced_global_times.is_empty()
+        {
+            // A complete mergeable transaction installs global current and
+            // cleans ahead-current for all of its versions atomically with the
+            // accepted metadata, including versions an earlier view-scoped
+            // fragment stored before the completing ingest. Replaying the same
+            // receipt therefore has no durable work after monotonicity/conflict
+            // validation. Exclusive fragments deliberately defer current
+            // installation and must still run the ordinary repair path below,
+            // even when their fate metadata is unchanged.
+            //
+            // This path performs no cleanup, so it deliberately does not
+            // advance the storage-consistency marker: vouching here would
+            // hide any leftover from recovery's settled-ahead sweep. A marker
+            // that lags only widens that sweep.
+            #[cfg(test)]
+            {
+                let tx_versions = self.query_versions_for_tx(tx_id).await?;
+                let missing = self
+                    .global_current_updates_for_versions(tx_id, &tx_versions)
+                    .await?;
+                assert!(
+                    missing.is_empty(),
+                    "skipped accepted receipt for {tx_id:?} whose versions lack global current: {missing:?}"
+                );
+            }
+            *terminal_fate_persisted = true;
+            self.rejections.child_txs_by_parent.remove(&tx_id);
+            self.prune_child_edges(tx_id);
+            return Ok(());
+        }
 
         let mut batch = self.database.open_batch();
         let mut global_current_updates = Vec::new();

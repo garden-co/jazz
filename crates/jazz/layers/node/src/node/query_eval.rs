@@ -537,12 +537,9 @@ where
             prepared_claim_binding_mode,
             false,
         )?;
-        // Retain the established, guarded primary-key paths. In particular a
-        // policy-scoped root must stay a complete current
-        // source: a point cap there can strand a deletion-driven membership
-        // transition. The new selector contributes only secondary equality
-        // indexes for concrete maintained roots; it must not widen that
-        // legacy guard by injecting another primary-key cap.
+        // Retain the established primary-key paths. The new selector
+        // contributes only secondary equality indexes for concrete maintained
+        // roots; it must not inject another primary-key cap.
         let mut access_paths = self.current_query_primary_key_access_paths(shape, binding)?;
         if allow_secondary_indexes {
             access_paths.extend(
@@ -1344,15 +1341,28 @@ where
         );
         let mut binding_claim_params = binding_claim_params_for_shape(&input_shape, shape.params());
         if use_prepared_binding_source && !client_local {
-            let policy_schema = self
-                .catalogue
-                .catalogue_schemas
-                .get(&policy_schema_version)
-                .ok_or(Error::InvalidStoredValue(
-                    "policy schema version is unknown",
-                ))?;
+            // Resolve policies exactly as the nested authorization subplans do.
+            // Deployed permissions live only in the active compiled view; the
+            // catalogue entry for the same version carries structural schema
+            // with placeholder policies. Collecting from that entry would omit
+            // claim slots which a nested read policy later requires from this
+            // shared binding descriptor.
+            let policy_schema = if policy_schema_version == self.catalogue.active_schema.schema {
+                &self.catalogue.active_schema.compiled
+            } else if policy_schema_version == self.catalogue.local_schema_version_id {
+                &self.catalogue.schema
+            } else {
+                &self
+                    .catalogue
+                    .catalogue_schemas
+                    .get(&policy_schema_version)
+                    .ok_or(Error::InvalidStoredValue(
+                        "policy schema version is unknown",
+                    ))?
+                    .schema
+            };
             self.collect_policy_dependency_claim_params(
-                &policy_schema.schema,
+                policy_schema,
                 &policy,
                 &input_shape,
                 &mut binding_claim_params,

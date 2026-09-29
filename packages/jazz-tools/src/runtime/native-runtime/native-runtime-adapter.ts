@@ -73,6 +73,7 @@ import {
 import { exactSignedI64 } from "./exact-integer.js";
 import { encodeSchema } from "./schema-codec.js";
 import { nativeRowFieldPlanCacheKey } from "./native-row-descriptor-key.js";
+import { nativeCoreErrorCode } from "./native-error-code.js";
 import {
   WebSocketCarrier,
   WIRE_PROTOCOL_VERSION,
@@ -3058,13 +3059,11 @@ export class NativeRuntimeAdapter implements Runtime {
       );
     };
 
-    void refresh().catch((error: unknown) => {
-      if (this.closed || this.ownerRuntime.closed) return;
-      if (error instanceof Error && error.message === "Timed out waiting for query coverage") {
-        return;
-      }
-      this.handleServerTransportError(error);
-    });
+    // Best effort: the foreground read has already answered. Only the carrier
+    // and the pump decide that the server transport has failed; a refresh
+    // failure (a coverage timeout, a rejected read) must never become the
+    // terminal transport error, or the next real drop is not retried (#3692).
+    void refresh().catch(() => undefined);
   }
 
   admitLocalFirstSession(session: Session, token: string, appId: string): void {
@@ -4849,8 +4848,7 @@ function rejectedWaitError(
   /** An Error-compatible diagnostic for direct native callers. */
   message: string;
 } | null {
-  const message = errorMessage(error);
-  if (extractWriteRejectedReason(message) === null) return null;
+  if (!isCoreWriteRejection(error)) return null;
   return queuedWriteRejection(transactionId, error);
 }
 
@@ -4893,9 +4891,9 @@ function writeOrNormalizeRejection<T>(
   try {
     return write();
   } catch (error) {
-    const message = errorMessage(error);
-    const reason = extractWriteRejectedReason(message);
-    if (reason !== null) {
+    if (isCoreWriteRejection(error)) {
+      const message = errorMessage(error);
+      const reason = extractWriteRejectedReason(message) ?? message;
       throw new Error(`${operation} failed: WriteError("${reason}")`);
     }
     throw error;
@@ -4950,6 +4948,11 @@ function rejectionReason(message: string): string {
   if (reason === null) return message;
   if (reason.includes("AuthorizationDenied")) return "Write rejected by server authorization";
   return reason || "Write rejected";
+}
+
+/** Whether a native error is a core `WriteRejected` error, decided by its stable core code. */
+function isCoreWriteRejection(error: unknown): boolean {
+  return nativeCoreErrorCode(error) === "write_rejected";
 }
 
 /** Parse the exact stable Rust `Error` display prefix without matching quoted diagnostics. */

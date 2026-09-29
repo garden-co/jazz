@@ -22,6 +22,11 @@ pub struct NodeAliases {
     /// Highest alias ever installed. Monotonic: `remove` does not lower it,
     /// which is conservative for allocating the next alias.
     max_alias: u64,
+    /// Counts dropped `node ↔ alias` pairs (a replacement of either side, or
+    /// a removal). Inserting a fresh pair never lowers it: a consumer that
+    /// observed an unchanged count knows every alias it resolved still
+    /// resolves to the same node.
+    retargets: u64,
 }
 
 impl NodeAliases {
@@ -48,14 +53,21 @@ impl NodeAliases {
             && previous_node != node
         {
             self.by_node.remove(&previous_node);
+            self.retargets += 1;
         }
         let previous_alias = self.by_node.insert(node, alias);
         if let Some(previous_alias) = previous_alias
             && previous_alias != alias
         {
             self.by_alias.remove(&previous_alias);
+            self.retargets += 1;
         }
         previous_alias
+    }
+
+    /// See the `retargets` field.
+    pub(crate) fn retarget_count(&self) -> u64 {
+        self.retargets
     }
 
     /// Highest alias ever installed, or 0 when none was.
@@ -68,6 +80,7 @@ impl NodeAliases {
     pub fn remove(&mut self, node: &NodeUuid) -> Option<NodeAlias> {
         let alias = self.by_node.remove(node)?;
         self.by_alias.remove(&alias);
+        self.retargets += 1;
         Some(alias)
     }
 
@@ -76,7 +89,6 @@ impl NodeAliases {
         self.by_node.iter()
     }
 
-    #[cfg(test)]
     #[doc(hidden)]
     #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {

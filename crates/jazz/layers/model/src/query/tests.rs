@@ -149,6 +149,82 @@ mod tests {
     }
 
     #[test]
+    fn empty_array_literal_compares_with_array_column_on_either_side() {
+        let empty_array = || lit(Value::Array(vec![]));
+
+        Query::from("issues")
+            .filter(eq(col("labels"), empty_array()))
+            .validate_runtime(&schema())
+            .expect("an empty array literal matches an array column");
+        Query::from("issues")
+            .filter(eq(empty_array(), col("labels")))
+            .validate_runtime(&schema())
+            .expect("an empty array literal matches an array column on the left");
+
+        let error = Query::from("issues")
+            .filter(eq(col("labels"), lit(Value::Array(vec![Value::I32(1)]))))
+            .validate_runtime(&schema())
+            .expect_err("a nonempty array with incompatible element type is rejected");
+        assert_eq!(error, QueryError::OperandTypeMismatch);
+    }
+    #[test]
+    fn empty_array_literal_compares_with_nullable_array_column_on_either_side() {
+        let source = PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("issues").nullable_column(
+                    "labels",
+                    PublicColumnType::Array {
+                        element: Box::new(PublicColumnType::Uuid),
+                    },
+                ),
+            )
+            .build();
+        let schema = JazzSchema::new(&source).expect("nullable array schema compiles");
+        let empty_array = || lit(Value::Array(vec![]));
+
+        Query::from("issues")
+            .filter(eq(col("labels"), empty_array()))
+            .validate(&schema)
+            .expect("empty array equality accepts nullable array columns");
+        Query::from("issues")
+            .filter(eq(empty_array(), col("labels")))
+            .validate(&schema)
+            .expect("operand order does not change nullable array equality");
+
+        let error = Query::from("issues")
+            .filter(lt(col("labels"), empty_array()))
+            .validate(&schema)
+            .expect_err("arrays remain invalid for ordered comparisons");
+        assert_eq!(error, QueryError::OperandTypeMismatch);
+    }
+
+
+    #[test]
+    fn empty_array_comparison_does_not_use_inferred_param_type() {
+        let empty_array = || lit(Value::Array(vec![]));
+
+        let column_comparison_first = Query::from("issues")
+            .filter(eq(col("labels"), param("labels")))
+            .filter(eq(empty_array(), param("labels")))
+            .validate_runtime(&schema())
+            .expect_err("an inferred parameter is not a direct array column");
+        assert_eq!(
+            column_comparison_first,
+            QueryError::OperandTypeMismatch
+        );
+
+        let empty_array_comparison_first = Query::from("issues")
+            .filter(eq(empty_array(), param("labels")))
+            .filter(eq(col("labels"), param("labels")))
+            .validate_runtime(&schema())
+            .expect_err("parameter inference order does not enable the empty-array exception");
+        assert_eq!(
+            empty_array_comparison_first,
+            QueryError::OperandTypeMismatch
+        );
+    }
+
+    #[test]
     fn bound_payload_enum_value_returns_param_type_mismatch() {
         let validated = Query::from("events")
             .filter(eq(col("event"), param("event")))

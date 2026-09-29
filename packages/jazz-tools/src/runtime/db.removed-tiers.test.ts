@@ -75,3 +75,26 @@ it("waits for global instead of rejecting an already committed write at the remo
     await server.stop();
   }
 }, 60_000);
+
+it("rejects an unknown wait tier with a clear error without duplicating the applied write", async () => {
+  db = await createDb({
+    ...(await localAccountConfig("unknown-write-wait-tier")),
+    driver: { type: "memory" },
+  });
+  // A typo from plain JavaScript or a cast.
+  const typo = { tier: "globl" } as unknown as { tier: "global" };
+
+  const inserted = db.insert(app.notes, { title: "Draft" });
+  const waiting = inserted.wait(typo);
+  await expect(waiting).rejects.toThrow(TypeError);
+  await expect(waiting).rejects.toThrow(
+    'Unknown wait tier "globl"; expected "local" or "global". The write was already applied',
+  );
+  await expect(
+    db.update(app.notes, inserted.value.id, { title: "Final" }).wait(typo),
+  ).rejects.toThrow("The write was already applied");
+
+  // The write itself stands and still settles at a valid tier.
+  await inserted.wait({ tier: "local" });
+  expect(await db.all(app.notes)).toEqual([{ id: inserted.value.id, title: "Final" }]);
+});
