@@ -1,0 +1,94 @@
+/* Jamazon keeps local CSS to what Astryx has no component for: the generated
+   product illustrations and a few layout helpers. Tokens only. */
+
+html,
+body {
+  margin: 0;
+  background: var(--color-background-body);
+}
+
+.product-art {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: var(--radius-container);
+}
+.product-art-ground {
+  fill: var(--art-ground);
+}
+.product-art-line {
+  stroke: var(--art-line);
+  stroke-width: 3;
+}
+.product-art[data-hue="gray"] {
+  --art-ground: var(--color-background-gray);
+  --art-line: var(--color-icon-gray);
+}
+.product-art[data-hue="blue"] {
+  --art-ground: var(--color-background-blue);
+  --art-line: var(--color-icon-blue);
+}
+.product-art[data-hue="cyan"] {
+  --art-ground: var(--color-background-cyan);
+  --art-line: var(--color-icon-cyan);
+}
+.product-art[data-hue="green"] {
+  --art-ground: var(--color-background-green);
+  --art-line: var(--color-icon-green);
+}
+.product-art[data-hue="orange"] {
+  --art-ground: var(--color-background-orange);
+  --art-line: var(--color-icon-orange);
+}
+.product-art[data-hue="pink"] {
+  --art-ground: var(--color-background-pink);
+  --art-line: var(--color-icon-pink);
+}
+.product-art[data-hue="purple"] {
+  --art-ground: var(--color-background-purple);
+  --art-line: var(--color-icon-purple);
+}
+.product-art[data-hue="red"] {
+  --art-ground: var(--color-background-red);
+  --art-line: var(--color-icon-red);
+}
+.product-art[data-hue="teal"] {
+  --art-ground: var(--color-background-teal);
+  --art-line: var(--color-icon-teal);
+}
+.product-art[data-hue="yellow"] {
+  --art-ground: var(--color-background-yellow);
+  --art-line: var(--color-icon-yellow);
+}
+
+/* Pushes the following items in an HStack to the end. */
+.spacer {
+  flex: 1;
+}
+
+/* Product page: art beside details, stacked on narrow screens. */
+.product-layout {
+  display: grid;
+  gap: var(--spacing-8);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: start;
+}
+/* Checkout: form beside the order summary, stacked on narrow screens. */
+.with-summary {
+  display: grid;
+  gap: var(--spacing-8);
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  align-items: start;
+}
+@media (max-width: 800px) {
+  .product-layout,
+  .with-summary {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* Cart line thumbnails. */
+.thumb {
+  width: calc(var(--spacing-12) * 1.5);
+  flex: none;
+}
