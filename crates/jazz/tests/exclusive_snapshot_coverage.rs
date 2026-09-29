@@ -20,8 +20,8 @@ use std::task::{Context, Poll, Waker};
 mod common;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, ExclusiveTxOps, ReadOpts, RemoteLinkHint, SerializedReadResult,
-    WireTransportAdapter, block_on,
+    Db, DbConfig, DbIdentity, ErrorCode, ExclusiveTxOps, ReadOpts, RemoteLinkHint,
+    SerializedReadResult, WireTransportAdapter, block_on,
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
@@ -43,6 +43,7 @@ fn schema() -> JazzSchema {
         &SchemaBuilder::new()
             .table(TableSchemaBuilder::new("invites").column("code", ColumnType::Text))
             .table(TableSchemaBuilder::new("members").column("code", ColumnType::Text))
+            .table(TableSchemaBuilder::new("audit").column("note", ColumnType::Text))
             .allow_all()
             .build(),
     )
@@ -252,15 +253,15 @@ impl Net {
             .expect("revocation settles");
     }
 
-    /// Advance `client`'s known authority cut with a receipt for an unrelated
-    /// query, without delivering anything about invites.
+    /// Advance `client`'s known authority cut with a receipt for a table no
+    /// test reads or writes, delivering nothing about invites or members.
     fn unrelated_receipt(&self, client: usize) {
-        self.read(
-            client,
-            &Query::from("members"),
-            DurabilityTier::Global,
-            None,
-        );
+        self.read(client, &Query::from("audit"), DurabilityTier::Global, None);
+    }
+
+    fn members(&self) -> usize {
+        self.read(OWNER, &Query::from("members"), DurabilityTier::Global, None)
+            .len()
     }
 
     /// The invite-link recipe at the default (local) read tier: check the
@@ -353,8 +354,7 @@ fn revoked_invite_never_adds_a_member() {
         assert_ne!(net.redeem(BACKEND, "abc"), Redeem::Joined);
     }
     assert_eq!(
-        net.read(OWNER, &Query::from("members"), DurabilityTier::Global, None)
-            .len(),
+        net.members(),
         1,
         "only the redemption before the revocation added a member"
     );
@@ -401,6 +401,9 @@ fn revocation_after_the_read_rejects_the_redemption() {
 fn a_redemption_on_another_backend_is_seen_as_taken() {
     let net = Net::new(&[0x0a, 0x0b, 0x0c]);
     net.create_invite(OWNER, "abc");
+    // The first backend already holds the invite, so its redemption does not
+    // depend on hydration.
+    net.read(BACKEND, &invite_query("abc"), DurabilityTier::Global, None);
     assert_eq!(net.redeem(BACKEND, "abc"), Redeem::Joined);
     net.unrelated_receipt(2);
 
@@ -416,10 +419,10 @@ fn a_redemption_on_another_backend_is_seen_as_taken() {
 }
 
 /// Offline, an exclusive read answers from the replica instead of waiting for
-/// an authority that cannot answer. The row it returns is still validated
-/// when the commit reaches the authority.
+/// an authority that cannot answer, but the transaction cannot commit: the
+/// replica cannot vouch for the snapshot its cut claims (INV-TX-13).
 #[test]
-fn offline_exclusive_read_answers_from_the_replica() {
+fn offline_exclusive_read_answers_from_the_replica_but_cannot_commit() {
     let net = Net::new(&[0x0a, 0x0b]);
     let invite = net.create_invite(OWNER, "abc");
     assert_eq!(
@@ -439,26 +442,53 @@ fn offline_exclusive_read_answers_from_the_replica() {
         ),
         Some(vec![invite])
     );
-
-    // The owner revokes the invite while the backend is offline. Back
-    // online, the authority rejects the membership the stale read allowed.
-    net.revoke(OWNER, invite);
     net.drive(
         db.exclusive_tx_ref(open)
             .insert("members", cells("abc"), Default::default()),
     )
     .unwrap();
-    let tx_id = net.drive(db.commit_exclusive_handle(open)).unwrap();
+    let error = net.drive(db.commit_exclusive_handle(open)).unwrap_err();
+    assert_eq!(error.code, ErrorCode::NotObserved);
     db.set_remote_link_hint(RemoteLinkHint::Live);
-    assert!(net.settle(BACKEND, tx_id).is_err());
-    assert!(
-        net.read(OWNER, &Query::from("members"), DurabilityTier::Global, None)
-            .is_empty()
+    assert_eq!(net.members(), 0);
+}
+
+/// The double-redeem half of #3694 offline: a backend whose cut covers
+/// another backend's redemption, but which never received it, reads "nobody
+/// redeemed it" from its replica. That absence guard returns no row to prove,
+/// so the commit must be refused rather than accepted by the authority.
+#[test]
+fn offline_absence_guard_cannot_commit() {
+    let net = Net::new(&[0x0a, 0x0b, 0x0c]);
+    net.create_invite(OWNER, "abc");
+    net.read(BACKEND, &invite_query("abc"), DurabilityTier::Global, None);
+    assert_eq!(net.redeem(BACKEND, "abc"), Redeem::Joined);
+    // The cut now covers the redemption; the members row never arrived.
+    net.read(2, &invite_query("abc"), DurabilityTier::Global, None);
+
+    let db = net.db(2);
+    db.set_remote_link_hint(RemoteLinkHint::NoServer);
+    let open = OpenTransactionId::new();
+    block_on(db.begin_exclusive(open)).unwrap();
+    let taken = Query::from("members").filter(eq(col("code"), lit("abc")));
+    assert_eq!(
+        net.read_while(2, &taken, open, RemoteLinkHint::NoServer),
+        Some(vec![])
     );
+    net.drive(
+        db.exclusive_tx_ref(open)
+            .insert("members", cells("abc"), Default::default()),
+    )
+    .unwrap();
+    let error = net.drive(db.commit_exclusive_handle(open)).unwrap_err();
+    assert_eq!(error.code, ErrorCode::NotObserved);
+    db.set_remote_link_hint(RemoteLinkHint::Live);
+    assert_eq!(net.members(), 1, "the invite was redeemed only once");
 }
 
 /// An exclusive read waiting on its snapshot hydration stops waiting when
-/// the authority becomes unreachable, and answers from the replica.
+/// the authority becomes unreachable and answers from the replica; the
+/// transaction then cannot commit.
 #[test]
 fn exclusive_read_falls_back_to_the_replica_when_the_link_is_lost() {
     let net = Net::new(&[0x0a, 0x0b]);
@@ -480,4 +510,36 @@ fn exclusive_read_falls_back_to_the_replica_when_the_link_is_lost() {
         net.read_while(BACKEND, &invite_query("abc"), open, RemoteLinkHint::Failed),
         Some(vec![invite])
     );
+    net.drive(
+        db.exclusive_tx_ref(open)
+            .insert("members", cells("abc"), Default::default()),
+    )
+    .unwrap();
+    db.set_remote_link_hint(RemoteLinkHint::Live);
+    let error = net.drive(db.commit_exclusive_handle(open)).unwrap_err();
+    assert_eq!(error.code, ErrorCode::NotObserved);
+    assert_eq!(net.members(), 0);
+}
+
+/// A transaction whose snapshot claims no authority state reads its replica
+/// offline and still commits: the authority validates its predicates from
+/// the beginning of history.
+#[test]
+fn offline_exclusive_commit_from_a_genesis_snapshot_is_allowed() {
+    let net = Net::new(&[0x0a]);
+    let db = net.db(OWNER);
+    db.set_remote_link_hint(RemoteLinkHint::NoServer);
+    let open = OpenTransactionId::new();
+    block_on(db.begin_exclusive(open)).unwrap();
+    assert_eq!(
+        net.read_while(OWNER, &invite_query("abc"), open, RemoteLinkHint::NoServer),
+        Some(vec![])
+    );
+    net.drive(
+        db.exclusive_tx_ref(open)
+            .insert("invites", cells("abc"), Default::default()),
+    )
+    .unwrap();
+    net.drive(db.commit_exclusive_handle(open))
+        .expect("a genesis snapshot needs no hydration");
 }

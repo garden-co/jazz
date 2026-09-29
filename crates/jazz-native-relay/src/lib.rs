@@ -8411,10 +8411,6 @@ mod tests {
             matches!(remote, ForegroundDbCommandResponse::Rows { .. }),
             "{remote:?}"
         );
-        fixture.execute(
-            foreground,
-            ForegroundDbCommandRequest::DisconnectNativeUpstream,
-        );
         let ForegroundDbCommandResponse::TransactionOpened { transaction } = fixture.execute(
             foreground,
             ForegroundDbCommandRequest::BeginTransaction {
@@ -8456,6 +8452,11 @@ mod tests {
         assert!(
             matches!(read, ForegroundDbCommandResponse::Rows { .. }),
             "{read:?}"
+        );
+        // The read hydrated its snapshot online; the commit is made offline.
+        fixture.execute(
+            foreground,
+            ForegroundDbCommandRequest::DisconnectNativeUpstream,
         );
         let ForegroundDbCommandResponse::TransactionCommitted { tx_id } = fixture.execute(
             foreground,
@@ -10944,6 +10945,92 @@ mod tests {
         };
         assert_exact_todo_rows(&rows, row_id, "queued");
         client.close().unwrap();
+    }
+
+    // Internal receipt: the reported hint is the core read gate's input, which
+    // no public surface exposes. A plain relay client's own upstream is the
+    // relay, so it must see the relay's server link, not an always-live peer.
+    #[test]
+    fn plain_relay_clients_see_the_relay_server_link() {
+        let directory = tempfile::tempdir().unwrap();
+        let relay =
+            NativeRelay::spawn(config(directory.path().join("link.sqlite"), Some("link"))).unwrap();
+        let client = relay
+            .attach_client(
+                fresh_client_identity(AuthorSubject::for_test_bytes([0x4a; 16])).unwrap(),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let id = client.id;
+        let hint = |relay: &NativeRelay| {
+            relay
+                .run(move |worker| Ok(worker.foreground_client(id)?.db.remote_link_hint_for_test()))
+                .unwrap()
+        };
+        assert_eq!(hint(&relay), Some(RemoteLinkHint::NoServer));
+
+        let generation = relay
+            .run(|worker| {
+                worker
+                    .begin_socket_upstream(None)
+                    .map(|(generation, _)| generation)
+            })
+            .unwrap();
+        relay.pump().unwrap();
+        assert!(matches!(
+            hint(&relay),
+            Some(RemoteLinkHint::Attempting | RemoteLinkHint::Live)
+        ));
+        for _ in 0..10 {
+            if hint(&relay) == Some(RemoteLinkHint::Live) {
+                break;
+            }
+            relay.pump().unwrap();
+        }
+        assert_eq!(hint(&relay), Some(RemoteLinkHint::Live));
+
+        assert!(
+            relay
+                .run(move |worker| worker.retire_socket_upstream(generation))
+                .unwrap()
+        );
+        relay.pump().unwrap();
+        assert_eq!(hint(&relay), Some(RemoteLinkHint::NoServer));
+        client.close().unwrap();
+    }
+
+    // Internal receipt: see above. A host foreground whose scope has no native
+    // socket session has no server its reads could wait for.
+    #[test]
+    fn host_foreground_without_a_socket_session_reports_no_server() {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = NativeHostAbiFixture::new();
+        let capability = fixture.admit(
+            &directory.path().join("no-socket.sqlite"),
+            "no-socket",
+            &permissive_schema(),
+            0xc7,
+        );
+        let foreground = fixture.open_foreground(&capability);
+        fixture.execute(
+            foreground,
+            ForegroundDbCommandRequest::NativeSessionMetadata,
+        );
+        let client = unsafe { &*fixture.host }
+            .inner
+            .lock()
+            .unwrap()
+            .foreground_client(foreground)
+            .unwrap()
+            .clone();
+        let id = client.id;
+        assert_eq!(
+            client
+                .relay
+                .run(move |worker| Ok(worker.foreground_client(id)?.db.remote_link_hint_for_test()))
+                .unwrap(),
+            Some(RemoteLinkHint::NoServer)
+        );
     }
 
     // Internal receipt: JS cannot deliberately hold the native owner. All results

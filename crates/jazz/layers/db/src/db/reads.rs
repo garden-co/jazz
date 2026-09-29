@@ -346,7 +346,6 @@ where
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
     /// Wait until a serialized read's coverage attachment is covered.
     async fn wait_for_serialized_read_coverage<F, E>(
         &self,
@@ -376,6 +375,7 @@ where
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn all_serialized_query_once<F, E>(
         &self,
         query: &[u8],
@@ -513,8 +513,10 @@ where
         // hold, and the authority validates the predicate against a cut the
         // reader never had (garden-co/jazz#3694).
         //
-        // Offline, the read keeps the replica's answer: the authority still
-        // validates every row it returned when the commit reaches it.
+        // Offline, the read keeps the replica's answer so the transaction
+        // stays usable, but the replica cannot vouch for rows it never
+        // received: the transaction is marked unhydrated and its commit is
+        // refused.
         let exclusive_snapshot_read = match open_tx {
             Some(open_tx) if self.node.receives_commits_as_local() => {
                 self.transaction_is_exclusive(open_tx).await?
@@ -523,10 +525,10 @@ where
             _ => false,
         };
         let mut coverage = None;
-        if exclusive_snapshot_read
-            && effective_read_tier(&opts) < DurabilityTier::Global
-            && let Some(epoch) = self.node.remote_link.arm()
-        {
+        let hydrate =
+            exclusive_snapshot_read && effective_read_tier(&opts) < DurabilityTier::Global;
+        let mut hydrated = !hydrate;
+        if hydrate && let Some(epoch) = self.node.remote_link.arm() {
             let mut hydration_opts = opts.clone();
             hydration_opts.tier = DurabilityTier::Global;
             let hydration = SerializedReadCoverage {
@@ -541,11 +543,15 @@ where
                 Some(result) => {
                     result?;
                     coverage = Some(hydration);
+                    hydrated = true;
                 }
                 // The authority became unreachable: drop the pending
                 // hydration and read the replica.
                 None => drop(hydration),
             }
+        }
+        if !hydrated && let Some(open_tx) = open_tx {
+            self.mark_exclusive_snapshot_unhydrated(open_tx).await?;
         }
         if coverage.is_none() && require_coverage {
             let attachment = self

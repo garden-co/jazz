@@ -65,6 +65,7 @@ impl From<crate::node::Error> for Error {
             crate::node::Error::Storage(_) | crate::node::Error::Groove(_) => ErrorCode::Storage,
             crate::node::Error::Query(_) => ErrorCode::Query,
             crate::node::Error::TransactionConflict => ErrorCode::TransactionConflict,
+            crate::node::Error::ExclusiveSnapshotNotHydrated => ErrorCode::NotObserved,
             crate::node::Error::TableNotFound(_)
             | crate::node::Error::UnsupportedColumnType(_)
             | crate::node::Error::InvalidMergeableCommit(_) => ErrorCode::Schema,

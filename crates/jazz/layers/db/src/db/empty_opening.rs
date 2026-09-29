@@ -225,6 +225,15 @@ impl RemoteLinkTracker {
         self.notify();
     }
 
+    fn reported_hint(&self) -> Option<RemoteLinkHint> {
+        self.hint.get().map(|host| match host {
+            HostLink::NoServer => RemoteLinkHint::NoServer,
+            HostLink::Attempting { .. } => RemoteLinkHint::Attempting,
+            HostLink::Live => RemoteLinkHint::Live,
+            HostLink::Failed => RemoteLinkHint::Failed,
+        })
+    }
+
     pub(super) fn upstream_attached(&self) {
         self.live_upstreams.set(self.live_upstreams.get() + 1);
     }
@@ -489,6 +498,12 @@ where
     /// own upstream connections.
     pub fn set_remote_link_hint(&self, hint: RemoteLinkHint) {
         self.node.remote_link.set_hint(hint);
+    }
+
+    /// The last hint a host reported, if any.
+    #[doc(hidden)]
+    pub fn remote_link_hint_for_test(&self) -> Option<RemoteLinkHint> {
+        self.node.remote_link.reported_hint()
     }
 
     /// Resolve an [`EmptyOpening::AwaitRemote`] subscription request: the
