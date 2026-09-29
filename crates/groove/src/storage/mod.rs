@@ -2183,6 +2183,10 @@ impl<S> OrderedKvStorage for StorageTransaction<'_, S>
 where
     S: OrderedKvStorage,
 {
+    fn permits_eager_read_retry(&self) -> bool {
+        self.base.permits_eager_read_retry()
+    }
+
     fn put_if_absent(
         &self,
         _cf: String,
@@ -2790,6 +2794,7 @@ mod tests {
             .await
             .expect("identity layout opens");
         assert!(layout.permits_eager_read_retry());
+        assert!(layout.begin_txn().permits_eager_read_retry());
 
         let (backend, _) = MeteredStorage::new();
         assert!(!BoxedStorage::new(backend).permits_eager_read_retry());

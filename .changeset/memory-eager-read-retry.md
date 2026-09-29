@@ -2,4 +2,4 @@
 "jazz-tools": patch
 ---
 
-In-memory databases re-poll a storage read that yields once in the same turn again, instead of leaving it for a later runtime tick.
+In-memory databases now honour their storage's eager read retry setting, which lets a read that yields once be re-polled in the same turn.
