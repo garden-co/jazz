@@ -62,9 +62,12 @@ use jazz_native_transport::NativeWebSocketConnector;
 use jazz_storage_sqlite::{Durability as SqliteDurability, SqliteStorage};
 use thiserror::Error;
 
-/// The first public native-relay ABI. Future breaking command/wire changes
-/// receive a distinct version; no historical implementation number is public.
-pub const NATIVE_RELAY_ABI_V1: u16 = 1;
+/// The current native-relay ABI version. (The name is kept for the exported
+/// `jazz-rn` constant.) Breaking command/response changes bump the value:
+/// 1 was the first public ABI; 2 added `CodedOperationError` answers to
+/// existing commands, so a JS bundle and native build from different ABIs
+/// refuse to open rather than misread a failure.
+pub const NATIVE_RELAY_ABI_V1: u16 = 2;
 
 const FOREGROUND_WAKE_IMMEDIATE: u8 = 0;
 const FOREGROUND_WAKE_DEFERRED: u8 = 1;
@@ -682,6 +685,13 @@ pub enum ForegroundDbCommandResponse {
     },
     PermissionAdvice {
         advice: ForegroundPermissionAdvice,
+    },
+    /// An `OperationError` caused by a core `jazz::db::Error`, carrying its
+    /// stable `ErrorCode::as_str` code beside the unchanged reason text.
+    /// Introduced by ABI 2: every other failure still uses `OperationError`.
+    CodedOperationError {
+        code: String,
+        reason: String,
     },
 }
 
@@ -1449,8 +1459,8 @@ impl NativeRelayHost {
     /// own upstream is the local relay core, which is always attached, so it
     /// cannot tell whether the authoritative server could answer. Only a
     /// change is reported, so an `Attempting` report timestamps the start of
-    /// the attempt the relay first observed. Foregrounds without a native
-    /// socket session keep the core's derived state.
+    /// the attempt the relay first observed. A foreground without a native
+    /// socket session has no server to wait for.
     fn sync_foreground_remote_link(&mut self, foreground: u64) {
         let Some(opened) = self.foregrounds.get(&foreground) else {
             return;
@@ -1462,6 +1472,7 @@ impl NativeRelayHost {
             .private_socket_sessions
             .contains_key(&relay.admitted_scope)
         {
+            self.report_foreground_remote_link(foreground, RemoteLinkHint::NoServer);
             return;
         }
         let scope = opened.scope.clone();
@@ -1496,6 +1507,17 @@ impl NativeRelayHost {
             }
         };
         if previous == Some(hint) {
+            return;
+        }
+        self.report_foreground_remote_link(foreground, hint);
+    }
+
+    fn report_foreground_remote_link(&mut self, foreground: u64, hint: RemoteLinkHint) {
+        if self
+            .foregrounds
+            .get(&foreground)
+            .is_none_or(|opened| opened.remote_link_hint == Some(hint))
+        {
             return;
         }
         let reported = self
@@ -3445,7 +3467,7 @@ impl NativeRelayClient {
     /// across JSI/JNI/Swift boundaries.
     pub fn with_db<T: Send + 'static>(
         &self,
-        operation: impl FnOnce(&Db<MemoryStorage>) -> Result<T, RelayError> + Send + 'static,
+        operation: impl FnOnce(&Db) -> Result<T, RelayError> + Send + 'static,
     ) -> Result<T, RelayError> {
         let id = self.id;
         self.relay.run(move |worker| {
@@ -4955,7 +4977,9 @@ struct ConnectedClient {
     refreshed_claims: Option<BTreeMap<String, Value>>,
     retiring: bool,
     admitted_scope_advice: bool,
-    db: Rc<Db<MemoryStorage>>,
+    /// Reachability last reported to a client the host does not manage.
+    relay_link_hint: Option<RemoteLinkHint>,
+    db: Rc<Db>,
     tick: Option<RelayTickFuture>,
     upstream_io: RelayPeerIo,
     served_io: Option<RelayPeerIo>,
@@ -4976,8 +5000,8 @@ struct ConnectedClient {
     next_foreground_handle: u64,
     // The core stores weak references for lifecycle ownership; retaining both
     // endpoints is what keeps the normal peer protocol connection alive.
-    _upstream: Rc<LocalMutex<PeerConnection<MemoryStorage>>>,
-    _served: Option<Rc<LocalMutex<PeerConnection<SqliteStorage>>>>,
+    _upstream: Rc<LocalMutex<PeerConnection>>,
+    _served: Option<Rc<LocalMutex<PeerConnection>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -5119,11 +5143,8 @@ type ForegroundOperationFuture =
     Pin<Box<dyn Future<Output = Result<ForegroundOperationResult, RelayError>> + 'static>>;
 
 type RelayTickFuture = Pin<Box<dyn Future<Output = Result<(), jazz::db::Error>>>>;
-type RelayAdmissionFuture = Pin<
-    Box<
-        dyn Future<Output = Result<Rc<LocalMutex<PeerConnection<SqliteStorage>>>, jazz::db::Error>>,
-    >,
->;
+type RelayAdmissionFuture =
+    Pin<Box<dyn Future<Output = Result<Rc<LocalMutex<PeerConnection>>, jazz::db::Error>>>>;
 
 /// A peer's chunk lane must progress even while its semantic tick or a
 /// foreground read owns the node. Retain both the endpoint and any suspended
@@ -5239,9 +5260,30 @@ enum ForegroundOperationResult {
 }
 
 enum ForegroundOperationPoll {
-    Pending { operation: u64 },
+    Pending {
+        operation: u64,
+    },
     Ready(ForegroundOperationResult),
-    Error { reason: String },
+    Error {
+        /// The stable core code when the failure is a core `jazz::db::Error`.
+        code: Option<&'static str>,
+        reason: String,
+    },
+}
+
+/// The response for a failed foreground operation. A core error keeps its
+/// display text as the reason and adds its stable code.
+fn foreground_operation_error(
+    code: Option<&'static str>,
+    reason: String,
+) -> ForegroundDbCommandResponse {
+    match code {
+        Some(code) => ForegroundDbCommandResponse::CodedOperationError {
+            code: code.to_owned(),
+            reason,
+        },
+        None => ForegroundDbCommandResponse::OperationError { reason },
+    }
 }
 
 fn foreground_operation_response(poll: ForegroundOperationPoll) -> ForegroundDbCommandResponse {
@@ -5274,9 +5316,7 @@ fn foreground_operation_response(poll: ForegroundOperationPoll) -> ForegroundDbC
                 tx_id: *tx_id.as_bytes(),
             }
         }
-        ForegroundOperationPoll::Error { reason } => {
-            ForegroundDbCommandResponse::OperationError { reason }
-        }
+        ForegroundOperationPoll::Error { code, reason } => foreground_operation_error(code, reason),
     }
 }
 
@@ -5294,9 +5334,10 @@ fn foreground_command_error(
         RelayError::QueueCapacityExceeded { .. } => Err(JazzNativeRelayStatus::Backpressure),
         // Preserve the core Error prefix consumed by the shared TS adapter's
         // rejection normalizer, exactly as NAPI and WASM do.
-        RelayError::Db(error) => Ok(ForegroundDbCommandResponse::OperationError {
-            reason: error.to_string(),
-        }),
+        RelayError::Db(error) => Ok(foreground_operation_error(
+            Some(error.code.as_str()),
+            error.to_string(),
+        )),
         error => Ok(ForegroundDbCommandResponse::OperationError {
             reason: error.to_string(),
         }),
@@ -5351,13 +5392,7 @@ impl ClosingForeground {
 type UpstreamTransition = Pin<
     Box<
         dyn Future<
-            Output = Result<
-                Option<(
-                    Rc<LocalMutex<PeerConnection<SqliteStorage>>>,
-                    NativeRelayWire,
-                )>,
-                RelayError,
-            >,
+            Output = Result<Option<(Rc<LocalMutex<PeerConnection>>, NativeRelayWire)>, RelayError>,
         >,
     >,
 >;
@@ -5369,13 +5404,13 @@ struct RelayWorker {
     drive_error: Option<RelayError>,
     #[cfg(test)]
     drive_turns: u64,
-    persistent: Rc<Db<SqliteStorage>>,
+    persistent: Rc<Db>,
     persistent_tick: Option<RelayTickFuture>,
     upstream_io: RelayPeerIo,
     pending_foreground_wakes: PendingForegroundWakes,
     foreground_wake_generations: BTreeMap<u64, Arc<AtomicU64>>,
     owner_wake_queued: Arc<AtomicBool>,
-    _upstream: Rc<LocalMutex<PeerConnection<SqliteStorage>>>,
+    _upstream: Rc<LocalMutex<PeerConnection>>,
     upstream_attached: bool,
     socket_generation: u64,
     socket_wire: Option<NativeRelayWire>,
@@ -5714,6 +5749,7 @@ impl RelayWorker {
                 refreshed_claims: None,
                 retiring: false,
                 admitted_scope_advice,
+                relay_link_hint: None,
                 mutations: foreground_mutations::MutationHandles::new(&db),
                 db,
                 tick: None,
@@ -5735,6 +5771,7 @@ impl RelayWorker {
                 _served: None,
             },
         );
+        self.report_relay_link();
         let client = self.clients.get_mut(&id).expect("new client was inserted");
         client.poll_admission(&Waker::from(Arc::clone(&self.wake)));
         if let Err(error) = client.check_admission() {
@@ -5811,9 +5848,33 @@ impl RelayWorker {
         self.flush_foreground_wakes();
     }
 
+    /// What a client's reads can expect from the authority through this
+    /// relay: its connected clients' own upstream is the relay, which answers
+    /// for the authority only while its socket upstream is installed.
+    fn relay_link_hint(&self) -> RemoteLinkHint {
+        match (&self.socket_wire, &self.upstream_transition) {
+            (None, _) => RemoteLinkHint::NoServer,
+            (Some(_), None) if self.upstream_attached => RemoteLinkHint::Live,
+            (Some(_), _) => RemoteLinkHint::Attempting,
+        }
+    }
+
+    /// Report the relay's reachability to clients whose host does not report
+    /// it (host-opened foregrounds get the host's own hint).
+    fn report_relay_link(&mut self) {
+        let hint = self.relay_link_hint();
+        for client in self.clients.values_mut() {
+            if !client.admitted_scope_advice && client.relay_link_hint != Some(hint) {
+                client.relay_link_hint = Some(hint);
+                client.db.set_remote_link_hint(hint);
+            }
+        }
+    }
+
     fn pump(&mut self) -> Result<(), RelayError> {
         let waker = Waker::from(Arc::clone(&self.wake));
         self.poll_upstream_transition()?;
+        self.report_relay_link();
         self.poll_closing(&waker)?;
         // One fair relay turn has exactly three protocol phases. A UI upload
         // becomes relay input, the relay applies/forwards it, then UI clients
@@ -6227,10 +6288,14 @@ impl RelayWorker {
         let mut context = Context::from_waker(&waker);
         match pending_operation.future.as_mut().poll(&mut context) {
             Poll::Ready(Ok(result)) => Ok(ForegroundOperationPoll::Ready(result)),
-            Poll::Ready(Err(error)) => Ok(ForegroundOperationPoll::Error {
-                reason: match error {
-                    RelayError::Db(error) => error.to_string(),
-                    error => error.to_string(),
+            Poll::Ready(Err(error)) => Ok(match error {
+                RelayError::Db(error) => ForegroundOperationPoll::Error {
+                    code: Some(error.code.as_str()),
+                    reason: error.to_string(),
+                },
+                error => ForegroundOperationPoll::Error {
+                    code: None,
+                    reason: error.to_string(),
                 },
             }),
             Poll::Pending => {
@@ -6325,7 +6390,7 @@ impl RelayWorker {
         &self,
         client: u64,
         transaction: u64,
-    ) -> Result<(Rc<Db<MemoryStorage>>, ForegroundTransaction), RelayError> {
+    ) -> Result<(Rc<Db>, ForegroundTransaction), RelayError> {
         let client = self.foreground_client(client)?;
         let transaction = client
             .transactions
@@ -8380,10 +8445,6 @@ mod tests {
             matches!(remote, ForegroundDbCommandResponse::Rows { .. }),
             "{remote:?}"
         );
-        fixture.execute(
-            foreground,
-            ForegroundDbCommandRequest::DisconnectNativeUpstream,
-        );
         let ForegroundDbCommandResponse::TransactionOpened { transaction } = fixture.execute(
             foreground,
             ForegroundDbCommandRequest::BeginTransaction {
@@ -8425,6 +8486,11 @@ mod tests {
         assert!(
             matches!(read, ForegroundDbCommandResponse::Rows { .. }),
             "{read:?}"
+        );
+        // The read hydrated its snapshot online; the commit is made offline.
+        fixture.execute(
+            foreground,
+            ForegroundDbCommandRequest::DisconnectNativeUpstream,
         );
         let ForegroundDbCommandResponse::TransactionCommitted { tx_id } = fixture.execute(
             foreground,
@@ -10915,6 +10981,92 @@ mod tests {
         client.close().unwrap();
     }
 
+    // Internal receipt: the reported hint is the core read gate's input, which
+    // no public surface exposes. A plain relay client's own upstream is the
+    // relay, so it must see the relay's server link, not an always-live peer.
+    #[test]
+    fn plain_relay_clients_see_the_relay_server_link() {
+        let directory = tempfile::tempdir().unwrap();
+        let relay =
+            NativeRelay::spawn(config(directory.path().join("link.sqlite"), Some("link"))).unwrap();
+        let client = relay
+            .attach_client(
+                fresh_client_identity(AuthorSubject::for_test_bytes([0x4a; 16])).unwrap(),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let id = client.id;
+        let hint = |relay: &NativeRelay| {
+            relay
+                .run(move |worker| Ok(worker.foreground_client(id)?.db.remote_link_hint_for_test()))
+                .unwrap()
+        };
+        assert_eq!(hint(&relay), Some(RemoteLinkHint::NoServer));
+
+        let generation = relay
+            .run(|worker| {
+                worker
+                    .begin_socket_upstream(None)
+                    .map(|(generation, _)| generation)
+            })
+            .unwrap();
+        relay.pump().unwrap();
+        assert!(matches!(
+            hint(&relay),
+            Some(RemoteLinkHint::Attempting | RemoteLinkHint::Live)
+        ));
+        for _ in 0..10 {
+            if hint(&relay) == Some(RemoteLinkHint::Live) {
+                break;
+            }
+            relay.pump().unwrap();
+        }
+        assert_eq!(hint(&relay), Some(RemoteLinkHint::Live));
+
+        assert!(
+            relay
+                .run(move |worker| worker.retire_socket_upstream(generation))
+                .unwrap()
+        );
+        relay.pump().unwrap();
+        assert_eq!(hint(&relay), Some(RemoteLinkHint::NoServer));
+        client.close().unwrap();
+    }
+
+    // Internal receipt: see above. A host foreground whose scope has no native
+    // socket session has no server its reads could wait for.
+    #[test]
+    fn host_foreground_without_a_socket_session_reports_no_server() {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = NativeHostAbiFixture::new();
+        let capability = fixture.admit(
+            &directory.path().join("no-socket.sqlite"),
+            "no-socket",
+            &permissive_schema(),
+            0xc7,
+        );
+        let foreground = fixture.open_foreground(&capability);
+        fixture.execute(
+            foreground,
+            ForegroundDbCommandRequest::NativeSessionMetadata,
+        );
+        let client = unsafe { &*fixture.host }
+            .inner
+            .lock()
+            .unwrap()
+            .foreground_client(foreground)
+            .unwrap()
+            .clone();
+        let id = client.id;
+        assert_eq!(
+            client
+                .relay
+                .run(move |worker| Ok(worker.foreground_client(id)?.db.remote_link_hint_for_test()))
+                .unwrap(),
+            Some(RemoteLinkHint::NoServer)
+        );
+    }
+
     // Internal receipt: JS cannot deliberately hold the native owner. All results
     // are asserted through the foreground transaction/read/settlement boundary.
     #[test]
@@ -11165,7 +11317,7 @@ mod tests {
                     )
                 })
                 .unwrap();
-            thread_local! { static CLOSED_DB: RefCell<std::rc::Weak<Db<MemoryStorage>>> = const { RefCell::new(std::rc::Weak::new()) }; }
+            thread_local! { static CLOSED_DB: RefCell<std::rc::Weak<Db>> = const { RefCell::new(std::rc::Weak::new()) }; }
             relay
                 .run(move |worker| {
                     CLOSED_DB.with(|weak| {
@@ -11191,7 +11343,7 @@ mod tests {
                 .start_foreground_read(query, "{}".into(), Some(tx))
                 .unwrap();
             assert!(matches!(pending, ForegroundOperationPoll::Pending { .. }));
-            thread_local! { static CLOSED_WRITE: RefCell<Option<Rc<jazz::db::WriteHandle<MemoryStorage>>>> = const { RefCell::new(None) }; }
+            thread_local! { static CLOSED_WRITE: RefCell<Option<Rc<jazz::db::WriteHandle>>> = const { RefCell::new(None) }; }
             if committed {
                 let tx_id = client.commit_foreground_transaction(tx).unwrap();
                 relay
@@ -11291,7 +11443,7 @@ mod tests {
         let id = client.id;
         let observed = Arc::new(AtomicBool::new(false));
         let receipt = Arc::clone(&observed);
-        thread_local! { static RETIRED_DB: RefCell<std::rc::Weak<Db<MemoryStorage>>> = const { RefCell::new(std::rc::Weak::new()) }; }
+        thread_local! { static RETIRED_DB: RefCell<std::rc::Weak<Db>> = const { RefCell::new(std::rc::Weak::new()) }; }
         relay
             .run(move |worker| {
                 let db = Rc::clone(&worker.foreground_client(id)?.db);
@@ -14344,8 +14496,14 @@ mod tests {
             admitted_scope,
         };
         for (request, expected) in [
-            (request(3, 2), JazzNativeRelayStatus::InvalidAbiRange),
-            (request(2, 2), JazzNativeRelayStatus::IncompatibleAbi),
+            (
+                request(NATIVE_RELAY_ABI_V1 + 2, NATIVE_RELAY_ABI_V1 + 1),
+                JazzNativeRelayStatus::InvalidAbiRange,
+            ),
+            (
+                request(NATIVE_RELAY_ABI_V1 + 1, NATIVE_RELAY_ABI_V1 + 1),
+                JazzNativeRelayStatus::IncompatibleAbi,
+            ),
         ] {
             let encoded = postcard::to_allocvec(&request).unwrap();
             let mut output = JazzNativeRelayBytes {
@@ -15799,7 +15957,7 @@ mod tests {
 
         // Invalid schema/cell input is a logical operation error rather than
         // a lifecycle failure, preserving the core error boundary for the
-        // shared adapter.
+        // shared adapter. Being a core error, it carries its stable code.
         let ForegroundDbCommandResponse::TransactionOpened { transaction } = response(
             foreground,
             ForegroundDbCommandRequest::BeginTransaction {
@@ -15808,18 +15966,22 @@ mod tests {
         ) else {
             panic!("begin must return a handle");
         };
-        assert!(matches!(
-            response(
-                foreground,
-                ForegroundDbCommandRequest::Insert {
-                    transaction,
-                    table: "missing_table".to_owned(),
-                    cells: encoded_title_cells("nope"),
-                    row_id: Some([0x73; 16]),
-                }
-            ),
-            ForegroundDbCommandResponse::OperationError { .. }
-        ));
+        let rejected_insert = response(
+            foreground,
+            ForegroundDbCommandRequest::Insert {
+                transaction,
+                table: "missing_table".to_owned(),
+                cells: encoded_title_cells("nope"),
+                row_id: Some([0x73; 16]),
+            },
+        );
+        assert_eq!(
+            rejected_insert,
+            ForegroundDbCommandResponse::CodedOperationError {
+                code: "schema".to_owned(),
+                reason: "Schema: unknown table missing_table".to_owned(),
+            }
+        );
         assert_eq!(
             response(
                 foreground,
@@ -16155,6 +16317,35 @@ mod tests {
         {
             assert_eq!(postcard::to_allocvec(&kind).unwrap(), vec![ordinal as u8]);
         }
+    }
+
+    #[test]
+    fn foreground_coded_operation_error_v1_byte_contract() {
+        // Response 25 is appended to V1: a core error's stable code, then the
+        // unchanged reason. Uncoded failures keep response 8.
+        let coded = ForegroundDbCommandResponse::CodedOperationError {
+            code: "not_observed".into(),
+            reason: "NotObserved: oops".into(),
+        };
+        let bytes = [
+            vec![25, 12],
+            b"not_observed".to_vec(),
+            vec![17],
+            b"NotObserved: oops".to_vec(),
+        ]
+        .concat();
+        assert_eq!(postcard::to_allocvec(&coded).unwrap(), bytes);
+        assert_eq!(
+            postcard::from_bytes::<ForegroundDbCommandResponse>(&bytes).unwrap(),
+            coded
+        );
+        assert_eq!(
+            postcard::to_allocvec(&ForegroundDbCommandResponse::OperationError {
+                reason: "oops".into()
+            })
+            .unwrap(),
+            vec![8, 4, 111, 111, 112, 115]
+        );
     }
 
     #[test]

@@ -2018,7 +2018,7 @@ fn validate_array(
             Err(Error::InvalidOffset)
         };
     }
-    let values_start = checked_add(4, count.saturating_sub(1) * 4)?;
+    let values_start = checked_array_table_end(4, count).map_err(|_| Error::InvalidOffset)?;
     if bytes.len() < values_start {
         return Err(Error::UnexpectedEof);
     }
@@ -2027,7 +2027,8 @@ fn validate_array(
         let end = if index + 1 == count {
             bytes.len()
         } else {
-            u32_to_usize(read_u32_at(bytes, 4 + index * 4)?)?
+            let slot = checked_offset_slot(4, index).map_err(|_| Error::InvalidOffset)?;
+            u32_to_usize(read_u32_at(bytes, slot)?)?
         };
         if end < start || end > bytes.len() {
             return Err(Error::InvalidOffset);
@@ -2133,13 +2134,7 @@ pub(super) fn visit_encoded_indirect_values(
             // Indirect-capable array elements are variable-width. Bounds-check
             // the offset table before visiting entries, without allocating it.
             let count = u32_to_usize(read_u32_at(bytes, 0)?)?;
-            let mut start = checked_add(
-                4,
-                count
-                    .saturating_sub(1)
-                    .checked_mul(4)
-                    .ok_or_else(|| Error::InvalidOffset)?,
-            )?;
+            let mut start = checked_array_table_end(4, count).map_err(|_| Error::InvalidOffset)?;
             if start > bytes.len() {
                 return Err(Error::UnexpectedEof);
             }
@@ -2147,7 +2142,8 @@ pub(super) fn visit_encoded_indirect_values(
                 let end = if index + 1 == count {
                     bytes.len()
                 } else {
-                    u32_to_usize(read_u32_at(bytes, 4 + index * 4)?)?
+                    let slot = checked_offset_slot(4, index).map_err(|_| Error::InvalidOffset)?;
+                    u32_to_usize(read_u32_at(bytes, slot)?)?
                 };
                 let item = bytes.get(start..end).ok_or_else(|| Error::InvalidOffset)?;
                 if visit_encoded_indirect_values(item, inner, visitor)? {
@@ -2200,7 +2196,7 @@ fn encode_array(
     let base = bytes.len();
     write_u32(bytes, usize_to_u32(values.len())?);
     let offset_count = values.len().saturating_sub(1);
-    let payload_start = checked_add(bytes.len(), offset_count * 4)?;
+    let payload_start = checked_array_table_end(bytes.len(), values.len())?;
     bytes.resize(payload_start, 0);
     for (index, value) in values.iter().enumerate() {
         encode_value_into(bytes, value, element_type)?;
@@ -2208,8 +2204,9 @@ fn encode_array(
             // Offsets belong to this array, even when nested inside another
             // array, nullable value or a record's shared output buffer.
             let end = usize_to_u32(bytes.len() - base)?;
-            let slot = base + 4 + index * 4;
-            bytes[slot..slot + 4].copy_from_slice(&end.to_le_bytes());
+            let slot = checked_offset_slot(checked_add(base, 4)?, index)?;
+            let slot_end = checked_add(slot, 4)?;
+            bytes[slot..slot_end].copy_from_slice(&end.to_le_bytes());
         }
     }
     Ok(())
@@ -2236,8 +2233,7 @@ fn decode_array(bytes: &[u8], element_type: &ValueType) -> Result<Value, Error> 
         };
     }
 
-    let offset_table_size = count.saturating_sub(1) * 4;
-    let values_start = checked_add(4, offset_table_size)?;
+    let values_start = checked_array_table_end(4, count).map_err(|_| Error::InvalidOffset)?;
     if bytes.len() < values_start {
         return Err(Error::UnexpectedEof);
     }
@@ -2555,7 +2551,12 @@ fn decode_tuple_member(bytes: &[u8], value_type: &ValueType) -> Result<Value, Er
 
 fn read_offsets(bytes: &[u8], start: usize, count: usize) -> Result<Vec<usize>, Error> {
     (0..count)
-        .map(|idx| read_u32_at(bytes, start + idx * 4).and_then(u32_to_usize))
+        .map(|idx| {
+            checked_offset_slot(start, idx)
+                .map_err(|_| Error::InvalidOffset)
+                .and_then(|slot| read_u32_at(bytes, slot))
+                .and_then(u32_to_usize)
+        })
         .collect()
 }
 
@@ -2602,8 +2603,97 @@ pub(super) fn checked_add(left: usize, right: usize) -> Result<usize, Error> {
     left.checked_add(right).ok_or_else(|| Error::LengthOverflow)
 }
 
+fn checked_array_table_end(prefix_size: usize, count: usize) -> Result<usize, Error> {
+    count
+        .saturating_sub(1)
+        .checked_mul(4)
+        .and_then(|table_size| prefix_size.checked_add(table_size))
+        .ok_or(Error::LengthOverflow)
+}
+
+fn checked_offset_slot(start: usize, index: usize) -> Result<usize, Error> {
+    index
+        .checked_mul(4)
+        .and_then(|offset| start.checked_add(offset))
+        .ok_or(Error::LengthOverflow)
+}
+
 pub(super) fn usize_to_u32(value: usize) -> Result<u32, Error> {
     value.try_into().map_err(|_| Error::LengthOverflow)
+}
+
+#[cfg(test)]
+mod variable_array_offset_tests {
+    use super::*;
+
+    #[test]
+    fn array_table_prefix_checks_multiplication_overflow() {
+        assert_eq!(
+            checked_array_table_end(4, usize::MAX),
+            Err(Error::LengthOverflow)
+        );
+    }
+
+    #[test]
+    fn array_table_prefix_checks_addition_after_multiplication() {
+        let count = usize::MAX / 4;
+        assert!((count - 1).checked_mul(4).is_some());
+        assert_eq!(
+            checked_array_table_end(8, count),
+            Err(Error::LengthOverflow)
+        );
+    }
+
+    #[test]
+    fn variable_string_arrays_round_trip_empty_and_populated_values() {
+        let element_type = ValueType::String;
+        for value in [
+            Value::Array(Vec::new()),
+            Value::Array(vec![
+                Value::String("first".to_owned()),
+                Value::String("second".to_owned()),
+            ]),
+        ] {
+            let encoded = encode_value(&value, &ValueType::Array(Box::new(element_type.clone())))
+                .expect("encode variable array");
+            validate_array(&encoded, &element_type, false).expect("validate variable array");
+            assert_eq!(
+                decode_array(&encoded, &element_type).expect("decode variable array"),
+                value
+            );
+        }
+    }
+
+    #[test]
+    fn positive_count_with_truncated_offset_table_is_unexpected_eof() {
+        let bytes = 2_u32.to_le_bytes();
+        assert_eq!(
+            validate_array(&bytes, &ValueType::String, false),
+            Err(Error::UnexpectedEof)
+        );
+        assert_eq!(
+            decode_array(&bytes, &ValueType::String),
+            Err(Error::UnexpectedEof)
+        );
+    }
+
+    #[cfg(target_pointer_width = "32")]
+    #[test]
+    fn large_raw_array_counts_are_invalid_for_validation_and_visiting() {
+        for count in [1_u32 << 30, u32::MAX] {
+            let bytes = count.to_le_bytes();
+            assert_eq!(
+                validate_array(&bytes, &ValueType::String, false),
+                Err(Error::InvalidOffset)
+            );
+
+            let array_type = ValueType::Array(Box::new(ValueType::Bytes));
+            assert_eq!(
+                visit_encoded_indirect_values(&bytes, &array_type, &mut |_, _| Ok(false)),
+                Err(Error::InvalidOffset)
+            );
+        }
+    }
 }
 
 fn u32_to_usize(value: u32) -> Result<usize, Error> {

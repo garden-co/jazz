@@ -481,6 +481,11 @@ export async function deploy(options: DeployOptions): Promise<void> {
             );
           }
           break;
+        case "migration-skipped":
+          console.log(
+            `Migration ${shortSchemaHash(event.fromHash)} -> ${shortSchemaHash(event.toHash)} is already connected; skipping migration publish.`,
+          );
+          break;
         case "permissions-published":
           break;
       }

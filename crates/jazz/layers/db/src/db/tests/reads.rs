@@ -1,0 +1,6624 @@
+//! Prepared reads, plan installation, runtime invalidation, and ordered snapshots.
+
+use super::*;
+
+/// Alice detaches a query while its storage read owns the runtime. Detachment
+/// must release coverage without re-entering that owner or breaking later reads.
+/// This is internal because a server test cannot deterministically pause storage
+/// at this ownership boundary or inspect coverage attachment cleanup.
+///
+/// alice: pause read -> detach -> resume -> coverage released -> read again
+#[test]
+fn detach_query_during_suspended_read_releases_coverage_without_reentry() {
+    use futures::executor::block_on;
+    use futures::task::noop_waker;
+    use groove::storage::TestStorage;
+
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text)),
+    );
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, control) = TestStorage::controlled(&refs);
+    let db = block_on(Db::open(DbConfig::new(
+        schema,
+        storage.clone(),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0x31; 16]),
+            author: AuthorSubject::for_test_bytes([0x41; 16]),
+        },
+    )))
+    .unwrap();
+    let prepared = block_on(db.prepare_query_async(&db.table("todos"))).unwrap();
+    let attachment =
+        block_on(db.attach_query_with_opts_async(&prepared, ReadOpts::default(), None, None))
+            .unwrap();
+    let opts = ReadOpts {
+        propagation: Propagation::LocalOnly,
+        ..ReadOpts::default()
+    };
+    storage.evict_all();
+    control.pause();
+    let waker = noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    let mut read = Box::pin(db.all(&prepared, opts.clone()));
+    assert!(read.as_mut().poll(&mut cx).is_pending());
+
+    db.detach_query(attachment);
+
+    control.resume();
+    assert!(block_on(read).unwrap().is_empty());
+    block_on(db.tick()).unwrap();
+    assert_eq!(db.query_coverage_attachment_counts_for_test(), (0, 0));
+    assert!(block_on(db.all(&prepared, opts)).unwrap().is_empty());
+}
+
+fn joined_issue_query() -> Query {
+    Query::from("issues").join_via("issue_tags", "issue", [eq(col("tag"), lit("prepared"))])
+}
+
+fn indexed_documents_schema() -> JazzSchema {
+    use crate::model::test_support::AllowAll;
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("documents")
+                    .column("team", PublicColumnType::Uuid)
+                    .column("active", PublicColumnType::Boolean)
+                    .column("title", PublicColumnType::Text)
+                    .index_only(["team"]),
+            )
+            .allow_all(),
+    )
+}
+
+fn multi_index_documents_schema() -> JazzSchema {
+    use crate::model::test_support::AllowAll;
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("documents")
+                    .column("team", PublicColumnType::Uuid)
+                    .column("active", PublicColumnType::Boolean)
+                    .column("title", PublicColumnType::Text)
+                    .index_only(["team", "active"]),
+            )
+            .allow_all(),
+    )
+}
+
+/// A maintained equality source is both an indexed hydration source and a
+/// live IVM source. In particular, a row changing either indexed equality must
+/// enter/leave exactly once rather than remaining filtered by the prefix that
+/// selected the initial snapshot.
+#[test]
+fn maintained_multi_index_query_tracks_either_index_transition() {
+    let schema = multi_index_documents_schema();
+    let author = AuthorSubject::for_test_bytes([0xd1; 16]);
+    let db = open_db(0xd1, author, &schema);
+    let team = row(0xa0);
+    let matching = row(1);
+    let inactive = row(2);
+    let other_team = row(3);
+    let cells = |team: RowUuid, active: bool, title: &str| {
+        BTreeMap::from([
+            ("team".to_owned(), Value::Uuid(team.0)),
+            ("active".to_owned(), Value::Bool(active)),
+            ("title".to_owned(), Value::String(title.to_owned())),
+        ])
+    };
+    for (id, values) in [
+        (matching, cells(team, true, "matching")),
+        (inactive, cells(team, false, "inactive")),
+        (other_team, cells(row(0xb0), true, "other team")),
+    ] {
+        db.insert(
+            "documents",
+            values,
+            crate::db::InsertOptions {
+                row_id: Some(id),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+
+    let query = Query::from("documents")
+        .filter(eq(col("team"), lit(Value::Uuid(team.0))))
+        .filter(eq(col("active"), lit(true)));
+    db.node.node.borrow_mut().reset_query_engine_read_metrics();
+    let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default()).unwrap();
+    let initial = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+    assert_eq!(row_ids(&initial.rows), vec![matching]);
+    assert!(
+        db.node
+            .node
+            .borrow()
+            .query_engine_read_metrics()
+            .source_index_probes
+            >= 2,
+        "the maintained Local source must probe both equality indices"
+    );
+
+    db.update(
+        "documents",
+        inactive,
+        BTreeMap::from([("active".to_owned(), Value::Bool(true))]),
+        Default::default(),
+    )
+    .unwrap();
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
+    assert_eq!(row_ids(&added), vec![inactive]);
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+
+    db.update(
+        "documents",
+        inactive,
+        BTreeMap::from([("team".to_owned(), Value::Uuid(row(0xb0).0))]),
+        Default::default(),
+    )
+    .unwrap();
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
+    assert!(added.is_empty());
+    assert!(updated.is_empty());
+    assert_eq!(
+        removed.iter().map(|row| row.row_uuid).collect::<Vec<_>>(),
+        vec![inactive]
+    );
+}
+
+/// Empty durable index prefixes remain live sources. The first matching row
+/// must not be lost merely because indexed hydration had no row to materialize.
+#[test]
+fn maintained_empty_index_prefix_delivers_first_matching_insert_once() {
+    let schema = indexed_documents_schema();
+    let author = AuthorSubject::for_test_bytes([0xd2; 16]);
+    let db = open_db(0xd2, author, &schema);
+    let team = row(0xa2);
+    let query = Query::from("documents").filter(eq(col("team"), lit(Value::Uuid(team.0))));
+    let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default()).unwrap();
+    let initial = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+    assert!(
+        initial.rows.is_empty(),
+        "empty prefix must still open a subscription"
+    );
+
+    let first = row(4);
+    db.insert(
+        "documents",
+        BTreeMap::from([
+            ("team".to_owned(), Value::Uuid(team.0)),
+            ("active".to_owned(), Value::Bool(true)),
+            ("title".to_owned(), Value::String("first".to_owned())),
+        ]),
+        crate::db::InsertOptions {
+            row_id: Some(first),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
+    assert_eq!(row_ids(&added), vec![first]);
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+    assert!(
+        subscription.try_next_event().is_none(),
+        "first insert must deliver exactly once"
+    );
+}
+
+/// A Local subscription remains complete when its settled source is indexed;
+/// the empty ahead overlay does not replace that indexed snapshot.
+#[test]
+fn maintained_local_index_snapshot_is_complete() {
+    let schema = indexed_documents_schema();
+    let author = AuthorSubject::for_test_bytes([0xd3; 16]);
+    let db = open_db(0xd3, author, &schema);
+    let team = row(0xa3);
+    let matching = row(5);
+    for (id, row_team) in [(matching, team), (row(6), row(0xb3))] {
+        db.seed_settled_mergeable_for_bootstrap(
+            "documents",
+            id,
+            author,
+            BTreeMap::from([
+                ("team".to_owned(), Value::Uuid(row_team.0)),
+                ("active".to_owned(), Value::Bool(true)),
+                ("title".to_owned(), Value::String("settled".to_owned())),
+            ]),
+        )
+        .unwrap();
+    }
+
+    let query = Query::from("documents").filter(eq(col("team"), lit(Value::Uuid(team.0))));
+    db.node.node.borrow_mut().reset_query_engine_read_metrics();
+    let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default()).unwrap();
+    let snapshot = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+    assert_eq!(row_ids(&snapshot.rows), vec![matching]);
+    let node = db.node.node.borrow();
+    let metrics = node.query_engine_read_metrics();
+    assert!(metrics.source_index_probes >= 1);
+}
+
+/// A Global subscription withholds its opening until its authority has settled the
+/// indexed source, then installs the same complete indexed snapshot that its
+/// Local counterpart would observe. This exercises the asynchronous delivery
+/// boundary that previously made the direct maintained index experiment lose
+/// fresh snapshots on worker-backed storage.
+#[test]
+fn maintained_global_index_snapshot_waits_for_settled_source() {
+    let schema = indexed_documents_schema();
+    let client_author = AuthorSubject::for_test_bytes([0xd5; 16]);
+    let server = open_core(0xd4, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xd5, client_author, &schema);
+    let team = row(0xa4);
+    let matching = seed(
+        &server,
+        "documents",
+        BTreeMap::from([
+            ("team".to_owned(), Value::Uuid(team.0)),
+            ("active".to_owned(), Value::Bool(true)),
+            ("title".to_owned(), Value::String("matching".to_owned())),
+        ]),
+    );
+    seed(
+        &server,
+        "documents",
+        BTreeMap::from([
+            ("team".to_owned(), Value::Uuid(row(0xb4).0)),
+            ("active".to_owned(), Value::Bool(true)),
+            ("title".to_owned(), Value::String("unrelated".to_owned())),
+        ]),
+    );
+
+    let (client_transport, server_transport) = duplex();
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, client_author);
+    let query = Query::from("documents").filter(eq(col("team"), lit(Value::Uuid(team.0))));
+    server.node().borrow_mut().reset_query_engine_read_metrics();
+    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    assert!(
+        subscription.try_next_event().is_none(),
+        "Global must not claim a snapshot before the authority settles it"
+    );
+
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+
+    let snapshot = snapshot_from_event(next_settled_opening(&mut subscription));
+    assert_eq!(row_ids(&snapshot.rows), vec![matching]);
+    assert!(
+        server
+            .node()
+            .borrow()
+            .query_engine_read_metrics()
+            .source_index_probes
+            >= 1,
+        "the authority must hydrate the settled Global source through its equality index"
+    );
+}
+
+#[test]
+fn negated_membership_uses_two_valued_null_semantics() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("items")
+                .nullable_column("label", PublicColumnType::Text)
+                .nullable_column("null_option", PublicColumnType::Text)
+                .nullable_column("blocked_option", PublicColumnType::Text),
+        ),
+    );
+    let db = open_db(0xb8, AuthorSubject::SYSTEM, &schema);
+    for (id, label) in [
+        (row(1), Value::Nullable(None)),
+        (
+            row(2),
+            Value::Nullable(Some(Box::new(Value::String("blocked".to_owned())))),
+        ),
+        (
+            row(3),
+            Value::Nullable(Some(Box::new(Value::String("allowed".to_owned())))),
+        ),
+    ] {
+        db.seed_settled_mergeable_for_bootstrap(
+            "items",
+            id,
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([
+                ("label".to_owned(), label),
+                ("null_option".to_owned(), Value::Nullable(None)),
+                (
+                    "blocked_option".to_owned(),
+                    Value::Nullable(Some(Box::new(Value::String("blocked".to_owned())))),
+                ),
+            ]),
+        )
+        .unwrap();
+    }
+
+    let matching_ids = |options: &[&str]| {
+        let query = Query::from("items")
+            .filter(not(in_list(col("label"), options.iter().copied().map(col))));
+        let prepared = db.prepare_query(&query).unwrap();
+        row_ids(&db.read(&prepared).unwrap())
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+    };
+
+    assert_eq!(
+        matching_ids(&["null_option"]),
+        BTreeSet::from([row(2), row(3)]),
+        "NOT(null IN [null]) is false, while non-null values differ from null"
+    );
+    assert_eq!(
+        matching_ids(&["blocked_option"]),
+        BTreeSet::from([row(1), row(3)]),
+        "a null value differs from every non-null membership option"
+    );
+    assert_eq!(
+        matching_ids(&["null_option", "blocked_option"]),
+        BTreeSet::from([row(3)]),
+        "mixed options exclude both null and matching non-null values"
+    );
+}
+
+#[test]
+fn prepared_query_discards_graph_handle_when_runtime_changes() {
+    let schema = issue_schema();
+    let db = open_db(0xb7, AuthorSubject::SYSTEM, &schema);
+    let prepared = db.prepare_query(&joined_issue_query()).unwrap();
+    let runtime_token = db.node.node.borrow().groove_runtime_token();
+    assert!(
+        prepared
+            .plan_for_tier(DurabilityTier::Local, runtime_token)
+            .is_some()
+    );
+    assert!(
+        prepared
+            .plan_for_tier(DurabilityTier::Local, runtime_token.wrapping_add(1))
+            .is_none()
+    );
+}
+
+fn seed_issue_project(db: &Db, author: AuthorSubject) {
+    db.seed_settled_mergeable_for_bootstrap(
+        "projects",
+        row(10),
+        author,
+        BTreeMap::from([("name".to_owned(), Value::String("Platform".to_owned()))]),
+    )
+    .unwrap();
+    db.seed_settled_mergeable_for_bootstrap(
+        "issues",
+        row(1),
+        author,
+        issue_cells("Platform", "open", author, row(10), 5, &["api"], None),
+    )
+    .unwrap();
+    db.seed_settled_mergeable_for_bootstrap(
+        "issue_tags",
+        row(20),
+        author,
+        BTreeMap::from([
+            ("issue".to_owned(), Value::Uuid(row(1).0)),
+            ("tag".to_owned(), Value::String("prepared".to_owned())),
+        ]),
+    )
+    .unwrap();
+}
+
+/// A one-shot read pinned to one issue probes the junction's issue index while
+/// preserving the policy-scoped join result across unrelated links and deletion.
+/// This lives here because the index-path assertion needs the internal source
+/// metric; row correctness is checked through the public Db read API.
+/// alice: seed two issues and links -> bob reads one issue -> delete its link -> bob reads
+#[test]
+fn point_join_one_shot_uses_junction_index_and_tracks_deletion() {
+    let write_grants = || {
+        PublicTablePolicies::new()
+            .with_insert(PublicPolicyExpr::True)
+            .with_delete(PublicPolicyExpr::True)
+    };
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("issues")
+                    .column("title", PublicColumnType::Text)
+                    .policies(write_grants().with_select(PublicPolicyExpr::eq_literal(
+                        "title",
+                        PublicValue::Text("target".to_owned()),
+                    ))),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("issue_tags")
+                    .fk_column("issue", "issues")
+                    .column("tag", PublicColumnType::Text)
+                    .policies(write_grants().with_select(PublicPolicyExpr::True)),
+            ),
+    );
+    let alice = AuthorSubject::SYSTEM;
+    let bob = AuthorSubject::for_test_bytes([0xa8; 16]);
+    let db = block_on(Db::open_history_complete(DbConfig {
+        schema: schema.clone(),
+        storage: rocks_storage(&schema),
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xa7; 16]),
+            author: alice,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xa7))),
+    }))
+    .unwrap();
+    for (id, title) in [(row(1), "target"), (row(2), "other")] {
+        db.seed_settled_mergeable_for_bootstrap(
+            "issues",
+            id,
+            alice,
+            BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]),
+        )
+        .unwrap();
+    }
+    for (id, issue, tag) in [
+        (row(20), row(1), "wanted"),
+        (row(21), row(1), "other"),
+        (row(22), row(2), "wanted"),
+    ] {
+        db.seed_settled_mergeable_for_bootstrap(
+            "issue_tags",
+            id,
+            alice,
+            BTreeMap::from([
+                ("issue".to_owned(), Value::Uuid(issue.0)),
+                ("tag".to_owned(), Value::String(tag.to_owned())),
+            ]),
+        )
+        .unwrap();
+    }
+    let prepared = db
+        .prepare_query(
+            &Query::from("issues")
+                .filter(eq(col("id"), lit(Value::Uuid(row(1).0))))
+                .join_via("issue_tags", "issue", [eq(col("tag"), lit("wanted"))]),
+        )
+        .unwrap();
+    let read = |prepared| {
+        row_ids(
+            &block_on(db.all_for_identity(
+                prepared,
+                ReadOpts {
+                    tier: DurabilityTier::Global,
+                    local_updates: LocalUpdates::Deferred,
+                    propagation: Propagation::LocalOnly,
+                    include_deleted: false,
+                    ..ReadOpts::default()
+                },
+                bob,
+            ))
+            .unwrap(),
+        )
+    };
+    db.node.node.borrow_mut().reset_query_engine_read_metrics();
+    assert_eq!(read(&prepared), vec![row(1)]);
+    assert!(
+        db.node
+            .node
+            .borrow()
+            .query_engine_read_metrics()
+            .source_index_probes
+            >= 1,
+        "the first result should probe the indexed issue foreign key"
+    );
+    let hidden = db
+        .prepare_query(
+            &Query::from("issues")
+                .filter(eq(col("id"), lit(Value::Uuid(row(2).0))))
+                .join_via("issue_tags", "issue", [eq(col("tag"), lit("wanted"))]),
+        )
+        .unwrap();
+    assert!(read(&hidden).is_empty(), "bob cannot read the other issue");
+
+    let deleted = block_on(db.delete("issue_tags", row(20), Default::default())).unwrap();
+    block_on(deleted.wait(DurabilityTier::Local)).unwrap();
+    db.finalize_local_mergeable_commit_for_test(deleted.mergeable_tx_id())
+        .unwrap();
+    assert!(read(&prepared).is_empty());
+
+    db.seed_settled_mergeable_for_bootstrap(
+        "issue_tags",
+        row(23),
+        alice,
+        BTreeMap::from([
+            ("issue".to_owned(), Value::Uuid(row(1).0)),
+            ("tag".to_owned(), Value::String("wanted".to_owned())),
+        ]),
+    )
+    .unwrap();
+    assert_eq!(read(&prepared), vec![row(1)]);
+}
+
+/// The public result is the oracle. The internal probe count confirms that a
+/// broad first-result join uses both the root and junction filter indexes.
+#[test]
+fn filtered_join_one_shot_uses_both_source_indexes() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("issues")
+                    .column("group", PublicColumnType::Text)
+                    .index_only(["group"])
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("issue_tags")
+                    .fk_column("issue", "issues")
+                    .column("tag", PublicColumnType::Text)
+                    .index_only(["tag"])
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            ),
+    );
+    let db = block_on(Db::open_history_complete(DbConfig::new(
+        schema.clone(),
+        rocks_storage(&schema),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xb8; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+    for n in 1..=80 {
+        db.seed_settled_mergeable_for_bootstrap(
+            "issues",
+            row(n),
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([(
+                "group".to_owned(),
+                Value::String(if n <= 40 { "wanted" } else { "other" }.to_owned()),
+            )]),
+        )
+        .unwrap();
+        db.seed_settled_mergeable_for_bootstrap(
+            "issue_tags",
+            row(n + 100),
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([
+                ("issue".to_owned(), Value::Uuid(row(n).0)),
+                (
+                    "tag".to_owned(),
+                    Value::String(if n == 1 || n > 40 { "wanted" } else { "other" }.to_owned()),
+                ),
+            ]),
+        )
+        .unwrap();
+    }
+    let prepared = db
+        .prepare_query(
+            &Query::from("issues")
+                .filter(eq(col("group"), lit("wanted")))
+                .join_via("issue_tags", "issue", [eq(col("tag"), lit("wanted"))]),
+        )
+        .unwrap();
+    db.node.node.borrow_mut().reset_query_engine_read_metrics();
+    let rows = block_on(db.all_for_identity(
+        &prepared,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            propagation: Propagation::LocalOnly,
+            ..ReadOpts::default()
+        },
+        AuthorSubject::SYSTEM,
+    ))
+    .unwrap();
+    assert_eq!(row_ids(&rows), vec![row(1)]);
+    assert!(
+        db.node
+            .node
+            .borrow()
+            .query_engine_read_metrics()
+            .source_index_probes
+            >= 2,
+        "both filtered sources should probe indexes before joining"
+    );
+}
+
+/// Opens a history-complete store with two issues and a set of settled
+/// `issue_tags` links for the point-join equivalence tests below. The junction
+/// carries a `scope` column so a test can install a read policy that hides some
+/// links; `nullable` stores the junction foreign key as a nullable column.
+fn open_point_join_db(
+    nullable: bool,
+    junction_select: PublicPolicyExpr,
+    links: &[(RowUuid, RowUuid, &str, &str)],
+) -> Db {
+    let grants = || {
+        PublicTablePolicies::new()
+            .with_insert(PublicPolicyExpr::True)
+            .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True)
+            .with_delete(PublicPolicyExpr::True)
+    };
+    let tags = PublicTableSchemaBuilder::new("issue_tags");
+    let tags = if nullable {
+        tags.nullable_fk_column("issue", "issues")
+    } else {
+        tags.fk_column("issue", "issues")
+    };
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("issues")
+                    .column("title", PublicColumnType::Text)
+                    .policies(grants().with_select(PublicPolicyExpr::True)),
+            )
+            .table(
+                tags.column("tag", PublicColumnType::Text)
+                    .column("scope", PublicColumnType::Text)
+                    .policies(grants().with_select(junction_select)),
+            ),
+    );
+    let db = block_on(Db::open_history_complete(DbConfig {
+        schema: schema.clone(),
+        storage: rocks_storage(&schema),
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xd7; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xd7))),
+    }))
+    .unwrap();
+    for (id, title) in [(row(1), "one"), (row(2), "two")] {
+        db.seed_settled_mergeable_for_bootstrap(
+            "issues",
+            id,
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]),
+        )
+        .unwrap();
+    }
+    for &(id, issue, tag, scope) in links {
+        db.seed_settled_mergeable_for_bootstrap(
+            "issue_tags",
+            id,
+            AuthorSubject::SYSTEM,
+            point_join_link_cells(nullable, issue, tag, scope),
+        )
+        .unwrap();
+    }
+    db
+}
+
+fn point_join_link_cells(nullable: bool, issue: RowUuid, tag: &str, scope: &str) -> RowCells {
+    let issue = if nullable {
+        Value::Nullable(Some(Box::new(Value::Uuid(issue.0))))
+    } else {
+        Value::Uuid(issue.0)
+    };
+    BTreeMap::from([
+        ("issue".to_owned(), issue),
+        ("tag".to_owned(), Value::String(tag.to_owned())),
+        ("scope".to_owned(), Value::String(scope.to_owned())),
+    ])
+}
+
+/// Reads the indexed point join for `issue` and the same join without the
+/// root id filter (which leaves the junction unindexed), then filters the
+/// control by id afterwards. Asserts both agree and returns the point join's
+/// rows together with the number of secondary-index probes it made.
+fn point_join_matches_unindexed_control(
+    db: &Db,
+    issue: RowUuid,
+    opts: &ReadOpts,
+    reader: AuthorSubject,
+    label: &str,
+) -> (Vec<RowUuid>, u64) {
+    let read = |query: Query| {
+        let prepared = db.prepare_query(&query).unwrap();
+        let mut rows =
+            row_ids(&block_on(db.all_for_identity(&prepared, opts.clone(), reader)).unwrap());
+        rows.sort();
+        rows
+    };
+    let join =
+        |query: Query| query.join_via("issue_tags", "issue", [eq(col("tag"), lit("wanted"))]);
+    db.node.node.borrow_mut().reset_query_engine_read_metrics();
+    let indexed = read(join(
+        Query::from("issues").filter(eq(col("id"), lit(Value::Uuid(issue.0)))),
+    ));
+    let probes = db
+        .node
+        .node
+        .borrow()
+        .query_engine_read_metrics()
+        .source_index_probes;
+    let mut control = read(join(Query::from("issues")));
+    control.retain(|id| *id == issue);
+    assert_eq!(
+        indexed, control,
+        "{label}: indexed point join for {issue:?} diverges from the unindexed control"
+    );
+    (indexed, probes)
+}
+
+fn point_join_read_opts(tier: DurabilityTier, include_deleted: bool) -> ReadOpts {
+    ReadOpts {
+        tier,
+        local_updates: LocalUpdates::Immediate,
+        propagation: Propagation::LocalOnly,
+        include_deleted,
+        ..ReadOpts::default()
+    }
+}
+
+/// A read policy on the junction table itself must still hide links from an
+/// indexed point join: the index only narrows candidates, and the policy graph
+/// decides membership exactly as for the unindexed join.
+/// This lives here because the index-path assertion needs the internal source
+/// metric; row correctness is checked through the public Db read API.
+/// system: seed links, some private -> bob point-joins each issue -> matches control
+#[test]
+fn point_join_honours_junction_read_policy_like_unindexed_control() {
+    let db = open_point_join_db(
+        false,
+        PublicPolicyExpr::eq_literal("scope", PublicValue::Text("public".to_owned())),
+        &[
+            (row(20), row(1), "wanted", "public"),
+            (row(21), row(1), "wanted", "private"),
+            (row(22), row(1), "other", "public"),
+            (row(23), row(2), "wanted", "private"),
+            (row(24), row(2), "other", "public"),
+        ],
+    );
+    let bob = AuthorSubject::for_test_bytes([0xa8; 16]);
+    for tier in [DurabilityTier::Global, DurabilityTier::Local] {
+        let opts = point_join_read_opts(tier, false);
+        let label = format!("junction policy {tier:?}");
+        let (visible, probes) =
+            point_join_matches_unindexed_control(&db, row(1), &opts, bob, &label);
+        assert_eq!(visible, vec![row(1)], "{label}: only the public link joins");
+        assert!(probes >= 1, "{label}: the junction index should be probed");
+        let (hidden, _) = point_join_matches_unindexed_control(&db, row(2), &opts, bob, &label);
+        assert!(
+            hidden.is_empty(),
+            "{label}: issue 2's only wanted link is private"
+        );
+        let (missing, _) = point_join_matches_unindexed_control(&db, row(9), &opts, bob, &label);
+        assert!(missing.is_empty(), "{label}: no such issue");
+    }
+}
+
+/// Local-tier point joins over settled links agree with the unindexed control,
+/// for both a required and a nullable junction foreign key.
+/// This lives here because the index-path assertion needs the internal source
+/// metric; row correctness is checked through the public Db read API.
+/// system: seed links -> read each issue at Local tier -> matches control
+#[test]
+fn point_join_at_local_tier_matches_unindexed_control() {
+    for nullable in [false, true] {
+        let db = open_point_join_db(
+            nullable,
+            PublicPolicyExpr::True,
+            &[
+                (row(20), row(1), "wanted", "public"),
+                (row(21), row(1), "other", "public"),
+                (row(22), row(2), "wanted", "public"),
+                (row(24), row(1), "wanted", "public"),
+            ],
+        );
+        let opts = point_join_read_opts(DurabilityTier::Local, false);
+        let label = format!("local nullable={nullable}");
+        let reader = AuthorSubject::SYSTEM;
+        let (one, probes) =
+            point_join_matches_unindexed_control(&db, row(1), &opts, reader, &label);
+        assert_eq!(one, vec![row(1), row(1)], "{label}: two wanted links");
+        assert!(probes >= 1, "{label}: the junction index should be probed");
+        let (two, _) = point_join_matches_unindexed_control(&db, row(2), &opts, reader, &label);
+        assert_eq!(two, vec![row(2)], "{label}");
+    }
+}
+
+/// Unsettled link writes (an insert, a move to another issue, and a delete)
+/// must be reflected by a Local point join and ignored by a Global one, exactly
+/// as the unindexed join reflects them, and agree again once they settle.
+/// This lives here because settling needs the internal local-finalize hook and
+/// the index-path assertion needs the internal source metric; row correctness
+/// is checked through the public Db read API.
+/// system: seed -> pending insert/move/delete -> read Global/Local -> settle -> read
+#[test]
+fn point_join_tracks_unsettled_link_insert_move_and_delete_like_control() {
+    for nullable in [false, true] {
+        let db = open_point_join_db(
+            nullable,
+            PublicPolicyExpr::True,
+            &[
+                (row(20), row(1), "wanted", "public"),
+                (row(21), row(1), "other", "public"),
+                (row(22), row(2), "wanted", "public"),
+                (row(24), row(1), "wanted", "public"),
+            ],
+        );
+        let reader = AuthorSubject::SYSTEM;
+        let inserted = block_on(db.insert(
+            "issue_tags",
+            point_join_link_cells(nullable, row(2), "wanted", "public"),
+            crate::db::InsertOptions {
+                row_id: Some(row(30)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        let issue = if nullable {
+            Value::Nullable(Some(Box::new(Value::Uuid(row(2).0))))
+        } else {
+            Value::Uuid(row(2).0)
+        };
+        let moved = block_on(db.update(
+            "issue_tags",
+            row(20),
+            BTreeMap::from([("issue".to_owned(), issue)]),
+            Default::default(),
+        ))
+        .unwrap();
+        let deleted = block_on(db.delete("issue_tags", row(24), Default::default())).unwrap();
+
+        // Settled state only: the pending writes are invisible at Global.
+        // Local: row 20 moved away and row 24 is deleted; issue 2 gains both
+        // the moved link and the inserted one.
+        for (tier, one, two) in [
+            (DurabilityTier::Global, vec![row(1), row(1)], vec![row(2)]),
+            (DurabilityTier::Local, vec![], vec![row(2), row(2), row(2)]),
+        ] {
+            let label = format!("unsettled nullable={nullable} {tier:?}");
+            let opts = point_join_read_opts(tier, false);
+            let (rows, probes) =
+                point_join_matches_unindexed_control(&db, row(1), &opts, reader, &label);
+            assert_eq!(rows, one, "{label}: issue 1");
+            assert!(probes >= 1, "{label}: the junction index should be probed");
+            let (rows, _) =
+                point_join_matches_unindexed_control(&db, row(2), &opts, reader, &label);
+            assert_eq!(rows, two, "{label}: issue 2");
+            // Deleted-row visibility follows the same control either way.
+            let with_deleted = point_join_read_opts(tier, true);
+            for issue in [row(1), row(2)] {
+                point_join_matches_unindexed_control(&db, issue, &with_deleted, reader, &label);
+            }
+        }
+
+        for tx in [
+            inserted.mergeable_tx_id(),
+            moved.mergeable_tx_id(),
+            deleted.mergeable_tx_id(),
+        ] {
+            db.finalize_local_mergeable_commit_for_test(tx).unwrap();
+        }
+        for tier in [DurabilityTier::Global, DurabilityTier::Local] {
+            let label = format!("settled nullable={nullable} {tier:?}");
+            let opts = point_join_read_opts(tier, false);
+            let (rows, _) =
+                point_join_matches_unindexed_control(&db, row(1), &opts, reader, &label);
+            assert!(rows.is_empty(), "{label}: issue 1 lost both wanted links");
+            let (rows, _) =
+                point_join_matches_unindexed_control(&db, row(2), &opts, reader, &label);
+            assert_eq!(rows, vec![row(2), row(2), row(2)], "{label}: issue 2");
+            let with_deleted = point_join_read_opts(tier, true);
+            for issue in [row(1), row(2)] {
+                point_join_matches_unindexed_control(&db, issue, &with_deleted, reader, &label);
+            }
+        }
+    }
+}
+
+fn open_ordered_page_db() -> Db {
+    let grants = PublicTablePolicies::new()
+        .with_select(PublicPolicyExpr::True)
+        .with_insert(PublicPolicyExpr::True)
+        .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True)
+        .with_delete(PublicPolicyExpr::True);
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("entries")
+                .column("bucket", PublicColumnType::Text)
+                .column("rank", PublicColumnType::BigInt)
+                .column("flag", PublicColumnType::Boolean)
+                .index_only(["bucket"])
+                .composite_index(["bucket", "rank"])
+                .policies(grants),
+        ),
+    );
+    let db = block_on(Db::open_history_complete(DbConfig {
+        schema: schema.clone(),
+        storage: rocks_storage(&schema),
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xc3; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xc3))),
+    }))
+    .unwrap();
+    // Bucket "a" is long with rank ties (three rows per rank) and a sparse
+    // flag; bucket "b" is shorter than most requested pages.
+    for n in 1..=60u8 {
+        let (bucket, rank) = if n <= 54 {
+            ("a", i64::from(n / 3))
+        } else {
+            ("b", i64::from(n))
+        };
+        db.seed_settled_mergeable_for_bootstrap(
+            "entries",
+            row(n),
+            AuthorSubject::SYSTEM,
+            ordered_page_cells(bucket, rank, n % 7 == 0),
+        )
+        .unwrap();
+    }
+    db
+}
+
+fn ordered_page_cells(bucket: &str, rank: i64, flag: bool) -> RowCells {
+    BTreeMap::from([
+        ("bucket".to_owned(), Value::String(bucket.to_owned())),
+        ("rank".to_owned(), Value::I64(rank)),
+        ("flag".to_owned(), Value::Bool(flag)),
+    ])
+}
+
+/// Reads every page shape for `bucket` and compares it with the same query
+/// without a limit, truncated afterwards. The unlimited query never takes the
+/// bounded ordered-page probe, so it is the unbounded control.
+fn ordered_pages_match_unbounded_control(db: &Db, tier: DurabilityTier, label: &str) {
+    let opts = ReadOpts {
+        tier,
+        local_updates: LocalUpdates::Immediate,
+        propagation: Propagation::LocalOnly,
+        ..ReadOpts::default()
+    };
+    let read = |query: Query| {
+        let prepared = db.prepare_query(&query).unwrap();
+        row_ids(
+            &block_on(db.all_for_identity(&prepared, opts.clone(), AuthorSubject::SYSTEM)).unwrap(),
+        )
+    };
+    for bucket in ["a", "b", "missing"] {
+        for direction in [OrderDirection::Asc, OrderDirection::Desc] {
+            for sparse in [false, true] {
+                let query = || {
+                    let query = Query::from("entries")
+                        .filter(eq(col("bucket"), lit(bucket)))
+                        .order_by("rank", direction);
+                    if sparse {
+                        query.filter(eq(col("flag"), lit(true)))
+                    } else {
+                        query
+                    }
+                };
+                let control = read(query());
+                for limit in [1, 2, 3, 4, 5, 7, 20, 100] {
+                    let page = read(query().limit(limit));
+                    let expected = control.iter().copied().take(limit).collect::<Vec<_>>();
+                    assert_eq!(
+                        page, expected,
+                        "{label} {tier:?}: bucket={bucket} {direction:?} sparse={sparse} limit={limit}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// A bounded ordered-page probe over a declared `(bucket, rank)` composite
+/// index must return exactly the page of the unbounded query: across rank
+/// ties, short and empty buckets, sparse visibility, order-column updates that
+/// move rows across the page boundary, bucket moves, and deletions, both
+/// before and after those writes settle.
+/// This lives here because settling needs the internal local-finalize hook and
+/// the bounded-read assertion needs the internal storage metric; row
+/// correctness is checked through the public Db read API.
+/// system: seed -> pages match control -> pending rank/bucket/delete writes ->
+///   pages match control at Global and Local -> settle -> pages match again
+#[test]
+fn ordered_composite_pages_match_unbounded_query() {
+    let db = open_ordered_page_db();
+    ordered_pages_match_unbounded_control(&db, DurabilityTier::Global, "seeded");
+
+    // The probe is actually bounded: a one-row page of the 54-row bucket
+    // must not hydrate the whole bucket. Rank 18 holds only row 54, so the
+    // first extra row (rank 17) is strictly worse and proves the page.
+    let prepared = db
+        .prepare_query(
+            &Query::from("entries")
+                .filter(eq(col("bucket"), lit("a")))
+                .order_by("rank", OrderDirection::Desc)
+                .limit(1),
+        )
+        .unwrap();
+    db.node.node.borrow().reset_storage_read_metrics();
+    let rows = block_on(db.all_for_identity(
+        &prepared,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            propagation: Propagation::LocalOnly,
+            ..ReadOpts::default()
+        },
+        AuthorSubject::SYSTEM,
+    ))
+    .unwrap();
+    let reads = db.node.node.borrow().take_storage_read_metrics();
+    assert_eq!(row_ids(&rows), vec![row(54)]);
+    assert!(
+        reads.global_current_rows.reads < 20,
+        "a bounded ordered page should not hydrate the whole bucket: {reads:?}"
+    );
+
+    let mut writes = Vec::new();
+    // Move the current top row to the bottom, and a bottom row to the top.
+    for (id, rank) in [(54, -5), (1, 100), (30, 17)] {
+        writes.push(
+            block_on(db.update(
+                "entries",
+                row(id),
+                BTreeMap::from([("rank".to_owned(), Value::I64(rank))]),
+                Default::default(),
+            ))
+            .unwrap()
+            .mergeable_tx_id(),
+        );
+    }
+    // Delete the next rows at the top of the descending page, and a row in
+    // the middle of a tie group.
+    for id in [53, 52, 20] {
+        writes.push(
+            block_on(db.delete("entries", row(id), Default::default()))
+                .unwrap()
+                .mergeable_tx_id(),
+        );
+    }
+    // Move one row from the long bucket into the short one.
+    writes.push(
+        block_on(db.update(
+            "entries",
+            row(51),
+            BTreeMap::from([("bucket".to_owned(), Value::String("b".to_owned()))]),
+            Default::default(),
+        ))
+        .unwrap()
+        .mergeable_tx_id(),
+    );
+    for tier in [DurabilityTier::Global, DurabilityTier::Local] {
+        ordered_pages_match_unbounded_control(&db, tier, "pending");
+    }
+    for tx in writes {
+        db.finalize_local_mergeable_commit_for_test(tx).unwrap();
+    }
+    for tier in [DurabilityTier::Global, DurabilityTier::Local] {
+        ordered_pages_match_unbounded_control(&db, tier, "settled");
+    }
+    // Deletion checks stay bounded too: the page reads the registers of its
+    // capped candidates, not every register in the table. Ascending, row 54
+    // (rank -5) is followed by row 2 (rank 0), which proves the page.
+    let ascending = db
+        .prepare_query(
+            &Query::from("entries")
+                .filter(eq(col("bucket"), lit("a")))
+                .order_by("rank", OrderDirection::Asc)
+                .limit(1),
+        )
+        .unwrap();
+    db.node.node.borrow().reset_storage_read_metrics();
+    let rows = block_on(db.all_for_identity(
+        &ascending,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            propagation: Propagation::LocalOnly,
+            ..ReadOpts::default()
+        },
+        AuthorSubject::SYSTEM,
+    ))
+    .unwrap();
+    let reads = db.node.node.borrow().take_storage_read_metrics();
+    assert_eq!(row_ids(&rows), vec![row(54)]);
+    assert!(
+        reads.global_current_rows.reads < 20,
+        "a bounded ordered page should not hydrate the whole bucket: {reads:?}"
+    );
+    assert!(
+        reads.register_global_current_rows.reads <= 2,
+        "a bounded ordered page should read only its candidates' registers: {reads:?}"
+    );
+}
+
+fn open_composite_equality_db() -> Db {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("issues")
+                    .column("group", PublicColumnType::Text)
+                    .column("state", PublicColumnType::Text)
+                    .column("assignee", PublicColumnType::Text)
+                    .index_only(["group", "assignee"])
+                    .composite_index(["group", "state"])
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(PublicPolicyExpr::True)
+                            .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True)
+                            .with_delete(PublicPolicyExpr::True),
+                    ),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("issue_tags")
+                    .fk_column("issue", "issues")
+                    .column("tag", PublicColumnType::Text)
+                    .index_only(["tag"])
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            ),
+    );
+    let db = block_on(Db::open_history_complete(DbConfig::new(
+        schema.clone(),
+        rocks_storage(&schema),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xb9; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+    // Issues 1..=40 are in group "wanted", every fourth one open; assignees
+    // alternate. Issue 1 and issues 41..=80 carry the "wanted" tag.
+    for n in 1..=80u8 {
+        db.seed_settled_mergeable_for_bootstrap(
+            "issues",
+            row(n),
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([
+                (
+                    "group".to_owned(),
+                    Value::String(if n <= 40 { "wanted" } else { "other" }.to_owned()),
+                ),
+                (
+                    "state".to_owned(),
+                    Value::String(if n % 4 == 1 { "open" } else { "closed" }.to_owned()),
+                ),
+                (
+                    "assignee".to_owned(),
+                    Value::String(if n % 2 == 1 { "ann" } else { "bo" }.to_owned()),
+                ),
+            ]),
+        )
+        .unwrap();
+        db.seed_settled_mergeable_for_bootstrap(
+            "issue_tags",
+            row(n + 100),
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([
+                ("issue".to_owned(), Value::Uuid(row(n).0)),
+                (
+                    "tag".to_owned(),
+                    Value::String(if n == 1 || n > 40 { "wanted" } else { "other" }.to_owned()),
+                ),
+            ]),
+        )
+        .unwrap();
+    }
+    db
+}
+
+/// Every query shape that can take the composite `(group, state)` prefix,
+/// compared with the same query under a limit no page reaches. A limit makes
+/// the first result decline composite-equality selection, so it is the
+/// control.
+fn composite_equality_reads_match_control(db: &Db, tier: DurabilityTier, label: &str) {
+    let opts = ReadOpts {
+        tier,
+        local_updates: LocalUpdates::Immediate,
+        propagation: Propagation::LocalOnly,
+        ..ReadOpts::default()
+    };
+    let read = |query: &Query| {
+        let prepared = db.prepare_query(query).unwrap();
+        let mut rows = row_ids(
+            &block_on(db.all_for_identity(&prepared, opts.clone(), AuthorSubject::SYSTEM)).unwrap(),
+        );
+        rows.sort();
+        rows
+    };
+    for assignee in [None, Some("ann")] {
+        for joined in [false, true] {
+            let mut query = Query::from("issues")
+                .filter(eq(col("group"), lit("wanted")))
+                .filter(eq(col("state"), lit("open")));
+            if let Some(assignee) = assignee {
+                query = query.filter(eq(col("assignee"), lit(assignee)));
+            }
+            if joined {
+                query = query.join_via("issue_tags", "issue", [eq(col("tag"), lit("wanted"))]);
+            }
+            assert_eq!(
+                read(&query),
+                read(&query.clone().limit(100_000)),
+                "{label} {tier:?}: assignee={assignee:?} joined={joined}"
+            );
+        }
+    }
+}
+
+/// A first-result equality conjunction over both columns of a declared
+/// `(group, state)` composite index reads only that prefix, and keeps other
+/// indexed equalities as intersections. It is admitted by the same guard as
+/// every other index path: only sources read at Local or Global may use it,
+/// so a read at tier `None` keeps its complete source. Results match the
+/// unindexed control at every tier, with pending edits that move rows into
+/// and out of the prefix, and after they settle.
+///
+/// The storage counter is needed because choosing the composite prefix is
+/// observable only as read work.
+///
+/// ```text
+/// seed: wanted/open = {1, 5, .., 37}; tag wanted = {1, 41..=80}
+/// Global join read -> [1], reads <= 55 (not the other 30 group rows)
+/// pending: 1 -> closed, 2 -> open, 41 -> wanted/open, delete 5; Local join read -> [41]
+/// tiers None, Local, Global == control -> settle -> == control again
+/// ```
+#[test]
+fn first_result_uses_guarded_composite_equality_index() {
+    let db = open_composite_equality_db();
+    let joined = Query::from("issues")
+        .filter(eq(col("group"), lit("wanted")))
+        .filter(eq(col("state"), lit("open")))
+        .join_via("issue_tags", "issue", [eq(col("tag"), lit("wanted"))]);
+    let (rows, reads) = global_page_with_reads(&db, joined.clone());
+    assert_eq!(rows, vec![row(1)]);
+    assert!(
+        reads.global_current_rows.reads <= 55,
+        "composite equality should avoid hydrating the other 30 group rows: {reads:?}"
+    );
+    for tier in [
+        DurabilityTier::None,
+        DurabilityTier::Local,
+        DurabilityTier::Global,
+    ] {
+        composite_equality_reads_match_control(&db, tier, "seeded");
+    }
+
+    let mut writes = Vec::new();
+    for (id, cells) in [
+        (1, vec![("state", "closed")]),
+        (2, vec![("state", "open")]),
+        (41, vec![("group", "wanted"), ("state", "open")]),
+    ] {
+        writes.push(
+            block_on(
+                db.update(
+                    "issues",
+                    row(id),
+                    cells
+                        .into_iter()
+                        .map(|(column, value)| (column.to_owned(), Value::String(value.to_owned())))
+                        .collect(),
+                    Default::default(),
+                ),
+            )
+            .unwrap()
+            .mergeable_tx_id(),
+        );
+    }
+    writes.push(
+        block_on(db.delete("issues", row(5), Default::default()))
+            .unwrap()
+            .mergeable_tx_id(),
+    );
+    for tier in [
+        DurabilityTier::None,
+        DurabilityTier::Local,
+        DurabilityTier::Global,
+    ] {
+        composite_equality_reads_match_control(&db, tier, "pending");
+    }
+    let prepared = db.prepare_query(&joined).unwrap();
+    assert_eq!(
+        row_ids(&db.read(&prepared).unwrap()),
+        vec![row(41)],
+        "a Local winner leaving the composite prefix must retract, one entering must appear"
+    );
+    for tx in writes {
+        db.finalize_local_mergeable_commit_for_test(tx).unwrap();
+    }
+    for tier in [
+        DurabilityTier::None,
+        DurabilityTier::Local,
+        DurabilityTier::Global,
+    ] {
+        composite_equality_reads_match_control(&db, tier, "settled");
+    }
+}
+
+/// Reads `query` once at Global and returns its rows with the storage reads
+/// it took.
+fn global_page_with_reads(db: &Db, query: Query) -> (Vec<RowUuid>, groove::db::StorageReadMetrics) {
+    let prepared = db.prepare_query(&query).unwrap();
+    db.node.node.borrow().reset_storage_read_metrics();
+    let rows = block_on(db.all_for_identity(
+        &prepared,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            propagation: Propagation::LocalOnly,
+            ..ReadOpts::default()
+        },
+        AuthorSubject::SYSTEM,
+    ))
+    .unwrap();
+    (
+        row_ids(&rows),
+        db.node.node.borrow().take_storage_read_metrics(),
+    )
+}
+
+/// A first bounded probe that finds no visible row, or only a tie, retries a
+/// larger bounded prefix instead of falling back to the whole bucket; a
+/// bucket shorter than the probe is complete without an extra row.
+///
+/// ```text
+/// bucket a, desc: rank 18 = [54], rank 17 = [53, 52, 51], rank 16 = [50, 49, 48]
+/// settle delete 54, 53
+/// desc limit 1: cap 2 -> [54 del, 53 del] -> retry cap 8 -> 52 | 51 tie | 50 worse
+/// settle delete 1..=40 in bucket a
+/// bucket b (6 rows), asc limit 20: cap 21 -> 6 entries -> exhausted, complete
+/// ```
+///
+/// Both pages equal the unbounded control and stay bounded: before retries
+/// and the exhausted proof, each fell back to the complete source.
+#[test]
+fn ordered_composite_pages_retry_past_deleted_ties_and_complete_short_buckets() {
+    let db = open_ordered_page_db();
+    let settle_deletes = |ids: Vec<u8>| {
+        let writes = ids
+            .into_iter()
+            .map(|id| {
+                block_on(db.delete("entries", row(id), Default::default()))
+                    .unwrap()
+                    .mergeable_tx_id()
+            })
+            .collect::<Vec<_>>();
+        for tx in writes {
+            db.finalize_local_mergeable_commit_for_test(tx).unwrap();
+        }
+    };
+    settle_deletes(vec![54, 53]);
+
+    let top = || {
+        Query::from("entries")
+            .filter(eq(col("bucket"), lit("a")))
+            .order_by("rank", OrderDirection::Desc)
+    };
+    let (control, _) = global_page_with_reads(&db, top());
+    let (page, reads) = global_page_with_reads(&db, top().limit(1));
+    assert_eq!(page, control[..1].to_vec());
+    assert!(
+        [row(52), row(51)].contains(&page[0]),
+        "the page holds a surviving rank-17 row: {page:?}"
+    );
+    // Two bounded attempts (2 then 8 entries) against 138 reads for the
+    // complete source.
+    assert!(
+        reads.global_current_rows.reads <= 30,
+        "a retried ordered page should not hydrate the whole bucket: {reads:?}"
+    );
+    ordered_pages_match_unbounded_control(&db, DurabilityTier::Global, "deleted top ties");
+
+    settle_deletes((1..=40).collect());
+    let short = || {
+        Query::from("entries")
+            .filter(eq(col("bucket"), lit("b")))
+            .order_by("rank", OrderDirection::Asc)
+    };
+    let (control, _) = global_page_with_reads(&db, short());
+    let (page, reads) = global_page_with_reads(&db, short().limit(20));
+    assert_eq!(page, control);
+    assert_eq!(page.len(), 6);
+    assert!(
+        reads.register_global_current_rows.reads <= 6,
+        "a short bucket should read only its own deletion registers: {reads:?}"
+    );
+    ordered_pages_match_unbounded_control(&db, DurabilityTier::Global, "short bucket");
+}
+
+/// The public result and live deltas guard semantics. The storage count checks
+/// that a first Global result compares covered join keys before loading link rows.
+#[test]
+fn first_result_join_filters_junction_keys_before_row_hydration() {
+    let link_row = |n: u8, replica: u8| {
+        let mut bytes = [0xbc; 16];
+        bytes[14] = replica;
+        bytes[15] = n;
+        RowUuid::from_bytes(bytes)
+    };
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("issues")
+                    .column("group", PublicColumnType::Text)
+                    .column("state", PublicColumnType::Text)
+                    .index_only(["group", "state"])
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("issue_tags")
+                    .fk_column("issue", "issues")
+                    .column("tag", PublicColumnType::Text)
+                    .composite_index(["tag", "issue"])
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            ),
+    );
+    let db = block_on(Db::open_history_complete(DbConfig::new(
+        schema.clone(),
+        rocks_storage(&schema),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xba; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+    for n in 1..=160 {
+        db.seed_settled_mergeable_for_bootstrap(
+            "issues",
+            row(n),
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([
+                (
+                    "group".to_owned(),
+                    Value::String(if n <= 80 { "wanted" } else { "other" }.to_owned()),
+                ),
+                (
+                    "state".to_owned(),
+                    Value::String(if n % 4 == 1 { "open" } else { "closed" }.to_owned()),
+                ),
+            ]),
+        )
+        .unwrap();
+        for replica in 0..if n > 81 { 7 } else { 1 } {
+            db.seed_settled_mergeable_for_bootstrap(
+                "issue_tags",
+                link_row(n, replica),
+                AuthorSubject::SYSTEM,
+                BTreeMap::from([
+                    ("issue".to_owned(), Value::Uuid(row(n).0)),
+                    (
+                        "tag".to_owned(),
+                        Value::String(if n == 1 || n > 80 { "wanted" } else { "other" }.to_owned()),
+                    ),
+                ]),
+            )
+            .unwrap();
+        }
+    }
+    let query = Query::from("issues")
+        .filter(eq(col("group"), lit("wanted")))
+        .filter(eq(col("state"), lit("open")))
+        .join_via("issue_tags", "issue", [eq(col("tag"), lit("wanted"))]);
+    let prepared = db.prepare_query(&query).unwrap();
+    db.node.node.borrow().reset_storage_read_metrics();
+    let rows = block_on(db.all_for_identity(
+        &prepared,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            propagation: Propagation::LocalOnly,
+            ..ReadOpts::default()
+        },
+        AuthorSubject::SYSTEM,
+    ))
+    .unwrap();
+    let reads = db.node.node.borrow().take_storage_read_metrics();
+    assert_eq!(row_ids(&rows), vec![row(1)]);
+    assert!(
+        reads.global_current_rows.reads <= 40,
+        "unmatched junction rows should not be hydrated: {reads:?}"
+    );
+
+    let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default()).unwrap();
+    let initial = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+    assert_eq!(row_ids(&initial.rows), vec![row(1)]);
+    let changed = block_on(db.update(
+        "issues",
+        row(81),
+        BTreeMap::from([("group".to_owned(), Value::String("wanted".to_owned()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    block_on(changed.wait(DurabilityTier::Local)).unwrap();
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
+    assert_eq!(row_ids(&added), vec![row(81)]);
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+    assert_eq!(row_ids(&db.read(&prepared).unwrap()), vec![row(1), row(81)]);
+
+    let deleted = block_on(db.delete("issue_tags", link_row(1, 0), Default::default())).unwrap();
+    block_on(deleted.wait(DurabilityTier::Local)).unwrap();
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
+    assert!(added.is_empty());
+    assert!(updated.is_empty());
+    assert_eq!(
+        removed.iter().map(|row| row.row_uuid).collect::<Vec<_>>(),
+        vec![row(1)]
+    );
+    assert_eq!(row_ids(&db.read(&prepared).unwrap()), vec![row(81)]);
+}
+
+fn covered_join_link_row(issue: u8, replica: u8) -> RowUuid {
+    let mut bytes = [0xce; 16];
+    bytes[14] = replica;
+    bytes[15] = issue;
+    RowUuid::from_bytes(bytes)
+}
+
+fn covered_join_link_cells(nullable: bool, issue: RowUuid, scope: &str) -> RowCells {
+    point_join_link_cells(nullable, issue, "wanted", scope)
+}
+
+/// Opens a store whose `issue_tags` declares `[tag, issue]`, so a broad
+/// `tag = "wanted"` junction prefix carries each link's issue in its index key.
+/// Issues 1..=40 are in group `wanted`; 41..=120 are not. Issues 1..=3 have
+/// one public wanted link each, and 41..=120 have seven wanted links each
+/// (replicas 0 and 1 public, the rest private). That is 563 wanted links, so
+/// a Global first result takes the covered-key filter rather than hydrating
+/// a small prefix directly. `tag_single_index` keeps the ordinary single-column
+/// tag index as well; without it the junction reaches the composite index only
+/// through the covered-key fallback.
+fn open_covered_join_db(
+    nullable: bool,
+    tag_single_index: bool,
+    junction_select: PublicPolicyExpr,
+) -> Db {
+    let grants = || {
+        PublicTablePolicies::new()
+            .with_insert(PublicPolicyExpr::True)
+            .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True)
+            .with_delete(PublicPolicyExpr::True)
+    };
+    let tags = PublicTableSchemaBuilder::new("issue_tags");
+    let tags = if nullable {
+        tags.nullable_fk_column("issue", "issues")
+    } else {
+        tags.fk_column("issue", "issues")
+    };
+    let tags = tags
+        .column("tag", PublicColumnType::Text)
+        .column("scope", PublicColumnType::Text)
+        .composite_index(["tag", "issue"])
+        .policies(grants().with_select(junction_select));
+    let tags = if tag_single_index {
+        tags
+    } else {
+        tags.index_only(["issue"])
+    };
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("issues")
+                    .column("group", PublicColumnType::Text)
+                    .index_only(["group"])
+                    .policies(grants().with_select(PublicPolicyExpr::True)),
+            )
+            .table(tags),
+    );
+    let db = block_on(Db::open_history_complete(DbConfig {
+        schema: schema.clone(),
+        storage: rocks_storage(&schema),
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xce; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xce))),
+    }))
+    .unwrap();
+    for n in 1..=120 {
+        let group = if n <= 40 { "wanted" } else { "other" };
+        db.seed_settled_mergeable_for_bootstrap(
+            "issues",
+            row(n),
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([("group".to_owned(), Value::String(group.to_owned()))]),
+        )
+        .unwrap();
+        let links = match n {
+            1..=3 => 1,
+            41.. => 7,
+            _ => 0,
+        };
+        for replica in 0..links {
+            let scope = if replica < 2 { "public" } else { "private" };
+            db.seed_settled_mergeable_for_bootstrap(
+                "issue_tags",
+                covered_join_link_row(n, replica),
+                AuthorSubject::SYSTEM,
+                covered_join_link_cells(nullable, row(n), scope),
+            )
+            .unwrap();
+        }
+    }
+    db
+}
+
+/// Reads the covered-key join and the same join with a limit far above the
+/// data, which declines the covered-key filter and its composite fallback but
+/// cannot drop a row. Asserts both agree and returns the sorted rows with the
+/// number of complete current rows the covered-key read hydrated.
+fn covered_join_matches_unfiltered_control(
+    db: &Db,
+    opts: &ReadOpts,
+    reader: AuthorSubject,
+    label: &str,
+) -> (Vec<RowUuid>, usize) {
+    let read = |query: Query| {
+        let prepared = db.prepare_query(&query).unwrap();
+        let mut rows =
+            row_ids(&block_on(db.all_for_identity(&prepared, opts.clone(), reader)).unwrap());
+        rows.sort();
+        rows
+    };
+    let query = Query::from("issues")
+        .filter(eq(col("group"), lit("wanted")))
+        .join_via("issue_tags", "issue", [eq(col("tag"), lit("wanted"))]);
+    db.node.node.borrow().reset_storage_read_metrics();
+    let filtered = read(query.clone());
+    let hydrated = db
+        .node
+        .node
+        .borrow()
+        .take_storage_read_metrics()
+        .global_current_rows
+        .reads;
+    let control = read(query.limit(100_000));
+    assert_eq!(
+        filtered, control,
+        "{label}: covered-key join diverges from the unfiltered control"
+    );
+    (filtered, hydrated)
+}
+
+/// The covered-key filter compares Global index keys only. A Local read
+/// combines settled candidates with the ahead overlay, so a pending root edit
+/// can move an issue into the root prefix while its settled links still
+/// point at an issue outside the Global candidate set (#3340 is the sibling
+/// stale-index hazard). Pending root and link writes must therefore appear at
+/// Local and stay invisible at Global, exactly as in the unfiltered join; a
+/// junction read policy still hides private links; and after settling, the
+/// filtered Global read follows the moved index entries.
+/// This lives here because settling needs the internal local-finalize hook;
+/// row correctness is checked through the public Db read API.
+/// system: seed -> bob reads -> pending root/link writes -> bob reads -> settle -> bob reads
+#[test]
+fn covered_join_key_filter_matches_unfiltered_join_across_tiers_and_pending_writes() {
+    for nullable in [false, true] {
+        for tag_single_index in [true, false] {
+            let db = open_covered_join_db(
+                nullable,
+                tag_single_index,
+                PublicPolicyExpr::eq_literal("scope", PublicValue::Text("public".to_owned())),
+            );
+            let bob = AuthorSubject::for_test_bytes([0xa9; 16]);
+            let case = format!("nullable={nullable} tag_single_index={tag_single_index}");
+            let expect = |tier: DurabilityTier, label: &str, expected: &[RowUuid]| {
+                let label = format!("{case} {label} {tier:?}");
+                let (rows, hydrated) = covered_join_matches_unfiltered_control(
+                    &db,
+                    &point_join_read_opts(tier, false),
+                    bob,
+                    &label,
+                );
+                assert_eq!(rows, expected, "{label}");
+                if tier == DurabilityTier::Global {
+                    // 40 root candidates plus the few surviving links, not
+                    // the 563 links of the broad `tag = "wanted"` prefix.
+                    assert!(
+                        hydrated < 100,
+                        "{label}: unmatched links should not be hydrated ({hydrated} rows)"
+                    );
+                }
+                covered_join_matches_unfiltered_control(
+                    &db,
+                    &point_join_read_opts(tier, true),
+                    bob,
+                    &format!("{label} include_deleted"),
+                );
+            };
+            for tier in [DurabilityTier::Global, DurabilityTier::Local] {
+                expect(tier, "seeded", &[row(1), row(2), row(3)]);
+            }
+
+            // Pending, unsettled: issue 50 enters the root prefix and issue 1
+            // leaves it; a new public link tags issue 4; one of issue 60's
+            // public links moves to issue 5; issue 2's only link is deleted.
+            let group = |value: &str| {
+                BTreeMap::from([("group".to_owned(), Value::String(value.to_owned()))])
+            };
+            let issue = |id: RowUuid| {
+                BTreeMap::from([(
+                    "issue".to_owned(),
+                    covered_join_link_cells(nullable, id, "public")["issue"].clone(),
+                )])
+            };
+            let writes = [
+                block_on(db.update("issues", row(50), group("wanted"), Default::default()))
+                    .unwrap(),
+                block_on(db.update("issues", row(1), group("other"), Default::default())).unwrap(),
+                block_on(db.insert(
+                    "issue_tags",
+                    covered_join_link_cells(nullable, row(4), "public"),
+                    crate::db::InsertOptions {
+                        row_id: Some(covered_join_link_row(4, 0)),
+                        ..Default::default()
+                    },
+                ))
+                .unwrap(),
+                block_on(db.update(
+                    "issue_tags",
+                    covered_join_link_row(60, 0),
+                    issue(row(5)),
+                    Default::default(),
+                ))
+                .unwrap(),
+                block_on(db.delete(
+                    "issue_tags",
+                    covered_join_link_row(2, 0),
+                    Default::default(),
+                ))
+                .unwrap(),
+            ];
+            expect(DurabilityTier::Global, "pending", &[row(1), row(2), row(3)]);
+            // Issue 50 joins through its two public links.
+            expect(
+                DurabilityTier::Local,
+                "pending",
+                &[row(3), row(4), row(5), row(50), row(50)],
+            );
+
+            for write in &writes {
+                db.finalize_local_mergeable_commit_for_test(write.mergeable_tx_id())
+                    .unwrap();
+            }
+            for tier in [DurabilityTier::Global, DurabilityTier::Local] {
+                expect(tier, "settled", &[row(3), row(4), row(5), row(50), row(50)]);
+            }
+        }
+    }
+}
+
+#[test]
+fn prepared_current_write_query_installs_and_reads_non_simple_plan() {
+    let schema = issue_schema();
+    let author = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let db = open_db(0xa1, author, &schema);
+    seed_issue_project(&db, author);
+
+    let prepared = db.prepare_query(&joined_issue_query()).unwrap();
+    assert!(prepared.has_plan_for_tier(DurabilityTier::Local));
+    assert!(prepared.has_plan_for_tier(DurabilityTier::Global));
+    db.node
+        .node
+        .borrow_mut()
+        .clear_prepared_query_plan_cache_for_test();
+
+    let rows = db.read(&prepared).unwrap();
+
+    assert_eq!(row_ids(&rows), vec![row(1)]);
+    assert!(
+        db.node
+            .node
+            .borrow()
+            .prepared_query_plan_cache_is_empty_for_test(),
+        "stored prepared plans should be used without replanning"
+    );
+}
+
+#[test]
+fn local_subscribe_uses_prepared_non_simple_plan() {
+    let schema = issue_schema();
+    let author = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let db = open_db(0xa2, author, &schema);
+    seed_issue_project(&db, author);
+
+    let prepared = db.prepare_query(&joined_issue_query()).unwrap();
+    db.node
+        .node
+        .borrow_mut()
+        .clear_prepared_query_plan_cache_for_test();
+
+    let mut subscription = block_on(db.subscribe(
+        &prepared,
+        ReadOpts {
+            tier: DurabilityTier::Local,
+            local_updates: LocalUpdates::Deferred,
+            propagation: Propagation::LocalOnly,
+            include_deleted: false,
+            ..ReadOpts::default()
+        },
+    ))
+    .unwrap();
+
+    assert_eq!(
+        row_ids(&opened_rows(block_on(subscription.next_raw()).unwrap())),
+        vec![row(1)]
+    );
+    assert!(
+        db.node
+            .node
+            .borrow()
+            .prepared_query_plan_cache_is_empty_for_test(),
+        "initial subscribe read should consume the stored prepared plan"
+    );
+}
+
+#[test]
+fn subscription_reset_preserves_ordered_window_rank() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let db = open_db(0xa3, author, &schema);
+    for (id, title) in [(4, "alpha"), (1, "bravo"), (3, "charlie"), (2, "delta")] {
+        db.seed_settled_mergeable_for_bootstrap(
+            "todos",
+            row(id),
+            author,
+            cells(title, false, author),
+        )
+        .unwrap();
+    }
+
+    let query = Query::from("todos")
+        .order_by("title", OrderDirection::Asc)
+        .offset(1)
+        .limit(2);
+    let mut subscription = prepared_subscribe(
+        &db,
+        &query,
+        ReadOpts {
+            tier: DurabilityTier::Local,
+            local_updates: LocalUpdates::Deferred,
+            propagation: Propagation::LocalOnly,
+            include_deleted: false,
+            ..ReadOpts::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        row_ids(&opened_rows(block_on(subscription.next_raw()).unwrap())),
+        vec![row(1), row(3)],
+        "reset rows must retain the selected ordered window rather than member-key order"
+    );
+}
+
+#[test]
+fn subscription_reset_preserves_ordered_flat_join_window_with_duplicate_roots() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .nullable_fk_column("ownerId", "users"),
+            ),
+    );
+    let db = open_db(0xc4, AuthorSubject::for_test_bytes([0xc4; 16]), &schema);
+    for (id, name) in [(0xa1, "alice"), (0xb1, "maria"), (0xc1, "zoe")] {
+        db.insert(
+            "users",
+            BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))]),
+            crate::db::InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    for (id, owner) in [(0x11, 0xa1), (0x22, 0xa1), (0x33, 0xb1), (0x44, 0xc1)] {
+        db.insert(
+            "todos",
+            BTreeMap::from([
+                ("title".to_owned(), Value::String(format!("todo-{id:x}"))),
+                (
+                    "ownerId".to_owned(),
+                    Value::Nullable(Some(Box::new(Value::Uuid(row(owner).0)))),
+                ),
+            ]),
+            crate::db::InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+
+    // The selected window is maria, then Alice's two distinct joined
+    // occurrences. Opaque terminal key map order would instead put Alice
+    // before maria, so this specifically proves materialization follows the
+    // lowered CollectBy sequence after custom sort, offset, and limit.
+    let query = Query::from("users")
+        .join_via_column("todos", "ownerId", "id", [])
+        .order_by("name", OrderDirection::Desc)
+        .offset(1)
+        .limit(3);
+    assert_eq!(
+        row_ids(&prepared_read(&db, &query)),
+        vec![row(0xb1), row(0xa1), row(0xa1)],
+        "the direct query establishes the lowered collector order",
+    );
+    let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default()).unwrap();
+    let SubscriptionEvent::Delta { added, .. } = block_on(subscription.next_raw()).unwrap() else {
+        panic!("flat join subscription must open with a delta");
+    };
+    assert_eq!(
+        added
+            .iter()
+            .map(|output| output.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![row(0xb1), row(0xa1), row(0xa1)],
+    );
+    assert_eq!(
+        added
+            .iter()
+            .map(|output| output.occurrence_id.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            OutputOccurrenceId::new(
+                ObjectId::from_uuid(row(0xb1).0),
+                [ObjectId::from_uuid(row(0x33).0)],
+            ),
+            OutputOccurrenceId::new(
+                ObjectId::from_uuid(row(0xa1).0),
+                [ObjectId::from_uuid(row(0x11).0)],
+            ),
+            OutputOccurrenceId::new(
+                ObjectId::from_uuid(row(0xa1).0),
+                [ObjectId::from_uuid(row(0x22).0)],
+            ),
+        ]
+    );
+    block_on(subscription.close()).unwrap();
+
+    // A non-key order update stays within the unwindowed result but changes
+    // its rank. Groove emits an exact opaque-key Move; the public subscription
+    // reducer consumes root terminal edits into indexed `updated` rows (only
+    // descendant terminal edits cross this API boundary).
+    let move_query = Query::from("users")
+        .join_via_column("todos", "ownerId", "id", [])
+        .order_by("name", OrderDirection::Desc);
+    let mut moved = prepared_subscribe(&db, &move_query, ReadOpts::default()).unwrap();
+    let _initial = block_on(moved.next_raw()).unwrap();
+    db.update(
+        "users",
+        row(0xb1),
+        BTreeMap::from([("name".to_owned(), Value::String("zzzz".to_owned()))]),
+        Default::default(),
+    )
+    .unwrap();
+    db.tick().unwrap();
+    let SubscriptionEvent::Delta { updated, .. } = block_on(moved.next_raw()).unwrap() else {
+        panic!("rank change must publish a structured delta");
+    };
+    assert!(updated.iter().any(|output| {
+        output.row.row_uuid() == row(0xb1)
+            && output.previous_index == Some(1)
+            && output.index == 0
+            && output.row.cell_at(0) == Some(Value::String("zzzz".to_owned()))
+    }));
+}
+
+#[test]
+fn simple_prepared_current_write_query_uses_lowered_plan() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let db = open_db(0xa3, author, &schema);
+    db.insert(
+        "todos",
+        cells("simple", false, author),
+        crate::db::InsertOptions {
+            row_id: Some(row(1)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let prepared = db.prepare_query(&Query::from("todos")).unwrap();
+    assert!(!prepared.has_plan_for_tier(DurabilityTier::Local));
+    assert!(!prepared.has_plan_for_tier(DurabilityTier::Global));
+
+    let rows = db.read(&prepared).unwrap();
+
+    assert_eq!(row_ids(&rows), vec![row(1)]);
+    assert!(
+        db.node
+            .node
+            .borrow()
+            .prepared_query_plan_cache_is_empty_for_test(),
+        "simple prepared current reads should stay on the direct lowered path without installing a shared plan"
+    );
+}
+
+#[test]
+fn filtered_root_prepared_query_still_reads_without_preinstalled_plan() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let db = open_db(0xa4, author, &schema);
+    db.insert(
+        "todos",
+        cells("wanted", false, author),
+        crate::db::InsertOptions {
+            row_id: Some(row(1)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let prepared = db
+        .prepare_query(&Query::from("todos").filter(eq(col("title"), lit("wanted"))))
+        .unwrap();
+    assert!(!prepared.has_plan_for_tier(DurabilityTier::Local));
+    assert_eq!(
+        db.read(&prepared)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![row(1)]
+    );
+}
+#[test]
+fn profiled_read_matches_ordinary_read_for_unselected_query() {
+    let schema = issue_schema();
+    let author = AuthorSubject::for_test_bytes([0xa6; 16]);
+    let db = open_db(0xa6, author, &schema);
+    seed_issue_project(&db, author);
+
+    let prepared = db.prepare_query(&joined_issue_query()).unwrap();
+    let ordinary = db.read(&prepared).unwrap();
+    let (profiled, _profile) = db.read_profiled(&prepared).unwrap();
+
+    assert_eq!(
+        profiled, ordinary,
+        "profiled reads must preserve ordinary public rows and descriptors",
+    );
+}
+
+#[test]
+fn authoritative_global_bound_read_uses_the_declared_index() {
+    // `Db::all` at Global consumes an upstream, identity-scoped result set.
+    // A standalone authority must instead use the explicit serving API, which
+    // evaluates the bound query against its complete settled state.
+    let schema = indexed_documents_schema();
+    let db = block_on(Db::open_history_complete(DbConfig {
+        schema: schema.clone(),
+        storage: rocks_storage(&schema),
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xa5; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xa5))),
+    }))
+    .expect("open history-complete standalone authority");
+    let wanted_team = row(0x51);
+    let wanted = row(0x52);
+    let other = row(0x53);
+    for (id, team, title) in [(wanted, wanted_team, "wanted"), (other, row(0x54), "other")] {
+        db.seed_settled_mergeable_for_bootstrap(
+            "documents",
+            id,
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([
+                ("team".to_owned(), Value::Uuid(team.0)),
+                ("active".to_owned(), Value::Bool(true)),
+                ("title".to_owned(), Value::String(title.to_owned())),
+            ]),
+        )
+        .unwrap();
+    }
+    let prepared = db
+        .prepare_query_bound(
+            &Query::from("documents")
+                .filter(eq(col("team"), param("team")))
+                .filter(eq(col("active"), lit(true))),
+            BTreeMap::from([("team".to_owned(), Value::Uuid(wanted_team.0))]),
+        )
+        .expect("prepare bound indexed query");
+
+    db.node.node.borrow().reset_storage_read_metrics();
+    let rows = block_on(db.all_for_identity(
+        &prepared,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            local_updates: LocalUpdates::Deferred,
+            propagation: Propagation::LocalOnly,
+            include_deleted: false,
+            ..ReadOpts::default()
+        },
+        AuthorSubject::SYSTEM,
+    ))
+    .expect("authoritative Global bound read");
+    let metrics = db.node.node.borrow().take_storage_read_metrics();
+
+    assert_eq!(row_ids(&rows), vec![wanted]);
+    assert_eq!(metrics.global_current_indexes.reads, 1);
+    assert_eq!(metrics.global_current_rows.reads, 1);
+}
+
+#[test]
+fn relation_query_one_shot_hop_uses_unified_query_path() {
+    let schema = relation_schema();
+    let db = open_db(0xc1, AuthorSubject::for_test_bytes([0xc1; 16]), &schema);
+    db.insert(
+        "users",
+        BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xa1)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert(
+        "users",
+        BTreeMap::from([("name".to_owned(), Value::String("bob".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xb1)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert(
+        "todos",
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("alice todo".to_owned())),
+            ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
+        ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x11)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert(
+        "todos",
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("bob todo".to_owned())),
+            ("owner_id".to_owned(), Value::Uuid(row(0xb1).0)),
+        ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x22)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let query = RelationQuery {
+        rel: RelationExpr::Project {
+            input: Box::new(RelationExpr::Join {
+                left: Box::new(RelationExpr::Filter {
+                    input: Box::new(RelationExpr::TableScan {
+                        table: "users".to_owned(),
+                        alias: None,
+                    }),
+                    predicate: RelationPredicate::Cmp {
+                        left: RelationColumnRef {
+                            scope: Some("users".to_owned()),
+                            column: "name".to_owned(),
+                        },
+                        op: RelationCmpOp::Eq,
+                        right: RelationValueRef::Literal(serde_json::Value::String(
+                            "alice".to_owned(),
+                        )),
+                    },
+                }),
+                right: Box::new(RelationExpr::TableScan {
+                    table: "todos".to_owned(),
+                    alias: Some("__hop_0".to_owned()),
+                }),
+                on: vec![crate::query::RelationJoinCondition {
+                    left: RelationColumnRef {
+                        scope: Some("users".to_owned()),
+                        column: "id".to_owned(),
+                    },
+                    right: RelationColumnRef {
+                        scope: Some("__hop_0".to_owned()),
+                        column: "owner_id".to_owned(),
+                    },
+                }],
+                join_kind: RelationJoinKind::Inner,
+            }),
+            columns: vec![
+                crate::query::RelationProjectColumn {
+                    alias: "id".to_owned(),
+                    expr: RelationProjectExpr::RowId(RelationRowIdRef::Current),
+                },
+                crate::query::RelationProjectColumn {
+                    alias: "title".to_owned(),
+                    expr: RelationProjectExpr::Column(RelationColumnRef {
+                        scope: Some("__hop_0".to_owned()),
+                        column: "title".to_owned(),
+                    }),
+                },
+                crate::query::RelationProjectColumn {
+                    alias: "owner_id".to_owned(),
+                    expr: RelationProjectExpr::Column(RelationColumnRef {
+                        scope: Some("__hop_0".to_owned()),
+                        column: "owner_id".to_owned(),
+                    }),
+                },
+            ],
+        },
+    };
+
+    let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default())).unwrap();
+    assert_eq!(row_ids(&snapshot.rows), vec![row(0x11)]);
+}
+/// A public relation projection must expose only its selected output under the
+/// requested alias, while retaining the source row identity. The relation IR
+/// is constructed directly because this is the public Rust seam used by the
+/// WASM and NAPI relation APIs; the assertion remains on the one-shot result.
+#[test]
+fn relation_query_one_shot_project_selects_alias_without_unselected_columns() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("projects")
+                .column("name", PublicColumnType::Text)
+                .column("secret", PublicColumnType::Text),
+        ),
+    );
+    let db = open_db(0xc2, AuthorSubject::for_test_bytes([0xc2; 16]), &schema);
+    let project = row(0x31);
+    db.insert(
+        "projects",
+        BTreeMap::from([
+            (
+                "name".to_owned(),
+                Value::String("Visible project".to_owned()),
+            ),
+            (
+                "secret".to_owned(),
+                Value::String("do not expose".to_owned()),
+            ),
+        ]),
+        crate::db::InsertOptions {
+            row_id: Some(project),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let query = RelationQuery {
+        rel: RelationExpr::Project {
+            input: Box::new(RelationExpr::TableScan {
+                table: "projects".to_owned(),
+                alias: Some("source".to_owned()),
+            }),
+            columns: vec![crate::query::RelationProjectColumn {
+                alias: "displayName".to_owned(),
+                expr: RelationProjectExpr::Column(RelationColumnRef {
+                    scope: Some("source".to_owned()),
+                    column: "name".to_owned(),
+                }),
+            }],
+        },
+    };
+
+    let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default())).unwrap();
+    assert_eq!(snapshot.root_count, 1);
+    assert_eq!(snapshot.rows.len(), 1);
+    let returned = &snapshot.rows[0];
+    assert_eq!(returned.table(), "projects");
+    assert_eq!(returned.row_uuid(), project);
+    assert_eq!(
+        returned
+            .binding_field_names()
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>(),
+        vec!["displayName"],
+        "the relation result must publish exactly the selected alias"
+    );
+    let (descriptor, raw) = returned.encoded_record();
+    assert_eq!(
+        descriptor.bind(raw).get("displayName"),
+        Ok(Value::String("Visible project".to_owned()))
+    );
+    assert_eq!(
+        returned.cell(&schema.tables[0], "secret"),
+        None,
+        "an unselected source column must not be visible in the relation result"
+    );
+    assert_eq!(returned.raw_field("secret"), None);
+}
+/// Relation ordering must use source-bound fields before the terminal projection
+/// narrows rows to their public aliases.
+#[test]
+fn relation_query_one_shot_orders_by_unselected_source_column() {
+    let schema = relation_schema();
+    let db = open_db(0xc3, AuthorSubject::for_test_bytes([0xc3; 16]), &schema);
+    let first = row(0xa1);
+    let second = row(0xb1);
+    db.insert(
+        "users",
+        BTreeMap::from([("name".to_owned(), Value::String("alpha".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(first),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert(
+        "users",
+        BTreeMap::from([("name".to_owned(), Value::String("zulu".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(second),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let query = RelationQuery {
+        rel: RelationExpr::OrderBy {
+            input: Box::new(RelationExpr::Project {
+                input: Box::new(RelationExpr::TableScan {
+                    table: "users".to_owned(),
+                    alias: Some("source".to_owned()),
+                }),
+                columns: vec![crate::query::RelationProjectColumn {
+                    alias: "displayName".to_owned(),
+                    expr: RelationProjectExpr::Column(RelationColumnRef {
+                        scope: Some("source".to_owned()),
+                        column: "name".to_owned(),
+                    }),
+                }],
+            }),
+            terms: vec![RelationOrderBy {
+                column: RelationColumnRef {
+                    scope: Some("source".to_owned()),
+                    column: "name".to_owned(),
+                },
+                direction: OrderDirection::Desc,
+            }],
+        },
+    };
+
+    let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default())).unwrap();
+    assert_eq!(row_ids(&snapshot.rows), vec![second, first]);
+    assert_eq!(
+        snapshot
+            .rows
+            .iter()
+            .map(|returned| returned
+                .encoded_record()
+                .0
+                .bind(returned.encoded_record().1)
+                .get("displayName"))
+            .collect::<Vec<_>>(),
+        vec![
+            Ok(Value::String("zulu".to_owned())),
+            Ok(Value::String("alpha".to_owned())),
+        ]
+    );
+    for returned in &snapshot.rows {
+        assert_eq!(
+            returned
+                .binding_field_names()
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>(),
+            vec!["displayName"]
+        );
+        assert_eq!(
+            returned.cell(&schema.tables[0], "name"),
+            None,
+            "the source order key must remain internal to the relation result"
+        );
+        assert_eq!(returned.raw_field("name"), None);
+    }
+}
+
+/// Union arms may use independent local aliases while exposing one public
+/// output contract.
+#[test]
+fn relation_union_all_accepts_arm_local_projection_scopes() {
+    let schema = relation_schema();
+    let db = open_db(0xc4, AuthorSubject::for_test_bytes([0xc4; 16]), &schema);
+    let first = row(0xa1);
+    let second = row(0xb1);
+    for (row_id, name) in [(first, "alpha"), (second, "zulu")] {
+        db.insert(
+            "users",
+            BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))]),
+            crate::db::InsertOptions {
+                row_id: Some(row_id),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let arm = |label: &str, scope: &str| crate::query::RelationUnionArm {
+        label: label.to_owned(),
+        input: RelationExpr::Project {
+            input: Box::new(RelationExpr::TableScan {
+                table: "users".to_owned(),
+                alias: Some(scope.to_owned()),
+            }),
+            columns: vec![crate::query::RelationProjectColumn {
+                alias: "displayName".to_owned(),
+                expr: RelationProjectExpr::Column(RelationColumnRef {
+                    scope: Some(scope.to_owned()),
+                    column: "name".to_owned(),
+                }),
+            }],
+        },
+    };
+    let query = RelationQuery {
+        rel: RelationExpr::Union {
+            inputs: vec![arm("left", "left_source"), arm("right", "right_source")],
+        },
+    };
+
+    let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default()))
+        .expect("union arms with equivalent public output contracts should validate");
+    assert_eq!(snapshot.rows.len(), 4);
+    assert!(
+        snapshot.rows.iter().all(|returned| {
+            returned
+                .binding_field_names()
+                .into_iter()
+                .flatten()
+                .eq(["displayName"])
+        }),
+        "each arm must publish the shared public alias"
+    );
+}
+
+/// Internal relation-IR construction is necessary here because the Rust DB
+/// integration surface is the public relation-query API exercised by WASM and
+/// NAPI; the assertion is the user-visible one-shot membership result.
+#[test]
+fn relation_union_all_preserves_labeled_same_row_derivations() {
+    let schema = relation_schema();
+    let db = open_db(0xca, AuthorSubject::for_test_bytes([0xca; 16]), &schema);
+    let alice = row(0xa1);
+    db.insert(
+        "users",
+        BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(alice),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let arm = |label: &str| crate::query::RelationUnionArm {
+        label: label.to_owned(),
+        input: RelationExpr::Filter {
+            input: Box::new(RelationExpr::TableScan {
+                table: "users".to_owned(),
+                alias: None,
+            }),
+            predicate: RelationPredicate::Cmp {
+                left: RelationColumnRef {
+                    scope: Some("users".to_owned()),
+                    column: "name".to_owned(),
+                },
+                op: RelationCmpOp::Eq,
+                right: RelationValueRef::Literal(serde_json::Value::String("alice".to_owned())),
+            },
+        },
+    };
+    let query = RelationQuery {
+        rel: RelationExpr::Project {
+            input: Box::new(RelationExpr::Union {
+                inputs: vec![arm("first"), arm("second")],
+            }),
+            columns: vec![crate::query::RelationProjectColumn {
+                alias: "name".to_owned(),
+                expr: RelationProjectExpr::Column(RelationColumnRef {
+                    scope: Some("users".to_owned()),
+                    column: "name".to_owned(),
+                }),
+            }],
+        },
+    };
+    let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default())).unwrap();
+    assert_eq!(row_ids(&snapshot.rows), vec![alice, alice]);
+
+    let mut subscription =
+        block_on(db.subscribe_relation_query(&query, ReadOpts::default())).unwrap();
+    let SubscriptionEvent::Delta { added: opened, .. } =
+        subscription.try_next_event().expect("opened event")
+    else {
+        panic!("subscription opening must be a delta")
+    };
+    assert_eq!(
+        opened
+            .iter()
+            .map(|output| output.row.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![alice, alice]
+    );
+    assert_ne!(opened[0].occurrence_id, opened[1].occurrence_id);
+    db.update(
+        "users",
+        alice,
+        BTreeMap::from([("name".to_owned(), Value::String("bob".to_owned()))]),
+        Default::default(),
+    )
+    .unwrap();
+    let (_, _, removed) = delta_rows(subscription.try_next_event().expect("removal event"));
+    assert_eq!(
+        removed.iter().map(|row| row.row_uuid).collect::<Vec<_>>(),
+        vec![alice, alice]
+    );
+    assert_ne!(removed[0].occurrence_id, removed[1].occurrence_id);
+
+    // Global order/window stays outside the UNION ALL arms. Rows from the
+    // same physical source tie on the user order and UUID, so the semantic
+    // arm carrier is the final deterministic page key.
+    db.update(
+        "users",
+        alice,
+        BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+        Default::default(),
+    )
+    .unwrap();
+    let windowed_query = RelationQuery {
+        rel: RelationExpr::Limit {
+            input: Box::new(RelationExpr::Offset {
+                input: Box::new(RelationExpr::OrderBy {
+                    input: Box::new(query.rel),
+                    terms: vec![RelationOrderBy {
+                        column: RelationColumnRef {
+                            scope: Some("users".to_owned()),
+                            column: "name".to_owned(),
+                        },
+                        direction: OrderDirection::Asc,
+                    }],
+                }),
+                offset: 1,
+            }),
+            limit: 1,
+        },
+    };
+    let mut windowed =
+        block_on(db.subscribe_relation_query(&windowed_query, ReadOpts::default())).unwrap();
+    let SubscriptionEvent::Delta {
+        added: windowed_opened,
+        ..
+    } = windowed.try_next_event().expect("windowed opening event")
+    else {
+        panic!("windowed subscription opening must be a delta");
+    };
+    assert_eq!(windowed_opened.len(), 1);
+    assert_eq!(
+        windowed_opened[0].occurrence_id.union_arms(),
+        &[(0, "second".to_owned())],
+        "the offset crosses the first physical-row occurrence into the second union arm",
+    );
+}
+
+/// One-shot and maintained reads of one projected relation must publish the
+/// same result descriptor: every alias carries its source column's declared
+/// type, so a non-null Text column stays `String`, a nullable FK stays
+/// `Nullable(Uuid)` and `id` is a plain `Uuid`. Relation IR is built directly
+/// because it is the public Rust relation seam used by WASM and NAPI.
+#[test]
+fn relation_query_projection_types_match_between_one_shot_and_maintained_reads() {
+    let schema = relation_hop_schema();
+    let db = open_db(0xd3, AuthorSubject::for_test_bytes([0xd3; 16]), &schema);
+    let parent = row(0x10);
+    let child = row(0x11);
+    db.insert(
+        "teams",
+        BTreeMap::from([("name".to_owned(), Value::String("Parent".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(parent),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert(
+        "teams",
+        BTreeMap::from([
+            ("name".to_owned(), Value::String("Child".to_owned())),
+            (
+                "parent_id".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(parent.0)))),
+            ),
+        ]),
+        crate::db::InsertOptions {
+            row_id: Some(child),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let column = |alias: &str, column: &str| crate::query::RelationProjectColumn {
+        alias: alias.to_owned(),
+        expr: RelationProjectExpr::Column(RelationColumnRef {
+            scope: Some("teams".to_owned()),
+            column: column.to_owned(),
+        }),
+    };
+    let query = RelationQuery {
+        rel: RelationExpr::Project {
+            input: Box::new(RelationExpr::TableScan {
+                table: "teams".to_owned(),
+                alias: None,
+            }),
+            columns: vec![
+                column("teamId", "id"),
+                column("label", "name"),
+                column("parent", "parent_id"),
+            ],
+        },
+    };
+    let expected_types = vec![
+        ("teamId".to_owned(), ValueType::Uuid),
+        ("label".to_owned(), ValueType::String),
+        (
+            "parent".to_owned(),
+            ValueType::Nullable(Box::new(ValueType::Uuid)),
+        ),
+    ];
+    // The published descriptor exactly as the native binding encodes it for
+    // hosts, minus fields it tags as hidden metadata (row identity, routes).
+    let field_types = |row: &CurrentRow| {
+        let batches = crate::binding_codec::row_batches(std::slice::from_ref(row)).unwrap();
+        batches[0]
+            .descriptor
+            .iter()
+            .filter_map(|field| match field.name {
+                crate::binding_codec::RowDescriptorFieldName::HiddenMetadata { .. } => None,
+                crate::binding_codec::RowDescriptorFieldName::ResultField { name } => {
+                    Some((name.to_owned(), field.value_type.clone()))
+                }
+                crate::binding_codec::RowDescriptorFieldName::StoredColumn {
+                    output_name, ..
+                } => Some((output_name.to_owned(), field.value_type.clone())),
+            })
+            .collect::<Vec<_>>()
+    };
+    let cells = |row: &CurrentRow| {
+        let (descriptor, raw) = row.encoded_record();
+        let bound = descriptor.bind(raw);
+        ["teamId", "label", "parent"].map(|alias| bound.get(alias).unwrap().clone())
+    };
+    let expected_cells = |id: RowUuid| {
+        if id == parent {
+            [
+                Value::Uuid(parent.0),
+                Value::String("Parent".to_owned()),
+                Value::Nullable(None),
+            ]
+        } else {
+            [
+                Value::Uuid(child.0),
+                Value::String("Child".to_owned()),
+                Value::Nullable(Some(Box::new(Value::Uuid(parent.0)))),
+            ]
+        }
+    };
+
+    let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default())).unwrap();
+    assert_eq!(snapshot.rows.len(), 2);
+    for returned in &snapshot.rows {
+        assert_eq!(field_types(returned), expected_types);
+        assert_eq!(cells(returned), expected_cells(returned.row_uuid()));
+    }
+
+    let mut subscription =
+        block_on(db.subscribe_relation_query(&query, ReadOpts::default())).unwrap();
+    let opened = opened_rows(subscription.try_next_event().expect("opened event"));
+    assert_eq!(opened.len(), 2);
+    for returned in &opened {
+        assert_eq!(field_types(returned), expected_types);
+        assert_eq!(cells(returned), expected_cells(returned.row_uuid()));
+    }
+    assert_eq!(
+        field_types(&opened[0]),
+        field_types(&snapshot.rows[0]),
+        "one-shot and maintained relation reads must publish one descriptor"
+    );
+
+    db.update(
+        "teams",
+        child,
+        BTreeMap::from([("parent_id".to_owned(), Value::Nullable(None))]),
+        Default::default(),
+    )
+    .unwrap();
+    let (_, updated, removed) = delta_rows(subscription.try_next_event().expect("update event"));
+    assert!(removed.is_empty());
+    assert_eq!(row_ids(&updated), vec![child]);
+    assert_eq!(field_types(&updated[0]), expected_types);
+    assert_eq!(
+        cells(&updated[0]),
+        [
+            Value::Uuid(child.0),
+            Value::String("Child".to_owned()),
+            Value::Nullable(None),
+        ]
+    );
+}
+
+/// A relation alias may reuse a source column name for a different column.
+/// Global UNION ordering by `users.name` must still sort by the source `name`
+/// column, never by an arm's `name := users.nickname` alias, in both one-shot
+/// and maintained reads, including across a global window. Relation IR is
+/// built directly because it is the public Rust relation seam used by WASM
+/// and NAPI.
+#[test]
+fn relation_union_all_order_by_source_column_is_not_shadowed_by_alias() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("users")
+                .column("name", PublicColumnType::Text)
+                .column("nickname", PublicColumnType::Text),
+        ),
+    );
+    let db = open_db(0xd4, AuthorSubject::for_test_bytes([0xd4; 16]), &schema);
+    // Source-name order is (first, second); nickname order is the reverse.
+    let first = row(0xa1);
+    let second = row(0xb2);
+    for (row_id, name, nickname) in [(first, "a", "z"), (second, "b", "y")] {
+        db.insert(
+            "users",
+            BTreeMap::from([
+                ("name".to_owned(), Value::String(name.to_owned())),
+                ("nickname".to_owned(), Value::String(nickname.to_owned())),
+            ]),
+            crate::db::InsertOptions {
+                row_id: Some(row_id),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let arm = |label: &str, column: &str| crate::query::RelationUnionArm {
+        label: label.to_owned(),
+        input: RelationExpr::Project {
+            input: Box::new(RelationExpr::TableScan {
+                table: "users".to_owned(),
+                alias: None,
+            }),
+            columns: vec![crate::query::RelationProjectColumn {
+                alias: "name".to_owned(),
+                expr: RelationProjectExpr::Column(RelationColumnRef {
+                    scope: Some("users".to_owned()),
+                    column: column.to_owned(),
+                }),
+            }],
+        },
+    };
+    let query = RelationQuery {
+        rel: RelationExpr::Limit {
+            input: Box::new(RelationExpr::OrderBy {
+                input: Box::new(RelationExpr::Union {
+                    inputs: vec![arm("first", "name"), arm("second", "nickname")],
+                }),
+                terms: vec![RelationOrderBy {
+                    column: RelationColumnRef {
+                        scope: Some("users".to_owned()),
+                        column: "name".to_owned(),
+                    },
+                    direction: OrderDirection::Asc,
+                }],
+            }),
+            limit: 3,
+        },
+    };
+    let published = |row: &CurrentRow| {
+        let (descriptor, raw) = row.encoded_record();
+        (
+            row.row_uuid(),
+            descriptor.bind(raw).get("name").unwrap().clone(),
+        )
+    };
+    // Ordered by source name, then row id, then arm label. Ordering by the
+    // alias instead would yield a, b, y.
+    let expected = vec![
+        (first, Value::String("a".to_owned())),
+        (first, Value::String("z".to_owned())),
+        (second, Value::String("b".to_owned())),
+    ];
+
+    let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default())).unwrap();
+    assert_eq!(
+        snapshot.rows.iter().map(published).collect::<Vec<_>>(),
+        expected
+    );
+
+    let mut subscription =
+        block_on(db.subscribe_relation_query(&query, ReadOpts::default())).unwrap();
+    let SubscriptionEvent::Delta { added, .. } =
+        subscription.try_next_event().expect("opened event")
+    else {
+        panic!("subscription opening must be a delta");
+    };
+    assert_eq!(
+        added
+            .iter()
+            .map(|output| published(&output.row))
+            .collect::<Vec<_>>(),
+        expected
+    );
+}
+
+/// Relation aliases share the lowered graph with the engine's own carriers
+/// (row identity, `_app_` cells, `$` provenance, `tx_*` versions, `__` engine
+/// fields such as UNION arm/row carriers, `left.`/`right.` join sides). An alias
+/// taking one of those names would replace the carrier, so it is rejected with
+/// a clear error for single-relation and UNION queries on both read paths.
+#[test]
+fn relation_projection_rejects_reserved_internal_aliases() {
+    let schema = relation_schema();
+    let db = open_db(0xd6, AuthorSubject::for_test_bytes([0xd6; 16]), &schema);
+    let project = |alias: &str| RelationExpr::Project {
+        input: Box::new(RelationExpr::TableScan {
+            table: "users".to_owned(),
+            alias: None,
+        }),
+        columns: vec![crate::query::RelationProjectColumn {
+            alias: alias.to_owned(),
+            expr: RelationProjectExpr::Column(RelationColumnRef {
+                scope: Some("users".to_owned()),
+                column: "name".to_owned(),
+            }),
+        }],
+    };
+    for alias in [
+        "row_uuid",
+        "tx_time",
+        "tx_node_id",
+        "$createdAt",
+        "_app_name",
+        "__root_union_arm",
+        "__root_union_row",
+        "left.name",
+        "right.name",
+    ] {
+        let single = RelationQuery {
+            rel: project(alias),
+        };
+        let union = RelationQuery {
+            rel: RelationExpr::Union {
+                inputs: ["first", "second"]
+                    .map(|label| crate::query::RelationUnionArm {
+                        label: label.to_owned(),
+                        input: project(alias),
+                    })
+                    .to_vec(),
+            },
+        };
+        for query in [&single, &union] {
+            let error = block_on(db.all_relation_query(query, ReadOpts::default())).unwrap_err();
+            assert_eq!(error.code, ErrorCode::Query, "{alias}");
+            assert!(
+                error.message.contains(&format!(
+                    "relation project alias {alias:?} is a reserved internal name"
+                )),
+                "{alias}: {}",
+                error.message
+            );
+            let error = block_on(db.subscribe_relation_query(query, ReadOpts::default()))
+                .err()
+                .unwrap_or_else(|| panic!("maintained read must reject alias {alias}"));
+            assert_eq!(error.code, ErrorCode::Query, "{alias}");
+        }
+    }
+}
+
+/// Reserved alias names apply only to retained projections. A full identity
+/// projection is the ordinary row shape, so a table whose schema-permitted
+/// column name resembles an engine carrier (`__note`) keeps working through
+/// relation queries exactly as before, on both read paths; a UNION, which
+/// always retains its arm projections, rejects the same alias clearly.
+#[test]
+fn relation_identity_projection_keeps_carrier_like_column_names() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("events")
+                .column("name", PublicColumnType::Text)
+                .column("__note", PublicColumnType::Text),
+        ),
+    );
+    let db = open_db(0xd8, AuthorSubject::for_test_bytes([0xd8; 16]), &schema);
+    let event = row(0xe1);
+    db.insert(
+        "events",
+        BTreeMap::from([
+            ("name".to_owned(), Value::String("launch".to_owned())),
+            ("__note".to_owned(), Value::String("noon".to_owned())),
+        ]),
+        crate::db::InsertOptions {
+            row_id: Some(event),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let identity = || RelationExpr::Project {
+        input: Box::new(RelationExpr::TableScan {
+            table: "events".to_owned(),
+            alias: None,
+        }),
+        columns: ["id", "name", "__note"]
+            .map(|column| crate::query::RelationProjectColumn {
+                alias: column.to_owned(),
+                expr: RelationProjectExpr::Column(RelationColumnRef {
+                    scope: Some("events".to_owned()),
+                    column: column.to_owned(),
+                }),
+            })
+            .to_vec(),
+    };
+    let query = RelationQuery { rel: identity() };
+    let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default())).unwrap();
+    assert_eq!(row_ids(&snapshot.rows), vec![event]);
+    assert_eq!(
+        snapshot.rows[0].cell(&schema.tables[0], "__note"),
+        Some(Value::String("noon".to_owned()))
+    );
+    let mut subscription =
+        block_on(db.subscribe_relation_query(&query, ReadOpts::default())).unwrap();
+    let opened = opened_rows(subscription.try_next_event().expect("opened event"));
+    assert_eq!(row_ids(&opened), vec![event]);
+    assert_eq!(
+        opened[0].cell(&schema.tables[0], "__note"),
+        Some(Value::String("noon".to_owned()))
+    );
+
+    let union = RelationQuery {
+        rel: RelationExpr::Union {
+            inputs: vec![crate::query::RelationUnionArm {
+                label: "only".to_owned(),
+                input: identity(),
+            }],
+        },
+    };
+    let error = block_on(db.all_relation_query(&union, ReadOpts::default())).unwrap_err();
+    assert!(
+        error
+            .message
+            .contains("relation project alias \"__note\" is a reserved internal name"),
+        "{}",
+        error.message
+    );
+}
+
+/// A relation envelope may carry `include` array subqueries, as the TypeScript
+/// adapter sends for `match` predicates: a full identity projection of the
+/// output table plus includes. The identity projection is the ordinary row
+/// shape, so includes must still arrive on one-shot and maintained reads. A
+/// renaming or narrowing projection cannot also carry include or select
+/// presentation and is rejected explicitly instead of dropping it.
+/// `Query::relation` is the public envelope field the native bindings fill.
+#[test]
+fn relation_query_projection_includes_are_served_or_rejected() {
+    let schema = relation_schema();
+    let db = open_db(0xd7, AuthorSubject::for_test_bytes([0xd7; 16]), &schema);
+    let alice = row(0xa1);
+    let todo = row(0xb1);
+    db.insert(
+        "users",
+        BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(alice),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert(
+        "todos",
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("write tests".to_owned())),
+            ("owner_id".to_owned(), Value::Uuid(alice.0)),
+        ]),
+        crate::db::InsertOptions {
+            row_id: Some(todo),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let relation_query = |columns: Vec<(&str, &str)>| {
+        let mut query = Query::from("users").array_subquery(
+            ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id").select(["title"]),
+        );
+        query.relation = Some(RelationQuery {
+            rel: RelationExpr::Project {
+                input: Box::new(RelationExpr::TableScan {
+                    table: "users".to_owned(),
+                    alias: None,
+                }),
+                columns: columns
+                    .into_iter()
+                    .map(|(alias, column)| crate::query::RelationProjectColumn {
+                        alias: alias.to_owned(),
+                        expr: RelationProjectExpr::Column(RelationColumnRef {
+                            scope: Some("users".to_owned()),
+                            column: column.to_owned(),
+                        }),
+                    })
+                    .collect(),
+            },
+        });
+        query
+    };
+
+    let identity = relation_query(vec![("id", "id"), ("name", "name")]);
+    let prepared = db.prepare_query(&identity).unwrap();
+    let snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
+    assert_eq!(row_ids(&snapshot.rows[..snapshot.root_count]), vec![alice]);
+    assert_eq!(
+        snapshot.rows[0].test_cells_by_descriptor().get("name"),
+        Some(&Value::String("alice".to_owned()))
+    );
+    assert_eq!(
+        terminal_nested_text_values(&snapshot, alice, "todosViaOwner", "title"),
+        vec!["write tests".to_owned()]
+    );
+    let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    let mut maintained = RelationSnapshot::default();
+    apply_subscription_event(
+        &mut maintained,
+        subscription.try_next_event().expect("opened event"),
+    );
+    assert_eq!(
+        terminal_nested_text_values(&maintained, alice, "todosViaOwner", "title"),
+        vec!["write tests".to_owned()],
+        "maintained reads must keep includes on an identity relation projection"
+    );
+
+    let renamed = relation_query(vec![("displayName", "name")]);
+    let error = db.prepare_query(&renamed).unwrap_err();
+    assert_eq!(error.code, ErrorCode::Query);
+    assert!(
+        error.message.contains(
+            "include(...) is not supported on a relation query whose projection renames or narrows its output columns"
+        ),
+        "{}",
+        error.message
+    );
+    let narrowed = relation_query(vec![("id", "id")]);
+    assert_eq!(
+        db.prepare_query(&narrowed).unwrap_err().code,
+        ErrorCode::Query
+    );
+
+    let mut selected = relation_query(vec![("displayName", "name")]);
+    selected.array_subqueries.clear();
+    selected.select = Some(vec!["displayName".to_owned()]);
+    let error = db.prepare_query(&selected).unwrap_err();
+    assert!(
+        error.message.contains(
+            "select(...) is not supported on a relation query whose projection renames or narrows its output columns"
+        ),
+        "{}",
+        error.message
+    );
+}
+
+/// Two `users` arms projected to `displayName`, ordered globally by `term`.
+fn users_union_ordered_by(term: RelationColumnRef) -> RelationQuery {
+    let arm = |label: &str| crate::query::RelationUnionArm {
+        label: label.to_owned(),
+        input: RelationExpr::Project {
+            input: Box::new(RelationExpr::TableScan {
+                table: "users".to_owned(),
+                alias: None,
+            }),
+            columns: vec![crate::query::RelationProjectColumn {
+                alias: "displayName".to_owned(),
+                expr: RelationProjectExpr::Column(RelationColumnRef {
+                    scope: Some("users".to_owned()),
+                    column: "name".to_owned(),
+                }),
+            }],
+        },
+    };
+    RelationQuery {
+        rel: RelationExpr::OrderBy {
+            input: Box::new(RelationExpr::Union {
+                inputs: vec![arm("first"), arm("second")],
+            }),
+            terms: vec![RelationOrderBy {
+                column: term,
+                direction: OrderDirection::Asc,
+            }],
+        },
+    }
+}
+
+/// Global UNION ordering runs over union output rows, so an order term scoped
+/// to anything but the output table has no meaning. It must be rejected rather
+/// than silently sorting by the output table's same-named column, and author
+/// provenance ordering stays unsupported exactly as for non-union queries.
+/// Relation IR is built directly because it is the public Rust relation seam
+/// used by WASM and NAPI; the assertions are on the public read results.
+#[test]
+fn relation_union_all_order_by_rejects_foreign_scope_and_author_columns() {
+    let schema = relation_schema();
+    let db = open_db(0xd2, AuthorSubject::for_test_bytes([0xd2; 16]), &schema);
+    let alice = row(0xa1);
+    db.insert(
+        "users",
+        BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(alice),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let accepted = users_union_ordered_by(RelationColumnRef {
+        scope: Some("users".to_owned()),
+        column: "name".to_owned(),
+    });
+    let snapshot = block_on(db.all_relation_query(&accepted, ReadOpts::default())).unwrap();
+    assert_eq!(row_ids(&snapshot.rows), vec![alice, alice]);
+
+    let foreign_scope = users_union_ordered_by(RelationColumnRef {
+        scope: Some("other".to_owned()),
+        column: "name".to_owned(),
+    });
+    let error = block_on(db.all_relation_query(&foreign_scope, ReadOpts::default())).unwrap_err();
+    assert_eq!(error.code, ErrorCode::Query);
+    assert!(
+        error
+            .message
+            .contains("union order_by must be scoped to the union output table"),
+        "{}",
+        error.message
+    );
+    let error = block_on(db.subscribe_relation_query(&foreign_scope, ReadOpts::default()))
+        .err()
+        .expect("maintained union with a foreign order scope must be rejected");
+    assert_eq!(error.code, ErrorCode::Query);
+
+    let unknown_column = users_union_ordered_by(RelationColumnRef {
+        scope: Some("users".to_owned()),
+        column: "missing".to_owned(),
+    });
+    let error = block_on(db.all_relation_query(&unknown_column, ReadOpts::default())).unwrap_err();
+    assert_eq!(error.code, ErrorCode::Query);
+    assert!(error.message.contains("missing"), "{}", error.message);
+
+    for author_column in ["$createdBy", "$updatedBy"] {
+        let author_ordered = users_union_ordered_by(RelationColumnRef {
+            scope: None,
+            column: author_column.to_owned(),
+        });
+        let error =
+            block_on(db.all_relation_query(&author_ordered, ReadOpts::default())).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Query);
+        assert!(
+            error.message.contains(&format!(
+                "ordering by author provenance column {author_column} is unsupported"
+            )),
+            "{}",
+            error.message
+        );
+    }
+}
+
+/// A maintained root UNION must retain source version metadata after each
+/// arm's public projection narrows the physical row.
+#[test]
+fn relation_union_all_maintained_opening_retains_source_metadata() {
+    let schema = relation_schema();
+    let db = open_db(0xcf, AuthorSubject::for_test_bytes([0xcf; 16]), &schema);
+    let alice = row(0xa1);
+    db.insert(
+        "users",
+        BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(alice),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let arm = |label: &str| crate::query::RelationUnionArm {
+        label: label.to_owned(),
+        input: RelationExpr::Filter {
+            input: Box::new(RelationExpr::TableScan {
+                table: "users".to_owned(),
+                alias: None,
+            }),
+            predicate: RelationPredicate::Cmp {
+                left: RelationColumnRef {
+                    scope: Some("users".to_owned()),
+                    column: "name".to_owned(),
+                },
+                op: RelationCmpOp::Eq,
+                right: RelationValueRef::Literal(serde_json::Value::String("alice".to_owned())),
+            },
+        },
+    };
+    let query = RelationQuery {
+        rel: RelationExpr::Project {
+            input: Box::new(RelationExpr::Union {
+                inputs: vec![arm("first"), arm("second")],
+            }),
+            columns: vec![crate::query::RelationProjectColumn {
+                alias: "name".to_owned(),
+                expr: RelationProjectExpr::Column(RelationColumnRef {
+                    scope: Some("users".to_owned()),
+                    column: "name".to_owned(),
+                }),
+            }],
+        },
+    };
+    let mut subscription = block_on(db.subscribe_relation_query(&query, ReadOpts::default()))
+        .expect("maintained root union should open");
+    let SubscriptionEvent::Delta { added, .. } =
+        subscription.try_next_event().expect("opening event")
+    else {
+        panic!("subscription opening must be a delta");
+    };
+    assert_eq!(
+        added
+            .iter()
+            .map(|output| output.row.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![alice, alice]
+    );
+}
+
+/// Maintained relation UNION arms may share an alias and type while reading
+/// different same-typed source columns. Each output occurrence must retain its
+/// arm-local projection on opening and on later updates.
+#[test]
+fn relation_union_all_maintained_projection_is_selected_by_arm() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("users")
+                    .column("name", PublicColumnType::Text)
+                    .column("nickname", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .fk_column("owner_id", "users"),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("comments")
+                    .column("body", PublicColumnType::Text)
+                    .fk_column("todo_id", "todos"),
+            ),
+    );
+    let db = open_db(0xd0, AuthorSubject::for_test_bytes([0xd0; 16]), &schema);
+    let left = row(0xa1);
+    let right = row(0xb2);
+    for (row_id, name, nickname) in [
+        (left, "left-name", "left-nickname"),
+        (right, "right-name", "right-nickname"),
+    ] {
+        db.insert(
+            "users",
+            BTreeMap::from([
+                ("name".to_owned(), Value::String(name.to_owned())),
+                ("nickname".to_owned(), Value::String(nickname.to_owned())),
+            ]),
+            crate::db::InsertOptions {
+                row_id: Some(row_id),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let arm = |label: &str, scope: &str, output_column: &str, filter_column: &str, value: &str| {
+        crate::query::RelationUnionArm {
+            label: label.to_owned(),
+            input: RelationExpr::Project {
+                input: Box::new(RelationExpr::Filter {
+                    input: Box::new(RelationExpr::TableScan {
+                        table: "users".to_owned(),
+                        alias: Some(scope.to_owned()),
+                    }),
+                    predicate: RelationPredicate::Cmp {
+                        left: RelationColumnRef {
+                            scope: Some(scope.to_owned()),
+                            column: filter_column.to_owned(),
+                        },
+                        op: RelationCmpOp::Eq,
+                        right: RelationValueRef::Literal(serde_json::Value::String(
+                            value.to_owned(),
+                        )),
+                    },
+                }),
+                columns: vec![crate::query::RelationProjectColumn {
+                    alias: "displayName".to_owned(),
+                    expr: RelationProjectExpr::Column(RelationColumnRef {
+                        scope: Some(scope.to_owned()),
+                        column: output_column.to_owned(),
+                    }),
+                }],
+            },
+        }
+    };
+    let query = RelationQuery {
+        rel: RelationExpr::Union {
+            inputs: vec![
+                arm("left", "source", "name", "name", "left-name"),
+                arm("right", "source", "nickname", "name", "right-name"),
+            ],
+        },
+    };
+    // Exact published type and value: `nickname` and `name` are non-nullable
+    // Text, so both one-shot and maintained reads must publish plain `String`.
+    let display_name = |row: &CurrentRow| {
+        let (descriptor, raw) = row.encoded_record();
+        let field = descriptor
+            .fields()
+            .iter()
+            .find(|field| field.name.as_deref() == Some("displayName"))
+            .expect("displayName field");
+        assert_eq!(field.value_type, ValueType::String);
+        descriptor.bind(raw).get("displayName").unwrap().clone()
+    };
+    let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default())).unwrap();
+    assert_eq!(
+        snapshot.rows.iter().map(display_name).collect::<Vec<_>>(),
+        vec![
+            Value::String("left-name".to_owned()),
+            Value::String("right-nickname".to_owned())
+        ]
+    );
+    let mut subscription = block_on(db.subscribe_relation_query(&query, ReadOpts::default()))
+        .expect("maintained union should open");
+    let SubscriptionEvent::Delta { added, .. } =
+        subscription.try_next_event().expect("opening event")
+    else {
+        panic!("subscription opening must be a delta");
+    };
+    assert_eq!(
+        added
+            .iter()
+            .map(|output| display_name(&output.row))
+            .collect::<Vec<_>>(),
+        vec![
+            Value::String("left-name".to_owned()),
+            Value::String("right-nickname".to_owned())
+        ]
+    );
+    assert_eq!(
+        added
+            .iter()
+            .map(|output| output.occurrence_id.union_arms().to_vec())
+            .collect::<Vec<_>>(),
+        vec![vec![(0, "left".to_owned())], vec![(0, "right".to_owned())]]
+    );
+    db.update(
+        "users",
+        right,
+        BTreeMap::from([(
+            "nickname".to_owned(),
+            Value::String("right-updated".to_owned()),
+        )]),
+        Default::default(),
+    )
+    .unwrap();
+    let (added, updated, removed) =
+        delta_rows(subscription.try_next_event().expect("update event"));
+    assert!(added.is_empty());
+    assert_eq!(
+        updated.iter().map(display_name).collect::<Vec<_>>(),
+        vec![Value::String("right-updated".to_owned())]
+    );
+    assert!(removed.is_empty());
+}
+
+#[test]
+fn relation_query_one_shot_hop_accepts_runtime_uuid_literal_filter() {
+    let schema = relation_schema();
+    let db = open_db(0xc1, AuthorSubject::for_test_bytes([0xc1; 16]), &schema);
+    db.insert(
+        "users",
+        BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xa1)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert(
+        "users",
+        BTreeMap::from([("name".to_owned(), Value::String("bob".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xb1)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert(
+        "todos",
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("alice todo".to_owned())),
+            ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
+        ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x11)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert(
+        "todos",
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("bob todo".to_owned())),
+            ("owner_id".to_owned(), Value::Uuid(row(0xb1).0)),
+        ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x22)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let query = RelationQuery {
+        rel: RelationExpr::Project {
+            input: Box::new(RelationExpr::Join {
+                left: Box::new(RelationExpr::Filter {
+                    input: Box::new(RelationExpr::TableScan {
+                        table: "users".to_owned(),
+                        alias: None,
+                    }),
+                    predicate: RelationPredicate::Cmp {
+                        left: RelationColumnRef {
+                            scope: Some("users".to_owned()),
+                            column: "id".to_owned(),
+                        },
+                        op: RelationCmpOp::Eq,
+                        right: RelationValueRef::Literal(serde_json::json!({
+                            "type": "Uuid",
+                            "value": row(0xa1).0.to_string(),
+                        })),
+                    },
+                }),
+                right: Box::new(RelationExpr::TableScan {
+                    table: "todos".to_owned(),
+                    alias: Some("__hop_0".to_owned()),
+                }),
+                on: vec![crate::query::RelationJoinCondition {
+                    left: RelationColumnRef {
+                        scope: Some("users".to_owned()),
+                        column: "id".to_owned(),
+                    },
+                    right: RelationColumnRef {
+                        scope: Some("__hop_0".to_owned()),
+                        column: "owner_id".to_owned(),
+                    },
+                }],
+                join_kind: RelationJoinKind::Inner,
+            }),
+            columns: vec![
+                crate::query::RelationProjectColumn {
+                    alias: "id".to_owned(),
+                    expr: RelationProjectExpr::Column(RelationColumnRef {
+                        scope: Some("__hop_0".to_owned()),
+                        column: "id".to_owned(),
+                    }),
+                },
+                crate::query::RelationProjectColumn {
+                    alias: "title".to_owned(),
+                    expr: RelationProjectExpr::Column(RelationColumnRef {
+                        scope: Some("__hop_0".to_owned()),
+                        column: "title".to_owned(),
+                    }),
+                },
+                crate::query::RelationProjectColumn {
+                    alias: "owner_id".to_owned(),
+                    expr: RelationProjectExpr::Column(RelationColumnRef {
+                        scope: Some("__hop_0".to_owned()),
+                        column: "owner_id".to_owned(),
+                    }),
+                },
+            ],
+        },
+    };
+
+    let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default())).unwrap();
+    assert_eq!(row_ids(&snapshot.rows), vec![row(0x11)]);
+}
+
+#[test]
+fn relation_query_one_shot_multi_hop_scalar_fk_uses_nested_join_path() {
+    let schema = relation_hop_schema();
+    let db = open_db(0xc1, AuthorSubject::for_test_bytes([0xc1; 16]), &schema);
+    db.insert(
+        "orgs",
+        BTreeMap::from([("name".to_owned(), Value::String("Org A".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x01)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert(
+        "orgs",
+        BTreeMap::from([("name".to_owned(), Value::String("Org B".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x02)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert(
+        "teams",
+        BTreeMap::from([
+            ("name".to_owned(), Value::String("Team A".to_owned())),
+            (
+                "org_id".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(row(0x01).0)))),
+            ),
+        ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x11)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert(
+        "users",
+        BTreeMap::from([
+            ("name".to_owned(), Value::String("User A".to_owned())),
+            (
+                "team_id".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(row(0x11).0)))),
+            ),
+        ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x21)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let query = users_to_orgs_relation_query();
+
+    let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default())).unwrap();
+    assert_eq!(row_ids(&snapshot.rows), vec![row(0x01)]);
+}
+
+#[test]
+fn relation_query_subscription_hop_uses_unified_query_path() {
+    let schema = relation_schema();
+    let db = open_db(0xc1, AuthorSubject::for_test_bytes([0xc1; 16]), &schema);
+    db.insert(
+        "users",
+        BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xa1)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert(
+        "todos",
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("alice todo".to_owned())),
+            ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
+        ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x11)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let query = RelationQuery {
+        rel: RelationExpr::Project {
+            input: Box::new(RelationExpr::Join {
+                left: Box::new(RelationExpr::TableScan {
+                    table: "users".to_owned(),
+                    alias: None,
+                }),
+                right: Box::new(RelationExpr::TableScan {
+                    table: "todos".to_owned(),
+                    alias: Some("__hop_0".to_owned()),
+                }),
+                on: vec![crate::query::RelationJoinCondition {
+                    left: RelationColumnRef {
+                        scope: Some("users".to_owned()),
+                        column: "id".to_owned(),
+                    },
+                    right: RelationColumnRef {
+                        scope: Some("__hop_0".to_owned()),
+                        column: "owner_id".to_owned(),
+                    },
+                }],
+                join_kind: RelationJoinKind::Inner,
+            }),
+            columns: vec![
+                crate::query::RelationProjectColumn {
+                    alias: "id".to_owned(),
+                    expr: RelationProjectExpr::RowId(RelationRowIdRef::Current),
+                },
+                crate::query::RelationProjectColumn {
+                    alias: "title".to_owned(),
+                    expr: RelationProjectExpr::Column(RelationColumnRef {
+                        scope: Some("__hop_0".to_owned()),
+                        column: "title".to_owned(),
+                    }),
+                },
+                crate::query::RelationProjectColumn {
+                    alias: "owner_id".to_owned(),
+                    expr: RelationProjectExpr::Column(RelationColumnRef {
+                        scope: Some("__hop_0".to_owned()),
+                        column: "owner_id".to_owned(),
+                    }),
+                },
+            ],
+        },
+    };
+
+    let mut stream = block_on(db.subscribe_relation_query(&query, ReadOpts::default())).unwrap();
+    let opened = opened_rows(stream.try_next_event().expect("opened event"));
+    assert_eq!(row_ids(&opened), vec![row(0x11)]);
+}
+
+#[test]
+fn relation_query_subscription_hop_preserves_projected_self_reference_cells() {
+    let schema = relation_hop_schema();
+    let db = open_db(0xc1, AuthorSubject::for_test_bytes([0xc1; 16]), &schema);
+    let parent = row(0x10);
+    let team = row(0x11);
+    let user = row(0x21);
+    db.insert(
+        "teams",
+        BTreeMap::from([("name".to_owned(), Value::String("Parent".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(parent),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert(
+        "teams",
+        BTreeMap::from([
+            ("name".to_owned(), Value::String("Team A".to_owned())),
+            (
+                "parent_id".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(parent.0)))),
+            ),
+        ]),
+        crate::db::InsertOptions {
+            row_id: Some(team),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert(
+        "users",
+        BTreeMap::from([
+            ("name".to_owned(), Value::String("User A".to_owned())),
+            (
+                "team_id".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(team.0)))),
+            ),
+        ]),
+        crate::db::InsertOptions {
+            row_id: Some(user),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let query = users_to_teams_relation_query();
+    let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default())).unwrap();
+    assert_eq!(row_ids(&snapshot.rows), vec![team]);
+    assert_eq!(
+        snapshot.rows[0].cell(&schema.tables[1], "name"),
+        Some(Value::String("Team A".to_owned()))
+    );
+    assert_eq!(
+        snapshot.rows[0].cell(&schema.tables[1], "parent_id"),
+        Some(Value::Nullable(Some(Box::new(Value::Uuid(parent.0)))))
+    );
+
+    let mut stream = block_on(db.subscribe_relation_query(&query, ReadOpts::default())).unwrap();
+    let opened = opened_rows(stream.try_next_event().expect("opened event"));
+    let opened_team = opened
+        .iter()
+        .find(|row| row.row_uuid() == team)
+        .expect("joined team row");
+    assert_eq!(
+        opened_team.cell(&schema.tables[1], "name"),
+        Some(Value::String("Team A".to_owned()))
+    );
+    assert_eq!(
+        opened_team.cell(&schema.tables[1], "parent_id"),
+        Some(Value::Nullable(Some(Box::new(Value::Uuid(parent.0)))))
+    );
+
+    db.update(
+        "teams",
+        team,
+        BTreeMap::from([("name".to_owned(), Value::String("Team B".to_owned()))]),
+        Default::default(),
+    )
+    .unwrap();
+    let (_, changed, removed) = delta_rows(stream.try_next_event().expect("updated event"));
+    assert!(removed.is_empty());
+    assert_eq!(row_ids(&changed), vec![team]);
+    assert_eq!(
+        changed[0].cell(&schema.tables[1], "name"),
+        Some(Value::String("Team B".to_owned()))
+    );
+    assert_eq!(
+        changed[0].cell(&schema.tables[1], "parent_id"),
+        Some(Value::Nullable(Some(Box::new(Value::Uuid(parent.0)))))
+    );
+}
+
+fn users_to_teams_relation_query() -> RelationQuery {
+    RelationQuery {
+        rel: RelationExpr::Project {
+            input: Box::new(RelationExpr::Join {
+                left: Box::new(RelationExpr::Filter {
+                    input: Box::new(RelationExpr::TableScan {
+                        table: "users".to_owned(),
+                        alias: None,
+                    }),
+                    predicate: RelationPredicate::Cmp {
+                        left: RelationColumnRef {
+                            scope: Some("users".to_owned()),
+                            column: "name".to_owned(),
+                        },
+                        op: RelationCmpOp::Eq,
+                        right: RelationValueRef::Literal(serde_json::Value::String(
+                            "User A".to_owned(),
+                        )),
+                    },
+                }),
+                right: Box::new(RelationExpr::TableScan {
+                    table: "teams".to_owned(),
+                    alias: Some("__hop_0".to_owned()),
+                }),
+                on: vec![crate::query::RelationJoinCondition {
+                    left: RelationColumnRef {
+                        scope: Some("users".to_owned()),
+                        column: "team_id".to_owned(),
+                    },
+                    right: RelationColumnRef {
+                        scope: Some("__hop_0".to_owned()),
+                        column: "id".to_owned(),
+                    },
+                }],
+                join_kind: RelationJoinKind::Inner,
+            }),
+            columns: vec![
+                crate::query::RelationProjectColumn {
+                    alias: "id".to_owned(),
+                    expr: RelationProjectExpr::Column(RelationColumnRef {
+                        scope: Some("__hop_0".to_owned()),
+                        column: "id".to_owned(),
+                    }),
+                },
+                crate::query::RelationProjectColumn {
+                    alias: "name".to_owned(),
+                    expr: RelationProjectExpr::Column(RelationColumnRef {
+                        scope: Some("__hop_0".to_owned()),
+                        column: "name".to_owned(),
+                    }),
+                },
+                crate::query::RelationProjectColumn {
+                    alias: "parent_id".to_owned(),
+                    expr: RelationProjectExpr::Column(RelationColumnRef {
+                        scope: Some("__hop_0".to_owned()),
+                        column: "parent_id".to_owned(),
+                    }),
+                },
+            ],
+        },
+    }
+}
+
+#[test]
+fn relation_query_subscription_multi_hop_scalar_fk_uses_nested_join_path() {
+    let schema = relation_hop_schema();
+    let db = open_db(0xc1, AuthorSubject::for_test_bytes([0xc1; 16]), &schema);
+    let query = users_to_orgs_relation_query();
+    let mut stream = block_on(db.subscribe_relation_query(&query, ReadOpts::default())).unwrap();
+    assert!(opened_rows(stream.try_next_event().expect("opened event")).is_empty());
+
+    db.insert(
+        "orgs",
+        BTreeMap::from([("name".to_owned(), Value::String("Org A".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x01)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert(
+        "teams",
+        BTreeMap::from([
+            ("name".to_owned(), Value::String("Team A".to_owned())),
+            (
+                "org_id".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(row(0x01).0)))),
+            ),
+        ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x11)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert(
+        "users",
+        BTreeMap::from([
+            ("name".to_owned(), Value::String("User A".to_owned())),
+            (
+                "team_id".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(row(0x11).0)))),
+            ),
+        ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x21)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let opened = opened_rows(stream.try_next_event().expect("opened event"));
+    assert_eq!(row_ids(&opened), vec![row(0x01)]);
+}
+
+fn users_to_orgs_relation_query() -> RelationQuery {
+    RelationQuery {
+        rel: RelationExpr::Project {
+            input: Box::new(RelationExpr::Join {
+                left: Box::new(RelationExpr::Join {
+                    left: Box::new(RelationExpr::TableScan {
+                        table: "users".to_owned(),
+                        alias: None,
+                    }),
+                    right: Box::new(RelationExpr::TableScan {
+                        table: "teams".to_owned(),
+                        alias: Some("__hop_0".to_owned()),
+                    }),
+                    on: vec![crate::query::RelationJoinCondition {
+                        left: RelationColumnRef {
+                            scope: Some("users".to_owned()),
+                            column: "team_id".to_owned(),
+                        },
+                        right: RelationColumnRef {
+                            scope: Some("__hop_0".to_owned()),
+                            column: "id".to_owned(),
+                        },
+                    }],
+                    join_kind: RelationJoinKind::Inner,
+                }),
+                right: Box::new(RelationExpr::TableScan {
+                    table: "orgs".to_owned(),
+                    alias: Some("__hop_1".to_owned()),
+                }),
+                on: vec![crate::query::RelationJoinCondition {
+                    left: RelationColumnRef {
+                        scope: Some("__hop_0".to_owned()),
+                        column: "org_id".to_owned(),
+                    },
+                    right: RelationColumnRef {
+                        scope: Some("__hop_1".to_owned()),
+                        column: "id".to_owned(),
+                    },
+                }],
+                join_kind: RelationJoinKind::Inner,
+            }),
+            columns: vec![
+                crate::query::RelationProjectColumn {
+                    alias: "id".to_owned(),
+                    expr: RelationProjectExpr::Column(RelationColumnRef {
+                        scope: Some("__hop_1".to_owned()),
+                        column: "id".to_owned(),
+                    }),
+                },
+                crate::query::RelationProjectColumn {
+                    alias: "name".to_owned(),
+                    expr: RelationProjectExpr::Column(RelationColumnRef {
+                        scope: Some("__hop_1".to_owned()),
+                        column: "name".to_owned(),
+                    }),
+                },
+            ],
+        },
+    }
+}
+
+#[test]
+fn relation_query_gather_uses_unified_reachable_lowering_for_reads_and_subscriptions() {
+    // This is an integration-level facade test: the public relation-query read
+    // and subscription APIs must both use the same maintained reachability
+    // program for the canonical gather IR emitted by the TypeScript builder.
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("teams")
+                .column("name", PublicColumnType::Text)
+                .nullable_fk_column("parent_id", "teams"),
+        ),
+    );
+    let db = open_db(0xc1, AuthorSubject::for_test_bytes([0xc1; 16]), &schema);
+    let query = teams_gather_relation_query();
+    let mut stream = block_on(db.subscribe_relation_query(&query, ReadOpts::default())).unwrap();
+    assert!(opened_rows(stream.try_next_event().expect("opened event")).is_empty());
+
+    let root = row(0x01);
+    let middle = row(0x02);
+    let leaf = row(0x03);
+    db.insert(
+        "teams",
+        BTreeMap::from([("name".to_owned(), Value::String("root".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(root),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert(
+        "teams",
+        BTreeMap::from([
+            ("name".to_owned(), Value::String("middle".to_owned())),
+            (
+                "parent_id".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(root.0)))),
+            ),
+        ]),
+        crate::db::InsertOptions {
+            row_id: Some(middle),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert(
+        "teams",
+        BTreeMap::from([
+            ("name".to_owned(), Value::String("leaf".to_owned())),
+            (
+                "parent_id".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(middle.0)))),
+            ),
+        ]),
+        crate::db::InsertOptions {
+            row_id: Some(leaf),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let changed = opened_rows(stream.try_next_event().expect("gathered rows event"));
+    assert_eq!(
+        row_ids(&changed).into_iter().collect::<BTreeSet<_>>(),
+        BTreeSet::from([root, middle, leaf])
+    );
+
+    let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default())).unwrap();
+    assert_eq!(
+        row_ids(&snapshot.rows).into_iter().collect::<BTreeSet<_>>(),
+        BTreeSet::from([root, middle, leaf])
+    );
+
+    let filtered_query = RelationQuery {
+        rel: RelationExpr::Filter {
+            input: Box::new(query.rel.clone()),
+            predicate: RelationPredicate::Cmp {
+                left: RelationColumnRef {
+                    scope: Some("teams".to_owned()),
+                    column: "name".to_owned(),
+                },
+                op: RelationCmpOp::Ne,
+                right: RelationValueRef::Literal(serde_json::Value::String("middle".to_owned())),
+            },
+        },
+    };
+    let filtered = block_on(db.all_relation_query(&filtered_query, ReadOpts::default())).unwrap();
+    assert_eq!(
+        row_ids(&filtered.rows).into_iter().collect::<BTreeSet<_>>(),
+        BTreeSet::from([root, leaf])
+    );
+
+    let or_true = RelationQuery {
+        rel: RelationExpr::Filter {
+            input: Box::new(query.rel.clone()),
+            predicate: RelationPredicate::Or(vec![
+                RelationPredicate::True,
+                RelationPredicate::False,
+            ]),
+        },
+    };
+    let unfiltered = block_on(db.all_relation_query(&or_true, ReadOpts::default())).unwrap();
+    assert_eq!(
+        row_ids(&unfiltered.rows)
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([root, middle, leaf])
+    );
+
+    let not_true = RelationQuery {
+        rel: RelationExpr::Filter {
+            input: Box::new(query.rel.clone()),
+            predicate: RelationPredicate::Not(Box::new(RelationPredicate::True)),
+        },
+    };
+    let empty = block_on(db.all_relation_query(&not_true, ReadOpts::default())).unwrap();
+    assert!(empty.rows.is_empty());
+
+    let filter_after_limit = RelationQuery {
+        rel: RelationExpr::Filter {
+            input: Box::new(RelationExpr::Limit {
+                input: Box::new(RelationExpr::OrderBy {
+                    input: Box::new(query.rel.clone()),
+                    terms: vec![RelationOrderBy {
+                        column: RelationColumnRef {
+                            scope: Some("teams".to_owned()),
+                            column: "name".to_owned(),
+                        },
+                        direction: OrderDirection::Asc,
+                    }],
+                }),
+                limit: 1,
+            }),
+            predicate: RelationPredicate::Cmp {
+                left: RelationColumnRef {
+                    scope: Some("teams".to_owned()),
+                    column: "name".to_owned(),
+                },
+                op: RelationCmpOp::Eq,
+                right: RelationValueRef::Literal(serde_json::Value::String("root".to_owned())),
+            },
+        },
+    };
+    let error =
+        block_on(db.all_relation_query(&filter_after_limit, ReadOpts::default())).unwrap_err();
+    assert_eq!(error.code, ErrorCode::Query);
+    assert!(
+        error
+            .message
+            .contains("gather output filters cannot wrap limit or offset")
+    );
+}
+
+fn teams_gather_relation_query() -> RelationQuery {
+    RelationQuery {
+        rel: RelationExpr::Gather {
+            seed: Box::new(RelationExpr::Filter {
+                input: Box::new(RelationExpr::TableScan {
+                    table: "teams".to_owned(),
+                    alias: None,
+                }),
+                predicate: RelationPredicate::Cmp {
+                    left: RelationColumnRef {
+                        scope: Some("teams".to_owned()),
+                        column: "name".to_owned(),
+                    },
+                    op: RelationCmpOp::Eq,
+                    right: RelationValueRef::Literal(serde_json::Value::String("leaf".to_owned())),
+                },
+            }),
+            step: Box::new(RelationExpr::Project {
+                input: Box::new(RelationExpr::Join {
+                    left: Box::new(RelationExpr::Filter {
+                        input: Box::new(RelationExpr::TableScan {
+                            table: "teams".to_owned(),
+                            alias: None,
+                        }),
+                        predicate: RelationPredicate::And(vec![RelationPredicate::Cmp {
+                            left: RelationColumnRef {
+                                scope: Some("teams".to_owned()),
+                                column: "id".to_owned(),
+                            },
+                            op: RelationCmpOp::Eq,
+                            right: RelationValueRef::RowId(RelationRowIdRef::Frontier),
+                        }]),
+                    }),
+                    right: Box::new(RelationExpr::TableScan {
+                        table: "teams".to_owned(),
+                        alias: Some("__recursive_hop_0".to_owned()),
+                    }),
+                    on: vec![crate::query::RelationJoinCondition {
+                        left: RelationColumnRef {
+                            scope: Some("teams".to_owned()),
+                            column: "parent_id".to_owned(),
+                        },
+                        right: RelationColumnRef {
+                            scope: Some("__recursive_hop_0".to_owned()),
+                            column: "id".to_owned(),
+                        },
+                    }],
+                    join_kind: RelationJoinKind::Inner,
+                }),
+                columns: vec![crate::query::RelationProjectColumn {
+                    alias: "id".to_owned(),
+                    expr: RelationProjectExpr::Column(RelationColumnRef {
+                        scope: Some("__recursive_hop_0".to_owned()),
+                        column: "id".to_owned(),
+                    }),
+                }],
+            }),
+            frontier_key: crate::query::RelationKeyRef::RowId(RelationRowIdRef::Current),
+            bound: crate::query::RecursionBound::MaxDepth(10),
+            dedupe_key: vec![crate::query::RelationKeyRef::RowId(
+                RelationRowIdRef::Current,
+            )],
+        },
+    }
+}
+#[derive(Clone, Copy, Debug)]
+enum RelationWindowCase {
+    OffsetOutsideLimit,
+    LimitOutsideOffset,
+    NestedLimits,
+    NestedOffsets,
+}
+
+fn projected_users_relation_expr() -> RelationExpr {
+    RelationExpr::Project {
+        input: Box::new(RelationExpr::TableScan {
+            table: "users".to_owned(),
+            alias: None,
+        }),
+        columns: vec![
+            crate::query::RelationProjectColumn {
+                alias: "id".to_owned(),
+                expr: RelationProjectExpr::RowId(RelationRowIdRef::Current),
+            },
+            crate::query::RelationProjectColumn {
+                alias: "name".to_owned(),
+                expr: RelationProjectExpr::Column(RelationColumnRef {
+                    scope: Some("users".to_owned()),
+                    column: "name".to_owned(),
+                }),
+            },
+        ],
+    }
+}
+
+fn ordered_relation_expr(input: RelationExpr, scope: &str) -> RelationExpr {
+    RelationExpr::OrderBy {
+        input: Box::new(input),
+        terms: vec![RelationOrderBy {
+            column: RelationColumnRef {
+                scope: Some(scope.to_owned()),
+                column: "name".to_owned(),
+            },
+            direction: OrderDirection::Asc,
+        }],
+    }
+}
+
+fn windowed_relation_expr(input: RelationExpr, case: RelationWindowCase) -> RelationExpr {
+    match case {
+        RelationWindowCase::OffsetOutsideLimit => RelationExpr::Offset {
+            input: Box::new(RelationExpr::Limit {
+                input: Box::new(input),
+                limit: 5,
+            }),
+            offset: 3,
+        },
+        RelationWindowCase::LimitOutsideOffset => RelationExpr::Limit {
+            input: Box::new(RelationExpr::Offset {
+                input: Box::new(input),
+                offset: 3,
+            }),
+            limit: 5,
+        },
+        RelationWindowCase::NestedLimits => RelationExpr::Limit {
+            input: Box::new(RelationExpr::Limit {
+                input: Box::new(input),
+                limit: 5,
+            }),
+            limit: 3,
+        },
+        RelationWindowCase::NestedOffsets => RelationExpr::Offset {
+            input: Box::new(RelationExpr::Offset {
+                input: Box::new(input),
+                offset: 3,
+            }),
+            offset: 2,
+        },
+    }
+}
+
+fn relation_window_cases() -> [(RelationWindowCase, Vec<RowUuid>); 4] {
+    [
+        (RelationWindowCase::OffsetOutsideLimit, vec![row(4), row(5)]),
+        (
+            RelationWindowCase::LimitOutsideOffset,
+            vec![row(4), row(5), row(6), row(7), row(8)],
+        ),
+        (
+            RelationWindowCase::NestedLimits,
+            vec![row(1), row(2), row(3)],
+        ),
+        (
+            RelationWindowCase::NestedOffsets,
+            vec![row(6), row(7), row(8)],
+        ),
+    ]
+}
+
+#[test]
+fn relation_query_pagination_composes_windows_for_reads_and_subscriptions() {
+    let schema = relation_schema();
+    let db = open_db(0xe1, AuthorSubject::for_test_bytes([0xe1; 16]), &schema);
+    for (id, name) in [
+        (1, "a"),
+        (2, "b"),
+        (3, "c"),
+        (4, "d"),
+        (5, "e"),
+        (6, "f"),
+        (7, "g"),
+        (8, "h"),
+    ] {
+        db.insert(
+            "users",
+            BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))]),
+            crate::db::InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+
+    for (case, expected) in relation_window_cases() {
+        let query = RelationQuery {
+            rel: windowed_relation_expr(
+                ordered_relation_expr(projected_users_relation_expr(), "users"),
+                case,
+            ),
+        };
+        let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default())).unwrap();
+        assert_eq!(row_ids(&snapshot.rows), expected, "{case:?}");
+    }
+
+    let query = RelationQuery {
+        rel: windowed_relation_expr(
+            ordered_relation_expr(projected_users_relation_expr(), "users"),
+            RelationWindowCase::OffsetOutsideLimit,
+        ),
+    };
+    let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default())).unwrap();
+    let mut subscription =
+        block_on(db.subscribe_relation_query(&query, ReadOpts::default())).unwrap();
+    let opened = opened_rows(subscription.try_next_event().expect("opened event"));
+    assert_eq!(row_ids(&opened), row_ids(&snapshot.rows));
+}
+
+#[test]
+fn relation_query_gather_pagination_composes_windows_for_reads_and_subscriptions() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("teams")
+                .column("name", PublicColumnType::Text)
+                .nullable_fk_column("parent_id", "teams"),
+        ),
+    );
+    let db = open_db(0xe2, AuthorSubject::for_test_bytes([0xe2; 16]), &schema);
+    for (id, name, parent) in [
+        (1, "a", None),
+        (2, "b", Some(1)),
+        (3, "c", Some(2)),
+        (4, "d", Some(3)),
+        (5, "e", Some(4)),
+        (6, "f", Some(5)),
+        (7, "g", Some(6)),
+        (8, "leaf", Some(7)),
+    ] {
+        let mut values = BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))]);
+        if let Some(parent) = parent {
+            values.insert(
+                "parent_id".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(row(parent).0)))),
+            );
+        }
+        db.insert(
+            "teams",
+            values,
+            crate::db::InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let query = RelationQuery {
+        rel: windowed_relation_expr(
+            ordered_relation_expr(teams_gather_relation_query().rel, "teams"),
+            RelationWindowCase::OffsetOutsideLimit,
+        ),
+    };
+    let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default())).unwrap();
+    let mut subscription =
+        block_on(db.subscribe_relation_query(&query, ReadOpts::default())).unwrap();
+    let opened = opened_rows(subscription.try_next_event().expect("opened event"));
+    assert_eq!(row_ids(&opened), row_ids(&snapshot.rows));
+
+    for (case, expected) in relation_window_cases() {
+        let query = RelationQuery {
+            rel: windowed_relation_expr(
+                ordered_relation_expr(teams_gather_relation_query().rel, "teams"),
+                case,
+            ),
+        };
+        let snapshot = block_on(db.all_relation_query(&query, ReadOpts::default())).unwrap();
+        assert_eq!(row_ids(&snapshot.rows), expected, "{case:?}");
+    }
+}
+
+#[test]
+fn relation_snapshot_reverse_array_skips_deleted_children() {
+    let schema = relation_schema();
+    let db = open_db(0xc1, AuthorSubject::for_test_bytes([0xc1; 16]), &schema);
+    db.insert(
+        "users",
+        BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xa1)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert(
+        "todos",
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("deleted todo".to_owned())),
+            ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
+        ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x11)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert(
+        "todos",
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("visible todo".to_owned())),
+            ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
+        ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x22)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.delete("todos", row(0x11), Default::default()).unwrap();
+
+    let query = Query::from("users")
+        .filter(eq(col("id"), lit(Value::Uuid(row(0xa1).0))))
+        .array_subquery(ArraySubquery::new(
+            "todosViaOwner",
+            "todos",
+            "owner_id",
+            "id",
+        ))
+        .limit(1);
+    let prepared = db.prepare_query(&query).unwrap();
+    let snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
+    assert_eq!(row_ids(&snapshot.rows), vec![row(0xa1)]);
+    assert!(snapshot.edges.is_empty());
+    assert_eq!(
+        terminal_nested_text_values(&snapshot, row(0xa1), "todosViaOwner", "title"),
+        vec!["visible todo".to_owned()]
+    );
+}
+
+#[test]
+fn maintained_subscription_with_two_reference_includes_opens_with_source_coverage() {
+    let schema = access_edge_include_schema();
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0xee, AuthorSubject::SYSTEM, &schema);
+    server
+        .insert_with_id(
+            "teams",
+            row(0xa1),
+            BTreeMap::from([("name".to_owned(), Value::String("resource team".to_owned()))]),
+        )
+        .unwrap();
+    server
+        .insert_with_id(
+            "teams",
+            row(0xb1),
+            BTreeMap::from([("name".to_owned(), Value::String("member team".to_owned()))]),
+        )
+        .unwrap();
+    server
+        .insert_with_id(
+            "team_access_edges",
+            row(0xc1),
+            BTreeMap::from([
+                ("resource_id".to_owned(), Value::Uuid(row(0xa1).0)),
+                ("team_id".to_owned(), Value::Uuid(row(0xb1).0)),
+            ]),
+        )
+        .unwrap();
+
+    let query = Query::from("team_access_edges")
+        .include("resource_id")
+        .include("team_id");
+    let shape = query.validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
+
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber = server.accept_subscriber(server_transport, client_author);
+    client_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(&shape),
+            opts: RegisterShapeOptions::default(),
+        })
+        .unwrap();
+    client_transport
+        .send(SyncMessage::Subscribe(Subscribe {
+            shape_id: shape.shape_id(),
+            subscription,
+            values: Vec::new(),
+            known_state: None,
+            delegated_session: None,
+        }))
+        .unwrap();
+
+    let message = drive_subscriber_until_payload(&subscriber, client_transport.as_mut());
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        subscription: served,
+        supporting_rows: program_fact_adds,
+        ..
+    }) = message
+    else {
+        panic!("expected include subscription view update, got {message:?}");
+    };
+    assert_eq!(served, subscription);
+    let mut tables = program_fact_adds
+        .added_rows()
+        .iter()
+        .map(|input| input.version_table.as_str())
+        .collect::<Vec<_>>();
+    tables.sort_unstable();
+    assert_eq!(tables, vec!["team_access_edges", "teams", "teams"]);
+
+    client_transport
+        .send(SyncMessage::Unsubscribe { subscription })
+        .unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    client_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(&shape),
+            opts: RegisterShapeOptions::default(),
+        })
+        .unwrap();
+    client_transport
+        .send(SyncMessage::Subscribe(Subscribe {
+            shape_id: shape.shape_id(),
+            subscription,
+            values: Vec::new(),
+            known_state: None,
+            delegated_session: None,
+        }))
+        .unwrap();
+
+    let message = drive_subscriber_until_payload(&subscriber, client_transport.as_mut());
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+        subscription: served,
+        supporting_rows: program_fact_adds,
+        ..
+    }) = message
+    else {
+        panic!("expected reopened include subscription view update, got {message:?}");
+    };
+    assert_eq!(served, subscription);
+    let mut tables = program_fact_adds
+        .added_rows()
+        .iter()
+        .map(|input| input.version_table.as_str())
+        .collect::<Vec<_>>();
+    tables.sort_unstable();
+    assert_eq!(tables, vec!["team_access_edges", "teams", "teams"]);
+}
+
+#[test]
+fn relation_snapshot_reverse_array_skips_deleted_children_with_camel_case_ref() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .column("done", PublicColumnType::Boolean)
+                    .nullable_fk_column("ownerId", "users"),
+            ),
+    );
+    let db = open_db(0xc1, AuthorSubject::for_test_bytes([0xc1; 16]), &schema);
+    db.insert(
+        "users",
+        BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xa1)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert(
+        "todos",
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("deleted todo".to_owned())),
+            ("done".to_owned(), Value::Bool(false)),
+            (
+                "ownerId".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(row(0xa1).0)))),
+            ),
+        ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x11)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert(
+        "todos",
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("visible todo".to_owned())),
+            ("done".to_owned(), Value::Bool(false)),
+            (
+                "ownerId".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(row(0xa1).0)))),
+            ),
+        ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x22)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let joined_before_delete = prepared_read(
+        &db,
+        &Query::from("users").join_via_column("todos", "ownerId", "id", []),
+    );
+    assert_eq!(row_ids(&joined_before_delete), vec![row(0xa1), row(0xa1)]);
+    let occurrence = |joined| {
+        OutputOccurrenceId::new(
+            ObjectId::from_uuid(row(0xa1).0),
+            [ObjectId::from_uuid(row(joined).0)],
+        )
+    };
+    let joined_snapshot = RelationSnapshot {
+        root_count: joined_before_delete.len(),
+        rows: joined_before_delete.clone(),
+        edges: Vec::new(),
+    };
+    assert!(subscription_outputs_with_occurrence_sidecar(&joined_snapshot, &[]).is_err());
+    assert!(
+        subscription_outputs_with_occurrence_sidecar(
+            &joined_snapshot,
+            &[occurrence(0x11), occurrence(0x11)],
+        )
+        .is_err()
+    );
+    assert!(
+        subscription_outputs_with_occurrence_sidecar(
+            &joined_snapshot,
+            &[
+                OutputOccurrenceId::single_source(ObjectId::from_uuid(row(0xbb).0)),
+                occurrence(0x22),
+            ],
+        )
+        .is_err()
+    );
+    let joined_query = Query::from("users").join_via_column("todos", "ownerId", "id", []);
+    let prepared_join = prepared(&db, &joined_query);
+    let mut subscription = block_on(db.subscribe(&prepared_join, ReadOpts::default())).unwrap();
+    let SubscriptionEvent::Delta { added, .. } = block_on(subscription.next_raw()).unwrap() else {
+        panic!("joined subscription must start with a delta");
+    };
+    assert_eq!(added.len(), 2);
+    let occurrence_ids = added
+        .iter()
+        .map(|output| output.occurrence_id.clone())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(occurrence_ids.len(), 2);
+    assert_eq!(
+        added
+            .iter()
+            .map(|output| output.occurrence_id.clone())
+            .collect::<Vec<_>>(),
+        vec![occurrence(0x11), occurrence(0x22)]
+    );
+    assert!(
+        added
+            .iter()
+            .all(|output| output.occurrence_id.canonical_bytes().len() == 32)
+    );
+    db.delete("todos", row(0x11), Default::default()).unwrap();
+    db.tick().unwrap();
+    let SubscriptionEvent::Delta { removed, .. } = block_on(subscription.next_raw()).unwrap()
+    else {
+        panic!("joined occurrence removal must emit a delta");
+    };
+    assert_eq!(removed.len(), 1);
+    assert_eq!(removed[0].occurrence_id, occurrence(0x11));
+
+    let joined = prepared_read(
+        &db,
+        &Query::from("users").join_via_column("todos", "ownerId", "id", []),
+    );
+    assert_eq!(row_ids(&joined), vec![row(0xa1)]);
+
+    let query = Query::from("users")
+        .filter(eq(col("id"), lit(Value::Uuid(row(0xa1).0))))
+        .array_subquery(
+            ArraySubquery::new("todosViaOwner", "todos", "ownerId", "id").select(["id"]),
+        )
+        .limit(1);
+    let prepared = db.prepare_query(&query).unwrap();
+    let snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
+    assert_eq!(row_ids(&snapshot.rows), vec![row(0xa1)]);
+    assert!(snapshot.edges.is_empty());
+    assert_eq!(
+        terminal_nested_values(&snapshot, row(0xa1), "todosViaOwner", "row_uuid"),
+        vec![Value::Uuid(row(0x22).0)]
+    );
+}
+
+/// Alice reads a projected reverse include whose parent has an unrelated JSON cell.
+/// The binding hydration boundary must expose the parent and child without physical types.
+#[test]
+fn relation_snapshot_json_parent_binding_hydration() {
+    assert_relation_snapshot_json_binding_hydration(false);
+}
+
+/// Alice includes a child with JSON, so collector anchor and child arms must
+/// agree on the physical JSON descriptor before binding hydration.
+#[test]
+fn relation_snapshot_json_child_binding_hydration() {
+    assert_relation_snapshot_json_binding_hydration(true);
+}
+
+fn assert_relation_snapshot_json_binding_hydration(child_json: bool) {
+    let mut children = PublicTableSchemaBuilder::new("children").fk_column("parentId", "parents");
+    if child_json {
+        children = children.column("metadata", PublicColumnType::Json { schema: None });
+    }
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("parents")
+                    .column("name", PublicColumnType::Text)
+                    .column("metadata", PublicColumnType::Json { schema: None }),
+            )
+            .table(children),
+    );
+    let db = open_db(0xc2, AuthorSubject::for_test_bytes([0xc2; 16]), &schema);
+    // Db's binding-facing API accepts core cells; row_input! is for JazzClient's
+    // public Value algebra and cannot represent this lower-level input type.
+    let parent = db
+        .insert(
+            "parents",
+            BTreeMap::from([
+                ("name".into(), Value::String("alice".into())),
+                ("metadata".into(), Value::String("{}".into())),
+            ]),
+            Default::default(),
+        )
+        .unwrap()
+        .row_uuid();
+    let mut child_cells = BTreeMap::from([("parentId".into(), Value::Uuid(parent.0))]);
+    if child_json {
+        child_cells.insert("metadata".into(), Value::String("{}".into()));
+    }
+    let child = db
+        .insert("children", child_cells, Default::default())
+        .unwrap()
+        .row_uuid();
+    let children = ArraySubquery::new("childrenViaParent", "children", "parentId", "id");
+    let children = if child_json {
+        children
+    } else {
+        children.select(["id"])
+    };
+    let query = Query::from("parents")
+        .select(["id"])
+        .array_subquery(children);
+    let prepared = db.prepare_query(&query).unwrap();
+    let mut snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
+    block_on(db.hydrate_rows_for_binding(&mut snapshot.rows)).unwrap();
+    assert_eq!(row_ids(&snapshot.rows), vec![parent]);
+    assert_eq!(
+        terminal_nested_values(&snapshot, parent, "childrenViaParent", "row_uuid"),
+        vec![Value::Uuid(child.0)]
+    );
+}
+
+/// Alice includes jobs whose nullable JSON `meta` was never set (#3662).
+/// The unset cell must not stall the include; the job still arrives.
+#[test]
+fn relation_snapshot_reverse_include_of_unset_nullable_json_child() {
+    assert_relation_snapshot_unset_nullable_json_include(false);
+}
+
+/// Alice includes each job's project, whose nullable JSON `meta` was never set (#3662).
+#[test]
+fn relation_snapshot_forward_include_of_unset_nullable_json_target() {
+    assert_relation_snapshot_unset_nullable_json_include(true);
+}
+
+/// Alice selects a project's unset nullable JSON `meta` alongside an include (#3662).
+#[test]
+fn relation_snapshot_selected_unset_nullable_json_root_with_include() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("projects")
+                    .column("name", PublicColumnType::Text)
+                    .nullable_column("meta", PublicColumnType::Json { schema: None }),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("jobs")
+                    .column("title", PublicColumnType::Text)
+                    .fk_column("projectId", "projects"),
+            ),
+    );
+    let db = open_db(0xc4, AuthorSubject::for_test_bytes([0xc4; 16]), &schema);
+    let project = db
+        .insert(
+            "projects",
+            BTreeMap::from([("name".into(), Value::String("p".into()))]),
+            Default::default(),
+        )
+        .unwrap()
+        .row_uuid();
+    let job = db
+        .insert(
+            "jobs",
+            BTreeMap::from([
+                ("title".into(), Value::String("j".into())),
+                ("projectId".into(), Value::Uuid(project.0)),
+            ]),
+            Default::default(),
+        )
+        .unwrap()
+        .row_uuid();
+    let query = Query::from("projects")
+        .select(["id", "meta"])
+        .array_subquery(ArraySubquery::new(
+            "jobsViaProject",
+            "jobs",
+            "projectId",
+            "id",
+        ));
+    let prepared = db.prepare_query(&query).unwrap();
+    let mut snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
+    block_on(db.hydrate_rows_for_binding(&mut snapshot.rows)).unwrap();
+    assert_eq!(
+        row_ids(&snapshot.rows[..snapshot.root_count]),
+        vec![project]
+    );
+    assert_eq!(
+        terminal_nested_values(&snapshot, project, "jobsViaProject", "row_uuid"),
+        vec![Value::Uuid(job.0)]
+    );
+    let (descriptor, raw) = snapshot.rows[0].encoded_record();
+    assert_eq!(
+        groove::records::BorrowedRecord::new(raw, descriptor)
+            .get("_app_meta")
+            .unwrap(),
+        Value::Nullable(None)
+    );
+
+    let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    let maintained = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+    assert_eq!(
+        row_ids(&maintained.rows[..maintained.root_count]),
+        vec![project]
+    );
+}
+
+fn nullable_json_include_schema() -> JazzSchema {
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("projects")
+                    .column("name", PublicColumnType::Text)
+                    .nullable_column("pmeta", PublicColumnType::Json { schema: None }),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("jobs")
+                    .column("title", PublicColumnType::Text)
+                    .nullable_column("note", PublicColumnType::Text)
+                    .nullable_column("meta", PublicColumnType::Json { schema: None })
+                    .column("req", PublicColumnType::Json { schema: None })
+                    .nullable_fk_column("projectId", "projects"),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("tasks")
+                    .column("label", PublicColumnType::Text)
+                    .nullable_column("tmeta", PublicColumnType::Json { schema: None })
+                    .fk_column("jobId", "jobs"),
+            ),
+    )
+}
+
+fn nested_field_values(value: Value, field: &str) -> Vec<Value> {
+    let Value::Array(children) = value else {
+        panic!("array expected, got {value:?}")
+    };
+    children
+        .into_iter()
+        .map(|child| {
+            let Value::Record(child) = child else {
+                panic!("record")
+            };
+            child.get(field).unwrap()
+        })
+        .collect()
+}
+
+/// Includes with nullable JSON beside nullable text and required JSON, nested
+/// JSON children, parents without children and a null forward reference (#3662).
+#[test]
+fn relation_snapshot_nullable_json_includes_with_anchor_only_nested_and_mixed_columns() {
+    let schema = nullable_json_include_schema();
+    let db = open_db(0xe1, AuthorSubject::for_test_bytes([0xe1; 16]), &schema);
+    let ins = |table: &str, cols: Vec<(&str, Value)>| {
+        db.insert(
+            table,
+            cols.into_iter().map(|(k, v)| (k.to_owned(), v)).collect(),
+            Default::default(),
+        )
+        .unwrap()
+        .row_uuid()
+    };
+    let some = |v: Value| Value::Nullable(Some(Box::new(v)));
+    let empty_project = ins("projects", vec![("name", Value::String("empty".into()))]);
+    let project = ins(
+        "projects",
+        vec![
+            ("name", Value::String("p".into())),
+            ("pmeta", Value::String("{\"p\":1}".into())),
+        ],
+    );
+    let job_unset = ins(
+        "jobs",
+        vec![
+            ("title", Value::String("a".into())),
+            ("req", Value::String("{\"r\":1}".into())),
+            ("projectId", some(Value::Uuid(project.0))),
+        ],
+    );
+    let job_set = ins(
+        "jobs",
+        vec![
+            ("title", Value::String("b".into())),
+            ("note", some(Value::String("n".into()))),
+            ("meta", Value::String("[1,2]".into())),
+            ("req", Value::String("{\"r\":2}".into())),
+            ("projectId", some(Value::Uuid(project.0))),
+        ],
+    );
+    let orphan_job = ins(
+        "jobs",
+        vec![
+            ("title", Value::String("orphan".into())),
+            ("req", Value::String("{}".into())),
+            ("projectId", Value::Nullable(None)),
+        ],
+    );
+    let _task_unset = ins(
+        "tasks",
+        vec![
+            ("label", Value::String("t1".into())),
+            ("jobId", Value::Uuid(job_unset.0)),
+        ],
+    );
+    let _task_set = ins(
+        "tasks",
+        vec![
+            ("label", Value::String("t2".into())),
+            ("tmeta", Value::String("\"x\"".into())),
+            ("jobId", Value::Uuid(job_unset.0)),
+        ],
+    );
+
+    // Reverse include with an anchor-only project and nested tasks.
+    let query = Query::from("projects").array_subquery(
+        ArraySubquery::new("jobsViaProject", "jobs", "projectId", "id")
+            .order_by("title", OrderDirection::Asc)
+            .nested(
+                ArraySubquery::new("tasks", "tasks", "jobId", "id")
+                    .order_by("label", OrderDirection::Asc),
+            ),
+    );
+    let prepared = db.prepare_query(&query).unwrap();
+    for pass in 0..2 {
+        let snapshot = if pass == 0 {
+            let mut s = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
+            block_on(db.hydrate_rows_for_binding(&mut s.rows)).unwrap();
+            s
+        } else {
+            let mut sub = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+            snapshot_from_event(block_on(sub.next_raw()).unwrap())
+        };
+        let mut roots = row_ids(&snapshot.rows[..snapshot.root_count]);
+        roots.sort();
+        let mut expected = vec![empty_project, project];
+        expected.sort();
+        assert_eq!(roots, expected, "pass {pass}");
+        assert!(
+            terminal_nested_values(&snapshot, empty_project, "jobsViaProject", "row_uuid")
+                .is_empty()
+        );
+        assert_eq!(
+            terminal_nested_values(&snapshot, project, "jobsViaProject", "row_uuid"),
+            vec![Value::Uuid(job_unset.0), Value::Uuid(job_set.0)],
+            "pass {pass}"
+        );
+        if pass == 0 {
+            assert_eq!(
+                terminal_nested_values(&snapshot, project, "jobsViaProject", "note"),
+                vec![Value::Nullable(None), some(Value::String("n".into()))]
+            );
+            assert_eq!(
+                terminal_nested_values(&snapshot, project, "jobsViaProject", "meta"),
+                vec![Value::Nullable(None), some(Value::String("[1,2]".into()))]
+            );
+            let tasks = terminal_nested_values(&snapshot, project, "jobsViaProject", "tasks");
+            assert_eq!(
+                nested_field_values(tasks[0].clone(), "tmeta"),
+                vec![Value::Nullable(None), some(Value::String("\"x\"".into()))]
+            );
+            assert!(nested_field_values(tasks[1].clone(), "tmeta").is_empty());
+        }
+    }
+
+    // Selected child JSON with provenance, ordered by a hidden nullable text column.
+    let query = Query::from("projects").array_subquery(
+        ArraySubquery::new("jobsViaProject", "jobs", "projectId", "id")
+            .select(["meta", "$createdAt", "$updatedBy"])
+            .order_by("note", OrderDirection::Desc),
+    );
+    let prepared = db.prepare_query(&query).unwrap();
+    let mut s = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
+    block_on(db.hydrate_rows_for_binding(&mut s.rows)).unwrap();
+    assert_eq!(s.root_count, 2);
+    let mut sub = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    let m = snapshot_from_event(block_on(sub.next_raw()).unwrap());
+    assert_eq!(m.root_count, 2);
+
+    // Required include keeps only the project with jobs.
+    let query = Query::from("projects").array_subquery(
+        ArraySubquery::new("jobsViaProject", "jobs", "projectId", "id")
+            .requirement(crate::query::ArraySubqueryRequirement::AtLeastOne),
+    );
+    let prepared = db.prepare_query(&query).unwrap();
+    let s = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
+    assert_eq!(row_ids(&s.rows[..s.root_count]), vec![project]);
+
+    // Forward include from jobs to projects; orphan job has null FK (anchor-only).
+    let query = Query::from("jobs").array_subquery(ArraySubquery::new(
+        "project",
+        "projects",
+        "id",
+        "projectId",
+    ));
+    let prepared = db.prepare_query(&query).unwrap();
+    let mut s = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
+    block_on(db.hydrate_rows_for_binding(&mut s.rows)).unwrap();
+    assert_eq!(s.root_count, 3);
+    assert!(terminal_nested_values(&s, orphan_job, "project", "pmeta").is_empty());
+    assert_eq!(
+        terminal_nested_values(&s, job_set, "project", "pmeta"),
+        vec![some(Value::String("{\"p\":1}".into()))]
+    );
+    let mut sub = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    let m = snapshot_from_event(block_on(sub.next_raw()).unwrap());
+    assert_eq!(m.root_count, 3);
+}
+
+fn assert_relation_snapshot_unset_nullable_json_include(forward: bool) {
+    let json = PublicColumnType::Json { schema: None };
+    let mut projects =
+        PublicTableSchemaBuilder::new("projects").column("name", PublicColumnType::Text);
+    let mut jobs = PublicTableSchemaBuilder::new("jobs")
+        .column("title", PublicColumnType::Text)
+        .fk_column("projectId", "projects");
+    if forward {
+        projects = projects.nullable_column("meta", json);
+    } else {
+        jobs = jobs.nullable_column("meta", json);
+    }
+    let schema =
+        build_public_db_test_schema(PublicSchemaBuilder::new().table(projects).table(jobs));
+    let db = open_db(0xc3, AuthorSubject::for_test_bytes([0xc3; 16]), &schema);
+    let project = db
+        .insert(
+            "projects",
+            BTreeMap::from([("name".into(), Value::String("p".into()))]),
+            Default::default(),
+        )
+        .unwrap()
+        .row_uuid();
+    let job = db
+        .insert(
+            "jobs",
+            BTreeMap::from([
+                ("title".into(), Value::String("j".into())),
+                ("projectId".into(), Value::Uuid(project.0)),
+            ]),
+            Default::default(),
+        )
+        .unwrap()
+        .row_uuid();
+
+    let (query, root, nested, arm) = if forward {
+        (
+            Query::from("jobs").array_subquery(ArraySubquery::new(
+                "project",
+                "projects",
+                "id",
+                "projectId",
+            )),
+            job,
+            project,
+            "project",
+        )
+    } else {
+        (
+            Query::from("projects").array_subquery(ArraySubquery::new(
+                "jobsViaProject",
+                "jobs",
+                "projectId",
+                "id",
+            )),
+            project,
+            job,
+            "jobsViaProject",
+        )
+    };
+    let prepared = db.prepare_query(&query).unwrap();
+    let mut snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
+    block_on(db.hydrate_rows_for_binding(&mut snapshot.rows)).unwrap();
+    assert_eq!(row_ids(&snapshot.rows), vec![root]);
+    assert_eq!(
+        terminal_nested_values(&snapshot, root, arm, "row_uuid"),
+        vec![Value::Uuid(nested.0)]
+    );
+    assert_eq!(
+        terminal_nested_values(&snapshot, root, arm, "meta"),
+        vec![Value::Nullable(None)]
+    );
+
+    // Bindings read includes through a maintained subscription, which must open.
+    let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    let maintained = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+    assert_eq!(
+        row_ids(&maintained.rows[..maintained.root_count]),
+        vec![root]
+    );
+    assert_eq!(
+        terminal_nested_values(&maintained, root, arm, "row_uuid"),
+        vec![Value::Uuid(nested.0)]
+    );
+
+    // Setting the JSON afterwards still reaches the included row.
+    db.update(
+        if forward { "projects" } else { "jobs" },
+        nested,
+        BTreeMap::from([("meta".to_owned(), Value::String("{\"a\":1}".to_owned()))]),
+        Default::default(),
+    )
+    .unwrap();
+    block_on(subscription.next_raw()).unwrap();
+    let mut snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
+    block_on(db.hydrate_rows_for_binding(&mut snapshot.rows)).unwrap();
+    assert_eq!(
+        terminal_nested_values(&snapshot, root, arm, "meta"),
+        vec![Value::Nullable(Some(Box::new(Value::String(
+            "{\"a\":1}".to_owned()
+        ))))]
+    );
+}
+
+#[test]
+fn relation_snapshot_reverse_array_reads_local_nullable_ref_child() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .nullable_fk_column("ownerId", "users"),
+            ),
+    );
+    let db = open_db(0xc1, AuthorSubject::for_test_bytes([0xc1; 16]), &schema);
+    let user = db
+        .insert(
+            "users",
+            BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+            Default::default(),
+        )
+        .unwrap()
+        .row_uuid();
+    let todo = db
+        .insert(
+            "todos",
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("visible todo".to_owned())),
+                (
+                    "ownerId".to_owned(),
+                    Value::Nullable(Some(Box::new(Value::Uuid(user.0)))),
+                ),
+            ]),
+            Default::default(),
+        )
+        .unwrap()
+        .row_uuid();
+
+    let query = Query::from("users")
+        .filter(eq(col("id"), lit(Value::Uuid(user.0))))
+        .array_subquery(
+            ArraySubquery::new("todosViaOwner", "todos", "ownerId", "id").select(["id"]),
+        )
+        .limit(1);
+    let prepared = db.prepare_query(&query).unwrap();
+    let snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
+
+    assert_eq!(row_ids(&snapshot.rows), vec![user]);
+    assert!(snapshot.edges.is_empty());
+    assert_eq!(
+        terminal_nested_values(&snapshot, user, "todosViaOwner", "row_uuid"),
+        vec![Value::Uuid(todo.0)]
+    );
+}
+
+#[test]
+fn relation_snapshot_reverse_array_limit_reads_local_child() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("projects").column("name", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .fk_column("projectId", "projects"),
+            ),
+    );
+    let db = open_db(0xc1, AuthorSubject::for_test_bytes([0xc1; 16]), &schema);
+    let project = db
+        .insert(
+            "projects",
+            BTreeMap::from([("name".to_owned(), Value::String("Announcements".to_owned()))]),
+            Default::default(),
+        )
+        .unwrap()
+        .row_uuid();
+    let _todo = db
+        .insert(
+            "todos",
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("visible todo".to_owned())),
+                ("projectId".to_owned(), Value::Uuid(project.0)),
+            ]),
+            Default::default(),
+        )
+        .unwrap()
+        .row_uuid();
+
+    let query = Query::from("projects")
+        .filter(eq(col("id"), lit(Value::Uuid(project.0))))
+        .array_subquery(
+            ArraySubquery::new("todosViaProject", "todos", "projectId", "id")
+                .select(["title"])
+                .limit(1),
+        )
+        .limit(1);
+    let prepared = db.prepare_query(&query).unwrap();
+    let snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
+
+    assert_eq!(row_ids(&snapshot.rows), vec![project]);
+    assert!(snapshot.edges.is_empty());
+    assert_eq!(
+        terminal_nested_text_values(&snapshot, project, "todosViaProject", "title"),
+        vec!["visible todo".to_owned()]
+    );
+}
+
+#[test]
+fn relation_snapshot_unordered_array_offset_uses_child_row_id_order() {
+    let schema = relation_schema();
+    let db = open_db(0xd4, AuthorSubject::for_test_bytes([0xd4; 16]), &schema);
+    let parent = row(0x41);
+    db.insert(
+        "todos",
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("parent".to_owned())),
+            ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
+        ]),
+        crate::db::InsertOptions {
+            row_id: Some(parent),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for id in [0xb1, 0xb2, 0xb3] {
+        db.insert(
+            "comments",
+            BTreeMap::from([
+                ("body".to_owned(), Value::String("tie".to_owned())),
+                ("todo_id".to_owned(), Value::Uuid(parent.0)),
+            ]),
+            crate::db::InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+
+    let query = Query::from("todos").array_subquery(
+        ArraySubquery::new("comments", "comments", "todo_id", "id")
+            .offset(1)
+            .limit(1),
+    );
+    let prepared = db.prepare_query(&query).unwrap();
+    let snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
+
+    assert!(snapshot.edges.is_empty());
+    assert_eq!(
+        terminal_nested_values(&snapshot, parent, "comments", "row_uuid"),
+        vec![Value::Uuid(row(0xb2).0)]
+    );
+}
+
+#[test]
+fn relation_snapshot_reverse_array_projects_provenance_magic_columns() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("projects").column("name", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .column("done", PublicColumnType::Boolean)
+                    .column(
+                        "tags",
+                        PublicColumnType::Array {
+                            element: Box::new(PublicColumnType::Text),
+                        },
+                    )
+                    .fk_column("projectId", "projects")
+                    .nullable_fk_column("ownerId", "users")
+                    .array_fk_column("assigneesIds", "users"),
+            )
+            .table(PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text)),
+    );
+    let db = open_db(0xc1, AuthorSubject::for_test_bytes([0xc1; 16]), &schema);
+    db.insert(
+        "projects",
+        BTreeMap::from([("name".to_owned(), Value::String("Announcements".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xa1)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert(
+        "todos",
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("Write tests".to_owned())),
+            ("done".to_owned(), Value::Bool(false)),
+            (
+                "tags".to_owned(),
+                Value::Array(vec![Value::String("dev".to_owned())]),
+            ),
+            ("projectId".to_owned(), Value::Uuid(row(0xa1).0)),
+            ("ownerId".to_owned(), Value::Nullable(None)),
+            ("assigneesIds".to_owned(), Value::Array(Vec::new())),
+        ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x22)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let query = Query::from("projects")
+        .filter(eq(col("id"), lit(Value::Uuid(row(0xa1).0))))
+        .array_subquery(
+            ArraySubquery::new("todosViaProject", "todos", "projectId", "id")
+                .select([
+                    "title",
+                    "done",
+                    "tags",
+                    "projectId",
+                    "ownerId",
+                    "assigneesIds",
+                    "$createdAt",
+                    "$updatedAt",
+                ])
+                .limit(1),
+        )
+        .limit(1);
+    let prepared = db.prepare_query(&query).unwrap();
+    let snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
+    assert_eq!(row_ids(&snapshot.rows), vec![row(0xa1)]);
+    assert!(snapshot.edges.is_empty());
+    assert_eq!(
+        terminal_nested_values(&snapshot, row(0xa1), "todosViaProject", "row_uuid"),
+        vec![Value::Uuid(row(0x22).0)]
+    );
+    assert!(matches!(
+        terminal_nested_values(&snapshot, row(0xa1), "todosViaProject", "$createdAt").as_slice(),
+        [Value::U64(_)]
+    ));
+    assert!(matches!(
+        terminal_nested_values(&snapshot, row(0xa1), "todosViaProject", "$updatedAt").as_slice(),
+        [Value::U64(_)]
+    ));
+}
+
+#[test]
+fn version_bearing_current_source_preserves_provenance_timestamps() {
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+    let id = row(0x7a);
+    db.insert(
+        "todos",
+        doctest_support::todo_cells("provenance", false),
+        crate::db::InsertOptions {
+            row_id: Some(id),
+            updated_at_ms: Some(1_234),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    {
+        let mut node = db.node.node.borrow_mut();
+        let table = node.table("todos").unwrap().clone();
+        let rows = node
+            .test_content_current_with_version(&table, DurabilityTier::Local)
+            .unwrap();
+        let created_at = rows.descriptor.field_index("created_at").unwrap();
+        let record = rows
+            .iter()
+            .find(|(record, weight)| *weight > 0 && record.get_uuid(0).unwrap() == id.0)
+            .unwrap()
+            .0;
+        assert_eq!(record.get_u64(created_at).unwrap(), 1_234);
+    }
+
+    let query = db
+        .table("todos")
+        .select(["title", "$createdAt", "$updatedAt"])
+        .filter(eq(col("id"), lit(Value::Uuid(id.0))));
+    let prepared = db.prepare_query(&query).unwrap();
+    let rows = block_on(db.all(&prepared, ReadOpts::default())).unwrap();
+    let row = rows.iter().find(|row| row.row_uuid() == id).unwrap();
+    assert_eq!(row.raw_field("$createdAt"), Some(Value::U64(1_234)));
+    assert_eq!(row.raw_field("$updatedAt"), Some(Value::U64(1_234)));
+    assert_eq!(row.raw_field("user_done"), None);
+}
+
+/// A session-dependent read policy binds its claim as a prepared route, so the
+/// one-shot read installs a routed terminal. That terminal must still publish
+/// the complete materialization row: selecting only `$createdAt` and
+/// `$updatedAt` must not leave the row with a partial provenance tuple that
+/// the public projection then drops.
+#[test]
+fn session_policy_read_retains_selected_provenance() {
+    use crate::binding_codec::{RowDescriptorFieldName, row_batches};
+
+    let schema = owner_read_schema();
+    let db = open_db(0xd4, AuthorSubject::SYSTEM, &schema);
+    let alice = AuthorSubject::for_test_bytes([0xa4; 16]);
+    db.set_test_provider_claims(alice, test_provider_claims(alice));
+    let id = row(0xa4);
+    db.insert(
+        "todos",
+        cells("alice", false, alice),
+        InsertOptions {
+            row_id: Some(id),
+            updated_at_ms: Some(1_234),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let prepared = db
+        .prepare_query(
+            &db.table("todos")
+                .select(["title", "$createdAt", "$updatedAt"]),
+        )
+        .unwrap();
+    let rows = block_on(db.all_for_identity(&prepared, ReadOpts::default(), alice)).unwrap();
+    assert_eq!(row_ids(&rows), vec![id]);
+    assert_eq!(rows[0].raw_field("$createdAt"), Some(Value::U64(1_234)));
+    assert_eq!(rows[0].raw_field("$updatedAt"), Some(Value::U64(1_234)));
+    let batches = row_batches(&rows).expect("policy-read rows encode for the native binding");
+    for name in ["$createdAt", "$updatedAt"] {
+        assert!(
+            batches[0].descriptor.iter().any(|field| matches!(
+                field.name,
+                RowDescriptorFieldName::ResultField { name: published } if published == name
+            )),
+            "selected provenance {name} reaches the native binding",
+        );
+    }
+}
+
+/// The native descriptor is only observable at the binding boundary, so this
+/// exercises a public subscription and then checks its encoded carrier.
+#[test]
+fn subscription_opening_retains_selected_created_at_in_native_carrier() {
+    use crate::binding_codec::{RowDescriptorFieldName, row_batches};
+
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+    let id = row(0x7b);
+    db.insert(
+        "todos",
+        doctest_support::todo_cells("subscription provenance", false),
+        crate::db::InsertOptions {
+            row_id: Some(id),
+            updated_at_ms: Some(4_321),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let query = db
+        .table("todos")
+        .select(["title", "$createdAt"])
+        .filter(eq(col("id"), lit(Value::Uuid(id.0))));
+    let prepared = db.prepare_query(&query).unwrap();
+    let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    let SubscriptionEvent::Delta { added, .. } = block_on(subscription.next_event()).unwrap()
+    else {
+        panic!("expected opening subscription delta");
+    };
+    let rows = added.into_iter().map(|row| row.row).collect::<Vec<_>>();
+    let batches = row_batches(&rows).expect("opening rows encode for the native binding");
+    assert!(batches[0].descriptor.iter().any(|field| matches!(
+        field.name,
+        RowDescriptorFieldName::ResultField { name } if name == "$createdAt"
+    )));
+    block_on(subscription.close()).unwrap();
+}
+
+#[test]
+fn db_at_reads_historical_cut_and_partial_requires_server() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let core = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let partial = open_db(0xc1, author, &schema);
+    let todo = row(0x42);
+
+    core.insert_with_id("todos", todo, cells("draft", false, author))
+        .unwrap();
+    let first = core.node().borrow().committed_global_time();
+    core.update(
+        "todos",
+        todo,
+        BTreeMap::from([("title".to_owned(), Value::String("final".to_owned()))]),
+    )
+    .unwrap();
+    let second = core.node().borrow().committed_global_time();
+
+    let table = &schema.tables[0];
+    let at_first = core.at(first, &Query::from("todos")).unwrap();
+    assert_eq!(at_first.len(), 1);
+    assert_eq!(
+        at_first[0].cell(table, "title"),
+        Some(Value::String("draft".to_owned()))
+    );
+    let at_second = core.at(second, &Query::from("todos")).unwrap();
+    assert_eq!(
+        at_second[0].cell(table, "title"),
+        Some(Value::String("final".to_owned()))
+    );
+
+    let partial_todos = partial.prepare_query(&Query::from("todos")).unwrap();
+    let err = partial.at(GlobalTime(1), &partial_todos).unwrap_err();
+    assert_eq!(err.code, ErrorCode::HistoricalReadRequiresServer);
+    assert_eq!(err.message, "historical read requires server evaluation");
+}
+
+#[test]
+fn db_query_builder_expresses_s1_shaped_filters_and_include_modes() {
+    let schema = issue_schema();
+    let dir = tempfile::tempdir().unwrap();
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
+    let db = block_on(Db::open(DbConfig {
+        schema: schema.clone(),
+        storage,
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0x22; 16]),
+            author: alice,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0x22))),
+    }))
+    .unwrap();
+
+    db.insert(
+        "projects",
+        BTreeMap::from([("name".to_owned(), Value::String("Platform".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(10)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert(
+        "issues",
+        issue_cells(
+            "ship api query builder",
+            "open",
+            alice,
+            row(10),
+            5,
+            &["api", "platform"],
+            None,
+        ),
+        crate::db::InsertOptions {
+            row_id: Some(row(1)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert(
+        "issues",
+        issue_cells("closed work", "done", alice, row(10), 3, &["api"], Some(99)),
+        crate::db::InsertOptions {
+            row_id: Some(row(2)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert(
+        "issues",
+        issue_cells("someone else", "open", bob, row(10), 8, &["platform"], None),
+        crate::db::InsertOptions {
+            row_id: Some(row(3)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert(
+        "issues",
+        issue_cells("missing project", "open", alice, row(99), 6, &["api"], None),
+        crate::db::InsertOptions {
+            row_id: Some(row(4)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let s1_query = db
+        .table("issues")
+        .filter(all_of([
+            eq(col("assignee"), lit(alice.test_uuid())),
+            in_list(col("state"), [lit("open"), lit("blocked")]),
+            not(ne(col("state"), lit("open"))),
+            any_of([
+                contains(col("title"), lit("api")),
+                contains(col("labels"), lit("api")),
+            ]),
+            gt(col("priority"), lit(4_u64)),
+            lte(col("priority"), lit(6_u64)),
+            is_null(col("snoozed_until")),
+        ]))
+        .include("project")
+        .select([
+            "title", "state", "assignee", "project", "priority", "labels",
+        ])
+        .limit(10)
+        .offset(0);
+
+    let table = schema
+        .tables
+        .iter()
+        .find(|table| table.name == "issues")
+        .unwrap();
+    let read_rows = prepared_read(&db, &s1_query);
+    assert_eq!(row_ids(&read_rows), vec![row(1)]);
+    assert_eq!(
+        read_rows[0].cell(table, "title"),
+        Some(Value::String("ship api query builder".to_owned()))
+    );
+    assert_eq!(read_rows[0].cell(table, "snoozed_until"), None);
+    let all_rows = prepared_all(&db, &s1_query, ReadOpts::default());
+    assert_eq!(row_ids(&all_rows), vec![row(1)]);
+
+    let holes_query = db
+        .table("issues")
+        .filter(eq(col("assignee"), lit(alice.test_uuid())))
+        .filter(eq(col("state"), lit("open")))
+        .include_with(Include::new("project").join_mode(JoinMode::Holes));
+    assert_eq!(
+        row_ids(&prepared_read(&db, &holes_query)),
+        vec![row(1), row(4)]
+    );
+
+    let require_query = holes_query.clone().include_with(
+        Include::new("project")
+            .join_mode(JoinMode::Holes)
+            .require_includes(),
+    );
+    assert_eq!(row_ids(&prepared_read(&db, &require_query)), vec![row(1)]);
+    assert_eq!(
+        row_ids(&prepared_all(&db, &require_query, ReadOpts::default())),
+        vec![row(1)],
+        "required scalar includes must retain public Root membership gating"
+    );
+
+    let paged = db
+        .table("issues")
+        .filter(eq(col("state"), lit("open")))
+        .include_with(Include::new("project").join_mode(JoinMode::Holes))
+        .offset(1)
+        .limit(1);
+    assert_eq!(row_ids(&prepared_read(&db, &paged)), vec![row(3)]);
+}
+
+#[test]
+fn payload_enum_match_filters_one_shot_and_maintained_case_transitions() {
+    let schema = payload_enum_query_schema();
+    let db = open_db(0xe7, AuthorSubject::for_test_bytes([0xe7; 16]), &schema);
+    let matching = row(0xe1);
+    let other_case = row(0xe2);
+    db.insert(
+        "events",
+        BTreeMap::from([("event".to_owned(), payload_message(2))]),
+        crate::db::InsertOptions {
+            row_id: Some(matching),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert(
+        "events",
+        BTreeMap::from([("event".to_owned(), payload_closed(2))]),
+        crate::db::InsertOptions {
+            row_id: Some(other_case),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let query = Query::from("events").filter(Predicate::EnumMatch {
+        column: "event".to_owned(),
+        case: "message".to_owned(),
+        payload: Box::new(Predicate::Eq(
+            Operand::Column("level".to_owned()),
+            Operand::Literal(Value::I32(2)),
+        )),
+    });
+    assert_eq!(row_ids(&prepared_read(&db, &query)), vec![matching]);
+
+    let prepared_query = prepared(&db, &query);
+    let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default()).unwrap();
+    let initial = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+    assert_eq!(row_ids(&initial.rows), vec![matching]);
+
+    db.update(
+        "events",
+        matching,
+        BTreeMap::from([("event".to_owned(), payload_closed(2))]),
+        Default::default(),
+    )
+    .unwrap();
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
+    assert!(added.is_empty());
+    assert!(updated.is_empty());
+    assert_eq!(
+        removed
+            .into_iter()
+            .map(|row| row.row_uuid)
+            .collect::<Vec<_>>(),
+        vec![matching]
+    );
+    assert!(db.read(&prepared_query).unwrap().is_empty());
+
+    db.update(
+        "events",
+        other_case,
+        BTreeMap::from([("event".to_owned(), payload_message(2))]),
+        Default::default(),
+    )
+    .unwrap();
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
+    assert_eq!(row_ids(&added), vec![other_case]);
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+    assert_eq!(
+        row_ids(&db.read(&prepared_query).unwrap()),
+        vec![other_case]
+    );
+}
+
+#[test]
+fn client_read_advice_is_unknown_even_when_a_local_winner_exists() {
+    let schema = owner_read_schema();
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let other = AuthorSubject::for_test_bytes([0xb2; 16]);
+    let core = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let row = row(1);
+    let write = core
+        .insert_with_id("todos", row, cells("private", false, owner))
+        .unwrap();
+
+    let owner_db = open_db(0xa1, owner, &schema);
+    let other_db = open_db(0xb2, other, &schema);
+    owner_db
+        .node
+        .node
+        .borrow_mut()
+        .set_test_provider_claims(owner, test_provider_claims(owner));
+    other_db
+        .node
+        .node
+        .borrow_mut()
+        .set_test_provider_claims(other, test_provider_claims(other));
+    let unit = core
+        .node()
+        .borrow_mut()
+        .commit_unit_for(write.mergeable_tx_id())
+        .resolve();
+    let SyncMessage::CommitUnit { tx, versions } = unit.unwrap() else {
+        panic!("commit unit expected");
+    };
+    owner_db
+        .node
+        .node
+        .borrow_mut()
+        .apply_sync_message_settled(SyncMessage::CommitUnit {
+            tx: tx.clone(),
+            versions: versions.clone(),
+        })
+        .unwrap();
+    other_db
+        .node
+        .node
+        .borrow_mut()
+        .apply_sync_message_settled(SyncMessage::CommitUnit { tx, versions })
+        .unwrap();
+
+    assert_eq!(
+        owner_db.can_read("todos", row).unwrap(),
+        PermissionAdvice::Unknown
+    );
+    assert_eq!(
+        other_db.can_read("todos", row).unwrap(),
+        PermissionAdvice::Unknown
+    );
+    assert_eq!(
+        owner_db
+            .authorize_read_for_identity("todos", row, owner)
+            .unwrap(),
+        PermissionAdvice::Allowed,
+    );
+    assert_eq!(
+        owner_db
+            .authorize_read_for_identity("todos", row, other)
+            .unwrap(),
+        PermissionAdvice::Denied,
+    );
+}
+
+#[test]
+fn permission_introspection_magic_columns_fail_closed_on_prepare_query() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+
+    let query = db.table("todos").select(["$canRead"]);
+    let error = expect_error(db.prepare_query(&query));
+    assert_eq!(error.code, ErrorCode::Query);
+    assert!(
+        error.message.contains("unsupported")
+            && error.message.contains("permission introspection")
+            && error.message.contains("$canRead"),
+        "unexpected error message: {}",
+        error.message
+    );
+
+    let provenance_query = db.table("todos").select(["$createdAt", "$createdBy"]);
+    db.prepare_query(&provenance_query).unwrap();
+}
+
+#[test]
+fn read_opts_default_and_effective_tier_preserve_local_update_contract() {
+    let opts = ReadOpts::default();
+    assert_eq!(opts.tier, DurabilityTier::Local);
+    assert_eq!(opts.local_updates, LocalUpdates::Immediate);
+    assert_eq!(opts.propagation, Propagation::Full);
+
+    assert_eq!(
+        effective_read_tier(&ReadOpts {
+            tier: DurabilityTier::None,
+            local_updates: LocalUpdates::Immediate,
+            propagation: Propagation::LocalOnly,
+            include_deleted: false,
+            ..ReadOpts::default()
+        }),
+        DurabilityTier::Local
+    );
+    assert_eq!(
+        effective_read_tier(&ReadOpts {
+            tier: DurabilityTier::Global,
+            local_updates: LocalUpdates::Immediate,
+            propagation: Propagation::LocalOnly,
+            include_deleted: false,
+            ..ReadOpts::default()
+        }),
+        DurabilityTier::Global
+    );
+    assert_eq!(
+        effective_read_tier(&ReadOpts {
+            tier: DurabilityTier::None,
+            local_updates: LocalUpdates::Deferred,
+            propagation: Propagation::Full,
+            include_deleted: false,
+            ..ReadOpts::default()
+        }),
+        DurabilityTier::None
+    );
+}
+
+#[test]
+fn global_read_and_wait_require_core_confirmation() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let write = db
+        .insert(
+            "todos",
+            doctest_support::todo_cells("core confirmed", false),
+            Default::default(),
+        )
+        .unwrap();
+    let query = db.table("todos");
+    let prepared_query = prepared(&db, &query);
+
+    assert_eq!(
+        effective_read_tier(&ReadOpts {
+            tier: DurabilityTier::Global,
+            local_updates: LocalUpdates::Immediate,
+            propagation: Propagation::LocalOnly,
+            include_deleted: false,
+            ..ReadOpts::default()
+        }),
+        DurabilityTier::Global
+    );
+    assert!(
+        doctest_support::block_on(db.all_for_identity(
+            &prepared_query,
+            ReadOpts {
+                tier: DurabilityTier::Global,
+                local_updates: LocalUpdates::Immediate,
+                propagation: Propagation::LocalOnly,
+                include_deleted: false,
+                ..ReadOpts::default()
+            },
+            AuthorSubject::SYSTEM,
+        ))
+        .unwrap()
+        .is_empty()
+    );
+    let not_observed = doctest_support::block_on(write.wait(DurabilityTier::Global)).unwrap_err();
+    assert_eq!(not_observed.code, ErrorCode::NotObserved);
+
+    // Simulate the Core confirmation received after local persistence.
+    db.node
+        .node
+        .borrow_mut()
+        .apply_fate_update(
+            write.mergeable_tx_id(),
+            Fate::Accepted,
+            Some(GlobalTime(1)),
+            Some(DurabilityTier::Global),
+        )
+        .unwrap();
+
+    assert_eq!(
+        doctest_support::block_on(write.wait(DurabilityTier::Global)).unwrap(),
+        write.mergeable_tx_id()
+    );
+    assert_eq!(
+        row_ids(
+            &doctest_support::block_on(db.all_for_identity(
+                &prepared_query,
+                ReadOpts {
+                    tier: DurabilityTier::Global,
+                    local_updates: LocalUpdates::Immediate,
+                    propagation: Propagation::LocalOnly,
+                    include_deleted: false,
+                    ..ReadOpts::default()
+                },
+                AuthorSubject::SYSTEM,
+            ))
+            .unwrap()
+        ),
+        vec![write.row_uuid()]
+    );
+}
+
+#[test]
+fn native_publication_finalizes_catalogue_ids_for_current_nested_grouped_and_joined_rows() {
+    use crate::binding_codec::{
+        RowDescriptorFieldName, encode_relation_snapshot, encode_rows, row_batches,
+    };
+    let schema = relation_schema();
+    let db = open_db(0x91, AuthorSubject::for_test_bytes([0x91; 16]), &schema);
+    for (table, id, fields) in [
+        (
+            "users",
+            0xa1,
+            BTreeMap::from([("name".to_owned(), Value::String("reader".to_owned()))]),
+        ),
+        (
+            "todos",
+            0x11,
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("task".to_owned())),
+                ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
+            ]),
+        ),
+    ] {
+        db.insert(
+            table,
+            fields,
+            InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let current = prepared_all(&db, &Query::from("todos"), ReadOpts::default());
+    let current_batches = row_batches(&current).expect("ordinary producer resolves physical IDs");
+    let title_id = current_batches[0]
+        .descriptor
+        .iter()
+        .find_map(|field| match field.name {
+            RowDescriptorFieldName::StoredColumn {
+                id,
+                output_name: "title",
+            } => Some(id),
+            _ => None,
+        })
+        .expect("title has a stored binding");
+    let grouped = prepared_all(
+        &db,
+        &Query::from("todos").count().group_by("title"),
+        ReadOpts::default(),
+    );
+    let grouped_batches =
+        row_batches(&grouped).expect("grouped source binding preserves catalogue ID");
+    assert!(
+        grouped_batches[0]
+            .descriptor
+            .iter()
+            .any(|field| matches!(field.name,
+        RowDescriptorFieldName::StoredColumn { id, output_name: "title" } if id == title_id))
+    );
+    assert!(current_batches[0].descriptor.iter().any(|field| matches!(
+        field.name,
+        RowDescriptorFieldName::HiddenMetadata { name: "tx_time" }
+    )));
+    assert!(current_batches[0].descriptor.iter().any(|field| matches!(
+        field.name,
+        RowDescriptorFieldName::ResultField { name: "$createdAt" }
+    )));
+    for query in [
+        Query::from("todos").count().group_by("title"),
+        Query::from("todos").select(["title", "$createdAt", "$updatedBy"]),
+        Query::from("todos").aggregate([crate::query::Aggregate::count().alias("schema_version")]),
+        Query::from("users").array_subquery(ArraySubquery::new("todos", "todos", "owner_id", "id")),
+        Query::from("users").join_via_column("todos", "owner_id", "id", []),
+    ] {
+        let rows = prepared_all(&db, &query, ReadOpts::default());
+        assert!(!rows.is_empty());
+        assert!(
+            !encode_rows(&rows)
+                .expect("all returned rows have finalized native bindings")
+                .is_empty()
+        );
+        if let Some(aggregate) = &query.aggregate {
+            let batches = row_batches(&rows).unwrap();
+            if aggregate.group_by.is_some() {
+                assert!(batches[0].descriptor.iter().any(|field| matches!(field.name,
+                    RowDescriptorFieldName::StoredColumn { id, output_name: "title" } if id == title_id)));
+            }
+            assert!(batches[0].descriptor.iter().any(|field| matches!(field.name,
+                RowDescriptorFieldName::ResultField { name } if name == aggregate.aggregates[0].alias)));
+        }
+        if query.table == "todos" && query.aggregate.is_none() {
+            let batches = row_batches(&rows).unwrap();
+            for name in ["$createdAt", "$updatedBy"] {
+                assert!(batches[0].descriptor.iter().any(|field| matches!(field.name, RowDescriptorFieldName::ResultField { name: published } if published == name)), "projected public provenance {name} remains visible");
+            }
+        }
+        let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default()).unwrap();
+        let snapshot = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+        assert!(!snapshot.rows.is_empty());
+        if let Some(aggregate) = &query.aggregate {
+            assert_eq!(snapshot.rows.len(), 1);
+            assert_eq!(
+                snapshot.rows[0].application_field(&aggregate.aggregates[0].alias),
+                Some(Value::U64(1)),
+                "aggregate reset preserves the computed count",
+            );
+            if aggregate.group_by.is_some() {
+                assert!(snapshot.rows[0].application_field("title").is_some());
+                assert_eq!(
+                    snapshot.rows[0].application_field("title"),
+                    Some(Value::String("task".to_owned()))
+                );
+            }
+        }
+
+        assert!(
+            !encode_relation_snapshot(&snapshot)
+                .expect("reset producer retains finalized bindings")
+                .is_empty()
+        );
+    }
+}
+
+/// Alice's admitted team-A subscription keeps its claims when a live catalogue
+/// token invalidates the maintained plan, while the same subject's ambient
+/// claims say team B. This internal test uses the existing token-invalidation
+/// hook because that lifecycle boundary has no small public trigger.
+///
+/// alice/A subscribe ──token invalidation──► rebuild ──new A row──► alice/A
+#[test]
+fn request_claims_survive_subscription_runtime_rebuild() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(public_session_eq("title", &["claims", "team"])),
+                ),
+        ),
+    );
+    let db = open_db(0x6a, AuthorSubject::SYSTEM, &schema);
+    let a = block_on(db.insert(
+        "todos",
+        [("title".into(), Value::String("team-a".into()))].into(),
+        Default::default(),
+    ))
+    .unwrap()
+    .row_uuid();
+    let b = block_on(db.insert(
+        "todos",
+        [("title".into(), Value::String("team-b".into()))].into(),
+        Default::default(),
+    ))
+    .unwrap()
+    .row_uuid();
+    let alice = AuthorSubject::for_test_bytes([0x6b; 16]);
+    let claims = |team: &str| {
+        [(
+            crate::query::provider_claim_key("team"),
+            Value::String(team.into()),
+        )]
+        .into()
+    };
+    let prepared = block_on(db.prepare_query_async(&db.table("todos"))).unwrap();
+    let scoped = prepared
+        .clone()
+        .with_identity_claims(alice, claims("team-a"));
+    let opts = ReadOpts {
+        propagation: Propagation::LocalOnly,
+        ..ReadOpts::default()
+    };
+    db.set_identity_claims(alice, claims("team-b"));
+    let mut subscription =
+        block_on(db.subscribe_for_identity(&scoped, opts.clone(), alice)).unwrap();
+    let SubscriptionEvent::Delta { added, .. } = block_on(subscription.next_event()).unwrap()
+    else {
+        panic!("expected initial rows")
+    };
+    assert_eq!(
+        added.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        vec![a]
+    );
+    let scoped_b = prepared
+        .clone()
+        .with_identity_claims(alice, claims("team-b"));
+    let mut subscription_b =
+        block_on(db.subscribe_for_identity(&scoped_b, opts.clone(), alice)).unwrap();
+    let SubscriptionEvent::Delta { added, .. } = block_on(subscription_b.next_event()).unwrap()
+    else {
+        panic!("expected team-B initial rows")
+    };
+    assert_eq!(
+        added.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        vec![b]
+    );
+    db.node
+        .node
+        .borrow_mut()
+        .invalidate_groove_runtime_for_test();
+    block_on(db.refresh_subscriptions()).unwrap();
+    let new_a = block_on(db.insert(
+        "todos",
+        [("title".into(), Value::String("team-a".into()))].into(),
+        Default::default(),
+    ))
+    .unwrap()
+    .row_uuid();
+    block_on(db.refresh_subscriptions()).unwrap();
+    let mut saw_new_a = false;
+    while let Some(event) = subscription.try_next_event() {
+        if let SubscriptionEvent::Delta { added, .. } = event {
+            assert!(
+                !added
+                    .iter()
+                    .map(|row| row.row_uuid())
+                    .collect::<Vec<_>>()
+                    .contains(&b),
+                "rebuild must never substitute ambient team-B claims"
+            );
+            saw_new_a |= added
+                .iter()
+                .map(|row| row.row_uuid())
+                .collect::<Vec<_>>()
+                .contains(&new_a);
+        }
+    }
+    assert!(
+        saw_new_a,
+        "rebuilt subscription still receives its admitted team's updates"
+    );
+    assert_eq!(
+        row_ids(&block_on(db.all_for_identity(&prepared, opts, alice)).unwrap()),
+        vec![b],
+        "request scope restores ambient claims"
+    );
+    while let Some(event) = subscription_b.try_next_event() {
+        if let SubscriptionEvent::Delta { added, .. } = event {
+            assert!(
+                added
+                    .iter()
+                    .all(|row| row.row_uuid() != a && row.row_uuid() != new_a),
+                "team-B request must not reuse team-A's prepared plan"
+            );
+        }
+    }
+    block_on(subscription_b.close()).unwrap();
+    block_on(subscription.close()).unwrap();
+}
+
+/// Exercise the public Rust prepared-handle API: a missing provider claim
+/// removes one OR branch, but must not poison a later request by the same author.
+#[test]
+fn prepared_request_claim_presence_keeps_policy_branches_isolated() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("rooms")
+                .column("owner", PublicColumnType::Uuid)
+                .column("joinCode", PublicColumnType::Text)
+                .policies(
+                    PublicTablePolicies::new().with_select(PublicPolicyExpr::Or(vec![
+                        PublicPolicyExpr::eq_session(
+                            "owner",
+                            vec!["user".into(), "account".into()],
+                        ),
+                        PublicPolicyExpr::eq_session(
+                            "joinCode",
+                            vec!["claims".into(), "invite".into()],
+                        ),
+                    ])),
+                ),
+        ),
+    );
+    let db = open_db(0x6c, AuthorSubject::SYSTEM, &schema);
+    let room = block_on(
+        db.insert(
+            "rooms",
+            [
+                ("owner".into(), Value::Uuid(row(0x6e).0)),
+                ("joinCode".into(), Value::String("invite-a".into())),
+            ]
+            .into(),
+            Default::default(),
+        ),
+    )
+    .unwrap()
+    .row_uuid();
+    let author = AuthorSubject::for_test_bytes([0x6d; 16])
+        .with_account(crate::account_registry::AccountId(row(0x6d).0));
+    let prepared = block_on(db.prepare_query_async(&db.table("rooms"))).unwrap();
+    let absent = prepared
+        .clone()
+        .with_identity_claims(author, BTreeMap::new());
+    let present = prepared.with_identity_claims(
+        author,
+        [(
+            crate::query::provider_claim_key("invite"),
+            Value::String("invite-a".into()),
+        )]
+        .into(),
+    );
+    let opts = ReadOpts {
+        propagation: Propagation::LocalOnly,
+        ..Default::default()
+    };
+    assert!(
+        block_on(db.all_for_identity(&absent, opts.clone(), author))
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        row_ids(&block_on(db.all_for_identity(&present, opts.clone(), author)).unwrap()),
+        vec![room]
+    );
+    let mut denied = block_on(db.subscribe_for_identity(&absent, opts.clone(), author)).unwrap();
+    let mut admitted = block_on(db.subscribe_for_identity(&present, opts, author)).unwrap();
+    let SubscriptionEvent::Delta { added, .. } = block_on(denied.next_event()).unwrap() else {
+        panic!("initial denied event")
+    };
+    assert!(added.is_empty());
+    let SubscriptionEvent::Delta { added, .. } = block_on(admitted.next_event()).unwrap() else {
+        panic!("initial admitted event")
+    };
+    assert_eq!(
+        added.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        vec![room]
+    );
+    block_on(denied.close()).unwrap();
+    block_on(admitted.close()).unwrap();
+}
+
+/// Alice requires an optional detail and its optional leaf. Required filtering
+/// must preserve nullable parent cells in both empty and populated collectors.
+#[test]
+fn required_nested_nullable_includes_preserve_parent_descriptors() {
+    use crate::query::ArraySubqueryRequirement;
+    for requirement in [
+        ArraySubqueryRequirement::AtLeastOne,
+        ArraySubqueryRequirement::MatchCorrelationCardinality,
+    ] {
+        let schema = build_public_db_test_schema(
+            PublicSchemaBuilder::new()
+                .table(
+                    PublicTableSchemaBuilder::new("roots")
+                        .nullable_fk_column("detailId", "details"),
+                )
+                .table(
+                    PublicTableSchemaBuilder::new("details").nullable_fk_column("leafId", "leaves"),
+                )
+                .table(
+                    PublicTableSchemaBuilder::new("leaves").column("name", PublicColumnType::Text),
+                ),
+        );
+        let db = open_db(0xd7, AuthorSubject::SYSTEM, &schema);
+        let query = Query::from("roots").array_subquery(
+            ArraySubquery::new("detail", "details", "id", "detailId")
+                .requirement(requirement)
+                .nested(
+                    ArraySubquery::new("leaf", "leaves", "id", "leafId").requirement(requirement),
+                ),
+        );
+        let prepared = db.prepare_query(&query).unwrap();
+        let empty = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
+        assert!(empty.rows.is_empty());
+        let leaf = db
+            .insert(
+                "leaves",
+                BTreeMap::from([("name".into(), Value::String("Alice".into()))]),
+                Default::default(),
+            )
+            .unwrap()
+            .row_uuid();
+        let optional_ref =
+            |id: Option<RowUuid>| Value::Nullable(id.map(|id| Box::new(Value::Uuid(id.0))));
+        let detail = db
+            .insert(
+                "details",
+                BTreeMap::from([("leafId".into(), optional_ref(Some(leaf)))]),
+                Default::default(),
+            )
+            .unwrap()
+            .row_uuid();
+        let root = db
+            .insert(
+                "roots",
+                BTreeMap::from([("detailId".into(), optional_ref(Some(detail)))]),
+                Default::default(),
+            )
+            .unwrap()
+            .row_uuid();
+        db.insert(
+            "roots",
+            BTreeMap::from([("detailId".into(), optional_ref(None))]),
+            Default::default(),
+        )
+        .unwrap();
+        let snapshot = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
+        assert_eq!(row_ids(&snapshot.rows), vec![root]);
+        let root_table = schema
+            .tables
+            .iter()
+            .find(|table| table.name == "roots")
+            .unwrap();
+        assert_eq!(
+            snapshot.rows[0].cell(root_table, "detailId"),
+            Some(optional_ref(Some(detail)))
+        );
+        assert_eq!(
+            terminal_nested_values(&snapshot, root, "detail", "row_uuid"),
+            vec![Value::Uuid(detail.0)]
+        );
+        db.update(
+            "details",
+            detail,
+            BTreeMap::from([("leafId".into(), optional_ref(None))]),
+            Default::default(),
+        )
+        .unwrap();
+        let removed = block_on(db.all_relation_snapshot(&prepared, ReadOpts::default())).unwrap();
+        assert!(removed.rows.is_empty());
+    }
+}
+
+// This internal scheduling fixture is necessary because a public remote source
+// cannot hold a read forever while exposing whether its owner future was dropped.
+#[test]
+fn cancelled_pending_read_releases_fence_preserving_later_operation() {
+    struct ObserveDrop(Rc<Cell<bool>>);
+    impl Drop for ObserveDrop {
+        fn drop(&mut self) {
+            self.0.set(true);
+        }
+    }
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+    let tx = block_on(db.mergeable_tx()).unwrap();
+    let dropped = Rc::new(Cell::new(false));
+    let guard = ObserveDrop(Rc::clone(&dropped));
+    let receiver = db.node.enqueue_transaction_read(tx.tx_id, async move {
+        let _guard = guard;
+        std::future::pending::<Result<(), Error>>().await
+    });
+    let advanced = Rc::new(Cell::new(false));
+    let mark = Rc::clone(&advanced);
+    db.node
+        .enqueue_transaction_operation(
+            tx.tx_id,
+            Box::pin(async move {
+                mark.set(true);
+                Ok(())
+            }),
+        )
+        .unwrap();
+    block_on(db.tick()).unwrap();
+    assert!(!dropped.get());
+    assert!(
+        !advanced.get(),
+        "later same-transaction operation must remain fenced"
+    );
+    drop(receiver);
+    for _ in 0..3 {
+        block_on(db.tick()).unwrap();
+    }
+    assert!(
+        dropped.get(),
+        "cancelled receiver must drop the indefinitely pending read"
+    );
+    assert!(
+        advanced.get(),
+        "cancellation must release the read fence without dropping later work"
+    );
+}
+
+/// A historical read (`Db::at`) that orders by a column it doesn't select
+/// returns rows in that column's order and does not return the column (#3495).
+/// Internal test: the public API offers no way to name a settled global-time
+/// position from an integration test.
+#[test]
+fn historical_read_orders_by_unselected_column_without_returning_it() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let core = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    // Row-id order is b, a; `done` order is a (false), b (true).
+    core.insert_with_id("todos", row(0x41), cells("b", true, author))
+        .unwrap();
+    core.insert_with_id("todos", row(0x42), cells("a", false, author))
+        .unwrap();
+    let now = core.node().borrow().committed_global_time();
+    let table = &schema.tables[0];
+    let rows = core
+        .at(
+            now,
+            &Query::from("todos")
+                .order_by("done", crate::query::OrderDirection::Asc)
+                .select(["title"]),
+        )
+        .unwrap();
+    assert!(
+        rows.iter().all(|row| row.cell(table, "done").is_none()),
+        "an unselected order key must not be returned"
+    );
+    let titles = rows
+        .iter()
+        .map(|row| row.cell(table, "title"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        titles,
+        [
+            Some(Value::String("a".to_owned())),
+            Some(Value::String("b".to_owned()))
+        ]
+    );
+}
+
+// Moved from the node query tests: these drive the Db facade.
+#[test]
+fn db_facade_current_rows_match_seeded_create_delete_sequence() {
+    let db =
+        crate::db::doctest_support::block_on(crate::db::doctest_support::open_todos_db()).unwrap();
+    let query = db.table("todos");
+    let prepared = db.prepare_query(&query).unwrap();
+    let table = &crate::db::doctest_support::schema().tables[0];
+
+    let write = db
+        .insert(
+            "todos",
+            crate::db::doctest_support::todo_cells("a1", false),
+            Default::default(),
+        )
+        .unwrap();
+    let row_a = write.row_uuid();
+    crate::db::doctest_support::block_on(write.wait(DurabilityTier::Local)).unwrap();
+    assert_eq!(db_facade_row_ids(&db.read(&prepared).unwrap()), vec![row_a]);
+    assert_eq!(
+        db.one(&prepared).unwrap().unwrap().cell(table, "title"),
+        Some(Value::String("a1".to_owned()))
+    );
+
+    let write = db
+        .insert(
+            "todos",
+            crate::db::doctest_support::todo_cells("b1", false),
+            Default::default(),
+        )
+        .unwrap();
+    let row_b = write.row_uuid();
+    crate::db::doctest_support::block_on(write.wait(DurabilityTier::Local)).unwrap();
+    assert_eq!(
+        db_facade_row_ids(
+            &crate::db::doctest_support::block_on(
+                db.all(&prepared, crate::db::ReadOpts::default())
+            )
+            .unwrap()
+        ),
+        vec![row_a, row_b]
+    );
+
+    crate::db::doctest_support::block_on(
+        db.delete("todos", row_a, Default::default())
+            .unwrap()
+            .wait(DurabilityTier::Local),
+    )
+    .unwrap();
+    assert_eq!(db_facade_row_ids(&db.read(&prepared).unwrap()), vec![row_b]);
+
+    crate::db::doctest_support::block_on(
+        db.restore(
+            "todos",
+            row_a,
+            Some(crate::db::doctest_support::todo_cells("a2", true)),
+            Default::default(),
+        )
+        .unwrap()
+        .wait(DurabilityTier::Local),
+    )
+    .unwrap();
+    let rows = db.read(&prepared).unwrap();
+    assert_eq!(db_facade_row_ids(&rows), vec![row_a, row_b]);
+    assert_eq!(
+        rows.iter()
+            .find(|row| row.row_uuid() == row_a)
+            .unwrap()
+            .cell(table, "title"),
+        Some(Value::String("a2".to_owned()))
+    );
+
+    crate::db::doctest_support::block_on(
+        db.delete("todos", row_b, Default::default())
+            .unwrap()
+            .wait(DurabilityTier::Local),
+    )
+    .unwrap();
+    assert_eq!(
+        db_facade_row_ids(
+            &crate::db::doctest_support::block_on(
+                db.all(&prepared, crate::db::ReadOpts::default())
+            )
+            .unwrap()
+        ),
+        vec![row_a]
+    );
+}
+
+#[test]
+fn db_facade_multi_row_query_matches_seeded_create_delete_sequence_via_write_handles() {
+    let db =
+        crate::db::doctest_support::block_on(crate::db::doctest_support::open_todos_db()).unwrap();
+    let query = db.table("todos");
+    let prepared = db.prepare_query(&query).unwrap();
+    let table = &crate::db::doctest_support::schema().tables[0];
+
+    let write = db
+        .insert(
+            "todos",
+            crate::db::doctest_support::todo_cells("a1", false),
+            Default::default(),
+        )
+        .unwrap();
+    let row_a = write.row_uuid();
+    crate::db::doctest_support::block_on(write.wait(DurabilityTier::Local)).unwrap();
+    let rows = db.read(&prepared).unwrap();
+    assert_eq!(db_facade_row_ids(&rows), vec![row_a]);
+    assert_eq!(
+        db.one(&prepared).unwrap().unwrap().cell(table, "title"),
+        Some(Value::String("a1".to_owned()))
+    );
+
+    let write = db
+        .insert(
+            "todos",
+            crate::db::doctest_support::todo_cells("b1", false),
+            Default::default(),
+        )
+        .unwrap();
+    let row_b = write.row_uuid();
+    crate::db::doctest_support::block_on(write.wait(DurabilityTier::Local)).unwrap();
+    let rows =
+        crate::db::doctest_support::block_on(db.all(&prepared, crate::db::ReadOpts::default()))
+            .unwrap();
+    assert_eq!(db_facade_row_ids(&rows), vec![row_a, row_b]);
+
+    let write = db.delete("todos", row_a, Default::default()).unwrap();
+    crate::db::doctest_support::block_on(write.wait(DurabilityTier::Local)).unwrap();
+    let rows = db.read(&prepared).unwrap();
+    assert_eq!(db_facade_row_ids(&rows), vec![row_b]);
+    assert_eq!(
+        db.one(&prepared).unwrap().unwrap().cell(table, "title"),
+        Some(Value::String("b1".to_owned()))
+    );
+
+    let write = db
+        .restore(
+            "todos",
+            row_a,
+            Some(crate::db::doctest_support::todo_cells("a2", true)),
+            Default::default(),
+        )
+        .unwrap();
+    crate::db::doctest_support::block_on(write.wait(DurabilityTier::Local)).unwrap();
+    let rows = db.read(&prepared).unwrap();
+    assert_eq!(db_facade_row_ids(&rows), vec![row_a, row_b]);
+    assert_eq!(
+        rows.iter()
+            .find(|row| row.row_uuid() == row_a)
+            .unwrap()
+            .cell(table, "title"),
+        Some(Value::String("a2".to_owned()))
+    );
+    assert_eq!(
+        rows.iter()
+            .find(|row| row.row_uuid() == row_a)
+            .unwrap()
+            .cell(table, "done"),
+        Some(Value::Bool(true))
+    );
+
+    let write = db.delete("todos", row_b, Default::default()).unwrap();
+    crate::db::doctest_support::block_on(write.wait(DurabilityTier::Local)).unwrap();
+    let rows =
+        crate::db::doctest_support::block_on(db.all(&prepared, crate::db::ReadOpts::default()))
+            .unwrap();
+    assert_eq!(db_facade_row_ids(&rows), vec![row_a]);
+}
+
+fn db_facade_row_ids(rows: &[CurrentRow]) -> Vec<RowUuid> {
+    rows.iter().map(CurrentRow::row_uuid).collect()
+}

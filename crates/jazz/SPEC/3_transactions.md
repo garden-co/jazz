@@ -33,13 +33,13 @@ Invariant digest:
 - `INV-TX-15`: Reads inside an exclusive transaction MUST observe that transaction's own pending writes.
 - `INV-TX-16`: Exclusive authority validation MUST reject when any recorded row read is no longer the globally current content/deletion read version.
 - `INV-TX-17`: Exclusive authority validation MUST reject when an absent row read has become globally present.
-- `INV-TX-18`: Exclusive authority validation MUST reject predicate phantoms by comparing source-row predicate output as real `(RowUuid, TxId)` identities, while aggregate predicate output MUST be compared as stable synthetic group identities plus canonical public aggregate payloads, at `base_snapshot.global_base` against current global output for the same shape and binding.
+- `INV-TX-18`: Exclusive authority validation MUST reject predicate phantoms against the rows the transaction proved it read: every row the predicate returns now, evaluated as the transaction's permission subject, MUST carry a current row proof in the commit, and a proved row the predicate returned at `base_snapshot.global_base` but no longer returns MUST conflict. Aggregate predicate reads MUST be validated through the rows the aggregate consumes, which the transaction proves as it reads them. Every non-root source a query reads (joined, included or correlated table) MUST be recorded as a predicate read with a proof for each row the reader can see there: its narrowed read (the source under its own filters, restricted by a reverse join chain to rows correlating with parent rows that pass their own filters up to the root) when the source correlates back to the root through key equalities, otherwise its whole table; tables consulted only by read policies are not recorded.
 - `INV-TX-19`: Exclusive predicate validation MUST be sensitive to `binding_id`/`binding_values` and MUST use the inline query shape without requiring prior shape registration.
 - `INV-TX-20`: Exclusive write validation MUST be first-committer-wins: each written version's current global winner in that version's own content/deletion layer MUST equal the single recorded parent, or absence when no parent is recorded. Row and predicate read validation remains against the observed visible content/deletion state (`INV-TX-16/17/18`); a version parent is not that read precondition.
 - `INV-TX-21`: Accepted global transactions MUST maintain per-layer global-current tables/change stream.
 - `INV-TX-22`: Downstream incomplete exclusive bundles MUST be stored but remain invisible for subscription views whose required exclusive payload is incomplete; they MAY become visible for a maintained subscription view once that view's required exclusive versions are present, even before all `n_total_writes` versions are known.
 - `INV-TX-24`: A caller-generated `OpenTransactionId` MUST name mutable work unchanged across local and worker runtimes, MUST be terminal after commit or rollback, and MUST never be accepted by an API requiring the post-commit `TransactionId`; only successful commit transitions `OpenTransactionId` to `TransactionId`.
-- `INV-TX-25`: A `CommitUnit` is one durable-publication boundary: canonical transaction/history rows, current/maintained-view inputs, fate/durability metadata, and recovery markers MUST become observable together. A failed or ambiguous persistence finalization MUST emit no `FateUpdate`, view/subscription update, or peer broadcast; reopen MUST either recover the entire unit or suppress it. Once persistence has completed, or a local publication has transferred to the node-owned ordered persistence queue, observer refresh failure MUST NOT be reported as commit failure.
+- `INV-TX-25`: A `CommitUnit` is one durable-publication boundary: canonical transaction/history rows, current/maintained-view inputs, fate/durability metadata, and ahead-current cleanup MUST become observable together. A failed or ambiguous persistence finalization MUST emit no `FateUpdate`, view/subscription update, or peer broadcast; reopen MUST either recover the entire unit or suppress it. Once persistence has completed, or a local publication has transferred to the node-owned ordered persistence queue, observer refresh failure MUST NOT be reported as commit failure.
 - `INV-TX-26`: Client-side mergeable mutation staging MAY validate structure, schema, locally required preimages, and transaction consistency, but MUST NOT reject from a local read- or write-policy evaluation. The fate authority alone issues the definitive authorization verdict from complete admitted policy inputs.
 
 ## Details
@@ -118,20 +118,22 @@ redelivered with a different payload, it fails as `ConflictingCommitUnit`
 
 `CommitUnit { tx, versions }` is the one atomic boundary for both storage and
 publication (`INV-TX-25`). The store may internally stage canonical history,
-currency/index state, IVM durable terminals, fate metadata, and recovery
-markers, but neither an acknowledgement nor a derived/subscription payload may
+currency/index state, IVM durable terminals, and fate metadata, but neither an acknowledgement nor a derived/subscription payload may
 escape until the required durable boundary completes. A local persistence
 relay acknowledges only its own durable boundary; it cannot manufacture a
 Core acceptance. A returned `FateUpdate` or `ViewUpdate` is publication, not
 speculative progress.
 
-If a process stops after an implementation's first durable stage and before its
-final marker/cleanup stage, recovery must inspect that state before serving it.
-It may complete a coherent unit or suppress it, but it must never serve a
-mixture such as history without currency, fate without versions, or a derived
-row that cannot be recreated from the recovered canonical state. This is the
-sync-core contract that the future asynchronous persistent instance preserves;
-an async completion/ack is not a second semantic commit.
+Transaction fate reconciliation is independent of carrier scope: an older
+pending fragment cannot downgrade a stored terminal fate or erase its global
+time. Settlement covers all locally held versions of that transaction, not
+only the incoming fragment. Its fate, accepted global-current effects (or
+rejection cleanup), and removal from the ahead-current overlay share one
+storage-atomic batch. A failed batch leaves the prior durable state intact;
+reopen does not scan settled transaction history to repair the overlay. No
+clean-close or consistency marker is required for this invariant. Existing
+stores containing leftovers from earlier implementations are not repaired.
+An async completion/ack is not a second semantic commit.
 
 The commit result and observer refresh result are distinct after this boundary.
 Before persistence completes or ordered publication ownership transfers, failure
@@ -307,12 +309,50 @@ recorded reads against current global state:
   separate from a write's own-layer CAS below and is covered by
   `exclusive_row_read_conflicts_when_a_later_delete_hides_the_content`;
 - an **absent read** must still be absent (`INV-TX-17`);
-- a **predicate read** must not have gained or lost rows — for source-row
-  predicates, authority compares the `(RowUuid, TxId)` output set for that
-  shape+binding at the complete dotted `base_snapshot` against current global
-  output (`INV-TX-18`). Aggregate predicates are the exception: authority
-  compares stable synthetic group identities together with canonical public
-  aggregate payloads at the same two frontiers.
+- a **predicate read** must not have gained or lost rows relative to what the
+  transaction actually read (`INV-TX-18`). A transaction proves each row a
+  predicate read returns with a row read. The authority re-runs the shape and
+  binding now, as the transaction's permission subject, and rejects when it
+  returns a row without a proof (a phantom, or a row that changed into the
+  result). A proved row the shape returned at `base_snapshot` but no longer
+  returns left the result through another row and also conflicts. The base
+  snapshot is not trusted for anything else: a partial client may have read
+  offline or from a replica that never held every row below its base, so it
+  can prepare an exclusive transaction offline and commit it later while its
+  reads still hold. An aggregate read proves the rows it consumes (the same
+  shape without aggregate, projection, ordering or pagination) and is
+  validated through them. Each source a query reads other than its root
+  (joined, included or correlated tables) is recorded as its own predicate
+  read with a proof for each row it returns, so a row added there conflicts
+  even when a proof from another read covers the root. A source that
+  correlates back to the root through key equalities (a join chain, an
+  include path, an implicit reference or a correlated array) is recorded as
+  its **narrowed read**: that table under its own filters, restricted by a
+  reverse join chain to rows that correlate with a parent row passing the
+  parent's own filters, up to the root's filters. The narrowed read depends
+  only on the query and its binding, and it keeps only conjuncts of the
+  original query, so it covers every row the query could have consulted
+  there, present or absent. A write elsewhere in that table does not
+  conflict. A hop through an array of references correlates by membership:
+  the narrowed read then requires, through nested correlated arrays, at
+  least one parent row whose array holds the row. Implicit root references
+  are sync payload that never decides a query's result, so they record no
+  read. A query with any other source (a lookup join, a recursive traversal,
+  access inherited from a parent row,
+  a read of deleted root rows, or any source of a query with policy
+  branches, a flat join or a retained relation tree) fails with an error
+  naming the read pattern as not supported in exclusive transactions yet;
+  it is never recorded as a read of the whole table. When the reader's read policy
+  filters a source, its read runs as the reader and proves only the rows it
+  can see. A partial node's online exclusive read hydrates each source's
+  read at its snapshot, so rows it never received do not make the read
+  conflict; offline, such a read conflicts if the replica lacks a row the
+  reader can see there. The tables a read policy
+  consults are not recorded: the authority re-runs every predicate read under
+  the reader's policies, so a change there conflicts exactly when it changes
+  what the reader sees.
+  A client that records no proofs for its predicate
+  reads conflicts whenever such a read returned rows.
 - each **write** is first-committer-wins in its **written history layer**: a
   content version compares its parent to the row's current global content
   `TxId`, while a deletion or restore version compares its parent to the

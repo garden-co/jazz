@@ -41,4 +41,4 @@ jobs:
       - run: pnpm --filter docs test:perf-timeline
       - run: pnpm --filter docs build
       - run: pnpm --filter docs exec playwright install --with-deps chromium
-      - run: pnpm --filter docs test:perf-timeline:e2e
+      - run: pnpm --filter docs test:examples:e2e

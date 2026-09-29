@@ -4,22 +4,57 @@ version = "0.1.0"
 edition = "2024"
 autobins = false
 autobenches = false
-autotests = true
+# Integration tests are listed explicitly so the flat files build as one
+# binary; see tests/integration/main.rs.
+autotests = false
 
 [features]
 # Jazz is the common semantic library. Process and target shells select
 # storage, transport, compression, and runtime capabilities explicitly.
 default = []
-runtime = ["dep:jsonwebtoken", "dep:tokio"]
-sync-autopsy = []
+runtime = [
+  "dep:jsonwebtoken",
+  "dep:tokio",
+  "jazz-model/runtime",
+  "jazz-node/runtime",
+  "jazz-db/runtime",
+]
+sync-autopsy = ["jazz-db/sync-autopsy"]
 # Disabled-by-default counters for the cold-settle attribution bench. They do
 # not alter protocol behavior or production measurement paths.
-cold-settle-attribution = ["groove/cold-settle-attribution"]
+cold-settle-attribution = [
+  "groove/cold-settle-attribution",
+  "jazz-node/cold-settle-attribution",
+  "jazz-db/cold-settle-attribution",
+]
 r3-open-attribution = ["testing"]
-testing = ["runtime"]
-transport-compression-lz4 = ["jazz-compression/lz4"]
-transport-compression-zstd = ["jazz-compression/zstd"]
-transport-compression-ruzstd = ["jazz-compression/ruzstd"]
+testing = [
+  "runtime",
+  "jazz-types/testing",
+  "jazz-model/testing",
+  "jazz-protocol/testing",
+  "jazz-engine/testing",
+  "jazz-node/testing",
+  "jazz-db/testing",
+]
+transport-compression-lz4 = [
+  "jazz-compression/lz4",
+  "jazz-protocol/transport-compression-lz4",
+  "jazz-node/transport-compression-lz4",
+  "jazz-db/transport-compression-lz4",
+]
+transport-compression-zstd = [
+  "jazz-compression/zstd",
+  "jazz-protocol/transport-compression-zstd",
+  "jazz-node/transport-compression-zstd",
+  "jazz-db/transport-compression-zstd",
+]
+transport-compression-ruzstd = [
+  "jazz-compression/ruzstd",
+  "jazz-protocol/transport-compression-ruzstd",
+  "jazz-node/transport-compression-ruzstd",
+  "jazz-db/transport-compression-ruzstd",
+]
 
 [dependencies]
 futures-core = "0.3.31"
@@ -28,6 +63,12 @@ futures = "0.3"
 futures-util = "0.3"
 blake3 = "1"
 groove = { workspace = true, default-features = false }
+jazz-types.workspace = true
+jazz-model.workspace = true
+jazz-protocol.workspace = true
+jazz-engine.workspace = true
+jazz-node.workspace = true
+jazz-db.workspace = true
 bytes = "1"
 jazz-compression.workspace = true
 postcard = { version = "1.1.3", features = ["alloc"] }
@@ -55,10 +96,12 @@ base64 = "0.22"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 
 [dev-dependencies]
+# Jazz's own tests (and the layer crates' test helpers they call) need the
+# `testing` feature, so a featureless `cargo test -p jazz` enables it here.
+jazz = { path = ".", default-features = false, features = ["testing"] }
 divan.workspace = true
 groove = { workspace = true, default-features = false, features = ["test"] }
 jazz-benchmark-guard = { path = "../benchmark-guard" }
-jazz-testkit = { path = "../jazz-testkit", default-features = false }
 hdrhistogram = "7.5.4"
 tempfile = "3.27.0"
 tar = "0.4"
@@ -123,6 +166,11 @@ harness = false
 required-features = ["testing"]
 
 [[bench]]
+name = "exclusive_join_narrowing"
+harness = false
+required-features = ["testing"]
+
+[[bench]]
 name = "owner_filter_diagnostic"
 harness = false
 required-features = ["testing"]
@@ -160,16 +208,14 @@ name = "route_subscription_curve"
 harness = false
 required-features = ["testing"]
 
-[[test]]
-name = "parameterized_subscription_routing"
+[[bench]]
+name = "accepted_fate_replay"
+harness = false
 required-features = ["testing"]
 
-[[test]]
-name = "authorization_scope_reentry"
-required-features = ["testing"]
-
-[[test]]
-name = "async_open"
+[[bench]]
+name = "local_blob_reads"
+harness = false
 required-features = ["testing"]
 
 [[test]]
@@ -177,25 +223,9 @@ name = "legacy_benchmark_smoke"
 required-features = ["testing"]
 
 [[test]]
-name = "core_client_topology"
-required-features = ["testing"]
+name = "integration"
+path = "tests/integration/main.rs"
 
 [[test]]
-name = "browser_relay_durability"
-required-features = ["testing"]
-
-[[test]]
-name = "threaded_client_relay"
-required-features = ["testing"]
-
-[[test]]
-name = "core_fate_authority"
-required-features = ["runtime"]
-
-[[test]]
-name = "auth_admission"
-required-features = ["runtime"]
-
-[[test]]
-name = "fate_replay"
-required-features = ["testing"]
+name = "incremental_delivery_canary"
+path = "tests/incremental_delivery_canary.rs"

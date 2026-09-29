@@ -2987,6 +2987,7 @@ async fn pending_incremental_checksum_survives_last_subscription_gc() {
         ready: Rc::clone(&ready),
     }));
     let graph = GraphBuilder::table("objects").streaming_checksum("payload", "checksum", 64, 64);
+    let baseline = database.ivm_runtime.stats().graph_nodes;
     let old = database.subscribe_one_sink(graph.clone()).await.unwrap();
     assert!(old.recv().unwrap().is_empty());
 
@@ -3038,11 +3039,18 @@ async fn pending_incremental_checksum_survives_last_subscription_gc() {
         "one subscription owns one checksum node"
     );
     let checksum_node = checksum_nodes[0];
+    let subscribed = database.ivm_runtime.stats().graph_nodes;
+    assert!(subscribed > baseline);
 
     assert!(database.unsubscribe(old.id()));
     assert!(
         database.ivm_runtime.graph().node(checksum_node).is_some(),
         "a parked incremental evaluation retains its checksum graph node after its final subscriber stops"
+    );
+    assert_eq!(
+        database.ivm_runtime.stats().graph_nodes,
+        subscribed,
+        "queued work keeps its whole input slice, not just the node it parked on"
     );
     ready.set(true);
     database.drive_progress().await.unwrap();
@@ -3050,5 +3058,10 @@ async fn pending_incremental_checksum_survives_last_subscription_gc() {
     assert!(
         database.ivm_runtime.graph().node(checksum_node).is_none(),
         "the checksum node is reclaimed once its parked evaluation drains"
+    );
+    assert_eq!(
+        database.ivm_runtime.stats().graph_nodes,
+        baseline,
+        "draining the queue releases the whole slice"
     );
 }

@@ -6239,3 +6239,60 @@ async fn direct_store_key_reads_validate_without_encoding_throwaway_records() {
         Value::U64(42)
     );
 }
+
+#[futures_test::test]
+async fn derived_append_rejects_a_base_descriptor_that_misdescribes_its_active_root() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let mut database = Database::new(schema, storage).await.unwrap();
+    database.set_chunk_storage(chunks);
+
+    let logical: Vec<u8> = (0..crate::large_values::INLINE_VALUE_MAX_BYTES * 9)
+        .map(|i| (i * 31 % 251) as u8)
+        .collect();
+    let staged = database
+        .prepare_and_stage_large_value(crate::large_values::LargeValueKind::Bytes, &logical)
+        .await
+        .unwrap();
+
+    // The root is active (it holds a staging receipt), but these base
+    // descriptors lie about it. A plain append reuses that root unchanged, so
+    // only the descriptor-to-root edge can catch the lie.
+    let mut longer = staged.value_ref.clone();
+    longer.byte_length += 4096;
+    let mut rehashed = staged.value_ref.clone();
+    rehashed.logical_hash.0[0] ^= 1;
+    for forged in [longer, rehashed] {
+        assert!(
+            database
+                .append_and_stage_large_value(forged, vec![1, 2, 3])
+                .await
+                .is_err(),
+            "a misdescribed base must not earn a staging receipt"
+        );
+    }
+
+    // Control: the honest descriptor still appends and reads back exactly.
+    let appended = database
+        .append_and_stage_large_value(staged.value_ref.clone(), vec![1, 2, 3])
+        .await
+        .unwrap();
+    let mut expected = logical;
+    expected.extend([1, 2, 3]);
+    assert_eq!(
+        database
+            .read_large_value_range(&appended.value_ref, 0..appended.value_ref.byte_length)
+            .await
+            .unwrap(),
+        expected
+    );
+}

@@ -231,7 +231,7 @@ struct RungReceipt {
 /// constructs this once, outside Divan's timed closure.
 struct HydrationFixture {
     _temp: tempfile::TempDir,
-    db: Db<RocksDbStorage>,
+    db: Db,
     prepared: PreparedQuery,
     expected: Vec<RowUuid>,
     target_rows: usize,
@@ -547,7 +547,7 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_db(path: &Path, schema: JazzSchema) -> (Db<RocksDbStorage>, u128, u128) {
+fn open_db(path: &Path, schema: JazzSchema) -> (Db, u128, u128) {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -573,7 +573,7 @@ fn open_db(path: &Path, schema: JazzSchema) -> (Db<RocksDbStorage>, u128, u128) 
     (db, storage_open_us, db_open_us)
 }
 
-fn seed_rows(db: &Db<RocksDbStorage>, config: ConfigRef, table_rows: usize) {
+fn seed_rows(db: &Db, config: ConfigRef, table_rows: usize) {
     for batch_start in (0..table_rows).step_by(config.batch_rows) {
         let batch_end = table_rows.min(batch_start + config.batch_rows);
         let tx = block_on(db.mergeable_tx()).expect("open selective-hydration seed transaction");

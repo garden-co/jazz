@@ -4,8 +4,6 @@ description: Jazz's approach to row-level security using relationship-based acce
 reviewedAt: "b29b48d1a"
 ---
 
-import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
-
 Permissions control who can read, insert, update, and delete rows. Jazz enforces them server-side using row-level policies defined in `permissions.ts`. Clients that fail a policy check have their writes rejected and their reads filtered.
 
 Jazz decides permissions per table:
@@ -181,9 +179,18 @@ same applies if you only use `.whereNew(...)`. Use both when the old-row and new
 
 Every policy is evaluated against a session. On the frontend, this is the authenticated user's session. In a backend handler, create a scoped session per request so queries run with the right identity.
 
-<include cwd lang="ts" meta='title="handler.ts"'>
-  ../examples/docs/todo-server-ts/src/request-context.ts#backend-request-handler-ts
-</include>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="handler.ts"'>
+      ../examples/docs/todo-server-ts/src/request-context.ts#backend-request-handler-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts" meta='title="handler.ts"'>
+      ../examples/docs/todo-effect/src/server.ts#backend-request-handler-effect
+    </include>
+  </Tab>
+</Tabs>
 
 See [Server Setup](/docs/getting-started/server-setup#backend-context-setup) for backend context setup details.
 
@@ -203,9 +210,18 @@ These results are advice, not permission enforcement. A result can become stale,
 means Jazz could not give a definite answer. The authority still makes the final decision when the
 read or write reaches it.
 
-<include cwd lang="ts" meta='title="app.ts"'>
-  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#dry-run-permissions-ts
-</include>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="app.ts"'>
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#dry-run-permissions-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts" meta='title="app.ts"'>
+      ../examples/docs/todo-effect/src/docs-snippets.ts#dry-run-permissions-effect
+    </include>
+  </Tab>
+</Tabs>
 
 ## Magic columns
 
