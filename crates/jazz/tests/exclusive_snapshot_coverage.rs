@@ -44,6 +44,12 @@ fn schema() -> JazzSchema {
             .table(TableSchemaBuilder::new("invites").column("code", ColumnType::Text))
             .table(TableSchemaBuilder::new("members").column("code", ColumnType::Text))
             .table(TableSchemaBuilder::new("audit").column("note", ColumnType::Text))
+            .table(
+                TableSchemaBuilder::new("grants")
+                    .column("code", ColumnType::Text)
+                    .fk_column("invite", "invites"),
+            )
+            .table(TableSchemaBuilder::new("claims").array_fk_column("invite_ids", "invites"))
             .allow_all()
             .build(),
     )
@@ -167,6 +173,19 @@ impl Net {
         tier: DurabilityTier,
         open_tx: Option<OpenTransactionId>,
     ) -> Vec<RowUuid> {
+        root_rows(
+            query,
+            self.try_read(client, query, tier, open_tx).expect("read"),
+        )
+    }
+
+    fn try_read(
+        &self,
+        client: usize,
+        query: &Query,
+        tier: DurabilityTier,
+        open_tx: Option<OpenTransactionId>,
+    ) -> Result<SerializedReadResult, jazz::db::Error> {
         let db = self.db(client);
         let bytes = postcard::to_allocvec(query).unwrap();
         let read = db.all_serialized_query(
@@ -182,7 +201,7 @@ impl Net {
             || false,
             |attachment| db.detach_query(attachment),
         );
-        root_rows(query, self.drive(read).expect("read"))
+        self.drive(read)
     }
 
     /// Poll a one-shot local exclusive read without pumping anything,
@@ -235,6 +254,25 @@ impl Net {
         self.settle(client, write.mergeable_tx_id())
             .expect("invite settles");
         write.row_uuid()
+    }
+
+    fn create_grant(&self, client: usize, code: &str, invite: RowUuid) -> RowUuid {
+        let mut grant = cells(code);
+        grant.insert("invite".to_owned(), Value::Uuid(invite.0));
+        let write = block_on(self.db(client).insert("grants", grant, Default::default())).unwrap();
+        self.settle(client, write.mergeable_tx_id())
+            .expect("grant settles");
+        write.row_uuid()
+    }
+
+    fn create_claim(&self, client: usize, invite: RowUuid) {
+        let claim = BTreeMap::from([(
+            "invite_ids".to_owned(),
+            Value::Array(vec![Value::Uuid(invite.0)]),
+        )]);
+        let write = block_on(self.db(client).insert("claims", claim, Default::default())).unwrap();
+        self.settle(client, write.mergeable_tx_id())
+            .expect("claim settles");
     }
 
     fn revoke(&self, client: usize, invite: RowUuid) {
@@ -941,4 +979,220 @@ fn global_tier_join_commits_despite_unrelated_joined_rows() {
     net.settle(2, tx_id)
         .expect("nobody redeemed this invite, so the redemption commits");
     assert_eq!(net.members(), 2);
+}
+
+/// garden-co/jazz#3694: a read through a join or a correlated relation records
+/// only the joined rows it could have consulted, so a redemption of another
+/// invite that lands between the read and the commit does not conflict it.
+fn assert_redemption_check_commits_despite_a_concurrent_unrelated_redemption(
+    check: RedemptionCheck,
+) {
+    let net = Net::new(&[0x0a, 0x0b, 0x0c]);
+    net.create_invite(OWNER, "abc");
+    net.create_invite(OWNER, "xyz");
+    net.read(BACKEND, &invite_query("xyz"), DurabilityTier::Global, None);
+    net.read(2, &invite_query("abc"), DurabilityTier::Global, None);
+
+    let outcome = redeem_unless_redeemed(&net, 2, "abc", check, false, || {
+        assert_eq!(
+            redeem_unless_redeemed(&net, BACKEND, "xyz", check, false, || {}),
+            Redeem::Joined
+        );
+    });
+    assert_eq!(outcome, Redeem::Joined);
+    assert_eq!(net.members(), 2);
+}
+
+#[test]
+fn join_commits_despite_a_concurrent_unrelated_redemption() {
+    assert_redemption_check_commits_despite_a_concurrent_unrelated_redemption(
+        RedemptionCheck::Join,
+    );
+}
+
+#[test]
+fn relation_commits_despite_a_concurrent_unrelated_redemption() {
+    assert_redemption_check_commits_despite_a_concurrent_unrelated_redemption(
+        RedemptionCheck::Relation,
+    );
+}
+
+/// The narrowed read still covers a correlated row that was absent when the
+/// relation read ran: a concurrent redemption of the same invite conflicts.
+#[test]
+fn relation_redemption_check_conflicts_with_a_concurrent_redemption() {
+    let net = Net::new(&[0x0a, 0x0b, 0x0c]);
+    net.create_invite(OWNER, "abc");
+    net.read(BACKEND, &invite_query("abc"), DurabilityTier::Global, None);
+    net.read(2, &invite_query("abc"), DurabilityTier::Global, None);
+
+    let outcome = redeem_unless_redeemed(&net, 2, "abc", RedemptionCheck::Relation, false, || {
+        assert_eq!(
+            redeem_unless_redeemed(
+                &net,
+                BACKEND,
+                "abc",
+                RedemptionCheck::Relation,
+                false,
+                || {}
+            ),
+            Redeem::Joined
+        );
+    });
+    assert_eq!(outcome, Redeem::Conflict);
+    assert_eq!(net.members(), 1, "the invite was redeemed only once");
+}
+
+/// The redeeming client receives the unrelated redemption before it commits.
+/// Its local serializability check compares the narrowed read's output rather
+/// than rejecting on any newer row in the joined table.
+#[test]
+fn join_commits_after_receiving_an_unrelated_redemption() {
+    let net = Net::new(&[0x0a, 0x0b, 0x0c]);
+    net.create_invite(OWNER, "abc");
+    net.create_invite(OWNER, "xyz");
+    net.read(BACKEND, &invite_query("xyz"), DurabilityTier::Global, None);
+    net.read(2, &invite_query("abc"), DurabilityTier::Global, None);
+
+    let outcome = redeem_unless_redeemed(&net, 2, "abc", RedemptionCheck::Join, false, || {
+        assert_eq!(
+            redeem_unless_redeemed(&net, BACKEND, "xyz", RedemptionCheck::Join, false, || {}),
+            Redeem::Joined
+        );
+        assert_eq!(
+            net.read(2, &Query::from("members"), DurabilityTier::Global, None)
+                .len(),
+            1,
+            "the redeeming client holds the unrelated redemption"
+        );
+    });
+    assert_eq!(outcome, Redeem::Joined);
+    assert_eq!(net.members(), 2);
+}
+
+fn grant_query(code: &str) -> Query {
+    Query::from("grants")
+        .filter(eq(col("code"), lit(code)))
+        .include("invite")
+}
+
+/// Redeem the grant `g` after reading it with the invite it includes, while
+/// either that invite or another one is revoked between the read and the
+/// commit.
+fn redeem_grant_while_revoking(revoke_included: bool) -> Redeem {
+    let net = Net::new(&[0x0a, 0x0b]);
+    let abc = net.create_invite(OWNER, "abc");
+    let xyz = net.create_invite(OWNER, "xyz");
+    net.create_grant(OWNER, "g", abc);
+    net.unrelated_receipt(BACKEND);
+
+    let db = net.db(BACKEND);
+    let open = OpenTransactionId::new();
+    block_on(db.begin_exclusive(open)).unwrap();
+    assert_eq!(
+        net.read(
+            BACKEND,
+            &grant_query("g"),
+            DurabilityTier::Local,
+            Some(open)
+        )
+        .len(),
+        1
+    );
+    net.revoke(OWNER, if revoke_included { abc } else { xyz });
+    net.drive(
+        db.exclusive_tx_ref(open)
+            .insert("members", cells("g"), Default::default()),
+    )
+    .unwrap();
+    let tx_id = net.drive(db.commit_exclusive_handle(open)).unwrap();
+    match net.settle(BACKEND, tx_id) {
+        Ok(_) => Redeem::Joined,
+        Err(_) => Redeem::Conflict,
+    }
+}
+
+/// An include records only the rows its reference reaches: revoking another
+/// invite does not conflict the redemption.
+#[test]
+fn include_commits_despite_an_unrelated_revocation() {
+    assert_eq!(redeem_grant_while_revoking(false), Redeem::Joined);
+}
+
+/// Revoking the included invite still conflicts.
+#[test]
+fn include_conflicts_when_the_included_row_is_revoked() {
+    assert_eq!(redeem_grant_while_revoking(true), Redeem::Conflict);
+}
+
+/// A read whose joined source has no narrowed read fails with the read
+/// pattern it attempted, instead of recording (and hydrating) the whole
+/// joined table.
+#[test]
+fn exclusive_read_through_a_flat_join_is_unsupported() {
+    let net = Net::new(&[0x0a, 0x0b]);
+    net.create_invite(OWNER, "abc");
+
+    let open = OpenTransactionId::new();
+    block_on(net.db(BACKEND).begin_exclusive(open)).unwrap();
+    let query = Query::from("invites").flat_join("members", "invites.code", "members.code");
+    let Err(error) = net.try_read(BACKEND, &query, DurabilityTier::Local, Some(open)) else {
+        panic!("a flat join is not supported in exclusive transactions");
+    };
+    assert!(
+        error.to_string().contains(
+            "Reading a flat join of `invites` with `members` is not supported in exclusive \
+             transactions yet"
+        ),
+        "{error}"
+    );
+}
+
+/// Redeem the invite `abc` after reading it with the claims whose invite
+/// list holds it, while a claim on `abc` or on another invite is filed
+/// between the read and the commit.
+fn redeem_while_claiming(claim_read_invite: bool) -> Redeem {
+    let net = Net::new(&[0x0a, 0x0b]);
+    let abc = net.create_invite(OWNER, "abc");
+    let xyz = net.create_invite(OWNER, "xyz");
+    net.unrelated_receipt(BACKEND);
+
+    let db = net.db(BACKEND);
+    let open = OpenTransactionId::new();
+    block_on(db.begin_exclusive(open)).unwrap();
+    let query = invite_query("abc").array_subquery(ArraySubquery::new(
+        "claims",
+        "claims",
+        "invite_ids",
+        "id",
+    ));
+    assert_eq!(
+        net.read(BACKEND, &query, DurabilityTier::Local, Some(open))
+            .len(),
+        1
+    );
+    net.create_claim(OWNER, if claim_read_invite { abc } else { xyz });
+    net.drive(
+        db.exclusive_tx_ref(open)
+            .insert("members", cells("abc"), Default::default()),
+    )
+    .unwrap();
+    let tx_id = net.drive(db.commit_exclusive_handle(open)).unwrap();
+    match net.settle(BACKEND, tx_id) {
+        Ok(_) => Redeem::Joined,
+        Err(_) => Redeem::Conflict,
+    }
+}
+
+/// A relation through an array of references records the rows whose array
+/// holds the read row: a new claim on the read invite conflicts.
+#[test]
+fn reference_array_relation_conflicts_with_a_new_claim_on_the_read_row() {
+    assert_eq!(redeem_while_claiming(true), Redeem::Conflict);
+}
+
+/// A claim on another invite is outside that read and does not conflict.
+#[test]
+fn reference_array_relation_commits_despite_a_claim_on_another_row() {
+    assert_eq!(redeem_while_claiming(false), Redeem::Joined);
 }

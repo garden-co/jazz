@@ -33,7 +33,7 @@ Invariant digest:
 - `INV-TX-15`: Reads inside an exclusive transaction MUST observe that transaction's own pending writes.
 - `INV-TX-16`: Exclusive authority validation MUST reject when any recorded row read is no longer the globally current content/deletion read version.
 - `INV-TX-17`: Exclusive authority validation MUST reject when an absent row read has become globally present.
-- `INV-TX-18`: Exclusive authority validation MUST reject predicate phantoms against the rows the transaction proved it read: every row the predicate returns now, evaluated as the transaction's permission subject, MUST carry a current row proof in the commit, and a proved row the predicate returned at `base_snapshot.global_base` but no longer returns MUST conflict. Aggregate predicate reads MUST be validated through the rows the aggregate consumes, which the transaction proves as it reads them. Every non-root source a query reads (joined, included or correlated table) MUST be recorded as a whole-table predicate read with a proof for each row the reader can see; tables consulted only by read policies are not recorded.
+- `INV-TX-18`: Exclusive authority validation MUST reject predicate phantoms against the rows the transaction proved it read: every row the predicate returns now, evaluated as the transaction's permission subject, MUST carry a current row proof in the commit, and a proved row the predicate returned at `base_snapshot.global_base` but no longer returns MUST conflict. Aggregate predicate reads MUST be validated through the rows the aggregate consumes, which the transaction proves as it reads them. Every non-root source a query reads (joined, included or correlated table) MUST be recorded as a predicate read with a proof for each row the reader can see there: its narrowed read (the source under its own filters, restricted by a reverse join chain to rows correlating with parent rows that pass their own filters up to the root) when the source correlates back to the root through key equalities, otherwise its whole table; tables consulted only by read policies are not recorded.
 - `INV-TX-19`: Exclusive predicate validation MUST be sensitive to `binding_id`/`binding_values` and MUST use the inline query shape without requiring prior shape registration.
 - `INV-TX-20`: Exclusive write validation MUST be first-committer-wins: each written version's current global winner in that version's own content/deletion layer MUST equal the single recorded parent, or absence when no parent is recorded. Row and predicate read validation remains against the observed visible content/deletion state (`INV-TX-16/17/18`); a version parent is not that read precondition.
 - `INV-TX-21`: Accepted global transactions MUST maintain per-layer global-current tables/change stream.
@@ -321,15 +321,33 @@ recorded reads against current global state:
   can prepare an exclusive transaction offline and commit it later while its
   reads still hold. An aggregate read proves the rows it consumes (the same
   shape without aggregate, projection, ordering or pagination) and is
-  validated through them. Rows a query reads from any source other than its
-  root (joined, included or correlated tables) are recorded as a predicate
-  read of that whole table with a proof for each row, so a row added there
-  conflicts even when a proof from another read covers the root. When the
-  reader's read policy filters that source, the whole-table read runs as the
-  reader and proves only the rows it can see. A partial node's online
-  exclusive read hydrates each such table whole at its snapshot, so rows it
-  never received do not make the read conflict; offline, such a read
-  conflicts if the replica lacks a row the reader can see there. The tables a read policy
+  validated through them. Each source a query reads other than its root
+  (joined, included or correlated tables) is recorded as its own predicate
+  read with a proof for each row it returns, so a row added there conflicts
+  even when a proof from another read covers the root. A source that
+  correlates back to the root through key equalities (a join chain, an
+  include path, an implicit reference or a correlated array) is recorded as
+  its **narrowed read**: that table under its own filters, restricted by a
+  reverse join chain to rows that correlate with a parent row passing the
+  parent's own filters, up to the root's filters. The narrowed read depends
+  only on the query and its binding, and it keeps only conjuncts of the
+  original query, so it covers every row the query could have consulted
+  there, present or absent. A write elsewhere in that table does not
+  conflict. A hop through an array of references correlates by membership:
+  the narrowed read then requires, through nested correlated arrays, at
+  least one parent row whose array holds the row. Implicit root references
+  are sync payload that never decides a query's result, so they record no
+  read. A query with any other source (a lookup join, a recursive traversal,
+  access inherited from a parent row,
+  a read of deleted root rows, or any source of a query with policy
+  branches, a flat join or a retained relation tree) fails with an error
+  naming the read pattern as not supported in exclusive transactions yet;
+  it is never recorded as a read of the whole table. When the reader's read policy
+  filters a source, its read runs as the reader and proves only the rows it
+  can see. A partial node's online exclusive read hydrates each source's
+  read at its snapshot, so rows it never received do not make the read
+  conflict; offline, such a read conflicts if the replica lacks a row the
+  reader can see there. The tables a read policy
   consults are not recorded: the authority re-runs every predicate read under
   the reader's policies, so a change there conflicts exactly when it changes
   what the reader sees.

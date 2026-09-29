@@ -254,6 +254,10 @@ mod normalization;
 
 use normalization::*;
 
+mod narrowed_reads;
+
+pub(in crate::node) use narrowed_reads::{ExclusiveSourceReads, NarrowedSourceRead};
+
 mod subscriptions;
 
 mod maintained_views;
@@ -3541,6 +3545,8 @@ where
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<RelationSnapshot, Error> {
         let identity = self.transaction_query_identity(tx_id, identity, authorization_mode)?;
+        let narrowing =
+            self.offer_tx_query_narrowed_reads(tx_id, shape, binding, include_deleted)?;
         let program = self
             .compile_open_tx_query_program(
                 tx_id,
@@ -3551,7 +3557,9 @@ where
                 include_deleted,
                 authorization_mode,
             )
-            .await?;
+            .await;
+        let narrowed_reads = self.withdraw_tx_narrowed_source_reads(tx_id, narrowing)?;
+        let program = program?;
         let snapshots = self
             .database
             .query_graphs(lowered_program_sinks(&program))
@@ -3597,7 +3605,7 @@ where
             )
             .await?;
         }
-        self.record_tx_visible_table_reads(tx_id, identity, authorization_mode)
+        self.record_tx_narrowed_source_reads(tx_id, narrowed_reads, identity, authorization_mode)
             .await?;
         Ok(snapshot)
     }
@@ -3614,6 +3622,8 @@ where
         let identity = self.transaction_query_identity(tx_id, identity, authorization_mode)?;
         let query = shape.query();
         let table = self.table_in_schema(&query.table, shape.schema_version())?;
+        let narrowing =
+            self.offer_tx_query_narrowed_reads(tx_id, shape, binding, include_deleted)?;
         let program = self
             .compile_open_tx_query_program(
                 tx_id,
@@ -3624,7 +3634,9 @@ where
                 include_deleted,
                 authorization_mode,
             )
-            .await?;
+            .await;
+        let narrowed_reads = self.withdraw_tx_narrowed_source_reads(tx_id, narrowing)?;
+        let program = program?;
         let deltas = self
             .database
             .query_graph(lowered_materialization_app_rows_graph(&program)?)
@@ -3666,7 +3678,7 @@ where
             )
             .await?;
         }
-        self.record_tx_visible_table_reads(tx_id, identity, authorization_mode)
+        self.record_tx_narrowed_source_reads(tx_id, narrowed_reads, identity, authorization_mode)
             .await?;
         self.finish_engine_query_rows_in_schema(query, shape.schema_version(), &mut rows)?;
         if query.array_subqueries.is_empty() {
@@ -3713,72 +3725,90 @@ where
         Ok(())
     }
 
-    /// Tables `shape` reads beyond its root: joined, included, correlated
-    /// and relation tables. An exclusive read records each as a read of the
-    /// whole table (garden-co/jazz#3694), so a partial node hydrates them
-    /// before reading.
+    /// The queries a partial node hydrates before an exclusive read of
+    /// `shape`: for each source it reads beyond its root (joined, included,
+    /// correlated and relation sources), the narrowed read the transaction
+    /// records for that source (garden-co/jazz#3694). Rows the replica never
+    /// received there then do not make the read conflict. Fails with
+    /// [`Error::UnsupportedExclusiveRead`] before anything is hydrated when a
+    /// source has no narrowed read.
     #[doc(hidden)]
-    pub fn query_non_root_source_tables(
+    pub fn exclusive_source_hydration_queries(
         &self,
         shape: &ValidatedQuery,
         binding: &Binding,
-    ) -> Result<BTreeSet<String>, Error> {
-        use crate::node::query_engine::{RowSetExpr, SourceRole};
-        let normalized = self.normalized_row_set_shape(shape, binding)?;
-        let is_non_root = |source: &crate::node::query_engine::SourceId| {
-            source.path.components != [SourceRole::Root]
-        };
-        Ok(normalized
-            .nodes
-            .values()
-            .filter_map(|node| match node {
-                RowSetExpr::Source { source, .. } if is_non_root(source) => {
-                    Some(source.table.clone())
-                }
-                _ => None,
-            })
-            .chain(
-                normalized
-                    .auxiliary_sources
-                    .iter()
-                    .filter(|source| is_non_root(source))
-                    .map(|source| source.table.clone()),
-            )
-            .collect())
+        include_deleted: bool,
+    ) -> Result<Vec<JazzQuery>, Error> {
+        let mut queries = Vec::new();
+        for read in self
+            .exclusive_source_reads(shape, binding, include_deleted)?
+            .reads
+            .into_values()
+        {
+            let query = read.shape.query().clone();
+            if !queries.contains(&query) {
+                queries.push(query);
+            }
+        }
+        Ok(queries)
     }
 
-    /// Prove the rows of the policy-filtered tables a query read beyond its
-    /// root, as the rows the reader can see. Each becomes a whole-table read
-    /// run as the reader, so the authority's re-run under the same policies
-    /// compares like with like (garden-co/jazz#3694).
-    async fn record_tx_visible_table_reads(
+    /// Offer the narrowed reads of `shape`'s non-root sources to the sources
+    /// of an exclusive transaction query about to be compiled. Returns the
+    /// narrowing to restore once it is compiled. Fails with
+    /// [`Error::UnsupportedExclusiveRead`] when a source has none.
+    fn offer_tx_query_narrowed_reads(
         &mut self,
         tx_id: OpenTransactionId,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        include_deleted: bool,
+    ) -> Result<SourceNarrowing, Error> {
+        let reads = if self.transaction_is_exclusive(tx_id)?
+            && !self.open_tx(tx_id)?.source_narrowing.recording
+        {
+            self.exclusive_source_reads(shape, binding, include_deleted)?
+        } else {
+            ExclusiveSourceReads::default()
+        };
+        self.offer_tx_narrowed_source_reads(tx_id, reads)
+    }
+
+    /// Record the narrowed reads a transaction query's sources claimed. Each
+    /// runs as its own query in the transaction, which records its predicate
+    /// read and proves the rows it returns; the sources beyond its root only
+    /// correlate it with the outer query's root and record nothing
+    /// (garden-co/jazz#3694).
+    async fn record_tx_narrowed_source_reads(
+        &mut self,
+        tx_id: OpenTransactionId,
+        reads: Vec<NarrowedSourceRead>,
         identity: AuthorSubject,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<(), Error> {
-        let tables = std::mem::take(&mut self.open_tx_mut(tx_id)?.visible_table_reads);
-        if !self.transaction_is_exclusive(tx_id)? {
+        if reads.is_empty() || !self.transaction_is_exclusive(tx_id)? {
             return Ok(());
         }
-        for (schema_version, table) in tables {
-            let schema = &self
-                .catalogue
-                .catalogue_schemas
-                .get(&schema_version)
-                .ok_or(Error::InvalidStoredValue("transaction schema is unknown"))?
-                .schema;
-            let shape = crate::query::Query::from(table.as_str()).validate(schema)?;
-            let binding = shape.bind(BTreeMap::new())?;
-            Box::pin(self.tx_query_in_authorization_mode(
+        for read in reads {
+            let key = (read.shape.shape_id(), read.binding.binding_id());
+            if self.open_tx(tx_id)?.narrowed_predicate_reads.contains(&key) {
+                continue;
+            }
+            self.open_tx_mut(tx_id)?.source_narrowing.recording = true;
+            let recorded = Box::pin(self.tx_query_in_authorization_mode(
                 tx_id,
-                &shape,
-                &binding,
+                &read.shape,
+                &read.binding,
                 identity,
                 false,
                 authorization_mode,
             ))
-            .await?;
+            .await;
+            self.open_tx_mut(tx_id)?.source_narrowing.recording = false;
+            recorded?;
+            self.open_tx_mut(tx_id)?
+                .narrowed_predicate_reads
+                .insert(key);
         }
         Ok(())
     }

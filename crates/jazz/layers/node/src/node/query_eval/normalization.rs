@@ -175,7 +175,7 @@ fn prefix_normalized_relation_arm(
     Ok(())
 }
 
-fn nested_join_source_id(join: &JoinVia, path: &str) -> SourceId {
+pub(super) fn nested_join_source_id(join: &JoinVia, path: &str) -> SourceId {
     SourceId {
         table: join.table.clone(),
         path: SourcePath {
@@ -1268,7 +1268,7 @@ fn array_requirement(requirement: ArraySubqueryRequirement) -> CorrelationRequir
     }
 }
 
-fn correlated_child_source_id(
+pub(super) fn correlated_child_source_id(
     owner: &SourceId,
     subquery: &ArraySubquery,
     path: &[usize],
@@ -1289,7 +1289,23 @@ fn correlated_child_source_id(
     }
 }
 
-fn include_auxiliary_source_id(
+/// The source an implicit root reference `column` reads from `table`.
+pub(super) fn implicit_reference_source_id(table: &str, column: &str) -> SourceId {
+    // Source identities cross native/WASM peers. A usize::MAX sentinel
+    // names different sources on 64-bit hosts and 32-bit WASM. Give
+    // implicit references their own stable, column-named namespace.
+    SourceId {
+        table: table.to_owned(),
+        path: SourcePath {
+            components: vec![
+                SourceRole::Root,
+                SourceRole::Alias(format!("reference:{column}")),
+            ],
+        },
+    }
+}
+
+pub(super) fn include_auxiliary_source_id(
     table: impl Into<String>,
     include_index: usize,
     segment_index: usize,
@@ -1326,18 +1342,7 @@ where
         if explicit_root_segments.contains(column.as_str()) {
             continue;
         }
-        // Source identities cross native/WASM peers. A usize::MAX sentinel
-        // names different sources on 64-bit hosts and 32-bit WASM. Give
-        // implicit references their own stable, column-named namespace.
-        let target = SourceId {
-            table: target_table.clone(),
-            path: SourcePath {
-                components: vec![
-                    SourceRole::Root,
-                    SourceRole::Alias(format!("reference:{column}")),
-                ],
-            },
-        };
+        let target = implicit_reference_source_id(target_table, column);
         sources.insert(target.clone());
         paths.push(ClosurePath::ImplicitRootReference {
             id: format!("reference:{column}"),

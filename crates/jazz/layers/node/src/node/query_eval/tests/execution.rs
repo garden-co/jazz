@@ -1358,8 +1358,24 @@ fn tx_query_reachable_uses_shared_snapshot_sources() {
     let binding = shape
         .bind(BTreeMap::from([("team".to_owned(), Value::Uuid(team1.0))]))
         .unwrap();
+    // An exclusive transaction cannot record a recursive traversal as a
+    // narrowed read, so it rejects the read rather than recording whole
+    // tables (garden-co/jazz#3694). A mergeable transaction reads the same
+    // snapshot sources.
+    let exclusive = OpenTransactionId::new();
+    node.open_exclusive(exclusive).unwrap();
+    assert_eq!(
+        node.tx_query(exclusive, &shape, &binding)
+            .unwrap_err()
+            .to_string(),
+        "Reading `resources` through a recursive traversal of `teamTeamMemberships` is not \
+         supported in exclusive transactions yet"
+    );
+    node.abandon_tx(exclusive).unwrap();
+
     let tx = OpenTransactionId::new();
-    node.open_exclusive(tx).unwrap();
+    node.open_mergeable(tx, AuthorSubject::SYSTEM, None)
+        .unwrap();
     let rows = node
         .tx_query(tx, &shape, &binding)
         .unwrap()

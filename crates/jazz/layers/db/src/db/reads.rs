@@ -524,6 +524,18 @@ where
             }
             _ => false,
         };
+        // The read records each joined, included or related source as a
+        // narrowed read of the rows it could have consulted there. Hydrate
+        // those reads too, so rows this replica never received do not make
+        // the read conflict. A source with no narrowed read fails the read
+        // here, before anything is hydrated.
+        let source_queries = match open_tx {
+            Some(open_tx) if exclusive_snapshot_read => {
+                self.exclusive_source_hydration_queries(open_tx, &prepared, opts.include_deleted)
+                    .await?
+            }
+            _ => Vec::new(),
+        };
         let mut coverage = None;
         let hydrate =
             exclusive_snapshot_read && effective_read_tier(&opts) < DurabilityTier::Global;
@@ -560,31 +572,22 @@ where
                 .await?;
             coverage = Some(required);
         }
-        // The read records each joined, included or related table as a read
-        // of the whole table, which the authority validates against every
-        // row the reader can see there. Hydrate those tables too, so rows
-        // this replica never received do not make the read conflict.
         let mut table_coverage = Vec::new();
         if exclusive_snapshot_read
             && coverage.is_some()
             && let Some(open_tx) = open_tx
         {
-            let tables = self
-                .query_non_root_source_tables(open_tx, &prepared)
-                .await?;
-            for table in tables {
+            for query in source_queries {
                 let Some(epoch) = self.node.remote_link.arm() else {
                     break;
                 };
-                let table_query = self
-                    .prepare_query_async(&Query::from(table.as_str()))
-                    .await?;
+                let source_query = self.prepare_query_async(&query).await?;
                 let mut hydration_opts = opts.clone();
                 hydration_opts.tier = DurabilityTier::Global;
                 let hydration = SerializedReadCoverage {
                     attachment: Some(
                         self.attach_query_with_opts_async(
-                            &table_query,
+                            &source_query,
                             hydration_opts,
                             Some(open_tx),
                             author,

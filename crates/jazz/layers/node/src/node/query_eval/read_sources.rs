@@ -1210,19 +1210,14 @@ where
             // Policy-subplan sources need none either: a policy only decides
             // which rows the reader sees, and the authority re-runs every
             // predicate read under the reader's policies. Any other source
-            // feeds the result, so it is read as a whole table: directly when
-            // unfiltered, or as the rows the reader can see when it is
-            // policy-filtered (garden-co/jazz#3694).
-            let table_read = !self.policy_subplan
-                && request.source.path.components != [crate::node::query_engine::SourceRole::Root];
-            let policy_filtered = !matches!(authorization, SourceAuthorizationRequest::System);
-            if table_read && policy_filtered {
+            // feeds the result and claims the narrowed read its query offers
+            // for it, which the query records once it finishes
+            // (garden-co/jazz#3694).
+            if !self.policy_subplan
+                && request.source.path.components != [crate::node::query_engine::SourceRole::Root]
+            {
                 self.node
-                    .defer_tx_visible_table_read(
-                        tx_id,
-                        self.read_view.read_schema,
-                        &request.source.table,
-                    )
+                    .claim_tx_source_read(tx_id, &request.source)
                     .map_err(|_| {
                         source_resolution_error(request, SourceGap::TransactionReadOverlay)
                     })?;
@@ -1234,7 +1229,6 @@ where
                     self.read_view.read_schema,
                     &request.source.table,
                     include_deleted,
-                    table_read && !policy_filtered,
                 )
                 .await
                 .map_err(|_| source_resolution_error(request, SourceGap::TransactionReadOverlay))?;
