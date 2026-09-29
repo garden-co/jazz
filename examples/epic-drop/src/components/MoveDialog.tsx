@@ -6,7 +6,7 @@ import { Selector } from "@astryxdesign/core/Selector";
 import { HStack, VStack } from "@astryxdesign/core/Stack";
 import { app } from "../../schema.js";
 import type { FolderIndex } from "../folders.js";
-import { offered, useAdvice, type Advice } from "../use-advice.js";
+import { useAdvice, type Advice } from "../use-advice.js";
 
 export interface MoveItem {
   kind: "file" | "folder";
@@ -55,6 +55,10 @@ export function MoveDialog({ item, index, revision, onMove, onClose }: MoveDialo
   }
   const advice = useAdvice(checks, `${revision}:${item?.id ?? ""}`);
   const isChecking = Object.keys(checks).some((key) => advice[key] === undefined);
+  // When Jazz cannot decide on the client, offer only the caller's own folders
+  // (and the top level for a folder they own); the server has the last word.
+  const allowed = (key: string, hint = item?.kind === "folder") =>
+    advice[key] === "allowed" || (advice[key] === "unknown" && hint);
 
   React.useEffect(() => setTarget(undefined), [item?.id]);
   return (
@@ -79,9 +83,9 @@ export function MoveDialog({ item, index, revision, onMove, onClose }: MoveDialo
               : "No other folders you can edit"
           }
           options={[
-            ...(offered(advice[TOP_LEVEL]) ? [{ value: TOP_LEVEL, label: "Top level" }] : []),
+            ...(allowed(TOP_LEVEL) ? [{ value: TOP_LEVEL, label: "Top level" }] : []),
             ...candidates
-              .filter((folder) => offered(advice[folder.id]))
+              .filter((folder) => allowed(folder.id, index.isMine(folder)))
               .map((folder) => ({ value: folder.id, label: index.label(folder) })),
           ]}
           value={target}

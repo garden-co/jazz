@@ -112,7 +112,14 @@ export function FileBrowser() {
       ownerId: file.owner_id,
     })),
   ];
-  const may = useBrowserAdvice({ index, userId, folderId: folder?.id, entries, revision });
+  const may = useBrowserAdvice({
+    index,
+    userId,
+    folderId: folder?.id,
+    entries,
+    memberships,
+    revision,
+  });
 
   const previewRow = files.find((file) => file.id === previewId);
   const preview: PreviewFile | undefined = previewRow && {

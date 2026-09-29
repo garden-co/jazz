@@ -57,8 +57,9 @@ invite links. It runs as a Vite and React single-page app on an anonymous local-
   reverse relations, and anyone else shows a generated name.
 - **What the UI offers.** Buttons, menu items, drop targets and move destinations come from
   `db.canInsert`, `db.canUpdate` and `db.canDelete` (`src/use-browser-advice.ts`), not from a copy
-  of the rules. While an answer is pending, the user's own folders count as editable so the app
-  works offline; the sync server decides every write either way.
+  of the rules. While an answer is pending, or when Jazz answers "unknown" (as it can for access
+  inherited from a shared folder), the app falls back to a conservative hint: the user's own tree
+  and folders under one where they are an editor. The sync server decides every write either way.
 
 ## Run and test
 

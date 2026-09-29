@@ -42,8 +42,3 @@ export function useAdvice(
 
   return cache.current.revision === revision ? results : {};
 }
-
-/** Offer an action unless Jazz said no. While a check is pending, hold it back. */
-export function offered(advice: Advice | undefined): boolean {
-  return advice === "allowed" || advice === "unknown";
-}
