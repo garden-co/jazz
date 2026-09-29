@@ -44,9 +44,16 @@ export function saveRelease(
     );
     if (holders.some((row) => row.id !== release.id))
       throw new CatalogNumberTakenError(fields.catalogNumber);
-    if (release.isNew) tx.insert(app.releases, { ...fields, organizationId }, { id: release.id });
-    else tx.update(app.releases, release.id, fields);
+    const row = { ...fields, catalogSequence: catalogSequence(fields.catalogNumber) };
+    if (release.isNew) tx.insert(app.releases, { ...row, organizationId }, { id: release.id });
+    else tx.update(app.releases, release.id, row);
   });
+}
+
+/** The trailing digits of a catalogue number: 13 for "NFC-013". */
+export function catalogSequence(catalogNumber: string) {
+  const digits = catalogNumber.match(/(\d+)$/)?.[1];
+  return digits === undefined ? null : Number(digits);
 }
 
 /** The number after the highest one used in a catalogue, e.g. NFC-013. */
@@ -57,12 +64,11 @@ export async function nextCatalogNumber(
 ) {
   const [highest] = await db.all(
     app.releases
-      .where({ organizationId, catalogueId: catalogue.id })
-      .orderBy("catalogNumber", "desc")
+      .where({ organizationId, catalogueId: catalogue.id, catalogSequence: { gte: 0 } })
+      .orderBy("catalogSequence", "desc")
       .limit(1),
   );
-  const sequence = Number(highest?.catalogNumber.match(/(\d+)$/)?.[1] ?? 0);
-  return formatCatalogNumber(catalogue.code, sequence + 1);
+  return formatCatalogNumber(catalogue.code, (highest?.catalogSequence ?? 0) + 1);
 }
 
 export class ArtistHasReleasesError extends Error {

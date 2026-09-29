@@ -53,10 +53,13 @@ members, and foreign labels read as empty.
 
 People are visible only to the labels they belong to: a signed-in account can
 read its own profile and the profiles of members of its labels, nothing more.
-To add a member, an admin enters their email. `POST /api/members` checks the
-caller is an admin of the label, looks the email up in `personEmails` (written
-only by the bootstrap route from the verified sign-in, and unreadable by
-browsers), and inserts the membership. The person needs to have signed in once.
+To add a member, an admin enters their email. `POST /api/members` uses the
+backend only to look the email up in `personEmails` (written only by the
+bootstrap route from the verified sign-in, and unreadable by browsers). It then
+writes the membership as the caller, via `forRequest()`, so `permissions.ts`
+decides: only admins add members, never as admins. The write is an exclusive
+transaction that first reads the person's membership, so a double submit adds
+them once. The person needs to have signed in once.
 
 Catalogue numbers are unique per label, but the permissions don't enforce
 that: a policy can't compare a row with its siblings. `saveRelease` in

@@ -92,6 +92,9 @@ const schema = {
       artistId: s.uuid(),
       catalogueId: s.uuid().optional(),
       catalogNumber: s.string(),
+      // The catalogue number's trailing digits, so "NFC-1000" sorts after
+      // "NFC-999" when suggesting the next number.
+      catalogSequence: s.int().optional(),
       title: s.string(),
       format: s.string(),
       releaseDate: s.timestamp(),

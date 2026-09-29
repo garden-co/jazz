@@ -35,6 +35,7 @@ export type Fixture = {
     artistId: string;
     catalogueId: string;
     catalogNumber: string;
+    catalogSequence: number;
     title: string;
     format: string;
     releaseDate: string;
@@ -165,6 +166,7 @@ export function createFixture(profile: FixtureProfile = "small", seed = 17): Fix
         artistId,
         catalogueId: catalogue.id,
         catalogNumber,
+        catalogSequence: a + 1,
         title,
         format: releaseFormats[a % releaseFormats.length]!,
         releaseDate: `2026-${String((a % 12) + 1).padStart(2, "0")}-01T00:00:00.000Z`,

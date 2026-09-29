@@ -3,6 +3,7 @@ import { app } from "../../schema";
 import { authJazzClient } from "./auth-jazz-client";
 import { planPersonalBootstrap } from "./bootstrap-state";
 import { normalizeEmail } from "./emails";
+import { isExclusiveConflict } from "./members";
 
 /**
  * Server-mediated first-tenant bootstrap. Ordinary clients never receive the
@@ -66,9 +67,4 @@ export async function ensurePersonalOrganization(
       if (!isExclusiveConflict(error)) throw error;
     }
   }
-}
-
-function isExclusiveConflict(error: unknown) {
-  const message = error instanceof Error ? error.message : String(error);
-  return /exclusive_conflict|transaction_conflict|cascade_rejected/.test(message);
 }
