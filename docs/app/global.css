@@ -63,3 +63,122 @@ h6 {
   --diagram-fg: var(--color-fd-foreground);
   --diagram-muted: var(--color-fd-muted-foreground);
 }
+
+/* Docs pages (Astryx). Astryx components carry no outer margins, so the
+   article sets the vertical rhythm between MDX blocks here. */
+.docs-body {
+  max-width: 46rem;
+}
+
+.docs-body :is(.docs-heading, [id]) {
+  scroll-margin-top: 5rem;
+}
+
+.docs-body h2.docs-heading {
+  margin-top: 2.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.docs-body :is(h3, h4, h5, h6).docs-heading {
+  margin-top: 2rem;
+  margin-bottom: 0.5rem;
+}
+
+.docs-body .docs-block {
+  margin-block: 1rem;
+}
+
+.docs-body :is(ul, ol) {
+  margin-block: 1rem;
+  padding-inline-start: 1.5rem;
+  line-height: 1.6;
+}
+
+.docs-body ul {
+  list-style: disc;
+}
+
+.docs-body ol {
+  list-style: decimal;
+}
+
+.docs-body li + li,
+.docs-body li > :is(ul, ol) {
+  margin-top: 0.375rem;
+}
+
+.docs-body .docs-callout > :first-child {
+  margin-top: 0;
+}
+
+.docs-body .docs-callout > :last-child {
+  margin-bottom: 0;
+}
+
+.docs-body img {
+  border-radius: 0.5rem;
+}
+
+/* The outline follows the reader; it needs the width of a wide screen. */
+.docs-toc-panel {
+  position: sticky;
+  top: 5rem;
+  align-self: start;
+  padding-top: 2rem;
+}
+
+@media (max-width: 1279px) {
+  .docs-toc-panel {
+    display: none;
+  }
+}
+
+/* Astryx tables bleed into their container's padding (for tables flush with
+   a card edge). Docs tables sit in the article text column, so they keep to
+   it; otherwise every table overflows by the layout's 32px padding on each
+   side and scrolls in both directions. */
+.docs-table {
+  --container-padding-inline-start: 0px;
+  --container-padding-inline-end: 0px;
+  --container-padding-block-start: 0px;
+  --container-padding-block-end: 0px;
+}
+
+/* The top nav's search trigger reads as a field: label left, shortcut right. */
+.site-search-field > button {
+  justify-content: flex-start;
+}
+.site-search-field > button > span > span:last-child {
+  flex: 1;
+}
+
+/* Homepage and blog: the site's page background (not Astryx's surface) and
+   the 1400px layout width their sections centre within. */
+.site-page-shell {
+  --fd-layout-width: 1400px;
+}
+.site-page-shell .astryx-app-shell,
+.site-page-shell .astryx-app-shell-header {
+  background-color: var(--color-background-body);
+}
+
+/* Callout bodies written in MDX use the Banner's own description style
+   (size, leading, colour), like callouts built in components. */
+.docs-callout .astryx-text {
+  font-size: inherit;
+  line-height: inherit;
+  color: inherit;
+}
+/* Banner descriptions default to the secondary text colour, which drops below
+   AA on the tinted warning and error backgrounds; callout prose is primary
+   text, and its links keep that colour with an underline to stand out. */
+.docs-callout {
+  color: var(--color-text-primary);
+}
+.docs-callout a {
+  color: inherit;
+  text-decoration-line: underline;
+}
+.docs-callout .astryx-code {
+  font-size: inherit;
+}
