@@ -15,8 +15,12 @@ mod arrangement_regressions;
 mod async_hydration_session;
 #[path = "../chunk_provider.rs"]
 mod chunk_provider;
+#[path = "../direct_metadata_progress.rs"]
+mod direct_metadata_progress;
 #[path = "../inline_records_snapshot.rs"]
 mod inline_records_snapshot;
+#[path = "../large_value_leaf_codec.rs"]
+mod large_value_leaf_codec;
 #[path = "../large_value_query.rs"]
 mod large_value_query;
 #[path = "../multisink_subscription.rs"]

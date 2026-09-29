@@ -2147,6 +2147,61 @@ impl Database {
         }
     }
 
+    /// Write a direct metadata batch while advancing retained query work that
+    /// may itself own the storage writer. This waits only for this batch, not
+    /// for unrelated cold queries to finish.
+    ///
+    /// Owners with automatic progress must supply their durable wake bridge.
+    /// Suspended query work keeps that bridge after this operation returns;
+    /// callers passing `None` remain responsible for subsequent owner turns.
+    pub async fn write_direct_records_with_progress(
+        &mut self,
+        name: &str,
+        operations: &[DirectRecordStoreWrite],
+        progress_waker: Option<&std::task::Waker>,
+    ) -> Result<(), Error> {
+        use std::task::{Context, Poll, Wake, Waker};
+
+        struct ProgressWake {
+            operation: Waker,
+            owner: Waker,
+        }
+        impl Wake for ProgressWake {
+            fn wake(self: std::sync::Arc<Self>) {
+                self.wake_by_ref();
+            }
+            fn wake_by_ref(self: &std::sync::Arc<Self>) {
+                self.operation.wake_by_ref();
+                self.owner.wake_by_ref();
+            }
+        }
+
+        self.ensure_not_poisoned()?;
+        let encoded = self.direct_record_store(name)?.encode_writes(operations)?;
+        let storage = Rc::clone(&self.storage);
+        let mut write = storage.write_many(encoded);
+        std::future::poll_fn(|cx| {
+            if let Poll::Ready(result) = write.as_mut().poll(cx) {
+                return Poll::Ready(result.map_err(Error::from));
+            }
+            // A chunk install retained by IVM can hold the backend mutation
+            // gate across I/O. Awaiting another writer without driving that
+            // owner would wait forever even after the I/O completes.
+            let bridge = progress_waker.map(|owner| {
+                Waker::from(std::sync::Arc::new(ProgressWake {
+                    operation: cx.waker().clone(),
+                    owner: owner.clone(),
+                }))
+            });
+            let mut progress_cx = Context::from_waker(bridge.as_ref().unwrap_or(cx.waker()));
+            if let Poll::Ready(Err(error)) = self.poll_progress(&mut progress_cx) {
+                return Poll::Ready(Err(error));
+            }
+            Poll::Pending
+        })
+        .await
+    }
+
     /// Return a typed handle for a schema-declared direct record store.
     ///
     /// Direct stores use record encoding and order-preserving typed primary

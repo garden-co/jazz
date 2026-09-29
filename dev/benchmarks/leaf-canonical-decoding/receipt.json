@@ -1,0 +1,52 @@
+{
+  "metadata": {
+    "control": {
+      "base": "cc5a303f1a2bfd0b56c8d36f1544464f6e23eba7",
+      "sourceFileBeforeSha256": "6ae765164f74eeb542122853c2dcaeac5d709c75dd475d0d8603ab209cf8196d",
+      "sourceFileAfterSha256": "31eb2894f4d3fde7a48bcbe79f31e9c9bcef3b38d4d504d4a5ef2e7aacf4f12e",
+      "binarySha256": "19bda8e9460599aeac5f22e69a2736083df77f750eca913a218b88ff961c0dab",
+      "benchmark": "local_blob_reads",
+      "scope": "Same retained integration as #3619 receipt, including authenticated chunk leases; publication_fairness bench scaffold does not alter this target."
+    },
+    "candidateSha256": "8715e9bceff10c0b7f773b624a896be317ec7361d0fe498539d5076a130103e2",
+    "patchSha256": "08a55a8c4c243e20ab5a9e380ee0ad5ae064c823eebba7453aad9ccf5daf3441"
+  },
+  "mainRounds": [
+    {
+      "bytes": 32768,
+      "control": 3.3805834999999997,
+      "candidate": 3.7351665,
+      "timeReduction": -0.10488810585509878
+    },
+    {
+      "bytes": 262144,
+      "control": 4.138624999999999,
+      "candidate": 3.8863545000000004,
+      "timeReduction": 0.06095514814702929
+    },
+    {
+      "bytes": 4194304,
+      "control": 14.8506045,
+      "candidate": 11.865874999999999,
+      "timeReduction": 0.2009837040640332
+    },
+    {
+      "bytes": 16777216,
+      "control": 90.897521,
+      "candidate": 78.990854,
+      "timeReduction": 0.13099000796732396
+    }
+  ],
+  "smallConfirmation": {
+    "32768": {
+      "control": 3.289917,
+      "candidate": 3.289521
+    },
+    "262144": {
+      "control": 4.161,
+      "candidate": 3.8537295
+    }
+  },
+  "mainSamplesPerArmSize": 32,
+  "smallConfirmationSamplesPerArmSize": 144
+}
