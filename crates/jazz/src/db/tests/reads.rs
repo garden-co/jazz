@@ -5120,6 +5120,34 @@ fn row_reads_never_publish_storage_internal_column_stamps() {
 }
 
 #[test]
+fn queries_cannot_reference_storage_internal_column_stamps() {
+    // Current reads carry the stored layout, stamps included, so the stamp
+    // fields must stay unreachable from the public query surface.
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+    for stamp in ["_ts_title", "_ts__app_title", "_ts__deletion"] {
+        let filtered = Query::from("todos").filter(eq(col(stamp), lit(Value::U64(0))));
+        assert_eq!(
+            db.prepare_query(&filtered).unwrap_err().code,
+            ErrorCode::Query,
+            "filter on {stamp}"
+        );
+        let ordered = Query::from("todos").order_by(stamp, OrderDirection::Asc);
+        assert_eq!(
+            db.prepare_query(&ordered).unwrap_err().code,
+            ErrorCode::Query,
+            "order by {stamp}"
+        );
+        let mut selected = Query::from("todos");
+        selected.select = Some(vec![stamp.to_owned()]);
+        assert_eq!(
+            db.prepare_query(&selected).unwrap_err().code,
+            ErrorCode::Query,
+            "select {stamp}"
+        );
+    }
+}
+
+#[test]
 fn db_at_reads_historical_cut_and_partial_requires_server() {
     let schema = schema();
     let author = AuthorSubject::for_test_bytes([0xa1; 16]);

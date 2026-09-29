@@ -3093,8 +3093,11 @@ fn core_row_provenance_to_public(
 /// Current rows already expose public provenance in Unix milliseconds. Packed
 /// HLC values remain internal version and transaction-ordering state.
 fn public_subscription_record(row: &crate::node::CurrentRow) -> Result<Vec<u8>> {
-    let (descriptor, raw) = row.encoded_record();
-    let mut values = BorrowedRecord::new(raw, descriptor)
+    // Storage-internal column stamps never cross the public boundary.
+    let published = crate::binding_codec::published_record(row)
+        .map_err(|error| JazzError::Query(format!("invalid subscription row: {error}")))?;
+    let descriptor = &published.descriptor;
+    let mut values = BorrowedRecord::new(&published.raw, descriptor)
         .to_values()
         .map_err(|error| JazzError::Query(format!("invalid subscription row: {error}")))?;
     normalize_public_subscription_record_values(descriptor, &mut values)?;
