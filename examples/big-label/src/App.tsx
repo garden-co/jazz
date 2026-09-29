@@ -5,7 +5,6 @@ import {
   AppShell,
   Button,
   EmptyState,
-  Icon,
   LayoutContent,
   NavHeadingMenu,
   NavHeadingMenuItem,
@@ -17,7 +16,6 @@ import {
   TopNav,
   TopNavHeading,
 } from "@astryxdesign/core";
-import { Disc3, LayoutGrid, Library, Mic2, Settings, Users, UsersRound } from "lucide-react";
 import { useAll, useSession } from "jazz-tools/react";
 import { app } from "../schema";
 import { OrganizationProvider, type CurrentOrganization } from "./lib/organization";
@@ -34,13 +32,13 @@ import { TeamPage, TeamsPage } from "./pages/teams";
 const selectedOrganizationKey = "big-label-organization";
 
 const navigation = [
-  { label: "Overview", href: href.overview, icon: LayoutGrid, pages: ["overview"] },
-  { label: "Artists", href: href.artists, icon: Mic2, pages: ["artists", "artist"] },
-  { label: "Releases", href: href.releases, icon: Disc3, pages: ["releases", "release"] },
-  { label: "Catalogues", href: href.catalogues, icon: Library, pages: ["catalogues", "catalogue"] },
-  { label: "Teams", href: href.teams, icon: UsersRound, pages: ["teams", "team"] },
-  { label: "People", href: href.people, icon: Users, pages: ["people"] },
-  { label: "Settings", href: href.settings, icon: Settings, pages: ["settings"] },
+  { label: "Overview", href: href.overview, pages: ["overview"] },
+  { label: "Artists", href: href.artists, pages: ["artists", "artist"] },
+  { label: "Releases", href: href.releases, pages: ["releases", "release"] },
+  { label: "Catalogues", href: href.catalogues, pages: ["catalogues", "catalogue"] },
+  { label: "Teams", href: href.teams, pages: ["teams", "team"] },
+  { label: "People", href: href.people, pages: ["people"] },
+  { label: "Settings", href: href.settings, pages: ["settings"] },
 ] as const;
 
 export function Operations({ email, onSignOut }: { email: string; onSignOut: () => void }) {
@@ -144,7 +142,6 @@ export function Operations({ email, onSignOut }: { email: string; onSignOut: () 
                 key={item.label}
                 label={item.label}
                 href={item.href}
-                icon={<Icon icon={item.icon} size="sm" />}
                 isSelected={(item.pages as readonly string[]).includes(route.page)}
               />
             ))}

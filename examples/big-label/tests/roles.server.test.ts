@@ -142,11 +142,11 @@ describe("BigLabel roles at the Jazz edge", () => {
     );
 
     // Foreign labels stay unreadable, including their catalogues and staffing.
-    for (const table of [app.releases, app.catalogues, app.releaseTeams, app.teams] as const) {
-      await expect(outsider.all(table.where({ organizationId: seeded.org.id }))).resolves.toEqual(
-        [],
-      );
-    }
+    const foreign = { organizationId: seeded.org.id };
+    await expect(outsider.all(app.releases.where(foreign))).resolves.toEqual([]);
+    await expect(outsider.all(app.catalogues.where(foreign))).resolves.toEqual([]);
+    await expect(outsider.all(app.releaseTeams.where(foreign))).resolves.toEqual([]);
+    await expect(outsider.all(app.teams.where(foreign))).resolves.toEqual([]);
     await expect(
       viewer.all(app.releaseTeams.where({ organizationId: seeded.org.id })),
     ).resolves.toEqual([expect.objectContaining({ teamId: seeded.team.id })]);

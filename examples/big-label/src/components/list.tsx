@@ -8,6 +8,7 @@ import {
   Selector,
   TextInput,
   useTableSortable,
+  type TablePlugin,
   type TableSortState,
 } from "@astryxdesign/core";
 
@@ -50,7 +51,8 @@ export function useListControls<K extends string>(
     pageSize,
     limit: pageSize + 1,
     offset: (page - 1) * pageSize,
-    plugins: { sort: sortPlugin },
+    // The sort plugin only reads column keys, so it fits any row type.
+    plugins: { sort: sortPlugin as TablePlugin<any> },
     resetPage: () => setPage(1),
   };
 }

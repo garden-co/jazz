@@ -15,7 +15,6 @@
     "better-auth": "1.7.1",
     "jazz-napi": "workspace:*",
     "jazz-tools": "workspace:*",
-    "lucide-react": "^0.563.0",
     "next": "catalog:default",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
