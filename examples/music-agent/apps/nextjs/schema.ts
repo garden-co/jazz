@@ -95,7 +95,10 @@ const schema = {
         heartbeatAt: s.timestamp().optional(),
         createdAt: s.timestamp(),
       },
-      { conversation: s.rel("conversations", "conversationId") },
+      {
+        conversation: s.rel("conversations", "conversationId"),
+        attachmentsViaTurn: s.reverse("attachments", "turn"),
+      },
     )
     .indexOnly(["conversationId", "status"]),
   toolCalls: s
@@ -124,7 +127,7 @@ const schema = {
         // Audio bytes. The player reads them page by page through HTTP ranges.
         payload: s.bytes(),
       },
-      { conversation: s.rel("conversations", "conversationId") },
+      { conversation: s.rel("conversations", "conversationId"), turn: s.rel("turns", "turnId") },
     )
     .indexOnly(["conversationId"]),
 };

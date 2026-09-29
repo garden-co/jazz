@@ -23,9 +23,10 @@ export default definePermissions(app, ({ policy, session, allOf, allowedTo }) =>
 
   const mine = { ownerAccount: session.user.account };
   policy.profiles.allowRead.where({ accountId: session.user.account });
-  for (const table of [policy.artists, policy.songs, policy.venues, policy.calendarEvents]) {
-    table.allowRead.where(mine);
-  }
+  policy.artists.allowRead.where(mine);
+  policy.songs.allowRead.where(mine);
+  policy.venues.allowRead.where(mine);
+  policy.calendarEvents.allowRead.where(mine);
 
   policy.conversations.allowRead.where(mine);
   policy.conversations.allowInsert.where(mine);

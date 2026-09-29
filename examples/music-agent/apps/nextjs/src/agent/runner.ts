@@ -117,7 +117,7 @@ async function loadInput(db: Db, turn: Turn): Promise<GenerateInput> {
   );
   const byId = new Map(turns.map((row) => [row.id, row]));
   const history: HistoryTurn[] = [];
-  for (let id = turn.parentId; id; id = byId.get(id)?.parentId ?? undefined) {
+  for (let id = turn.parentId; id; id = byId.get(id)?.parentId ?? null) {
     const row = byId.get(id);
     if (!row) break;
     history.unshift({

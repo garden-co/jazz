@@ -17,8 +17,6 @@ beforeAll(async () => {
   process.env.SCRIPTED_AGENT_TOKEN_DELAY_MS = "0";
 });
 afterAll(async () => {
-  const { backendJazzClient } = await import("../src/lib/backend-jazz-client");
-  await (await backendJazzClient()).shutdown?.();
   await server?.stop();
 });
 

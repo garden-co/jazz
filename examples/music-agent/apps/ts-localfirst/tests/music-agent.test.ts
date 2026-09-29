@@ -7,11 +7,15 @@ import {
   DeterministicMusicAgent,
   JazzMusicStore,
   MemoryMusicStore,
-  chunks,
   type MusicStore,
 } from "../src/music-agent.js";
 
 const openDbs: Db[] = [];
+
+/** Bytes columns stream Uint8Array chunks (text columns take strings). */
+async function* byteChunks(parts: readonly string[]): AsyncIterable<Uint8Array> {
+  for (const part of parts) yield new TextEncoder().encode(part);
+}
 let server: LocalJazzServerHandle | undefined;
 
 afterEach(async () => {
@@ -74,7 +78,7 @@ describe.each(stores)("MusicAgent on the %s store", (_name, openStore) => {
     });
     const attachment = await store.addAttachment(
       { turnId, filename: "clip.raw", mediaType: "audio/raw", byteLength: 6 },
-      chunks(["ab", "cdef"]),
+      byteChunks(["ab", "cdef"]),
     );
 
     expect(Array.from(await store.readAttachmentRange(attachment, 2, 5))).toEqual([99, 100, 101]);
