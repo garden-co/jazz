@@ -6,28 +6,54 @@ product slice, not another generic Todo tutorial.
 
 ## What it demonstrates
 
+- **A chat app, not a demo form.** Rooms in a side nav ordered by recent
+  activity, with unread counts; a room view built from the design system's chat
+  components; inline image previews, audio players and downloadable file chips;
+  emoji reactions; shared sketches; profiles with names and photos. The UI is
+  Astryx with the Jazz theme from `@garden-co/design`, using design tokens only.
 - Better Auth owns the browser session, signs an ES256 JWT, and exposes its
   JWKS route. Jazz enrolls that JWT into an account handle: sign-up uses
   `registerJWT`, sign-in uses `loginJWT`, and the provider receives the result.
 - Better Auth's generated tables are persisted through a trusted backend Jazz
-  context and carry explicit deny-all client policies. Creating a room can
-  provision its profile; read hooks do not create accounts, profiles, rooms, or memberships.
-- A room creator may bootstrap their own membership and admit another profile.
-  The room UI lists members and lets its issuer-scoped creator admit or remove
-  them. A guest cannot add themself. A message must reference a profile owned by
-  `session.user.account`. Profiles, memberships, and row provenance store that
-  enrolled account UUID. The external issuer and subject remain account identity
-  metadata, never membership values. Revocation rejects subsequent writes at the serving authority;
-  it does not erase rows already retained locally.
-- The attachment picker accepts inline PNG, JPEG, WebP, text, and PDF files up
-  to 256 KiB. This is client-side UX validation only, not a Jazz authorization,
-  security, or storage limit: `s.bytes()` has no size constraint, so an actor
-  otherwise allowed to insert a message can write a different-sized value
-  directly. Larger media belongs in the file/blob pattern; enforce any
-  authoritative content limit at a trusted application boundary.
-- Room creation and messages are ordinary local-first writes, so they appear
-  before a reconnect. The browser receipt exercises the real React form; the
-  policy receipt exercises serving-authority admission and removal.
+  context and carry explicit deny-all client policies. Read hooks do not create
+  accounts, profiles, rooms, or memberships: a profile is created on an explicit
+  first-run step.
+- **Creator-managed admission.** A room creator bootstraps their own membership
+  and is the only identity that admits or removes others. A room link
+  (`?join=<room id>`) does not grant anything: it lets a signed-in person *ask* to
+  join by writing a `joinRequests` row that only they and the room creator can
+  read. The creator admits a request, or adds someone they already share a room
+  with. A guest cannot add themself, and a membership may only name a profile
+  owned by the admitted account. Members may leave on their own. Secure,
+  revocable bearer invite capabilities belong to
+  [#1954](https://github.com/garden-co/jazz/issues/1954).
+- **Profile visibility follows relationships.** A profile is readable by its
+  owner, by co-members, by anyone who can read a message it sent, and by a room
+  creator reviewing its join request. The "people you know" picker is simply
+  every readable profile.
+- A message must reference a profile owned by `session.user.account`. Profiles,
+  memberships, and row provenance store that enrolled account UUID. The
+  external issuer and subject remain account identity metadata, never
+  membership values. Revocation rejects subsequent writes at the serving
+  authority; it does not erase rows already retained locally.
+- **Unread state.** `rooms.lastActivityAt` is a denormalized carrier that any
+  member may bump (an `exists` check against the stored row keeps the name
+  creator-only). Each reader keeps a private `readMarkers` row per room; a room
+  is unread when its activity is newer than the marker, and only unread rooms pay
+  for a bounded count query.
+- **Attachments** stream into the message row with `db.insertStreaming`. The
+  room timeline selects message metadata only; each attachment reads its own
+  bytes when it is shown or downloaded. The picker accepts images, audio, text
+  and PDF up to 10 MB. That limit is client-side UX validation only, not a Jazz
+  authorization, security, or storage limit: `s.bytes()` has no size
+  constraint, so an actor otherwise allowed to insert a message can write a
+  different-sized value directly.
+- **Sketches.** A message can carry a canvas; every finished stroke is one row,
+  so strokes from bandmates appear live and offline strokes sync later. Stroke
+  inserts carry `roomId` and require current membership, so a removed member can
+  no longer draw.
+- Room creation, messages, reactions and strokes are ordinary local-first
+  writes, so they appear before a reconnect.
 
 ## Setup
 
@@ -49,12 +75,16 @@ pnpm build
 ```
 
 The permission receipt covers the normal path (owner creates a room, bootstraps
-membership, invites a guest, and the guest posts) and the important failures:
+membership, admits a guest, and the guest posts) and the important failures:
 self-admission, selecting someone else's profile as sender, and posting after
-removal, including a same-subject/different-issuer owner check. `test:browser`
+removal, including a same-subject/different-issuer owner check. A second case
+covers join requests (visible only to requester and creator, own profile only),
+profile visibility, member-only admission denial, activity-only room updates,
+private read markers, and sketch strokes before and after leaving. `test:browser`
 deploys the real permissions to a test authority and drives the React UI through
-owner creation, guest admission, guest messaging, and removal. It also covers
-the local create/send path and attachment-picker validation. The browser receipt
+profile setup, room creation, a guest opening the room link and asking to join,
+the owner admitting the request, guest messaging, and removal. It also covers
+the local create/send/react path and attachment-picker validation. The browser receipt
 uses test-authority JWTs; it does not claim to exercise Better Auth's HTTP
 session/JWKS endpoints.
 
@@ -62,6 +92,6 @@ session/JWKS endpoints.
 
 This app intentionally does not restore the retired Todo app, a separate app
 backend, app-local worker/WASM copies, or a compatibility path for pre-canonical
-author identifiers. It also does not treat direct room-membership writes as a
-shareable invite-link product. Secure, revocable invite capabilities belong to
+author identifiers. The room link is deliberately an "ask to join" link, not a
+bearer capability; secure, revocable invite capabilities belong to
 [#1954](https://github.com/garden-co/jazz/issues/1954).
