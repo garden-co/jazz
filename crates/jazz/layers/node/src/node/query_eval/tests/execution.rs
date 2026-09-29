@@ -1364,10 +1364,13 @@ fn tx_query_reachable_uses_shared_snapshot_sources() {
     // snapshot sources.
     let exclusive = OpenTransactionId::new();
     node.open_exclusive(exclusive).unwrap();
-    assert!(matches!(
-        node.tx_query(exclusive, &shape, &binding).unwrap_err(),
-        Error::UnsupportedExclusiveRead(_)
-    ));
+    assert_eq!(
+        node.tx_query(exclusive, &shape, &binding)
+            .unwrap_err()
+            .to_string(),
+        "Reading `resources` through a recursive traversal of `teamTeamMemberships` is not \
+         supported in exclusive transactions yet"
+    );
     node.abandon_tx(exclusive).unwrap();
 
     let tx = OpenTransactionId::new();

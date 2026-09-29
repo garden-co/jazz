@@ -336,6 +336,7 @@ recorded reads against current global state:
   least one parent row whose array holds the row. Implicit root references
   are sync payload that never decides a query's result, so they record no
   read. A query with any other source (a lookup join, a recursive traversal,
+  access inherited from a parent row,
   a read of deleted root rows, or any source of a query with policy
   branches, a flat join or a retained relation tree) fails with an error
   naming the read pattern as not supported in exclusive transactions yet;

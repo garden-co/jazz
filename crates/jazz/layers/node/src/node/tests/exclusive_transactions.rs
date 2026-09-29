@@ -3091,23 +3091,179 @@ fn narrowed_reads_follow_a_reference_array_by_membership() {
     );
 }
 
+/// Assert an exclusive read of `query` fails before reading anything, naming
+/// its read pattern.
+fn assert_exclusive_read_unsupported(
+    query: crate::query::Query,
+    values: BTreeMap<String, Value>,
+    pattern: &str,
+) {
+    let schema = narrowing_hierarchy_schema();
+    let (_dir, node) = open_node_with_schema(node(1), schema.clone());
+    let shape = query.validate(&schema).unwrap();
+    let binding = shape.bind(values).unwrap();
+    let Err(error) = node.exclusive_source_reads(&shape, &binding, false) else {
+        panic!("{pattern} has no narrowed reads");
+    };
+    assert_eq!(
+        error.to_string(),
+        format!("Reading {pattern} is not supported in exclusive transactions yet")
+    );
+}
+
 /// A flat join routes its filters per source, so its root rows are not
 /// constrained by the root's own filters alone: it narrows nothing.
 #[test]
 fn exclusive_reads_reject_a_flat_join() {
-    let schema = narrowing_hierarchy_schema();
-    let (_dir, node) = open_node_with_schema(node(1), schema.clone());
-    let shape = crate::query::Query::from("todos")
-        .flat_join("comments", "todos._id", "comments.todo")
-        .validate(&schema)
-        .unwrap();
-    let binding = shape.bind(BTreeMap::new()).unwrap();
-    let Err(error) = node.exclusive_source_reads(&shape, &binding, false) else {
-        panic!("a flat join has no narrowed reads");
+    assert_exclusive_read_unsupported(
+        crate::query::Query::from("todos").flat_join("comments", "todos._id", "comments.todo"),
+        BTreeMap::new(),
+        "a flat join of `todos` with `comments`",
+    );
+}
+
+/// A lookup join correlates through a third table (projects sharing the
+/// org of a todo's project), which a reverse join cannot express.
+#[test]
+fn exclusive_reads_reject_a_lookup_join() {
+    let mut query = narrowing_todos_titled();
+    query.joins.push(crate::query::JoinVia {
+        table: "projects".to_owned(),
+        on_column: "org".to_owned(),
+        target: crate::query::JoinTarget::Column,
+        source_column: Some("org".to_owned()),
+        source_lookup: Some(crate::query::JoinSourceLookup {
+            table: "projects".to_owned(),
+            row_id_source_column: "project".to_owned(),
+            value_column: "org".to_owned(),
+        }),
+        correlated_filters: Vec::new(),
+        filters: Vec::new(),
+        nested_joins: Vec::new(),
+    });
+    assert_exclusive_read_unsupported(
+        query,
+        BTreeMap::from([("title".to_owned(), Value::String("a".to_owned()))]),
+        "`projects` through a lookup join from `todos`",
+    );
+}
+
+/// A membership hop has no equality to carry extra correlated keys on.
+#[test]
+fn exclusive_reads_reject_a_reference_array_join_with_extra_keys() {
+    let mut query = crate::query::Query::from("people");
+    query.joins.push(crate::query::JoinVia {
+        table: "todos".to_owned(),
+        on_column: "assignees".to_owned(),
+        target: crate::query::JoinTarget::Column,
+        source_column: Some("id".to_owned()),
+        source_lookup: None,
+        correlated_filters: vec![crate::query::JoinCorrelation {
+            join_column: "title".to_owned(),
+            source_column: "name".to_owned(),
+        }],
+        filters: Vec::new(),
+        nested_joins: Vec::new(),
+    });
+    assert_exclusive_read_unsupported(
+        query,
+        BTreeMap::new(),
+        "`todos` through a reference array together with additional join keys",
+    );
+}
+
+/// Inheriting access evaluates the parent's policy, which is not a
+/// correlation the narrowed read can carry.
+#[test]
+fn exclusive_reads_reject_inherited_access() {
+    let mut query = crate::query::Query::from("todos");
+    query.inherits.push(crate::query::InheritsVia {
+        parent_column: "project".to_owned(),
+        operation: crate::query::InheritsOperation::Select,
+        max_depth: None,
+    });
+    assert_exclusive_read_unsupported(
+        query,
+        BTreeMap::new(),
+        "`todos` inheriting read access from `projects`",
+    );
+}
+
+/// Policy branches are disjunctive, so the root rows are not constrained by
+/// the root's own filters alone.
+#[test]
+fn exclusive_reads_reject_policy_branches() {
+    let mut query = crate::query::Query::from("todos");
+    query.policy_branches.push(crate::query::PolicyBranch {
+        filters: vec![narrowing_title_is_a()],
+        joins: vec![narrowing_reverse_join(
+            "comments",
+            "todo",
+            "id",
+            Vec::new(),
+            None,
+        )],
+        reachable: Vec::new(),
+        inherits: Vec::new(),
+    });
+    assert_exclusive_read_unsupported(
+        query,
+        BTreeMap::new(),
+        "`todos` through policy branches",
+    );
+}
+
+/// A union's rows come from several arms, so they are not constrained by
+/// the root's own filters alone.
+#[test]
+fn exclusive_reads_reject_a_union_of_relations() {
+    use crate::query::{
+        RelationColumnRef, RelationExpr, RelationJoinCondition, RelationJoinKind,
+        RelationProjectColumn, RelationProjectExpr, RelationQuery, RelationUnionArm,
     };
-    assert_eq!(
-        error.to_string(),
-        "Reading a flat join of `todos` with `comments` is not supported in exclusive \
-         transactions yet"
+    let column = |scope: &str, column: &str| RelationColumnRef {
+        scope: Some(scope.to_owned()),
+        column: column.to_owned(),
+    };
+    let arm = |label: &str| RelationUnionArm {
+        label: label.to_owned(),
+        input: RelationExpr::Project {
+            input: Box::new(RelationExpr::Join {
+                left: Box::new(RelationExpr::TableScan {
+                    table: "todos".to_owned(),
+                    alias: None,
+                }),
+                right: Box::new(RelationExpr::TableScan {
+                    table: "comments".to_owned(),
+                    alias: Some("__hop_0".to_owned()),
+                }),
+                on: vec![RelationJoinCondition {
+                    left: column("todos", "id"),
+                    right: column("__hop_0", "todo"),
+                }],
+                join_kind: RelationJoinKind::Inner,
+            }),
+            columns: vec![
+                RelationProjectColumn {
+                    alias: "id".to_owned(),
+                    expr: RelationProjectExpr::Column(column("todos", "id")),
+                },
+                RelationProjectColumn {
+                    alias: "title".to_owned(),
+                    expr: RelationProjectExpr::Column(column("todos", "title")),
+                },
+            ],
+        },
+    };
+    let query = crate::query::relation_query_to_query(&RelationQuery {
+        rel: RelationExpr::Union {
+            inputs: vec![arm("first"), arm("second")],
+        },
+    })
+    .unwrap();
+    assert_exclusive_read_unsupported(
+        query,
+        BTreeMap::new(),
+        "a union of relations over `todos`",
     );
 }

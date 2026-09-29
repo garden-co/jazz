@@ -29,7 +29,7 @@
 //! falling back to a read of the whole table, which does not scale.
 
 use super::*;
-use crate::query::JoinCorrelation;
+use crate::query::{InheritsOperation, JoinCorrelation};
 
 /// A narrowed read of one non-root source: the query the transaction runs
 /// and records as its read of that source.
@@ -387,6 +387,29 @@ where
         if !query.policy_branches.is_empty() {
             return Ok(NarrowedSources::unsupported_query(format!(
                 "`{root_table}` through policy branches"
+            )));
+        }
+        if let Some(reachable) = query.reachable.first() {
+            return Ok(NarrowedSources::unsupported_query(format!(
+                "`{root_table}` through a recursive traversal of `{}`",
+                reachable.edge_table
+            )));
+        }
+        if let Some(inherits) = query.inherits.first() {
+            let parent = self
+                .table_in_schema_ref(root_table, shape.schema_version())?
+                .references
+                .get(&inherits.parent_column)
+                .cloned()
+                .unwrap_or_else(|| inherits.parent_column.clone());
+            let access = match inherits.operation {
+                InheritsOperation::Select => "read",
+                InheritsOperation::Insert => "insert",
+                InheritsOperation::Update => "update",
+                InheritsOperation::Delete => "delete",
+            };
+            return Ok(NarrowedSources::unsupported_query(format!(
+                "`{root_table}` inheriting {access} access from `{parent}`"
             )));
         }
         let values = binding.values();
