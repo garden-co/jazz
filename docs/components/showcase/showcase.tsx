@@ -3,7 +3,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Badge } from "@astryxdesign/core/Badge";
 import { Banner } from "@astryxdesign/core/Banner";
-import { Button } from "@astryxdesign/core/Button";
 import { Card } from "@astryxdesign/core/Card";
 import { Divider } from "@astryxdesign/core/Divider";
 import { Grid } from "@astryxdesign/core/Grid";
@@ -401,7 +400,7 @@ export function Showcase() {
   const released = [...summaries.values()].some((entry) => entry.summary.basis === "release");
 
   return (
-    <div className="mx-auto w-full max-w-(--fd-layout-width) px-4 pb-24 pt-14">
+    <div className="mx-auto w-full max-w-[1120px] px-4 pb-24 pt-10 sm:px-8">
       <VStack gap={10}>
         <VStack as="header" gap={4} className="max-w-3xl">
           <Heading level={1}>Real apps, measured on every commit</Heading>
@@ -410,20 +409,6 @@ export function Showcase() {
             benchmarks of that same workload, run in CI on CodSpeed. We show the latest released
             numbers; hover any of them for how they changed across releases.
           </Text>
-          <nav aria-label="Examples">
-            <HStack gap={2} wrap="wrap">
-              {heroExamples.map((example) => (
-                <Button
-                  key={example.id}
-                  label={example.title}
-                  href={`#${example.id}`}
-                  variant="secondary"
-                  size="sm"
-                />
-              ))}
-              <Button label="More benchmarks" href="#benchmarks" variant="secondary" size="sm" />
-            </HStack>
-          </nav>
           {error && <Banner status="error" title={error} />}
           {data && !released && (
             <Banner
