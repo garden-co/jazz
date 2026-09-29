@@ -473,8 +473,9 @@ where
         durability: DurabilityTier,
         staged_global_times: &mut Vec<GlobalTime>,
         staged_content_versions: &mut Vec<VersionRow>,
+        staged_rejections: &mut Vec<RejectedTransaction>,
     ) -> Result<(), Error> {
-        let (staged_versions, fate, global_time) = self
+        let (staged_versions, fate, global_time, rejected_payload) = self
             .stage_transaction_and_versions_with_current_indexes(
                 batch,
                 tx,
@@ -487,6 +488,9 @@ where
                 Some(staged_content_versions),
             )
             .await?;
+        if let Some(rejected) = rejected_payload {
+            staged_rejections.push(rejected);
+        }
         self.finalize_staged_transaction_ingest(
             batch,
             fate,
@@ -585,7 +589,7 @@ where
         // Staging owns the decoded records and derived-index working set. Keep
         // it behind an async allocation boundary so admission does not retain
         // that state on the caller's poll stack.
-        let (staged_versions, fate, global_time) = Box::pin(self.stage_transaction_and_versions_with_current_indexes(
+        let (staged_versions, fate, global_time, rejected_payload) = Box::pin(self.stage_transaction_and_versions_with_current_indexes(
             &mut batch,
             tx,
             versions,
@@ -632,10 +636,12 @@ where
         let applied = self.database.apply_batch(batch).await?;
         let persisted = applied.persist().await;
         self.database.finish_persistence(persisted)?;
-        // A later complete payload may have appended to a transaction first
-        // seen through a view-scoped fragment. The staging cache contains only
-        // this call's new versions, so discard it before any constraint or
-        // caller re-query observes the assembled transaction.
+        if let Some(rejected) = rejected_payload {
+            self.rejections.rejected_transactions.insert(tx_id, rejected);
+        }
+        // Pending fragments may cache only this call's versions. Never let
+        // subsequent constraints or callers mistake that subset for the whole
+        // stored transaction.
         self.invalidate_tx_version_tables_cache(tx_id);
         self.reject_mismatched_pending_children_for_parent(tx_id)
             .await?;
@@ -653,7 +659,7 @@ where
         update_current_indexes: bool,
         view_scoped_cardinality: bool,
         staged_content_versions: Option<&mut Vec<VersionRow>>,
-    ) -> Result<(Vec<VersionRow>, Fate, Option<GlobalTime>), Error> {
+    ) -> Result<(Vec<VersionRow>, Fate, Option<GlobalTime>, Option<RejectedTransaction>), Error> {
         // Provenance operation identities participate in merge deduplication.
         // Admit them before accepting staged values or writing any derived
         // transaction/current state, on every local, remote, and view ingress.
@@ -678,26 +684,52 @@ where
             self.ensure_schema_version_alias(schema).await?;
         }
         let stored_tx = self.query_transaction(tx.tx_id).await?;
-        // A discarded Pending view may have preserved only its transaction
-        // identity. Every extension of a view-scoped fragment must retain
-        // settlement learned in the meantime, including after restart and
-        // earlier partial extensions, before indexing new bodies.
-        let (fate, global_time, durability) = if let Some(stored) = stored_tx.as_ref()
-            && stored.view_scoped_cardinality
-        {
-            if let (Some(current), Some(next)) = (stored.global_time, global_time)
-                && next < current
-            {
-                return Err(Error::NonMonotoneState("global seq cannot move backwards"));
-            }
-            (
-                next_fate(&stored.fate, fate)?,
-                global_time.or(stored.global_time),
-                durability.max(stored.durability),
-            )
+        let (fate, global_time, durability) = if let Some(mut stored) = stored_tx.clone() {
+            stored.reconcile_fate(fate, global_time, Some(durability))?;
+            (stored.fate, stored.global_time, stored.durability)
         } else {
             (fate, global_time, durability)
         };
+        // A rejected transaction has no live history left to extend. Keep its
+        // retained retry payload intact while reconciling the header normally.
+        let mut versions = if stored_tx.as_ref()
+            .is_some_and(|stored| matches!(stored.fate, Fate::Rejected(_)))
+        {
+            Vec::new()
+        } else {
+            versions
+        };
+        // Fate belongs to the whole transaction. A new fragment may settle
+        // versions received earlier, including history-only exclusive fragments.
+        // Assemble them before publishing either fate or derived current state.
+        let mut update_current_indexes = update_current_indexes;
+        // Already-settled view fragments only add their incoming versions.
+        // A terminal transition or a complete payload must cover earlier ones.
+        let settle_existing = stored_tx.as_ref().is_some_and(|stored| {
+            matches!(fate, Fate::Rejected(_))
+                || global_time.is_some()
+                    && (stored.global_time != global_time || !view_scoped_cardinality)
+        });
+        if settle_existing {
+            let incoming = versions.iter().enumerate()
+                .map(|(index, version)| (view_version_key_for_ingest(version), index))
+                .collect::<BTreeMap<_, _>>();
+            for stored in self.query_versions_for_tx(tx.tx_id).await? {
+                update_current_indexes |= self.ahead_current_keys.contains(&(
+                    self.physical_table_id_for_version(&stored)?,
+                    stored.layer(),
+                    history_primary_key(&stored).into_bytes(),
+                ));
+                let version = self.version_record_from_row(&stored)?;
+                match incoming.get(&view_version_key_for_ingest(&version)) {
+                    Some(index) if matches!(fate, Fate::Rejected(_)) && versions[*index] != version => {
+                        return Err(Error::ConflictingCommitUnit(tx.tx_id));
+                    }
+                    Some(_) => {}
+                    None => versions.push(version),
+                }
+            }
+        }
         let tx_already_known = stored_tx.is_some();
         let preserve_authoritative_cardinality = view_scoped_cardinality
             && stored_tx
@@ -823,12 +855,17 @@ where
                     }
                 }
             }
-            let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
-            let storage_key = self.version_storage_primary_key(&stored)?;
-            if batch.ensure_exact(&self.database, history_table.as_ref(), storage_key, groove_record).await?
-                == groove::db::EnsureExactOutcome::Conflict
-            {
-                return Err(Error::ConflictingCommitUnit(tx.tx_id));
+            // Rejected payloads go directly to rejection cleanup. Inserting
+            // immutable history and deleting it in the same batch would violate
+            // ensure_exact's promise that admitted immutable bytes survive.
+            if !matches!(fate, Fate::Rejected(_)) {
+                let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
+                let storage_key = self.version_storage_primary_key(&stored)?;
+                if batch.ensure_exact(&self.database, history_table.as_ref(), storage_key, groove_record).await?
+                    == groove::db::EnsureExactOutcome::Conflict
+                {
+                    return Err(Error::ConflictingCommitUnit(tx.tx_id));
+                }
             }
             if update_current_indexes && !matches!(fate, Fate::Rejected(_)) && global_time.is_none()
             {
@@ -871,7 +908,20 @@ where
             self.record_child_edges(tx.tx_id, parent_edges).await;
         }
         self.cache_tx_versions(tx.tx_id, stored_versions.clone());
-        Ok((stored_versions, fate, global_time))
+        let rejected_payload = if matches!(fate, Fate::Rejected(_)) {
+            let rejected_tx = StoredTransaction {
+                tx: storage_tx.clone(),
+                node_alias: tx_node_alias,
+                fate: fate.clone(),
+                global_time,
+                durability,
+                view_scoped_cardinality: view_scoped_cardinality && !preserve_authoritative_cardinality,
+            };
+            self.remove_rejected_local_versions(tx.tx_id, &rejected_tx, batch).await?
+        } else {
+            None
+        };
+        Ok((stored_versions, fate, global_time, rejected_payload))
     }
 
     async fn finalize_staged_transaction_ingest(
