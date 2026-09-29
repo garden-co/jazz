@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import { createAccountManager } from "jazz-tools";
 import { createJazzClient, JazzClientProvider, type JazzClient } from "jazz-tools/react";
 import { authClient, getJwtFromBetterAuth } from "@/src/lib/auth-client";
+import { jazzEnv } from "@/src/lib/jazz-env";
 
 const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID ?? "poster-shop-local";
 const serverUrl = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL ?? "http://127.0.0.1:4200";
@@ -22,12 +23,12 @@ export function JazzProvider({ children }: { children: React.ReactNode }) {
     let cancelled = false;
     setError(undefined);
     void (async () => {
-      const accounts = await createAccountManager({ appId, serverUrl, env: "dev" });
+      const accounts = await createAccountManager({ appId, serverUrl, env: jazzEnv });
       const credential = { getToken: requireBetterAuthToken };
       // One ordered core decision: the active assignment, or a new account
       // for a fresh identity (docs/auth/authentication).
       const account = await accounts.loginOrRegisterJWT(credential);
-      const opened = await createJazzClient({ appId, serverUrl, account });
+      const opened = await createJazzClient({ appId, serverUrl, env: jazzEnv, account });
       if (cancelled) return void opened.shutdown();
       await clientRef.current?.shutdown({ waitForSync: true });
       if (cancelled) return void opened.shutdown();

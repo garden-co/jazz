@@ -3,6 +3,7 @@ import permissions from "@/permissions";
 import type { JazzClient } from "jazz-tools/backend";
 import { createRequire as createRequireFromModule } from "node:module";
 import { configuredIssuer } from "./identity";
+import { jazzEnv } from "./jazz-env";
 import { serverSecret } from "./server-secret";
 
 const createRequire =
@@ -30,7 +31,7 @@ export async function authJazzClient(): Promise<JazzClient> {
     initial: {
       backendSecret: serverSecret("BACKEND_SECRET", "poster-shop-development-backend-secret"),
     },
-    env: configuredIssuer === "http://127.0.0.1:3000" ? "dev" : "prod",
+    env: jazzEnv,
     // `forRequest` and `withAttributionForRequest` verify Better Auth bearer
     // JWTs against this app's own JWKS before resolving the Jazz account.
     jwksUrl: `${configuredIssuer}/api/auth/jwks`,

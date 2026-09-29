@@ -2,6 +2,7 @@
 
 import {
   Badge,
+  Banner,
   Button,
   EmptyState,
   Heading,
@@ -50,7 +51,7 @@ export function PosterStudio({
 }) {
   const session = useSession();
   const { data: authSession } = authClient.useSession();
-  const { data: canvases } = useAll(app.canvases);
+  const { data: canvases, error: canvasesError } = useAll(app.canvases);
   const [activeId, setActiveId] = useState<string | null>(initialCanvasId);
   const [selectedShapeId, setSelectedShapeId] = useState<string | null>(null);
   const [activeLayerId, setActiveLayerId] = useState<string | null>(null);
@@ -64,6 +65,14 @@ export function PosterStudio({
   const canAdmin = role === "admin";
   const displayName = authSession?.user.name ?? "Guest";
 
+  if (canvasesError)
+    return (
+      <Banner
+        status="error"
+        title="Could not load your posters"
+        description={canvasesError.message}
+      />
+    );
   if (!canvases) return <Spinner label="Opening your posters" />;
   if (!active)
     return (
