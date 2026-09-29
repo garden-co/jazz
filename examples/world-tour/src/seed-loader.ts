@@ -1,111 +1,62 @@
 import type { Db } from "jazz-tools";
 import { app } from "../schema.js";
-import type { Venue } from "../schema.js";
-import { defaultBandName, venues as seedVenues, descriptions, privateNotes } from "./seed-data.js";
+import { buildTourFixture, DEFAULT_SEED } from "./fixture.js";
 
-function pickWeightedStatus(rand: number): "confirmed" | "tentative" | "cancelled" {
-  if (rand < 0.7) return "confirmed";
-  if (rand < 0.95) return "tentative";
-  return "cancelled";
+/** A fresh invite code. Codes are bearer secrets, so keep the full UUID's entropy. */
+export function newInviteCode(): string {
+  return crypto.randomUUID();
 }
 
-export async function ensureData(
+/**
+ * Creates a band owned by `userId`, with the owner's membership, an invite code,
+ * and the seeded demo tour starting today. Each step waits for the server so the
+ * next step's permission check (membership, band ownership) can see it.
+ */
+export async function startDemoTour(
   db: Db,
-  userId: string | undefined,
-  isMember: boolean,
-): Promise<void> {
-  const existingBands = await db.all(app.bands);
-  let bandId: string;
+  { userId, ownerName, seed = DEFAULT_SEED }: { userId: string; ownerName: string; seed?: number },
+): Promise<string> {
+  const fixture = buildTourFixture({ seed, start: new Date() });
 
-  if (existingBands.length === 0) {
-    const { value: band } = db.insert(app.bands, { name: defaultBandName });
-    bandId = band.id;
-  } else {
-    bandId = existingBands[0].id;
-  }
+  const band = db.insert(app.bands, { name: fixture.bandName, ownerId: userId });
+  await band.wait({ tier: "global" });
+  const bandId = band.value.id;
 
-  if (userId && isMember) {
-    const myMembership = await db.all(app.members.where({ userId }));
-    if (myMembership.length === 0) {
-      db.insert(app.members, { bandId, userId });
+  await Promise.all([
+    db.insert(app.members, { bandId, userId, name: ownerName }).wait({ tier: "global" }),
+    db.insert(app.bandInvites, { bandId, code: newInviteCode() }).wait({ tier: "global" }),
+  ]);
+
+  // Venues are shared: reuse one that already exists with the same name.
+  const existing = new Map((await db.all(app.venues)).map((v) => [v.name, v.id]));
+  const venueIds = new Map<string, string>();
+  const venueWrites: Promise<unknown>[] = [];
+  for (const { venue } of fixture.stops) {
+    const id = existing.get(venue.name);
+    if (id) {
+      venueIds.set(venue.name, id);
+      continue;
     }
+    const handle = db.insert(app.venues, { ...venue, ownerId: userId, bandId });
+    venueIds.set(venue.name, handle.value.id);
+    venueWrites.push(handle.wait({ tier: "global" }));
   }
+  await Promise.all(venueWrites);
 
-  const existingVenues = await db.all(app.venues);
-  const existingNames = new Set(existingVenues.map((v: any) => v.name));
-  const insertedVenues: Venue[] = [];
-  for (const v of seedVenues) {
-    if (!existingNames.has(v.name)) {
-      try {
-        const { value: venue } = db.insert(app.venues, v);
-        insertedVenues.push(venue);
-      } catch (err) {
-        console.warn("[ensureData] venue insert skipped:", (err as Error).message);
-      }
-    }
-  }
-
-  const allVenues = [...existingVenues, ...insertedVenues];
-
-  if (!isMember) return;
-
-  const now = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const threeWeeks = new Date(today.getTime() + 21 * 24 * 60 * 60 * 1000);
-
-  const upcomingStops = await db.all(
-    app.stops.where({ date: { gte: today, lte: threeWeeks } }).limit(12),
-  );
-
-  const needed = 12 - upcomingStops.length;
-  if (needed <= 0) return;
-
-  if (allVenues.length === 0) return;
-
-  const existingDates = new Set(
-    upcomingStops.map((s: any) => {
-      const d = s.date instanceof Date ? s.date : new Date(s.date);
-      return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+  await Promise.all(
+    fixture.stops.map(async (stop) => {
+      const handle = db.insert(app.stops, {
+        bandId,
+        venueId: venueIds.get(stop.venue.name)!,
+        date: stop.date,
+        status: stop.status,
+        publicDescription: stop.publicDescription,
+      });
+      if (!stop.privateNote) return;
+      await handle.wait({ tier: "global" });
+      db.insert(app.stopNotes, { stopId: handle.value.id, bandId, body: stop.privateNote });
     }),
   );
 
-  const rand = Math.random;
-  const availableDays: Date[] = [];
-  for (let i = 0; i < 21; i++) {
-    const d = new Date(today.getTime() + i * 24 * 60 * 60 * 1000);
-    const key = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
-    if (!existingDates.has(key)) {
-      availableDays.push(d);
-    }
-  }
-
-  // Shuffle available days then pick `needed`
-  for (let i = availableDays.length - 1; i > 0; i--) {
-    const j = Math.floor(rand() * (i + 1));
-    [availableDays[i], availableDays[j]] = [availableDays[j], availableDays[i]];
-  }
-  const pickedDays = availableDays.slice(0, needed).sort((a, b) => a.getTime() - b.getTime());
-
-  // Pick random venues, sort by longitude for a believable west-to-east route
-  const shuffledVenues = [...allVenues].sort(() => rand() - 0.5);
-  const pickedVenues = shuffledVenues.slice(0, needed).sort((a, b) => (a.lng ?? 0) - (b.lng ?? 0));
-
-  for (let i = 0; i < pickedDays.length; i++) {
-    const day = pickedDays[i];
-    const venue = pickedVenues[i % pickedVenues.length];
-    if (!venue?.id) continue;
-
-    const hour = 18 + Math.floor(rand() * 4);
-    day.setHours(hour, 0, 0, 0);
-
-    db.insert(app.stops, {
-      bandId,
-      venueId: venue.id,
-      date: day,
-      status: pickWeightedStatus(rand()),
-      publicDescription: descriptions[Math.floor(rand() * descriptions.length)],
-      privateNotes:
-        rand() > 0.3 ? privateNotes[Math.floor(rand() * privateNotes.length)] : undefined,
-    });
-  }
+  return bandId;
 }

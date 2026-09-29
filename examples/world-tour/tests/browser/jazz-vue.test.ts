@@ -80,6 +80,12 @@ async function waitFor(check: () => boolean, ms: number, label: string): Promise
   throw new Error(`Timeout waiting for: ${label}`);
 }
 
+function sessionUser(client: JazzClient): string {
+  const userId = client.session?.user.account;
+  if (!userId) throw new Error("test session is missing user");
+  return userId;
+}
+
 interface Mounted {
   el: HTMLDivElement;
   client: JazzClient;
@@ -157,6 +163,7 @@ describe("world-tour Jazz + Vue integration", () => {
         country: "UK",
         lat: 51.5159,
         lng: -0.1311,
+        ownerId: sessionUser(client),
       }),
     );
 
@@ -192,14 +199,15 @@ describe("world-tour Jazz + Vue integration", () => {
 
     const { el, client } = await mount(StopList);
 
-    const userId = client.session?.user.account;
-    if (!userId) throw new Error("test session is missing user");
+    const userId = sessionUser(client);
 
     // Each dependent insert awaits edge-tier confirmation. The stop's policy
     // check (isBandMember) and the include-resolution of `venue` both require
     // the prior writes to be visible at the server before the next op lands.
-    const band = await inserted(client.db.insert(app.bands, { name: `${s.marker}-band` }));
-    await inserted(client.db.insert(app.members, { bandId: band.id, userId }));
+    const band = await inserted(
+      client.db.insert(app.bands, { name: `${s.marker}-band`, ownerId: userId }),
+    );
+    await inserted(client.db.insert(app.members, { bandId: band.id, userId, name: "Owner" }));
     const venue = await inserted(
       client.db.insert(app.venues, {
         name: `${s.marker}-venue`,
@@ -207,6 +215,8 @@ describe("world-tour Jazz + Vue integration", () => {
         country: "UK",
         lat: 51.5159,
         lng: -0.1311,
+        ownerId: userId,
+        bandId: band.id,
       }),
     );
     const stop = await inserted(
@@ -268,6 +278,7 @@ describe("world-tour Jazz + Vue integration", () => {
     const Inserter = defineComponent({
       setup() {
         const db = useDb();
+        const session = useSession();
         const { data: venues } = useAll(s.queries.venues);
         function add() {
           db.insert(
@@ -278,6 +289,7 @@ describe("world-tour Jazz + Vue integration", () => {
               country: "UK",
               lat: 51.4659,
               lng: -0.1149,
+              ownerId: session.value!.user.account,
             }),
           );
         }

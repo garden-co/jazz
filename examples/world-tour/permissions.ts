@@ -1,27 +1,84 @@
 import { schema as s } from "jazz-tools";
 import { app } from "./schema.js";
 
-export default s.definePermissions(app, ({ policy, session, anyOf }) => {
-  const isBandMember = policy.members.exists.where({ userId: session.user.account });
+export default s.definePermissions(app, ({ policy, session, anyOf, allOf }) => {
+  const me = session.user.account;
+  const isMemberOf = (bandId: string) => policy.members.exists.where({ bandId, userId: me });
+  const isOwnerOf = (bandId: string) => policy.bands.exists.where({ id: bandId, ownerId: me });
 
-  // Open inserts for bands, members, and venues allow the demo app to
-  // bootstrap seed data without an external auth provider. In a production
-  // app you'd gate these behind isBandMember or a real identity check.
-  policy.bands.allowRead.where({});
-  policy.bands.allowInsert.where({});
-  policy.bands.allowUpdate.where(isBandMember);
-  policy.bands.allowDelete.where(isBandMember);
+  // Bands: the name is public. Members can rename the band; only the owner deletes
+  // it, and nobody can hand ownership to someone else by editing the row.
+  policy.bands.allowRead.always();
+  policy.bands.allowInsert.where({ ownerId: me });
+  policy.bands.allowUpdate
+    .whereOld((band) => isMemberOf(band.id))
+    .whereNew((band) =>
+      allOf([
+        isMemberOf(band.id),
+        policy.bands.exists.where({ id: band.id, ownerId: band.ownerId }),
+      ]),
+    );
+  policy.bands.allowDelete.where({ ownerId: me });
 
-  policy.members.allowRead.where({ userId: session.user.account });
-  policy.members.allowInsert.where({});
+  // Invites: visible to and managed by the band owner only.
+  policy.bandInvites.allowRead.where((invite) => isOwnerOf(invite.bandId));
+  policy.bandInvites.allowInsert.where((invite) => isOwnerOf(invite.bandId));
+  policy.bandInvites.allowDelete.where((invite) => isOwnerOf(invite.bandId));
 
-  policy.venues.allowRead.where({});
-  policy.venues.allowInsert.where({});
-  policy.venues.allowUpdate.where(isBandMember);
-  policy.venues.allowDelete.where(isBandMember);
+  // Members: you can only ever add yourself, either as the owner bootstrapping the
+  // band or with a current invite code. The owner can remove anyone; members can leave.
+  policy.members.allowRead.where((member) => anyOf([{ userId: me }, isMemberOf(member.bandId)]));
+  policy.members.allowInsert.where((member) =>
+    allOf([
+      { userId: me },
+      anyOf([
+        isOwnerOf(member.bandId),
+        allOf([
+          { inviteCode: { isNull: false } },
+          policy.bandInvites.exists.where({ bandId: member.bandId, code: member.inviteCode }),
+        ]),
+      ]),
+    ]),
+  );
+  policy.members.allowDelete.where((member) => anyOf([{ userId: me }, isOwnerOf(member.bandId)]));
 
-  policy.stops.allowRead.where(anyOf([{ status: "confirmed" }, isBandMember]));
-  policy.stops.allowInsert.where(isBandMember);
-  policy.stops.allowUpdate.where(isBandMember);
-  policy.stops.allowDelete.where(isBandMember);
+  // Venues: public places. The creator owns a venue, and so do the members of the
+  // band it was added for.
+  const managesVenue = (venue: { ownerId: string; bandId: string | null | undefined }) =>
+    anyOf([{ ownerId: me }, isMemberOf(venue.bandId as string)]);
+  policy.venues.allowRead.always();
+  policy.venues.allowInsert.where((venue) =>
+    allOf([
+      { ownerId: me },
+      anyOf([{ bandId: { isNull: true } }, isMemberOf(venue.bandId as string)]),
+    ]),
+  );
+  policy.venues.allowUpdate
+    .whereOld(managesVenue)
+    .whereNew((venue) =>
+      allOf([
+        managesVenue(venue),
+        policy.venues.exists.where({ id: venue.id, ownerId: venue.ownerId }),
+      ]),
+    );
+  policy.venues.allowDelete.where(managesVenue);
+
+  // Stops: the public sees confirmed dates; the band sees and edits everything.
+  const onMyBand = (row: { bandId: string }) => isMemberOf(row.bandId);
+  policy.stops.allowRead.where((stop) => anyOf([{ status: "confirmed" }, onMyBand(stop)]));
+  policy.stops.allowInsert.where(onMyBand);
+  policy.stops.allowUpdate.whereOld(onMyBand).whereNew(onMyBand);
+  policy.stops.allowDelete.where(onMyBand);
+
+  // Private notes: band members only, and always attached to one of their stops.
+  policy.stopNotes.allowRead.where(onMyBand);
+  policy.stopNotes.allowInsert.where((note) =>
+    allOf([onMyBand(note), policy.stops.exists.where({ id: note.stopId, bandId: note.bandId })]),
+  );
+  policy.stopNotes.allowUpdate
+    .whereOld(onMyBand)
+    .whereNew((note) =>
+      allOf([onMyBand(note), policy.stops.exists.where({ id: note.stopId, bandId: note.bandId })]),
+    );
+  policy.stopNotes.allowDelete.where(onMyBand);
 });

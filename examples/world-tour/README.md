@@ -1,6 +1,6 @@
 # Jazz World Tour example
 
-A local-first tour management app built with Vue + Vite and the Jazz Vite plugin. The globe is rendered as a custom 2D canvas dot-art projection — illustrative, not cartographic.
+A band plans its world tour on a dot-art globe; fans follow the confirmed dates. Built with Vue + Vite and the Jazz Vite plugin. The globe is a custom 2D canvas projection: illustrative, not cartographic.
 
 ## Getting started
 
@@ -8,7 +8,28 @@ A local-first tour management app built with Vue + Vite and the Jazz Vite plugin
 pnpm dev
 ```
 
-`pnpm dev` starts the Jazz dev server and the Vite dev server together via the Jazz Vite plugin.
+`pnpm dev` starts the Jazz dev server and the Vite dev server together via the Jazz Vite plugin. The first visitor to an empty server gets the seeded demo tour and owns the band.
+
+## Who sees what
+
+Every visitor has a local-first account. Band membership, enforced in [`permissions.ts`](./permissions.ts), decides the rest:
+
+- **Public visitors** see the band and its confirmed stops. Tentative and cancelled stops, private notes, invites and the member list never reach them.
+- **Members** see and edit every stop, rename the band and add venues. They join with the owner's invite link (`#/bands/<id>/join/<code>`); nobody can add themselves to a band without the current code.
+- **The owner** manages the invite link and removes members. Removing a member also resets the link, so a revoked member can't rejoin with the old one.
+- **Venues** are public places, owned by whoever created them and by the band they were added for.
+
+## Demo data
+
+[`src/fixture.ts`](./src/fixture.ts) builds the demo tour from a seedable PRNG with a fixed default seed, so every fresh install shows the same twelve shows over the next three weeks.
+
+## Tests
+
+```bash
+pnpm test:unit      # fixture determinism and permissions (member, public, outsider, revoked)
+pnpm test:browser   # Vue bindings against a local Jazz server
+pnpm walkthrough:shots
+```
 
 ## Benchmark variant
 
