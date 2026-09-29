@@ -576,3 +576,91 @@ h6 {
     display: none;
   }
 }
+
+/* Adopter quotes: one featured quote at statement size, the rest in a row. */
+.home-quotes {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-12);
+}
+.home-quote {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: var(--spacing-6);
+}
+.home-quote blockquote {
+  margin: 0;
+}
+.home-quote blockquote p {
+  font-size: var(--text-large-size);
+  line-height: 1.5;
+  color: var(--color-text-primary);
+}
+.home-quote-featured blockquote p {
+  max-width: 52rem;
+  font-size: clamp(1.5rem, 1.1rem + 1.4vw, 2.25rem);
+  line-height: 1.25;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  text-wrap: balance;
+  /* Hang the opening quote mark so the text edge stays on the grid. */
+  text-indent: -0.4em;
+}
+.home-quote-row {
+  display: grid;
+  gap: var(--spacing-8);
+}
+@media (min-width: 768px) {
+  .home-quote-row {
+    grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  }
+}
+.home-quote-row .home-quote {
+  border-top: 1px solid var(--color-border-emphasized);
+  padding-top: var(--spacing-5);
+}
+.home-quote-attribution {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-3);
+}
+.home-quote-source {
+  color: inherit;
+  text-decoration: none;
+}
+.home-quote-source:hover {
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+.home-quote-portrait {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  overflow: hidden;
+  background-color: var(--color-background-muted);
+  color: var(--color-text-secondary);
+  font-size: var(--text-supporting-size);
+  font-weight: 500;
+}
+.home-quote-portrait-avatar {
+  border-radius: 999px;
+}
+.home-quote-portrait-logo {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-element);
+  padding: var(--spacing-1-5);
+}
+.home-quote-portrait img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.home-quote-portrait-logo img {
+  object-fit: contain;
+  filter: grayscale(1);
+}

@@ -21,10 +21,12 @@ import {
   SchemaDiagram,
   StackDiagram,
 } from "@/components/home/diagrams";
+import { AdopterQuotes } from "@/components/home/adopter-quotes";
 import { CodeWindow } from "@/components/home/code-window";
 import { PricingCalculator } from "@/components/home/pricing-calculator";
 import { CreateJazzCommand } from "@/components/home/create-jazz-command";
 import { pricingMeters } from "@/lib/home-pricing";
+import { adopterQuotes } from "@/lib/home-quotes";
 import { blogSource } from "@/lib/source";
 
 export const metadata: Metadata = {
@@ -397,6 +399,14 @@ export default function HomePage() {
           </Text>
         </div>
       </section>
+
+      {adopterQuotes.length > 0 ? (
+        <section className="home-section" aria-label="What adopters say">
+          <div className="home-container">
+            <AdopterQuotes quotes={adopterQuotes} />
+          </div>
+        </section>
+      ) : null}
 
       <section className="home-section">
         <div className="home-container">
