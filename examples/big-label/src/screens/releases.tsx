@@ -33,6 +33,7 @@ import { PageHeader, PageSection } from "../components/page";
 import { releaseStatuses } from "../fixtures";
 import { useCan, useOrganization } from "../lib/organization";
 import { href, navigate } from "../lib/route";
+import { deleteRelease } from "../lib/mutations";
 import { useWrite } from "../lib/use-write";
 
 type ReleaseRow = {
@@ -214,14 +215,9 @@ export function ReleasePage({ id }: { id: string }) {
     setTeamId(null);
   };
   const remove = () => {
-    write("Couldn't delete the release", async () => {
-      await db
-        .transaction((tx) => {
-          for (const assignment of assignments) tx.delete(app.releaseTeams, assignment.id);
-          tx.delete(app.releases, id);
-        })
-        .then((result) => result.wait({ tier: "global" }));
-    });
+    write("Couldn't delete the release", async () =>
+      (await deleteRelease(db, organization.id, id)).wait({ tier: "global" }),
+    );
     navigate(href.releases);
   };
 

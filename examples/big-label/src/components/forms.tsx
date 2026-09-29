@@ -4,14 +4,9 @@ import { useState } from "react";
 import { DateInput, Selector, TextInput } from "@astryxdesign/core";
 import { useAll, useDb } from "jazz-tools/react";
 import { app } from "../../schema";
-import {
-  artistStatuses,
-  formatCatalogNumber,
-  genres,
-  releaseFormats,
-  releaseStatuses,
-  searchKey,
-} from "../fixtures";
+import { artistStatuses, genres, releaseFormats, releaseStatuses, searchKey } from "../fixtures";
+import { nextCatalogNumber, saveRelease } from "../lib/mutations";
+import { getJwtFromBetterAuth } from "../lib/auth-client";
 import { useOrganization } from "../lib/organization";
 import { useWrite } from "../lib/use-write";
 import { roleLabels, type Role } from "../roles";
@@ -110,48 +105,40 @@ export function ReleaseDialog({
   const [status, setStatus] = useState(release?.status ?? "planning");
   const [numberError, setNumberError] = useState<string>();
 
-  // Suggest the next free number in the chosen catalogue.
+  // Suggest the number after the highest one in the chosen catalogue.
   const chooseCatalogue = async (id: string | null) => {
     setCatalogueId(id);
     const catalogue = catalogues.find((entry) => entry.id === id);
     if (!catalogue || release) return;
-    const inCatalogue = await db.all(
-      app.releases.where({ organizationId: organization.id, catalogueId: catalogue.id }),
-    );
-    setCatalogNumber(formatCatalogNumber(catalogue.code, inCatalogue.length + 1));
+    setCatalogNumber(await nextCatalogNumber(db, organization.id, catalogue));
     setNumberError(undefined);
   };
 
   const save = () => {
     const number = catalogNumber.trim();
-    const fields = {
-      title: title.trim(),
-      artistId,
-      catalogueId,
-      catalogNumber: number,
-      format,
-      releaseDate: new Date(`${releaseDate}T00:00:00.000Z`),
-      status,
-      searchKey: searchKey(title.trim(), number),
-    };
     const id = release?.id ?? crypto.randomUUID();
-    // Catalogue numbers are unique per label. The exclusive transaction makes
-    // the authority re-check that no concurrent write took the number.
-    const commit = db.exclusiveTransaction(async (tx) => {
-      const taken = await tx.all(
-        app.releases.where({ organizationId: organization.id, catalogNumber: number }),
-      );
-      if (taken.some((row) => row.id !== id)) throw new Error(`${number} is already in use`);
-      if (release) tx.update(app.releases, id, fields);
-      else tx.insert(app.releases, { ...fields, organizationId: organization.id }, { id });
-    });
+    const commit = saveRelease(
+      db,
+      organization.id,
+      { id, isNew: !release },
+      {
+        title: title.trim(),
+        artistId,
+        catalogueId,
+        catalogNumber: number,
+        format,
+        releaseDate: new Date(`${releaseDate}T00:00:00.000Z`),
+        status,
+        searchKey: searchKey(title.trim(), number),
+      },
+    );
     write(release ? "Couldn't save the release" : "Couldn't add the release", async () =>
       (await commit).wait(),
     );
     if (!release) onCreated?.(id);
   };
 
-  // A local read gives instant feedback; the transaction above is the real check.
+  // A local read gives instant feedback; saveRelease's transaction is the real check.
   const submit = () => {
     const number = catalogNumber.trim();
     void db
@@ -301,49 +288,48 @@ export function CatalogueDialog({
   );
 }
 
-/** Admins add someone who already has a BigLabel profile. New members can't be admins. */
-export function AddMemberDialog({
-  memberPersonIds,
-  ...dialog
-}: DialogProps & { memberPersonIds: Set<string> }) {
-  const db = useDb();
-  const write = useWrite();
+/**
+ * Admins add someone who has signed in to BigLabel, by their sign-in email.
+ * Emails are private, so the server looks them up (`POST /api/members`) and
+ * checks that the caller is an admin. New members can't be admins.
+ */
+export function AddMemberDialog(dialog: DialogProps) {
   const organization = useOrganization();
-  const { data: people = [] } = useAll(app.people.orderBy("name", "asc").limit(500));
-  const [personId, setPersonId] = useState("");
+  const [email, setEmail] = useState("");
   const [role, setRole] = useState<Role>("editor");
-  const candidates = people.filter((person) => !memberPersonIds.has(person.id));
-  const save = () => {
-    const person = candidates.find((entry) => entry.id === personId);
-    if (!person) return false;
-    write("Couldn't add the member", () =>
-      db
-        .insert(app.memberships, {
-          organizationId: organization.id,
-          personId: person.id,
-          userId: person.userId,
-          role,
-        })
-        .wait({ tier: "global" }),
-    );
+  const [error, setError] = useState<string>();
+  const [isPending, setIsPending] = useState(false);
+  const submit = () => {
+    setIsPending(true);
+    setError(undefined);
+    void addMember({ organizationId: organization.id, email, role })
+      .then((message) => {
+        if (message) setError(message);
+        else dialog.onOpenChange(false);
+      })
+      .finally(() => setIsPending(false));
+    return false;
   };
   return (
     <FormDialog
       {...dialog}
       title="Add member"
       submitLabel="Add member"
-      canSubmit={Boolean(personId)}
-      onSubmit={save}
+      canSubmit={Boolean(email.trim()) && !isPending}
+      onSubmit={submit}
     >
-      <Selector
-        label="Person"
-        options={candidates.map((person) => ({ value: person.id, label: person.name }))}
-        value={personId}
-        onChange={setPersonId}
-        placeholder="Choose a person"
-        description="People appear here once they have signed in to BigLabel."
-        hasSearch
+      <TextInput
+        label="Email"
+        type="email"
+        value={email}
+        onChange={(value) => {
+          setEmail(value);
+          setError(undefined);
+        }}
+        description="The email they sign in to BigLabel with."
+        status={error ? { type: "error", message: error } : undefined}
         isRequired
+        hasAutoFocus
       />
       <Selector
         label="Role"
@@ -357,6 +343,26 @@ export function AddMemberDialog({
       />
     </FormDialog>
   );
+}
+
+const addMemberErrors: Record<string, string> = {
+  "not-found": "Nobody has signed in to BigLabel with that email yet.",
+  "already-member": "They're already a member of this label.",
+  forbidden: "Only admins can add members.",
+};
+
+/** Returns an error message, or nothing when the member was added. */
+async function addMember(input: { organizationId: string; email: string; role: Role }) {
+  const token = await getJwtFromBetterAuth();
+  if (!token) return "Your session has expired. Sign in again.";
+  const response = await fetch("/api/members", {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (response.ok) return undefined;
+  const { status } = (await response.json().catch(() => ({}))) as { status?: string };
+  return addMemberErrors[status ?? ""] ?? `The member couldn't be added (${response.status}).`;
 }
 
 function toISODate(date: Date) {

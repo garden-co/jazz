@@ -2,12 +2,17 @@ import { randomUUID } from "node:crypto";
 import { app } from "../../schema";
 import { authJazzClient } from "./auth-jazz-client";
 import { planPersonalBootstrap } from "./bootstrap-state";
+import { normalizeEmail } from "./emails";
 
 /**
  * Server-mediated first-tenant bootstrap. Ordinary clients never receive the
  * backend secret and remain subject to the admin-only membership policy.
  */
-export async function ensurePersonalOrganization(userId: string, name: string) {
+export async function ensurePersonalOrganization(
+  userId: string,
+  name: string,
+  email: string | null = null,
+) {
   const db = (await authJazzClient()).db;
   const slug = `personal-${userId}`;
   // Both the initial read and every retry happen inside the exclusive
@@ -31,6 +36,15 @@ export async function ensurePersonalOrganization(userId: string, name: string) {
         if (!plan.person) tx.insert(app.people, { userId, name }, { id: personId });
         if (!plan.organization) {
           tx.insert(app.organizations, { name: `${name}'s label`, slug }, { id: organizationId });
+        }
+        // Record the verified sign-in email so admins can add this person
+        // by email. Only this trusted path writes or reads the table.
+        if (email) {
+          const emails = plan.person ? await tx.all(app.personEmails.where({ personId })) : [];
+          const normalized = normalizeEmail(email);
+          if (emails.length === 0) tx.insert(app.personEmails, { personId, email: normalized });
+          else if (emails[0]!.email !== normalized)
+            tx.update(app.personEmails, emails[0]!.id, { email: normalized });
         }
         if (!plan.membership) {
           tx.insert(

@@ -3,6 +3,7 @@
 import { Button, EmptyState, Grid, HStack, VStack } from "@astryxdesign/core";
 import { useAll } from "jazz-tools/react";
 import { app } from "../../schema";
+import { formatCount } from "../components/list";
 import { PageHeader, PageSection, Stat } from "../components/page";
 import { roleDescriptions } from "../roles";
 import { useCan, useOrganization } from "../lib/organization";
@@ -29,7 +30,8 @@ export function OverviewPage() {
       .include({ artist: true })
       .limit(8),
   );
-  const count = (rows: unknown[] | undefined) => (rows ? rows.length.toLocaleString() : "–");
+  const count = (rows: unknown[] | undefined) =>
+    rows ? formatCount(rows.length, rows.length >= countLimit) : "–";
   const scheduled = releases?.filter((release) => release.status === "scheduled").length;
 
   return (
@@ -40,7 +42,11 @@ export function OverviewPage() {
       />
       <Grid columns={{ minWidth: 160 }} gap={3}>
         <Stat label="Artists" value={count(artists)} />
-        <Stat label="Releases" value={count(releases)} note={`${scheduled ?? 0} scheduled`} />
+        <Stat
+          label="Releases"
+          value={count(releases)}
+          note={`${formatCount(scheduled ?? 0, (releases?.length ?? 0) >= countLimit)} scheduled`}
+        />
         <Stat label="Members" value={count(members)} />
         <Stat label="Teams" value={count(teams)} />
       </Grid>

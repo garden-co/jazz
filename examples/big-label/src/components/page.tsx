@@ -52,9 +52,7 @@ export function Stat({ label, value, note }: { label: string; value: ReactNode; 
         <Text type="supporting" color="secondary">
           {label}
         </Text>
-        <Heading level={2} type="display-3">
-          {value}
-        </Heading>
+        <Heading level={2}>{value}</Heading>
         {note && (
           <Text type="supporting" color="secondary">
             {note}

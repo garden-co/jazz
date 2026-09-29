@@ -18,7 +18,16 @@ const schema = {
   ),
   people: s.table(
     { userId: s.uuid(), name: s.string() },
-    { membershipsViaPerson: s.reverse("memberships", "person") },
+    {
+      membershipsViaPerson: s.reverse("memberships", "person"),
+      personEmailsViaPerson: s.reverse("personEmails", "person"),
+    },
+  ),
+  // Sign-in emails, written only by the trusted server (bootstrap) and read
+  // only by it (adding a member by email). Clients never see this table.
+  personEmails: s.table(
+    { personId: s.uuid(), email: s.string() },
+    { person: s.rel("people", "personId") },
   ),
   teams: s.table(
     { organizationId: s.uuid(), name: s.string() },

@@ -17,14 +17,17 @@ import {
 import { useAll, useDb, useOne } from "jazz-tools/react";
 import { app } from "../../schema";
 import { TeamDialog } from "../components/forms";
-import { StatusBadge, formatDate, sentence } from "../components/list";
+import { StatusBadge, formatCount, formatDate, sentence } from "../components/list";
 import { ConfirmButton } from "../components/confirm-button";
 import { PageHeader, PageSection } from "../components/page";
 import { useCan, useOrganization } from "../lib/organization";
 import { href, navigate } from "../lib/route";
+import { deleteTeam as removeTeam } from "../lib/mutations";
 import { useWrite } from "../lib/use-write";
 
 const teamRoles = ["lead", "member"] as const;
+
+const countLimit = 2000;
 
 export function TeamsPage() {
   const organization = useOrganization();
@@ -34,13 +37,13 @@ export function TeamsPage() {
     app.teams.where({ organizationId: organization.id }).orderBy("name", "asc"),
   );
   const { data: members = [] } = useAll(
-    app.teamAssignments.where({ organizationId: organization.id }).limit(2000),
+    app.teamAssignments.where({ organizationId: organization.id }).limit(countLimit),
   );
   const { data: releases = [] } = useAll(
-    app.releaseTeams.where({ organizationId: organization.id }).limit(2000),
+    app.releaseTeams.where({ organizationId: organization.id }).limit(countLimit),
   );
   const count = (rows: { teamId: string }[], teamId: string) =>
-    rows.filter((row) => row.teamId === teamId).length;
+    formatCount(rows.filter((row) => row.teamId === teamId).length, rows.length >= countLimit);
 
   return (
     <VStack gap={5}>
@@ -132,14 +135,9 @@ export function TeamPage({ id }: { id: string }) {
     setMembershipId(null);
   };
   const deleteTeam = () => {
-    write("Couldn't delete the team", async () => {
-      const result = await db.transaction((tx) => {
-        for (const assignment of assignments) tx.delete(app.teamAssignments, assignment.id);
-        for (const release of releases) tx.delete(app.releaseTeams, release.id);
-        tx.delete(app.teams, id);
-      });
-      await result.wait({ tier: "global" });
-    });
+    write("Couldn't delete the team", async () =>
+      (await removeTeam(db, organization.id, id)).wait({ tier: "global" }),
+    );
     navigate(href.teams);
   };
   const sortedReleases = releases

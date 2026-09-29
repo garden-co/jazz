@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
+import type { Db } from "jazz-tools";
 import { app } from "../../schema";
 import { createFixture, type FixtureProfile } from "../fixtures";
-import { authJazzClient } from "./auth-jazz-client";
 
 export const demoProfiles = ["smoke", "small"] as const satisfies readonly FixtureProfile[];
 export type DemoProfile = (typeof demoProfiles)[number];
@@ -19,8 +19,7 @@ export function isDemoProfile(value: unknown): value is DemoProfile {
  * so loading the same profile twice is a no-op and two callers never share
  * demo tenants.
  */
-export async function loadDemoData(userId: string, profile: DemoProfile, seed = 17) {
-  const db = (await authJazzClient()).db;
+export async function loadDemoData(db: Db, userId: string, profile: DemoProfile, seed = 17) {
   const fixture = createFixture(profile, seed);
   const id = (fixtureId: string) => stableUuid(`${userId}:${profile}:${seed}:${fixtureId}`);
 

@@ -6,6 +6,10 @@ export const runtime = "nodejs";
 export async function POST(request: Request) {
   const account = await requestAccount(request);
   if (!account) return Response.json({ error: "account required" }, { status: 401 });
-  const organization = await ensurePersonalOrganization(account.accountId, account.displayName);
+  const organization = await ensurePersonalOrganization(
+    account.accountId,
+    account.displayName,
+    account.email,
+  );
   return Response.json({ organizationId: organization.id });
 }

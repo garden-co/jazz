@@ -51,9 +51,24 @@ real local server: no self-promotion, no admin inserts, no cross-tenant team or
 catalogue references, viewers can't write, editors can't manage teams or
 members, and foreign labels read as empty.
 
-Catalogue numbers are unique per label. The release form checks locally for
-instant feedback, then writes in an exclusive transaction that re-checks at the
-authority, so two people can't take the same number concurrently.
+People are visible only to the labels they belong to: a signed-in account can
+read its own profile and the profiles of members of its labels, nothing more.
+To add a member, an admin enters their email. `POST /api/members` checks the
+caller is an admin of the label, looks the email up in `personEmails` (written
+only by the bootstrap route from the verified sign-in, and unreadable by
+browsers), and inserts the membership. The person needs to have signed in once.
+
+Catalogue numbers are unique per label, but the permissions don't enforce
+that: a policy can't compare a row with its siblings. `saveRelease` in
+`src/lib/mutations.ts` does, in an exclusive transaction that reads the
+number's current holders; the authority rejects the transaction if a
+concurrent one changed that read. The release form uses it, so numbers stay
+unique for writes made through the app. A client writing to `releases`
+directly could still create a duplicate.
+
+Deleting an artist that still has releases is refused the same way (Jazz has
+no foreign-key restrict yet), and deleting a release, team or member deletes
+its assignments in the same transaction.
 
 ## Demo data
 
@@ -64,27 +79,30 @@ with the caller as admin, plus synthetic members, teams, catalogues, artists and
 releases. Fixture IDs map to UUIDs derived from the caller, so loading twice is
 a no-op and callers never share demo tenants.
 
-## Fixtures and headless scenarios
+## Fixtures and benchmarks
 
-`createFixture(profile, seed)` provides public, deterministic data for three profiles:
+`createFixture(profile, seed)` in `src/fixtures.ts` generates the same data
+every time for a given profile and seed:
 
-| Profile  | Purpose                                      |
-| -------- | -------------------------------------------- |
-| `smoke`  | two tenants, quick topology/E2E receipt      |
-| `small`  | docs and local development                   |
-| `scaled` | larger owned-slice/read-amplification checks |
+| Profile  | Size                                        |
+| -------- | ------------------------------------------- |
+| `smoke`  | 2 labels, enough for a quick end-to-end run |
+| `small`  | 3 labels, for docs and local development    |
+| `scaled` | 24 labels, for larger local load checks     |
 
-`tenantOperations()` is framework-neutral. A future topology adapter should execute its declared sequence against a real client/edge/server arrangement: cold-load the membership graph, issue the indexed organization query, hydrate releases with artists, and churn release state. The authority receipt executes the tenant-isolation query against a real local edge; fixture tests do not claim to prove authorization.
+The demo-data button uses `smoke` and `small`. The Rust benchmarks in
+`benchmarks/` keep their own copy of the schema and a similar fixture, and
+measure the app's main queries: loading a label, filtering its releases,
+following release → artist relations, and updating release status.
 
-Run `pnpm --dir examples/big-label test` for the deterministic fixture and isolation receipt. The workload intentionally describes current public API capabilities only; it does not duplicate `jazz-sim`'s benchmark engine.
+`pnpm --dir examples/big-label test` runs the fixture tests and the permission
+tests. Only the permission tests, which run against a real local Jazz server,
+say anything about who can read or write what.
 
-## Coverage and planned work
+Not covered yet: schema migrations. This example doesn't invent its own
+mechanism for them.
 
-- `jazz-sim s1_saas`: tenant cold load, indexed owned-slice filtering, relations/includes, write churn.
-- Policy-graph fixture: organization → membership → team/assignment authorization shape.
-- Future blocker: schema migrations/versioned reconnect are recorded for a shared migration/topology lane. This example does not invent a migration mechanism.
-
-All identities, names, and IDs are generated public fixtures; no adopter data is used.
+All names, emails and IDs are generated; no real data is used.
 
 ## Admission boundary
 

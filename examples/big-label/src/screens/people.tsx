@@ -17,6 +17,7 @@ import { app } from "../../schema";
 import { AddMemberDialog } from "../components/forms";
 import { PageHeader, PageSection } from "../components/page";
 import { useCan, useOrganization } from "../lib/organization";
+import { removeMember } from "../lib/mutations";
 import { useWrite } from "../lib/use-write";
 import { capabilities, roleLabels, roles, isRole } from "../roles";
 
@@ -37,14 +38,9 @@ export function PeoplePage() {
       db.update(app.memberships, membershipId, { role }).wait({ tier: "global" }),
     );
   const remove = (membershipId: string) =>
-    write("Couldn't remove the member", async () => {
-      const assignments = await db.all(app.teamAssignments.where({ membershipId }));
-      const result = await db.transaction((tx) => {
-        for (const assignment of assignments) tx.delete(app.teamAssignments, assignment.id);
-        tx.delete(app.memberships, membershipId);
-      });
-      await result.wait({ tier: "global" });
-    });
+    write("Couldn't remove the member", async () =>
+      (await removeMember(db, organization.id, membershipId)).wait({ tier: "global" }),
+    );
 
   return (
     <VStack gap={6}>
@@ -140,13 +136,7 @@ export function PeoplePage() {
           ]}
         />
       </PageSection>
-      {isAdding && (
-        <AddMemberDialog
-          isOpen
-          onOpenChange={setIsAdding}
-          memberPersonIds={new Set(memberships.map((member) => member.personId))}
-        />
-      )}
+      {isAdding && <AddMemberDialog isOpen onOpenChange={setIsAdding} />}
     </VStack>
   );
 }

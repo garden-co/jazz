@@ -143,3 +143,11 @@ export function formatDate(value: Date | string | number) {
     timeZone: "UTC",
   });
 }
+
+/**
+ * Jazz has no count query yet, so counts come from bounded reads. When a read
+ * returns its full limit there may be more rows, and the count says so.
+ */
+export function formatCount(count: number, isCapped: boolean) {
+  return isCapped ? `${count.toLocaleString()}+` : count.toLocaleString();
+}

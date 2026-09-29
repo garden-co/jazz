@@ -16,5 +16,9 @@ export async function requestAccount(request: Request) {
   const { name, email } = session.claims;
   const displayName =
     typeof name === "string" && name ? name : typeof email === "string" && email ? email : null;
-  return { accountId: session.account_id, displayName: displayName ?? session.user_id };
+  return {
+    accountId: session.account_id,
+    displayName: displayName ?? session.user_id,
+    email: typeof email === "string" && email ? email : null,
+  };
 }

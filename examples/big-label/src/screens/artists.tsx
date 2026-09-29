@@ -28,6 +28,7 @@ import { ReleaseTable } from "./releases";
 import { artistStatuses } from "../fixtures";
 import { useCan, useOrganization } from "../lib/organization";
 import { href, navigate } from "../lib/route";
+import { deleteArtist } from "../lib/mutations";
 import { useWrite } from "../lib/use-write";
 
 export function ArtistsPage() {
@@ -150,8 +151,8 @@ export function ArtistPage({ id }: { id: string }) {
 
   const remove = () => {
     if (releases.length > 0) return;
-    write("Couldn't delete the artist", () =>
-      db.delete(app.artists, artist.id).wait({ tier: "global" }),
+    write("Couldn't delete the artist", async () =>
+      (await deleteArtist(db, organization.id, artist.id)).wait(),
     );
     navigate(href.artists);
   };

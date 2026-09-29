@@ -62,7 +62,10 @@ const tenantPermissions = definePermissions(app, ({ policy, session, allowedTo, 
       organizationId: row.organizationId as never,
     });
 
-  policy.people.allowRead.where({});
+  // You see your own profile and the people who share a label with you.
+  policy.people.allowRead.where(
+    anyOf([{ userId: session.user.account }, allowedTo.read("membershipsViaPerson")]),
+  );
   // Profiles are created only by the trusted bootstrap transaction. This
   // prevents a client-created duplicate from splitting a user's membership
   // identity before their personal tenant is established.
@@ -71,6 +74,11 @@ const tenantPermissions = definePermissions(app, ({ policy, session, allowedTo, 
     .whereOld({ userId: session.user.account })
     .whereNew({ userId: session.user.account });
   policy.people.allowDelete.never();
+
+  policy.personEmails.allowRead.never();
+  policy.personEmails.allowInsert.never();
+  policy.personEmails.allowUpdate.never();
+  policy.personEmails.allowDelete.never();
 
   policy.organizations.allowRead.where((row) => member(row.id));
   policy.organizations.allowInsert.never();
