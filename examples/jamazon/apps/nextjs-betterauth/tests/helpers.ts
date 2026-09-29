@@ -31,3 +31,13 @@ export function shopper(testApp: PolicyTestApp, name: string): { account: string
   });
   return { account, db };
 }
+
+/**
+ * A guest: the local-first account every visitor gets on first load, before
+ * signing in. A real guest session: no issuer, no admitted account and no
+ * custom claims; the test app derives its account from the device key.
+ */
+export function guest(testApp: PolicyTestApp, device: string): { account: string; db: TestDb } {
+  const session = { user_id: device, claims: {}, authMode: "local-first" } as const;
+  return { account: testApp.accountFor(session), db: testApp.as(session) };
+}

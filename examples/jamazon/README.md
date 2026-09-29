@@ -63,6 +63,8 @@ Configuration fails closed. Local defaults apply only to a non-production proces
 origin; any production build or start must set the origin, Jazz app, both secrets and
 `PAYMENT_PROVIDER` (see [`.env.example`](apps/nextjs-betterauth/.env.example)), or it refuses to
 start.
+That includes `next dev` on a non-loopback host (for example a LAN address or a tunnel): it
+needs the full deployment configuration too.
 
 To try Stripe test mode, set `PAYMENT_PROVIDER=stripe`, `STRIPE_SECRET_KEY=sk_test_…` and
 `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY=pk_test_…`. Live keys are refused.
@@ -83,7 +85,8 @@ pnpm --filter jamazon-nextjs-betterauth test
 
 Runs against a local Jazz server started by `createPolicyTestApp`:
 
-- `tests/permissions.test.ts`: the catalogue is public and read-only; carts are private and
+- `tests/permissions.test.ts`: signed-in shoppers and real local-first guests. The catalogue is
+  public and read-only; guest carts work before sign-in and stay private; carts are private and
   lines cannot move between them; orders and payments are readable only by their shopper and
   never writable by clients.
 - `tests/build-config.test.ts`: configuration fails closed; production never uses local

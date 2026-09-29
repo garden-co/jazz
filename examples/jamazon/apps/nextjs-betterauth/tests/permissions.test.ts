@@ -5,7 +5,7 @@ import { MAX_LINE_QUANTITY } from "../permissions";
 import { app } from "../schema";
 import { ids } from "../src/lib/ids";
 import { seedCatalogue } from "../src/server/seed";
-import { shopper, startStore } from "./helpers";
+import { guest, shopper, startStore } from "./helpers";
 
 let testApp: PolicyTestApp;
 let backend: Db;
@@ -18,20 +18,11 @@ afterEach(async () => testApp.shutdown());
 
 const strings = ids.product("JAM-001");
 
-describe("local-first guests (needs garden-co/jazz#3741)", () => {
-  it.todo("a guest reads the catalogue and cannot write it");
-  it.todo("a guest fills its own cart and cannot read another shopper's");
-  it.todo("a guest cannot read any order");
-});
-
 describe("catalogue", () => {
   it("is readable by any account, and writable by none", async () => {
-    // PolicyTestApp cannot act as a local-first guest yet; the core fix is
-    // https://github.com/garden-co/jazz/pull/3741. Until it lands, a second,
-    // unrelated account stands in for "anyone" (see the todos below).
-    const guest = shopper(testApp, "someone-else").db;
+    const visitor = guest(testApp, "visitor-device").db;
     const alice = shopper(testApp, "alice");
-    for (const db of [guest, alice.db]) {
+    for (const db of [visitor, alice.db]) {
       const products = await db.all(app.products.where({ id: strings }), { tier: "global" });
       expect(products.map((p) => p.sku)).toEqual(["JAM-001"]);
       expect(
@@ -41,7 +32,8 @@ describe("catalogue", () => {
     const [stock] = await alice.db.all(app.stock.where({ productId: strings }), { tier: "global" });
     await alice.db.expectDenied((db) => db.update(app.stock, stock!.id, { onHand: 9999 }));
     await alice.db.expectDenied((db) => db.update(app.products, strings, { priceCents: 1 }));
-    await guest.expectDenied((db) =>
+    await visitor.expectDenied((db) => db.update(app.stock, stock!.id, { onHand: 0 }));
+    await visitor.expectDenied((db) =>
       db.insert(app.categories, { slug: "free", name: "Free stuff", blurb: "", position: 0 }),
     );
   });
@@ -94,6 +86,41 @@ describe("carts", () => {
   });
 });
 
+describe("guest carts", () => {
+  it("work before sign-in and stay private to the guest's device account", async () => {
+    const visitor = guest(testApp, "visitor-device");
+    const other = guest(testApp, "other-device");
+    const alice = shopper(testApp, "alice");
+    expect(other.account).not.toBe(visitor.account);
+
+    const cartId = ids.cart(visitor.account);
+    await visitor.db
+      .upsert(app.carts, cartId, { shopper: visitor.account })
+      .wait({ tier: "global" });
+    await visitor.db
+      .upsert(app.cartLines, ids.cartLine(cartId, strings), {
+        cartId,
+        productId: strings,
+        quantity: 3,
+      })
+      .wait({ tier: "global" });
+    expect(
+      (await visitor.db.all(app.cartLines.where({ cartId }), { tier: "global" })).map(
+        (line) => line.quantity,
+      ),
+    ).toEqual([3]);
+
+    for (const outsider of [other.db, alice.db]) {
+      expect(await outsider.all(app.carts.where({ id: cartId }), { tier: "global" })).toEqual([]);
+      await outsider.expectDenied((db) =>
+        db.insert(app.cartLines, { cartId, productId: ids.product("JAM-002"), quantity: 1 }),
+      );
+    }
+    // A guest cannot open a cart in a signed-in shopper's name either.
+    await visitor.db.expectDenied((db) => db.insert(app.carts, { shopper: alice.account }));
+  });
+});
+
 describe("orders", () => {
   it("are visible only to their shopper and are never written by clients", async () => {
     const alice = shopper(testApp, "alice");
@@ -141,6 +168,8 @@ describe("orders", () => {
     expect(await alice.db.all(app.payments.where({ orderId }), { tier: "global" })).toHaveLength(1);
     expect(await mallory.db.all(app.orders.where({ id: orderId }), { tier: "global" })).toEqual([]);
     expect(await mallory.db.all(app.payments.where({ orderId }), { tier: "global" })).toEqual([]);
+    const visitor = guest(testApp, "visitor-device").db;
+    expect(await visitor.all(app.orders.where({ id: orderId }), { tier: "global" })).toEqual([]);
 
     // Only the backend marks an order paid or shipped.
     await alice.db.expectDenied((db) => db.update(app.orders, orderId, { status: "paid" }));

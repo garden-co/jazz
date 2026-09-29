@@ -303,10 +303,10 @@ function conflictCode(error: unknown): string | undefined {
     (error instanceof Error && error.name === "PersistedWriteRejectedError")
   )
     return (error as PersistedWriteRejectedError).code;
-  // Known core gap: with the native runtime, a conflict detected while the
-  // client ticks is thrown from `wait()` as a plain Error "(code): reason"
-  // rather than a PersistedWriteRejectedError. Read the code from that shape
-  // until the runtime reports it as a rejection.
+  // Workaround for core gap https://github.com/garden-co/jazz/issues/2713:
+  // with the native runtime, a conflict detected while the client ticks is
+  // thrown from `wait()` as a plain Error "(code): reason" rather than a
+  // PersistedWriteRejectedError. Delete this fallback when #2713 lands.
   const match = error instanceof Error ? /^\((\w+)\): /.exec(error.message) : null;
   return match?.[1];
 }
