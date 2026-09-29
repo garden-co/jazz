@@ -49,6 +49,7 @@ Invariant digest:
 
 - `INV-SYNC-37`: LocalOnly propagation MUST remain on the calling node. Every remote subscription with propagate_upstream=false MUST be rejected regardless of identity, trust, role or worker transport.
 - `INV-SYNC-38`: An extra local query input absent from a completed selected-authority scope MUST be revalidated; scope absence or Unknown MUST NOT assert deletion or access loss. Bounded batches MUST preserve eventual retry/progression for supported active queries.
+- `INV-SYNC-48`: A fresh strict (Global) read of a current/default single-table scalar query MUST NOT report settled while a row the client holds live, whose local winner is accepted at Global and which matches the query locally, is absent from the settled authority answer: exactly those rows are probed through `CurrentRowsRequest` and the receipt's carriers (deleted images included) are ingested first; access loss does not redact the local copy. Agreeing views settle without a probe; an Unknown or unanswered probe, or discovery exceeding its bound, releases settlement on the authority answer alone.
 - `INV-SYNC-39`: Confirmed current unavailability MUST be scoped to the exact effective identity/claims and filter current application inputs before joins, counts and limits. It MUST NOT erase shared content, expose the cause, or affect SYSTEM and other contexts.
 - `INV-SYNC-40`: Readmission MUST follow complete authorized native content ingestion and fresh correlated evidence. Durable per-row denial and clear watermarks MUST survive reopen and prevent stale replies from reversing a newer decision; authoritative inclusion MUST be able to revalidate an excluded row.
 - `INV-SYNC-41`: A partial client relay MUST NOT authorize query or exact-version repair bytes using cached policy inputs. Core authorizes disclosure for the admitted reader; delegated client scopes remain client-scoped across local relay links. SYSTEM reconciliation MUST NOT create access-loss markers for an ordinary reader.
@@ -992,6 +993,42 @@ value. Revalidating that extra task obtains its readable current native version;
 local IVM then removes it from the unfinished list while an all-tasks query can
 still show the updated task. A live-exit push is an eager optimization; a missed
 push must not be the only opportunity to repair this query after reconnect.
+
+Strict (Global) reads apply the same comparison before their first settlement
+(`INV-SYNC-48`). Query programs carry no deletion witnesses: a deletion reaches
+a receiver only as a row delta on a coverage live when it happened, or through
+that same usage's stored-watermark catch-up. A row retained from an earlier,
+closed read can therefore be live locally while a fresh settled authority
+answer simply omits it. Before a fresh strict stream (and so a `Remote`
+one-shot, which reads through one) first reports `settled`, the receiver
+compares the settled authority input rows with the rows its own local store
+holds live for the same query. The local inventory comes from an ordinary
+Local-tier maintained graph of the same query, opened only after the stream's
+own graph has installed and evaluated the settled closure and the query runtime
+is otherwise idle, so it never queues behind large-value chunk work that the
+same sync turn must request. Rows whose current local winner is an accepted
+Global transaction and which the authority omitted are probed through the
+ordinary `CurrentRowsRequest` path, in `MAX_CURRENT_ROWS` batches, under the
+stream's admitted policy binding. Settlement is withheld until each receipt's
+carriers are ingested; a deleted image deletes the row locally. A
+`CurrentUnavailable` outcome is access loss, which the settled result already
+omits: it does not redact the local copy (`INV-SYNC-14`). Pending local writes
+are never candidates. Agreeing views settle in the same refresh without any
+round trip; the cost is one local evaluation of the query. Discovery that
+cannot finish within five seconds, and an Unknown, unanswered, or timed-out
+probe, release settlement on the authority's answer alone, as before; neither
+asserts deletion or access loss. The initial scope is the current/default
+single-table scalar query (no joins, includes, projections, aggregates,
+windows, or policy branches), filtered or not; a stream that already opens
+settled on a coverage live before it is not rechecked.
+
+For example, an editor reads an invitation, the read closes, and the owner then
+deletes the invitation while nothing on the editor covers it. The editor's next
+`Remote` read of that invitation receives an empty authority answer, probes the
+held row, ingests its deleted image, and only then settles: both the returned
+rows and later local-only reads omit the invitation. Had the owner instead
+revoked the editor's read access, the probe would answer `CurrentUnavailable`:
+the settled read omits the invitation and the local copy stays readable.
 
 This exchange also crosses local foreground-to-worker links. A default local
 query may read through a durable worker before reaching Core; the

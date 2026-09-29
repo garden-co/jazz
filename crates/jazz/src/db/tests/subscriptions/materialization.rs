@@ -811,6 +811,13 @@ fn client_tier_routing_scans_local_overlay_but_uses_global_settled_members() {
     db.tick().unwrap();
     server.tick().unwrap();
     db.tick().unwrap();
+    // The client holds `server_overemitted` live at Global while the
+    // authority omits it, so first settlement waits for one current-rows
+    // probe of exactly that row, applied on one further client turn
+    // (INV-SYNC-48).
+    server.tick().unwrap();
+    db.tick().unwrap();
+    db.tick().unwrap();
     assert_eq!(
         ids(opened_rows(next_settled_opening(&mut global_subscription))),
         BTreeSet::from([published]),
