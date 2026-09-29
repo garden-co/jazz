@@ -5,6 +5,7 @@ import { createAccountManager } from "jazz-tools";
 import { createJazzClient, JazzClientProvider, type JazzClient } from "jazz-tools/react";
 import { authClient, getJwtFromBetterAuth } from "@/src/lib/auth-client";
 import { loginOrRegister } from "@/src/lib/account-enrollment";
+import { jazzEnv } from "@/src/lib/jazz-env";
 import { StatusScreen } from "./status-screen";
 
 const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID ?? "music-agent-local";
@@ -22,7 +23,7 @@ export function JazzProvider({ children }: { children: React.ReactNode }) {
     let cancelled = false;
     setError(undefined);
     void (async () => {
-      const accounts = await createAccountManager({ appId, serverUrl, env: "dev" });
+      const accounts = await createAccountManager({ appId, serverUrl, env: jazzEnv });
       const credential = { getToken: requireBetterAuthToken };
       const account = await loginOrRegister(accounts, credential);
       const opened = await createJazzClient({ appId, serverUrl, account });

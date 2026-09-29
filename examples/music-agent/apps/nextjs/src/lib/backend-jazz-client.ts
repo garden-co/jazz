@@ -2,9 +2,8 @@ import { app } from "@/schema";
 import permissions from "@/permissions";
 import type { JazzClient } from "jazz-tools/backend";
 import { createRequire as createRequireFromModule } from "node:module";
+import { jazzEnv } from "./jazz-env";
 import { serverSecret } from "./server-secret";
-
-const configuredIssuer = process.env.NEXT_PUBLIC_APP_ORIGIN ?? "http://127.0.0.1:3000";
 
 const createRequire =
   process.getBuiltinModule?.("module")?.createRequire ?? createRequireFromModule;
@@ -32,7 +31,7 @@ export async function backendJazzClient(): Promise<JazzClient> {
     initial: {
       backendSecret: serverSecret("BACKEND_SECRET", "music-agent-development-backend-secret"),
     },
-    env: configuredIssuer === "http://127.0.0.1:3000" ? "dev" : "prod",
+    env: jazzEnv,
     tier: "global",
   }));
   try {
