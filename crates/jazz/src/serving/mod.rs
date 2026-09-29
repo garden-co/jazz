@@ -8,7 +8,7 @@
 //! and metrics snapshots, and graceful drain state while the executable server
 //! shape is still being designed.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::net::SocketAddr;
@@ -231,6 +231,10 @@ pub struct InMemoryServerShell {
     runtime_schema_state: RuntimeSchemaState,
     metrics: InMemoryServerShellMetrics,
     drain_state: DrainState,
+    /// Canonical frames queued for any downstream session since startup.
+    /// Shared by every session transport so a host turn can tell whether
+    /// its tick produced output for a session other than the one it serves.
+    session_frames_queued: Rc<Cell<u64>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -321,6 +325,18 @@ impl fmt::Debug for ShellPeerConnection {
 #[derive(Clone, Debug, Default)]
 pub(super) struct SharedWireTransport {
     queues: Rc<RefCell<WireQueues>>,
+    /// Monotonic count of accepted outbound frames, shared across the
+    /// shell's downstream sessions (a private cell for upstream links).
+    queued: Rc<Cell<u64>>,
+}
+
+impl SharedWireTransport {
+    fn counting(queued: &Rc<Cell<u64>>) -> Self {
+        Self {
+            queues: Rc::default(),
+            queued: Rc::clone(queued),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -366,6 +382,7 @@ impl WireTransport for SharedWireTransport {
             return Err(TransportError::Backpressure);
         }
         queues.outbound.push_back(frame);
+        self.queued.set(self.queued.get().wrapping_add(1));
         Ok(())
     }
 
@@ -906,6 +923,7 @@ impl InMemoryServerShell {
             runtime_schema_state: RuntimeSchemaState::default(),
             metrics: InMemoryServerShellMetrics::default(),
             drain_state: DrainState::Running,
+            session_frames_queued: Rc::new(Cell::new(0)),
         };
         if bootstrap_runtime_schema {
             shell.bootstrap_runtime_schema(bootstrap_schema)?;
@@ -1125,7 +1143,7 @@ impl InMemoryServerShell {
         let generation = self
             .allocate_session_generation()
             .map_err(|_| ShellError::Storage("server session generation exhausted".into()))?;
-        let transport = SharedWireTransport::default();
+        let transport = SharedWireTransport::counting(&self.session_frames_queued);
         let transport_adapter = Box::new(WireTransportAdapter::new_with_session_context(
             transport.clone(),
             crate::wire::WIRE_PROTOCOL_VERSION,
@@ -1291,7 +1309,7 @@ impl InMemoryServerShell {
         // immutable authenticated binding but not the capability epoch issued
         // to the detached connection.
         cursor.refresh_scope_relay_admission_epoch();
-        let transport = SharedWireTransport::default();
+        let transport = SharedWireTransport::counting(&self.session_frames_queued);
         let connection = self.db.accept_subscriber_with_claims(
             Box::new(WireTransportAdapter::current(transport.clone())),
             resume.identity,
@@ -1528,6 +1546,13 @@ impl InMemoryServerShell {
     /// Run one expiry pass from the host's maintenance timer.
     pub async fn evict_expired_staged_large_values(&self) -> ShellResult<usize> {
         self.db.evict_expired_staged_large_values().await
+    }
+
+    /// Monotonic count of canonical frames queued for any downstream session.
+    /// Hosts compare it across a tick: it only advances when the tick itself
+    /// produced session output, never merely because output is still queued.
+    pub(super) fn session_frames_queued(&self) -> u64 {
+        self.session_frames_queued.get()
     }
 
     /// Drain encoded wire frames ready to send to the host for a session.

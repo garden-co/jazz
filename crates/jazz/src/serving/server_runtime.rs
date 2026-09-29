@@ -1544,13 +1544,17 @@ impl ServerRuntimeHandle {
                 if reply.is_closed() {
                     return;
                 }
+                let queued_before = shell.session_frames_queued();
                 let result = match shell.tick_async().await {
                     Ok(()) => shell
                         .take_frames(session)
                         .map_err(|error| error.to_string()),
                     Err(error) => Err(error.to_string()),
                 };
-                let made_progress = result.as_ref().is_ok_and(|frames| !frames.is_empty());
+                // See `tick_take`: re-arm on frames taken here or produced for
+                // any session by this tick, never on output merely queued.
+                let made_progress = result.as_ref().is_ok_and(|frames| !frames.is_empty())
+                    || shell.session_frames_queued() != queued_before;
                 let _ = reply.send(result);
                 if made_progress {
                     notify_shell_activity(&activity_tx);
@@ -1564,6 +1568,7 @@ impl ServerRuntimeHandle {
         let activity_tx = self.inner.activity_tx.clone();
         self.run_async(move |shell| {
             Box::pin(async move {
+                let queued_before = shell.session_frames_queued();
                 let result = match shell.tick_async().await {
                     Ok(()) => shell
                         .take_frames(session)
@@ -1576,9 +1581,16 @@ impl ServerRuntimeHandle {
                 // consolidation-spin feeder. One notification must never buy an
                 // unbounded loop, and delivery must never stall mid-reset; frames
                 // produced is exactly the signal that separates the two.
-                if let Ok(frames) = &result
-                    && !frames.is_empty()
-                {
+                //
+                // "Produced" covers every session, not only this one: the tick
+                // serves all connections, so it can queue another session's
+                // update while this session receives nothing. Only that
+                // session's own activity wake drains it, so announce it here.
+                // The counter advances only when a tick queues new output, so a
+                // session that never drains its backlog cannot re-arm an empty
+                // tick.
+                let produced = shell.session_frames_queued() != queued_before;
+                if produced || result.as_ref().is_ok_and(|frames| !frames.is_empty()) {
                     notify_shell_activity(&activity_tx);
                 }
                 result
