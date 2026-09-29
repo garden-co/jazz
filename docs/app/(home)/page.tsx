@@ -21,10 +21,11 @@ import {
   SchemaDiagram,
   StackDiagram,
 } from "@/components/home/diagrams";
-import { HomeCode } from "@/components/home/home-code";
+import { CodeWindow } from "@/components/home/code-window";
 import { PricingCalculator } from "@/components/home/pricing-calculator";
 import { CreateJazzCommand } from "@/components/home/create-jazz-command";
 import { pricingMeters } from "@/lib/home-pricing";
+import { blogSource } from "@/lib/source";
 
 export const metadata: Metadata = {
   title: "Jazz - The database that syncs.",
@@ -105,6 +106,7 @@ const features: {
   body: ReactNode;
   link: { label: string; href: string };
   diagram: ReactNode;
+  caption: string;
 }[] = [
   {
     id: "consistency",
@@ -124,6 +126,7 @@ const features: {
     ),
     link: { label: "How sync works", href: "/docs/concepts/how-sync-works" },
     diagram: <ConsistencyDiagram />,
+    caption: "When a write becomes visible, locally and globally",
   },
   {
     id: "permissions",
@@ -142,6 +145,7 @@ const features: {
     ),
     link: { label: "Permissions", href: "/docs/auth/permissions" },
     diagram: <PermissionsDiagram />,
+    caption: "A query and its read policy, planned together",
   },
   {
     id: "history",
@@ -160,6 +164,7 @@ const features: {
     ),
     link: { label: "Branches", href: "/docs/concepts/branches" },
     diagram: <HistoryDiagram />,
+    caption: "The history of one row, with a draft branch",
   },
   {
     id: "schema",
@@ -178,6 +183,7 @@ const features: {
     ),
     link: { label: "Migrations", href: "/docs/schemas/migrations" },
     diagram: <SchemaDiagram />,
+    caption: "Two app versions reading and writing one table",
   },
   {
     id: "backend",
@@ -196,6 +202,7 @@ const features: {
     ),
     link: { label: "Server setup", href: "/docs/getting-started/server-setup" },
     diagram: <BackendDiagram />,
+    caption: "What moves out of your backend into Jazz",
   },
 ];
 
@@ -248,8 +255,36 @@ function SectionHeader({
   );
 }
 
-function Figure({ children, className }: { children: ReactNode; className?: string }) {
-  return <figure className={`home-figure ${className ?? ""}`}>{children}</figure>;
+function Figure({
+  children,
+  caption,
+  className,
+  number,
+}: {
+  children: ReactNode;
+  caption?: string;
+  className?: string;
+  number?: number;
+}) {
+  return (
+    <figure className={`home-figure-frame ${className ?? ""}`}>
+      <div className="home-figure">{children}</div>
+      {caption ? (
+        <figcaption className="home-figcaption">
+          {number ? <span className="home-figcaption-number">Fig. {number}</span> : null}
+          {caption}
+        </figcaption>
+      ) : null}
+    </figure>
+  );
+}
+
+const dateFormatter = new Intl.DateTimeFormat("en-US", { dateStyle: "medium" });
+
+function latestPosts(count: number) {
+  return [...blogSource.getPages()]
+    .sort((left, right) => new Date(right.data.date).getTime() - new Date(left.data.date).getTime())
+    .slice(0, count);
 }
 export default function HomePage() {
   return (
@@ -300,7 +335,11 @@ export default function HomePage() {
               copy of the rows it uses, and Core keeps everyone consistent and secure.
             </Text>
           </SectionHeader>
-          <Figure className="home-figure-wide mt-12">
+          <Figure
+            className="home-figure-wide mt-12"
+            number={1}
+            caption="Where Jazz runs. Every peer keeps a local copy of the rows it uses; Core authorizes and stores every write."
+          >
             <StackDiagram />
           </Figure>
           <div className="home-facts mt-10">
@@ -324,10 +363,33 @@ export default function HomePage() {
               apply locally at once and sync in the background.
             </Text>
           </SectionHeader>
-          <div className="mt-12 grid gap-4 lg:grid-cols-3">
-            <HomeCode title="schema.ts" language="ts" code={schemaCode} />
-            <HomeCode title="permissions.ts" language="ts" code={permissionsCode} />
-            <HomeCode title="OpenTodos.tsx" language="tsx" code={componentCode} />
+          <div className="home-code-grid mt-12">
+            <CodeWindow
+              files={[
+                { name: "OpenTodos.tsx", language: "tsx", code: componentCode },
+                { name: "schema.ts", language: "ts", code: schemaCode },
+                { name: "permissions.ts", language: "ts", code: permissionsCode },
+              ]}
+            />
+            <Figure
+              className="home-video-figure"
+              number={2}
+              caption="The todo example on two devices, recorded from the running app."
+            >
+              <video
+                className="home-video"
+                src="/examples/videos/todo-two-devices.mp4"
+                poster="/examples/videos/todo-two-devices.jpg"
+                autoPlay
+                muted
+                loop
+                playsInline
+                aria-label="Two browser windows running the todo example. A todo added or checked off in one appears in the other."
+              />
+              <AppLink href="/examples" className="home-video-link font-medium">
+                More examples and benchmarks →
+              </AppLink>
+            </Figure>
           </div>
           <Text as="p" display="block" color="secondary" className="mt-6">
             Also for Vue, Svelte, Solid, React Native, plain TypeScript and Rust.{" "}
@@ -338,14 +400,14 @@ export default function HomePage() {
 
       <section className="home-section">
         <div className="home-container">
-          <SectionHeader id="features" title="Built into the database">
-            <Text as="p" display="block" type="large" color="secondary" weight="normal">
-              The hard parts of shared, live data, handled once in the database instead of in every
-              app.
-            </Text>
-          </SectionHeader>
+          <Heading level={2} type="display-3" id="features" className="home-anchor home-statement">
+            Built into the database.{" "}
+            <span className="home-statement-muted">
+              The hard parts of shared, live data, handled once instead of in every app.
+            </span>
+          </Heading>
           <div className="mt-12">
-            {features.map((feature) => (
+            {features.map((feature, index) => (
               <article key={feature.id} className="home-feature">
                 <div className="home-feature-text">
                   <Heading level={3} id={feature.id} className="home-anchor">
@@ -356,7 +418,13 @@ export default function HomePage() {
                     {feature.link.label} →
                   </AppLink>
                 </div>
-                <Figure className="home-feature-figure">{feature.diagram}</Figure>
+                <Figure
+                  className="home-feature-figure"
+                  number={index + 3}
+                  caption={feature.caption}
+                >
+                  {feature.diagram}
+                </Figure>
               </article>
             ))}
           </div>
@@ -447,6 +515,41 @@ export default function HomePage() {
               <PricingCalculator />
             </div>
           </div>
+        </div>
+      </section>
+
+      <section className="home-section">
+        <div className="home-container">
+          <div className="flex flex-wrap items-end justify-between gap-4">
+            <Heading level={2} type="display-3" id="blog" className="home-anchor">
+              From the blog
+            </Heading>
+            <AppLink href="/blog" className="font-medium">
+              All posts →
+            </AppLink>
+          </div>
+          <ol className="home-posts mt-10">
+            {latestPosts(3).map((post) => (
+              <li key={post.url} className="home-post">
+                <Text as="p" display="block" type="supporting" color="secondary">
+                  <time dateTime={new Date(post.data.date).toISOString().slice(0, 10)}>
+                    {dateFormatter.format(new Date(post.data.date))}
+                  </time>{" "}
+                  · {post.data.author}
+                </Text>
+                <Heading level={3} className="mt-3">
+                  <a href={post.url} className="home-post-link">
+                    {post.data.title}
+                  </a>
+                </Heading>
+                {post.data.description ? (
+                  <Text as="p" display="block" color="secondary" className="mt-2">
+                    {post.data.description}
+                  </Text>
+                ) : null}
+              </li>
+            ))}
+          </ol>
         </div>
       </section>
 

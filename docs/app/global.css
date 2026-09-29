@@ -375,6 +375,109 @@ h6 {
 .home-code {
   height: 100%;
 }
+/* Figures: the frame holds the figure surface and its caption. A faint
+   dot grid behind the diagram marks it as a technical drawing. */
+.home-figure-frame {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-3);
+  min-width: 0;
+}
+.home-figure {
+  background-image: radial-gradient(var(--color-border) 1px, transparent 1px);
+  background-size: 16px 16px;
+  background-position: -8px -8px;
+}
+.home-figcaption {
+  display: flex;
+  gap: var(--spacing-3);
+  font-size: var(--text-supporting-size);
+  line-height: 1.5;
+  color: var(--color-text-secondary);
+}
+.home-figcaption-number {
+  flex: none;
+  font-family: var(--font-family-code);
+  color: var(--color-text-primary);
+}
+.home-statement {
+  max-width: 56rem;
+}
+.home-statement-muted {
+  color: var(--color-text-secondary);
+}
+.home-code-grid {
+  display: grid;
+  gap: var(--spacing-6);
+}
+@media (min-width: 1024px) {
+  .home-code-grid {
+    grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+    align-items: start;
+  }
+}
+.home-code-window {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-container);
+  background-color: var(--color-background-card);
+  overflow: hidden;
+}
+.home-code-window > [role="tablist"] {
+  padding-inline: var(--spacing-3);
+}
+.home-code-window .home-code {
+  border: 0;
+  border-radius: 0;
+}
+.home-video-figure .home-figure {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-4);
+  padding: 0;
+  border: 0;
+  background: none;
+  overflow: visible;
+}
+.home-video {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: var(--radius-element);
+  background-color: var(--color-background-muted);
+}
+.home-posts {
+  display: grid;
+  gap: var(--spacing-8);
+  list-style: none;
+  padding: 0;
+}
+@media (min-width: 768px) {
+  .home-posts {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+.home-post {
+  position: relative;
+  border-top: 1px solid var(--color-border-emphasized);
+  padding-top: var(--spacing-5);
+}
+.home-post-link {
+  color: inherit;
+  text-decoration: none;
+}
+.home-post-link::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+}
+.home-post:hover .home-post-link {
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
 @media (max-width: 767px) {
   /* Keep diagram text legible on phones: scroll the figure sideways
      instead of shrinking it. */
@@ -385,14 +488,14 @@ h6 {
   .home-figure > svg {
     min-width: 34rem;
   }
-  .home-figure-wide > svg {
+  .home-figure-wide .home-figure > svg {
     min-width: 44rem;
   }
   .home-table table {
     min-width: 34rem;
   }
 }
-.home-figure-wide > svg {
+.home-figure-wide .home-figure > svg {
   max-width: 64rem;
   margin-inline: auto;
 }
