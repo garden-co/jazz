@@ -5,7 +5,11 @@ import { useRouter } from "next/navigation";
 import { Search } from "lucide-react";
 import { Button } from "@astryxdesign/core/Button";
 import { IconButton } from "@astryxdesign/core/IconButton";
-import { CommandPalette, CommandPaletteInput } from "@astryxdesign/core/CommandPalette";
+import {
+  CommandPalette,
+  CommandPaletteInput,
+  useCommandPaletteContext,
+} from "@astryxdesign/core/CommandPalette";
 import { Icon } from "@astryxdesign/core/Icon";
 import { Kbd } from "@astryxdesign/core/Kbd";
 import { Text } from "@astryxdesign/core/Text";
@@ -61,6 +65,38 @@ function Marked({ text }: { text: string }) {
       part
     ),
   );
+}
+
+/**
+ * Search input that highlights the first result of each new query, so Enter
+ * opens it without an ArrowDown first. Astryx `CommandPalette` leaves the
+ * highlight at -1 after each search and has no option for this yet (an upstream
+ * prop is the proper home); this uses only its public context.
+ */
+function SearchInput() {
+  const palette = useCommandPaletteContext();
+  const query = palette?.search ?? "";
+  const items = palette?.selectableItems;
+  const setHighlightedIndex = palette?.setHighlightedIndex;
+  // The query whose first result was last highlighted. Results change more than
+  // once per query (instant filtering, then the fetched results), and a later
+  // change must not override an ArrowDown or hover the user already made.
+  const highlightedFor = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!items || !setHighlightedIndex) return;
+    const first = items.findIndex((item) => !item.disabled);
+    if (query === "" || first < 0) {
+      highlightedFor.current = null;
+      setHighlightedIndex(-1);
+      return;
+    }
+    if (highlightedFor.current === query) return;
+    highlightedFor.current = query;
+    setHighlightedIndex(first);
+  }, [query, items, setHighlightedIndex]);
+
+  return <CommandPaletteInput placeholder="Search the docs" />;
 }
 
 /** Search trigger styled as a field, for the end of the desktop top nav. */
@@ -151,7 +187,7 @@ export function SiteSearch({
       onOpenChange={setOpen}
       searchSource={source}
       label="Search the docs"
-      input={<CommandPaletteInput placeholder="Search the docs" />}
+      input={<SearchInput />}
       emptyBootstrapText="Type to search the docs"
       emptySearchText="No results"
       onValueChange={(id) => {

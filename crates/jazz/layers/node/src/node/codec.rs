@@ -4635,6 +4635,7 @@ pub(super) fn positional_cells_from_map(
                 .get(&column.name)
                 .cloned()
                 .map(|value| {
+                    let value = column.storage_value(value);
                     validate_cell_value(column, &value)?;
                     Ok(value)
                 })
