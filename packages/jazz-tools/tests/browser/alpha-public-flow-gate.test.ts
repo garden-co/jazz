@@ -238,15 +238,15 @@ describe("alpha public package flow", () => {
       })
       .wait({ tier: "local" });
 
-    await expectTodoSummariesForQuery(db, openTodos, ["Starts open:open"], "local");
+    await expectTodoSummariesForQuery(db, openTodos, ["Starts open:open"], "local-first");
     await waitForSnapshotSummaries(snapshots, ["Starts open:open"], "initial open predicate");
 
     await db.update(app.todos, startsOpen.id, { done: true }).wait({ tier: "local" });
-    await expectTodoSummariesForQuery(db, openTodos, [], "local");
+    await expectTodoSummariesForQuery(db, openTodos, [], "local-first");
     await waitForSnapshotSummaries(snapshots, [], "row leaves open predicate after update");
 
     await db.update(app.todos, startsDone.id, { done: false }).wait({ tier: "local" });
-    await expectTodoSummariesForQuery(db, openTodos, ["Starts done:open"], "local");
+    await expectTodoSummariesForQuery(db, openTodos, ["Starts done:open"], "local-first");
     await waitForSnapshotSummaries(
       snapshots,
       ["Starts done:open"],
@@ -1011,7 +1011,7 @@ async function waitForRichTodos(
   predicate: (todos: RichTodo[]) => boolean,
   label: string,
 ): Promise<RichTodo[]> {
-  return await waitForQuery(db, query, predicate, label, 45_000, "global");
+  return await waitForQuery(db, query, predicate, label, 45_000, "remote");
 }
 
 function titlesEqual(rows: Todo[], titles: string[]): boolean {

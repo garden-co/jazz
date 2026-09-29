@@ -133,7 +133,7 @@ describe("Db.one", () => {
     } as any);
 
     expect(query.mock.calls[0]?.[1]).toEqual({
-      tier: "local",
+      tier: "local-first",
       localUpdates: "deferred",
       openTransactionId: "00000000000070008000000000000001",
     });

@@ -519,7 +519,7 @@ describe("raw websocket private read gate", () => {
             predicate as (rows: unknown[]) => boolean,
             `Bob subscription should settle: ${label}`,
             15_000,
-            { tier: "global" },
+            { tier: "remote" },
           ).then((unsubscribe) => {
             unsubscribeSubscriptions.push(unsubscribe);
           }),
