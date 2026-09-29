@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -58,4 +66,43 @@ test("a source without embedded.html fails validation without destroying the exi
 
   assert.notEqual(result.status, 0, result.stderr);
   assert.equal(readFileSync(join(destination, "embedded.html"), "utf8"), "old embedded content");
+});
+
+test("a directory named embedded.html is rejected without replacing the existing overlay", (t) => {
+  const { source, destination, fixtureScript } = makeFixture(t);
+  mkdirSync(join(source, "embedded.html"), { recursive: true });
+
+  const result = runStage(fixtureScript);
+
+  assert.notEqual(result.status, 0, result.stderr);
+  assert.equal(readFileSync(join(destination, "embedded.html"), "utf8"), "old embedded content");
+});
+
+test("an embedded.html symlink escaping the source is rejected without replacing the existing overlay", (t) => {
+  const { source, destination, fixtureScript } = makeFixture(t);
+  mkdirSync(source, { recursive: true });
+  const outsideSource = join(dirname(source), "outside.html");
+  writeFileSync(outsideSource, "outside content");
+  symlinkSync(outsideSource, join(source, "embedded.html"));
+
+  const result = runStage(fixtureScript);
+
+  assert.notEqual(result.status, 0, result.stderr);
+  assert.equal(readFileSync(join(destination, "embedded.html"), "utf8"), "old embedded content");
+});
+
+test("a previous interrupted promotion restores its backup on the next invocation", (t) => {
+  const { destination, fixtureScript } = makeFixture(t);
+  const backup = join(dirname(destination), ".inspector-overlay-backup");
+  rmSync(destination, { recursive: true, force: true });
+  mkdirSync(backup, { recursive: true });
+  writeFileSync(join(backup, "embedded.html"), "recoverable embedded content");
+
+  const result = runStage(fixtureScript);
+
+  assert.notEqual(result.status, 0, result.stderr);
+  assert.equal(
+    readFileSync(join(destination, "embedded.html"), "utf8"),
+    "recoverable embedded content",
+  );
 });
