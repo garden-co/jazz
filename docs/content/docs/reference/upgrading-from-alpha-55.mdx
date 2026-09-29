@@ -127,8 +127,8 @@ newer build:
 - Local writes are kept. When the page loads a newer build of your app, the same account comes
   back and resubmits them, and the server checks them like any other write. Exclusive
   transactions are the exception: the alpha.55 build stored them without the row records an
-  alpha.58 server requires, so one whose query reads returned any rows is rejected with
-  `exclusive_conflict` (see [In alpha.58](#in-alpha58)).
+  alpha.58 server requires, so one whose queries, table reads or counts match any rows on the
+  server is rejected with `exclusive_conflict` (see [In alpha.58](#in-alpha58)).
 
 To keep this window short, ship the upgraded app build together with the server upgrade, and make
 sure your HTML isn't cached: a cached `index.html` keeps loading the old client.
@@ -157,9 +157,19 @@ Clients now connect straight to the core server, which authorizes and confirms w
 
 The server now checks an exclusive transaction against the rows it actually read, including counts
 and other aggregates, and rejects the commit with `exclusive_conflict` if any of them changed. It
-needs the row records that alpha.58 clients send with each exclusive read, so an exclusive
-transaction from an older client whose query read returned any rows is rejected with
-`exclusive_conflict` on every attempt, until the client is upgraded. Retrying doesn't help.
+needs the row records that alpha.58 clients send with each exclusive read. So an exclusive
+transaction from an older client is rejected with `exclusive_conflict` on every attempt until the
+client is upgraded, whenever one of its queries, table reads or counts matches any rows on the
+server. Retrying doesn't help. Reads of a single row by id are not affected.
+
+Joins, includes and relations inside an exclusive transaction are checked against just the related
+rows the query could have consulted, so a write to an unrelated row doesn't conflict. Some reads
+can't be checked this precisely yet: lookup and flat joins, unions, recursive traversals
+(`gather`), inherited access, policy branches, and `includeDeleted` together with a join or
+include. Inside an exclusive transaction these throw
+`Reading <pattern> is not supported in exclusive transactions yet` instead of running. Filtered
+reads of a single table, and joins, includes and relations keyed by column equality or reference
+arrays, are supported.
 
 If your app uses exclusive transactions, ship the alpha.58 client build together with the server
 upgrade. Other writes and reads from alpha.56 and alpha.57 clients keep working.
