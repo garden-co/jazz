@@ -134,7 +134,7 @@ export function SessionPage({ sessionId }: { sessionId: string }) {
   const onToggleStep = useCallback(
     async (trackId: string, position: number, enabled: boolean) => {
       if (!patternId) return;
-      const row = await stepRow({ sessionId, trackId, patternId, position }, enabled);
+      const row = stepRow({ sessionId, trackId, patternId, position }, enabled);
       await reportWrite(
         db.upsert(app.steps, row.id, row.data).wait({ tier: "global" }),
         "Pad update",

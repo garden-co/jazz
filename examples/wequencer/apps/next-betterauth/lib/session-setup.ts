@@ -17,9 +17,9 @@ function instrumentName(position: number) {
 type StepAddress = { sessionId: string; trackId: string; patternId: string; position: number };
 
 /** The derived row id and full row for one pad, ready to upsert. */
-export async function stepRow(step: StepAddress, enabled: boolean) {
+export function stepRow(step: StepAddress, enabled: boolean) {
   return {
-    id: await stepId(step.trackId, step.patternId, step.position),
+    id: stepId(step.trackId, step.patternId, step.position),
     data: {
       session_id: step.sessionId,
       track_id: step.trackId,
@@ -65,7 +65,7 @@ export async function createSession(
       });
       for (let step = 0; step < MAX_STEPS; step += 1) {
         if (!starterStep(instrument, step)) continue;
-        const row = await stepRow(
+        const row = stepRow(
           { sessionId: session.id, trackId: track.id, patternId: pattern.id, position: step },
           true,
         );

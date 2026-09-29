@@ -3,6 +3,7 @@ import { createAccountManager } from "../../../../../../packages/jazz-tools/src/
 import type { AccountHandle } from "../../../../../../packages/jazz-tools/src/accounts/state.js";
 import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue.js";
 import { createDb } from "../../../../../../packages/jazz-tools/src/runtime/default-create-db.js";
+import { PersistedWriteRejectedError } from "../../../../../../packages/jazz-tools/src/runtime/client.js";
 import type { Db } from "../../../../../../packages/jazz-tools/src/runtime/db.js";
 import {
   sleep,
@@ -640,12 +641,12 @@ describe("Wequencer cross-topology recovery", () => {
                 "viewer reads the session's steps",
                 15_000,
               );
-              await expect(
+              await expectPermissionDenied(
                 viewer
                   .update(app.steps, viewerSteps[0]!.id, { enabled: true })
                   .wait({ tier: "global" }),
-              ).rejects.toThrow();
-              await expect(
+              );
+              await expectPermissionDenied(
                 viewer
                   .insert(app.transport_observations, {
                     session_id: session.id,
@@ -654,7 +655,7 @@ describe("Wequencer cross-topology recovery", () => {
                     observed_at: new Date(),
                   })
                   .wait({ tier: "global" }),
-              ).rejects.toThrow();
+              );
 
               // The editor can edit a session of their own too, but a step
               // or transport row must not borrow that session's pattern.
@@ -676,7 +677,7 @@ describe("Wequencer cross-topology recovery", () => {
                   length: stepsPerTrack,
                 })
                 .wait({ tier: "global" });
-              await expect(
+              await expectPermissionDenied(
                 editor
                   .insert(app.steps, {
                     session_id: session.id,
@@ -688,8 +689,8 @@ describe("Wequencer cross-topology recovery", () => {
                     probability: 100,
                   })
                   .wait({ tier: "global" }),
-              ).rejects.toThrow();
-              await expect(
+              );
+              await expectPermissionDenied(
                 editor
                   .insert(app.transport_observations, {
                     session_id: session.id,
@@ -699,7 +700,7 @@ describe("Wequencer cross-topology recovery", () => {
                     pattern_id: foreignPattern.id,
                   })
                   .wait({ tier: "global" }),
-              ).rejects.toThrow();
+              );
             },
           },
           {
@@ -743,6 +744,16 @@ function sessionQueries(sessionId: string) {
       .limit(1),
     presence: app.presence.where({ session_id: sessionId }),
   };
+}
+
+/** A write the server refuses for lack of permission, not for any other reason. */
+async function expectPermissionDenied(write: Promise<unknown>) {
+  const error = await write.then(
+    () => undefined,
+    (reason: unknown) => reason,
+  );
+  expect(error).toBeInstanceOf(PersistedWriteRejectedError);
+  expect(error).toMatchObject({ code: "permission_denied" });
 }
 
 function trackSteps(trackId: string, patternId: string) {

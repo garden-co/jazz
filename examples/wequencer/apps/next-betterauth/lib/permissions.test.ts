@@ -57,10 +57,10 @@ describe("Wequencer permissions", () => {
     ]);
     const address = { sessionId: session.id, trackId: track.id, patternId: pattern.id };
 
-    const first = await stepRow({ ...address, position: 0 }, true);
+    const first = stepRow({ ...address, position: 0 }, true);
     await editor.db.upsert(app.steps, first.id, first.data).wait({ tier: "global" });
 
-    const second = await stepRow({ ...address, position: 1 }, true);
+    const second = stepRow({ ...address, position: 1 }, true);
     await viewer.db.expectDenied((db) => db.upsert(app.steps, second.id, second.data));
     await viewer.db.expectDenied((db) => db.update(app.steps, first.id, { enabled: false }));
     await viewer.db.expectDenied((db) =>
@@ -80,7 +80,7 @@ describe("Wequencer permissions", () => {
     // The editor also creates a session of their own, so they can edit both.
     const elsewhere = await seedSession(editor.account, []);
 
-    const crossed = await stepRow(
+    const crossed = stepRow(
       {
         sessionId: here.session.id,
         trackId: here.track.id,
@@ -138,12 +138,13 @@ describe("Wequencer permissions", () => {
       patternId: pattern.id,
       position: 3,
     };
-    const fromCreator = await stepRow(address, true);
-    const fromEditor = await stepRow(address, true);
+    const fromCreator = stepRow(address, true);
+    const fromEditor = stepRow(address, true);
     expect(fromEditor.id).toBe(fromCreator.id);
-    // Awaited one after the other: two in-flight upserts of one id abort the
-    // native test runtime today (a core bug, reported upstream). Order does not
-    // matter to the outcome, since both writers target the same derived row.
+    // Awaited one after the other: two in-flight upserts of one id abort a
+    // trusted-serving session db today (https://github.com/garden-co/jazz/issues/3758).
+    // The app's own pad presses are client-local writes and are unaffected.
+    // Order does not matter to the outcome: both writers target the same row.
     await creator.db.upsert(app.steps, fromCreator.id, fromCreator.data).wait({ tier: "global" });
     await editor.db.upsert(app.steps, fromEditor.id, fromEditor.data).wait({ tier: "global" });
 

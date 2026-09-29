@@ -2,6 +2,7 @@
 
 import { useState, type FormEvent } from "react";
 import { useDb } from "jazz-tools/react";
+import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
 import { Dialog, DialogHeader } from "@astryxdesign/core/Dialog";
 import { HStack } from "@astryxdesign/core/HStack";
@@ -31,15 +32,27 @@ export function NewSessionDialog({
   const [tempo, setTempo] = useState(124);
   const [trackCount, setTrackCount] = useState(8);
   const [length, setLength] = useState(16);
+  const [isCreating, setIsCreating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const sessionId = await createSession(db, author, {
-      title: title.trim() || "Untitled session",
-      tempo,
-      trackCount,
-      length,
-    });
+    setError(null);
+    setIsCreating(true);
+    let sessionId: string;
+    try {
+      sessionId = await createSession(db, author, {
+        title: title.trim() || "Untitled session",
+        tempo,
+        trackCount,
+        length,
+      });
+    } catch {
+      setError("The session could not be created. Try again.");
+      return;
+    } finally {
+      setIsCreating(false);
+    }
     onOpenChange(false);
     onCreated(sessionId);
   }
@@ -49,6 +62,11 @@ export function NewSessionDialog({
       <DialogHeader title="New session" onOpenChange={onOpenChange} />
       <form onSubmit={(event) => void submit(event)}>
         <VStack gap={4} padding={4}>
+          {error ? (
+            <div role="status">
+              <Banner status="error" title={error} />
+            </div>
+          ) : null}
           <TextInput label="Title" value={title} onChange={setTitle} isRequired />
           <NumberInput
             label="Tempo"
@@ -87,7 +105,12 @@ export function NewSessionDialog({
           </VStack>
           <HStack gap={2} justify="end">
             <Button label="Cancel" variant="ghost" onClick={() => onOpenChange(false)} />
-            <Button label="Create session" variant="primary" type="submit" />
+            <Button
+              label="Create session"
+              variant="primary"
+              type="submit"
+              isDisabled={isCreating}
+            />
           </HStack>
         </VStack>
       </form>

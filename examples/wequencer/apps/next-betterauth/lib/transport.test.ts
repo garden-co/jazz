@@ -89,10 +89,10 @@ describe("mix and roles", () => {
     expect(starterStep("kick", 1)).toBe(false);
   });
 
-  it("derives one uuid-shaped row id per pad", async () => {
-    const id = await stepId("track", "pattern", 3);
+  it("derives one uuid-shaped row id per pad", () => {
+    const id = stepId("track", "pattern", 3);
     expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-a[0-9a-f]{3}-[0-9a-f]{12}$/);
-    expect(await stepId("track", "pattern", 3)).toBe(id);
-    expect(await stepId("track", "pattern", 4)).not.toBe(id);
+    expect(stepId("track", "pattern", 3)).toBe(id);
+    expect(stepId("track", "pattern", 4)).not.toBe(id);
   });
 });
