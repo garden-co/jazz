@@ -1,77 +1,68 @@
 "use client";
 
 import { useState } from "react";
-import { useAll, useDb, useSession } from "jazz-tools/react";
+import { useRouter } from "next/navigation";
+import { useAll, useSession } from "jazz-tools/react";
+import { Button } from "@astryxdesign/core/Button";
+import { ClickableCard } from "@astryxdesign/core/ClickableCard";
+import { EmptyState } from "@astryxdesign/core/EmptyState";
+import { Grid } from "@astryxdesign/core/Grid";
+import { Heading } from "@astryxdesign/core/Heading";
+import { HStack } from "@astryxdesign/core/HStack";
+import { Spinner } from "@astryxdesign/core/Spinner";
+import { Text } from "@astryxdesign/core/Text";
+import { VStack } from "@astryxdesign/core/VStack";
 import { app } from "@/schema";
-import { SequencerSession } from "@/components/sequencer-session";
-
-const TRACK_COLORS = ["#ff7a59", "#f5c451", "#5dd6c0", "#7998ff"];
-const INSTRUMENTS = ["Kick", "Snare", "Closed hat", "Bass"];
+import { AccountId } from "@/components/account-id";
+import { PageColumn } from "@/components/page-column";
+import { NewSessionDialog } from "@/components/new-session-dialog";
 
 export function SessionBrowser() {
-  const db = useDb();
-  const session = useSession();
-  const author = session?.user.account;
+  const router = useRouter();
+  const author = useSession()?.user.account;
   const { data: sessions = [], isLoading } = useAll(app.sessions.orderBy("$createdAt", "desc"));
-  const { data: profiles = [] } = useAll(
-    app.profiles.where({ author: author ?? "00000000-0000-0000-0000-000000000000" }),
-  );
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-
-  function createSession() {
-    // This is an explicit user action, not account bootstrap on the initial
-    // read-through path. A production app's server route may additionally
-    // create default shared structures with its trusted backend credential.
-    const profile = profiles[0];
-    if (!profile) return;
-    const session = db.insert(app.sessions, {
-      title: "Late-night rehearsal",
-      tempo_bpm: 124,
-      loop_steps: 16,
-    });
-    db.insert(app.session_members, {
-      session_id: session.value.id,
-      member_author: author,
-      role: "owner",
-    });
-    for (const [position, name] of INSTRUMENTS.entries()) {
-      const track = db.insert(app.tracks, {
-        session_id: session.value.id,
-        position,
-        name,
-        color: TRACK_COLORS[position],
-      });
-      for (let step = 0; step < 16; step += 1) {
-        db.insert(app.steps, {
-          track_id: track.value.id,
-          position: step,
-          enabled: step % (position + 2) === 0,
-          velocity: position === 0 ? 112 : 88,
-          probability: 100,
-        });
-      }
-    }
-    setSelectedId(session.value.id);
-  }
-
-  const selected = sessions.find((session) => session.id === selectedId) ?? sessions[0];
-  const profileId = profiles[0]?.id;
-  if (author && selected && profileId)
-    return <SequencerSession sessionId={selected.id} author={author} profileId={profileId} />;
-
-  if (!author) return <p className="loading-state">Opening your Jazz account…</p>;
+  const [isCreating, setIsCreating] = useState(false);
 
   return (
-    <section className="session-empty">
-      <p className="eyebrow">COLLABORATIVE STEP SEQUENCER</p>
-      <h2>{isLoading ? "Finding your sessions…" : "Start a rehearsal"}</h2>
-      <p>
-        Every pad is an ordinary local-first row. Jazz keeps independent edits responsive offline
-        and converges them after a reconnect.
-      </p>
-      <button className="btn-primary" type="button" onClick={createSession} disabled={isLoading}>
-        Create a 4-track session
-      </button>
-    </section>
+    <PageColumn>
+      <HStack gap={4} justify="between" align="center" wrap="wrap">
+        <Heading level={1}>Sessions</Heading>
+        <Button variant="primary" label="New session" onClick={() => setIsCreating(true)} />
+      </HStack>
+      {isLoading ? (
+        <Spinner label="Finding your sessions…" />
+      ) : sessions.length === 0 ? (
+        <EmptyState
+          headingLevel={2}
+          title="No sessions yet"
+          description="Start a session and add bandmates, or send your account ID to a bandmate so they can add you to theirs."
+          actions={
+            <Button variant="primary" label="New session" onClick={() => setIsCreating(true)} />
+          }
+        />
+      ) : (
+        <Grid columns={{ minWidth: 240 }} gap={4}>
+          {sessions.map((session) => (
+            <ClickableCard key={session.id} label={session.title} href={`/dashboard/${session.id}`}>
+              <VStack gap={1}>
+                <Heading level={2} maxLines={1}>
+                  {session.title}
+                </Heading>
+                <Text type="supporting">{session.tempo_bpm} BPM</Text>
+              </VStack>
+            </ClickableCard>
+          ))}
+        </Grid>
+      )}
+      {author ? <AccountId accountId={author} /> : null}
+      {author ? (
+        <NewSessionDialog
+          author={author}
+          isOpen={isCreating}
+          onOpenChange={setIsCreating}
+          onCreated={(sessionId) => router.push(`/dashboard/${sessionId}`)}
+        />
+      ) : null}
+    </PageColumn>
   );
 }

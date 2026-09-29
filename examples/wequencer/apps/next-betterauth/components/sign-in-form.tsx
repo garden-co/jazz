@@ -1,65 +1,98 @@
 "use client";
 
-import { useState, useActionState } from "react";
+import { useState, type FormEvent } from "react";
+import { Banner } from "@astryxdesign/core/Banner";
+import { Button } from "@astryxdesign/core/Button";
+import { Card } from "@astryxdesign/core/Card";
+import { Heading } from "@astryxdesign/core/Heading";
+import { HStack } from "@astryxdesign/core/HStack";
+import { Text } from "@astryxdesign/core/Text";
+import { TextInput } from "@astryxdesign/core/TextInput";
+import { VStack } from "@astryxdesign/core/VStack";
 import { authClient } from "@/lib/auth-client";
 import { beginSignupIntent, clearSignupIntent } from "@/components/jazz-provider";
 
-async function authAction(_prev: string | null, formData: FormData): Promise<string | null> {
-  const email = formData.get("email") as string;
-  const password = formData.get("password") as string;
-  const name = formData.get("name") as string | null;
-
-  if (name) beginSignupIntent(email);
-  const { error } = await (name
-    ? authClient.signUp.email({ name, email, password })
-    : authClient.signIn.email({ email, password }));
-
-  if (error) {
-    if (name) clearSignupIntent();
-    return error.message ?? (name ? "Sign-up failed" : "Sign-in failed");
-  }
-
-  window.location.assign("/dashboard");
-  return null;
-}
-
 export function SignInForm() {
   const [isSignUp, setIsSignUp] = useState(false);
-  const [error, formAction, isPending] = useActionState(authAction, null);
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [isPending, setIsPending] = useState(false);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError(null);
+    setIsPending(true);
+    if (isSignUp) beginSignupIntent(email);
+    const { error } = await (isSignUp
+      ? authClient.signUp.email({ name, email, password })
+      : authClient.signIn.email({ email, password }));
+    if (error) {
+      if (isSignUp) clearSignupIntent();
+      setError(error.message ?? (isSignUp ? "Sign-up failed" : "Sign-in failed"));
+      setIsPending(false);
+      return;
+    }
+    window.location.assign("/dashboard");
+  }
 
   return (
-    <div className="card">
-      <h1>{isSignUp ? "Create account" : "Sign in"}</h1>
-      <form action={formAction}>
-        {isSignUp && (
-          <div className="field">
-            <label htmlFor="name">Name</label>
-            <input id="name" name="name" type="text" required />
-          </div>
-        )}
-        <div className="field">
-          <label htmlFor="email">Email</label>
-          <input id="email" name="email" type="email" required />
-        </div>
-        <div className="field">
-          <label htmlFor="password">Password</label>
-          <input id="password" name="password" type="password" required />
-        </div>
-        {error && (
-          <p className="alert-error" role="alert">
-            {error}
-          </p>
-        )}
-        <button type="submit" className="btn-primary" disabled={isPending}>
-          {isSignUp ? "Create account" : "Sign in"}
-        </button>
+    <Card width="100%" maxWidth={400}>
+      <form onSubmit={submit}>
+        <VStack gap={4}>
+          <Heading level={2}>{isSignUp ? "Create account" : "Sign in"}</Heading>
+          {isSignUp && (
+            <TextInput
+              label="Name"
+              value={name}
+              onChange={setName}
+              isRequired
+              autoComplete="name"
+            />
+          )}
+          <TextInput
+            label="Email"
+            type="email"
+            value={email}
+            onChange={setEmail}
+            isRequired
+            autoComplete="email"
+          />
+          <TextInput
+            label="Password"
+            type="password"
+            value={password}
+            onChange={setPassword}
+            isRequired
+            autoComplete={isSignUp ? "new-password" : "current-password"}
+          />
+          {error && (
+            <div role="alert">
+              <Banner status="error" title={error} />
+            </div>
+          )}
+          <Button
+            type="submit"
+            variant="primary"
+            label={isSignUp ? "Create account" : "Sign in"}
+            isLoading={isPending}
+            width="100%"
+          />
+          <HStack gap={1} align="center" justify="center" wrap="wrap">
+            <Text type="supporting">{isSignUp ? "Already have an account?" : "New here?"}</Text>
+            <Button
+              variant="ghost"
+              size="sm"
+              label={isSignUp ? "Sign in" : "Create an account"}
+              onClick={() => {
+                setError(null);
+                setIsSignUp(!isSignUp);
+              }}
+            />
+          </HStack>
+        </VStack>
       </form>
-      <p className="toggle">
-        {isSignUp ? "Already have an account?" : "New here?"}
-        <button type="button" className="link" onClick={() => setIsSignUp(!isSignUp)}>
-          {isSignUp ? "Sign in" : "Create an account"}
-        </button>
-      </p>
-    </div>
+    </Card>
   );
 }

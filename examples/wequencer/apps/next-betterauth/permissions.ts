@@ -29,7 +29,12 @@ const wequencerPermissions = s.definePermissions(
     // creator's ability to administer the session.
     const isCreator = (sessionId: RowRefValue) =>
       policy.sessions.exists.where({ id: sessionId, "$createdBy.account": session.user.account });
-    policy.profiles.allowRead.where({ author: session.user.account });
+    // Bandmates see each other's display name once that profile has shown
+    // presence in a session they can both read. Presence stays advisory: it
+    // only reveals a name, never grants a write.
+    policy.profiles.allowRead.where(
+      anyOf([{ author: session.user.account }, allowedTo.read("presenceViaProfile")]),
+    );
     policy.profiles.allowInsert.where({ author: session.user.account });
     policy.profiles.allowUpdate
       .whereOld({ author: session.user.account })
@@ -49,9 +54,15 @@ const wequencerPermissions = s.definePermissions(
     policy.tracks.allowInsert.where((row) => canEdit(row.session_id));
     policy.tracks.allowUpdate.where((row) => canEdit(row.session_id));
     policy.tracks.allowDelete.where((row) => isCreator(row.session_id));
+    policy.patterns.allowRead.where((row) => isMember(row.session_id));
+    policy.patterns.allowInsert.where((row) => canEdit(row.session_id));
+    policy.patterns.allowUpdate.where((row) => canEdit(row.session_id));
+    policy.patterns.allowDelete.where((row) => isCreator(row.session_id));
     policy.steps.allowRead.where(allowedTo.read("track"));
-    policy.steps.allowInsert.where(allowedTo.update("track"));
-    policy.steps.allowUpdate.where(allowedTo.update("track"));
+    // A step joins one track and one pattern; writing it needs edit access to
+    // both, so a step cannot be attached to another session's pattern.
+    policy.steps.allowInsert.where(allOf([allowedTo.update("track"), allowedTo.update("pattern")]));
+    policy.steps.allowUpdate.where(allOf([allowedTo.update("track"), allowedTo.update("pattern")]));
     policy.steps.allowDelete.where(allowedTo.update("track"));
     policy.transport_observations.allowRead.where((row) => isMember(row.session_id));
     policy.transport_observations.allowInsert.where((row) => canEdit(row.session_id));

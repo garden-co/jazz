@@ -11,6 +11,7 @@ import {
 } from "jazz-tools/react";
 import { authClient } from "@/lib/auth-client";
 import { JazzLifecycle } from "@/lib/jazz-lifecycle";
+import { ErrorScreen, LoadingScreen } from "@/components/status-screen";
 
 const APP_ID = process.env.NEXT_PUBLIC_JAZZ_APP_ID!;
 const SERVER_URL = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!;
@@ -96,14 +97,12 @@ export function JazzProvider({ children }: { children: React.ReactNode }) {
   // Pair the manager with the external session before rendering any account
   // client. A new session can therefore never observe the prior session's Db.
   if (slot?.sessionId !== sessionId || slot.identityId !== identityId)
-    return <p className="loading-state">Opening your Jazz account…</p>;
+    return <LoadingScreen label="Opening your Jazz account…" />;
   if (slot.error)
     return (
-      <p className="loading-state" role="alert">
-        {slot.error.message} <button onClick={() => setRetry((value) => value + 1)}>Retry</button>
-      </p>
+      <ErrorScreen message={slot.error.message} onRetry={() => setRetry((value) => value + 1)} />
     );
-  if (!slot.manager) return <p className="loading-state">Opening your Jazz account…</p>;
+  if (!slot.manager) return <LoadingScreen label="Opening your Jazz account…" />;
   return (
     <EnrolledProvider
       key={sessionId}
@@ -191,12 +190,8 @@ function EnrolledProvider({
   }, [lifecycle]);
 
   if (error)
-    return (
-      <p className="loading-state" role="alert">
-        {error.message} <button onClick={() => setRetry((value) => value + 1)}>Retry</button>
-      </p>
-    );
-  if (!client || !ready) return <p className="loading-state">Opening your Jazz account…</p>;
+    return <ErrorScreen message={error.message} onRetry={() => setRetry((value) => value + 1)} />;
+  if (!client || !ready) return <LoadingScreen label="Opening your Jazz account…" />;
   return (
     <JazzClientProvider client={client}>
       <SignOutContext.Provider value={signOut}>{children}</SignOutContext.Provider>

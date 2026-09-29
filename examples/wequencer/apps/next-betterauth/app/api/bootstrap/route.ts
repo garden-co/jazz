@@ -15,6 +15,12 @@ export async function POST(request: Request) {
     jwtIssuer: origin,
   });
   if (!session.account_id) return Response.json({ error: "account required" }, { status: 401 });
-  const profile = await ensureProfile(session.account_id, session.user_id);
+  // Better Auth's JWT carries the user's name; it becomes the display name
+  // bandmates see beside the presence avatars.
+  const name = (session.claims as Record<string, unknown> | undefined)?.name;
+  const profile = await ensureProfile(
+    session.account_id,
+    typeof name === "string" && name.trim() ? name.trim() : "Bandmate",
+  );
   return Response.json({ profileId: profile.id });
 }

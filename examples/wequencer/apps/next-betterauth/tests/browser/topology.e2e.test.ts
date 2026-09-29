@@ -80,6 +80,7 @@ describe("Wequencer cross-topology recovery", () => {
     let creatorMembership: { id: string };
     let editorMembership: { id: string };
     let tracks: Array<{ id: string }>;
+    let pattern: { id: string };
     let offlineStep: { id: string };
     let subscribedOwnerStepId: string;
     let transport: { id: string } | undefined;
@@ -229,12 +230,21 @@ describe("Wequencer cross-topology recovery", () => {
                       .wait({ tier: "global" }),
                 ),
               );
+              pattern = await owner
+                .insert(app.patterns, {
+                  session_id: session.id,
+                  position: 0,
+                  name: "Pattern 1",
+                  length: stepsPerTrack,
+                })
+                .wait({ tier: "global" });
               await Promise.all(
                 tracks.flatMap((track) =>
                   Array.from({ length: stepsPerTrack }, (_, position) =>
                     owner
                       .insert(app.steps, {
                         track_id: track.id,
+                        pattern_id: pattern.id,
                         position,
                         enabled: false,
                         velocity: 100,
@@ -317,8 +327,8 @@ describe("Wequencer cross-topology recovery", () => {
             name: "concurrent ordered sequencer edits and presence",
             run: async () => {
               const [ownerSteps, editorSteps] = await Promise.all([
-                owner.all(trackSteps(tracks[0].id), { tier: "global" }),
-                editor.all(trackSteps(tracks[1].id), { tier: "global" }),
+                owner.all(trackSteps(tracks[0].id, pattern.id), { tier: "global" }),
+                editor.all(trackSteps(tracks[1].id, pattern.id), { tier: "global" }),
               ]);
               const ownerStepId = ownerSteps[1]!.id;
               subscribedOwnerStepId = ownerStepId;
@@ -327,7 +337,7 @@ describe("Wequencer cross-topology recovery", () => {
               // its stream exactly as a consumer does, so this receipt proves
               // both its pre-write false snapshot and the later remote update.
               ctx.trackSubscription(
-                editor.subscribe(trackSteps(tracks[0].id), (rows) => {
+                editor.subscribe(trackSteps(tracks[0].id, pattern.id), (rows) => {
                   subscribedTrackSteps = rows;
                 }),
               );
@@ -367,7 +377,7 @@ describe("Wequencer cross-topology recovery", () => {
               ]);
               const ownerTrackSteps = await waitForQuery(
                 editor,
-                trackSteps(tracks[0].id),
+                trackSteps(tracks[0].id, pattern.id),
                 (rows) => rows.length === stepsPerTrack && rows[1]?.enabled === true,
                 "editor receives owner's ordered step edit",
                 15_000,
@@ -388,7 +398,7 @@ describe("Wequencer cross-topology recovery", () => {
               );
               await waitForQuery(
                 owner,
-                trackSteps(tracks[1].id),
+                trackSteps(tracks[1].id, pattern.id),
                 (rows) => rows.length === stepsPerTrack && rows[2]?.enabled === true,
                 "owner receives editor's ordered step edit",
                 15_000,
@@ -411,13 +421,15 @@ describe("Wequencer cross-topology recovery", () => {
           {
             name: "offline local edit and deterministic transport retry",
             run: async () => {
-              const ownerSteps = await owner.all(trackSteps(tracks[2].id), { tier: "local" });
+              const ownerSteps = await owner.all(trackSteps(tracks[2].id, pattern.id), {
+                tier: "local",
+              });
               offlineStep = { id: ownerSteps[3].id };
               await owner
                 .update(app.steps, offlineStep.id, { enabled: true })
                 .wait({ tier: "local" });
               expect(
-                (await owner.all(trackSteps(tracks[2].id), { tier: "local" })).find(
+                (await owner.all(trackSteps(tracks[2].id, pattern.id), { tier: "local" })).find(
                   (step) => step.id === offlineStep.id,
                 ),
               ).toMatchObject({ enabled: true, position: 3 });
@@ -426,7 +438,9 @@ describe("Wequencer cross-topology recovery", () => {
               // the owner's optimistic edit stays private for the duration
               // of the partition, rather than merely losing a race once.
               for (let attempt = 0; attempt < 3; attempt += 1) {
-                const peerSteps = await editor.all(trackSteps(tracks[2].id), { tier: "global" });
+                const peerSteps = await editor.all(trackSteps(tracks[2].id, pattern.id), {
+                  tier: "global",
+                });
                 expect(peerSteps.find((step) => step.id === offlineStep.id)).toMatchObject({
                   enabled: false,
                   position: 3,
@@ -474,7 +488,7 @@ describe("Wequencer cross-topology recovery", () => {
               expect(ownerTracks.map((row) => row.position)).toEqual([0, 1, 2, 3]);
               const replayedSteps = await waitForQuery(
                 editor,
-                trackSteps(tracks[2].id),
+                trackSteps(tracks[2].id, pattern.id),
                 (rows) => rows.some((step) => step.id === offlineStep.id && step.enabled),
                 "editor receives owner offline step",
                 20_000,
@@ -484,7 +498,7 @@ describe("Wequencer cross-topology recovery", () => {
               expect(subscribedTrackSteps).toHaveLength(stepsPerTrack);
               await waitForQuery(
                 owner,
-                trackSteps(tracks[0].id),
+                trackSteps(tracks[0].id, pattern.id),
                 (rows) => rows.some((step) => step.id === subscribedOwnerStepId),
                 "persistent owner reopens target track steps",
                 20_000,
@@ -580,7 +594,7 @@ describe("Wequencer cross-topology recovery", () => {
               expect(projectedWindow).toHaveLength(2);
               expect("color" in projectedWindow[0]!).toBe(false);
 
-              const restoredOfflineStep = await editor.all(trackSteps(tracks[2].id), {
+              const restoredOfflineStep = await editor.all(trackSteps(tracks[2].id, pattern.id), {
                 tier: "local",
               });
               expect(restoredOfflineStep.find((step) => step.id === offlineStep.id)).toMatchObject({
@@ -608,7 +622,9 @@ describe("Wequencer cross-topology recovery", () => {
             name: "membership revocation rejects former editor",
             run: async () => {
               await owner.delete(app.session_members, editorMembership.id).wait({ tier: "global" });
-              const editorSteps = await editor.all(trackSteps(tracks[1].id), { tier: "local" });
+              const editorSteps = await editor.all(trackSteps(tracks[1].id, pattern.id), {
+                tier: "local",
+              });
               await expect(
                 editor
                   .update(app.steps, editorSteps[4].id, { enabled: true })
@@ -645,8 +661,8 @@ function sessionQueries(sessionId: string) {
   };
 }
 
-function trackSteps(trackId: string) {
-  return app.steps.where({ track_id: trackId }).orderBy("position", "asc");
+function trackSteps(trackId: string, patternId: string) {
+  return app.steps.where({ track_id: trackId, pattern_id: patternId }).orderBy("position", "asc");
 }
 
 async function openClient(
