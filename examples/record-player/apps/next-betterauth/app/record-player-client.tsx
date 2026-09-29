@@ -8,6 +8,7 @@ import { Button } from "@astryxdesign/core/Button";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
 import { Icon } from "@astryxdesign/core/Icon";
 import { ProgressBar } from "@astryxdesign/core/ProgressBar";
+import { Spinner } from "@astryxdesign/core/Spinner";
 import { HStack, VStack } from "@astryxdesign/core/Stack";
 import { Tab, TabList } from "@astryxdesign/core/TabList";
 import { seedDemoLibrary, type UploadProgress } from "../src/upload";
@@ -112,7 +113,25 @@ function Library() {
     />
   );
 
-  if (albums.data && list.length === 0) {
+  if (albums.error) {
+    return (
+      <Banner
+        status="error"
+        title="Could not load the library"
+        description={albums.error.message}
+      />
+    );
+  }
+
+  if (!albums.data) {
+    return (
+      <HStack justify="center">
+        <Spinner label="Loading the library" />
+      </HStack>
+    );
+  }
+
+  if (list.length === 0) {
     return (
       <VStack gap={4}>
         <EmptyState

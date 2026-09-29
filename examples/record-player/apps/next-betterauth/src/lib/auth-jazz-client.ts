@@ -1,5 +1,6 @@
 import { app } from "../../schema";
 import permissions from "../../permissions";
+import { jazzEnv } from "./jazz-env";
 import type { JazzClient } from "jazz-tools/backend";
 import { createRequire as createRequireFromModule } from "node:module";
 
@@ -29,7 +30,7 @@ export async function authJazzClient(): Promise<JazzClient> {
     driver: { type: "memory" },
     serverUrl: process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!,
     initial: { backendSecret },
-    env: process.env.NODE_ENV === "production" ? "prod" : "dev",
+    env: jazzEnv,
     tier: "global",
   }));
   try {

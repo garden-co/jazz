@@ -11,6 +11,7 @@ import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { authClient, getJwtFromBetterAuth } from "../src/lib/auth-client";
 import { prepareAccounts } from "../src/lib/accounts";
+import { jazzEnv } from "../src/lib/jazz-env";
 import { JazzLifecycle } from "../src/lib/jazz-lifecycle";
 
 const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID!;
@@ -87,7 +88,7 @@ function AccountContext({
   if (!lifecycleRef.current) {
     lifecycleRef.current = new JazzLifecycle(
       accounts,
-      (account) => createJazzClient({ appId, env: "dev", serverUrl, account }),
+      (account) => createJazzClient({ appId, env: jazzEnv, serverUrl, account }),
       setClient,
     );
   }
