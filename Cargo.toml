@@ -82,6 +82,14 @@ debug = false
 inherits = "dev"
 debug = true
 
+# The Linux jazz-tools server binary keeps line tables so heap profiles, CPU
+# profiles and panics resolve to file:line in production. Everything else
+# (optimization, codegen units) matches `release`; other release artifacts
+# (NAPI, WASM) stay without debug info.
+[profile.release-server]
+inherits = "release"
+debug = "line-tables-only"
+
 [profile.perf]
 inherits = "release"
 opt-level = 2

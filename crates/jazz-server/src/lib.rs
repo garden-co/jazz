@@ -2,6 +2,7 @@
 
 pub mod loopback;
 pub mod middleware;
+pub mod profiling;
 pub mod server;
 mod tcp;
 
@@ -20,6 +21,7 @@ use std::time::Duration;
 
 use axum::serve;
 use jazz::tools::AppId;
+use profiling::DiagnosticsConfig;
 use tokio::task::JoinHandle;
 use tracing::info;
 
@@ -35,6 +37,7 @@ pub async fn run(
     auth_config: AuthConfig,
     bound_port_file: Option<String>,
     shutdown_timeout: Duration,
+    diagnostics: DiagnosticsConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let app_id = AppId::from_string(app_id_str)?;
     let app_id_string = app_id.to_string();
@@ -45,9 +48,12 @@ pub async fn run(
     } else {
         info!("Data directory: {}", data_dir);
     }
-    let builder = ServerBuilder::new(app_id)
+    let mut builder = ServerBuilder::new(app_id)
         .with_auth_config(auth_config)
         .with_shutdown_timeout(shutdown_timeout);
+    if let Some(dump) = diagnostics.heap_profiler {
+        builder = builder.with_heap_profiler(dump);
+    }
     let built = if in_memory {
         builder.with_storage(StorageBackend::InMemory).build().await
     } else {
@@ -64,6 +70,23 @@ pub async fn run(
     .map_err(|error| format!("failed to build server: {error}"))?;
     let listener = tokio::net::TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], port))).await?;
     let bound_addr = listener.local_addr()?;
+    // Serves until this function returns, including while the app drains.
+    let _diagnostics_task = match diagnostics.listen {
+        Some(addr) => {
+            let listener = tokio::net::TcpListener::bind(addr).await?;
+            info!(
+                "Diagnostics listening on http://{} (unauthenticated)",
+                listener.local_addr()?
+            );
+            let router = profiling::diagnostics_router(diagnostics.heap_profiler);
+            Some(AbortOnDrop(tokio::spawn(async move {
+                if let Err(error) = serve(listener, router).await {
+                    tracing::warn!("diagnostics listener stopped: {error}");
+                }
+            })))
+        }
+        None => None,
+    };
     let shutdown = built.state.shutdown.clone();
     let mut sigterm_task = install_signal_before_readiness(
         || spawn_sigterm_shutdown_task(shutdown.clone()),
@@ -197,6 +220,14 @@ fn spawn_sigterm_shutdown_task(
 fn spawn_sigterm_shutdown_task(_: ShutdownController) -> Result<JoinHandle<()>, std::io::Error> {
     Ok(tokio::spawn(async { std::future::pending::<()>().await }))
 }
+struct AbortOnDrop(JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 async fn abort_task<T>(task: &mut JoinHandle<T>) {
     task.abort();
     let _ = tokio::time::timeout(Duration::from_millis(50), task).await;

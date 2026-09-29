@@ -7,10 +7,30 @@
 //! jazz-tools server <APP_ID> [--port 1625] [--data-dir ./data] [--in-memory]
 //! ```
 
-// mimalloc replaces the system allocator for ~12-26% throughput on the server's
-// allocation-heavy paths (query/insert/observer). The global allocator is a
-// per-binary choice; library code in `jazz-tools` does not declare one so that
-// consumers (jazz-napi, todo-server, third-party embedders) keep theirs.
+// The global allocator is a per-binary choice; library code in `jazz-tools`
+// does not declare one so that consumers (jazz-napi, todo-server, third-party
+// embedders) keep theirs. Both choices replace the system allocator for
+// throughput on the server's allocation-heavy paths (query/insert/observer).
+//
+// On Linux, where production servers run, jemalloc also samples the heap so
+// operators can see which code holds memory (see `jazz_cli::heap_profiling`).
+// It replaces `malloc` too, so RocksDB's allocations are sampled as well.
+#[cfg(target_os = "linux")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+// Read by jemalloc before `main`. Profiling starts inactive so that
+// `heap_profiling::activate` can refuse builds without a safe unwinder.
+// Background threads return freed memory to the OS while the server is idle.
+// Operators can override any of these with the `MALLOC_CONF` environment
+// variable, for example `MALLOC_CONF=lg_prof_sample:17` for denser sampling.
+#[cfg(target_os = "linux")]
+#[allow(non_upper_case_globals)]
+#[unsafe(export_name = "malloc_conf")]
+pub static malloc_conf: &[u8] =
+    b"prof:true,prof_active:false,lg_prof_sample:19,background_thread:true\0";
+
+#[cfg(not(target_os = "linux"))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -19,6 +39,7 @@ use jazz_cli::commands;
 #[cfg(feature = "otel")]
 use jazz_otel as otel;
 use jazz_server::AuthConfig;
+use jazz_server::profiling::DiagnosticsConfig;
 
 const DEFAULT_SHUTDOWN_TIMEOUT_SECS: u64 = 30;
 const MAX_SHUTDOWN_TIMEOUT_SECS: u64 = 60 * 60;
@@ -177,6 +198,14 @@ enum Commands {
         /// Internal testing hook: write the resolved listen port after binding.
         #[arg(long, env = "JAZZ_BOUND_PORT_FILE", hide = true)]
         bound_port_file: Option<String>,
+
+        /// Address for an unauthenticated diagnostics listener serving
+        /// `/debug/pprof/heap`, e.g. `0.0.0.0:6060`.
+        ///
+        /// Bind it only where your own infrastructure can reach it. The same
+        /// profile is served on the main port with the admin secret.
+        #[arg(long, env = "JAZZ_DIAGNOSTICS_LISTEN")]
+        diagnostics_listen: Option<std::net::SocketAddr>,
     },
 }
 
@@ -224,6 +253,7 @@ async fn main() {
             admin_secret,
             shutdown_timeout_secs,
             bound_port_file,
+            diagnostics_listen,
         } => {
             let node_env_mode = resolve_node_env_mode();
             let explicitly_allowed = allow_local_first_auth;
@@ -270,6 +300,13 @@ async fn main() {
                 auth_config,
                 bound_port_file,
                 std::time::Duration::from_secs(shutdown_timeout_secs),
+                DiagnosticsConfig {
+                    #[cfg(target_os = "linux")]
+                    heap_profiler: jazz_cli::heap_profiling::activate(),
+                    #[cfg(not(target_os = "linux"))]
+                    heap_profiler: None,
+                    listen: diagnostics_listen,
+                },
             )
             .await
             {
