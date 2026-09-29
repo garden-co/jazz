@@ -4,6 +4,12 @@
 
 export const LOCAL_ORIGIN = "http://127.0.0.1:3000";
 
+/**
+ * The audience Better Auth writes into BandChat's JWTs and the Jazz server
+ * requires. The issuer is the app origin.
+ */
+export const JWT_AUDIENCE = "band-chat";
+
 /** @param {Record<string, string | undefined>} env */
 export function readConfig(env = process.env) {
   return {

@@ -1,5 +1,5 @@
 import { withJazz } from "jazz-tools/dev/next";
-import { assertConfiguration } from "./src/lib/config.mjs";
+import { assertConfiguration, JWT_AUDIENCE } from "./src/lib/config.mjs";
 
 // Fails closed: a deployment without its origin, Jazz app and secrets does not
 // start, and there are no checked-in secrets. `pnpm dev` generates local ones.
@@ -15,6 +15,10 @@ export default withJazz(
     server: {
       backendSecret: config.backendSecret,
       jwksUrl: `${appOrigin}/api/auth/jwks`,
+      // The server accepts only BandChat's own tokens: issued by this origin
+      // for this audience.
+      jwtIssuer: appOrigin,
+      jwtAudience: JWT_AUDIENCE,
     },
   },
 );

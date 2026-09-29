@@ -8,6 +8,7 @@ export interface BandChatConfig {
   betterAuthSecret: string | undefined;
 }
 export declare const LOCAL_ORIGIN: string;
+export declare const JWT_AUDIENCE: string;
 export declare function readConfig(env?: Record<string, string | undefined>): BandChatConfig;
 export declare function usesLocalDefaults(config?: BandChatConfig): boolean;
 export declare function assertConfiguration(

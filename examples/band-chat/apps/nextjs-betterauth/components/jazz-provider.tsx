@@ -15,6 +15,7 @@ import {
 } from "jazz-tools/react";
 import { Banner, Button, Center, Spinner } from "@astryxdesign/core";
 import { authClient, getJwtFromBetterAuth } from "@/src/lib/auth-client";
+import { JAZZ_ENV } from "@/src/lib/jazz-env";
 const APP_ID = process.env.NEXT_PUBLIC_JAZZ_APP_ID;
 const SERVER_URL = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL;
 const registerIntentKey = "band-chat-register-jwt";
@@ -50,7 +51,7 @@ function ConfiguredJazzProvider({
   serverUrl,
   children,
 }: React.PropsWithChildren<{ appId: string; serverUrl: string }>) {
-  const { session: jazz, error, retry } = useJazzSessionOwner({ appId, serverUrl });
+  const { session: jazz, error, retry } = useJazzSessionOwner({ appId, serverUrl, env: JAZZ_ENV });
   if (error)
     return (
       <StatusScreen>

@@ -4,7 +4,7 @@ import { bearer, jwt } from "better-auth/plugins";
 import { jazzAdapter } from "jazz-tools/better-auth-adapter";
 import { app } from "../../schema";
 import { authJazzClient } from "./auth-jazz-client";
-import { assertConfiguration } from "./config.mjs";
+import { assertConfiguration, JWT_AUDIENCE } from "./config.mjs";
 
 // Fails closed: no fallback secret, and a deployment must name its origin.
 const config = assertConfiguration();
@@ -30,6 +30,7 @@ export const auth = betterAuth({
       jwks: { keyPairConfig: { alg: "ES256" } },
       jwt: {
         issuer: appOrigin,
+        audience: JWT_AUDIENCE,
         expirationTime: "1h",
         // Better Auth's stable internal user id remains the raw session user
         // id. Jazz independently records issuer-scoped session.user.
