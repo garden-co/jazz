@@ -1,8 +1,9 @@
 # Wequencer (Next.js + Better Auth)
 
 Wequencer is a collaborative step-sequencer example: a session has members,
-ordered tracks, ordered pads, transport observations, and advisory presence.
-It is a product-shaped Jazz example, not an audio engine.
+instrument tracks, a list of patterns of up to 64 steps, shared transport
+observations, and advisory presence. Every bandmate hears the pattern through
+a small Web Audio drum machine synthesised in the browser (no samples).
 
 ## What it demonstrates
 
@@ -17,8 +18,19 @@ It is a product-shaped Jazz example, not an audio engine.
   downgrading that row does not change creator authority. Richer ownership
   semantics are tracked in [#2100](https://github.com/garden-co/jazz/issues/2100).
   Editors change tracks, pads, and transport observations; viewers only read.
-- Each pad is an ordinary indexed row. Parent-scoped ordered queries keep a
-  4×16 grid locally responsive and converge independent edits after reconnect.
+- Each pad is an ordinary indexed row keyed by track, pattern and position.
+  Every pattern has one row per track and position for all 64 steps, so
+  lengthening a pattern never races to create rows. Parent-scoped ordered
+  queries keep a grid of up to 16 tracks × 64 steps locally responsive and
+  converge independent edits after reconnect.
+- Play, stop, tempo and the playing pattern are shared: each change appends a
+  `transport_observations` row, and every client extrapolates the playhead
+  from the newest one with its own wall clock. Bandmates hear roughly the
+  same step; clock-accurate sync is out of scope. Mute, solo and volume are
+  shared track columns, so the band hears one mix. Sound is opt-in per device
+  because browsers only start audio after a gesture.
+- A bandmate's display name becomes readable once their profile has shown
+  presence in a session you can read.
 - Presence heartbeats run every five seconds independently of subscription
   rerenders. Observations may remain stale; they are advisory and never authorize a write.
 
@@ -40,8 +52,8 @@ and subscription delivery contract.
 
 ## Non-goals
 
-`transport_observations` records convergent UI state only. It does not provide
-sample-accurate clock synchronization, audio scheduling authority, conflict
+`transport_observations` records convergent transport state only. It does not provide
+sample-accurate clock synchronization or skew correction between clients, conflict
 resolution for simultaneous edits to the same pad, presence expiry guarantees,
 or a secure invite-capability product. Those require separate designs rather
 than app-local assumptions.
