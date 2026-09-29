@@ -32,7 +32,6 @@ import {
   type RestoreOptions as InternalRestoreOptions,
   type UpdateOptions as InternalUpdateOptions,
   type DurabilityTier,
-  type QueryExecutionOptions,
   type ReadTierOptions,
   type InternalQueryExecutionOptions,
   type QueryPropagation,
