@@ -4955,6 +4955,8 @@ struct ConnectedClient {
     refreshed_claims: Option<BTreeMap<String, Value>>,
     retiring: bool,
     admitted_scope_advice: bool,
+    /// Reachability last reported to a client the host does not manage.
+    relay_link_hint: Option<RemoteLinkHint>,
     db: Rc<Db>,
     tick: Option<RelayTickFuture>,
     upstream_io: RelayPeerIo,
@@ -5705,6 +5707,7 @@ impl RelayWorker {
                 refreshed_claims: None,
                 retiring: false,
                 admitted_scope_advice,
+                relay_link_hint: None,
                 mutations: foreground_mutations::MutationHandles::new(&db),
                 db,
                 tick: None,
@@ -5726,6 +5729,7 @@ impl RelayWorker {
                 _served: None,
             },
         );
+        self.report_relay_link();
         let client = self.clients.get_mut(&id).expect("new client was inserted");
         client.poll_admission(&Waker::from(Arc::clone(&self.wake)));
         if let Err(error) = client.check_admission() {
@@ -5802,9 +5806,33 @@ impl RelayWorker {
         self.flush_foreground_wakes();
     }
 
+    /// What a client's reads can expect from the authority through this
+    /// relay: its connected clients' own upstream is the relay, which answers
+    /// for the authority only while its socket upstream is installed.
+    fn relay_link_hint(&self) -> RemoteLinkHint {
+        match (&self.socket_wire, &self.upstream_transition) {
+            (None, _) => RemoteLinkHint::NoServer,
+            (Some(_), None) if self.upstream_attached => RemoteLinkHint::Live,
+            (Some(_), _) => RemoteLinkHint::Attempting,
+        }
+    }
+
+    /// Report the relay's reachability to clients whose host does not report
+    /// it (host-opened foregrounds get the host's own hint).
+    fn report_relay_link(&mut self) {
+        let hint = self.relay_link_hint();
+        for client in self.clients.values_mut() {
+            if !client.admitted_scope_advice && client.relay_link_hint != Some(hint) {
+                client.relay_link_hint = Some(hint);
+                client.db.set_remote_link_hint(hint);
+            }
+        }
+    }
+
     fn pump(&mut self) -> Result<(), RelayError> {
         let waker = Waker::from(Arc::clone(&self.wake));
         self.poll_upstream_transition()?;
+        self.report_relay_link();
         self.poll_closing(&waker)?;
         // One fair relay turn has exactly three protocol phases. A UI upload
         // becomes relay input, the relay applies/forwards it, then UI clients

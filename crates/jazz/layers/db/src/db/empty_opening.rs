@@ -579,7 +579,7 @@ where
 
     /// Poll `remote` until it completes or the remote can no longer answer.
     /// Returning `None` drops the pending remote read.
-    async fn race_remote_answer<T>(
+    pub(super) async fn race_remote_answer<T>(
         &self,
         epoch: u64,
         remote: impl Future<Output = T>,

@@ -20,8 +20,8 @@ use std::task::{Context, Poll, Waker};
 mod common;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, ExclusiveTxOps, ReadOpts, SerializedReadResult, WireTransportAdapter,
-    block_on,
+    Db, DbConfig, DbIdentity, ExclusiveTxOps, ReadOpts, RemoteLinkHint, SerializedReadResult,
+    WireTransportAdapter, block_on,
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
@@ -185,6 +185,43 @@ impl Net {
             panic!("expected plain rows");
         };
         rows.iter().map(|row| row.row_uuid()).collect()
+    }
+
+    /// Poll a one-shot local exclusive read without pumping anything,
+    /// reporting `hint` once the read has had its first poll.
+    fn read_while(
+        &self,
+        client: usize,
+        query: &Query,
+        open_tx: OpenTransactionId,
+        hint: RemoteLinkHint,
+    ) -> Option<Vec<RowUuid>> {
+        let db = self.db(client);
+        let bytes = postcard::to_allocvec(query).unwrap();
+        let mut read = pin!(db.all_serialized_query(
+            &bytes,
+            ReadOpts::default(),
+            Some(open_tx),
+            None,
+            None,
+            false,
+            || false,
+            |attachment| db.detach_query(attachment),
+        ));
+        let mut context = Context::from_waker(Waker::noop());
+        let mut polled = read.as_mut().poll(&mut context);
+        if polled.is_pending() {
+            db.set_remote_link_hint(hint);
+            polled = read.as_mut().poll(&mut context);
+        }
+        match polled {
+            Poll::Ready(Ok(SerializedReadResult::Rows(rows))) => {
+                Some(rows.iter().map(|row| row.row_uuid()).collect())
+            }
+            Poll::Ready(Ok(_)) => panic!("expected plain rows"),
+            Poll::Ready(Err(error)) => panic!("read failed: {error:?}"),
+            Poll::Pending => None,
+        }
     }
 
     fn settle(&self, client: usize, tx_id: TxId) -> Result<TxId, jazz::db::Error> {
@@ -375,5 +412,72 @@ fn a_redemption_on_another_backend_is_seen_as_taken() {
     assert_eq!(
         net.read(2, &taken, DurabilityTier::Local, Some(open)).len(),
         1
+    );
+}
+
+/// Offline, an exclusive read answers from the replica instead of waiting for
+/// an authority that cannot answer. The row it returns is still validated
+/// when the commit reaches the authority.
+#[test]
+fn offline_exclusive_read_answers_from_the_replica() {
+    let net = Net::new(&[0x0a, 0x0b]);
+    let invite = net.create_invite(OWNER, "abc");
+    assert_eq!(
+        net.read(BACKEND, &invite_query("abc"), DurabilityTier::Global, None),
+        vec![invite]
+    );
+    let db = net.db(BACKEND);
+    db.set_remote_link_hint(RemoteLinkHint::NoServer);
+    let open = OpenTransactionId::new();
+    block_on(db.begin_exclusive(open)).unwrap();
+    assert_eq!(
+        net.read_while(
+            BACKEND,
+            &invite_query("abc"),
+            open,
+            RemoteLinkHint::NoServer
+        ),
+        Some(vec![invite])
+    );
+
+    // The owner revokes the invite while the backend is offline. Back
+    // online, the authority rejects the membership the stale read allowed.
+    net.revoke(OWNER, invite);
+    net.drive(
+        db.exclusive_tx_ref(open)
+            .insert("members", cells("abc"), Default::default()),
+    )
+    .unwrap();
+    let tx_id = net.drive(db.commit_exclusive_handle(open)).unwrap();
+    db.set_remote_link_hint(RemoteLinkHint::Live);
+    assert!(net.settle(BACKEND, tx_id).is_err());
+    assert!(
+        net.read(OWNER, &Query::from("members"), DurabilityTier::Global, None)
+            .is_empty()
+    );
+}
+
+/// An exclusive read waiting on its snapshot hydration stops waiting when
+/// the authority becomes unreachable, and answers from the replica.
+#[test]
+fn exclusive_read_falls_back_to_the_replica_when_the_link_is_lost() {
+    let net = Net::new(&[0x0a, 0x0b]);
+    let invite = net.create_invite(OWNER, "abc");
+    assert_eq!(
+        net.read(BACKEND, &invite_query("abc"), DurabilityTier::Global, None),
+        vec![invite]
+    );
+    let db = net.db(BACKEND);
+    db.set_remote_link_hint(RemoteLinkHint::Live);
+    let open = OpenTransactionId::new();
+    block_on(db.begin_exclusive(open)).unwrap();
+    // While the link stays live, the read waits for the authority.
+    assert_eq!(
+        net.read_while(BACKEND, &invite_query("abc"), open, RemoteLinkHint::Live),
+        None
+    );
+    assert_eq!(
+        net.read_while(BACKEND, &invite_query("abc"), open, RemoteLinkHint::Failed),
+        Some(vec![invite])
     );
 }
