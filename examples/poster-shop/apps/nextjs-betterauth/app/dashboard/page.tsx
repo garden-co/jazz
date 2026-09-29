@@ -1,6 +1,7 @@
 "use client";
 
-import { Banner, Button, Center, Spinner } from "@astryxdesign/core";
+import { Banner, Button, Spinner } from "@astryxdesign/core";
+import { CenteredPage } from "@/components/centered-page";
 import { useEffect, useState } from "react";
 import { PosterShopApp } from "@/src/App";
 import { parseInviteFragment, prepareStudio } from "@/src/lib/account-enrollment";
@@ -41,24 +42,20 @@ export default function Dashboard() {
   }, [isPending, session]);
   if (!session || bootstrap === "loading")
     return (
-      <main>
-        <Center minHeight="100dvh" padding={4}>
-          <Spinner label="Preparing your poster studio" />
-        </Center>
-      </main>
+      <CenteredPage>
+        <Spinner label="Preparing your poster studio" />
+      </CenteredPage>
     );
   if (bootstrap === "failed")
     return (
-      <main>
-        <Center minHeight="100dvh" padding={4}>
-          <Banner
-            status="error"
-            title="Could not prepare your poster studio"
-            description="The server did not finish setting up your first poster. Your work is safe; try again."
-            endContent={<Button label="Try again" onClick={() => setAttempt(attempt + 1)} />}
-          />
-        </Center>
-      </main>
+      <CenteredPage>
+        <Banner
+          status="error"
+          title="Could not prepare your poster studio"
+          description="The server did not finish setting up your first poster. Your work is safe; try again."
+          endContent={<Button label="Try again" onClick={() => setAttempt(attempt + 1)} />}
+        />
+      </CenteredPage>
     );
   return (
     <PosterShopApp

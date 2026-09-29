@@ -1,6 +1,6 @@
-import { Center } from "@astryxdesign/core";
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
+import { CenteredPage } from "@/components/centered-page";
 import { SignInForm } from "@/components/sign-in-form";
 import { auth } from "@/src/lib/auth";
 
@@ -14,10 +14,8 @@ async function HomeContent() {
   // (`#invite/...`) survives without ever being sent to the server.
   if (session) redirect("/dashboard");
   return (
-    <main>
-      <Center minHeight="100dvh" padding={4}>
-        <SignInForm />
-      </Center>
-    </main>
+    <CenteredPage>
+      <SignInForm />
+    </CenteredPage>
   );
 }

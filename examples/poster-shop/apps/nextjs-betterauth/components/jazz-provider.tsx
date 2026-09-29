@@ -1,6 +1,7 @@
 "use client";
 
-import { Banner, Center, Spinner } from "@astryxdesign/core";
+import { Banner, Spinner } from "@astryxdesign/core";
+import { CenteredPage } from "@/components/centered-page";
 import { useEffect, useRef, useState } from "react";
 import { createAccountManager } from "jazz-tools";
 import { createJazzClient, JazzClientProvider, type JazzClient } from "jazz-tools/react";
@@ -56,15 +57,13 @@ export function JazzProvider({ children }: { children: React.ReactNode }) {
       : undefined;
   if (visibleError)
     return (
-      <main>
-        <Center minHeight="100dvh" padding={4}>
-          <Banner
-            status="error"
-            title="Could not open the poster studio"
-            description={visibleError.message}
-          />
-        </Center>
-      </main>
+      <CenteredPage>
+        <Banner
+          status="error"
+          title="Could not open the poster studio"
+          description={visibleError.message}
+        />
+      </CenteredPage>
     );
   const client =
     connection?.sessionId === session.session.id && connection.userId === session.user.id
@@ -72,11 +71,9 @@ export function JazzProvider({ children }: { children: React.ReactNode }) {
       : undefined;
   if (!client)
     return (
-      <main>
-        <Center minHeight="100dvh" padding={4}>
-          <Spinner label="Opening the poster studio" />
-        </Center>
-      </main>
+      <CenteredPage>
+        <Spinner label="Opening the poster studio" />
+      </CenteredPage>
     );
   return <JazzClientProvider client={client}>{children}</JazzClientProvider>;
 }
