@@ -135,6 +135,40 @@ test("release starter gate exercises packaged artifacts through create-jazz-e2e"
   assert.match(e2e, /--verbose --keep/);
 });
 
+test("release starter runs test the release preview's packages instead of rebuilding", () => {
+  const prepare = job("prepare", "e2e");
+  const reuse =
+    "github.ref == 'refs/heads/changeset-release/release' || github.head_ref == 'changeset-release/release' || (github.event_name == 'workflow_dispatch' && inputs.preview_run_id != '')";
+  assert.ok(prepare.includes(`REUSE_PREVIEW: \${{ ${reuse} }}`), "reuse covers release heads");
+  // Every build step is skipped when reusing; every reuse step only runs then.
+  const steps = prepare.split(/\n {6}- /);
+  for (const buildStep of [
+    "uses: dtolnay/rust-toolchain@",
+    "uses: ./.github/actions/install-rust-tool",
+    "run: pnpm run build:starters-e2e",
+    "run: node dev/artifacts/verify-starter-e2e-artifacts.mjs",
+  ]) {
+    const step = steps.find((candidate) => candidate.includes(buildStep));
+    assert.ok(step, `missing ${buildStep}`);
+    assert.match(step, /if: env\.REUSE_PREVIEW != 'true'/, buildStep);
+  }
+  assert.match(prepare, /run: node dev\/scripts\/await-release-preview\.mjs/);
+  for (const artifact of ["pkg-jazz-tools", "pkg-jazz-wasm", "pkg-jazz-napi"])
+    assert.match(
+      prepare,
+      new RegExp(
+        `if: env\\.REUSE_PREVIEW == 'true'[\\s\\S]{0,200}name: ${artifact}\\n[\\s\\S]{0,100}run-id: \\$\\{\\{ steps\\.preview\\.outputs\\.run_id \\}\\}`,
+      ),
+      `download ${artifact} from the preview run`,
+    );
+  assert.match(prepare, /node dev\/artifacts\/verify-packed-napi\.mjs/);
+  assert.ok(
+    prepare.indexOf("name: Pack workspace tarballs") <
+      prepare.indexOf("cp crates/jazz-napi/npm/linux-x64-gnu/jazz-napi.linux-x64-gnu.node"),
+    "pack jazz-napi exactly as published before staging the harness binary",
+  );
+});
+
 test("release starter gate reuses its pnpm store across the prepare and matrix jobs", () => {
   const expectedCache =
     /name: Cache pnpm store[\s\S]*path: \$\{\{ steps\.pnpm-store\.outputs\.path \}\}[\s\S]*key: starters-e2e-pnpm-\$\{\{ runner\.os \}\}-\$\{\{ hashFiles\('pnpm-lock\.yaml'\) \}\}/;
