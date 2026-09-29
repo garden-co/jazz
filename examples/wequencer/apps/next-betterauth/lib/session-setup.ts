@@ -6,7 +6,7 @@ import {
   instrumentForPosition,
   starterStep,
   trackColor,
-} from "@/lib/instruments";
+} from "./instruments";
 
 type TrackSeed = { id: string; instrument: Instrument };
 

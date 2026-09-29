@@ -1,10 +1,8 @@
 "use client";
 
 import { useDb } from "jazz-tools/react";
-import { Play, Square, Volume2, VolumeX } from "lucide-react";
 import { Button } from "@astryxdesign/core/Button";
 import { HStack } from "@astryxdesign/core/HStack";
-import { Icon } from "@astryxdesign/core/Icon";
 import { NumberInput } from "@astryxdesign/core/NumberInput";
 import { Text } from "@astryxdesign/core/Text";
 import { ToggleButton } from "@astryxdesign/core/ToggleButton";
@@ -63,7 +61,6 @@ export function TransportBar({
       <Button
         variant="primary"
         label={transport.playing ? "Stop" : "Play"}
-        icon={<Icon icon={transport.playing ? Square : Play} size="sm" />}
         isDisabled={!canEdit}
         onClick={togglePlay}
       />
@@ -88,7 +85,6 @@ export function TransportBar({
       <ToggleButton
         label={isSoundOn ? "Sound on" : "Sound off"}
         tooltip={isSoundOn ? "Mute this device" : "Hear the band on this device"}
-        icon={<Icon icon={isSoundOn ? Volume2 : VolumeX} size="sm" />}
         isPressed={isSoundOn}
         onPressedChange={onSoundChange}
       >

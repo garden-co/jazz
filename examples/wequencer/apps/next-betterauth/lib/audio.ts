@@ -1,5 +1,5 @@
 import type { Instrument } from "@/schema";
-import { absoluteStepAt, stepStartMs, wrapStep, type TransportState } from "@/lib/transport";
+import { absoluteStepAt, stepStartMs, wrapStep, type TransportState } from "./transport";
 
 /**
  * A small Web Audio drum machine. Every voice is synthesised from oscillators

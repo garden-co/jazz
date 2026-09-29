@@ -1,4 +1,4 @@
-import { STEPS_PER_BEAT } from "@/lib/instruments";
+import { STEPS_PER_BEAT } from "./instruments";
 
 /**
  * The shared transport, read from the newest `transport_observations` row.

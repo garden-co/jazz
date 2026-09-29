@@ -278,7 +278,7 @@ export function SessionPage({ sessionId }: { sessionId: string }) {
         sessionId={sessionId}
         members={members}
         presence={presence}
-        author={author}
+        author={author ?? undefined}
         isCreator={isCreator}
       />
       {settingsTrack ? (
