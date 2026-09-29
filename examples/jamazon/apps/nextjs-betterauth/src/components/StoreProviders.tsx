@@ -6,6 +6,7 @@ import { Button } from "@astryxdesign/core/Button";
 import { Center } from "@astryxdesign/core/Center";
 import { Spinner } from "@astryxdesign/core/Spinner";
 import { jazzTheme } from "@garden-co/design/jazz";
+import type { Db } from "jazz-tools";
 import { JazzProvider, useDb, useJazzAuth, useSession } from "jazz-tools/react";
 import { createContext, useContext, useEffect, useMemo, useRef, type ReactNode } from "react";
 import { authClient, requireBetterAuthToken } from "@/src/lib/auth-client";
@@ -80,7 +81,7 @@ export function useShopper(): Shopper {
 }
 
 function ShopperProvider({ children }: { children: ReactNode }) {
-  const db = useDb();
+  const db = useDb<Db>();
   const session = useSession();
   const { sessionActions: actions, account: handle } = useJazzAuth();
   const { data: auth, isPending } = authClient.useSession();
@@ -144,7 +145,7 @@ async function getToken() {
 
 /** Stash the guest's cart, then switch; the new account claims it on mount. */
 async function switchToAccount(
-  db: ReturnType<typeof useDb>,
+  db: Db,
   guestAccount: string,
   login: () => Promise<void>,
 ) {
