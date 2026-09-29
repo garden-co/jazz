@@ -9,6 +9,8 @@ import { isExclusiveConflict } from "./write-errors";
  * Server-mediated first-tenant bootstrap. Ordinary clients never receive the
  * backend secret and remain subject to the admin-only membership policy.
  */
+const maxAttempts = 5;
+
 export async function ensurePersonalOrganization(
   userId: string,
   name: string,
@@ -19,7 +21,9 @@ export async function ensurePersonalOrganization(
   // Both the initial read and every retry happen inside the exclusive
   // transaction. A concurrent bootstrap can therefore only either commit the
   // complete triple or force this attempt to re-read the committed triple.
-  for (;;) {
+  // The retries are bounded: a cascade can come from a rejection that will
+  // never clear, and this runs on a server route.
+  for (let attempt = 1; ; attempt++) {
     try {
       const write = await db.exclusiveTransaction(async (tx) => {
         const [people, organizations] = await Promise.all([
@@ -64,7 +68,7 @@ export async function ensurePersonalOrganization(
       // The authority rejects a competing exclusive snapshot. Retry only once
       // it has become durable; all successful retry reads still pass the
       // duplicate/integrity checks above rather than selecting an arbitrary row.
-      if (!isExclusiveConflict(error)) throw error;
+      if (!isExclusiveConflict(error) || attempt >= maxAttempts) throw error;
     }
   }
 }
