@@ -4950,17 +4950,9 @@ function rejectionReason(message: string): string {
   return reason || "Write rejected";
 }
 
-/**
- * Whether a native error is a core `WriteRejected` error.
- *
- * A binding error carries the stable core code, which decides. Only a value
- * without a core code (for example a test double or a relayed payload that
- * never had one) falls back to the stable Rust display prefix.
- */
+/** Whether a native error is a core `WriteRejected` error, decided by its stable core code. */
 function isCoreWriteRejection(error: unknown): boolean {
-  const code = nativeCoreErrorCode(error);
-  if (code !== undefined) return code === "write_rejected";
-  return extractWriteRejectedReason(errorMessage(error)) !== null;
+  return nativeCoreErrorCode(error) === "write_rejected";
 }
 
 /** Parse the exact stable Rust `Error` display prefix without matching quoted diagnostics. */

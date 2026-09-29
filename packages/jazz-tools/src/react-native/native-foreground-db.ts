@@ -361,7 +361,10 @@ export class NativeForegroundDb {
         : this.execute({ type: "poll", operation });
     if (response.type === "pending") return { pendingOperation: response.operation };
     if (response.type === "operationError") {
-      throw new Error(`React Native native foreground subscription failed: ${response.reason}`);
+      throw foregroundOperationError({
+        ...response,
+        reason: `React Native native foreground subscription failed: ${response.reason}`,
+      });
     }
     if (response.type !== "subscriptionEvents")
       return unexpected("drainSubscription", response.type);
@@ -478,7 +481,10 @@ export class NativeForegroundDb {
         if (response.type === "pending") return null;
         completed = true;
         if (response.type === "operationError") {
-          throw new Error(`React Native native foreground read failed: ${response.reason}`);
+          throw foregroundOperationError({
+            ...response,
+            reason: `React Native native foreground read failed: ${response.reason}`,
+          });
         }
         if (response.type !== "rows") return unexpected("poll", response.type);
         return response.rows;
