@@ -14,7 +14,9 @@ browser needs as one Blob to seek.
 Sharing follows the invite-link recipe without a backend route: the membership insert itself
 carries the invite code, and its permission checks a matching `folderInvites` row at the sync
 server, which can see invites the caller cannot read. The role is part of the match, so a viewer
-link cannot be replayed as an editor membership. Inherited folder access uses bounded recursive
+link cannot be replayed as an editor membership. The membership row keeps its code, which makes
+it as sensitive as the invite: only the member and the folder owner may read it, otherwise a viewer
+could lift an editor's code from a co-member's row. Inherited folder access uses bounded recursive
 `allowedTo` (`maxDepth: 8`).
 
 The native benchmark is a correctness companion to the UI rather than a second application model:

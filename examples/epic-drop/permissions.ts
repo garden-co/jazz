@@ -48,9 +48,10 @@ export default s.definePermissions(app, ({ allOf, anyOf, allowedTo, policy, sess
   );
   policy.folders.allowDelete.where(canEditFolder);
 
-  // Members see who else shares the folder. Only the folder owner manages them.
+  // Membership rows carry the invite code used to join, so only the member and
+  // the folder owner read them: a viewer must not learn an editor's code.
   policy.folderMembers.allowRead.where((member) =>
-    anyOf([{ user_id: me }, ownsFolder(member.folder_id), isMember(member.folder_id)]),
+    anyOf([{ user_id: me }, ownsFolder(member.folder_id)]),
   );
   // Joining requires a live invite for the same folder, code and role. The
   // check runs at the sync server, which sees invites the caller cannot read.

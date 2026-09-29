@@ -101,6 +101,11 @@ describe("EpicDrop folder sharing", () => {
       .insert(app.folderMembers, membership("view-code", "viewer"))
       .wait({ tier: "global" });
     await expect(bobDb.all(app.folders.where({ id: demos.id }))).resolves.toHaveLength(1);
+
+    // Membership rows hold invite codes, so a viewer cannot read an editor's row.
+    await join(carol, demos.id, "editor");
+    await expect(bobDb.all(app.folderMembers.where({ user_id: carol }))).resolves.toEqual([]);
+    await expect(bobDb.all(app.folderMembers.where({ user_id: bob }))).resolves.toHaveLength(1);
   });
 
   it("lets viewers read the whole subtree but change nothing", async () => {

@@ -140,13 +140,15 @@ export function FileBrowser() {
   }
 
   function moveItem(item: { kind: "file" | "folder"; id: string }, target: string | null) {
-    if (item.kind === "file") {
-      if (target) db.update(app.files, item.id, { folder_id: target });
+    // Drops get the same checks as the Move dialog: editable, not into itself,
+    // and within the depth that inherited access reaches.
+    const allowed = index.moveTargets(item.kind === "folder" ? item.id : undefined);
+    if (target && !allowed.some((candidate) => candidate.id === target)) {
+      showToast({ body: "That item cannot move into this folder." });
       return;
     }
-    const blocked = new Set([item.id, ...index.descendants(item.id).map((f) => f.id)]);
-    if (target && blocked.has(target)) {
-      showToast({ body: "A folder cannot move into itself." });
+    if (item.kind === "file") {
+      if (target) db.update(app.files, item.id, { folder_id: target });
       return;
     }
     db.update(app.folders, item.id, { parent_id: target });
