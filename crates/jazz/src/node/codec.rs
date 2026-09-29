@@ -2004,7 +2004,7 @@ impl VersionRecord {
         )
         .with_branch_key(stored.branch_key().clone())
         .with_authored_columns(authored_columns)
-        .with_col_stamps(stored.col_stamps_bytes()?.to_vec()))
+        .with_col_stamps(stored.col_stamps_wire()?))
     }
 }
 
@@ -2144,7 +2144,8 @@ pub(super) struct VersionRowParts {
     pub(super) cells: BTreeMap<String, Value>,
     pub(super) authored_columns: Option<BTreeSet<PhysicalColumnId>>,
     pub(super) deletion: Option<DeletionEvent>,
-    /// `_col_stamps` carrier: empty for an unstamped image.
+    /// Wire `col_stamps` carrier (SPEC 4.6): empty when every slot is `0`,
+    /// as for an unstamped image.
     pub(super) col_stamps: Vec<u8>,
 }
 
@@ -2277,7 +2278,8 @@ impl VersionRow {
             ));
         }
         let deletion = version.deletion();
-        super::col_stamps::validate_stamps(version.col_stamps(), table)?;
+        let stamp_values = super::col_stamps::wire_stamp_values(version.col_stamps(), table)?;
+        let first_stamp_field = HistoryRowRecord::USER_CELLS + table.columns.len() + 1;
         let descriptor = history_record_descriptor(table);
         let source = version.record().borrowed();
         let source_descriptor = source.descriptor();
@@ -2343,7 +2345,11 @@ impl VersionRow {
                     i if i == HistoryRowRecord::USER_CELLS + table.columns.len() => {
                         authored_column_ids_value(authored_columns.as_ref())
                     }
-                    _ => Value::Bytes(version.col_stamps().to_vec()),
+                    i => stamp_values.get(i - first_stamp_field).cloned().ok_or(
+                        Error::InvalidStoredValue(
+                            "history layout does not match the table's stamp slots",
+                        ),
+                    )?,
                 };
                 descriptor.encode_field_into(index, &value, output)?;
                 Ok(())
@@ -2515,26 +2521,25 @@ impl VersionRow {
         value.map(authored_column_ids_from_value).transpose()
     }
 
-    /// The `_col_stamps` carrier of this row image: empty when unstamped
-    /// (a pending patch, or a layout without the field).
-    pub(super) fn col_stamps_bytes(&self) -> Result<&[u8], Error> {
-        let Some(field) = self
-            .record
-            .descriptor()
-            .field_index(crate::schema::COLUMN_STAMPS_FIELD)
-        else {
-            return Ok(&[]);
-        };
-        Ok(self.record.borrowed().get_bytes(field)?)
+    /// The canonical wire `col_stamps` carrier of this row image (SPEC 4.6):
+    /// empty when every stamp field is `0` or the layout has none.
+    pub(super) fn col_stamps_wire(&self) -> Result<Vec<u8>, Error> {
+        super::col_stamps::wire_stamps(self.record.borrowed())
     }
 
-    /// Decode this image's stamps for its own table layout.
+    /// The newest stamp field of this row image; `0` when unstamped.
+    pub(super) fn max_col_stamp(&self) -> Result<u64, Error> {
+        super::col_stamps::max_stamp(self.record.borrowed())
+    }
+
+    /// Read this image's stamp fields for its own table layout; `None` for a
+    /// layout without stamp fields.
     pub(super) fn col_stamps(
         &self,
         table: &TableSchema,
     ) -> Result<Option<super::col_stamps::ColumnStamps>, Error> {
-        super::col_stamps::ColumnStamps::decode(
-            self.col_stamps_bytes()?,
+        super::col_stamps::ColumnStamps::read(
+            self.record.borrowed(),
             &super::col_stamps::StampSlots::for_table(table),
         )
     }
@@ -3698,7 +3703,10 @@ pub(super) fn history_values_from_parts(
         ));
     }
     values.push(authored_column_ids_value(version.authored_columns.as_ref()));
-    values.push(Value::Bytes(version.col_stamps.clone()));
+    values.extend(super::col_stamps::wire_stamp_values(
+        &version.col_stamps,
+        table,
+    )?);
     Ok(values)
 }
 
@@ -3740,7 +3748,10 @@ fn history_values_from_wire(
         values.push(Value::Nullable(value.map(Box::new)));
     }
     values.push(authored_column_ids_value(authored_columns.as_ref()));
-    values.push(Value::Bytes(version.col_stamps().to_vec()));
+    values.extend(super::col_stamps::wire_stamp_values(
+        version.col_stamps(),
+        table,
+    )?);
     Ok(values)
 }
 
@@ -3815,7 +3826,14 @@ pub(super) fn global_current_values(
     values.push(authored_column_ids_value(
         version.authored_column_ids()?.as_ref(),
     ));
-    values.push(Value::Bytes(version.col_stamps_bytes()?.to_vec()));
+    let slots = super::col_stamps::StampSlots::for_table(table);
+    values.extend(
+        version
+            .col_stamps(table)?
+            .unwrap_or_else(|| super::col_stamps::ColumnStamps::uniform(&slots, 0))
+            .values()
+            .collect::<Vec<_>>(),
+    );
     Ok(values)
 }
 

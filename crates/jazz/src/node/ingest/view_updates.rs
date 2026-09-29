@@ -25,7 +25,7 @@ where
         incoming_tx: TxId,
         global_time: GlobalTime,
     ) -> Result<Option<VersionRow>, Error> {
-        use crate::node::col_stamps::{ColumnStamps, StampSlots, max_stamp};
+        use crate::node::col_stamps::{ColumnStamps, StampSlots};
 
         let stamp = incoming
             .tx_time()
@@ -34,13 +34,7 @@ where
         let slots = StampSlots::for_table(table_schema);
         let authored = self.authored_columns_for_version(incoming)?;
         let authors = |name: &str| authored.as_ref().is_none_or(|columns| columns.contains(name));
-        let stamps_index = incoming
-            .record
-            .descriptor()
-            .field_index(crate::schema::COLUMN_STAMPS_FIELD)
-            .ok_or(Error::InvalidStoredValue(
-                "row image layout has no column stamps field",
-            ))?;
+        let incoming_descriptor = incoming.record.descriptor();
         let Some((previous, previous_seq)) = self
             .query_global_winner_with_seq_in_batch(
                 batch,
@@ -65,7 +59,7 @@ where
                 stamps.set(slots.deletion(), stamp);
             }
             let mut values = incoming.record.to_values()?;
-            values[stamps_index] = Value::Bytes(stamps.encode());
+            stamps.write_values(&mut values, &incoming_descriptor)?;
             return incoming.with_record_values(values).map(Some);
         };
         let previous_tx = self.version_tx_id(&previous)?;
@@ -79,7 +73,7 @@ where
         let beats = |stored: u64| stamp > stored || (stamp == stored && applies_later);
         // An unstamped previous image (legacy, or a lens-translated payload)
         // counts as stamp 0 everywhere: any stamped write may replace it.
-        let previous_row_stamp = max_stamp(previous.col_stamps_bytes()?)?;
+        let previous_row_stamp = previous.max_col_stamp()?;
         let incoming_is_newest = beats(previous_row_stamp);
         if previous.schema_version_alias() != incoming.schema_version_alias() {
             // Different authored layouts: keep whole-row last-writer-wins
@@ -89,7 +83,7 @@ where
                 return Ok(None);
             }
             let mut values = incoming.record.to_values()?;
-            values[stamps_index] = Value::Bytes(ColumnStamps::uniform(&slots, stamp).encode());
+            ColumnStamps::uniform(&slots, stamp).write_values(&mut values, &incoming_descriptor)?;
             return incoming.with_record_values(values).map(Some);
         }
         let mut stamps = previous
@@ -153,7 +147,7 @@ where
         ] {
             keep(&mut merged, index);
         }
-        merged[stamps_index] = Value::Bytes(stamps.encode());
+        stamps.write_values(&mut merged, &incoming_descriptor)?;
         incoming.with_record_values(merged).map(Some)
     }
 
@@ -449,7 +443,7 @@ where
         // writes at least as high, so an edit made after observing a value
         // is never older than that value. The row's identity is the write at
         // its seq, which need not carry the row's highest stamp.
-        let observed = crate::node::col_stamps::max_stamp(version.col_stamps_bytes()?)?;
+        let observed = version.max_col_stamp()?;
         self.merge_tx_time(TxTime::from_physical_ms(observed).map_err(|_| {
             Error::InvalidStoredValue("column stamp exceeds the packed HLC range")
         })?);

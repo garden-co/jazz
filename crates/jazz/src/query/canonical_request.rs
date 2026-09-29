@@ -738,7 +738,10 @@ fn put_binding_value(bytes: &mut Vec<u8>, value: &Value) -> Result<(), QueryErro
             )?;
             put_bytes(bytes, record.raw());
         }
-        Value::Enum(_) | Value::Large(_) => return Err(QueryError::OperandTypeMismatch),
+        // U48 is an engine-owned stamp width, never a public query binding.
+        Value::Enum(_) | Value::Large(_) | Value::U48(_) => {
+            return Err(QueryError::OperandTypeMismatch);
+        }
     }
     Ok(())
 }
@@ -825,7 +828,7 @@ fn put_binding_column_type(
                 )?;
             }
         }
-        ColumnType::Internal(_) => return Err(QueryError::OperandTypeMismatch),
+        ColumnType::Internal(_) | ColumnType::U48 => return Err(QueryError::OperandTypeMismatch),
     }
     Ok(())
 }
@@ -852,7 +855,7 @@ fn validate_public_column_type(column_type: &ColumnType) -> Result<(), QueryErro
                 }
             }
         }
-        ColumnType::Internal(_) => return Err(QueryError::OperandTypeMismatch),
+        ColumnType::Internal(_) | ColumnType::U48 => return Err(QueryError::OperandTypeMismatch),
         ColumnType::U8
         | ColumnType::U16
         | ColumnType::U32
@@ -908,7 +911,7 @@ fn value_type(value: &Value) -> Result<ColumnType, QueryError> {
             validate_public_column_type(&column_type)?;
             Ok(column_type)
         }
-        Value::Enum(_) | Value::Large(_) => Err(QueryError::OperandTypeMismatch),
+        Value::Enum(_) | Value::Large(_) | Value::U48(_) => Err(QueryError::OperandTypeMismatch),
     }
 }
 
@@ -1044,6 +1047,10 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
             );
             put_bytes(bytes, value.record().raw());
         }
+        Value::U48(value) => {
+            bytes.push(19);
+            bytes.extend_from_slice(&value.to_be_bytes());
+        }
         Value::Large(value) => {
             bytes.push(18);
             bytes.push(match value.kind {
@@ -1142,6 +1149,7 @@ fn put_column_type(bytes: &mut Vec<u8>, ty: &ColumnType) {
         // interface. Still keep this defensive encoder total if an internal
         // descriptor is carried by an otherwise supported record literal.
         ColumnType::Internal(_) => bytes.push(17),
+        ColumnType::U48 => bytes.push(18),
     }
 }
 

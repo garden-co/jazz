@@ -25,6 +25,7 @@ Invariant digest:
 - `INV-STORAGE-7`: Public insert/update values MUST be interpreted in `TableSchema.columns` declaration order, independent of the `RecordDescriptor` physical encoding order.
 - `INV-STORAGE-8`: `RecordDescriptor::fields()` and field indices MUST remain in logical declaration order even though encoded bytes may reorder fixed-width fields before variable-width fields.
 - `INV-STORAGE-9`: Fixed-width record scalar payloads and record/array offsets MUST use little-endian encoding inside record values; fixed-width tuple integer members MUST use big-endian order-preserving member encoding.
+- `INV-STORAGE-37`: A `U48` value MUST lie in `0..=2^48-1` and MUST be rejected on encode otherwise; it is constant-width: exactly 6 bytes little-endian as a record scalar (fixed region), exactly 6 bytes big-endian as a tuple member, and tag `0x10` plus 6 big-endian bytes as a primary-key or ordered-index part.
 - `INV-STORAGE-10`: Fixed-width nullable nulls MUST encode as flag `0` plus zero-filled reserved payload width; variable-width nullable nulls MUST encode as only flag `0`.
 - `INV-STORAGE-11`: Fixed-width arrays MUST encode as concatenated element encodings without an element count; variable-width arrays MUST encode `count: u32`, offsets for all but the final element, then payloads.
 - `INV-STORAGE-12`: `F64` record and ordered-key values MUST NOT be NaN.
@@ -592,6 +593,7 @@ Nodes encode a prefix-order tree, bounded to 1024 nodes. Permanent tags are:
 | 17, 18 | UUID, scalar enum                        |
 | 19–22  | Tuple, Array, Nullable, Record           |
 | 23, 24 | Payload enum, enum case                  |
+| 25     | U48                                      |
 
 A descriptor declares its field count; each field retains its exact optional
 name and one type child. Tuple nodes declare their type-child count; Array and
@@ -790,6 +792,17 @@ infinity are valid, while every NaN bit pattern is invalid on encode, decode, an
 structural validation before a caller-supplied raw `VariantRecord` can enter durable
 storage. Ordered-index `F64` uses the separately specified order transform in §2.8.
 
+**`U48`** (`INV-STORAGE-37`) is a constant-width unsigned 48-bit integer
+carried as a widened `u64` in memory. Its record payload is the low 6 bytes of
+the value, little-endian, in the fixed-width region (so a `U48` field never adds
+an offset-table entry); as a fixed tuple member it is the same 6 bytes
+big-endian. `Nullable<U48>` is 7 bytes: flag plus a 6-byte payload that is zero
+when null. Encoders reject values above `2^48 - 1` (`Error::U48OutOfRange`);
+every 6-byte payload decodes to an in-range value, so there is one byte
+representation per value. `U48` is its own type: a `U64` value does not encode
+into a `U48` field or vice versa. Typed wrappers use `records::U48` or
+`impl_record_field_u48!` for a `u64` newtype.
+
 **Nullable values** (`INV-STORAGE-10`): a fixed-width null is flag `0` plus a
 zero-filled reserved width; a variable-width null is the flag byte alone.
 
@@ -819,7 +832,10 @@ nested records), and nullable values are not valid key parts.
 
 The epoch-1 tags are frozen: `U8=00`, `U16=01`, `U32=02`, `U64=03`,
 `I64=0d`, `I32=0e`, `Bool=05`, `String=06`, `Bytes=07`, `Uuid=0a`, and
-fixed-width `Tuple=0b`. Signed integer payloads flip their sign bit before
+fixed-width `Tuple=0b`. `U48=10` (followed by exactly 6 big-endian payload
+bytes, `INV-STORAGE-37`) was added after epoch 1 and is likewise permanent;
+tags `0c` and `0f` are used by non-durable runtime identity keys and are not
+key-part tags. Signed integer payloads flip their sign bit before
 big-endian emission. A direct record-store key may use only the supported
 declared key types and fixed tuples thereof; a tuple payload recursively uses
 the same tagged encoding for each member in declaration order. Every key decoder is type-directed

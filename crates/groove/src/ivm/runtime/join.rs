@@ -1166,7 +1166,7 @@ fn encode_join_key_part(
             crate::records::Value::U32(value) => {
                 return encode_join_integer_key(key, i128::from(*value));
             }
-            crate::records::Value::U64(value) => {
+            crate::records::Value::U64(value) | crate::records::Value::U48(value) => {
                 return encode_join_integer_key(key, i128::from(*value));
             }
             crate::records::Value::I32(value) => {

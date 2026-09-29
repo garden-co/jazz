@@ -116,6 +116,11 @@ pub(super) fn encode_record_field_key_part(
             key.extend(borrowed.get_u64(field_idx)?.to_be_bytes());
             Ok(())
         }
+        ValueType::U48 => {
+            key.push(16);
+            key.extend(crate::records::u48_be_bytes(borrowed.get_u48(field_idx)?)?);
+            Ok(())
+        }
         ValueType::I32 => {
             key.push(14);
             key.extend(order_preserving_i32_bits(borrowed.get_i32(field_idx)?).to_be_bytes());
@@ -392,6 +397,9 @@ pub(super) fn record_field_literal_ordering(
         (ValueType::U64, LiteralValue::U64(expected)) => {
             Ok(ordering(&record.get_u64(field_idx)?, expected))
         }
+        (ValueType::U48, LiteralValue::U48(expected)) => {
+            Ok(ordering(&record.get_u48(field_idx)?, expected))
+        }
         (ValueType::I32, LiteralValue::I32(expected)) => {
             Ok(ordering(&record.get_i32(field_idx)?, expected))
         }
@@ -441,6 +449,10 @@ fn nullable_record_field_literal_ordering(
     match (inner, expected) {
         (ValueType::U64, LiteralValue::U64(expected)) => Ok(record
             .get_nullable_u64(field_idx)?
+            .map(|actual| ordering(&actual, expected))
+            .unwrap_or(FieldLiteralOrdering::SqlNull)),
+        (ValueType::U48, LiteralValue::U48(expected)) => Ok(record
+            .get_nullable_u48(field_idx)?
             .map(|actual| ordering(&actual, expected))
             .unwrap_or(FieldLiteralOrdering::SqlNull)),
         (ValueType::I64, LiteralValue::I64(expected)) => Ok(record
@@ -573,6 +585,7 @@ fn compare_values(
         (Value::U16(left), Value::U16(right)) => left.partial_cmp(right),
         (Value::U32(left), Value::U32(right)) => left.partial_cmp(right),
         (Value::U64(left), Value::U64(right)) => left.partial_cmp(right),
+        (Value::U48(left), Value::U48(right)) => left.partial_cmp(right),
         (Value::I32(left), Value::I32(right)) => left.partial_cmp(right),
         (Value::I64(left), Value::I64(right)) => left.partial_cmp(right),
         (Value::F64(left), Value::F64(right)) => left.partial_cmp(right),
@@ -603,6 +616,7 @@ fn integer_value(value: &Value) -> Option<i128> {
         Value::U16(value) => Some(i128::from(*value)),
         Value::U32(value) => Some(i128::from(*value)),
         Value::U64(value) => Some(i128::from(*value)),
+        Value::U48(value) => Some(i128::from(*value)),
         Value::I32(value) => Some(i128::from(*value)),
         Value::I64(value) => Some(i128::from(*value)),
         _ => None,
@@ -652,6 +666,10 @@ pub(crate) fn encode_key_part(key: &mut Vec<u8>, value: &Value) -> Result<(), Iv
         Value::U64(value) => {
             key.push(3);
             key.extend(value.to_be_bytes());
+        }
+        Value::U48(value) => {
+            key.push(16);
+            key.extend(crate::records::u48_be_bytes(*value)?);
         }
         Value::I32(value) => {
             key.push(14);

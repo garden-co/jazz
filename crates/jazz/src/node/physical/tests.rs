@@ -123,7 +123,18 @@ mod variant_case_tests {
                 expected.extend(table.columns.iter()
                     .filter(|column| present.as_ref().is_none_or(|set| set.contains(&column.name)))
                     .map(|column| physical_user_column_field(mapping.columns[&column.name])));
-                expected.extend(storage.columns[prefix + table.columns.len()..].iter().map(|c| c.name.clone()));
+                let trailing = &storage.columns[prefix + table.columns.len()..];
+                expected.extend(trailing.iter()
+                    .filter(|c| !c.name.starts_with(crate::schema::STAMP_FIELD_PREFIX))
+                    .map(|c| c.name.clone()));
+                // Stamp fields are named after the physical cell they stamp.
+                if trailing.iter().any(|c| c.name.starts_with(crate::schema::STAMP_FIELD_PREFIX)) {
+                    expected.extend(table.columns.iter()
+                        .filter(|column| present.as_ref().is_none_or(|set| set.contains(&column.name)))
+                        .map(|column| crate::schema::stamp_field_name(
+                            &physical_user_column_field(mapping.columns[&column.name]))));
+                    expected.push("_ts__deletion".to_owned());
+                }
                 assert_eq!(*actual, expected);
             }
         }
