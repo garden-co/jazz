@@ -1209,6 +1209,10 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     private readonly session?: Session,
     private readonly attribution?: string,
     ownerClient?: JazzClient,
+    // Reads authorize as the Db's read session, like reads outside the
+    // transaction. Attributed Dbs read with backend authority while their
+    // `session` only supplies write provenance.
+    private readonly readSession?: Session,
   ) {
     if (ownerClient) this.bindOwnerClient(ownerClient);
   }
@@ -1475,7 +1479,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
         localUpdates: "deferred",
         openTransactionId,
       },
-      session,
+      this.readSession ?? session,
     );
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const outputTransforms = resolveOutputColumnTransforms(query, builtQuery.table, outputTable);
@@ -2456,6 +2460,7 @@ export class Db {
             context?.session,
             context?.attribution,
             ownerClient,
+            context?.readSession,
           ),
       );
     return new Transaction(
@@ -2464,6 +2469,7 @@ export class Db {
       context?.session,
       context?.attribution,
       ownerClient ?? undefined,
+      context?.readSession,
     );
   }
 
