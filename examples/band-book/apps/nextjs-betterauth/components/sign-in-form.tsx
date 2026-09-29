@@ -30,59 +30,63 @@ export function SignInForm({ next = "/workspace" }: { next?: string }) {
   }
 
   return (
-    <Card maxWidth={420} width="100%">
-      <form onSubmit={submit}>
-        <VStack gap={4}>
-          <VStack gap={1}>
-            <Heading level={1}>{signingUp ? "Create your account" : "Sign in to BandBook"}</Heading>
-            <Text type="supporting">
-              Setlists, lyrics, tour notes and the band's to-do list, in one shared notebook.
-            </Text>
-          </VStack>
-          {signingUp && (
+    <VStack as="main" height="100dvh" justify="center" align="center" padding={4}>
+      <Card maxWidth={420} width="100%">
+        <form onSubmit={submit}>
+          <VStack gap={4}>
+            <VStack gap={1}>
+              <Heading level={1}>
+                {signingUp ? "Create your account" : "Sign in to BandBook"}
+              </Heading>
+              <Text type="supporting">
+                Setlists, lyrics, tour notes and the band's to-do list, in one shared notebook.
+              </Text>
+            </VStack>
+            {signingUp && (
+              <TextInput
+                label="Name"
+                value={name}
+                onChange={setName}
+                isRequired
+                autoComplete="name"
+              />
+            )}
             <TextInput
-              label="Name"
-              value={name}
-              onChange={setName}
+              label="Email"
+              type="email"
+              value={email}
+              onChange={setEmail}
               isRequired
-              autoComplete="name"
+              autoComplete="email"
             />
-          )}
-          <TextInput
-            label="Email"
-            type="email"
-            value={email}
-            onChange={setEmail}
-            isRequired
-            autoComplete="email"
-          />
-          <TextInput
-            label="Password"
-            type="password"
-            value={password}
-            onChange={setPassword}
-            isRequired
-            description={signingUp ? "At least 8 characters" : undefined}
-            autoComplete={signingUp ? "new-password" : "current-password"}
-          />
-          {error && <Banner status="error" title={error} collapsible={false} />}
-          <VStack gap={2}>
-            <Button
-              type="submit"
-              variant="primary"
-              label={signingUp ? "Create account" : "Sign in"}
-              isLoading={pending}
-              width="100%"
+            <TextInput
+              label="Password"
+              type="password"
+              value={password}
+              onChange={setPassword}
+              isRequired
+              description={signingUp ? "At least 8 characters" : undefined}
+              autoComplete={signingUp ? "new-password" : "current-password"}
             />
-            <Button
-              variant="ghost"
-              label={signingUp ? "I already have an account" : "Create an account"}
-              onClick={() => setMode(signingUp ? "sign-in" : "sign-up")}
-              width="100%"
-            />
+            {error && <Banner status="error" title={error} collapsible={false} />}
+            <VStack gap={2}>
+              <Button
+                type="submit"
+                variant="primary"
+                label={signingUp ? "Create account" : "Sign in"}
+                isLoading={pending}
+                width="100%"
+              />
+              <Button
+                variant="ghost"
+                label={signingUp ? "I already have an account" : "Create an account"}
+                onClick={() => setMode(signingUp ? "sign-in" : "sign-up")}
+                width="100%"
+              />
+            </VStack>
           </VStack>
-        </VStack>
-      </form>
-    </Card>
+        </form>
+      </Card>
+    </VStack>
   );
 }
