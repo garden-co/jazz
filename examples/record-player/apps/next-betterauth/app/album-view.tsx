@@ -16,7 +16,7 @@ import type { PlayableTrack } from "../src/audio-stream";
 import { ALBUM_TRACK_LIMIT, positionBetween } from "../src/record-player";
 import { CoverArt } from "./cover-art";
 import { formatBytes, formatDuration } from "./format";
-import { useStore, usePlaylists, type Album } from "./library-data";
+import { FIRST_READ, useStore, usePlaylists, type Album } from "./library-data";
 import { usePlayer } from "./player";
 
 type TrackRow = PlayableTrack & { ordinal: number };
@@ -31,6 +31,7 @@ export function useAlbumTracks(album: Album | undefined): TrackRow[] | undefined
           .limit(ALBUM_TRACK_LIMIT)
           .select("title", "ordinal", "duration_ms", "audio_mime", "audio_byte_length")
       : undefined,
+    FIRST_READ,
   );
   return tracks.data?.map((track) => ({
     id: track.id,

@@ -18,7 +18,7 @@ import { app } from "../schema";
 import type { PlayableTrack } from "../src/audio-stream";
 import { positionBetween } from "../src/record-player";
 import { formatDuration } from "./format";
-import { usePlaylists, useStore, type PlaylistSummary } from "./library-data";
+import { FIRST_READ, usePlaylists, useStore, type PlaylistSummary } from "./library-data";
 import { usePlayer } from "./player";
 import { ShareDialog } from "./share-dialog";
 
@@ -89,6 +89,7 @@ function PlaylistDetail({ playlist }: { playlist: PlaylistSummary }) {
           .select("album_id", "title", "duration_ms", "audio_mime", "audio_byte_length")
           .include({ album: app.albums.select("title", "artist", "cover_mime") }),
       }),
+    FIRST_READ,
   );
 
   const rows = useMemo<EntryRow[]>(
