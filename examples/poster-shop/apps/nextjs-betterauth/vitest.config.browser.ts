@@ -107,7 +107,7 @@ export default defineConfig({
       provider: playwright(),
       instances: [{ browser: "chromium", headless: true }],
       commands: {
-        jazzServerInfo: async (_context, appId, schema) => jazzServerInfo(appId, schema),
+        jazzServerInfo: async (_context, appId) => jazzServerInfo(appId),
         jazzServerBlockNetwork: async ({ context }, serverUrl) =>
           blockJazzServerNetwork(context, serverUrl),
         jazzServerUnblockNetwork: async ({ context }, serverUrl) =>
