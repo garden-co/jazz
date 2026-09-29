@@ -13,8 +13,8 @@ export interface JazzServerNetworkDebugState {
   activePatterns: string[];
 }
 
-export function getJazzServerInfo(appId?: string): Promise<JazzServerInfo> {
-  return jazzServerBrowserCommands().jazzServerInfo(appId);
+export function getJazzServerInfo(appId?: string, schema?: Uint8Array): Promise<JazzServerInfo> {
+  return jazzServerBrowserCommands().jazzServerInfo(appId, schema ? [...schema] : undefined);
 }
 
 export function stopJazzServer(serverUrl: string): Promise<void> {

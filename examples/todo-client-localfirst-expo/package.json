@@ -12,8 +12,7 @@
     "prebuild": "expo prebuild --clean",
     "verify:expo": "pnpm verify:expo:android && pnpm verify:expo:ios",
     "verify:expo:android": "CI=1 expo prebuild --platform android --clean --no-install",
-    "verify:expo:ios": "CI=1 expo prebuild --platform ios --clean --no-install",
-    "typecheck": "tsc --noEmit"
+    "verify:expo:ios": "CI=1 expo prebuild --platform ios --clean --no-install"
   },
   "dependencies": {
     "expo": "^54.0.0",

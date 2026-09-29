@@ -9,8 +9,7 @@
     "start": "next start",
     "test": "pnpm test:config-security && pnpm test:e2e",
     "test:e2e": "playwright test",
-    "test:config-security": "tsx --test e2e/config-security.spec.ts",
-    "typecheck": "tsc --noEmit"
+    "test:config-security": "tsx --test e2e/config-security.spec.ts"
   },
   "dependencies": {
     "jazz-napi": "workspace:*",

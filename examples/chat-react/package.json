@@ -10,8 +10,7 @@
     "test": "pnpm run test:unit && pnpm run test:browser",
     "test:unit": "vitest run --config vitest.config.ts",
     "test:browser": "vitest run --config vitest.config.browser.ts",
-    "test:e2e": "playwright test",
-    "typecheck": "tsc --noEmit"
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@multiavatar/multiavatar": "^1.0.7",
