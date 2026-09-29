@@ -490,7 +490,7 @@ fn authored_columns_cross_nodes_with_different_physical_column_ids() {
         .unwrap();
     // Exercise the explicit immutable-row envelope before local catalogue translation.
     let wire = crate::wire::encode_sync_message(&unit).unwrap();
-    assert!(wire.windows(5).any(|bytes| bytes == b"JVRR\x01"));
+    assert!(wire.windows(5).any(|bytes| bytes == b"JVRR\x02"));
     let unit = crate::wire::decode_sync_message(&wire).unwrap();
     receiver.apply_sync_message_settled(unit).unwrap();
     let stored = receiver.query_versions_for_tx(tx_id).unwrap();

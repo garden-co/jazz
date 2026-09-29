@@ -30,7 +30,7 @@ use crate::protocol::{
     SyncMessage,
 };
 use crate::schema::JazzSchema;
-use crate::storage_codec_profile::epoch_1_storage_codec_profile;
+use crate::storage_codec_profile::node_storage_codec_profile;
 use crate::wire::{TransportError, WireTransport};
 use futures::lock::Mutex as LocalMutex;
 
@@ -841,7 +841,7 @@ impl InMemoryServerShell {
                 let storage = crate::db::block_on(factory.open(
                     path.clone(),
                     refs,
-                    epoch_1_storage_codec_profile().map_err(db_storage_error)?,
+                    node_storage_codec_profile().map_err(db_storage_error)?,
                 ))
                 .map_err(db_storage_error)?;
                 let (storage, schema) = if config.reopen_with_durable_schema {

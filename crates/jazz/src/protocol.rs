@@ -29,7 +29,7 @@ use crate::tx::{DeletionEvent, DurabilityTier, Fate, Snapshot, Transaction, TxId
 
 /// Uninhabited payload preserving retired postcard discriminants.
 #[doc(hidden)]
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum ReservedWireMessage {}
 
 /// Messages exchanged between Jazz nodes.
@@ -926,7 +926,7 @@ pub struct PeerPayloadInventory {
 /// One immutable row-version payload carried by a committed transaction.
 ///
 /// The outer message retains table, schema UUID, branch and authored-column
-/// identity. The row uses the explicit `JVRR` v1 envelope: persisted schema
+/// identity. The row uses the explicit `JVRR` v2 envelope: persisted schema
 /// descriptor plus canonical record bytes, never runtime `OwnedRecord` serde.
 /// The receiver validates that descriptor against the declared schema before
 /// translating columns into its node-local physical catalogue.
@@ -957,7 +957,10 @@ pub struct VersionRecord {
 mod version_record_wire_row {
     use super::*;
 
-    const MAGIC: &[u8; 5] = b"JVRR\x01";
+    // Version 2 (wire protocol v4): the record no longer carries `parents`,
+    // gains the `_deletion` cell, and travels beside `col_stamps`. Version 1
+    // rows (the DAG-history layout) are rejected rather than reinterpreted.
+    const MAGIC: &[u8; 5] = b"JVRR\x02";
 
     // Descriptor identity includes immutable names, layouts, nested types and
     // enum registry/case schemas. Row bytes are produced by the encoder;
@@ -1131,8 +1134,9 @@ mod version_record_wire_row {
         fn row_bulk_bytes_reject_truncated_and_invalid_envelopes() {
             for bytes in [
                 vec![],
-                b"JVRR\x02".to_vec(),
-                b"JVRR\x01\xff\xff\xff\xff".to_vec(),
+                b"JVRR\x01".to_vec(),
+                b"JVRR\x03".to_vec(),
+                b"JVRR\x02\xff\xff\xff\xff".to_vec(),
             ] {
                 let wire = postcard::to_allocvec(&bytes).unwrap();
                 assert!(postcard::from_bytes::<WireRow>(&wire).is_err());
@@ -1265,9 +1269,9 @@ mod version_record_wire_row {
             let encoded = encode(&original).unwrap();
             assert_eq!(
                 blake3::hash(&encoded).to_hex().as_str(),
-                "49f95ea224a6eb504d45a80ec11f003fa4717998d4d477198716237c865d0875"
+                "ec3b67be19dc025171263e46873fb5d8d3179b360d1527bebd135ee9b8803340"
             );
-            assert_eq!(&encoded[..5], b"JVRR\x01");
+            assert_eq!(&encoded[..5], b"JVRR\x02");
             assert_eq!(decode(&encoded).unwrap(), original);
 
             let mut fields = descriptor.fields().to_vec();
@@ -1292,9 +1296,12 @@ mod version_record_wire_row {
                 encoded,
                 "logical field identity remains authoritative"
             );
-            let mut unknown_version = encoded.clone();
-            unknown_version[4] = 2;
-            assert!(decode(&unknown_version).is_err());
+            // Version 1 (the DAG row with `parents`) is retired; 3 is unknown.
+            for version in [1, 3] {
+                let mut other_version = encoded.clone();
+                other_version[4] = version;
+                assert!(decode(&other_version).is_err());
+            }
             let mut trailing = encoded.clone();
             trailing.push(0);
             assert_eq!(
@@ -1325,7 +1332,7 @@ mod version_record_wire_row {
             type Value = OwnedRecord;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str("a JVRR v1 row byte blob")
+                formatter.write_str("a JVRR v2 row byte blob")
             }
 
             fn visit_bytes<E: serde::de::Error>(self, bytes: &[u8]) -> Result<Self::Value, E> {
@@ -3600,6 +3607,11 @@ pub enum KnownStateDeclaration {
         /// Server-stamped authorization generation echoed by the receiver.
         authorization_progress: u64,
     },
+    /// Retired tag 2 (`ExactVersionSet` before wire protocol v4). Uninhabited,
+    /// so a pre-v4 exact version-set declaration fails to decode instead of
+    /// being reinterpreted as a watermark prefix.
+    #[doc(hidden)]
+    Reserved2(ReservedWireMessage),
     /// "I have Q at watermark W": the receiver holds the supporting set it
     /// installed as `supporting_revision`, complete through `position`. A
     /// serving peer that can answer from its `by_seq` index replies with a

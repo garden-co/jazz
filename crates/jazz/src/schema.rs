@@ -562,18 +562,8 @@ impl RuntimeSchema {
             ))
             .with_direct_record_store(DirectRecordStoreSchema::new(
                 SUBSCRIPTION_WATERMARKS_STORE,
-                RecordDescriptor::new([
-                    ("shape_id", ValueType::Uuid),
-                    ("binding_id", ValueType::Uuid),
-                    ("read_view_id", ValueType::Uuid),
-                    ("policy_scope", ValueType::U8),
-                    ("policy_binding_digest", ValueType::Bytes),
-                ]),
-                RecordDescriptor::new([
-                    ("format_v1", ValueType::U8),
-                    ("settled_through", ValueType::U64),
-                    ("supporting_revision", ValueType::Bytes),
-                ]),
+                subscription_watermark_key_descriptor(),
+                subscription_watermark_value_descriptor(),
             ))
             .with_direct_record_store(DirectRecordStoreSchema::new(
                 LOCAL_ROW_AVAILABILITY_STORE,
@@ -1225,6 +1215,28 @@ impl TableSchema {
             })),
         )
     }
+}
+
+/// Key of a subscription watermark record v1: the canonical binding view
+/// and its policy scope (`0` unscoped with an empty digest, `1` scoped by the
+/// policy-binding directory digest).
+pub(crate) fn subscription_watermark_key_descriptor() -> RecordDescriptor {
+    RecordDescriptor::new([
+        ("shape_id", ValueType::Uuid),
+        ("binding_id", ValueType::Uuid),
+        ("read_view_id", ValueType::Uuid),
+        ("policy_scope", ValueType::U8),
+        ("policy_binding_digest", ValueType::Bytes),
+    ])
+}
+
+/// Value of a subscription watermark record v1 (format byte `1`).
+pub(crate) fn subscription_watermark_value_descriptor() -> RecordDescriptor {
+    RecordDescriptor::new([
+        ("format_v1", ValueType::U8),
+        ("settled_through", ValueType::U64),
+        ("supporting_revision", ValueType::Bytes),
+    ])
 }
 
 fn schema_versions_table() -> GrooveTableSchema {

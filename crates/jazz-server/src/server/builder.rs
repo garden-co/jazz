@@ -1142,7 +1142,7 @@ mod tests {
                     dir.path().join(SERVER_SHELL_ROCKSDB_DIR),
                     &refs,
                     jazz_storage_rocksdb::Durability::WalNoSync,
-                    &jazz::storage_codec_profile::epoch_1_storage_codec_profile().unwrap(),
+                    &jazz::storage_codec_profile::node_storage_codec_profile().unwrap(),
                 )
                 .unwrap();
             let mut database = groove::db::Database::new_with_storage_layout(

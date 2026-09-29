@@ -25,7 +25,7 @@ Invariant digest:
 - `INV-DATA-12`: A table read or write policy, when present, MUST name the table it is attached to and MUST validate against the complete `JazzSchema`.
 - `INV-DATA-14`: History storage MUST preserve each content version's row identity, transaction identity, schema identity, parent set, and user cells.
 - `INV-DATA-15`: Deletion-register storage MUST preserve each deletion version's row identity, transaction identity, schema identity, parent set, and deletion event.
-- `INV-DATA-16`: The wire row descriptor for replicated row payloads MUST include only `row_uuid`, `parents`, nullable `_deletion`, and nullable `user_{col}` cells; receiver-local currentness and authority-state columns MUST be excluded.
+- `INV-DATA-16`: The wire row descriptor for replicated row payloads MUST include only `row_uuid`, the row provenance cells, nullable `_deletion`, and nullable `user_{col}` cells, inside the `JVRR` version-2 envelope; it MUST NOT carry `parents`, and receiver-local currentness and authority-state columns MUST be excluded.
 - `INV-DATA-17`: A stored row version MUST belong to exactly one physical layer: content with user cells or deletion-register state with `_deletion` and no user cells.
 - `INV-DATA-18`: Derived global-current storage MUST identify the per-layer winner by row and preserve the content fields needed for global current reads.
 - `INV-DATA-19`: The global change stream MUST retain enough table, row, layer, and sequence information to reconstruct global as-of reads.
@@ -277,8 +277,10 @@ one sparse immutable deletion history across the database without cross-table or
 cross-branch-key row-UUID collisions (`INV-DATA-21`).
 
 The replicated wire payload for a version (`VersionRecord`) is exactly the
-replicated-immutable fields (§2.1): `row_uuid`, `parents`, a nullable
-`_deletion`, and nullable `user_{col}` cells. Receiver-local currency and
+replicated-immutable fields (§2.1): `row_uuid`, the provenance cells, a nullable
+`_deletion`, and nullable `user_{col}` cells, carried in the `JVRR` version-2
+row blob (SPEC 16) and followed by the record's `col_stamps` (SPEC 4 §4.6).
+Wire protocol v4 removed `parents`; a version-1 blob is rejected. Receiver-local currency and
 authority-state columns are excluded (`INV-DATA-16`). Mixed-version _sync_ is
 owned by ch. 8 / ch. 10.
 
@@ -322,6 +324,30 @@ SYSTEM capability is not persisted as a row author. Node-local aliases live in `
 `jazz_schema_versions` and are rebuilt from those tables on recovery.
 
 ### 2.7.1 Settled history layout and canonical receipts
+
+**Linear-history storage boundary (2026-09-29).** A node root that holds row
+history (Core, relay and client stores on every adapter) declares the codec
+family `jazz.history-version-current.v2` in its storage manifest, in addition
+to the shared Jazz epoch-one profile. That family is the linear row-state
+layout: one history record per accepted transaction holding the row state after
+Core's merge, keyed `(branch_key, row_uuid, tx_time, tx_node_id)` with index
+`by_tx`; a global-current record per row with `global_time` (the row's seq) and
+index `by_seq (branch_key, global_time, row_uuid)`; an ahead overlay keyed
+`(branch_key, row_uuid)` with its `ahead_shadow` copy; `_deletion` as an
+ordinary nullable cell; and, after `authored_columns`, one hidden `U48` stamp
+per LWW column then `_ts__deletion` (SPEC 4 §4.6). It has no `parents`, no
+register tables, no shared deletion history, no `jazz_merge_heads`, no
+`jazz_global_changes` and no parked parent edges. A root written by the DAG
+layout (`jazz.history-version-current.v1`, alpha.54 to alpha.57) lacks the v2
+family, so opening it fails at the manifest check, before any record is
+decoded, with the typed `groove::storage::Error::UnsupportedStorageCodecs`,
+which names the codec IDs the root lacks and the ones this build does not know.
+There is no migration: whether old stores are refused, discarded and resynced,
+or converted is an open question below. Auxiliary roots that hold no row
+history (the server's account registry and catalogue-entry store) keep the
+epoch-one profile unchanged. The paragraphs of this section and §2.8 that still
+describe `parents`, the deletion register tables and `jazz_global_changes`
+specify the retired v1 layout.
 
 The authoritative identity of one immutable row version is exactly
 `(PhysicalTableId, BranchKey, RowUuid, Layer, TxId)`. `Layer` is either content
@@ -471,8 +497,9 @@ created_by, created_at, updated_by, updated_at)`, followed by declared
 (§2.2); deletion-layer records keep full authors. The deletion relation
 adds `physical_table_id` at position 1 and ends with `_deletion` at position 11;
 it has no user cells. The replicated `WireRowRecord` positions are
-`(row_uuid, parents, created_by, created_at_ms, updated_by, updated_at_ms,
-nullable _deletion, user cells...)`. A version is content iff `_deletion` is
+`(row_uuid, created_by, created_at_ms, updated_by, updated_at_ms,
+nullable _deletion, user cells...)` (`JVRR` version 2; version 1 also had
+`parents` at position 1). A version is content iff `_deletion` is
 null, otherwise it is the deletion/register layer. Parent references are the
 strictly increasing lexicographic sequence of `(TxTime, NodeUuid)` pairs;
 duplicates and insertion-order spellings are rejected on receipt. This makes a
@@ -608,3 +635,4 @@ and sync machinery.
 
 - 🔶 [#1758](https://github.com/garden-co/jazz/issues/1758) — Canonical authorship and node identity.
 - 🔶 [#1777](https://github.com/garden-co/jazz/issues/1777) — Mixed-version descriptors and visible-row encoding.
+- 🔶 [#3281](https://github.com/garden-co/jazz/issues/3281) — Stores written by the DAG history layout (`jazz.history-version-current.v1`) are refused at open. Should Core and relays convert them, and should clients discard and resync (losing unsynced pending writes) instead of surfacing the refusal?

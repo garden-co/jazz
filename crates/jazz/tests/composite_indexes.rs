@@ -261,11 +261,12 @@ fn physical_composite_index_entry_keys_are_pinned() {
     // `jazz_physical_1_ahead_current\0by_physical_composite_v1_1_2\0`, the
     // persisted-index tag 7, then the escaped logical key: branch key bytes,
     // text "alice", order-preserving i32 7, and the ahead row's primary key
-    // (branch key, row uuid 0x0a.., transaction coordinate).
+    // (branch key, row uuid 0x0a..). The ahead overlay holds one row per row,
+    // so its primary key has no transaction coordinate.
     assert_eq!(
         keys,
         [
-            "6a617a7a5f706879736963616c5f315f61686561645f63757272656e740062795f706879736963616c5f636f6d706f736974655f76315f315f320007070100ffff00ffff00ffff00ffff00ff00ff0906616c69636500ff00ff090e8000ff00ff07ff070100ffff00ffff00ffff00ffff00ff00ff0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0300ff00ff00ff00ff00ff0400ff00ff0300ff00ff00ff00ff00ff00ff00ff010000"
+            "6a617a7a5f706879736963616c5f315f61686561645f63757272656e740062795f706879736963616c5f636f6d706f736974655f76315f315f320007070100ffff00ffff00ffff00ffff00ff00ff0906616c69636500ff00ff090e8000ff00ff07ff070100ffff00ffff00ffff00ffff00ff00ff0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0000"
         ]
     );
 }

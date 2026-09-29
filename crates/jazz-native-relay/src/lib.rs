@@ -48,7 +48,7 @@ use jazz::protocol_limits::{MAX_LOGICAL_MESSAGE_BYTES, validate_logical_message_
 #[cfg(test)]
 use jazz::query::Query;
 use jazz::schema::JazzSchema;
-use jazz::storage_codec_profile::epoch_1_storage_codec_profile;
+use jazz::storage_codec_profile::node_storage_codec_profile;
 use jazz::time::TxTime;
 use jazz::tools::AppId;
 use jazz::tools::native_transport_connector::{
@@ -5418,7 +5418,7 @@ impl RelayWorker {
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>();
-        let codec_profile = epoch_1_storage_codec_profile().map_err(RelayError::Storage)?;
+        let codec_profile = node_storage_codec_profile().map_err(RelayError::Storage)?;
         let db_config = DbConfig {
             schema: config.schema.clone(),
             storage: SqliteStorage::open_with_durability_and_codec_profile(

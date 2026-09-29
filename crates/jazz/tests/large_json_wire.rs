@@ -102,7 +102,7 @@ fn json_version_records_freeze_inline_and_indirect_semantics() {
     assert_eq!(corpus, expected);
     for (name, value) in [("inline", inline_value), ("indirect", indirect_value)] {
         let bytes = unhex(expected[name].as_str().unwrap());
-        assert!(bytes.windows(5).any(|bytes| bytes == b"JVRR\x01"));
+        assert!(bytes.windows(5).any(|bytes| bytes == b"JVRR\x02"));
         let decoded: VersionRecord = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(
             decoded.record().descriptor(),
