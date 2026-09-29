@@ -1,6 +1,6 @@
 import type { NextConfig } from "next";
 import { withJazz } from "jazz-tools/dev/next";
-import { appOrigin } from "./src/lib/config";
+import { appOrigin, jwtAudience, jwtIssuer } from "./src/lib/config";
 
 export default withJazz(
   {
@@ -11,6 +11,8 @@ export default withJazz(
     server: {
       backendSecret: process.env.BACKEND_SECRET ?? "band-book-development-backend-secret",
       jwksUrl: `${appOrigin}/api/auth/jwks`,
+      jwtIssuer,
+      jwtAudience,
     },
   },
 );

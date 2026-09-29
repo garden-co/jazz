@@ -4,7 +4,7 @@ import { bearer, jwt } from "better-auth/plugins";
 import { jazzAdapter } from "jazz-tools/better-auth-adapter";
 import { app } from "@/schema";
 import { authJazzClient } from "@/src/lib/auth-jazz-client";
-import { appOrigin } from "@/src/lib/config";
+import { appOrigin, jwtAudience, jwtIssuer } from "@/src/lib/config";
 import { serverSecret } from "@/src/lib/server-secret";
 
 export const auth = betterAuth({
@@ -23,7 +23,8 @@ export const auth = betterAuth({
     jwt({
       jwks: { keyPairConfig: { alg: "ES256" } },
       jwt: {
-        issuer: appOrigin,
+        issuer: jwtIssuer,
+        audience: jwtAudience,
         expirationTime: "1h",
         getSubject: ({ user }: { user: { id: string } }) => user.id,
       },

@@ -1,6 +1,6 @@
 import { accountRegistryUrl } from "jazz-tools";
 import { resolveRequestSession } from "jazz-tools/backend";
-import { appOrigin, jazzAppId, jazzServerUrl } from "@/src/lib/config";
+import { appOrigin, jazzAppId, jazzServerUrl, jwtAudience, jwtIssuer } from "@/src/lib/config";
 
 export type RequestAccount = { account: string; displayName: string };
 
@@ -21,7 +21,8 @@ export async function requireRequestAccount(request: Request): Promise<RequestAc
       appId: jazzAppId,
       accountRegistry: accountRegistryUrl(jazzServerUrl, jazzAppId),
       jwksUrl: `${appOrigin}/api/auth/jwks`,
-      jwtIssuer: appOrigin,
+      jwtIssuer,
+      jwtAudience,
     });
   } catch {
     return Response.json({ error: "sign in required" }, { status: 401 });
