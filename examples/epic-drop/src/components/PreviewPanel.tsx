@@ -204,7 +204,7 @@ function HexPreview({ file }: { file: PreviewFile }) {
   React.useEffect(() => {
     let cancelled = false;
     readFileRange(db, { id, size_bytes }, 0, HEX_PREVIEW_BYTES).then(
-      (bytes) => !cancelled && setDump(hexDump(bytes)),
+      (bytes) => !cancelled && setDump(hexDump(bytes, 8)),
       (cause: Error) => !cancelled && setError(cause.message),
     );
     return () => {

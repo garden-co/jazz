@@ -36,6 +36,8 @@ export type EntryAction = "open" | "download" | "rename" | "move" | "share" | "d
 interface FileTableProps {
   entries: Entry[];
   canEdit: boolean;
+  /** Fewer columns, for narrow screens or beside the preview panel. */
+  isCompact?: boolean;
   canShare: (entry: Entry) => boolean;
   onAction: (entry: Entry, action: EntryAction) => void;
   onDropOnFolder: (folderId: string, payload: DropPayload) => void;
@@ -126,7 +128,7 @@ export function FileTable({
       renderCell: (entry) =>
         entry.kind === "folder" ? null : <Text hasTabularNumbers>{formatBytes(entry.size)}</Text>,
     },
-    ...(isNarrow
+    ...(isNarrow || isCompact
       ? []
       : ([
           {
@@ -142,7 +144,7 @@ export function FileTable({
     {
       key: "actions",
       header: <VisuallyHidden>Actions</VisuallyHidden>,
-      width: pixel(56),
+      width: pixel(72),
       align: "end",
       renderCell: (entry) => (
         <MoreMenu

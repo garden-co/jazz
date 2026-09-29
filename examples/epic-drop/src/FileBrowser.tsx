@@ -336,6 +336,7 @@ export function FileBrowser() {
         <FileTable
           entries={entries}
           canEdit={canEdit}
+          isCompact={preview !== undefined && isWide}
           canShare={(entry) =>
             entry.kind === "folder" && index.byId.get(entry.id)?.owner_id === userId
           }

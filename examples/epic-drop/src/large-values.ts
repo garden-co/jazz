@@ -128,16 +128,16 @@ export function previewKind(contentType: string): PreviewKind {
   return "binary";
 }
 
-/** Offset, hex and printable ASCII, 16 bytes per line. */
-export function hexDump(bytes: Uint8Array): string {
+/** Offset, hex and printable ASCII, `perRow` bytes per line. */
+export function hexDump(bytes: Uint8Array, perRow = 16): string {
   const lines: string[] = [];
-  for (let offset = 0; offset < bytes.length; offset += 16) {
-    const row = bytes.subarray(offset, offset + 16);
+  for (let offset = 0; offset < bytes.length; offset += perRow) {
+    const row = bytes.subarray(offset, offset + perRow);
     const hex = [...row].map((byte) => byte.toString(16).padStart(2, "0")).join(" ");
     const ascii = [...row]
       .map((byte) => (byte >= 0x20 && byte < 0x7f ? String.fromCharCode(byte) : "."))
       .join("");
-    lines.push(`${offset.toString(16).padStart(8, "0")}  ${hex.padEnd(47)}  ${ascii}`);
+    lines.push(`${offset.toString(16).padStart(8, "0")}  ${hex.padEnd(perRow * 3 - 1)}  ${ascii}`);
   }
   return lines.join("\n");
 }
