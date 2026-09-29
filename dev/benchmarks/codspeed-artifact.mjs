@@ -54,6 +54,30 @@ const workloadSpecs = {
   },
 };
 export const workloads = Object.keys(workloadSpecs);
+
+// CodSpeed jobs. Each group is one build job and one measurement job: the
+// build job runs one `cargo codspeed build` per workload in a shared target
+// directory (cargo-codspeed replaces only that package's executables, and each
+// build keeps its own features, so nothing is unified across workloads), and
+// the measurement job runs the workloads one after another under a single
+// CodSpeed session. Groups balance measurement time on the macro runner.
+const workloadGroups = {
+  "tasks-and-docs": ["stage-plan", "band-book", "permissioned-resources"],
+  "live-apps": ["band-chat", "world-tour", "wequencer", "poster-shop", "record-player"],
+  "files-and-ops": ["epic-drop", "jamazon-warehouse", "music-agent", "big-label"],
+  engine: ["groove-ivm"],
+};
+export const groups = Object.keys(workloadGroups);
+{
+  const grouped = Object.values(workloadGroups).flat();
+  assert.deepEqual([...grouped].sort(), [...workloads].sort(), "every workload in one group");
+  assert.equal(new Set(grouped).size, grouped.length, "no workload in two groups");
+}
+
+export function groupWorkloads(group) {
+  assert.ok(Object.hasOwn(workloadGroups, group), "unknown group");
+  return workloadGroups[group];
+}
 const format = "jazz-codspeed-benchmark-artifact-v2";
 // Observed codspeed-macro checkout root. Relative DWARF paths still receive
 // origin=unknown; match the absolute repository root uploaded by the runner.
@@ -91,6 +115,17 @@ export function measureSettings() {
   );
 }
 
+// Per-group measurement job settings: the group's workloads run in sequence,
+// so its timeout is the sum of theirs.
+export function groupMeasureSettings() {
+  return Object.fromEntries(
+    groups.map((group) => [
+      group,
+      { timeout: groupWorkloads(group).reduce((sum, w) => sum + workloadSpecs[w].timeout, 0) },
+    ]),
+  );
+}
+
 // Arguments after `cargo codspeed build -m walltime` / `cargo codspeed run -m walltime`.
 // Features are chosen at build time only; cargo-codspeed rejects them on `run`.
 export function buildArgs(workload) {
@@ -106,6 +141,19 @@ export function buildArgs(workload) {
 export function runArgs(workload) {
   const { package: pkg, benches } = spec(workload);
   return ["--package", pkg, ...benches.flatMap((bench) => ["--bench", bench])];
+}
+
+// One shell command that measures a group's workloads in order, each with its
+// own measurement thread stack (none: Rust std's default), stopping at the
+// first failure. The CodSpeed action runs it as a single session.
+export function runCommand(group) {
+  return groupWorkloads(group)
+    .map((workload) => {
+      const { minStack } = workloadSpecs[workload];
+      const env = minStack ? `RUST_MIN_STACK=${minStack} ` : "env -u RUST_MIN_STACK ";
+      return `${env}cargo codspeed run -m walltime ${runArgs(workload).join(" ")}`;
+    })
+    .join(" && ");
 }
 
 export function sourcePathFlags(buildWorkspace) {
@@ -252,6 +300,22 @@ async function main() {
     console.log(JSON.stringify(measureSettings()));
     return;
   }
+  if (action === "groups") {
+    console.log(JSON.stringify(groups));
+    return;
+  }
+  if (action === "group-measure") {
+    console.log(JSON.stringify(groupMeasureSettings()));
+    return;
+  }
+  if (action === "group-workloads") {
+    console.log(groupWorkloads(workload).join(" "));
+    return;
+  }
+  if (action === "run-command") {
+    console.log(runCommand(workload));
+    return;
+  }
   if (action === "build-args" || action === "run-args") {
     console.log((action === "build-args" ? buildArgs : runArgs)(workload).join(" "));
     return;
@@ -259,7 +323,7 @@ async function main() {
   const { binaries, bundle } = artifactPaths(workload);
   assert.ok(
     ["seal", "install"].includes(action),
-    "usage: codspeed-artifact.mjs seal|install|build-args|run-args WORKLOAD | rustflags | matrix | measure",
+    "usage: codspeed-artifact.mjs seal|install|build-args|run-args WORKLOAD | group-workloads|run-command GROUP | rustflags | matrix | measure | groups | group-measure",
   );
   await platform();
   const identity = context();

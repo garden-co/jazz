@@ -8,9 +8,13 @@ import { fileURLToPath } from "node:url";
 import {
   artifactPaths,
   buildArgs,
+  groupMeasureSettings,
+  groupWorkloads,
+  groups,
   measureSettings,
   measurementWorkspace,
   runArgs,
+  runCommand,
   seal,
   sourcePathFlags,
   verify,
@@ -287,7 +291,45 @@ test("measurement keeps each workload's former thread stack and timeout", () => 
   assert.deepEqual(JSON.parse(cli("measure")), measureSettings());
 });
 
-test("workflow separates native builds from unchanged CodSpeed measurement", async () => {
+test("workload groups share jobs without changing what each workload measures", () => {
+  const grouped = groups.flatMap(groupWorkloads);
+  assert.deepEqual([...grouped].sort(), [...workloads].sort(), "every workload once");
+  assert.equal(new Set(grouped).size, workloads.length);
+  assert.ok(groups.length < workloads.length, "grouping reduces CodSpeed jobs");
+  const settings = measureSettings();
+  for (const group of groups) {
+    // A group's measurement job gets the sum of its workloads' limits.
+    assert.equal(
+      groupMeasureSettings()[group].timeout,
+      groupWorkloads(group).reduce((sum, w) => sum + settings[w].timeout, 0),
+    );
+    // One command per workload, in order, with that workload's own run
+    // arguments and thread stack; the first failure stops the group.
+    const commands = runCommand(group).split(" && ");
+    assert.equal(commands.length, groupWorkloads(group).length);
+    groupWorkloads(group).forEach((workload, index) => {
+      const env = settings[workload].min_stack
+        ? `RUST_MIN_STACK=${settings[workload].min_stack}`
+        : "env -u RUST_MIN_STACK";
+      assert.equal(
+        commands[index],
+        `${env} cargo codspeed run -m walltime ${runArgs(workload).join(" ")}`,
+      );
+      assert.doesNotMatch(commands[index], /--features/);
+    });
+  }
+  assert.throws(() => groupWorkloads("../everything"), /unknown group/);
+  const cli = (...args) =>
+    execFileSync("node", [path.join(root, "dev/benchmarks/codspeed-artifact.mjs"), ...args], {
+      encoding: "utf8",
+    }).trim();
+  assert.deepEqual(JSON.parse(cli("groups")), groups);
+  assert.deepEqual(JSON.parse(cli("group-measure")), groupMeasureSettings());
+  assert.equal(cli("group-workloads", "engine"), "groove-ivm");
+  assert.equal(cli("run-command", "engine"), runCommand("engine"));
+});
+
+test("workflow separates grouped native builds from unchanged CodSpeed measurement", async () => {
   const workflow = await readFile(path.join(root, ".github/workflows/codspeed.yml"), "utf8");
   const build = workflow
     .split("\n  native-workloads-build:\n")[1]
@@ -301,39 +343,53 @@ test("workflow separates native builds from unchanged CodSpeed measurement", asy
       'RUSTFLAGS="$(node dev/benchmarks/codspeed-artifact.mjs rustflags)"\n          export RUSTFLAGS',
     ),
   );
+  // One Cargo invocation per workload of the group, each with its own
+  // arguments (and so its own features), in one shared target directory.
   assert.ok(
     build.includes(
-      'args="$(node dev/benchmarks/codspeed-artifact.mjs build-args ${{ matrix.workload }})"\n' +
-        '          read -ra args <<<"$args"\n' +
-        '          /usr/bin/time -v cargo codspeed build -m walltime "${args[@]}" --locked',
+      'workloads="$(node dev/benchmarks/codspeed-artifact.mjs group-workloads ${{ matrix.group }})"\n' +
+        "          for workload in $workloads; do\n" +
+        '            args="$(node dev/benchmarks/codspeed-artifact.mjs build-args "$workload")"\n' +
+        '            read -ra args <<<"$args"\n',
     ),
   );
+  assert.ok(
+    build.includes(
+      '            /usr/bin/time -v cargo codspeed build -m walltime "${args[@]}" --locked\n',
+    ),
+  );
+  assert.match(build, /codspeed-artifact\.mjs seal "\$workload"/);
+  // The marker keeps target/ the artifact root for a one-workload group.
+  assert.ok(build.includes("target/codspeed-group.txt\n            target/codspeed-artifact-*/"));
   assert.match(run, /runs-on: codspeed-macro\n/);
   // One failed build must not skip the other workloads' measurements.
   assert.ok(
     run.includes("if: ${{ !cancelled() && needs.native-workloads-build.result != 'skipped' }}\n"),
   );
   assert.doesNotMatch(run, /cargo (install|build|codspeed build)/);
-  assert.match(run, /codspeed-artifact.mjs install \$\{\{ matrix.workload \}\}/);
-  assert.ok(
-    run.includes(
-      'args="$(node dev/benchmarks/codspeed-artifact.mjs run-args ${{ matrix.workload }})"\n' +
-        '          echo "run-args=$args" >> "$GITHUB_OUTPUT"',
-    ),
-  );
+  assert.match(run, /codspeed-artifact\.mjs install "\$workload"/);
   assert.match(
     run,
-    /run: cargo codspeed run -m walltime \$\{\{ steps.install.outputs.run-args \}\}\n/,
+    /name: codspeed-native-\$\{\{ matrix.group \}\}-\$\{\{ github.sha \}\}\n\s+path: target\/\n/,
   );
+  assert.ok(
+    run.includes(
+      'command="$(node dev/benchmarks/codspeed-artifact.mjs run-command ${{ matrix.group }})"\n' +
+        '          echo "run-command=$command" >> "$GITHUB_OUTPUT"',
+    ),
+  );
+  assert.match(run, /run: \$\{\{ steps.install.outputs.run-command \}\}\n/);
   // Both matrices and the measurement settings come from the artifact script.
-  const fromPlan = "${{ fromJSON(needs.native-workloads-plan.outputs.workloads) }}";
-  assert.ok(build.includes(`workload: ${fromPlan}\n`));
-  assert.ok(run.includes(`workload: ${fromPlan}\n`));
-  const measure = "fromJSON(needs.native-workloads-plan.outputs.measure)[matrix.workload]";
+  const fromPlan = "${{ fromJSON(needs.native-workloads-plan.outputs.groups) }}";
+  assert.ok(build.includes(`group: ${fromPlan}\n`));
+  assert.ok(run.includes(`group: ${fromPlan}\n`));
+  const measure = "fromJSON(needs.native-workloads-plan.outputs.measure)[matrix.group]";
   assert.ok(run.includes(`timeout-minutes: \${{ ${measure}.timeout }}\n`));
-  assert.ok(run.includes(`RUST_MIN_STACK: \${{ ${measure}.min_stack }}\n`));
-  assert.doesNotMatch(run, /RUST_MIN_STACK: 4194304/);
-  assert.ok(workflow.includes('measure="$(node dev/benchmarks/codspeed-artifact.mjs measure)"'));
+  // Thread stacks are per workload, in the run command, not per job.
+  assert.doesNotMatch(run, /RUST_MIN_STACK:/);
+  assert.ok(
+    workflow.includes('measure="$(node dev/benchmarks/codspeed-artifact.mjs group-measure)"'),
+  );
   // No other job compiles on the measurement runner.
   for (const job of workflow.split(/\n  (?=[a-z-]+:\n)/)) {
     if (/runs-on: codspeed-macro/.test(job)) {
@@ -351,7 +407,7 @@ test("compiler cache restores across revisions while isolating compatible worklo
   const prefix = cache.match(/          restore-keys: \|\n            (.+)/)[1];
   const render = (template, overrides = {}) => {
     const values = {
-      "matrix.workload": "stage-plan",
+      "matrix.group": "tasks-and-docs",
       "runner.os": "Linux",
       "runner.arch": "ARM64",
       "github.sha": "source-a",
@@ -367,7 +423,7 @@ test("compiler cache restores across revisions while isolating compatible worklo
   assert.notEqual(oldKey, nextKey, "each source can save new workspace outputs");
   assert.ok(oldKey.startsWith(nextPrefix), "next source must restore previous source outputs");
   for (const change of [
-    { "matrix.workload": "band-book" },
+    { "matrix.group": "live-apps" },
     { "runner.os": "macOS" },
     { "runner.arch": "X64" },
     { lockHash: "lock-b" },

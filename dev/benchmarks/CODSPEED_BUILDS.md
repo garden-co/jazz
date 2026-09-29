@@ -7,9 +7,14 @@ RecordPlayer, EpicDrop, Jamazon warehouse, MusicAgent, and BigLabel with its
 ingest and loads benches), the anonymized permissioned-resources adopter
 workload, and the Groove IVM engine experiment. `workloadSpecs` in `codspeed-artifact.mjs` is the one
 table of each workload's package, benches, build-time features, measurement
-thread stack and timeout. The workflow's plan job reads its `matrix` and
-`measure` output, and the build and measurement jobs read `build-args` and
-`run-args`, rather than repeating them. Build latency, cache behavior and acceptance receipts are tracked in
+thread stack and timeout, and `workloadGroups` groups the workloads into four
+CodSpeed jobs (tasks-and-docs, live-apps, files-and-ops, engine). The
+workflow's plan job reads its `groups` and `group-measure` output; each group's
+build job builds its workloads one after another with their own `build-args`
+in one shared target directory and seals one bundle per workload into one
+artifact, and each group's measurement job verifies those bundles and runs the
+group's `run-command`: the workloads' `cargo codspeed run` commands in
+sequence under a single CodSpeed session. Build latency, cache behavior and acceptance receipts are tracked in
 [#3174](https://github.com/garden-co/jazz/issues/3174).
 
 ## Invariants
@@ -18,8 +23,9 @@ thread stack and timeout. The workflow's plan job reads its `matrix` and
   debug info, per-workload features (the mimalloc allocator for the native
   examples, `testing` for the two `jazz` benches) and benchmark commands remain
   unchanged. The measurement job keeps each workload's former environment:
-  only the native examples set `RUST_MIN_STACK`, and each keeps the timeout its
-  former build-and-run job had.
+  only the native examples' run commands set `RUST_MIN_STACK`, and a group's
+  timeout is the sum of the timeouts its workloads' former build-and-run jobs
+  had.
   `--locked` forbids dependency resolution drift. No `target-cpu=native`,
   optimization downgrade, debug stripping or fixture change. Rust's
   `--remap-path-prefix=$PWD=/actions-runner/_work/jazz/jazz` maps source paths
@@ -31,7 +37,9 @@ thread stack and timeout. The workflow's plan job reads its `matrix` and
   the artifact contract pins it, and installation rejects checkout-path drift.
   This is the one intentional debug-path flag difference; it does not change
   optimization settings. Hosted user-source attribution passed at `9c7995a1d41189ae0719e2cdb442423c9b75f233`: CodSpeed run `6aaf3c6cc8296f49201b8f39` classified all 54,073 cold-sync project frames and 5,539 sequential-update project frames as user code, with zero non-repository paths. Result IDs are `6aaf3ee7ad9a6239bfb27f3b` and `6aaf3ee7ad9a6239bfb27f37`, respectively.
-- Each workload builds separately to avoid feature unification. A 16-vCPU
+- Each workload builds with its own Cargo invocation to avoid feature
+  unification, even when a group's workloads share a target directory:
+  cargo-codspeed replaces only the built package's executables. A 16-vCPU
   build host replaces four compile jobs on a measurement host. This does not
   change benchmark execution parallelism or the measurement machine.
 - `timed-cargo/cargo` forwards every argument and adds only `--timings` to
@@ -43,7 +51,7 @@ thread stack and timeout. The workflow's plan job reads its `matrix` and
   sealing outputs. Rust-cache retains registry, Git and installed-tool caches
   with target caching disabled. Explicit cache restore/save steps retain
   `target/release`, including workspace outputs. Their compatibility prefix
-  pins workload (and so its features), OS/architecture, Ubuntu image, Rust/CodSpeed versions,
+  pins the group (and so its workloads' features), OS/architecture, Ubuntu image, Rust/CodSpeed versions,
   absolute debug-path contract, Cargo lockfile, toolchain file and Cargo config.
   Only the primary save key appends the source SHA; the restore prefix does not,
   so a new revision can restore and then save refreshed outputs. The pinned

@@ -1859,18 +1859,21 @@ test("CodSpeed measures every example benchmark suite in wall-clock mode", () =>
 });
 
 test("CodSpeed measures BandChat and WorldTour through the native wall-time matrix", async () => {
-  const { workloads } = await import(
+  const { workloads, groups, groupWorkloads } = await import(
     pathToFileURL(path.join(root, "dev/benchmarks/codspeed-artifact.mjs")).href
   );
-  for (const workload of ["band-chat", "world-tour"]) assert.ok(workloads.includes(workload));
+  for (const workload of ["band-chat", "world-tour"]) {
+    assert.ok(workloads.includes(workload));
+    assert.ok(groups.some((group) => groupWorkloads(group).includes(workload)));
+  }
   assert.equal(
     codspeedWorkflow.match(
-      /workload: \$\{\{ fromJSON\(needs\.native-workloads-plan\.outputs\.workloads\) \}\}/g,
+      /group: \$\{\{ fromJSON\(needs\.native-workloads-plan\.outputs\.groups\) \}\}/g,
     )?.length,
     2,
-    "both native matrix jobs read the single workload list",
+    "both native matrix jobs read the single group list",
   );
-  assert.match(codspeedWorkflow, /node dev\/benchmarks\/codspeed-artifact\.mjs matrix/);
+  assert.match(codspeedWorkflow, /node dev\/benchmarks\/codspeed-artifact\.mjs groups/);
 });
 
 test("jazz-tools advertises exactly the CLI artifacts its build matrix produces", () => {
