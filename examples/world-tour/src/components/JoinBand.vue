@@ -2,8 +2,8 @@
   <Dialog :title="`Join ${bandName}`" @close="emit('done')">
     <form class="form" @submit.prevent="join">
       <p class="text-secondary">
-        Members plan the tour together: they see tentative dates and private notes, and can add
-        and move stops.
+        Members plan the tour together: they see tentative dates and private notes, and can add and
+        move stops.
       </p>
       <label class="field">
         <span class="field__label">Your name</span>

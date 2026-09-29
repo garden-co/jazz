@@ -4,7 +4,7 @@
     <p class="poster-date">
       <time :datetime="stop.date.toISOString()">{{ formatLongDate(stop.date) }}</time>
     </p>
-    <p>{{ bandName }}<template v-if="stop.publicDescription">: {{ stop.publicDescription }}</template></p>
+    <p>{{ [bandName, stop.publicDescription].filter(Boolean).join(": ") }}</p>
     <p v-if="stop.venue?.capacity" class="text-secondary">
       {{ stop.venue.capacity.toLocaleString("en-GB") }} capacity
     </p>

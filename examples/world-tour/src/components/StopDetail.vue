@@ -90,7 +90,11 @@ function save() {
   // Keep the show's time of day when only the day changes.
   const day = fromDateInput(draft.date);
   day.setHours(date.getHours(), date.getMinutes());
-  db.update(app.stops, id, { date: day, status: draft.status, publicDescription: draft.description });
+  db.update(app.stops, id, {
+    date: day,
+    status: draft.status,
+    publicDescription: draft.description,
+  });
 
   const body = draft.notes.trim();
   if (note.value && body) db.update(app.stopNotes, note.value.id, { body });

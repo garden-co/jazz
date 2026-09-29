@@ -1,5 +1,10 @@
 <template>
-  <aside class="sheet" :class="{ open }" :aria-hidden="!open" @transitionend.self="!open && emit('closed')">
+  <aside
+    class="sheet"
+    :class="{ open }"
+    :aria-hidden="!open"
+    @transitionend.self="!open && emit('closed')"
+  >
     <header class="sheet__header">
       <h2 class="sheet__title">{{ title }}</h2>
       <Button variant="ghost" icon-only aria-label="Close" @click="emit('close')">

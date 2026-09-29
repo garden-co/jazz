@@ -15,13 +15,21 @@
           @blur="rename(($event.target as HTMLInputElement).value)"
         />
         <h1 v-else class="heading-3">{{ band?.name ?? "World tour" }}</h1>
-        <Button v-if="isMember && !renaming" variant="ghost" icon-only aria-label="Rename band" @click="startRename">
+        <Button
+          v-if="isMember && !renaming"
+          variant="ghost"
+          icon-only
+          aria-label="Rename band"
+          @click="startRename"
+        >
           <Icon name="pencil" />
         </Button>
       </div>
       <p class="text-supporting">{{ roleLine }}</p>
       <div class="actions">
-        <Button v-if="isMember" @click="openSheet({ kind: 'band' })"><Icon name="users" />Band</Button>
+        <Button v-if="isMember" @click="openSheet({ kind: 'band' })"
+          ><Icon name="users" />Band</Button
+        >
         <Button v-else-if="userId && band" :disabled="starting" @click="startOwnTour">
           {{ starting ? "Starting…" : "Start your own tour" }}
         </Button>
@@ -45,8 +53,17 @@
 
     <Sheet :open="!!sheet" :title="sheetTitle" @close="closeSheet" @closed="shownSheet = null">
       <template v-if="shownSheet?.kind === 'stop'">
-        <TourCalendar :stops="stops" :selected-stop-id="selectedStop?.id ?? null" @select-stop="selectStop" />
-        <StopDetail v-if="selectedStop" :key="selectedStop.id" :stop="selectedStop" @deleted="closeSheet" />
+        <TourCalendar
+          :stops="stops"
+          :selected-stop-id="selectedStop?.id ?? null"
+          @select-stop="selectStop"
+        />
+        <StopDetail
+          v-if="selectedStop"
+          :key="selectedStop.id"
+          :stop="selectedStop"
+          @deleted="closeSheet"
+        />
       </template>
       <StopCreateForm
         v-else-if="shownSheet?.kind === 'create' && band && userId"
@@ -57,7 +74,11 @@
         @created="selectStop"
         @cancel="closeSheet"
       />
-      <BandPanel v-else-if="shownSheet?.kind === 'band' && band && userId" :band="band" :user-id="userId" />
+      <BandPanel
+        v-else-if="shownSheet?.kind === 'band' && band && userId"
+        :band="band"
+        :user-id="userId"
+      />
     </Sheet>
 
     <JoinBand
@@ -138,7 +159,8 @@ const roleLine = computed(() => {
 // A fresh app has no bands: start the seeded demo tour, owned by this account.
 let seeding = false;
 watch([userId, memberships, someBand], async ([id, mine, any]) => {
-  if (seeding || !id || !mine || !any || mine.length > 0 || any.length > 0 || route.value.bandId) return;
+  if (seeding || !id || !mine || !any || mine.length > 0 || any.length > 0 || route.value.bandId)
+    return;
   seeding = true;
   await startDemoTour(db, { userId: id, ownerName: "Tour manager" });
 });
@@ -254,7 +276,9 @@ async function playTour() {
   if (!mapCtrl) return;
   closeSheet();
   touring.value = true;
-  await mapCtrl.tour(stops.value.map((s) => ({ id: s.id, name: s.venue!.name, ...latLng(s.venue!) })));
+  await mapCtrl.tour(
+    stops.value.map((s) => ({ id: s.id, name: s.venue!.name, ...latLng(s.venue!) })),
+  );
   touring.value = false;
 }
 function stopTour() {

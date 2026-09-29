@@ -25,11 +25,27 @@
         <div class="field-row">
           <label class="field">
             <span class="field__label">Latitude</span>
-            <input v-model.number="venue.lat" class="input" type="number" step="any" min="-90" max="90" required />
+            <input
+              v-model.number="venue.lat"
+              class="input"
+              type="number"
+              step="any"
+              min="-90"
+              max="90"
+              required
+            />
           </label>
           <label class="field">
             <span class="field__label">Longitude</span>
-            <input v-model.number="venue.lng" class="input" type="number" step="any" min="-180" max="180" required />
+            <input
+              v-model.number="venue.lng"
+              class="input"
+              type="number"
+              step="any"
+              min="-180"
+              max="180"
+              required
+            />
           </label>
         </div>
         <label class="field">

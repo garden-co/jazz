@@ -1,5 +1,10 @@
 <template>
-  <button :type="type" class="button" :data-variant="variant" :data-icon-only="iconOnly || undefined">
+  <button
+    :type="type"
+    class="button"
+    :data-variant="variant"
+    :data-icon-only="iconOnly || undefined"
+  >
     <slot />
   </button>
 </template>

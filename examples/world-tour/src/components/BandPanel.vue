@@ -21,7 +21,13 @@
         Anyone who opens this link can join the band and see tentative dates and private notes.
       </p>
       <div class="field-row field-row--tight">
-        <input class="input" :value="inviteLink" readonly aria-label="Invite link" @focus="($event.target as HTMLInputElement).select()" />
+        <input
+          class="input"
+          :value="inviteLink"
+          readonly
+          aria-label="Invite link"
+          @focus="($event.target as HTMLInputElement).select()"
+        />
         <Button :disabled="!inviteLink" @click="copy">{{ copied ? "Copied" : "Copy" }}</Button>
       </div>
       <div class="actions">
@@ -55,13 +61,17 @@ const props = defineProps<{ band: Band; userId: string }>();
 
 const db = useDb();
 const isOwner = computed(() => props.band.ownerId === props.userId);
-const { data: members } = useAll(() => app.members.where({ bandId: props.band.id }).orderBy("name", "asc"));
+const { data: members } = useAll(() =>
+  app.members.where({ bandId: props.band.id }).orderBy("name", "asc"),
+);
 // Only the owner can read invites; for everyone else this stays empty.
 const { data: invites } = useAll(() => app.bandInvites.where({ bandId: props.band.id }).limit(1));
 
 const membership = computed(() => members.value?.find((m) => m.userId === props.userId));
 const invite = computed(() => invites.value?.[0]);
-const inviteLink = computed(() => (invite.value ? buildInviteLink(props.band.id, invite.value.code) : ""));
+const inviteLink = computed(() =>
+  invite.value ? buildInviteLink(props.band.id, invite.value.code) : "",
+);
 const publicLink = computed(() => bandLink(props.band.id));
 
 const copied = ref(false);
