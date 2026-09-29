@@ -350,7 +350,7 @@ fn session_branch_updates_require_read_visibility_before_staging() {
 }
 
 /// A policy-free point update uses its known row id, while absent/deleted
-/// targets retain the facade's existing rejection behavior. Tables with a
+/// targets are still rejected (absent as not loaded, deleted as deleted). Tables with a
 /// read policy deliberately retain the client-local query dispatch; client
 /// replicas rely on upstream sync, rather than local policy re-evaluation, for
 /// confidentiality.
@@ -415,8 +415,11 @@ fn point_update_preimage_fast_path_preserves_target_and_policy_dispatch() {
         Ok(_) => panic!("absent point target stays rejected"),
         Err(error) => error,
     };
-    assert_eq!(missing_error.code, crate::db::ErrorCode::WriteRejected);
+    // An absent target has no preimage to stage against; that is a missing
+    // observation, not a read-policy denial.
+    assert_eq!(missing_error.code, crate::db::ErrorCode::NotObserved);
     assert!(missing_error.message.contains("UPDATE"));
+    assert!(missing_error.message.contains("not loaded locally"));
 
     let deletion = db
         .delete("todos", deleted, Default::default())
@@ -4753,4 +4756,184 @@ fn queued_resident_insert_refreshes_only_matching_subscription_inputs() {
     };
     assert_eq!(added.len(), 1);
     assert_eq!(added[0].row.row_uuid(), notes_write.row_uuid());
+}
+
+/// Bindings send a present nullable JSON value wrapped as nullable (#2733).
+/// It is stored like the bare value and reads back unchanged.
+#[test]
+fn nullable_json_accepts_present_values_wrapped_as_nullable() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("docs")
+                .column("name", PublicColumnType::Text)
+                .nullable_column("meta", PublicColumnType::Json { schema: None }),
+        ),
+    );
+    let db = open_db(0xd1, AuthorSubject::for_test_bytes([0xd1; 16]), &schema);
+    let present = |json: &str| Value::Nullable(Some(Box::new(Value::String(json.to_owned()))));
+    let wrapped = block_on(db.insert(
+        "docs",
+        BTreeMap::from([
+            ("name".to_owned(), Value::String("wrapped".to_owned())),
+            ("meta".to_owned(), present("{\"a\":1}")),
+        ]),
+        Default::default(),
+    ))
+    .unwrap()
+    .row_uuid();
+    let bare = block_on(db.insert(
+        "docs",
+        BTreeMap::from([
+            ("name".to_owned(), Value::String("bare".to_owned())),
+            ("meta".to_owned(), Value::String("{\"a\":1}".to_owned())),
+        ]),
+        Default::default(),
+    ))
+    .unwrap()
+    .row_uuid();
+    block_on(db.update(
+        "docs",
+        wrapped,
+        BTreeMap::from([("meta".to_owned(), present("[1,2]"))]),
+        Default::default(),
+    ))
+    .unwrap();
+    let exclusive = db.exclusive_tx().unwrap();
+    let exclusive_row = exclusive
+        .insert(
+            "docs",
+            BTreeMap::from([
+                ("name".to_owned(), Value::String("exclusive".to_owned())),
+                ("meta".to_owned(), present("{\"b\":2}")),
+            ]),
+            Default::default(),
+        )
+        .unwrap();
+    exclusive.commit().unwrap();
+
+    let prepared = db.prepare_query(&Query::from("docs")).unwrap();
+    let mut rows = block_on(db.all(&prepared, ReadOpts::default())).unwrap();
+    block_on(db.hydrate_rows_for_binding(&mut rows)).unwrap();
+    let meta = |row: RowUuid| {
+        let row = rows
+            .iter()
+            .find(|candidate| candidate.row_uuid() == row)
+            .unwrap();
+        let (descriptor, raw) = row.encoded_record();
+        groove::records::BorrowedRecord::new(raw, descriptor)
+            .get("meta")
+            .unwrap()
+    };
+    // Result rows carry a presence wrapper around the logical nullable cell.
+    let read = |json: &str| Value::Nullable(Some(Box::new(present(json))));
+    assert_eq!(meta(wrapped), read("[1,2]"));
+    assert_eq!(meta(bare), read("{\"a\":1}"));
+    assert_eq!(meta(exclusive_row), read("{\"b\":2}"));
+}
+
+/// A client that has never loaded a row cannot stage a partial UPDATE for it:
+/// the mergeable commit carries the complete current cells and the parent
+/// version, and neither exists on this replica yet. That is a missing local
+/// observation, not a read-policy decision, so it must not be reported as a
+/// read denial — including for `always()`-readable tables and for rows the
+/// session is explicitly allowed to read. Once the row is loaded, the same
+/// patch stages and the authority accepts it without touching other columns.
+///
+/// ```text
+/// server (row) ──not synced──► client ──partial UPDATE──► NotObserved
+/// client subscribes ──row arrives──► partial UPDATE ──► Accepted
+/// ```
+#[test]
+fn client_partial_update_of_unloaded_row_is_not_observed_rather_than_read_denied() {
+    let alice = AuthorSubject::for_test_bytes([0xe4; 16]);
+    let owner_readable = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(public_session_eq("owner", &["claims", "sub"]))
+                        .with_insert(PublicPolicyExpr::True)
+                        .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True),
+                ),
+        ),
+    );
+    for (label, schema, node) in [
+        ("always-readable table", schema(), 0xe5),
+        ("owner-readable table", owner_readable, 0xe6),
+    ] {
+        let target = row(node);
+        let server = open_core(node, AuthorSubject::SYSTEM, &schema);
+        server
+            .insert_with_id("todos", target, cells("original", false, alice))
+            .unwrap();
+        let client = open_db(node.wrapping_add(0x10), alice, &schema);
+        client.set_test_provider_claims(alice, test_provider_claims(alice));
+        let (client_transport, server_transport) = duplex();
+        let _upstream = block_on(client.connect_upstream(client_transport));
+        let _subscriber = server.accept_subscriber_with_claims(
+            server_transport,
+            alice,
+            test_provider_claims(alice),
+        );
+        client.tick().unwrap();
+        server.tick().unwrap();
+        client.tick().unwrap();
+
+        let patch = BTreeMap::from([("done".to_owned(), Value::Bool(true))]);
+        let error =
+            match block_on(client.update("todos", target, patch.clone(), Default::default())) {
+                Ok(_) => panic!("{label}: an unloaded row has no preimage to stage against"),
+                Err(error) => error,
+            };
+        assert_eq!(
+            error.code,
+            ErrorCode::NotObserved,
+            "{label}: {}",
+            error.message
+        );
+        assert!(
+            !error.message.contains("read policy denied"),
+            "{label}: an unloaded row is not a read denial: {}",
+            error.message
+        );
+        assert!(
+            error.message.contains("not loaded"),
+            "{label}: the error explains what is missing: {}",
+            error.message
+        );
+
+        let query = Query::from("todos");
+        let _subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+        for _ in 0..16 {
+            client.tick().unwrap();
+            server.tick().unwrap();
+            client.tick().unwrap();
+            if !prepared_all(&client, &query, global_subscribe_opts()).is_empty() {
+                break;
+            }
+        }
+        let write = block_on(client.update("todos", target, patch, Default::default()))
+            .unwrap_or_else(|error| panic!("{label}: loaded row updates: {error:?}"));
+        client.tick().unwrap();
+        server.tick().unwrap();
+        client.tick().unwrap();
+        block_on(write.wait(DurabilityTier::Global))
+            .unwrap_or_else(|error| panic!("{label}: authority accepts: {error:?}"));
+        let server_rows = server.read(&query).unwrap();
+        assert_eq!(server_rows.len(), 1, "{label}");
+        let table = &schema.tables[0];
+        assert_eq!(
+            server_rows[0].cell(table, "done"),
+            Some(Value::Bool(true)),
+            "{label}"
+        );
+        assert_eq!(
+            server_rows[0].cell(table, "title"),
+            Some(Value::String("original".to_owned())),
+            "{label}: the partial update preserves unauthored cells"
+        );
+    }
 }
