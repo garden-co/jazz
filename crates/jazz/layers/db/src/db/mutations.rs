@@ -3214,6 +3214,41 @@ where
                 }
             }
         }
+        if cells.is_empty() {
+            // A content version must carry at least one cell: the model reads
+            // an empty cell set as "no content", and node validation rejects
+            // it so an empty update can never masquerade as a write. A row
+            // written with every column omitted still has content (all
+            // null), so author that null explicitly. Only insert-shaped
+            // writes reach this path: inserts, upserts into an absent row,
+            // and restores that carry content. Updates never do.
+            for column in &table_schema.columns {
+                if matches!(
+                    crate::schema::storage_column_type(column),
+                    GrooveColumnType::Nullable(_)
+                ) {
+                    cells.insert(column.name.clone(), Value::Nullable(None));
+                }
+            }
+            // Nullable JSON's published storage type cannot carry SQL null
+            // yet (#2733, #3007), so it gets no explicit null above.
+            if cells.is_empty()
+                && !table_schema.columns.is_empty()
+                && table_schema.columns.iter().all(|column| {
+                    column.large_value_kind == crate::schema::LargeValueSemanticKind::Json
+                        && matches!(column.column_type, GrooveColumnType::Nullable(_))
+                })
+            {
+                return Err(Error::new(
+                    ErrorCode::Schema,
+                    format!(
+                        "inserting a row with every column omitted is not supported yet for \
+                         table `{table}`: its optional columns are all JSON, which cannot \
+                         store null until #3007 lands; set at least one column"
+                    ),
+                ));
+            }
+        }
         Ok(cells)
     }
 
@@ -3444,6 +3479,22 @@ where
         Ok((content_parents, deletion_parents))
     }
 
+    /// Why a client-local UPDATE found no preimage. A row this replica never
+    /// received cannot be staged against, and saying so discloses nothing the
+    /// replica does not already hold. A resident row that the client query
+    /// still hides stays a read denial.
+    async fn client_update_target_missing(
+        &self,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<Error, Error> {
+        Ok(if self.local_current_row(table, row).await?.is_none() {
+            update_target_not_loaded("UPDATE", table, row)
+        } else {
+            read_for_write_denied("UPDATE", table)
+        })
+    }
+
     async fn local_row_for_client_identity(
         &self,
         table: &str,
@@ -3538,10 +3589,12 @@ where
         identity: AuthorSubject,
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row).await?;
-        let existing = self
+        let Some(existing) = self
             .local_row_for_client_identity(table, row, identity)
             .await?
-            .ok_or_else(|| read_for_write_denied("UPDATE", table))?;
+        else {
+            return Err(self.client_update_target_missing(table, row).await?);
+        };
         let tx_id = self
             .node
             .node
@@ -3619,22 +3672,26 @@ where
             // the cells it inherits. SYSTEM and policy-free tables are
             // unconditionally visible, so that query cannot change the answer.
             // Preserve indirect descriptors by reading the physical winner.
+            // With nothing able to hide the row, absence only means this
+            // replica has not loaded it.
             let (mut cells, parent) = {
                 let mut node = self.node.node.lock().await;
                 let (cells, parent) = node
                     .current_physical_cells_and_winner_in_schema(self.schema_version_id, table, row)
                     .await?
-                    .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
+                    .ok_or_else(|| update_target_not_loaded("partial UPDATE", table, row))?;
                 (cells, Some(parent))
             };
             let authored_columns = patch.keys().cloned().collect();
             cells.extend(patch);
             return Ok((cells, parent, authored_columns));
         }
-        let existing = self
+        let Some(existing) = self
             .local_row_for_client_identity(table, row, identity)
             .await?
-            .ok_or_else(|| read_for_write_denied("UPDATE", table))?;
+        else {
+            return Err(self.client_update_target_missing(table, row).await?);
+        };
         let (mut cells, parent) = {
             let mut node = self.node.node.lock().await;
             let cells = node

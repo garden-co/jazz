@@ -936,15 +936,24 @@ fn graph_contains_input_source(graph: &GraphBuilder) -> bool {
 }
 
 /// Return builder nodes in child-before-parent order without consuming the
-/// calling thread's stack. Builder graphs are finite by construction; shared
-/// children are intentionally visited once per structural occurrence, matching
-/// the previous recursive walkers.
+/// calling thread's stack. Builder graphs are finite, acyclic and share
+/// subgraphs through `Arc`, so each node is returned once, keyed by address:
+/// walking a shared subgraph once per structural occurrence grows with the
+/// number of paths to it, which is exponential in policy graphs that reuse
+/// branches. Every caller only accumulates per-node facts, so visiting a node
+/// once is equivalent.
 fn graph_builder_postorder(graph: &GraphBuilder) -> Vec<&GraphBuilder> {
     let mut pending = vec![(graph, false)];
     let mut ordered = Vec::new();
+    let mut expanded = std::collections::HashSet::<*const GraphBuilder>::new();
     while let Some((node, visited)) = pending.pop() {
         if visited {
             ordered.push(node);
+            continue;
+        }
+        // A DAG has no cycles, so a node expanded earlier has already been (or
+        // will be, before any later parent) emitted.
+        if !expanded.insert(std::ptr::from_ref(node)) {
             continue;
         }
         pending.push((node, true));
@@ -1004,6 +1013,26 @@ fn graph_builder_postorder(graph: &GraphBuilder) -> Vec<&GraphBuilder> {
 #[cfg(test)]
 mod stack_receipts {
     use super::*;
+
+    #[test]
+    fn structural_walks_visit_each_shared_subgraph_once() {
+        // Policy lowering reuses subgraphs through `Arc`. A union of a shared
+        // input with itself, nested N times, has N + 1 distinct nodes but 2^N
+        // paths from the root; a walk per structural occurrence grows with the
+        // paths.
+        const DEPTH: usize = 20;
+        let mut graph = std::sync::Arc::new(GraphBuilder::table("records"));
+        for _ in 0..DEPTH {
+            graph = std::sync::Arc::new(GraphBuilder::Union {
+                inputs: vec![graph.clone(), graph],
+            });
+        }
+        let order = graph_builder_postorder(&graph);
+        assert_eq!(order.len(), DEPTH + 1);
+        assert!(std::ptr::eq(*order.last().unwrap(), graph.as_ref()));
+        assert!(matches!(order[0], GraphBuilder::Table { .. }));
+        assert_eq!(graph_declared_output_fields(&graph), None);
+    }
 
     #[test]
     fn deep_declared_field_discovery_stays_on_a_server_sized_stack() {

@@ -449,7 +449,12 @@ impl HydrationTraversal {
                         }
                     }
                     HydrationTraversalFrame::Evaluate(node) => {
-                        debug_assert!(self.visiting.remove(&node));
+                        // Keep the removal outside the assertion: release
+                        // builds compile `debug_assert!` away, and a node that
+                        // stays marked as visiting turns every later shared
+                        // (diamond) input into a false dependency cycle.
+                        let was_visiting = self.visiting.remove(&node);
+                        debug_assert!(was_visiting);
                         self.order.push(node);
                     }
                 }
