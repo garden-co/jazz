@@ -75,14 +75,7 @@ impl<S: OrderedKvStorage> NodeState<S> {
         let store_key = self.subscription_watermark_key(key).await?;
         self.database
             .direct_record_store(SUBSCRIPTION_WATERMARKS_STORE)?
-            .set(
-                &store_key,
-                &[
-                    Value::U8(1),
-                    Value::U64(settled_through.0),
-                    Value::Bytes(revision.to_vec()),
-                ],
-            )
+            .set(&store_key, &encode_watermark_v1(settled_through, revision))
             .await?;
         self.query
             .persisted_watermarks
@@ -114,28 +107,8 @@ impl<S: OrderedKvStorage> NodeState<S> {
         let Some(record) = store.get(&store_key).await? else {
             return Ok(false);
         };
-        let values = record.to_values()?;
-        let [
-            Value::U8(1),
-            Value::U64(settled_through),
-            Value::Bytes(revision),
-        ] = values.as_slice()
-        else {
-            return Err(Error::InvalidStoredValue(
-                "invalid subscription watermark record v1",
-            ));
-        };
-        let settled_through = GlobalTime(*settled_through);
-        let revision: [u8; 16] = revision.as_slice().try_into().map_err(|_| {
-            Error::InvalidStoredValue("subscription watermark revision must be 16 bytes")
-        })?;
-        drop(values);
+        let (settled_through, revision) = decode_watermark_v1(&record.to_values()?)?;
         drop(store);
-        if settled_through.0 == 0 || revision == [0; 16] {
-            return Err(Error::InvalidStoredValue(
-                "subscription watermark record v1 must name a settled revision",
-            ));
-        }
         let table = shape.query().table.clone();
         let physical_table = self.scope_physical_table(shape.schema_version(), &table)?;
         let branch = BranchKey::default().canonical_bytes();
@@ -174,5 +147,78 @@ impl<S: OrderedKvStorage> NodeState<S> {
         state.settled_through = Some(settled_through);
         state.supporting_revision = Some(revision);
         Ok(true)
+    }
+}
+
+/// Value of subscription watermark record v1: format byte `1`, the settled
+/// seq, and the 16-byte supporting revision (SPEC 8, "Persisted subscription
+/// watermark record v1").
+fn encode_watermark_v1(settled_through: GlobalTime, revision: [u8; 16]) -> [Value; 3] {
+    [
+        Value::U8(1),
+        Value::U64(settled_through.0),
+        Value::Bytes(revision.to_vec()),
+    ]
+}
+
+/// Decode and validate a watermark record v1. Any other format, a revision
+/// that is not exactly 16 bytes, a zero seq or a nil revision is corruption.
+fn decode_watermark_v1(values: &[Value]) -> Result<(GlobalTime, [u8; 16]), Error> {
+    let [
+        Value::U8(1),
+        Value::U64(settled_through),
+        Value::Bytes(revision),
+    ] = values
+    else {
+        return Err(Error::InvalidStoredValue(
+            "invalid subscription watermark record v1",
+        ));
+    };
+    let revision: [u8; 16] = revision.as_slice().try_into().map_err(|_| {
+        Error::InvalidStoredValue("subscription watermark revision must be 16 bytes")
+    })?;
+    if *settled_through == 0 || revision == [0; 16] {
+        return Err(Error::InvalidStoredValue(
+            "subscription watermark record v1 must name a settled revision",
+        ));
+    }
+    Ok((GlobalTime(*settled_through), revision))
+}
+
+// Internal byte receipt: the watermark record is node-local durable state that
+// no public API returns, so its exact Groove record bytes are pinned here.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::subscription_watermark_value_descriptor;
+
+    #[test]
+    fn subscription_watermark_v1_record_bytes_and_rejection_are_pinned() {
+        let descriptor = subscription_watermark_value_descriptor();
+        let values = encode_watermark_v1(GlobalTime(0x0102_0304_0506_0708), [0x5a; 16]);
+        let bytes = descriptor.create(&values).unwrap();
+        // Groove typed record: U8 format, U64 seq little-endian, then the
+        // variable-width revision bytes.
+        assert_eq!(
+            hex::encode(&bytes),
+            "010807060504030201025a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
+        );
+        let decoded = descriptor.bind(&bytes).to_values().unwrap();
+        assert_eq!(
+            decode_watermark_v1(&decoded).unwrap(),
+            (GlobalTime(0x0102_0304_0506_0708), [0x5a; 16])
+        );
+        let mut future = values.clone();
+        future[0] = Value::U8(2);
+        assert!(decode_watermark_v1(&future).is_err());
+        let mut short = values.clone();
+        short[2] = Value::Bytes(vec![0x5a; 15]);
+        assert!(decode_watermark_v1(&short).is_err());
+        let mut unsettled = values.clone();
+        unsettled[1] = Value::U64(0);
+        assert!(decode_watermark_v1(&unsettled).is_err());
+        let mut nil = values;
+        nil[2] = Value::Bytes(vec![0; 16]);
+        assert!(decode_watermark_v1(&nil).is_err());
     }
 }

@@ -784,6 +784,34 @@ the cursor must not mark the query live or satisfy a settled read. Fresh selecte
 upstream confirmation remains required under `INV-SYNC-30`, and client-link
 authorization-progress checks still govern payload suppression.
 
+#### Persisted subscription watermark record v1
+
+A receiver that settled a row-local view (membership depends only on each
+row's own state and on no session claim, under a read policy with the same
+property) persists one record in the direct record store
+`jazz_subscription_watermarks_v1`, so after a reopen it can send a
+`Watermark` declaration instead of starting from nothing. The durable family
+is `jazz.subscription-watermark.v1`. Both halves are Groove typed records:
+
+- key `(shape_id: UUID, binding_id: UUID, read_view_id: UUID, policy_scope:
+U8, policy_binding_digest: Bytes)`, where `policy_scope` is `0` with an
+  empty digest for an unscoped view and `1` with the policy-binding directory
+  digest for a scoped one;
+- value `(format_v1: U8 = 1, settled_through: U64, supporting_revision:
+Bytes)`. For seq `0x0102030405060708` and revision `5a` × 16 the value bytes
+  are `01 0807060504030201 02 5a…5a`.
+
+Reopen accepts exactly format `1`, a nonzero seq and a non-nil revision of
+exactly 16 bytes; anything else is corruption, not a fallback to a full
+resend. The held set is not stored: it is rebuilt from the synced local rows
+that match the query, and Core's `CatchUp` replaces or drops every row whose
+seq moved past the watermark. Local eviction of row bodies purges the store,
+since the held set could no longer be rebuilt. Receipts:
+`subscription_watermarks::tests::subscription_watermark_v1_record_bytes_and_rejection_are_pinned`
+(bytes and rejection) and
+`db::tests::node_runtime::reopened_client_catches_up_from_its_stored_watermark`
+(reopen).
+
 #### Authorization progress
 
 A fast declaration may additionally carry an **authorization-progress token**.

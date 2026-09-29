@@ -24,3 +24,11 @@ durable ordered-KV profile IDs.
 The registry is an inventory, not a migration mechanism. An incompatible
 epoch-one durable change still requires a new storage epoch and an explicit
 migration decision.
+
+Linear row-state history (2026-09-29) retired `jazz.history-version-current.v1`,
+`jazz.contribution-provenance.v1` and `jazz.merge-heads.v1`: no current code
+writes or reads them, and a root written with them is refused at manifest
+admission. It added `jazz.history-version-current.v2`, the one member of the
+`jazz-node-root` profile that every row-holding root declares on top of the
+epoch-one `jazz-root` base, and the non-profile
+`jazz.subscription-watermark.v1` direct record store.
