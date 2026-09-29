@@ -7,110 +7,10 @@
 
 use super::*;
 
-use crate::schema::{CLEAN_CLOSE_MARKERS_STORE, STORAGE_CONSISTENCY_MARKERS_STORE};
-
-const CLEAN_CLOSE_MARKER_NAME: &str = "node-clean-close";
-const CLEAN_CLOSE_MARKER_VERSION: u64 = 1;
-const STORAGE_CONSISTENCY_MARKER_NAME: &str = "settled-ahead-current-clean-through";
-const STORAGE_CONSISTENCY_MARKER_VERSION: u64 = 1;
-
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    pub(super) async fn persist_clean_close_marker(&self) -> Result<(), Error> {
-        self.database
-            .direct_record_store(CLEAN_CLOSE_MARKERS_STORE)?
-            .set(
-                &clean_close_marker_key(),
-                &[
-                    Value::U64(CLEAN_CLOSE_MARKER_VERSION),
-                    Value::Uuid(self.node_uuid.0),
-                ],
-            )
-            .await?;
-        Ok(())
-    }
-
-    async fn take_valid_clean_close_marker(&mut self) -> Result<bool, Error> {
-        let store = self
-            .database
-            .direct_record_store(CLEAN_CLOSE_MARKERS_STORE)?;
-        let key = clean_close_marker_key();
-        let Some(record) = store.get(&key).await? else {
-            return Ok(false);
-        };
-        store.delete(&key).await?;
-
-        let version = match record.get_idx(0)? {
-            Value::U64(value) => value,
-            _ => return Ok(false),
-        };
-        let node = match record.get_idx(1)? {
-            Value::Uuid(value) => value,
-            _ => return Ok(false),
-        };
-        Ok(version == CLEAN_CLOSE_MARKER_VERSION && node == self.node_uuid.0)
-    }
-
-    pub(super) async fn persist_storage_consistency_marker_through(
-        &self,
-        tx_time: TxTime,
-    ) -> Result<(), Error> {
-        let store = self
-            .database
-            .direct_record_store(STORAGE_CONSISTENCY_MARKERS_STORE)?;
-        let key = storage_consistency_marker_key();
-        if let Some(record) = store.get(&key).await?
-            && matches!(
-                record.get_idx(0)?,
-                Value::U64(STORAGE_CONSISTENCY_MARKER_VERSION)
-            )
-            && matches!(record.get_idx(1)?, Value::Uuid(node) if node == self.node_uuid.0)
-            && let Value::U64(existing) = record.get_idx(2)?
-            && existing >= tx_time.0
-        {
-            return Ok(());
-        }
-        store
-            .set(
-                &key,
-                &[
-                    Value::U64(STORAGE_CONSISTENCY_MARKER_VERSION),
-                    Value::Uuid(self.node_uuid.0),
-                    Value::U64(tx_time.0),
-                ],
-            )
-            .await?;
-        Ok(())
-    }
-
-    async fn valid_storage_consistency_marker(&self) -> Result<Option<TxTime>, Error> {
-        let store = self
-            .database
-            .direct_record_store(STORAGE_CONSISTENCY_MARKERS_STORE)?;
-        let Some(record) = store.get(&storage_consistency_marker_key()).await? else {
-            return Ok(None);
-        };
-        let version = match record.get_idx(0)? {
-            Value::U64(value) => value,
-            _ => return Ok(None),
-        };
-        let node = match record.get_idx(1)? {
-            Value::Uuid(value) => value,
-            _ => return Ok(None),
-        };
-        let tx_time = match record.get_idx(2)? {
-            Value::U64(value) => value,
-            _ => return Ok(None),
-        };
-        if version == STORAGE_CONSISTENCY_MARKER_VERSION && node == self.node_uuid.0 {
-            Ok(Some(TxTime(tx_time)))
-        } else {
-            Ok(None)
-        }
-    }
-
     pub(super) async fn rejected_versions_for(
         &mut self,
         alias: NodeAlias,
@@ -182,12 +82,6 @@ where
     ) -> Result<(), Error> {
         #[cfg(feature = "testing")]
         let started = receipt.as_ref().map(|_| web_time::Instant::now());
-        let cleanly_closed = self.take_valid_clean_close_marker().await?;
-        let storage_consistent_through = if cleanly_closed {
-            None
-        } else {
-            self.valid_storage_consistency_marker().await?
-        };
         for raw in self
             .database
             .primary_key_scan_raw("jazz_nodes", &[])
@@ -423,26 +317,8 @@ where
         if let (Some(receipt), Some(started)) = (&mut receipt, started) {
             receipt.recover_pending_and_rejected = started.elapsed();
         }
-        #[cfg(feature = "testing")]
-        let started = receipt.as_ref().map(|_| web_time::Instant::now());
-        if !cleanly_closed {
-            self.cleanup_settled_ahead_current_leftovers(storage_consistent_through)
-                .await?;
-        }
-        #[cfg(feature = "testing")]
-        if let (Some(receipt), Some(started)) = (&mut receipt, started) {
-            receipt.recover_unclean_close = started.elapsed();
-        }
         Ok(())
     }
-}
-
-fn clean_close_marker_key() -> [Value; 1] {
-    [Value::String(CLEAN_CLOSE_MARKER_NAME.to_owned())]
-}
-
-fn storage_consistency_marker_key() -> [Value; 1] {
-    [Value::String(STORAGE_CONSISTENCY_MARKER_NAME.to_owned())]
 }
 
 // The current API cannot author a legacy edge receipt. Only this test fixture
