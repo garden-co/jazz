@@ -35,7 +35,7 @@ test("capture walkthrough screenshots", async ({ browser }) => {
   await owner.screenshot({ path: join(SHOTS, "01-globe-overview.png") });
   await owner.locator(".masthead").screenshot({ path: join(SHOTS, "08-masthead.png") });
 
-  await owner.getByRole("button", { name: "Band" }).click();
+  await owner.getByRole("button", { name: "Band", exact: true }).click();
   const inviteInput = owner.getByLabel("Invite link");
   await expect(inviteInput).toHaveValue(/\/join\//);
   const inviteLink = await inviteInput.inputValue();

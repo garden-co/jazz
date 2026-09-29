@@ -284,6 +284,10 @@ a {
   box-shadow: var(--shadow-inset-selected);
 }
 
+.input:not(textarea) {
+  height: var(--size-element-md);
+}
+
 textarea.input {
   resize: vertical;
 }
