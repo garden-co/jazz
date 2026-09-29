@@ -1209,6 +1209,7 @@ where
                     self.read_view.read_schema,
                     &request.source.table,
                     include_deleted,
+                    request.source.path.components != [crate::node::query_engine::SourceRole::Root],
                 )
                 .await
                 .map_err(|_| source_resolution_error(request, SourceGap::TransactionReadOverlay))?;

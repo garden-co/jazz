@@ -341,23 +341,28 @@ where
 
     /// Read transaction rows through a registered schema view, optionally
     /// retaining root rows whose deletion register wins.
+    ///
+    /// A query's root source needs no read of its own: the query records its
+    /// predicate read and proves the rows it returns. Any other source (an
+    /// included, joined or policy table) is read as a whole table, proving
+    /// every row it scanned, so a change there conflicts
+    /// (garden-co/jazz#3694).
     pub async fn tx_current_rows_in_schema_with_options(
         &mut self,
         tx_id: OpenTransactionId,
         schema_version: SchemaVersionId,
         table: &str,
         include_deleted: bool,
+        record_table_read: bool,
     ) -> Result<Vec<CurrentRow>, Error> {
         let table_schema = self.table_in_schema(table, schema_version)?;
-        // Query sources scan the whole table; the query records proofs for
-        // the rows it actually returns.
         self.tx_current_rows_with_table(
             tx_id,
             schema_version,
             table,
             table_schema,
             include_deleted,
-            false,
+            record_table_read,
         )
         .await
     }
@@ -369,7 +374,7 @@ where
         table: &str,
         table_schema: TableSchema,
         include_deleted: bool,
-        prove_returned_rows: bool,
+        record_table_read: bool,
     ) -> Result<Vec<CurrentRow>, Error> {
         let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
         let mut proofs = Vec::new();
@@ -455,16 +460,14 @@ where
                     current_row_from_positional_cells(&table_schema, row_uuid, &cells)?
                 };
                 current.push(if deleted { row.into_deleted() } else { row });
-                if prove_returned_rows && let Some(version) = read_version {
+                if record_table_read && let Some(version) = read_version {
                     proofs.push((row_uuid, version));
                 }
             }
         }
         self.open_tx_mut(tx_id)?.record_row_reads(table, proofs);
         sort_current_rows(&mut current);
-        // A query's source scan is not a read of the whole table: the query
-        // records its own predicate read and proves the rows it returns.
-        if !prove_returned_rows {
+        if !record_table_read {
             return Ok(current);
         }
         let schema = self
