@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { Db } from "../../../../packages/jazz-tools/src/runtime/db.js";
-import { createDb } from "../../../../packages/jazz-tools/src/runtime/testing/create-internal-db.js";
+import { createBrowserTestDb } from "../../../../packages/jazz-tools/tests/browser/account-fixtures.js";
 import { deploy } from "../../../../packages/jazz-tools/src/dev/catalogue.js";
 import {
   TestCleanup,
@@ -570,9 +570,18 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
               ).rejects.toThrow(/AuthorizationDenied|Write rejected/);
               // #1899: warehouse ownership covers operational rows, so the
               // transfer also revokes the former manager's stock writes.
+              // A partial update needs the row's current cells locally, so
+              // each client loads the rows it edits first, as the console does.
+              await owner.all(app.stock.where({ id: stock.id }).limit(1), { tier: "global" });
               await expect(
                 owner.update(app.stock, stock.id, { on_hand: 99 }).wait({ tier: "global" }),
               ).rejects.toThrow(/AuthorizationDenied|Write rejected/);
+              await nextOperator.all(app.warehouses.where({ id: warehouse.id }).limit(1), {
+                tier: "global",
+              });
+              await nextOperator.all(app.stock.where({ id: stock.id }).limit(1), {
+                tier: "global",
+              });
               await nextOperator
                 .update(app.warehouses, warehouse.id, { region: "next-operator-write" })
                 .wait({ tier: "global" });
@@ -614,11 +623,14 @@ async function openClient(
   jwtToken: string,
   dbName = uniqueDbName(`jamazon-${label}`),
 ): Promise<Db> {
+  // Public clients sign in through a real account handle: the JWT is
+  // registered with the account registry once, and reopening logs it in again.
   return ctx.track(
-    await createDb({
+    await createBrowserTestDb({
       appId: server.appId,
       serverUrl: server.serverUrl,
       jwtToken,
+      registerJwt: true,
       driver: { type: "persistent", dbName },
     }),
   );
