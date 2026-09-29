@@ -266,7 +266,7 @@ function PlayerBar(props: {
               max={100}
               value={Math.round(props.volume * 100)}
               valueDisplay="none"
-              onChange={(value) => props.onVolume(value / 100)}
+              onChange={(value: number) => props.onVolume(value / 100)}
             />
           </div>
         </HStack>
