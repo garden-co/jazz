@@ -5,6 +5,7 @@ import { ReadTier } from "./client.js";
 import { createDb } from "./default-create-db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
+import { startHoldingProxy } from "./testing/holding-proxy.js";
 
 const app = s.defineApp({ entries: s.table({ title: s.string() }, {}) });
 const permissions = definePermissions(app, ({ policy }) => {
@@ -135,6 +136,63 @@ it("gives an empty client the server's rows as its first delivery", async () => 
     ).toEqual(["Already on the server"]);
   } finally {
     for (const db of dbs) await db.shutdown();
+    await server.stop();
+  }
+}, 60_000);
+
+it("shows local rows at the deadline when a live server has not answered", async () => {
+  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  const proxy = await startHoldingProxy(server.url);
+  const dbs: Awaited<ReturnType<typeof createDb>>[] = [];
+  try {
+    await deploy({
+      serverUrl: server.url,
+      appId: server.appId,
+      adminSecret: server.adminSecret,
+      schema: app,
+      permissions,
+    });
+    const writer = await createDb(await localAccountConfig(server.appId, server.url));
+    dbs.push(writer);
+    await writer.insert(app.entries, { title: "Only on the server" }).wait({ tier: "global" });
+
+    const reader = await createDb(await localAccountConfig(server.appId, proxy.url));
+    dbs.push(reader);
+    // The reader's own write reaching the server proves its link is live.
+    await reader.insert(app.entries, { title: "Written by the reader" }).wait({ tier: "global" });
+
+    proxy.hold();
+    const waitMs = 1_500;
+    const started = Date.now();
+    const deliveries: string[][] = [];
+    const unsubscribe = reader.subscribe(
+      app.entries,
+      (rows) => deliveries.push(rows.map((row) => row.title).sort()),
+      { tier: ReadTier.LocalFirst, firstLoadRemoteWaitMs: waitMs },
+    );
+    await expect.poll(() => deliveries.length, { timeout: 10_000 }).toBeGreaterThan(0);
+    // The opening waited for the whole timeout, then showed the local rows.
+    expect(Date.now() - started).toBeGreaterThanOrEqual(waitMs - 50);
+    expect(deliveries[0]).toEqual(["Written by the reader"]);
+
+    const oneShotStarted = Date.now();
+    expect(
+      (
+        await reader.all(app.entries, { tier: ReadTier.LocalFirst, firstLoadRemoteWaitMs: waitMs })
+      ).map((row) => row.title),
+    ).toEqual(["Written by the reader"]);
+    expect(Date.now() - oneShotStarted).toBeGreaterThanOrEqual(waitMs - 50);
+
+    // The late answer arrives as an ordinary change.
+    proxy.release();
+    await expect
+      .poll(() => deliveries.at(-1), { timeout: 10_000 })
+      .toEqual(["Only on the server", "Written by the reader"]);
+    unsubscribe();
+  } finally {
+    proxy.release();
+    for (const db of dbs) await db.shutdown();
+    await proxy.stop();
     await server.stop();
   }
 }, 60_000);

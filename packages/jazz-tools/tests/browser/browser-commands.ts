@@ -14,6 +14,23 @@ export interface JazzServerBrowserCommands {
   ): Promise<string>;
 }
 
+export interface JazzServerHoldingProxyBrowserCommands {
+  jazzServerHoldingProxyStart(serverUrl: string): Promise<string>;
+  jazzServerHoldingProxySetHeld(proxyUrl: string, held: boolean): Promise<void>;
+  jazzServerHoldingProxyStop(proxyUrl: string): Promise<void>;
+}
+
+export function jazzServerHoldingProxyBrowserCommands(): JazzServerHoldingProxyBrowserCommands {
+  if (
+    !hasFunction(commands, "jazzServerHoldingProxyStart") ||
+    !hasFunction(commands, "jazzServerHoldingProxySetHeld") ||
+    !hasFunction(commands, "jazzServerHoldingProxyStop")
+  ) {
+    throw new Error("Browser test project is missing the Jazz server holding-proxy commands.");
+  }
+  return commands as unknown as JazzServerHoldingProxyBrowserCommands;
+}
+
 export interface JazzTopologyBrowserCommands {
   jazzBrowserTopologyLog(
     status: "start" | "complete" | "failed",

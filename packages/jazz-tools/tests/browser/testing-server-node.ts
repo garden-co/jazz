@@ -5,6 +5,7 @@ import {
   type LocalJazzServerHandle,
   type TestJwtIssuerHandle,
 } from "../../src/testing/index.js";
+import { startHoldingProxy, type HoldingProxy } from "../../src/runtime/testing/holding-proxy.js";
 
 interface StartedJazzServer {
   server: LocalJazzServerHandle;
@@ -260,4 +261,32 @@ export async function unblockJazzServerNetwork(
     webSocketPattern: routeBlock.webSocketPattern,
     activePatterns: activeBlockedPatterns(contextRoutes),
   });
+}
+
+const holdingProxies = new Map<string, HoldingProxy>();
+
+function holdingProxy(proxyUrl: string): HoldingProxy {
+  const proxy = holdingProxies.get(proxyUrl);
+  if (!proxy) throw new Error(`No holding proxy is running at ${proxyUrl}`);
+  return proxy;
+}
+
+/** Start a proxy that can hold back the server's answers; returns its URL. */
+export async function startJazzServerHoldingProxy(serverUrl: string): Promise<string> {
+  const proxy = await startHoldingProxy(serverUrl);
+  holdingProxies.set(proxy.url, proxy);
+  return proxy.url;
+}
+
+export function setJazzServerAnswersHeld(proxyUrl: string, held: boolean): void {
+  const proxy = holdingProxy(proxyUrl);
+  if (held) proxy.hold();
+  else proxy.release();
+}
+
+export async function stopJazzServerHoldingProxy(proxyUrl: string): Promise<void> {
+  const proxy = holdingProxy(proxyUrl);
+  holdingProxies.delete(proxyUrl);
+  proxy.release();
+  await proxy.stop();
 }
