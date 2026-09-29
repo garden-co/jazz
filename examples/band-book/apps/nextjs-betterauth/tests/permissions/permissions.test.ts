@@ -173,6 +173,43 @@ describe("page grants", () => {
     await guest.delete(app.pages, subpage.id).wait(global);
   });
 
+  // Expected to fail until garden-co/jazz#3750: advice for createPolicyTestApp
+  // sessions (backend-delegated through forSession) answers "unknown" instead
+  // of asking the authority. `it.fails` turns red once that is fixed, so this
+  // becomes a plain `it` again.
+  it.fails("are what the permission advice behind the UI's controls reports", async () => {
+    const owner = person("owner");
+    const guest = person("guest");
+    const band = await createBand(owner, "owner");
+    const songs = await page(owner, band.id, "Songs");
+    const harbour = await page(owner, band.id, "Harbour lights", songs.id);
+    const notes = await page(owner, band.id, "Arrangement notes", harbour.id);
+    await owner
+      .insert(app.pageGrants, {
+        workspaceId: band.id,
+        pageId: harbour.id,
+        account: accountFor("guest"),
+        role: "editor",
+      })
+      .wait(global);
+    await guest.all(app.pages.where({ workspaceId: band.id }), global);
+
+    // Edit: the granted page and below. Restructure: only below it.
+    expect(await guest.canUpdate(app.pages, harbour.id, { title: "x" })).toBe("allowed");
+    expect(await guest.canUpdate(app.pages, notes.id, { title: "x" })).toBe("allowed");
+    expect(await guest.canDelete(app.pages, notes.id)).toBe("allowed");
+    expect(await guest.canDelete(app.pages, harbour.id)).not.toBe("allowed");
+    // Sharing is for owners and band members.
+    const grant = {
+      workspaceId: band.id,
+      pageId: harbour.id,
+      account: accountFor("x"),
+      role: "viewer" as const,
+    };
+    expect(await guest.canInsert(app.pageGrants, grant)).not.toBe("allowed");
+    expect(await owner.canInsert(app.pageGrants, grant)).toBe("allowed");
+  });
+
   it("stop applying the moment the grant is removed", async () => {
     const owner = person("owner");
     const guest = person("guest");

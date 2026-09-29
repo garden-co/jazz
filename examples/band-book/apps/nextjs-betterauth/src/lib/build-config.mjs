@@ -12,11 +12,18 @@ export function readBuildConfig(env = process.env) {
     serverUrl: env.NEXT_PUBLIC_JAZZ_SERVER_URL ?? LOCAL_DEFAULTS.serverUrl,
     backendSecret: env.BACKEND_SECRET,
     betterAuthSecret: env.BETTER_AUTH_SECRET,
+    nodeEnv: env.NODE_ENV,
   };
 }
 
-/** @param {ReturnType<typeof readBuildConfig>} config */
+/**
+ * Whether the checked-in development values (and their dev secrets) may be
+ * used. Never in production: a deploy that forgets its env vars would
+ * otherwise look exactly like local development, so it fails closed instead.
+ * @param {ReturnType<typeof readBuildConfig>} config
+ */
 export function usesLocalDefaults(config = readBuildConfig()) {
+  if (config.nodeEnv === "production") return false;
   return (
     config.origin === LOCAL_DEFAULTS.origin &&
     config.appId === LOCAL_DEFAULTS.appId &&
@@ -34,7 +41,7 @@ export function assertBuildConfiguration(config = readBuildConfig()) {
   ].filter(Boolean);
   if (missing.length) {
     throw new Error(
-      `BandBook nonlocal configuration requires BACKEND_SECRET and BETTER_AUTH_SECRET; missing: ${missing.join(", ")}`,
+      `BandBook production or nonlocal configuration requires BACKEND_SECRET and BETTER_AUTH_SECRET; missing: ${missing.join(", ")}`,
     );
   }
   return config;

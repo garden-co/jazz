@@ -36,9 +36,10 @@ open it in a private window with a second account. That account sees only the
 song and the pages inside it, under **Shared with you**.
 
 `apps/nextjs-betterauth/.env.example` lists the settings. The checked-in
-defaults are for local development only; a deployment must set
-`BACKEND_SECRET` and `BETTER_AUTH_SECRET` (the build refuses to continue
-without them when the app id, origin or server URL differ from the defaults).
+defaults are for local development only. A production build or server
+(`NODE_ENV=production`) never uses them and refuses to start without
+`BACKEND_SECRET` and `BETTER_AUTH_SECRET`, as does any deployment whose app id,
+origin or server URL differ from the defaults.
 
 ## How it fits together
 
