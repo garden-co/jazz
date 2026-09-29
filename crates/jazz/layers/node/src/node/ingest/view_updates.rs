@@ -1492,21 +1492,6 @@ where
         Ok(())
     }
 
-    /// Once a transaction is rejected or globally settled, it must not remain
-    /// in the ahead-current overlay: accepted global effects live in current
-    /// tables, and rejected effects are no longer visible. Pending local
-    /// transactions remain in this overlay until Core supplies a final fate.
-    /// Outbox/redelivery may keep the commit unit until fate arrives, so
-    /// callers invoke this strictly after the cleanup-triggering fate is durable.
-    pub(super) async fn cleanup_fated_ahead_current_for_tx(
-        &mut self,
-        batch: &mut DatabaseBatch,
-        tx_id: TxId,
-    ) -> Result<(), Error> {
-        let versions = self.query_versions_for_tx(tx_id).await?;
-        self.cleanup_fated_ahead_current_for_versions(batch, &versions)
-    }
-
     fn cleanup_fated_ahead_current_for_versions(
         &mut self,
         batch: &mut DatabaseBatch,
@@ -1514,52 +1499,6 @@ where
     ) -> Result<(), Error> {
         for version in versions {
             self.write_ahead_current_delete(batch, &version)?;
-        }
-        Ok(())
-    }
-
-    pub(super) async fn cleanup_settled_ahead_current_leftovers(
-        &mut self,
-        already_consistent_through: Option<TxTime>,
-    ) -> Result<(), Error> {
-        let mut tx_ids = Vec::new();
-        for raw in self
-            .database
-            .primary_key_scan_raw("jazz_transactions", &[])
-            .await?
-        {
-            let record = raw.record();
-            let fate = fate_from_encoded_fields(record)?;
-            let global_time = record.get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_TIME_IDX)?;
-            if !matches!(fate, Fate::Rejected(_)) && global_time.is_none() {
-                continue;
-            }
-            let tx_time = TxTime(record.get_u64(TransactionRowRecord::FIELD_TIME_IDX)?);
-            if already_consistent_through.is_some_and(|through| tx_time <= through) {
-                continue;
-            }
-            let node_alias = NodeAlias(record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?);
-            let node = self
-                .node_for_alias(node_alias)
-                .ok_or(Error::InvalidStoredValue(
-                    "transaction node alias must exist",
-                ))?;
-            tx_ids.push(TxId::new(tx_time, node));
-        }
-        if tx_ids.is_empty() {
-            return Ok(());
-        }
-        let mut batch = self.database.open_batch();
-        for tx_id in &tx_ids {
-            self.cleanup_fated_ahead_current_for_tx(&mut batch, *tx_id)
-                .await?;
-        }
-        let applied = self.database.apply_batch(batch).await?;
-let persisted = applied.persist().await;
-self.database.finish_persistence(persisted)?;
-        if let Some(tx_time) = tx_ids.into_iter().map(|tx_id| tx_id.time).max() {
-            self.persist_storage_consistency_marker_through(tx_time)
-                .await?;
         }
         Ok(())
     }
