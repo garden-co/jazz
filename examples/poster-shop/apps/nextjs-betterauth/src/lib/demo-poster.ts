@@ -9,7 +9,10 @@ export const POSTER_WIDTH = 1080;
 export const POSTER_HEIGHT = 1350;
 
 type LayerSeed = Omit<SnapshotLayer, "id"> & { key: string };
-type ShapeSeed = Omit<SnapshotShape, "id" | "layerId" | "assetId"> & { layer: string };
+type ShapeSeed = Omit<SnapshotShape, "id" | "layerId" | "assetId" | "text"> & {
+  layer: string;
+  text?: string;
+};
 
 const LAYERS: LayerSeed[] = [
   { key: "background", name: "Background", zIndex: 0, visible: true, locked: true },

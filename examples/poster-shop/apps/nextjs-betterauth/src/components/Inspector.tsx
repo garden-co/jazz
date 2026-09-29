@@ -126,9 +126,9 @@ export function Inspector({
         max={180}
         step={1}
         valueDisplay="text"
-        formatValue={(value) => `${value}°`}
+        formatValue={(value: number) => `${value}°`}
         isDisabled={!canEdit}
-        onChange={(rotation) => update({ rotation })}
+        onChange={(rotation: number) => update({ rotation })}
       />
       <Selector
         label="Layer"
