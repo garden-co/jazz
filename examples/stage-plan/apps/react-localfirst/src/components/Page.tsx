@@ -12,7 +12,7 @@ type PageProps = {
 /** A page body: title row with actions, then the content. */
 export function Page({ title, description, actions, children }: PageProps) {
   return (
-    <VStack gap={6} padding={6} className="page">
+    <VStack gap={6} paddingBlock={6} paddingInline={4} className="page">
       <HStack gap={3} vAlign="center" justify="between" wrap="wrap">
         <VStack gap={1}>
           <Heading level={1}>{title}</Heading>

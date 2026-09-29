@@ -1,6 +1,6 @@
-import type { Db } from "jazz-tools";
+import type { Db, WriteResult } from "jazz-tools";
 import { app, type Crew, type TaskStatus } from "../../schema.js";
-import { addComment, createShow, type Me } from "./actions.js";
+import { addComment, createShow, ensureChiefSetup, type Me } from "./actions.js";
 
 /**
  * The demo show every new account starts with. The content is fixed, so every
@@ -47,43 +47,78 @@ export async function ensureProfile(
   return { profile: profile.value, isNew: true };
 }
 
-/**
- * Creates the demo show for a new account: the show, its crew chief and
- * invite, the board with its activity, and a first comment.
- *
- * Each write only depends on earlier writes, never on rows in its own
- * transaction: the server checks a transaction's rows against data from
- * before it, so a task can't share a transaction with the show it belongs to.
- */
-export async function seedDemoShow(db: Db, me: Me) {
-  const { show, writes } = await createShow(db, me, DEMO_SHOW);
+const DEMO_COMMENT = "Channel 7 crackles. Swapping the DI box before soundcheck.";
 
+type Writes = WriteResult<unknown>[];
+
+/**
+ * Makes sure an account has a crew profile and gives a new account the demo
+ * show, unless it arrived through an invite link. Only local reads and
+ * writes, so it works offline. Returns the writes it made, so the caller can
+ * check that the server accepted them.
+ */
+export async function setUpAccount(db: Db, account: string, { withDemo }: { withDemo: boolean }) {
+  const { profile, isNew } = await ensureProfile(db, account);
+  const me = { account, profile };
+  const writes = isNew && withDemo ? await seedDemoShow(db, me) : [];
+  return { me, isNew, writes };
+}
+
+/**
+ * Writes the demo show: the show, its crew chief and invite, the board with
+ * its activity, and a first comment. Each write only depends on earlier
+ * writes, never on rows in its own transaction
+ * (https://github.com/garden-co/jazz/issues/3755).
+ */
+export async function seedDemoShow(db: Db, me: Me): Promise<Writes> {
+  const created = await createShow(db, me, DEMO_SHOW);
+  const board = await writeBoard(db, me, created.show.id);
+  const comment = await addComment(db, me, board.lineCheck, DEMO_COMMENT);
+  return [...created.writes, ...board.writes, comment];
+}
+
+/**
+ * Finishes a demo show that was only partly saved, for example because the
+ * server rejected one of its writes. The show's activity log records which steps already ran,
+ * so tasks you delete later don't come back.
+ */
+export async function resumeDemoShow(db: Db, me: Me): Promise<Writes> {
+  const show = await db.one(app.shows.where({ chiefAccount: me.account, name: DEMO_SHOW.name }), {
+    tier: "local-first-unless-empty",
+  });
+  if (!show) return [];
+  const writes = await ensureChiefSetup(db, me, show.id);
+  const log = await db.all(app.activity.where({ showId: show.id }), {
+    tier: "local-first-unless-empty",
+  });
+  if (log.length === 0) {
+    const board = await writeBoard(db, me, show.id);
+    writes.push(...board.writes, await addComment(db, me, board.lineCheck, DEMO_COMMENT));
+  } else if (!log.some((entry) => entry.kind === "commented")) {
+    const lineCheck = await db.one(app.tasks.where({ showId: show.id, title: "Line check" }), {
+      tier: "local-first-unless-empty",
+    });
+    if (lineCheck) writes.push(await addComment(db, me, lineCheck, DEMO_COMMENT));
+  }
+  return writes;
+}
+
+/** The demo board: eight tasks, each with its "created" activity. */
+async function writeBoard(db: Db, me: Me, showId: string) {
   const board = await db.transaction((tx) =>
     DEMO_TASKS.map((demo, index) => {
       const task = tx.insert(app.tasks, {
-        showId: show.id,
+        showId,
         title: demo.title,
         status: demo.status,
         assigneeId: demo.mine ? me.profile.id : null,
         notes: demo.notes ?? null,
         rank: index + 1,
       });
-      tx.insert(app.activity, {
-        showId: show.id,
-        taskId: task.id,
-        actorId: me.profile.id,
-        kind: "created",
-      });
+      tx.insert(app.activity, { showId, taskId: task.id, actorId: me.profile.id, kind: "created" });
       return task;
     }),
   );
-
   const lineCheck = board.value.find((task) => task.title === "Line check")!;
-  const comment = await addComment(
-    db,
-    me,
-    lineCheck,
-    "Channel 7 crackles. Swapping the DI box before soundcheck.",
-  );
-  return { show, writes: [...writes, board, comment] };
+  return { lineCheck, writes: [board] as Writes };
 }

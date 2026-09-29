@@ -2,7 +2,8 @@ import { createPolicyTestApp, type PolicyTestApp } from "jazz-tools/testing";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { app } from "../../schema.js";
 import permissions from "../../permissions.js";
-import { seedDemoShow } from "../../src/model/seed.js";
+import { joinShow } from "../../src/model/actions.js";
+import { DEMO_SHOW, resumeDemoShow, seedDemoShow } from "../../src/model/seed.js";
 
 /**
  * Three people: Chiara runs the show (crew chief), Cole is on her crew,
@@ -87,6 +88,20 @@ async function setUpShow() {
   return { chief, crew, outsider, chiefProfile, crewProfile, outsiderProfile, show, invite, task };
 }
 
+/** The demo show exactly once: chief, invite, eight tasks and one comment. */
+async function expectCompleteDemoShow(chief: ReturnType<PolicyTestApp["as"]>) {
+  const global = { tier: "global" } as const;
+  const shows = await chief.all(app.shows.where({ chiefAccount }), global);
+  expect(shows).toHaveLength(1);
+  const showId = shows[0]!.id;
+  await expect(chief.all(app.showCrew.where({ showId }), global)).resolves.toEqual([
+    expect.objectContaining({ account: chiefAccount, role: "chief" }),
+  ]);
+  await expect(chief.all(app.showInvites.where({ showId }), global)).resolves.toHaveLength(1);
+  await expect(chief.all(app.tasks.where({ showId }), global)).resolves.toHaveLength(8);
+  await expect(chief.all(app.comments, global)).resolves.toHaveLength(1);
+}
+
 async function joinAsCrew(ctx: Awaited<ReturnType<typeof setUpShow>>) {
   return ctx.crew
     .insert(app.showCrew, {
@@ -119,23 +134,32 @@ describe("StagePlan permissions", () => {
     await expect(outsider.all(app.showInvites.where({ showId: ctx.show.id }))).resolves.toEqual([]);
   });
 
-  it("accepts a new account's demo show, created in one transaction as the app does", async () => {
+  it("saves a new account's demo show the way the app writes it", async () => {
     const chief = testApp.as(session("chiara", chiefAccount));
     const profile = await chief
       .insert(app.crew, { account: chiefAccount, name: "Chiara" })
       .wait({ tier: "global" });
 
-    const { show, writes } = await seedDemoShow(chief, { account: chiefAccount, profile });
+    const writes = await seedDemoShow(chief, { account: chiefAccount, profile });
     await Promise.all(writes.map((write) => write.wait({ tier: "global" })));
 
-    const tasks = await chief.all(app.tasks.where({ showId: show.id }), { tier: "global" });
-    expect(tasks).toHaveLength(8);
-    const [membership] = await chief.all(app.showCrew.where({ showId: show.id }), {
-      tier: "global",
-    });
-    expect(membership).toMatchObject({ account: chiefAccount, role: "chief" });
-    const comments = await chief.all(app.comments, { tier: "global" });
-    expect(comments).toHaveLength(1);
+    await expectCompleteDemoShow(chief);
+  });
+
+  it("finishes a demo show that was only partly saved, without duplicating it", async () => {
+    const chief = testApp.as(session("chiara", chiefAccount));
+    const profile = await chief
+      .insert(app.crew, { account: chiefAccount, name: "Chiara" })
+      .wait({ tier: "global" });
+    const me = { account: chiefAccount, profile };
+    // Only the show itself reached the server.
+    await chief.insert(app.shows, { ...DEMO_SHOW, chiefAccount }).wait({ tier: "global" });
+
+    const resumed = await resumeDemoShow(chief, me);
+    await Promise.all(resumed.map((write) => write.wait({ tier: "global" })));
+    await expectCompleteDemoShow(chief);
+
+    await expect(resumeDemoShow(chief, me)).resolves.toEqual([]);
   });
 
   it("stops outsiders from writing to a show they are not on", async () => {
@@ -191,10 +215,34 @@ describe("StagePlan permissions", () => {
       }),
     );
 
-    await joinAsCrew(ctx);
+    await joinShow(
+      ctx.crew,
+      { account: crewAccount, profile: ctx.crewProfile },
+      ctx.show.id,
+      ctx.invite.code,
+    );
     await expect(ctx.crew.all(app.shows.where({ id: ctx.show.id }))).resolves.toEqual([
       expect.objectContaining({ name: "Late show" }),
     ]);
+
+    // Joining clears the code from the membership, so other crew can't read it.
+    const membership = await ctx.chief.one(
+      app.showCrew.where({ showId: ctx.show.id, account: crewAccount }),
+      { tier: "global" },
+    );
+    expect(membership).toMatchObject({ role: "crew", inviteCode: null });
+
+    // Clearing the code is the only change a member can make to their membership.
+    const otherShow = await ctx.chief
+      .insert(app.shows, { ...DEMO_SHOW, chiefAccount })
+      .wait({ tier: "global" });
+    await ctx.crew.expectDenied((db) =>
+      db.update(app.showCrew, membership!.id, { showId: otherShow.id }),
+    );
+    await ctx.crew.expectDenied((db) => db.update(app.showCrew, membership!.id, { role: "chief" }));
+    await ctx.crew.expectDenied((db) =>
+      db.update(app.showCrew, membership!.id, { inviteCode: ctx.invite.code }),
+    );
   });
 
   it("lets crew edit tasks, comment and log activity", async () => {
@@ -232,6 +280,12 @@ describe("StagePlan permissions", () => {
         detail: "In progress",
       })
       .wait({ tier: "global" });
+
+    // Tasks go to someone on the crew, or to nobody.
+    await crew.expectDenied((db) =>
+      db.update(app.tasks, ctx.task.id, { assigneeId: ctx.outsiderProfile.id }),
+    );
+    await crew.update(app.tasks, ctx.task.id, { assigneeId: null }).wait({ tier: "global" });
 
     // Crew can delete tasks they created, but not the chief's.
     await crew.delete(app.tasks, added.id).wait({ tier: "global" });

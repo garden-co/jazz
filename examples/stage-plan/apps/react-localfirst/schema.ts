@@ -62,7 +62,11 @@ const schema = {
       crewId: s.uuid(),
       account: s.uuid(),
       role: s.enum("chief", "crew"),
-      /** The invite code a crew member joined with; checked by permissions. */
+      /**
+       * The invite code a crew member joins with, checked by permissions.
+       * The app clears it once the server accepts the membership, because
+       * the rest of the crew can read membership rows.
+       */
       inviteCode: s.string().optional(),
     },
     {

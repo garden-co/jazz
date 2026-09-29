@@ -48,20 +48,39 @@ export default s.definePermissions(app, ({ policy, session, anyOf, allOf, allowe
       ]),
     ]),
   );
+  // Once the server has accepted a membership, the joiner clears the invite
+  // code from it, so other crew can't read the code. That's the only change
+  // allowed: same row, same show, same profile, still crew.
+  policy.showCrew.allowUpdate
+    .whereOld({ account: me, role: "crew" })
+    .whereNew((member) =>
+      allOf([
+        { account: me, role: "crew", inviteCode: { isNull: true } },
+        isMyProfile(member.crewId),
+        policy.showCrew.exists.where({ id: member.id, showId: member.showId }),
+      ]),
+    );
   // Members leave on their own; the chief can remove anyone.
   policy.showCrew.allowDelete.where((member) => anyOf([{ account: me }, isChief(member.showId)]));
 
-  // --- invite codes are bearer secrets: only the chief reads or rotates them ---
+  // --- invite codes are bearer secrets: only the chief reads or rotates them.
+  // A joiner's membership carries the code until they clear it (see above). ---
   policy.showInvites.allowRead.where((invite) => isChief(invite.showId));
   policy.showInvites.allowInsert.where((invite) => isChief(invite.showId));
   policy.showInvites.allowDelete.where((invite) => isChief(invite.showId));
 
   // --- tasks: any crew member edits; the chief or the task's creator deletes ---
+  // A task is assigned to nobody or to someone on the show's crew.
+  const assigneeIsCrew = (task: { showId: RowRefValue; assigneeId: RowRefValue }) =>
+    anyOf([
+      { assigneeId: { isNull: true } },
+      policy.showCrew.exists.where({ showId: task.showId, crewId: task.assigneeId }),
+    ]);
   policy.tasks.allowRead.where((task) => isCrew(task.showId));
-  policy.tasks.allowInsert.where((task) => isCrew(task.showId));
+  policy.tasks.allowInsert.where((task) => allOf([isCrew(task.showId), assigneeIsCrew(task)]));
   policy.tasks.allowUpdate
     .whereOld((task) => isCrew(task.showId))
-    .whereNew((task) => isCrew(task.showId));
+    .whereNew((task) => allOf([isCrew(task.showId), assigneeIsCrew(task)]));
   policy.tasks.allowDelete.where((task) =>
     anyOf([isChief(task.showId), allOf([{ "$createdBy.account": me }, isCrew(task.showId)])]),
   );

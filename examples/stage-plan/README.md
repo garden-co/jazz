@@ -52,10 +52,20 @@ and are enforced by the server.
 
 - Invite codes sit in their own `showInvites` table that only the chief can
   read. Joining inserts a `showCrew` row carrying the code; the server accepts
-  it only if a matching invite exists. Making a new link deletes the old code,
-  so the old link stops working (people who already joined stay on the crew).
+  it only if a matching invite exists. Membership rows are visible to the
+  whole crew, so once the server accepts the join the app clears the code
+  from the row; the only change a member may make to their membership is
+  clearing it. Until then, other crew could read the code. Making a new link
+  deletes the old code, so the old link stops working (people who already
+  joined stay on the crew).
+- Tasks are assigned to nobody or to someone on the show's crew.
 - Comments and activity are written as your own crew profile; nobody can post
-  as someone else. The activity log is append-only.
+  as someone else. The activity log is append-only. Authors may delete their
+  own comments, though the app doesn't offer that yet.
+- The server doesn't check that an activity entry's task belongs to its show.
+  That check would look up the task, and a new task and its "created" entry
+  are written in one transaction, where policies can't see each other's rows
+  ([#3755](https://github.com/garden-co/jazz/issues/3755)).
 - Checklist items are private to their owner.
 - Crew profiles (display names) are readable by every signed-in account, like
   the chat examples' profiles.

@@ -1,4 +1,4 @@
-import type { Db } from "jazz-tools";
+import type { Db, WriteResult } from "jazz-tools";
 import {
   app,
   type ActivityKind,
@@ -35,6 +35,9 @@ function activityEntry(
   };
 }
 
+/** Local rows and unsynced writes; asks the server only when there are none. */
+const LOCAL_OR_SERVER = "local-first-unless-empty";
+
 export function newInviteCode() {
   // Full UUID entropy: the link is a reusable bearer capability.
   return crypto.randomUUID();
@@ -45,14 +48,18 @@ export type ShowInput = Pick<Show, "name" | "venue" | "date" | "doors">;
 /**
  * Creates a show with the creator as crew chief and a first invite code.
  *
- * The show is its own write. The membership and invite policies check the
- * show row, and the server checks a transaction's rows against data from
- * before that transaction, so they can't share one with the show.
+ * The show is its own write, before the membership and invite: their
+ * policies look up the show, and the server checks a transaction's rows
+ * against data from before that transaction, so they can't share one with
+ * the show (https://github.com/garden-co/jazz/issues/3755).
+ *
+ * Everything applies locally at once, offline too. The returned writes let a
+ * caller wait for the server to accept them.
  */
 export async function createShow(db: Db, me: Me, input: ShowInput) {
   const showWrite = db.insert(app.shows, { ...input, chiefAccount: me.account });
   const show = showWrite.value;
-  const membership = await db.transaction((tx) => {
+  const setup = await db.transaction((tx) => {
     tx.insert(app.showCrew, {
       showId: show.id,
       crewId: me.profile.id,
@@ -61,8 +68,33 @@ export async function createShow(db: Db, me: Me, input: ShowInput) {
     });
     tx.insert(app.showInvites, { showId: show.id, code: newInviteCode() });
   });
-  // The writes let callers wait for the server to accept the new show.
-  return { show, writes: [showWrite, membership] };
+  return { show, writes: [showWrite, setup] as WriteResult<unknown>[] };
+}
+
+/**
+ * Re-adds the chief's membership and invite when either is missing, for
+ * example because the server rejected that write. The check includes writes
+ * that haven't synced yet, so it doesn't add a second membership, and it
+ * works offline.
+ */
+export async function ensureChiefSetup(db: Db, me: Me, showId: string) {
+  const [membership, invites] = await Promise.all([
+    db.one(app.showCrew.where({ showId, account: me.account }), { tier: LOCAL_OR_SERVER }),
+    db.all(app.showInvites.where({ showId }), { tier: LOCAL_OR_SERVER }),
+  ]);
+  if (membership && invites.length > 0) return [];
+  const setup = await db.transaction((tx) => {
+    if (!membership) {
+      tx.insert(app.showCrew, {
+        showId,
+        crewId: me.profile.id,
+        account: me.account,
+        role: "chief",
+      });
+    }
+    if (invites.length === 0) tx.insert(app.showInvites, { showId, code: newInviteCode() });
+  });
+  return [setup] as WriteResult<unknown>[];
 }
 
 export function updateShow(db: Db, showId: string, input: ShowInput) {
@@ -143,19 +175,27 @@ export function rotateInvite(db: Db, showId: string, oldInviteIds: string[]) {
   });
 }
 
-/** Joins a show with an invite code. The server checks the code against the private invite. */
+/**
+ * Joins a show with an invite code. The server checks the code against the
+ * private invite; once it accepts, the code is cleared from the membership so
+ * the rest of the crew can't read it.
+ */
 export async function joinShow(db: Db, me: Me, showId: string, code: string) {
-  const existing = await db.one(app.showCrew.where({ showId, account: me.account }));
-  if (existing) return;
-  await db
-    .insert(app.showCrew, {
-      showId,
-      crewId: me.profile.id,
-      account: me.account,
-      role: "crew",
-      inviteCode: code,
-    })
-    .wait({ tier: "global" });
+  let membership = await db.one(app.showCrew.where({ showId, account: me.account }));
+  if (!membership) {
+    membership = await db
+      .insert(app.showCrew, {
+        showId,
+        crewId: me.profile.id,
+        account: me.account,
+        role: "crew",
+        inviteCode: code,
+      })
+      .wait({ tier: "global" });
+  }
+  if (membership.inviteCode) {
+    await db.update(app.showCrew, membership.id, { inviteCode: null }).wait({ tier: "global" });
+  }
 }
 
 /** Rank that puts a task after every task in the column. */

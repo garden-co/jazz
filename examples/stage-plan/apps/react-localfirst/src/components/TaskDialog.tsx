@@ -32,6 +32,8 @@ type TaskWithTime = Task & { $updatedAt: Date };
 
 type TaskDialogProps = {
   task?: TaskWithTime;
+  /** Every task on the show, to rank a task at the end of its new column. */
+  tasks: Task[];
   crew: CrewMember[];
   /** The route names a task this person can't see (deleted, or another show's). */
   isMissing: boolean;
@@ -40,12 +42,12 @@ type TaskDialogProps = {
 
 const UNASSIGNED = "unassigned";
 
-export function TaskDialog({ task, crew, isMissing, onClose }: TaskDialogProps) {
+export function TaskDialog({ task, tasks, crew, isMissing, onClose }: TaskDialogProps) {
   const isOpen = Boolean(task) || isMissing;
   return (
     <Dialog isOpen={isOpen} onOpenChange={(open) => !open && onClose()} width={640}>
       {task ? (
-        <TaskDetail key={task.id} task={task} crew={crew} onClose={onClose} />
+        <TaskDetail key={task.id} task={task} tasks={tasks} crew={crew} onClose={onClose} />
       ) : (
         <Layout
           header={<DialogHeader title="Task not found" onOpenChange={onClose} />}
@@ -65,10 +67,12 @@ export function TaskDialog({ task, crew, isMissing, onClose }: TaskDialogProps) 
 
 function TaskDetail({
   task,
+  tasks,
   crew,
   onClose,
 }: {
   task: TaskWithTime;
+  tasks: Task[];
   crew: CrewMember[];
   onClose: () => void;
 }) {
@@ -84,9 +88,6 @@ function TaskDetail({
       .select("*", "$createdAt")
       .include({ author: true })
       .orderBy("$createdAt", "asc"),
-  );
-  const { data: columnTasks = [] } = useAll(
-    app.tasks.where({ showId: task.showId }).select("rank", "status"),
   );
 
   // Remote edits replace the local draft unless you're typing in the field.
@@ -157,7 +158,7 @@ function TaskDetail({
                       me,
                       task,
                       next,
-                      rankAfter(columnTasks.filter((t) => t.status === next)),
+                      rankAfter(tasks.filter((t) => t.status === next)),
                     );
                   }
                 }}

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useAll, useDb, useOne } from "jazz-tools/react";
 import { Badge } from "@astryxdesign/core/Badge";
 import { Button } from "@astryxdesign/core/Button";
@@ -6,7 +6,7 @@ import { EmptyState } from "@astryxdesign/core/EmptyState";
 import { HStack } from "@astryxdesign/core/Stack";
 import { Tab, TabList } from "@astryxdesign/core/TabList";
 import { app } from "../../schema.js";
-import { updateShow } from "../model/actions.js";
+import { ensureChiefSetup, updateShow } from "../model/actions.js";
 import { useMe } from "../model/me.js";
 import { href, navigate, type ShowTab } from "../router.js";
 import { ActivityFeed } from "./ActivityFeed.js";
@@ -35,6 +35,16 @@ export function ShowPage({ showId, tab, taskId }: ShowPageProps) {
   const { data: tasks = [] } = useAll(
     app.tasks.where({ showId }).select("*", "$updatedAt").orderBy("rank", "asc"),
   );
+
+  // If the server rejected the chief's membership or invite, add them back,
+  // so the chief stays in the crew list and the assignee picker.
+  const isChiefOfShow = show?.chiefAccount === me.account;
+  useEffect(() => {
+    if (!isChiefOfShow) return;
+    ensureChiefSetup(db, me, showId).catch((error) =>
+      console.error("Could not restore the chief's membership", error),
+    );
+  }, [db, me, showId, isChiefOfShow]);
 
   if (isLoading) return <Loading label="Opening the show" />;
   if (!show) {
@@ -80,6 +90,7 @@ export function ShowPage({ showId, tab, taskId }: ShowPageProps) {
 
       <TaskDialog
         task={openTask}
+        tasks={tasks}
         crew={crew}
         isMissing={Boolean(taskId) && !openTask}
         onClose={() => navigate(href.show(showId))}

@@ -23,9 +23,3 @@ body {
 .board-column[data-drop-target="true"] {
   outline-color: var(--color-accent);
 }
-
-@media (max-width: 480px) {
-  .page {
-    padding-inline: var(--spacing-4) !important;
-  }
-}

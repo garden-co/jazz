@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useSyncExternalStore } from "react";
 import { useDb } from "jazz-tools/react";
 import { Avatar } from "@astryxdesign/core/Avatar";
 import { Switch } from "@astryxdesign/core/Switch";
@@ -50,21 +50,44 @@ export function AppTopNav({ route, me }: { route: Route; me?: Me }) {
 
 /**
  * Pauses syncing to show local-first behaviour: edits keep working while
- * offline and reach the crew once you switch back.
+ * offline and reach the crew once you switch back. Jazz has no public
+ * connection-status API yet, so the switch shows what it asked for, and the
+ * browser's own network state.
  */
 function SyncSwitch() {
   const db = useDb();
-  const [isOnline, setOnline] = useState(true);
+  const [isPaused, setPaused] = useState(false);
+  const [isSwitching, setSwitching] = useState(false);
+  const hasNetwork = useSyncExternalStore(
+    subscribeToNetwork,
+    () => navigator.onLine,
+    () => true,
+  );
   return (
     <Switch
-      label="Online"
+      label={hasNetwork ? "Online" : "No network"}
       size="sm"
-      value={isOnline}
+      value={hasNetwork && !isPaused}
+      isDisabled={!hasNetwork || isSwitching}
       changeAction={async (next) => {
-        setOnline(next);
-        if (next) await db.reconnect();
-        else await db.disconnect();
+        setSwitching(true);
+        try {
+          if (next) await db.reconnect();
+          else await db.disconnect();
+          setPaused(!next);
+        } finally {
+          setSwitching(false);
+        }
       }}
     />
   );
+}
+
+function subscribeToNetwork(onChange: () => void) {
+  window.addEventListener("online", onChange);
+  window.addEventListener("offline", onChange);
+  return () => {
+    window.removeEventListener("online", onChange);
+    window.removeEventListener("offline", onChange);
+  };
 }
