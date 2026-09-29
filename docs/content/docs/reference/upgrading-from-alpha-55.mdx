@@ -8,7 +8,8 @@ data needs nothing: server data directories and browser storage from alpha.55 op
 no reset or conversion step. Your code and deployment do need changes.
 
 The changes are grouped by the release that introduced them. If your app is on alpha.56, skip to
-[From alpha.56](#from-alpha56). Upgrade all Jazz packages together.
+[From alpha.56](#from-alpha56); on alpha.57, read [In alpha.58](#in-alpha58). Upgrade all Jazz
+packages together.
 
 ## From alpha.55
 
@@ -124,7 +125,10 @@ newer build:
   reject and `remote` reads error with
   `unsupported wire protocol advertisement: remote 2..=2, expected 3..=3`.
 - Local writes are kept. When the page loads a newer build of your app, the same account comes
-  back and resubmits them, and the server checks them like any other write.
+  back and resubmits them, and the server checks them like any other write. Exclusive
+  transactions are the exception: the alpha.55 build stored them without the row records an
+  alpha.58 server requires, so one whose query reads returned any rows is rejected with
+  `exclusive_conflict` (see [In alpha.58](#in-alpha58)).
 
 To keep this window short, ship the upgraded app build together with the server upgrade, and make
 sure your HTML isn't cached: a cached `index.html` keeps loading the old client.
@@ -146,3 +150,16 @@ Clients now connect straight to the core server, which authorizes and confirms w
   waits but warns and waits for `"global"`. It throws as a read tier.
 - Remove server upstream and edge configuration.
 - Don't clear local databases: writes an old edge had accepted are resubmitted to the core server.
+
+## In alpha.58
+
+### Upgrade clients that use exclusive transactions
+
+The server now checks an exclusive transaction against the rows it actually read, including counts
+and other aggregates, and rejects the commit with `exclusive_conflict` if any of them changed. It
+needs the row records that alpha.58 clients send with each exclusive read, so an exclusive
+transaction from an older client whose query read returned any rows is rejected with
+`exclusive_conflict` on every attempt, until the client is upgraded. Retrying doesn't help.
+
+If your app uses exclusive transactions, ship the alpha.58 client build together with the server
+upgrade. Other writes and reads from alpha.56 and alpha.57 clients keep working.
