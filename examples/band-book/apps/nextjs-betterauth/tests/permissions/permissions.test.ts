@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { PermissionAdvice } from "jazz-tools";
 import { createPolicyTestApp, type PolicyTestApp, type TestDb } from "jazz-tools/testing";
 import { app, type BlockKind, type WorkspaceRole } from "../../schema.js";
 import permissions from "../../permissions.js";
@@ -36,6 +37,20 @@ function person(subject: string, identityIssuer = issuer): TestDb {
 }
 
 const global = { tier: "global" } as const;
+
+/**
+ * Permission advice as the UI asks for it. "unknown" means Jazz could not give
+ * a definite answer yet (for example while the authority connection settles;
+ * garden-co/jazz#3750), so ask again, as a client would, before asserting.
+ */
+async function advice(ask: () => Promise<PermissionAdvice>): Promise<PermissionAdvice> {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const answer = await ask();
+    if (answer !== "unknown") return answer;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return "unknown";
+}
 
 /** A band created from a client: workspace first, then its owner's own membership. */
 async function createBand(owner: TestDb, ownerSubject: string, name = "The Late Shift") {
@@ -173,11 +188,7 @@ describe("page grants", () => {
     await guest.delete(app.pages, subpage.id).wait(global);
   });
 
-  // Expected to fail until garden-co/jazz#3750: advice for createPolicyTestApp
-  // sessions (backend-delegated through forSession) answers "unknown" instead
-  // of asking the authority. `it.fails` turns red once that is fixed, so this
-  // becomes a plain `it` again.
-  it.fails("are what the permission advice behind the UI's controls reports", async () => {
+  it("are what the permission advice behind the UI's controls reports", async () => {
     const owner = person("owner");
     const guest = person("guest");
     const band = await createBand(owner, "owner");
@@ -195,10 +206,14 @@ describe("page grants", () => {
     await guest.all(app.pages.where({ workspaceId: band.id }), global);
 
     // Edit: the granted page and below. Restructure: only below it.
-    expect(await guest.canUpdate(app.pages, harbour.id, { title: "x" })).toBe("allowed");
-    expect(await guest.canUpdate(app.pages, notes.id, { title: "x" })).toBe("allowed");
-    expect(await guest.canDelete(app.pages, notes.id)).toBe("allowed");
-    expect(await guest.canDelete(app.pages, harbour.id)).not.toBe("allowed");
+    expect(await advice(() => guest.canUpdate(app.pages, harbour.id, { title: "x" }))).toBe(
+      "allowed",
+    );
+    expect(await advice(() => guest.canUpdate(app.pages, notes.id, { title: "x" }))).toBe(
+      "allowed",
+    );
+    expect(await advice(() => guest.canDelete(app.pages, notes.id))).toBe("allowed");
+    expect(await advice(() => guest.canDelete(app.pages, harbour.id))).toBe("denied");
     // Sharing is for owners and band members.
     const grant = {
       workspaceId: band.id,
@@ -206,8 +221,8 @@ describe("page grants", () => {
       account: accountFor("x"),
       role: "viewer" as const,
     };
-    expect(await guest.canInsert(app.pageGrants, grant)).not.toBe("allowed");
-    expect(await owner.canInsert(app.pageGrants, grant)).toBe("allowed");
+    expect(await advice(() => guest.canInsert(app.pageGrants, grant))).toBe("denied");
+    expect(await advice(() => owner.canInsert(app.pageGrants, grant))).toBe("allowed");
   });
 
   it("stop applying the moment the grant is removed", async () => {
