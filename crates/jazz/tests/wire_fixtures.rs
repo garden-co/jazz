@@ -749,7 +749,7 @@ fn fixture_manifest() -> Manifest {
         .collect();
 
     Manifest {
-        fixture_set: "jazz-wire-message-frames-v3",
+        fixture_set: "jazz-wire-message-frames-v4",
         codec: "postcard WireFrame::Message(WireEnvelope { payload: encode_sync_message(..) })",
         protocol_version: WIRE_PROTOCOL_VERSION,
         features: FEATURE_SYNC_MESSAGE_PAYLOAD,
@@ -1134,7 +1134,9 @@ fn supporting_snapshots_reject_duplicate_rows_and_invalid_native_table() {
 #[test]
 fn v1_delegated_policy_fields_reject_old_shapes_and_pin_claim_bytes() {
     let messages = wire_fixture_messages();
-    for name in ["subscribe_empty_todos_binding", "fetch_row_versions_todos"] {
+    // `FetchRowVersions` (tag 15) is retired in wire v4, so `Subscribe` is the
+    // only direct-policy message left to pin; its retired fixtures are gone.
+    for name in ["subscribe_empty_todos_binding"] {
         let (_, _, message) = messages
             .iter()
             .find(|(candidate, _, _)| *candidate == name)
