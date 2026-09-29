@@ -1616,6 +1616,7 @@ where
         self.subscription_runtime_retired.set(true);
         self.subscriptions.borrow_mut().clear();
         self.connections.borrow_mut().clear();
+        self.pending_detaches.borrow_mut().clear();
         self.upstream_subscriptions.borrow_mut().clear();
         self.pending_subscription_finalizations.borrow_mut().clear();
         self.latest_coverage_subscriptions.borrow_mut().clear();
@@ -2838,45 +2839,65 @@ where
     /// Such a detach is completed by the next tick instead of re-entering the
     /// suspended owner; the connection is reported as detached either way.
     pub fn detach_connection(&self, connection: &Rc<LocalMutex<PeerConnection<S>>>) -> bool {
-        let peers = self.connections.borrow().clone();
-        if !peers
+        if self
+            .pending_detaches
+            .borrow()
             .iter()
-            .any(|candidate| Rc::ptr_eq(candidate, connection))
-            || self
-                .pending_detaches
-                .borrow()
-                .iter()
-                .any(|pending| Rc::ptr_eq(pending, connection))
+            .any(|pending| Rc::ptr_eq(pending, connection))
         {
             return false;
         }
-        let guards = peers
-            .iter()
-            .map(|peer| Some((Rc::as_ptr(peer) as usize, peer.try_lock()?)))
-            .collect::<Option<PeerOwnerGuards<'_, S>>>();
-        match (guards, self.node.try_lock()) {
-            (Some(mut guards), Some(node)) => {
-                let target = guards
-                    .remove(&(Rc::as_ptr(connection) as usize))
-                    .expect("registered detach target");
-                self.detach_connection_with_guards(connection, target, node, Some(guards))
-            }
-            _ => {
-                self.pending_detaches
-                    .borrow_mut()
-                    .push(Rc::clone(connection));
-                self.schedule_tick(TickUrgency::Immediate);
-                true
-            }
+        if let Some(detached) = self.try_detach_connection_now(connection) {
+            return detached;
         }
+        self.pending_detaches
+            .borrow_mut()
+            .push(Rc::clone(connection));
+        self.schedule_tick(TickUrgency::Immediate);
+        true
     }
 
-    async fn drain_pending_detaches(&self) -> Result<(), Error> {
-        let pending = std::mem::take(&mut *self.pending_detaches.borrow_mut());
-        for connection in pending {
-            self.detach_connection_async(&connection).await?;
+    /// Detach with every owner taken by `try_lock`, or `None` when a suspended
+    /// operation still owns the node or a registered peer.
+    fn try_detach_connection_now(
+        &self,
+        connection: &Rc<LocalMutex<PeerConnection<S>>>,
+    ) -> Option<bool> {
+        let peers = self.connections.borrow().clone();
+        if !peers.iter().any(|peer| Rc::ptr_eq(peer, connection)) {
+            return Some(false);
         }
-        Ok(())
+        let mut guards = peers
+            .iter()
+            .map(|peer| Some((Rc::as_ptr(peer) as usize, peer.try_lock()?)))
+            .collect::<Option<PeerOwnerGuards<'_, S>>>()?;
+        let node = self.node.try_lock()?;
+        let target = guards
+            .remove(&(Rc::as_ptr(connection) as usize))
+            .expect("registered detach target");
+        Some(self.detach_connection_with_guards(connection, target, node, Some(guards)))
+    }
+
+    /// Complete queued synchronous detaches without awaiting an owner.
+    ///
+    /// A poll-once host (NAPI) drops a tick that returns pending, so awaiting
+    /// the owner here would lose the queue. A detach whose owner is still held
+    /// stays queued and retries on a later tick.
+    fn drain_pending_detaches(&self) {
+        let pending = self.pending_detaches.borrow().clone();
+        if pending.is_empty() {
+            return;
+        }
+        let finished = pending
+            .into_iter()
+            .filter(|connection| self.try_detach_connection_now(connection).is_some())
+            .collect::<Vec<_>>();
+        let mut queued = self.pending_detaches.borrow_mut();
+        queued.retain(|pending| !finished.iter().any(|done| Rc::ptr_eq(done, pending)));
+        if !queued.is_empty() {
+            drop(queued);
+            self.schedule_tick(TickUrgency::Deferred);
+        }
     }
 
     async fn acquire_peer_inventory(
@@ -3241,7 +3262,7 @@ where
         // boundary, before any connection tick can observe stale readiness.
         self.mark_subscriber_connections_dirty_after_query_runtime_wake();
         self.remote_link.on_tick();
-        self.drain_pending_detaches().await?;
+        self.drain_pending_detaches();
         self.drain_transaction_abandonments().await?;
         self.drain_subscription_finalizations().await?;
         let mut stats = DbTickStats::default();
