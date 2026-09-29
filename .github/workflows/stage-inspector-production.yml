@@ -16,6 +16,24 @@ on:
         required: true
         default: release
         type: string
+  workflow_call:
+    inputs:
+      artifact-run-id:
+        description: "Admitted run containing inspector-prebuilt. Empty uses this run's own artifact, built from source-sha."
+        required: false
+        default: ""
+        type: string
+      source-sha:
+        required: true
+        type: string
+      source-branch:
+        required: false
+        default: release
+        type: string
+    outputs:
+      deployment-url:
+        description: "URL of the staged (not yet promoted) production deployment"
+        value: ${{ jobs.stage.outputs.deployment-url }}
 
 jobs:
   stage:
@@ -24,6 +42,8 @@ jobs:
     permissions:
       contents: read
       actions: read
+    outputs:
+      deployment-url: ${{ steps.deploy.outputs.deployment_url }}
     env:
       SOURCE_SHA: ${{ inputs.source-sha }}
       SOURCE_BRANCH: ${{ inputs.source-branch }}
@@ -38,8 +58,12 @@ jobs:
         with:
           node-version-file: .nvmrc
 
+      # An empty run ID is only reachable from workflow_call: the publisher
+      # built inspector-prebuilt earlier in this same run from source-sha, and
+      # the receipt verification below still binds every file to that SHA.
       - name: Verify artifact run identity and deployment source tree
         id: artifact
+        if: inputs.artifact-run-id != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: node dev/scripts/inspector-provenance.mjs
@@ -48,14 +72,16 @@ jobs:
         with:
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
-          run-id: ${{ inputs.artifact-run-id }}
+          run-id: ${{ inputs.artifact-run-id || github.run_id }}
           name: inspector-prebuilt
           path: target/inspector-prebuilt
 
       - name: Verify complete output and stage without assigning domains
+        id: deploy
         env:
-          ARTIFACT_SHA: ${{ steps.artifact.outputs.source_sha }}
+          ARTIFACT_SHA: ${{ steps.artifact.outputs.source_sha || inputs.source-sha }}
         run: |
+          set -o pipefail
           node dev/scripts/inspector-prebuilt.mjs verify target/inspector-prebuilt "${ARTIFACT_SHA}"
           for name in VERCEL_ORG_ID VERCEL_PROJECT_ID VERCEL_TOKEN; do
             if [ -z "${!name}" ]; then
@@ -69,7 +95,15 @@ jobs:
           cp -R target/inspector-prebuilt/.vercel/output target/inspector-prebuilt/packages/inspector/.vercel/output
           cd target/inspector-prebuilt
           node --input-type=module -e 'import fs from "node:fs"; fs.writeFileSync(".vercel/project.json", JSON.stringify({orgId: process.env.VERCEL_ORG_ID, projectId: process.env.VERCEL_PROJECT_ID}));'
-          npx --yes vercel@latest deploy --prebuilt --prod --skip-domain --yes \
+          # Pinned to the CLI that staged alpha.57: its last stdout line is the bare
+          # deployment URL (progress goes to stderr). Re-check that before bumping.
+          DEPLOYMENT_URL=$(npx --yes vercel@60.1.3 deploy --prebuilt --prod --skip-domain --yes \
             --token="${VERCEL_TOKEN}" \
             --meta "githubCommitSha=${SOURCE_SHA}" --meta "githubCommitRef=${SOURCE_BRANCH}" \
-            --meta "releaseSourceSha=${ARTIFACT_SHA}"
+            --meta "releaseSourceSha=${ARTIFACT_SHA}" | tail -n 1)
+          if ! [[ "${DEPLOYMENT_URL}" =~ ^https://[a-z0-9.-]+\.vercel\.app$ ]]; then
+            echo "::error::Vercel did not report a deployment URL for the staged Inspector."
+            exit 1
+          fi
+          echo "Staged Inspector deployment: ${DEPLOYMENT_URL}"
+          echo "deployment_url=${DEPLOYMENT_URL}" >> "${GITHUB_OUTPUT}"
