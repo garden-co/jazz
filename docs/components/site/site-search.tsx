@@ -68,21 +68,33 @@ function Marked({ text }: { text: string }) {
 }
 
 /**
- * Search input that highlights the first result whenever a search commits, so
- * Enter opens it without an ArrowDown first. Astryx `CommandPalette` leaves the
- * highlight at -1 after each search and has no option for this yet; this uses
- * only its public context and belongs in garden-co/design once it exports one.
+ * Search input that highlights the first result of each new query, so Enter
+ * opens it without an ArrowDown first. Astryx `CommandPalette` leaves the
+ * highlight at -1 after each search and has no option for this yet (an upstream
+ * prop is the proper home); this uses only its public context.
  */
 function SearchInput() {
   const palette = useCommandPaletteContext();
+  const query = palette?.search ?? "";
   const items = palette?.selectableItems;
-  const hasQuery = (palette?.search ?? "") !== "";
   const setHighlightedIndex = palette?.setHighlightedIndex;
+  // The query whose first result was last highlighted. Results change more than
+  // once per query (instant filtering, then the fetched results), and a later
+  // change must not override an ArrowDown or hover the user already made.
+  const highlightedFor = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!items || !setHighlightedIndex || !hasQuery) return;
-    setHighlightedIndex(items.findIndex((item) => !item.disabled));
-  }, [items, hasQuery, setHighlightedIndex]);
+    if (!items || !setHighlightedIndex) return;
+    const first = items.findIndex((item) => !item.disabled);
+    if (query === "" || first < 0) {
+      highlightedFor.current = null;
+      setHighlightedIndex(-1);
+      return;
+    }
+    if (highlightedFor.current === query) return;
+    highlightedFor.current = query;
+    setHighlightedIndex(first);
+  }, [query, items, setHighlightedIndex]);
 
   return <CommandPaletteInput placeholder="Search the docs" />;
 }
