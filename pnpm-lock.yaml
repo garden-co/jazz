@@ -318,8 +318,8 @@ importers:
         specifier: 0.6.3
         version: 0.6.3(@stylexjs/stylex@0.19.1)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       '@garden-co/design':
-        specifier: github:garden-co/design#e40d6ff2e79debe4aac4df8b54601708ee8b304c
-        version: https://codeload.github.com/garden-co/design/tar.gz/e40d6ff2e79debe4aac4df8b54601708ee8b304c(@astryxdesign/core@0.6.3(@stylexjs/stylex@0.19.1)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(react@19.2.4)
+        specifier: github:garden-co/design#029a33b43b2585e55cb119912481e0f6b1c909e8
+        version: https://codeload.github.com/garden-co/design/tar.gz/029a33b43b2585e55cb119912481e0f6b1c909e8(@astryxdesign/core@0.6.3(@stylexjs/stylex@0.19.1)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(react@19.2.4)
       '@vercel/analytics':
         specifier: ^2.0.1
         version: 2.0.1(@sveltejs/kit@2.57.1(@opentelemetry/api@1.9.1)(@sveltejs/vite-plugin-svelte@7.0.0(svelte@5.53.6)(vite@8.0.1(@types/node@22.19.13)(esbuild@0.27.4)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)))(svelte@5.53.6)(typescript@6.0.2)(vite@8.0.1(@types/node@22.19.13)(esbuild@0.27.4)(jiti@2.6.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)))(next@16.2.11(@opentelemetry/api@1.9.1)(@playwright/test@1.58.2)(babel-plugin-react-compiler@1.0.0)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(react@19.2.4)(svelte@5.53.6)(vue@3.5.29(typescript@6.0.2))
@@ -4308,8 +4308,8 @@ packages:
       tailwindcss:
         optional: true
 
-  '@garden-co/design@https://codeload.github.com/garden-co/design/tar.gz/e40d6ff2e79debe4aac4df8b54601708ee8b304c':
-    resolution: {tarball: https://codeload.github.com/garden-co/design/tar.gz/e40d6ff2e79debe4aac4df8b54601708ee8b304c}
+  '@garden-co/design@https://codeload.github.com/garden-co/design/tar.gz/029a33b43b2585e55cb119912481e0f6b1c909e8':
+    resolution: {tarball: https://codeload.github.com/garden-co/design/tar.gz/029a33b43b2585e55cb119912481e0f6b1c909e8}
     version: 0.1.0
     peerDependencies:
       '@astryxdesign/core': ^0.6.3
@@ -16051,7 +16051,7 @@ snapshots:
     optionalDependencies:
       tailwindcss: 4.2.1
 
-  '@garden-co/design@https://codeload.github.com/garden-co/design/tar.gz/e40d6ff2e79debe4aac4df8b54601708ee8b304c(@astryxdesign/core@0.6.3(@stylexjs/stylex@0.19.1)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(react@19.2.4)':
+  '@garden-co/design@https://codeload.github.com/garden-co/design/tar.gz/029a33b43b2585e55cb119912481e0f6b1c909e8(@astryxdesign/core@0.6.3(@stylexjs/stylex@0.19.1)(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(react@19.2.4)':
     optionalDependencies:
       '@astryxdesign/core': 0.6.3(@stylexjs/stylex@0.19.1)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       react: 19.2.4
