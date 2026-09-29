@@ -1,6 +1,7 @@
 "use client";
 
 import { Badge } from "@astryxdesign/core/Badge";
+import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
 import { Card } from "@astryxdesign/core/Card";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
@@ -8,7 +9,7 @@ import { MetadataList, MetadataListItem } from "@astryxdesign/core/MetadataList"
 import { NumberInput } from "@astryxdesign/core/NumberInput";
 import { SegmentedControl, SegmentedControlItem } from "@astryxdesign/core/SegmentedControl";
 import { Selector } from "@astryxdesign/core/Selector";
-import { VStack } from "@astryxdesign/core/Stack";
+import { HStack, VStack } from "@astryxdesign/core/Stack";
 import {
   Table,
   TableBody,
@@ -18,10 +19,17 @@ import {
   TableRow,
 } from "@astryxdesign/core/Table";
 import { Heading, Text } from "@astryxdesign/core/Text";
-import { useAll } from "jazz-tools/react";
+import { useAll, useDb } from "jazz-tools/react";
 import { useState } from "react";
 import { formatCents } from "@/src/format";
-import { consoleQueries, ORDER_STATUS, warehouseQueries } from "@/src/warehouse";
+import {
+  consoleQueries,
+  ORDER_STATUS,
+  placeReservation,
+  releaseReservation,
+  reservationOf,
+  warehouseQueries,
+} from "@/src/warehouse";
 import { useScope } from "./console";
 import { Page } from "./page";
 
@@ -118,6 +126,7 @@ export function OrderStatus() {
             status: shown.status,
             totalCents: shown.total_cents,
             customer: shown.customer?.name ?? "Unknown customer",
+            reservedLines: shown.reserved_lines ?? null,
           }}
         />
       ) : (
@@ -138,19 +147,41 @@ export function OrderStatus() {
   );
 }
 
-function OrderDetails({
-  warehouseId,
-  order,
-}: {
-  warehouseId: string;
-  order: { id: string; number: number; status: string; totalCents: number; customer: string };
-}) {
+interface ShownOrder {
+  id: string;
+  number: number;
+  status: string;
+  totalCents: number;
+  customer: string;
+  reservedLines: string | null;
+}
+
+function OrderDetails({ warehouseId, order }: { warehouseId: string; order: ShownOrder }) {
   const lines = useAll(consoleQueries.linesOf(order.id));
   const deliveries = useAll(consoleQueries.deliveriesOf(warehouseId, order.id));
+  const items = useAll(order.status === ORDER_STATUS.draft ? consoleQueries.items : undefined);
+  // A draft has no lines yet: show what it reserved instead.
+  const rows =
+    order.status === ORDER_STATUS.draft && order.reservedLines
+      ? reservationOf({ reserved_lines: order.reservedLines }).map((line, index) => ({
+          key: `${index}`,
+          lineNumber: index + 1,
+          item: items.data?.find((item) => item.id === line.itemId)?.name,
+          quantity: line.quantity,
+          amountCents: line.amountCents,
+        }))
+      : (lines.data ?? []).map((line) => ({
+          key: line.id,
+          lineNumber: line.line_number,
+          item: line.item?.name,
+          quantity: line.quantity,
+          amountCents: line.amount_cents,
+        }));
   return (
     <Card padding={6}>
       <VStack gap={4}>
         <Heading level={2}>Order {order.number}</Heading>
+        {order.status === ORDER_STATUS.draft && <ReservedActions orderId={order.id} />}
         <MetadataList columns="multi">
           <MetadataListItem label="Customer">{order.customer}</MetadataListItem>
           <MetadataListItem label="Status">
@@ -171,15 +202,15 @@ function OrderDetails({
             </TableRow>
           </TableHeader>
           <TableBody>
-            {(lines.data ?? []).map((line) => (
-              <TableRow key={line.id}>
-                <TableCell>{line.line_number}</TableCell>
-                <TableCell>{line.item?.name ?? "Unknown item"}</TableCell>
+            {rows.map((line) => (
+              <TableRow key={line.key}>
+                <TableCell>{line.lineNumber}</TableCell>
+                <TableCell>{line.item ?? "Unknown item"}</TableCell>
                 <TableCell>
                   <Text hasTabularNumbers>{line.quantity}</Text>
                 </TableCell>
                 <TableCell>
-                  <Text hasTabularNumbers>{formatCents(line.amount_cents)}</Text>
+                  <Text hasTabularNumbers>{formatCents(line.amountCents)}</Text>
                 </TableCell>
               </TableRow>
             ))}
@@ -187,6 +218,58 @@ function OrderDetails({
         </Table>
       </VStack>
     </Card>
+  );
+}
+
+/**
+ * A reservation whose checkout was interrupted after taking stock. Placing it
+ * finishes the checkout; releasing it returns the stock and balance.
+ */
+function ReservedActions({ orderId }: { orderId: string }) {
+  const db = useDb();
+  const { canOperate } = useScope();
+  const [busy, setBusy] = useState<"place" | "release" | null>(null);
+  const [error, setError] = useState<string>();
+  async function run(action: "place" | "release") {
+    setBusy(action);
+    setError(undefined);
+    try {
+      await (action === "place" ? placeReservation(db, orderId) : releaseReservation(db, orderId));
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure));
+    } finally {
+      setBusy(null);
+    }
+  }
+  return (
+    <VStack gap={3}>
+      <Banner
+        status="warning"
+        title="Reserved, not placed"
+        description="This checkout took stock and charged the balance, then stopped before the order was placed. Place it to put it in the delivery queue, or release it to give the stock and balance back."
+      />
+      {error && <Banner status="error" title="That didn't go through" description={error} />}
+      {canOperate && (
+        <HStack gap={2} wrap="wrap">
+          <Button
+            label="Place order"
+            variant="primary"
+            size="sm"
+            isLoading={busy === "place"}
+            isDisabled={busy !== null}
+            onClick={() => void run("place")}
+          />
+          <Button
+            label="Release"
+            variant="secondary"
+            size="sm"
+            isLoading={busy === "release"}
+            isDisabled={busy !== null}
+            onClick={() => void run("release")}
+          />
+        </HStack>
+      )}
+    </VStack>
   );
 }
 

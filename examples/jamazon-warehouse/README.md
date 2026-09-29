@@ -39,6 +39,11 @@ once (`src/seed.ts`): two warehouses with three districts each, four customers p
 through the same route, which verifies the operator's Better Auth session and Jazz account and
 then adds a `warehouse_operators` row with backend authority.
 
+Joining is deliberately open in this demo: any signed-in account can staff itself on any
+warehouse, once, through `/api/bootstrap` (`ensureOperator` in `src/seed.ts`). A real deployment
+would have the manager invite operators instead; the permissions already allow that, since only a
+warehouse's manager (or backend authority) may insert its `warehouse_operators` rows.
+
 To see stock contention, have both operators order 4 "Vintage tube amp" (5 on hand) at the same
 moment. The authority accepts one order; the other checkout re-reads stock and fails with
 "Insufficient stock", with nothing charged or taken.
@@ -63,10 +68,16 @@ Jazz authorization spec). The policies that prove a line or a payment belongs to
 own warehouse can't see an order staged in the same transaction, so the order has to be committed
 first.
 
-If the authority rejects the second phase, the draft is cancelled and its stock and balance are
-returned. If the second phase is interrupted any other way (a lost connection, say), the draft
-stays visible as "Reserved" in order status and never enters the delivery queue; resubmitting
-the same request key places it.
+The draft stores its reservation (`orders.reserved_lines`): the normalised lines and amounts the
+first phase took stock and balance for. Placing and releasing work from that reservation, never
+from a later request, so a resubmitted request key must ask for the same lines or it is refused.
+
+If the authority rejects the second phase, the draft is released: its reserved stock and balance
+are returned and it is cancelled. If the second phase is interrupted any other way (a lost
+connection, a closed tab), the draft stays visible as "Reserved" in order status and never enters
+the delivery queue. Resubmitting the same request places it, and order status offers "Place
+order" and "Release" for any reserved order, so a reservation can't get stuck after its request
+key is lost. Dashboard counts ignore drafts and cancelled orders.
 
 ## Permissions
 
@@ -104,7 +115,8 @@ makes that candidate set complete.
 - `pnpm --dir examples/jamazon-warehouse test` runs `schema.test.ts` (indexes, bounded reads,
   seed consistency) and `tests/permissions` against a local Jazz server: operator staffing,
   handover and revocation, the cross-warehouse rejections, the two-operator stock race, the
-  two-phase checkout (including placing an interrupted draft), retried checkout and delivery
+  two-phase checkout (placing an interrupted draft, refusing a reused key with different lines,
+  and releasing a reservation whose placement was rejected), retried checkout and delivery
   batches.
 - `pnpm --dir examples/jamazon-warehouse test:browser` runs the browser topology receipt: a
   duplicated and dropped checkout hand-off, reconnect, persistent reopen and ownership transfer.

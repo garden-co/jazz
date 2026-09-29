@@ -4,11 +4,17 @@ import type { Db } from "jazz-tools";
 import { createPolicyTestApp, type PolicyTestApp, type TestDb } from "jazz-tools/testing";
 import permissions from "../../permissions.js";
 import { app, REORDER_LEVEL_CAP } from "../../schema.js";
+import { isDefinitiveRejection } from "../../src/write-errors.js";
 import {
+  CheckoutCancelledError,
   deliverBatch,
   InsufficientStockError,
   ORDER_STATUS,
+  placeReservation,
   purchase,
+  releaseReservation,
+  RequestMismatchError,
+  reserveOrder,
   recordPayment,
 } from "../../src/warehouse.js";
 
@@ -398,41 +404,128 @@ describe("stock contention", () => {
   it("places a draft left by an interrupted checkout when the request is resubmitted", async () => {
     const manager = actor("recovering-manager");
     const east = await buildWarehouse(manager, "east");
-    // Phase one landed but phase two never ran: a reserved draft, with stock
-    // and balance already taken, and no lines or payment yet.
-    await manager.db.update(app.stock, east.stock.id, { on_hand: 3 }).wait({ tier: "global" });
-    await manager.db
-      .update(app.customers, east.customer.id, { balance_cents: -2_000 })
-      .wait({ tier: "global" });
-    await manager.db
-      .update(app.districts, east.district.id, { next_order_number: 2 })
-      .wait({ tier: "global" });
-    const draft = await manager.db
-      .insert(app.orders, {
-        warehouse_id: east.warehouse.id,
-        district_id: east.district.id,
-        customer_id: east.customer.id,
-        order_number: 1,
-        status: ORDER_STATUS.draft,
-        total_cents: 2_000,
-        idempotency_key: "interrupted",
-      })
-      .wait({ tier: "global" });
-
-    const receipt = await purchase(asDb(manager.db), {
+    const request = {
       warehouseId: east.warehouse.id,
       districtId: east.district.id,
       customerId: east.customer.id,
       lines: [{ itemId: east.item.id, quantity: 2 }],
       idempotencyKey: "interrupted",
-    });
-    expect(receipt).toMatchObject({ orderId: draft.id, orderNumber: 1, totalCents: 2_000 });
-
+    };
+    // Phase one landed but phase two never ran: a reserved draft, with stock
+    // and balance already taken, and no lines or payment yet.
+    const reserved = await reserveOrder(asDb(manager.db), request);
+    if (!("draft" in reserved)) throw new Error("expected a draft");
     const read = { tier: "global" } as const;
-    const [order] = await manager.db.all(app.orders.where({ id: draft.id }).limit(1), read);
+    expect(
+      await manager.db.all(app.order_lines.where({ order_id: reserved.draft.id }).limit(5), read),
+    ).toEqual([]);
+
+    const receipt = await purchase(asDb(manager.db), request);
+    expect(receipt).toMatchObject({
+      orderId: reserved.draft.id,
+      orderNumber: 1,
+      totalCents: 2_000,
+    });
+    expect(receipt.lines).toEqual([
+      { lineNumber: 1, itemId: east.item.id, quantity: 2, amountCents: 2_000 },
+    ]);
+    const [order] = await manager.db.all(
+      app.orders.where({ id: reserved.draft.id }).limit(1),
+      read,
+    );
     expect(order?.status).toBe(ORDER_STATUS.pending);
     const [stock] = await manager.db.all(app.stock.where({ id: east.stock.id }).limit(1), read);
     expect(stock?.on_hand).toBe(3);
+  });
+
+  it("refuses to place a reservation with different lines under the same request key", async () => {
+    const manager = actor("mismatch-manager");
+    const east = await buildWarehouse(manager, "east");
+    const request = {
+      warehouseId: east.warehouse.id,
+      districtId: east.district.id,
+      customerId: east.customer.id,
+      lines: [{ itemId: east.item.id, quantity: 2 }],
+      idempotencyKey: "reused-key",
+    };
+    const reserved = await reserveOrder(asDb(manager.db), request);
+    if (!("draft" in reserved)) throw new Error("expected a draft");
+
+    await expect(
+      purchase(asDb(manager.db), { ...request, lines: [{ itemId: east.item.id, quantity: 1 }] }),
+    ).rejects.toBeInstanceOf(RequestMismatchError);
+    const read = { tier: "global" } as const;
+    const [order] = await manager.db.all(
+      app.orders.where({ id: reserved.draft.id }).limit(1),
+      read,
+    );
+    expect(order?.status).toBe(ORDER_STATUS.draft);
+    expect(
+      await manager.db.all(app.order_lines.where({ order_id: reserved.draft.id }).limit(5), read),
+    ).toEqual([]);
+  });
+
+  it("releases a reservation whose placement was rejected, restoring stock, balance and status", async () => {
+    const manager = actor("releasing-manager");
+    const operator = actor("revoked-mid-checkout");
+    const east = await buildWarehouse(manager, "east");
+    const membership = await staff(manager, east.warehouse.id, operator);
+    const request = {
+      warehouseId: east.warehouse.id,
+      districtId: east.district.id,
+      customerId: east.customer.id,
+      lines: [{ itemId: east.item.id, quantity: 4 }],
+      idempotencyKey: "revoked-between-phases",
+    };
+
+    // The operator reserves, then loses their staffing before placing.
+    const reserved = await reserveOrder(asDb(operator.db), request);
+    if (!("draft" in reserved)) throw new Error("expected a draft");
+    const read = { tier: "global" } as const;
+    const [taken] = await manager.db.all(app.stock.where({ id: east.stock.id }).limit(1), read);
+    expect(taken?.on_hand).toBe(1);
+    await manager.db.delete(app.warehouse_operators, membership.id).wait({ tier: "global" });
+
+    const rejected = await placeReservation(asDb(operator.db), reserved.draft.id).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(isDefinitiveRejection(rejected)).toBe(true);
+    // The operator can't release it either; the draft stays visible as reserved.
+    await expect(releaseReservation(asDb(operator.db), reserved.draft.id)).rejects.toSatisfy(
+      isDefinitiveRejection,
+    );
+    const [stuck] = await manager.db.all(
+      app.orders.where({ id: reserved.draft.id }).limit(1),
+      read,
+    );
+    expect(stuck?.status).toBe(ORDER_STATUS.draft);
+
+    // The manager releases it from order status.
+    await releaseReservation(asDb(manager.db), reserved.draft.id);
+    const [order] = await manager.db.all(
+      app.orders.where({ id: reserved.draft.id }).limit(1),
+      read,
+    );
+    expect(order?.status).toBe(ORDER_STATUS.cancelled);
+    const [stock] = await manager.db.all(app.stock.where({ id: east.stock.id }).limit(1), read);
+    expect(stock?.on_hand).toBe(5);
+    const [customer] = await manager.db.all(
+      app.customers.where({ id: east.customer.id }).limit(1),
+      read,
+    );
+    expect(customer?.balance_cents).toBe(0);
+    expect(
+      await manager.db.all(app.order_lines.where({ order_id: reserved.draft.id }).limit(5), read),
+    ).toEqual([]);
+    expect(
+      await manager.db.all(app.payments.where({ order_id: reserved.draft.id }).limit(5), read),
+    ).toEqual([]);
+    // Releasing twice is a no-op, and the request key now reports the cancellation.
+    await releaseReservation(asDb(manager.db), reserved.draft.id);
+    await expect(purchase(asDb(manager.db), request)).rejects.toBeInstanceOf(
+      CheckoutCancelledError,
+    );
   });
 
   it("delivers the oldest pending order per district once", async () => {

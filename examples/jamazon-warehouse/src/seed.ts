@@ -1,4 +1,5 @@
 import type { Db } from "jazz-tools";
+import { retryOnConflict } from "./write-errors.js";
 import { app } from "../schema.js";
 
 /**
@@ -313,17 +314,4 @@ export async function ensureOperator(
     });
     return await write.wait();
   });
-}
-
-async function retryOnConflict<T>(attempt: () => Promise<T>): Promise<T> {
-  for (let tries = 1; ; tries++) {
-    try {
-      return await attempt();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (tries >= 8 || !/exclusive_conflict|transaction_conflict|cascade_rejected/.test(message)) {
-        throw error;
-      }
-    }
-  }
 }

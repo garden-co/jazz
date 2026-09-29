@@ -25,6 +25,7 @@ import {
   consoleQueries,
   InsufficientStockError,
   MAX_ORDER_LINES,
+  RequestMismatchError,
   purchase,
   type PurchaseReceipt,
   warehouseQueries,
@@ -262,6 +263,16 @@ function FailureBanner({
         status="error"
         title="Insufficient stock"
         description={`${itemName(error.itemId)} has ${error.onHand} on hand; this order asks for ${error.requested}. Nothing was charged or taken from stock.`}
+      />
+    );
+  }
+  if (error instanceof RequestMismatchError) {
+    return (
+      <Banner
+        status="warning"
+        title={`Order ${error.orderNumber} is already reserved`}
+        description="An earlier attempt of this request reserved different lines. Place or release that order from order status, or start a new order."
+        endContent={<Button label="Start over" size="sm" onClick={startOver} />}
       />
     );
   }

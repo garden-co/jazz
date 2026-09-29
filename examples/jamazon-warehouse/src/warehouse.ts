@@ -1,5 +1,6 @@
 import type { Db } from "jazz-tools";
 import { app, REORDER_LEVEL_CAP } from "../schema.js";
+import { isDefinitiveRejection, retryOnConflict } from "./write-errors.js";
 
 export interface WarehouseScope {
   warehouseId: string;
@@ -100,9 +101,18 @@ export const consoleQueries = {
       .where({ warehouse_id: warehouseId })
       .orderBy("name", "asc")
       .limit(PAGE_SIZE),
-  /** Orders entered since `sinceMs`, capped at {@link COUNT_CAP}. */
+  /**
+   * Orders placed since `sinceMs`, capped at {@link COUNT_CAP}. Drafts still
+   * being placed and cancelled drafts are not orders yet, so they don't count.
+   */
   ordersSince: (warehouseId: string, sinceMs: number) =>
-    app.orders.where({ warehouse_id: warehouseId, $createdAt: { gte: sinceMs } }).limit(COUNT_CAP),
+    app.orders
+      .where({
+        warehouse_id: warehouseId,
+        status: { in: [ORDER_STATUS.pending, ORDER_STATUS.delivered] },
+        $createdAt: { gte: sinceMs },
+      })
+      .limit(COUNT_CAP),
   pendingInWarehouse: (warehouseId: string) =>
     app.orders.where({ warehouse_id: warehouseId, status: ORDER_STATUS.pending }).limit(COUNT_CAP),
   pendingQueue: (scope: WarehouseScope) =>
@@ -162,59 +172,84 @@ export class CheckoutCancelledError extends Error {
   }
 }
 
+/** Thrown when a request key is reused for a different order than it reserved. */
+export class RequestMismatchError extends Error {
+  constructor(readonly orderNumber: number) {
+    super(`this request key already reserved order ${orderNumber} with different lines`);
+    this.name = "RequestMismatchError";
+  }
+}
+
+/** One line of a draft's reservation, priced when the stock was taken. */
+export interface ReservedLine extends PurchaseLine {
+  amountCents: number;
+}
+
 interface DraftOrder {
   id: string;
   order_number: number;
   total_cents: number;
-  customer_id: string;
+  reserved_lines?: string | null;
+}
+
+/** Read a draft's reservation. Only drafts written by {@link reserveOrder} carry one. */
+export function reservationOf(order: { reserved_lines?: string | null }): ReservedLine[] {
+  if (!order.reserved_lines) throw new Error("this order has no reservation to place or release");
+  return JSON.parse(order.reserved_lines) as ReservedLine[];
 }
 
 /**
  * TPC-C "new order", in two exclusive phases.
  *
- * 1. Reserve: stock for every line, the district's order counter, the
- *    customer's balance and a `draft` order change together or not at all.
- *    Two operators racing for the last units see exactly one reservation; the
- *    other retries, re-reads stock and fails with {@link InsufficientStockError}.
- * 2. Place: the order's lines and payment hand-off are written against the
- *    now-committed order, and the order becomes `pending`.
+ * 1. {@link reserveOrder}: stock for every line, the district's order counter,
+ *    the customer's balance and a `draft` order carrying its reservation
+ *    change together or not at all. Two operators racing for the last units
+ *    see exactly one reservation; the other retries, re-reads stock and fails
+ *    with {@link InsufficientStockError}.
+ * 2. {@link placeReservation}: the order's lines and payment hand-off are
+ *    written from the reservation against the now-committed order, and the
+ *    order becomes `pending`.
  *
  * Checkout is two-phase because permission `exists` checks only see committed
  * rows (INV-RLS-9): the policies that prove a line or payment belongs to an
  * order of its own warehouse can't see an order staged in the same commit.
  *
  * Repeating a request key is always safe: a placed order returns its original
- * receipt, and a draft left by an interrupted checkout is placed. If the
- * authority rejects the second phase, the draft is cancelled and its stock
- * and balance returned; if that can't be confirmed either, the draft stays
- * visible and resubmitting the key finishes it.
+ * receipt, and a draft left by an interrupted checkout is placed, provided the
+ * request asks for the same lines it reserved. If the authority rejects the
+ * second phase, the draft is released: its reserved stock and balance are
+ * returned and it is cancelled. If neither can be confirmed, the draft stays
+ * visible in order status, where an operator can place or release it.
  */
 export async function purchase(db: Db, request: PurchaseRequest): Promise<PurchaseReceipt> {
-  const lines = normalizeLines(request.lines);
   // Create the client before beginning an exclusive transaction. This is also
   // the app's minimal connected preflight; an exclusive checkout is not an
   // offline cart operation.
   await db.all(app.warehouses.where({ id: request.warehouseId }).limit(1), { tier: "global" });
 
-  const reserved = await reserveOrder(db, request, lines);
+  const reserved = await reserveOrder(db, request);
   if ("receipt" in reserved) return reserved.receipt;
   try {
-    return await placeOrder(db, request, reserved.draft, lines);
+    return await placeReservation(db, reserved.draft.id);
   } catch (error) {
     if (isDefinitiveRejection(error)) {
-      await cancelDraft(db, request.warehouseId, reserved.draft.id, lines).catch(() => {
-        // The draft stays visible; resubmitting the request key places it.
+      await releaseReservation(db, reserved.draft.id).catch(() => {
+        // The draft stays visible as reserved; order status offers both actions.
       });
     }
     throw error;
   }
 }
 
-async function reserveOrder(
+/**
+ * Phase one of {@link purchase}. Returns the receipt when the request key's
+ * order was already placed, and otherwise its draft.
+ */
+export async function reserveOrder(
   db: Db,
   request: PurchaseRequest,
-  lines: PurchaseLine[],
 ): Promise<{ receipt: PurchaseReceipt } | { draft: DraftOrder }> {
+  const lines = normalizeLines(request.lines);
   return await retryExclusive(
     db,
     async () => {
@@ -229,7 +264,12 @@ async function reserveOrder(
             if (existing.status === ORDER_STATUS.cancelled) {
               throw new CheckoutCancelledError(existing.order_number);
             }
-            if (existing.status === ORDER_STATUS.draft) return { draft: existing };
+            if (existing.status === ORDER_STATUS.draft) {
+              if (!sameLines(reservationOf(existing), lines)) {
+                throw new RequestMismatchError(existing.order_number);
+              }
+              return { draft: existing };
+            }
             const storedLines = await tx.all(
               app.order_lines
                 .where({ order_id: existing.id })
@@ -289,6 +329,11 @@ async function reserveOrder(
           }
           tx.update(app.districts, district.id, { next_order_number: nextOrderNumber });
           tx.update(app.customers, customer.id, { balance_cents: nextBalance });
+          const reservation: ReservedLine[] = stocked.map(({ itemId, quantity, amountCents }) => ({
+            itemId,
+            quantity,
+            amountCents,
+          }));
           const draft = tx.insert(app.orders, {
             warehouse_id: request.warehouseId,
             district_id: request.districtId,
@@ -297,6 +342,7 @@ async function reserveOrder(
             status: ORDER_STATUS.draft,
             total_cents: totalCents,
             idempotency_key: request.idempotencyKey,
+            reserved_lines: JSON.stringify(reservation),
           });
           return { draft };
         },
@@ -312,15 +358,15 @@ async function reserveOrder(
   );
 }
 
-async function placeOrder(
-  db: Db,
-  request: PurchaseRequest,
-  draft: DraftOrder,
-  lines: PurchaseLine[],
-): Promise<PurchaseReceipt> {
+/**
+ * Phase two of {@link purchase}: write a draft's reserved lines and payment
+ * and put it in the delivery queue. Placing an order that is already placed
+ * returns its receipt, so it is safe to repeat.
+ */
+export async function placeReservation(db: Db, orderId: string): Promise<PurchaseReceipt> {
   return await retryExclusive(db, async () => {
     const write = await db.exclusiveTransaction(async (tx): Promise<PurchaseReceipt> => {
-      const order = await tx.one(app.orders.where({ id: draft.id }).limit(1));
+      const order = await tx.one(app.orders.where({ id: orderId }).limit(1));
       if (!order) throw new Error("the reserved order is missing");
       if (order.status === ORDER_STATUS.cancelled) {
         throw new CheckoutCancelledError(order.order_number);
@@ -336,25 +382,15 @@ async function placeOrder(
         return storedReceipt(order, storedLines);
       }
 
-      const priced = await Promise.all(
-        lines.map(async (line, index) => {
-          const item = await tx.one(app.items.where({ id: line.itemId }).limit(1));
-          if (!item) throw new Error("item is missing");
-          return {
-            lineNumber: index + 1,
-            itemId: line.itemId,
-            quantity: line.quantity,
-            amountCents: lineAmount(line, item.unit_price_cents),
-          };
-        }),
-      );
-      const totalCents = priced.reduce((sum, line) => sum + line.amountCents, 0);
-      if (totalCents !== order.total_cents) {
-        throw new Error("this request no longer matches its reserved order");
-      }
-      for (const line of priced) {
+      const lines = reservationOf(order).map((line, index) => ({
+        lineNumber: index + 1,
+        itemId: line.itemId,
+        quantity: line.quantity,
+        amountCents: line.amountCents,
+      }));
+      for (const line of lines) {
         tx.insert(app.order_lines, {
-          warehouse_id: request.warehouseId,
+          warehouse_id: order.warehouse_id,
           order_id: order.id,
           line_number: line.lineNumber,
           item_id: line.itemId,
@@ -364,44 +400,45 @@ async function placeOrder(
       }
       // The payment row is the idempotent hand-off to an external charge.
       tx.insert(app.payments, {
-        warehouse_id: request.warehouseId,
+        warehouse_id: order.warehouse_id,
         customer_id: order.customer_id,
         order_id: order.id,
-        amount_cents: totalCents,
-        idempotency_key: request.idempotencyKey,
+        amount_cents: order.total_cents,
+        idempotency_key: order.idempotency_key,
       });
       tx.update(app.orders, order.id, { status: ORDER_STATUS.pending });
       return {
         orderId: order.id,
         orderNumber: order.order_number,
-        totalCents,
-        lines: priced,
+        totalCents: order.total_cents,
+        lines,
       };
     });
     return await write.wait();
   });
 }
 
-/** Return a rejected draft's stock and balance, and mark it cancelled. */
-async function cancelDraft(
-  db: Db,
-  warehouseId: string,
-  orderId: string,
-  lines: PurchaseLine[],
-): Promise<void> {
+/**
+ * Give back what a draft reserved (its stock and the customer's balance) and
+ * cancel it. Releasing an order that is no longer a draft does nothing.
+ */
+export async function releaseReservation(db: Db, orderId: string): Promise<void> {
   await retryExclusive(db, async () => {
     const write = await db.exclusiveTransaction(async (tx) => {
       const order = await tx.one(app.orders.where({ id: orderId }).limit(1));
       if (!order || order.status !== ORDER_STATUS.draft) return;
+      const reservation = reservationOf(order);
       const [customer, stock] = await Promise.all([
         tx.one(app.customers.where({ id: order.customer_id }).limit(1)),
         Promise.all(
-          lines.map((line) =>
-            tx.one(app.stock.where({ warehouse_id: warehouseId, item_id: line.itemId }).limit(1)),
+          reservation.map((line) =>
+            tx.one(
+              app.stock.where({ warehouse_id: order.warehouse_id, item_id: line.itemId }).limit(1),
+            ),
           ),
         ),
       ]);
-      lines.forEach((line, index) => {
+      reservation.forEach((line, index) => {
         const row = stock[index];
         if (row) tx.update(app.stock, row.id, { on_hand: row.on_hand + line.quantity });
       });
@@ -414,6 +451,16 @@ async function cancelDraft(
     });
     await write.wait();
   });
+}
+
+function sameLines(reserved: readonly ReservedLine[], requested: readonly PurchaseLine[]) {
+  return (
+    reserved.length === requested.length &&
+    reserved.every(
+      (line, index) =>
+        line.itemId === requested[index]?.itemId && line.quantity === requested[index]?.quantity,
+    )
+  );
 }
 
 function storedReceipt(
@@ -567,8 +614,6 @@ function normalizeLines(lines: readonly PurchaseLine[]): PurchaseLine[] {
   return [...merged].map(([itemId, quantity]) => ({ itemId, quantity }));
 }
 
-const MAX_ATTEMPTS = 8;
-
 /**
  * Re-run an exclusive transaction the authority rejected because a
  * concurrent write changed what it read. Every other error is final.
@@ -576,25 +621,7 @@ const MAX_ATTEMPTS = 8;
 async function retryExclusive<T>(
   db: Db,
   attempt: () => Promise<T>,
-  beforeRetry?: () => Promise<unknown>,
+  beforeRetry: () => Promise<unknown> = () => db.all(app.warehouses.limit(1), { tier: "global" }),
 ): Promise<T> {
-  for (let tries = 1; ; tries++) {
-    try {
-      return await attempt();
-    } catch (error) {
-      if (!isExclusiveConflict(error) || tries >= MAX_ATTEMPTS) throw error;
-      await (beforeRetry ? beforeRetry() : db.all(app.warehouses.limit(1), { tier: "global" }));
-    }
-  }
-}
-
-/** The authority refused the write outright; retrying the same write can't help. */
-function isDefinitiveRejection(error: unknown) {
-  const message = error instanceof Error ? error.message : String(error);
-  return /permission_denied|AuthorizationDenied|write_rejected|Write rejected/.test(message);
-}
-
-function isExclusiveConflict(error: unknown) {
-  const message = error instanceof Error ? error.message : String(error);
-  return /exclusive_conflict|transaction_conflict|cascade_rejected/.test(message);
+  return await retryOnConflict(attempt, beforeRetry);
 }

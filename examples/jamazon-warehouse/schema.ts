@@ -103,6 +103,10 @@ const schema = {
         status: s.string(),
         total_cents: s.int(),
         idempotency_key: s.string(),
+        // A draft's reservation: the normalised lines and amounts phase one
+        // took stock and balance for. Placing or releasing the draft works
+        // from this, never from a later request (see `purchase`).
+        reserved_lines: s.string().optional(),
       },
       {
         warehouse: s.rel("warehouses", "warehouse_id"),
