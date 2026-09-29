@@ -489,8 +489,8 @@ describe("createPolicyTestApp", () => {
 
     try {
       expect(() =>
+        // @ts-expect-error: local-first sessions only use the reserved local-first issuer.
         policyTestApp.as({
-          // @ts-expect-error: local-first sessions only use the reserved local-first issuer.
           issuer: "https://policy-test.example",
           user_id: "guest-device",
           claims: {},
