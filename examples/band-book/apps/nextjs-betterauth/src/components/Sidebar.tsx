@@ -13,7 +13,6 @@ import {
   SideNavSection,
   type DropdownMenuOption,
 } from "@astryxdesign/core";
-import { Plus } from "lucide-react";
 import type { Member, Page, Workspace } from "@/schema";
 import { PAGE_TREE_MAX_DEPTH } from "@/src/lib/limits";
 import { createPage } from "@/src/lib/page-actions";
@@ -74,13 +73,7 @@ export function Sidebar({
         }
         topContent={
           canCreateTopLevel ? (
-            <Button
-              label="New page"
-              icon={<Plus aria-hidden size="1em" />}
-              variant="ghost"
-              width="100%"
-              onClick={() => addPage(null)}
-            />
+            <Button label="New page" variant="ghost" width="100%" onClick={() => addPage(null)} />
           ) : undefined
         }
       >

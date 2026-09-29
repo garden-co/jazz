@@ -22,7 +22,6 @@ import {
   VStack,
   type TableColumn,
 } from "@astryxdesign/core";
-import { Plus } from "lucide-react";
 import { app, type Issue, type IssueStatus } from "@/schema";
 import { createIssue } from "@/src/lib/page-actions";
 import {
@@ -131,7 +130,6 @@ export function IssuesDatabase({
               label="New issue"
               size="sm"
               variant="primary"
-              icon={<Plus aria-hidden size="1em" />}
               onClick={() => addIssue("todo")}
             />
           ) : undefined
@@ -166,12 +164,12 @@ export function IssuesDatabase({
                   {editable && (
                     <Button
                       label={`New ${STATUS_LABELS[status].toLowerCase()} issue`}
-                      isIconOnly
                       size="sm"
                       variant="ghost"
-                      icon={<Plus aria-hidden size="1em" />}
                       onClick={() => addIssue(status)}
-                    />
+                    >
+                      Add
+                    </Button>
                   )}
                 </HStack>
                 {inColumn.map((issue) => (

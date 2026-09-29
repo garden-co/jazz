@@ -13,7 +13,6 @@ import {
   VStack,
   type DropdownMenuOption,
 } from "@astryxdesign/core";
-import { Plus } from "lucide-react";
 import { app, type Block, type BlockKind } from "@/schema";
 import { comparePositioned, positionBetween } from "@/src/lib/positions";
 import { textSplice } from "@/src/lib/text-splice";
@@ -297,7 +296,6 @@ export function BlockEditor({ pageId, editable }: { pageId: string; editable: bo
               label: "Add block",
               variant: "ghost",
               size: "sm",
-              icon: <Plus aria-hidden size="1em" />,
             }}
             items={[
               ...TEXT_KINDS.map(({ kind, label }) => ({
