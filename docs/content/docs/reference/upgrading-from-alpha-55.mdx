@@ -1,16 +1,18 @@
 ---
 title: Upgrading from alpha.55
-description: Rewrite an alpha.55 schema for explicit relations, and what happens to alpha.55 clients once the server is upgraded.
+description: The breaking changes between alpha.55 and alpha.58, what to change in your app, and what happens to clients that haven't upgraded yet.
 ---
 
-Apps on `jazz-tools@2.0.0-alpha.55` need two things when they move to alpha.57 or later: a schema
-file rewritten for explicit relations, and a plan for end users who still run an alpha.55 build of
-the app for a while. Stored data needs nothing: server data directories and browser storage from
-alpha.55 open in place, with no reset or conversion step.
+This page covers moving an app from `jazz-tools@2.0.0-alpha.55` or `alpha.56` to alpha.58. Stored
+data needs nothing: server data directories and browser storage from alpha.55 open in place, with
+no reset or conversion step. Your code and deployment do need changes.
 
-Apps on alpha.56 or later can skip this page.
+The changes are grouped by the release that introduced them. If your app is on alpha.56, skip to
+[From alpha.56](#from-alpha56). Upgrade all Jazz packages together.
 
-## Rewrite the schema
+## From alpha.55
+
+### Rewrite the schema
 
 Newer versions don't load an alpha.55 `schema.ts`. Running the CLI on an unchanged alpha.55 schema
 fails with:
@@ -24,10 +26,13 @@ names from it: the forward relation `project` and the reverse relation `tasksVia
 references are plain UUID columns and every relation is named in a second argument to `s.table`
 (see [Explicit relations](/docs/schemas/defining-tables#explicit-relations)):
 
-1. Change each `s.ref("table")` column to `s.uuid()` (`s.uuid().optional()` if it was optional).
-2. Declare the forward relation with `s.rel("table", "column")`.
+1. Change each `s.ref("table")` column to `s.uuid()`, keeping its modifiers:
+   `s.ref("users").optional()` becomes `s.uuid().optional()`, and `s.array(s.ref("users"))` becomes
+   `s.array(s.uuid())`.
+2. Declare a forward relation with `s.rel("table", "column")` for every former reference column,
+   even ones no query uses. It carries the reference target that used to live in `s.ref`.
 3. Declare each reverse relation you use with `s.reverse("table", "forwardRelation")`, under
-   whatever name you like.
+   whatever name you like. None are added automatically.
 4. Pass `{}` for tables without relations.
 
 Before (alpha.55):
@@ -71,29 +76,73 @@ const schema = {
 Then update the relation names your queries and permissions use. Forward names can stay the same
 (`project` above), but the generated reverse names are gone, so an include such as
 `app.projects.include({ tasksViaProject: true })` becomes `app.projects.include({ tasks: true })`,
-or whatever name you gave the `s.reverse`.
+or whatever name you gave the `s.reverse`. Permission traversals (`allowedTo.*`, `hopTo`,
+`*Referencing`) now also take declared relation names, not column names or the old generated names.
 
-### No migration needed
+#### No migration needed
 
-The rewritten schema has the same structural hash as the alpha.55 one, so
-`deploy` reports that the schema is already stored and skips publishing it. There's no migration to
-write, and stored rows are untouched. Schema changes you make after the rewrite go through the
-normal [migrations](/docs/schemas/migrations) flow.
+Keep every column's name, order, type, modifiers, default and reference target exactly as they
+were. Then the rewritten schema has the same structural hash as the alpha.55 one, so `deploy`
+reports that the schema is already stored and skips publishing it. There's no migration to write,
+and stored rows are untouched.
 
-## alpha.55 clients against an upgraded server
+To check before deploying, export the schema with `jazz-tools schema export` on alpha.55 and again
+after the rewrite, drop each table's `relations` field, and compare. They must be identical. If they
+differ, fix the rewrite; don't reset data. The alpha.56 changelog entry for explicit relationships
+has a ready-made comparison script.
 
-alpha.55 clients speak an older sync protocol than alpha.57 and later servers, so once your server
-(or Jazz Cloud app) is upgraded, end users still running an alpha.55 build of your app work
-local-only until they load a newer build:
+### Define permissions for every table
+
+Reads, inserts, updates and deletes now need explicit policies. A table with no policies, or an app
+with no permissions at all, gets no data back from the server and has every write rejected. Local
+writes still apply optimistically, then fail on the server.
+
+Before upgrading the server, make sure `permissions.ts` defines a policy for every table and
+operation your app uses. See [Permissions](/docs/auth/permissions).
+
+### Publish with `deploy`
+
+`deploy` is now the only way to publish a schema, permissions and migrations, from the CLI and
+from code. It requires a permissions file (an empty one is valid and denies everything) and fails
+before publishing if a required migration is missing. These were removed:
+
+- `pushSchema`, `pushPermissions` and `pushMigration`, and the package-root
+  `publishStoredSchema` and `publishStoredPermissions` exports.
+- The `migrations push` CLI command.
+- The `--no-verify` / `noVerify` bypass.
+
+See [Migrations](/docs/schemas/migrations) for the deploy flow.
+
+### alpha.55 clients against an upgraded server
+
+alpha.56 moved to a newer sync protocol, so once your server (or Jazz Cloud app) runs alpha.56 or
+later, end users still running an alpha.55 build of your app work local-only until they load a
+newer build:
 
 - Local reads and writes keep working.
 - Reads and waits that need the server fail straight away rather than hanging: `global` waits
   reject and `remote` reads error with
   `unsupported wire protocol advertisement: remote 2..=2, expected 3..=3`.
 - Local writes are kept. When the page loads a newer build of your app, the same account comes
-  back and every write made in the meantime syncs.
+  back and resubmits them, and the server checks them like any other write.
 
-alpha.56 clients use the current protocol and keep syncing with upgraded servers.
+To keep this window short, ship the upgraded app build together with the server upgrade, and make
+sure your HTML isn't cached: a cached `index.html` keeps loading the old client.
 
-To keep the local-only window short, ship the upgraded app build at the same time as the server
-upgrade, and make sure your HTML isn't cached: a cached `index.html` keeps loading the old client.
+## From alpha.56
+
+### `remote-if-possible` read tier removed
+
+`ReadTier.RemoteIfPossible` (`"remote-if-possible"`) was removed, and passing it now throws. Use
+`ReadTier.LocalFirstUnlessEmpty` (`"local-first-unless-empty"`) to show local results at once but
+wait for the server when there's nothing local yet, or `ReadTier.Remote` for server-confirmed
+results. See [Durability Tiers](/docs/reference/durability-tiers).
+
+### Server edges removed
+
+Clients now connect straight to the core server, which authorizes and confirms writes.
+
+- Replace write waits on `{ tier: "edge" }` with `{ tier: "global" }`. `"edge"` still works for
+  waits but warns and waits for `"global"`. It throws as a read tier.
+- Remove server upstream and edge configuration.
+- Don't clear local databases: writes an old edge had accepted are resubmitted to the core server.
