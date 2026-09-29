@@ -467,3 +467,93 @@ describe("createPolicyTestApp", () => {
     }
   }, 10_000);
 });
+
+describe("policies that correlate optional and required columns", () => {
+  // `exists.where` equalities between an optional column and a required column
+  // of the same type used to be rejected when the server converted the policy
+  // (OperandTypeMismatch), although the TypeScript DSL accepted them.
+  const inviteSchema = {
+    shows: s.table({ name: s.string() }, {}),
+    invites: s.table(
+      { showId: s.uuid(), code: s.string(), parentId: s.uuid().optional() },
+      { show: s.rel("shows", "showId"), parent: s.rel("shows", "parentId") },
+    ),
+    members: s.table(
+      {
+        showId: s.uuid(),
+        parentId: s.uuid(),
+        account: s.uuid(),
+        inviteCode: s.string().optional(),
+      },
+      { show: s.rel("shows", "showId"), parent: s.rel("shows", "parentId") },
+    ),
+  };
+  type InviteSchema = s.Schema<typeof inviteSchema>;
+  const inviteApp: s.App<InviteSchema> = s.defineApp(inviteSchema);
+  const invitePermissions = definePermissions(inviteApp, ({ policy, session }) => {
+    policy.shows.allowRead.always();
+    policy.members.allowRead.where({ account: session.user.account });
+    policy.members.allowInsert.where((member) =>
+      policy.invites.exists.where({
+        showId: member.showId,
+        // Optional text compared with required text.
+        code: member.inviteCode,
+        // Required reference compared with an optional reference.
+        parentId: member.parentId,
+      }),
+    );
+  });
+
+  it("publishes the policy and enforces the correlation", async () => {
+    const policyTestApp = await createPolicyTestApp(inviteApp, invitePermissions, expect);
+    try {
+      const show = await policyTestApp.seed((db) => db.insert(inviteApp.shows, { name: "Gig" }));
+      await policyTestApp.seed((db) =>
+        db.insert(inviteApp.invites, { showId: show.id, code: "current", parentId: show.id }),
+      );
+      const account = "00000000-0000-4000-8000-000000000003";
+      const carol = policyTestApp.as({
+        issuer: "https://policy-test.example",
+        user_id: "carol",
+        account_id: account,
+        claims: {},
+        authMode: "external",
+      });
+
+      await carol.expectDenied((db) =>
+        db.insert(inviteApp.members, {
+          showId: show.id,
+          parentId: show.id,
+          account,
+          inviteCode: "guessed",
+        }),
+      );
+      await carol.expectDenied((db) =>
+        db.insert(inviteApp.members, { showId: show.id, parentId: show.id, account }),
+      );
+      // An invite whose optional parentId is NULL must not match a member whose
+      // parentId is set, even though every other correlated column matches.
+      await policyTestApp.seed((db) =>
+        db.insert(inviteApp.invites, { showId: show.id, code: "orphan", parentId: null }),
+      );
+      await carol.expectDenied((db) =>
+        db.insert(inviteApp.members, {
+          showId: show.id,
+          parentId: show.id,
+          account,
+          inviteCode: "orphan",
+        }),
+      );
+      await carol
+        .insert(inviteApp.members, {
+          showId: show.id,
+          parentId: show.id,
+          account,
+          inviteCode: "current",
+        })
+        .wait({ tier: "global" });
+    } finally {
+      await policyTestApp.shutdown();
+    }
+  }, 20_000);
+});
