@@ -8,9 +8,9 @@ import { schema as s } from "jazz-tools";
  *
  *   W1 users     -> crew       (a person's display profile)
  *   W1 projects  -> shows      (a gig with venue, date and doors time)
- *   W1 tasks     -> tasks      (show, title, status, assignee, updatedAt)
- *   W1 comments  -> comments   (task, author, body, createdAt)
- *   W1 activity  -> activity   (show, task, actor, kind, createdAt)
+ *   W1 tasks     -> tasks      (show, title, status, assignee; updated_at is $updatedAt)
+ *   W1 comments  -> comments   (task, author, body; created_at is $createdAt)
+ *   W1 activity  -> activity   (show, task, actor, kind; created_at is $createdAt)
  *
  * On top of that, StagePlan adds what a real app needs for permissions
  * (showCrew memberships and private showInvites) and a personal checklist.
@@ -86,7 +86,6 @@ const schema = {
       notes: s.string().optional(),
       /** Sort key inside a column. Lower values come first. */
       rank: s.float(),
-      updatedAt: s.timestamp(),
     },
     {
       show: s.rel("shows", "showId"),
@@ -100,7 +99,6 @@ const schema = {
       taskId: s.uuid(),
       authorId: s.uuid(),
       body: s.string(),
-      createdAt: s.timestamp(),
     },
     {
       task: s.rel("tasks", "taskId"),
@@ -115,7 +113,6 @@ const schema = {
       kind: s.enum(...ACTIVITY_KINDS),
       /** Short human-readable detail, such as the column a task moved to. */
       detail: s.string().optional(),
-      createdAt: s.timestamp(),
     },
     {
       show: s.rel("shows", "showId"),

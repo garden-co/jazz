@@ -28,8 +28,10 @@ import {
 import { useMe } from "../data/me.js";
 import { ActivityFeed } from "./ActivityFeed.js";
 
+type TaskWithTime = Task & { $updatedAt: Date };
+
 type TaskDialogProps = {
-  task?: Task;
+  task?: TaskWithTime;
   crew: CrewMember[];
   /** The route names a task this person can't see (deleted, or another show's). */
   isMissing: boolean;
@@ -66,7 +68,7 @@ function TaskDetail({
   crew,
   onClose,
 }: {
-  task: Task;
+  task: TaskWithTime;
   crew: CrewMember[];
   onClose: () => void;
 }) {
@@ -77,7 +79,11 @@ function TaskDetail({
   const [comment, setComment] = useState("");
   const [canDelete, setCanDelete] = useState(false);
   const { data: comments = [] } = useAll(
-    app.comments.where({ taskId: task.id }).include({ author: true }).orderBy("createdAt", "asc"),
+    app.comments
+      .where({ taskId: task.id })
+      .select("*", "$createdAt")
+      .include({ author: true })
+      .orderBy("$createdAt", "asc"),
   );
   const { data: columnTasks = [] } = useAll(
     app.tasks.where({ showId: task.showId }).select("rank", "status"),
@@ -179,7 +185,7 @@ function TaskDetail({
             />
             <Text color="secondary" type="supporting">
               Last changed{" "}
-              <Timestamp value={task.updatedAt.toISOString()} format="relative" isLive />
+              <Timestamp value={task.$updatedAt.toISOString()} format="relative" isLive />
             </Text>
 
             <Divider />
@@ -193,7 +199,7 @@ function TaskDetail({
                     <HStack gap={2} vAlign="center" wrap="wrap">
                       <Text weight="semibold">{entry.author?.name ?? "Former crew"}</Text>
                       <Timestamp
-                        value={entry.createdAt.toISOString()}
+                        value={entry.$createdAt.toISOString()}
                         format="relative"
                         type="supporting"
                         color="secondary"

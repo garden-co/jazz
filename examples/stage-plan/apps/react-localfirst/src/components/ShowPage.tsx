@@ -32,7 +32,9 @@ export function ShowPage({ showId, tab, taskId }: ShowPageProps) {
   const { data: crew = [] } = useAll(
     app.showCrew.where({ showId }).include({ crew: true }).orderBy("role", "asc"),
   );
-  const { data: tasks = [] } = useAll(app.tasks.where({ showId }).orderBy("rank", "asc"));
+  const { data: tasks = [] } = useAll(
+    app.tasks.where({ showId }).select("*", "$updatedAt").orderBy("rank", "asc"),
+  );
 
   if (isLoading) return <Loading label="Opening the show" />;
   if (!show) {

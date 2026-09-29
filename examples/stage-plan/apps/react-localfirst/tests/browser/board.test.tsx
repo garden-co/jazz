@@ -176,9 +176,7 @@ describe("StagePlan board", () => {
 
     // The crew member moves a task; the chief's board follows.
     const lineCheck = (await crewTasks()).find((task) => task.title === "Line check")!;
-    await crewDb
-      .update(app.tasks, lineCheck.id, { status: "done", updatedAt: new Date() })
-      .wait({ tier: "global" });
+    await crewDb.update(app.tasks, lineCheck.id, { status: "done" }).wait({ tier: "global" });
     window.location.hash = `#/shows/${showId}`;
     await waitFor(
       () => cardTitles(el, "done").some((t) => t.includes("Line check")),

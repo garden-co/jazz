@@ -18,7 +18,8 @@ export function ActivityFeed({ query, tasks, isCompact }: ActivityFeedProps) {
   const { data: entries } = useAll(
     query
       .include({ actor: true })
-      .orderBy("createdAt", "desc")
+      .select("*", "$createdAt")
+      .orderBy("$createdAt", "desc")
       .limit(isCompact ? 20 : 100),
   );
   if (!entries) return null;
@@ -41,7 +42,7 @@ export function ActivityFeed({ query, tasks, isCompact }: ActivityFeedProps) {
             }
             description={
               <Timestamp
-                value={entry.createdAt.toISOString()}
+                value={entry.$createdAt.toISOString()}
                 format="relative"
                 type="supporting"
                 color="secondary"

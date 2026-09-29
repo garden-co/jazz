@@ -71,13 +71,13 @@ browser profile holds the account. That keeps the example small; see the
 The core tables map one to one onto the W1 benchmark schema, so the workload
 can later run against this app's schema:
 
-| W1         | StagePlan  | Columns                                                                    |
-| ---------- | ---------- | -------------------------------------------------------------------------- |
-| `users`    | `crew`     | `name` (+ `account`)                                                       |
-| `projects` | `shows`    | `name` (+ `venue`, `date`, `doors`, `chiefAccount`)                        |
-| `tasks`    | `tasks`    | `showId`, `title`, `status`, `assigneeId`, `updatedAt` (+ `notes`, `rank`) |
-| `comments` | `comments` | `taskId`, `authorId`, `body`, `createdAt`                                  |
-| `activity` | `activity` | `showId`, `taskId`, `actorId`, `kind`, `createdAt` (+ `detail`)            |
+| W1         | StagePlan  | Columns                                                                                            |
+| ---------- | ---------- | -------------------------------------------------------------------------------------------------- |
+| `users`    | `crew`     | `name` (+ `account`)                                                                               |
+| `projects` | `shows`    | `name` (+ `venue`, `date`, `doors`, `chiefAccount`)                                                |
+| `tasks`    | `tasks`    | `showId`, `title`, `status`, `assigneeId`; `updated_at` is Jazz's `$updatedAt` (+ `notes`, `rank`) |
+| `comments` | `comments` | `taskId`, `authorId`, `body`; `created_at` is `$createdAt`                                         |
+| `activity` | `activity` | `showId`, `taskId`, `actorId`, `kind`; `created_at` is `$createdAt` (+ `detail`)                   |
 
 `showCrew` (memberships), `showInvites` and `checklistItems` are the extra
 tables a real app needs. Benchmarks for StagePlan belong in

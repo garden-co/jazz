@@ -29,6 +29,16 @@ afterEach(async () => {
   await testApp?.shutdown();
 });
 
+/**
+ * Updating a row you can't read fails before it leaves your device: Jazz
+ * needs read permission on the existing row to apply an update, so there is
+ * nothing to send to the server. `expectDenied` waits for a server
+ * rejection, so these cases assert the local denial instead.
+ */
+function expectUnreadableUpdate(write: () => unknown) {
+  expect(write).toThrow(/read policy denied UPDATE/);
+}
+
 async function setUpShow() {
   const chief = testApp.as(session("chiara", chiefAccount));
   const crew = testApp.as(session("cole", crewAccount));
@@ -70,7 +80,6 @@ async function setUpShow() {
       title: "Load-in",
       status: "todo",
       rank: 1,
-      updatedAt: new Date(),
     })
     .wait({ tier: "global" });
 
@@ -97,7 +106,6 @@ describe("StagePlan permissions", () => {
         taskId: ctx.task.id,
         authorId: ctx.chiefProfile.id,
         body: "Dock opens at two",
-        createdAt: new Date(),
       })
       .wait({ tier: "global" });
 
@@ -119,20 +127,18 @@ describe("StagePlan permissions", () => {
         title: "Sneak in",
         status: "todo",
         rank: 2,
-        updatedAt: new Date(),
       }),
     );
-    await outsider.expectDenied((db) => db.update(app.tasks, ctx.task.id, { status: "done" }));
+    expectUnreadableUpdate(() => outsider.update(app.tasks, ctx.task.id, { status: "done" }));
     await outsider.expectDenied((db) =>
       db.insert(app.activity, {
         showId: ctx.show.id,
         taskId: ctx.task.id,
         actorId: ctx.outsiderProfile.id,
         kind: "moved",
-        createdAt: new Date(),
       }),
     );
-    await outsider.expectDenied((db) => db.update(app.shows, ctx.show.id, { name: "Mine now" }));
+    expectUnreadableUpdate(() => outsider.update(app.shows, ctx.show.id, { name: "Mine now" }));
   });
 
   it("lets someone join only with the current invite code", async () => {
@@ -180,7 +186,6 @@ describe("StagePlan permissions", () => {
       .update(app.tasks, ctx.task.id, {
         status: "doing",
         assigneeId: ctx.crewProfile.id,
-        updatedAt: new Date(),
       })
       .wait({ tier: "global" });
     const added = await crew
@@ -189,7 +194,6 @@ describe("StagePlan permissions", () => {
         title: "Line check",
         status: "todo",
         rank: 2,
-        updatedAt: new Date(),
       })
       .wait({ tier: "global" });
     await crew
@@ -197,7 +201,6 @@ describe("StagePlan permissions", () => {
         taskId: ctx.task.id,
         authorId: ctx.crewProfile.id,
         body: "Riser is on the truck",
-        createdAt: new Date(),
       })
       .wait({ tier: "global" });
     await crew
@@ -207,7 +210,6 @@ describe("StagePlan permissions", () => {
         actorId: ctx.crewProfile.id,
         kind: "moved",
         detail: "In progress",
-        createdAt: new Date(),
       })
       .wait({ tier: "global" });
 
@@ -221,7 +223,6 @@ describe("StagePlan permissions", () => {
         taskId: ctx.task.id,
         authorId: ctx.chiefProfile.id,
         body: "Pretending to be the chief",
-        createdAt: new Date(),
       }),
     );
   });
@@ -260,7 +261,6 @@ describe("StagePlan permissions", () => {
         taskId: ctx.task.id,
         actorId: ctx.chiefProfile.id,
         kind: "created",
-        createdAt: new Date(),
       })
       .wait({ tier: "global" });
     await ctx.chief.expectDenied((db) => db.update(app.activity, entry.id, { kind: "moved" }));
@@ -277,7 +277,7 @@ describe("StagePlan permissions", () => {
       })
       .wait({ tier: "global" });
     await expect(ctx.chief.all(app.checklistItems.where({ id: item.id }))).resolves.toEqual([]);
-    await ctx.chief.expectDenied((db) => db.update(app.checklistItems, item.id, { done: true }));
+    expectUnreadableUpdate(() => ctx.chief.update(app.checklistItems, item.id, { done: true }));
     await ctx.crew.update(app.checklistItems, item.id, { done: true }).wait({ tier: "global" });
   });
 });
