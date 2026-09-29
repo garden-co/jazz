@@ -104,6 +104,7 @@ import { reactive, ref } from "vue";
 import { useAll, useDb } from "jazz-tools/vue";
 import { app, type StopStatus } from "../../schema.js";
 import { fromDateInput, statusLabels } from "../lib/format.js";
+import { reportWriteError } from "../lib/write-errors.js";
 import Button from "./ui/Button.vue";
 
 const props = defineProps<{ lat: number; lng: number; bandId: string; userId: string }>();
@@ -127,40 +128,44 @@ const venue = reactive({
 });
 const show = reactive({ date: "", status: "tentative" as StopStatus, description: "", notes: "" });
 
-async function submit() {
+function submit() {
+  addStop().catch(reportWriteError);
+}
+
+async function addStop() {
   const date = fromDateInput(show.date);
   date.setHours(20);
 
-  // The venue and the stop go in one transaction.
-  const created = await db.transaction((tx) => {
-    const venueId =
-      venueMode.value === "existing"
-        ? existingVenueId.value
-        : tx.insert(app.venues, {
-            ...venue,
-            capacity: venue.capacity || undefined,
-            ownerId: props.userId,
-            bandId: props.bandId,
-          }).id;
-    return tx.insert(app.stops, {
+  // A new venue, the stop and its note can't share one transaction: the stop's
+  // policy checks that its venue belongs to the band, the note's that its stop
+  // does, and permission `exists` checks only see committed rows (INV-RLS-9).
+  // Whether they should see a transaction's own writes is an open question for
+  // the core team; until then each row waits for the one it depends on.
+  let venueId = existingVenueId.value;
+  if (venueMode.value === "new") {
+    const created = db.insert(app.venues, {
+      ...venue,
+      capacity: venue.capacity || undefined,
+      ownerId: props.userId,
       bandId: props.bandId,
-      venueId,
-      date,
-      status: show.status,
-      publicDescription: show.description,
-    }).id;
-  });
-  const stopId = created.value;
-  emit("created", stopId);
+    });
+    venueId = created.value.id;
+    await created.wait({ tier: "global" });
+  }
 
-  // The note can't join that transaction: its policy checks that the stop exists
-  // in the band, and permission `exists` checks only see committed rows
-  // (INV-RLS-9). Whether they should see a transaction's own writes is an open
-  // question for the core team; until then the note waits for the stop.
+  const stop = db.insert(app.stops, {
+    bandId: props.bandId,
+    venueId,
+    date,
+    status: show.status,
+    publicDescription: show.description,
+  });
+  emit("created", stop.value.id);
+
   const body = show.notes.trim();
   if (body) {
-    await created.wait({ tier: "global" });
-    db.insert(app.stopNotes, { stopId, bandId: props.bandId, body });
+    await stop.wait({ tier: "global" });
+    db.insert(app.stopNotes, { stopId: stop.value.id, bandId: props.bandId, body });
   }
 }
 </script>

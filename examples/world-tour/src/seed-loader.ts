@@ -14,10 +14,19 @@ export function newInviteCode(): string {
 }
 
 /**
- * Creates the demo band on an empty server. The insert runs in an exclusive
- * transaction with a fixed id, so when two first visitors race, the server commits
- * one band and rejects the other; the loser then sees the winner's tour.
- * Resolves to false when this visitor lost (or the demo band was deleted).
+ * Creates the demo band on an empty server.
+ *
+ * The band insert runs in an exclusive transaction with the fixed DEMO_BAND_ID, and
+ * an exclusive insert with an explicit id is create-only: when two first visitors
+ * race, the server commits one band and rejects the other, whose app then shows
+ * the winner's tour. The same rejection happens if the demo band was ever deleted,
+ * so an empty server whose demo band is gone stays empty. Resolves to false when
+ * the claim is rejected.
+ *
+ * The rest of the tour is written after the claim commits (see `writeTour`). If
+ * that fails part-way (the tab closes, the connection drops), the band stays with
+ * whatever was written, possibly no stops, and is not reseeded; the caller only
+ * reports the error.
  */
 export async function claimDemoBand(
   db: Db,
@@ -52,10 +61,10 @@ export async function startDemoTour(
  * Writes the owner's membership, an invite, and the tour for a band that exists
  * on the server.
  *
- * Three transactions rather than one: permission `exists` checks only see
+ * Four transactions rather than one: permission `exists` checks only see
  * committed rows, not rows staged earlier in the same transaction (INV-RLS-9).
- * The membership and invite inserts need the band, the venue and stop inserts
- * need the membership, and the notes need their stops, so each group commits
+ * The membership and invite need the band, the venues need the membership, the
+ * stops need their venues, and the notes need their stops, so each group commits
  * before the next. Whether `exists` should see a transaction's own writes is an
  * open question for the core team; if it does, this becomes one transaction.
  */
@@ -73,24 +82,28 @@ async function writeTour(
 
   // Each band gets its own venues: a shared venue could be moved or deleted by
   // another band, taking this band's stops with it.
-  const tour = await db.transaction((tx) => {
+  const venues = await db.transaction((tx) => {
     const venueIds = new Map<string, string>();
-    return fixture.stops.map((stop) => {
-      let venueId = venueIds.get(stop.venue.name);
-      if (!venueId) {
-        venueId = tx.insert(app.venues, { ...stop.venue, ownerId: userId, bandId }).id;
-        venueIds.set(stop.venue.name, venueId);
-      }
+    for (const { venue } of fixture.stops) {
+      if (!venueIds.has(venue.name))
+        venueIds.set(venue.name, tx.insert(app.venues, { ...venue, ownerId: userId, bandId }).id);
+    }
+    return venueIds;
+  });
+  await venues.wait({ tier: "global" });
+
+  const tour = await db.transaction((tx) =>
+    fixture.stops.map((stop) => {
       const row = tx.insert(app.stops, {
         bandId,
-        venueId,
+        venueId: venues.value.get(stop.venue.name)!,
         date: stop.date,
         status: stop.status,
         publicDescription: stop.publicDescription,
       });
       return { stopId: row.id, note: stop.privateNote };
-    });
-  });
+    }),
+  );
   await tour.wait({ tier: "global" });
 
   const notes = tour.value.filter((s): s is { stopId: string; note: string } => !!s.note);

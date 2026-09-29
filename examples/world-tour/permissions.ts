@@ -74,8 +74,12 @@ export default s.definePermissions(app, ({ policy, session, anyOf, allOf }) => {
   // Stops: the public sees confirmed dates; the band sees and edits everything.
   const onMyBand = (row: BandScoped) => isMemberOf(row.bandId);
   policy.stops.allowRead.where((stop) => anyOf([{ status: "confirmed" }, onMyBand(stop)]));
-  policy.stops.allowInsert.where(onMyBand);
-  policy.stops.allowUpdate.whereOld(onMyBand).whereNew(onMyBand);
+  // A stop's venue must be one of its band's venues, so no other band can move or
+  // delete it from under the stop.
+  const writableStop = (stop: RowContext<{ bandId: string; venueId: string }>) =>
+    allOf([onMyBand(stop), policy.venues.exists.where({ id: stop.venueId, bandId: stop.bandId })]);
+  policy.stops.allowInsert.where(writableStop);
+  policy.stops.allowUpdate.whereOld(onMyBand).whereNew(writableStop);
   policy.stops.allowDelete.where(onMyBand);
 
   // Private notes: band members only, and always attached to one of their stops.

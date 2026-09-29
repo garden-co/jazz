@@ -97,6 +97,9 @@
       @select="selectStop"
       @dismiss="showPoster = false"
     />
+    <p v-if="writeError" class="toast" role="alert" @animationend="writeError = ''">
+      {{ writeError }}
+    </p>
     <StopPoster
       v-if="posterStop && band"
       :stop="posterStop"
@@ -113,6 +116,7 @@ import { app } from "../schema.js";
 import { MapController } from "./lib/map-controller";
 import { findNearestStop } from "./lib/nearest-stop";
 import { useRoute } from "./lib/routes";
+import { reportWriteError, writeError } from "./lib/write-errors";
 import { claimDemoBand, startDemoTour } from "./seed-loader";
 import AddStopPopover from "./components/AddStopPopover.vue";
 import BandPanel from "./components/BandPanel.vue";
@@ -131,6 +135,9 @@ const db = useDb();
 const session = useSession();
 const userId = computed(() => session.value?.user.account ?? null);
 const { route, goToBand } = useRoute();
+
+// Writes the server rejects later (a permission changed, a conflict) end up here.
+const stopWriteErrors = db.onMutationError(reportWriteError);
 
 // --- Which band we're looking at, and who we are to it -----------------------
 
@@ -349,6 +356,7 @@ watch(
 );
 
 onUnmounted(() => {
+  stopWriteErrors();
   clearInterval(dayTimer);
   mapCtrl?.destroy();
   mapCtrl = null;

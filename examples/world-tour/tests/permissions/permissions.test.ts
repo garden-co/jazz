@@ -249,6 +249,25 @@ describe("other bands", () => {
     await otherOwner.expectDenied((db) => db.delete(app.venues, tour.venue.id));
   });
 
+  it("cannot book a stop at another band's venue", async () => {
+    const tour = await seedTour();
+    const other = await seedOtherBand();
+    const member = as("member");
+
+    await member.expectDenied((db) =>
+      db.insert(app.stops, {
+        bandId: tour.band.id,
+        venueId: other.venue.id,
+        date: new Date(2026, 9, 9, 20),
+        status: "tentative",
+        publicDescription: "Borrowed venue",
+      }),
+    );
+    await member.expectDenied((db) =>
+      db.update(app.stops, tour.tentative.id, { venueId: other.venue.id }),
+    );
+  });
+
   it("cannot attach private notes to this band's stops", async () => {
     const tour = await seedTour();
     const other = await seedOtherBand();

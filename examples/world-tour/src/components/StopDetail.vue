@@ -63,6 +63,7 @@ import { computed, reactive, ref } from "vue";
 import { useAll, useDb } from "jazz-tools/vue";
 import { app, type StopStatus, type StopWithVenue } from "../../schema.js";
 import { formatLongDate, fromDateInput, statusLabels, toDateInput } from "../lib/format.js";
+import { reportWriteError } from "../lib/write-errors.js";
 import Button from "./ui/Button.vue";
 
 const props = defineProps<{ stop: StopWithVenue }>();
@@ -93,7 +94,7 @@ function save() {
   const day = fromDateInput(draft.date);
   day.setHours(date.getHours(), date.getMinutes());
   const body = draft.notes.trim();
-  void db.transaction((tx) => {
+  db.transaction((tx) => {
     tx.update(app.stops, id, {
       date: day,
       status: draft.status,
@@ -102,16 +103,16 @@ function save() {
     if (existing && body) tx.update(app.stopNotes, existing.id, { body });
     else if (existing) tx.delete(app.stopNotes, existing.id);
     else if (body) tx.insert(app.stopNotes, { stopId: id, bandId, body });
-  });
+  }).catch(reportWriteError);
   editing.value = false;
 }
 
 function deleteStop() {
   const existing = note.value;
-  void db.transaction((tx) => {
+  db.transaction((tx) => {
     if (existing) tx.delete(app.stopNotes, existing.id);
     tx.delete(app.stops, props.stop.id);
-  });
+  }).catch(reportWriteError);
   emit("deleted");
 }
 </script>

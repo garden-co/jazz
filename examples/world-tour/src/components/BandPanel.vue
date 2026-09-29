@@ -55,6 +55,7 @@ import { useAll, useDb } from "jazz-tools/vue";
 import { app, type Band } from "../../schema.js";
 import { bandLink, inviteLink as buildInviteLink } from "../lib/routes.js";
 import { newInviteCode } from "../seed-loader.js";
+import { reportWriteError } from "../lib/write-errors.js";
 import Button from "./ui/Button.vue";
 
 const props = defineProps<{ band: Band; userId: string }>();
@@ -89,16 +90,16 @@ function replaceInvite(tx: Tx) {
 }
 
 function resetInvite() {
-  void db.transaction(replaceInvite);
+  db.transaction(replaceInvite).catch(reportWriteError);
 }
 
 // A kept invite link would let a removed member straight back in, so revoking
 // resets it in the same transaction.
 function revoke(memberId: string) {
-  void db.transaction((tx) => {
+  db.transaction((tx) => {
     tx.delete(app.members, memberId);
     replaceInvite(tx);
-  });
+  }).catch(reportWriteError);
 }
 
 function leave() {
