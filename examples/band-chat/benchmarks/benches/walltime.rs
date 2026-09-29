@@ -1,6 +1,7 @@
 //! BandChat wall-clock suite, measured on CodSpeed's macro runner. Names are
 //! app-prefixed because the examples page matches results by exact name.
 
+use jazz_example_band_chat_benchmark::announcements::AnnouncementsFixture;
 use jazz_example_band_chat_benchmark::live_rooms::LiveRoomsFixture;
 use jazz_example_band_chat_benchmark::membership_room::{OpenFixture, SendFixture};
 use jazz_example_band_chat_benchmark::{FastResumeFixture, Fixture};
@@ -70,4 +71,20 @@ fn band_chat_new_message_rooms_open(bencher: divan::Bencher<'_, '_>, rooms: usiz
     bencher
         .with_inputs(|| LiveRoomsFixture::seeded(rooms).open_all())
         .bench_local_values(|open| open.new_message());
+}
+
+/// Posts per iteration of `band_chat_post_announcements`. Each post's update
+/// of the open full-history view scales with the room (#2086), so 10 posts
+/// keep the case inside the workload's macro-runner budget.
+const ANNOUNCEMENTS_POSTED: usize = 10;
+
+/// The band's admin posts 10 announcements into the announcements room they
+/// have open. Reading needs a `member` or `admin` role claim and posting an
+/// `admin` one (session-claim-gated policies); the open view is the room's
+/// whole history, unbounded, so every post updates a 10,000-message view.
+#[divan::bench(args = [10_000], sample_count = 10, sample_size = 1)]
+fn band_chat_post_announcements(bencher: divan::Bencher<'_, '_>, messages: usize) {
+    bencher
+        .with_inputs(|| AnnouncementsFixture::new(messages))
+        .bench_local_refs(|fixture| fixture.post_announcements(ANNOUNCEMENTS_POSTED));
 }

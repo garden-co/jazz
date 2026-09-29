@@ -14,14 +14,15 @@ fan-out.
 
 ## Cases and former names
 
-| Case                                          | Former case                                                               |
-| --------------------------------------------- | ------------------------------------------------------------------------- |
-| `band_chat_open_room[10000]`                  | `chat_open_chat[10000]` (Chat example); also covers `auth_chat_open_room` |
-| `band_chat_send_100[10000]`                   | `chat_send_100[10000]` (Chat example); also covers `auth_chat_send`       |
-| `band_chat_new_message_rooms_open[100]`       | `matching_write_fanout` (`crates/jazz` route subscription curve)          |
-| `band_chat_timeline_second_page[4096]`        | unchanged (the 1,024 point was dropped)                                   |
-| `band_chat_unread_recent_rooms[4096]`         | unchanged (the 1,024 point was dropped)                                   |
-| `band_chat_caught_up_fast_resume[100, 10000]` | unchanged (the 1,000 point was dropped)                                   |
+| Case                                          | Former case                                                           |
+| --------------------------------------------- | --------------------------------------------------------------------- |
+| `band_chat_open_room[10000]`                  | `chat_open_chat[10000]` (Chat example)                                |
+| `band_chat_send_100[10000]`                   | `chat_send_100[10000]` (Chat example)                                 |
+| `band_chat_post_announcements[10000]`         | `auth_chat_send[10000]` and `auth_chat_open_room` (auth chat example) |
+| `band_chat_new_message_rooms_open[100]`       | `matching_write_fanout` (`crates/jazz` route subscription curve)      |
+| `band_chat_timeline_second_page[4096]`        | unchanged (the 1,024 point was dropped)                               |
+| `band_chat_unread_recent_rooms[4096]`         | unchanged (the 1,024 point was dropped)                               |
+| `band_chat_caught_up_fast_resume[100, 10000]` | unchanged (the 1,000 point was dropped)                               |
 
 `band_chat_author_history` was dropped: StagePlan's bounded activity page
 measures the same indexed, ordered, bounded read. The route subscription curve
@@ -33,6 +34,13 @@ Wequencer's `wequencer_open_pattern_views[100]`.
 a member and sends messages, with an outsider who must never see them.
 `src/live_rooms.rs` keeps 100 live room subscriptions open and posts one
 message: exactly one room wakes and unrelated rooms stay quiet.
+`src/announcements.rs` (from the auth chat example, modelled in the benchmark
+only: the app has no claim-gated room) is the one case with session-claim
+policies and an unbounded view: reading needs a `member` or `admin` role
+claim, posting announcements needs `admin`, and the admin's open view is the
+room's whole history, so every post updates a 10,000-message view (#2086).
+The auth chat room opening itself (`auth_chat_open_room`) happens untimed in
+its fixture; `band_chat_open_room` measures opening a policy-protected room.
 
 ## Timeline, unread rooms and resume
 

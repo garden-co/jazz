@@ -135,4 +135,24 @@ bandChatBenchmarks.push(
     },
     source,
   },
+  {
+    name: "band_chat_post_announcements[10000]",
+    title: "BandChat · post announcements to a full-history room",
+    description:
+      "The band's admin posts 10 announcements into the announcements room they have open. Reading the room needs a `member` or `admin` role claim and posting needs `admin`: session-claim-gated read and insert policies. The open view is the room's whole history in send order, with no LIMIT, and each post's update of that view currently scales with the history (https://github.com/garden-co/jazz/issues/2086), so the per-post cost at 10,000 messages is mostly that update.",
+    fixture:
+      "10,000 announcements and 10,000 general-room messages from 16 authors, settled; the admin's announcements view is open and hydrated before timing.",
+    storage: roomStorage,
+    includes: [
+      "Announcement insert, authority admin-only insert-policy check and acceptance",
+      "Runtime ticks until the open full-history view shows each announcement",
+    ],
+    excludes: ["Seeding, claim admission, opening the room, network and teardown"],
+    work: {
+      count: 10,
+      unit: "announcements posted/s",
+      explanation: "10 announcements, each posted, accepted and shown before the next.",
+    },
+    source,
+  },
 );
