@@ -3287,7 +3287,9 @@ pub enum Error {
     /// An exclusive transaction read from the local replica while the
     /// authority could not serve its snapshot (INV-TX-13), so its reads
     /// cannot vouch for rows the replica never received.
-    #[error("exclusive transaction read offline; its snapshot was never hydrated")]
+    #[error(
+        "exclusive transaction read offline, so its snapshot was never hydrated; abandon it and retry in a new transaction"
+    )]
     ExclusiveSnapshotNotHydrated,
     /// Stored value failed validation.
     #[error("invalid stored value: {0}")]

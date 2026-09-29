@@ -11,12 +11,13 @@
     "test": "vitest run",
     "types:check": "fumadocs-mdx && next typegen && tsc --noEmit",
     "postinstall": "fumadocs-mdx",
-    "test:perf-timeline": "node --experimental-strip-types --test lib/perf-timeline/*.test.ts ../dev/benchmarks/metadata/metadata.test.ts",
-    "test:perf-timeline:e2e": "node tests/perf-timeline.browser.mjs"
+    "test:perf-timeline": "node --experimental-strip-types --test lib/perf-timeline/*.test.ts lib/showcase/*.test.ts ../dev/benchmarks/metadata/metadata.test.ts",
+    "capture:example-videos": "node scripts/example-videos/todo-two-devices.mjs",
+    "test:examples:e2e": "node tests/examples.browser.mjs"
   },
   "dependencies": {
     "@astryxdesign/core": "0.6.3",
-    "@garden-co/design": "github:garden-co/design#d304747b24783326a68d7a4345600aa5bf9413a1",
+    "@garden-co/design": "github:garden-co/design#fe96522c2484b894380fab7f0217b76ee4bda3a2",
     "@vercel/analytics": "^2.0.1",
     "feed": "^5.2.1",
     "fumadocs-core": "16.6.2",
