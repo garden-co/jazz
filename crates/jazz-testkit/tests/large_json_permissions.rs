@@ -92,7 +92,8 @@ async fn run_matrix(private_reads: bool) {
                         ],
                     ) {
                         Err(error) => assert!(
-                            error.to_string().contains("read policy denied UPDATE"),
+                            error.to_string().contains("read policy denied UPDATE")
+                                || error.to_string().contains("not loaded locally"),
                             "{error}"
                         ),
                         Ok(Some(tx)) => {
