@@ -412,11 +412,20 @@ where
                 .cloned()
                 .map(|version| (version_bundle_record_key(&version), version))
                 .collect::<BTreeMap<_, _>>();
-            // An accepted bundle for this node's own write carries Core's
-            // post-images, which replace the locally stored patches.
-            let carries_post_images = tx_id.node == self.node_uuid
-                && matches!(bundle.fate, Fate::Accepted)
-                && bundle.global_time.is_some();
+            // An accepted, Core-sequenced bundle carries Core's post-images,
+            // which replace a locally stored authored unit: this node's own
+            // patch, or, on a client relay (a browser worker), the patch it
+            // relayed upstream for its downstream originator. The relay may
+            // apply the accepted fate before the post-image arrives, so a
+            // copy at the same sequence position is still that patch. Any
+            // other node holds only upstream post-images, where a differing
+            // copy is a genuine conflict.
+            let carries_post_images = matches!(bundle.fate, Fate::Accepted)
+                && bundle.global_time.is_some()
+                && (tx_id.node == self.node_uuid
+                    || (self.client_relay_scope().is_some()
+                        && (stored.global_time.is_none()
+                            || stored.global_time == bundle.global_time)));
             for (key, incoming) in &incoming_by_key {
                 if let Some(existing) = stored_by_key.get(key)
                     && existing != incoming
@@ -932,6 +941,24 @@ where
                 by_tx
             },
         );
+        // A member that leaves and re-enters naming the same content
+        // transaction was re-settled: once Core sequences a unit, this node
+        // stores Core's post-image in place of the authored patch the peer may
+        // have received (always so for the downstream that authored it), and
+        // the supporting-row identity, keyed by transaction, cannot show that.
+        // Ship the settled payload again so the peer replaces its copy.
+        let resettled_rows = row_result_removes
+            .iter()
+            .map(|(table, row, tx)| (table.to_string(), *row, *tx))
+            .collect::<BTreeSet<_>>();
+        for (table, row_uuid, tx_id) in &row_result_adds {
+            if resettled_rows.contains(&(table.to_string(), *row_uuid, *tx_id)) {
+                wanted_add_rows_by_tx
+                    .entry(*tx_id)
+                    .or_default()
+                    .insert((table.to_string(), *row_uuid));
+            }
+        }
         // Scalar publication can retract only its covered root source;
         // the receiver derives result removal from that source delta.
         let exit_candidates = row_result_removes

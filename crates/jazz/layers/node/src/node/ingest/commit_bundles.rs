@@ -340,8 +340,19 @@ where
                 .map(|stored| self.version_record_from_row(&stored))
                 .collect::<Result<Vec<_>, Error>>()?;
             existing_versions.sort();
+            // Once Core has sequenced the unit, this relay stores Core's
+            // post-images rather than the authored patch, so a downstream
+            // resend of the same unit is matched by the rows it addresses,
+            // as `ingest_commit_unit_once` does at Core.
+            let same_payload = if matches!(existing.fate, Fate::Accepted)
+                && existing.global_time.is_some()
+            {
+                same_addressed_rows(&existing_versions, &versions)
+            } else {
+                existing_versions == versions
+            };
             if !known_transaction_payload_matches_redacted_permission_subject(&existing.tx, &tx)
-                || existing_versions != versions
+                || !same_payload
             {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
             }
@@ -443,20 +454,7 @@ where
                 // Cells of the authored patch are no longer stored, so a
                 // redelivery is deduplicated by tx id; it must still address
                 // the same rows with the same deletion intent.
-                let rows = |records: &[VersionRecord]| {
-                    records
-                        .iter()
-                        .map(|record| {
-                            (
-                                record.table().to_owned(),
-                                record.branch_key().clone(),
-                                record.row_uuid(),
-                                record.deletes_row(),
-                            )
-                        })
-                        .collect::<BTreeSet<_>>()
-                };
-                rows(&existing_versions) == rows(&versions)
+                same_addressed_rows(&existing_versions, &versions)
             } else {
                 existing_versions == versions
             };
@@ -985,4 +983,24 @@ where
         }
         Ok(loaded_tx_ids)
     }
+}
+
+/// Whether two unit payloads address the same rows with the same deletion
+/// intent. Used where Core's stored post-images stand in for the authored
+/// patch of an already-sequenced unit, so cells can no longer be compared.
+fn same_addressed_rows(stored: &[VersionRecord], resent: &[VersionRecord]) -> bool {
+    let rows = |records: &[VersionRecord]| {
+        records
+            .iter()
+            .map(|record| {
+                (
+                    record.table().to_owned(),
+                    record.branch_key().clone(),
+                    record.row_uuid(),
+                    record.deletes_row(),
+                )
+            })
+            .collect::<BTreeSet<_>>()
+    };
+    rows(stored) == rows(resent)
 }
