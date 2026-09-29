@@ -395,7 +395,21 @@ where
         // Remote publication waits for settlement. A local foreground also
         // needs a fresh delivery from its durable owner, while the maintained
         // subscription drives the complete multi-hop input closure.
-        if require_coverage && is_relation {
+        //
+        // A strict (Global) client one-shot reads through its own fresh
+        // stream as well, as the native client's remote one-shot does.
+        // Attaching coverage first and then evaluating `Db::all` would read
+        // against an already-settled coverage, so no stream would run its
+        // first-settlement deletion reconciliation and a held row deleted at
+        // Core would survive locally (INV-SYNC-48).
+        let strict_client_one_shot = !is_relation
+            && open_tx.is_none()
+            && author.is_none()
+            && prepared.shape().query().array_subqueries.is_empty()
+            && effective_read_tier(&opts) >= DurabilityTier::Global
+            && opts.read_view.is_default()
+            && !opts.include_deleted;
+        if require_coverage && (is_relation || strict_client_one_shot) {
             let local_coverage = if effective_read_tier(&opts) == DurabilityTier::Local {
                 Some(SerializedReadCoverage {
                     attachment: Some(

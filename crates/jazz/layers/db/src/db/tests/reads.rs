@@ -6280,3 +6280,175 @@ fn db_facade_multi_row_query_matches_seeded_create_delete_sequence_via_write_han
 fn db_facade_row_ids(rows: &[CurrentRow]) -> Vec<RowUuid> {
     rows.iter().map(CurrentRow::row_uuid).collect()
 }
+
+/// A strict (Global) one-shot through the serialized read boundary that the
+/// WASM and NAPI bindings call reconciles the rows the client already holds
+/// (INV-SYNC-48): a row deleted at Core leaves the client's local store, while
+/// a row that merely stopped being readable stays cached (INV-SYNC-14).
+///
+/// Internal because the test needs deterministic owner turns and an
+/// authenticated in-memory link to a Core that mints current-row receipts;
+/// the assertions use only the public `Db` read APIs.
+///
+/// ```text
+/// bob ──insert doomed, kept (owner = alice)──► core
+/// alice ──Global one-shot──► core            (alice now holds both rows)
+/// bob ──delete doomed──► core ; core ──kept.owner = bob
+/// alice ──Global one-shot──► []               (probes the omitted held rows)
+/// alice local store: doomed gone, kept still cached
+/// ```
+#[test]
+fn strict_serialized_one_shot_drops_deleted_held_row_but_keeps_unreadable_one() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(public_session_eq("owner", &["claims", "sub"]))
+                        .with_insert(PublicPolicyExpr::True)
+                        .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True)
+                        .with_delete(PublicPolicyExpr::True),
+                ),
+        ),
+    );
+    let alice = AuthorSubject::for_test_bytes([0xa7; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb7; 16]);
+    let core = open_core(0xc7, AuthorSubject::SYSTEM, &schema);
+    core.server.enable_authoritative_scalar_exit_refresh();
+    let alice_db = open_db(0xd7, alice, &schema);
+    let bob_db = open_db(0xe7, bob, &schema);
+    alice_db.set_test_provider_claims(alice, test_provider_claims(alice));
+    bob_db.set_test_provider_claims(bob, test_provider_claims(bob));
+    let connect = |db: &Db, identity: AuthorSubject, node: u8| {
+        let (up, down) = duplex_with_admitted_session_context(
+            identity,
+            NodeUuid::from_bytes([node; 16]),
+            1,
+            NodeUuid::from_bytes([0xc7; 16]),
+            1,
+        );
+        let upstream = block_on(db.connect_upstream(up));
+        let subscriber = core.accept_subscriber(down, identity);
+        (upstream, subscriber)
+    };
+    let _alice_link = connect(&alice_db, alice, 0xd7);
+    let _bob_link = connect(&bob_db, bob, 0xe7);
+    let turn = || {
+        for db in [&alice_db, &bob_db] {
+            db.tick().unwrap();
+        }
+        core.tick().unwrap();
+        for db in [&alice_db, &bob_db] {
+            db.tick().unwrap();
+        }
+    };
+    let core_ids = || {
+        core.read(&Query::from("todos"))
+            .unwrap()
+            .iter()
+            .map(CurrentRow::row_uuid)
+            .collect::<BTreeSet<_>>()
+    };
+    let strict_one_shot = || -> BTreeSet<RowUuid> {
+        let bytes = postcard::to_allocvec(&Query::from("todos")).unwrap();
+        let read = alice_db.all_serialized_query(
+            &bytes,
+            global_subscribe_opts(),
+            None,
+            None,
+            None,
+            true,
+            || false,
+            |attachment| alice_db.detach_query(attachment),
+        );
+        let mut read = pin!(read);
+        let mut context = Context::from_waker(Waker::noop());
+        for _ in 0..200 {
+            if let Poll::Ready(result) = read.as_mut().poll(&mut context) {
+                return match result.expect("strict one-shot") {
+                    SerializedReadResult::Rows(rows) => {
+                        rows.iter().map(CurrentRow::row_uuid).collect()
+                    }
+                    SerializedReadResult::Relation(_) => panic!("todos is a row query"),
+                };
+            }
+            turn();
+        }
+        panic!("strict one-shot never settled");
+    };
+    let alice_local_ids = || {
+        row_ids(&prepared_all(
+            &alice_db,
+            &Query::from("todos"),
+            ReadOpts {
+                tier: DurabilityTier::Local,
+                local_updates: LocalUpdates::Immediate,
+                propagation: Propagation::LocalOnly,
+                ..ReadOpts::default()
+            },
+        ))
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+    };
+    for _ in 0..4 {
+        turn();
+    }
+
+    let doomed = row(0x71);
+    let kept = row(0x72);
+    for (id, title) in [(doomed, "doomed"), (kept, "kept")] {
+        block_on(bob_db.insert(
+            "todos",
+            cells(title, false, alice),
+            crate::db::InsertOptions {
+                row_id: Some(id),
+                ..Default::default()
+            },
+        ))
+        .expect("bob inserts a todo owned by alice");
+    }
+    for _ in 0..50 {
+        if core_ids() == BTreeSet::from([doomed, kept]) {
+            break;
+        }
+        turn();
+    }
+    assert_eq!(core_ids(), BTreeSet::from([doomed, kept]));
+    assert_eq!(
+        strict_one_shot(),
+        BTreeSet::from([doomed, kept]),
+        "alice reads both of her todos at Global"
+    );
+    assert_eq!(alice_local_ids(), BTreeSet::from([doomed, kept]));
+
+    block_on(bob_db.delete("todos", doomed, DeleteOptions::default()))
+        .expect("bob deletes one todo");
+    for _ in 0..50 {
+        if core_ids() == BTreeSet::from([kept]) {
+            break;
+        }
+        turn();
+    }
+    assert_eq!(
+        core_ids(),
+        BTreeSet::from([kept]),
+        "Core admits the deletion"
+    );
+    core.update("todos", kept, cells("kept", false, bob))
+        .expect("Core reassigns the other todo to bob");
+    turn();
+
+    assert_eq!(
+        strict_one_shot(),
+        BTreeSet::new(),
+        "alice can read neither todo at Global any more"
+    );
+    assert_eq!(
+        alice_local_ids(),
+        BTreeSet::from([kept]),
+        "the deletion reaches alice's local store; the unreadable row stays cached"
+    );
+}
