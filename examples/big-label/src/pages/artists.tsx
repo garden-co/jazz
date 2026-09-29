@@ -22,6 +22,7 @@ import {
   sentence,
   useListControls,
 } from "../components/list";
+import { ConfirmButton } from "../components/confirm-button";
 import { PageHeader, PageSection } from "../components/page";
 import { ReleaseTable } from "./releases";
 import { artistStatuses } from "../fixtures";
@@ -165,15 +166,22 @@ export function ArtistPage({ id }: { id: string }) {
             {canEdit && (
               <Button label="Edit" variant="secondary" onClick={() => setDialog("edit")} />
             )}
-            {canDelete && (
-              <Button
-                label="Delete"
-                variant="destructive"
-                isDisabled={releases.length > 0}
-                tooltip={releases.length > 0 ? "Delete this artist's releases first" : undefined}
-                onClick={remove}
-              />
-            )}
+            {canDelete &&
+              (releases.length > 0 ? (
+                <Button
+                  label="Delete"
+                  variant="destructive"
+                  isDisabled
+                  tooltip="Delete this artist's releases first"
+                />
+              ) : (
+                <ConfirmButton
+                  label="Delete"
+                  title={`Delete ${artist.name}?`}
+                  description="The artist is removed for everyone in this label."
+                  onConfirm={remove}
+                />
+              ))}
           </>
         }
       />

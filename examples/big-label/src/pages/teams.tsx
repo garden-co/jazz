@@ -18,6 +18,7 @@ import { useAll, useDb, useOne } from "jazz-tools/react";
 import { app } from "../../schema";
 import { TeamDialog } from "../components/forms";
 import { StatusBadge, formatDate, sentence } from "../components/list";
+import { ConfirmButton } from "../components/confirm-button";
 import { PageHeader, PageSection } from "../components/page";
 import { useCan, useOrganization } from "../lib/organization";
 import { href, navigate } from "../lib/route";
@@ -154,7 +155,12 @@ export function TeamPage({ id }: { id: string }) {
           canManage && (
             <>
               <Button label="Rename" variant="secondary" onClick={() => setIsRenaming(true)} />
-              <Button label="Delete team" variant="destructive" onClick={deleteTeam} />
+              <ConfirmButton
+                label="Delete team"
+                title={`Delete ${team.name}?`}
+                description="Members stay in the label; the team and its release assignments go."
+                onConfirm={deleteTeam}
+              />
             </>
           )
         }

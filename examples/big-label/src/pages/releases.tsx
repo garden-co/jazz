@@ -28,6 +28,7 @@ import {
   pageOf,
   useListControls,
 } from "../components/list";
+import { ConfirmButton } from "../components/confirm-button";
 import { PageHeader, PageSection } from "../components/page";
 import { releaseStatuses } from "../fixtures";
 import { useCan, useOrganization } from "../lib/organization";
@@ -234,7 +235,14 @@ export function ReleasePage({ id }: { id: string }) {
             {canEdit && (
               <Button label="Edit" variant="secondary" onClick={() => setIsEditing(true)} />
             )}
-            {canDelete && <Button label="Delete" variant="destructive" onClick={remove} />}
+            {canDelete && (
+              <ConfirmButton
+                label="Delete"
+                title={`Delete ${release.title}?`}
+                description="The release and its team assignments are removed for everyone."
+                onConfirm={remove}
+              />
+            )}
           </>
         }
       />
