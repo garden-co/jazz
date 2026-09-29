@@ -62,8 +62,7 @@ describe("browser WASM URL initialization", () => {
     "retries after a %s failure, including an already queued caller",
     async (failure) => {
       if (failure === "network") fetchWasm.mockRejectedValueOnce(new Error("Network unavailable"));
-      if (failure === "http")
-        fetchWasm.mockResolvedValueOnce(new Response(null, { status: 503 }));
+      if (failure === "http") fetchWasm.mockResolvedValueOnce(new Response(null, { status: 503 }));
       if (failure === "html") fetchWasm.mockResolvedValueOnce(new Response("<!doctype html>"));
       if (failure === "initialization") initialize.mockRejectedValueOnce(new Error("Init failed"));
 
