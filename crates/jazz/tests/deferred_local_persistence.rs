@@ -607,7 +607,14 @@ fn queued_mutations_are_fifo_owned_and_surface_preparation_failures() {
         }
     }
     let error = block_on(rejected.write_state()).expect_err("missing-row update must fail");
-    assert_eq!(error.code, ErrorCode::WriteRejected);
+    // The replica has no preimage for the target, so preparation fails as an
+    // unloaded row rather than as a read-policy denial.
+    assert_eq!(error.code, ErrorCode::NotObserved);
+    assert!(
+        error.message.contains("not loaded locally"),
+        "{}",
+        error.message
+    );
     assert!(
         db.write_state(accepted_tx)
             .is_ok_and(|state| state.durability >= DurabilityTier::Local),
@@ -757,11 +764,12 @@ fn close_owns_and_drains_cold_failed_and_following_fifo_mutations() {
         reentrant_waits.borrow()[0].as_ref().unwrap_err().code,
         ErrorCode::NotObserved,
     );
+    // The failing head updates a row this replica never loaded.
     assert_eq!(
         block_on(failed.write_state())
             .expect_err("failed queued operation remains terminally observable")
             .code,
-        ErrorCode::WriteRejected,
+        ErrorCode::NotObserved,
     );
     drop(close);
     drop(db);
