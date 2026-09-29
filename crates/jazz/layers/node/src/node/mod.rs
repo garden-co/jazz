@@ -597,8 +597,10 @@ pub struct NodeState<S = BoxedStorage> {
     /// Overlay row key -> the pending transaction whose image it holds.
     ahead_current_keys: FxHashMap<(PhysicalTableId, Vec<u8>), TxId>,
     /// Rows whose overlay or synced image changed in the open batch; their
-    /// shadow copies are brought in line by `flush_ahead_shadows`.
-    ahead_shadow_dirty: Vec<(SchemaVersionId, String, BranchKey, RowUuid)>,
+    /// shadow copies are brought in line by `flush_ahead_shadows`. The flag
+    /// says whether the row may already hold a shadow (it had an overlay
+    /// before this batch touched it).
+    ahead_shadow_dirty: Vec<(SchemaVersionId, String, BranchKey, RowUuid, bool)>,
     /// Set while this node (Core) mints a seq for an incoming patch.
     minting_global_time: bool,
 

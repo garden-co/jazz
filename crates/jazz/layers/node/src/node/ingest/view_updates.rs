@@ -442,17 +442,26 @@ where
         })?);
         let overlay_key = self.ahead_overlay_key(version)?;
         if self.ahead_current_keys.contains_key(&overlay_key) {
-            self.mark_ahead_shadow_dirty(schema_version, version);
+            self.mark_ahead_shadow_dirty(schema_version, version, true);
         }
         Ok(())
     }
 
-    fn mark_ahead_shadow_dirty(&mut self, schema_version: SchemaVersionId, version: &VersionRow) {
+    /// `shadow_may_exist` is false only when the row just gained its overlay:
+    /// a row without an overlay has no shadow, so there is nothing to delete
+    /// if its synced image is also absent.
+    fn mark_ahead_shadow_dirty(
+        &mut self,
+        schema_version: SchemaVersionId,
+        version: &VersionRow,
+        shadow_may_exist: bool,
+    ) {
         self.ahead_shadow_dirty.push((
             schema_version,
             version.table().to_owned(),
             version.branch_key().clone(),
             version.row_uuid(),
+            shadow_may_exist,
         ));
     }
 
@@ -468,8 +477,14 @@ where
         }
         let mut dirty = std::mem::take(&mut self.ahead_shadow_dirty);
         dirty.sort_by(|a, b| (&a.1, &a.2, a.3).cmp(&(&b.1, &b.2, b.3)));
-        dirty.dedup_by(|a, b| a.1 == b.1 && a.2 == b.2 && a.3 == b.3);
-        for (schema_version, table, branch_key, row_uuid) in dirty {
+        dirty.dedup_by(|later, kept| {
+            let same_row = later.1 == kept.1 && later.2 == kept.2 && later.3 == kept.3;
+            if same_row {
+                kept.4 |= later.4;
+            }
+            same_row
+        });
+        for (schema_version, table, branch_key, row_uuid, shadow_may_exist) in dirty {
             let table_id = self.physical_table_id_for_schema(schema_version, &table)?;
             let primary_key = global_current_primary_key(&branch_key, row_uuid);
             let shadow = self.physical_current_table_for_schema(
@@ -505,6 +520,8 @@ where
                     let (_, record) = raw.into_variant_parts();
                     batch.update_raw(shadow, primary_key, record);
                 }
+                // No overlay before this batch means no shadow to remove.
+                None if !shadow_may_exist => {}
                 None => batch.delete(shadow, primary_key),
             }
         }
@@ -550,7 +567,7 @@ where
             physical,
         );
         if self.ahead_current_keys.insert(overlay_key, tx_id).is_none() {
-            self.mark_ahead_shadow_dirty(schema_version, version);
+            self.mark_ahead_shadow_dirty(schema_version, version, false);
         }
         Ok(())
     }
@@ -598,7 +615,7 @@ where
         )?;
         batch.delete(table, primary_key);
         self.ahead_current_keys.remove(&overlay_key);
-        self.mark_ahead_shadow_dirty(schema_version, version);
+        self.mark_ahead_shadow_dirty(schema_version, version, true);
         Ok(true)
     }
 
@@ -668,8 +685,15 @@ where
         }
         if let Some(image) = image {
             let key = self.ahead_overlay_key(&image)?;
-            self.ahead_current_keys.remove(&key);
+            let had_overlay = self.ahead_current_keys.remove(&key).is_some();
             self.write_ahead_current_insert(batch, &image)?;
+            if had_overlay {
+                // The replaced overlay may have left a shadow behind.
+                let image_schema_version = self
+                    .schema_version_for_alias(image.schema_version_alias())
+                    .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
+                self.mark_ahead_shadow_dirty(image_schema_version, &image, true);
+            }
         }
         Ok(())
     }
