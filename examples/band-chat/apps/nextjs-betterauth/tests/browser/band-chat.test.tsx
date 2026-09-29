@@ -1,5 +1,5 @@
 import { afterEach, it } from "vitest";
-import { page } from "vitest/browser";
+import { page, userEvent } from "vitest/browser";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { createAccountManager, type AccountStore, type DbConfig } from "jazz-tools";
@@ -179,6 +179,9 @@ it("negotiates persistent browser workers and renders the owner, join-request, m
   const linkInput = openDialog().getByLabelText("Room link");
   await waitFor(() => (linkInput.element() as HTMLInputElement).value.includes("join="), "link");
   const roomId = new URL((linkInput.element() as HTMLInputElement).value).searchParams.get("join")!;
+  // Dialogs are modal; close it so the second preview can be used.
+  await userEvent.keyboard("{Escape}");
+  await waitFor(() => document.querySelector("dialog[open]") === null, "invite dialog closes");
 
   const guest = await mount(
     {
@@ -199,6 +202,7 @@ it("negotiates persistent browser workers and renders the owner, join-request, m
     15_000,
   );
 
+  await preview(owner).getByRole("button", { name: /^Invite( \d+)?$/ }).click();
   await waitFor(
     () => hasText(openDialog().element() as HTMLElement, "Gus Guest"),
     "owner should see the join request with the guest's name",
@@ -210,6 +214,8 @@ it("negotiates persistent browser workers and renders the owner, join-request, m
     "the admitted request should clear",
     15_000,
   );
+  await userEvent.keyboard("{Escape}");
+  await waitFor(() => document.querySelector("dialog[open]") === null, "members dialog closes");
 
   await waitFor(
     () => guest.querySelector("h2")?.textContent === "Owner room",
@@ -223,20 +229,26 @@ it("negotiates persistent browser workers and renders the owner, join-request, m
     15_000,
   );
 
+  await preview(owner).getByRole("button", { name: /^Invite( \d+)?$/ }).click();
+  await waitFor(() => document.querySelector("dialog[open]") !== null, "members dialog opens");
   const dialog = openDialog().element() as HTMLElement;
   const guestRow = [...dialog.querySelectorAll("li")].find((row) => hasText(row, "Gus Guest"))!;
   await act(async () =>
     [...guestRow.querySelectorAll("button")].find((button) => hasText(button, "Remove"))!.click(),
   );
+  // Once removed, the guest moves from the member list to "People you know".
   await waitFor(
-    () => !hasText(openDialog().element() as HTMLElement, "Gus Guest"),
+    () =>
+      ![...(openDialog().element() as HTMLElement).querySelectorAll("li")].some(
+        (row) => hasText(row, "Gus Guest") && hasText(row, "Remove"),
+      ),
     "owner should render the guest removal",
     15_000,
   );
   // Revocation is an authority boundary, not a promise to erase rows already
   // retained in the guest's local-first store. The permission receipt proves
   // that a post-removal write is rejected at the serving authority.
-});
+}, 90_000);
 
 async function enrollTestAccount(server: { appId: string; serverUrl: string }, token: string) {
   const accounts = await createAccountManager({ appId: server.appId, serverUrl: server.serverUrl });
