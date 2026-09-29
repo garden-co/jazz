@@ -1,7 +1,9 @@
-//! Payload and contention of exclusive reads through a join, with each joined
-//! source recorded as its whole table (as garden-co/jazz#3697 shipped) or as
-//! the narrowed read of the rows the join could have consulted
-//! (garden-co/jazz#3694).
+//! Payload and contention of exclusive reads through a join, which record the
+//! joined source as the narrowed read of the rows the join could have
+//! consulted (garden-co/jazz#3694). Before narrowed reads, the joined source
+//! was recorded as its whole table: at 1,000 joined rows that downloaded
+//! 1,741,824 bytes for the read, uploaded 48,701 bytes to commit, and 7 of 8
+//! concurrent redemptions conflicted.
 //!
 //! A Core shell serves clients over queued wire transports. The owner seeds
 //! `JOINED_ROWS` invites, each already redeemed by one member, plus the
@@ -13,11 +15,11 @@
 //! cargo bench -p jazz --features testing --bench exclusive_join_narrowing
 //! ```
 //!
-//! The default run exposes one wall-time redemption per mode to Divan. Set
-//! `JAZZ_EXCLUSIVE_NARROWING_RECEIPT=1` to print a JSONL receipt instead: for
-//! each mode, the bytes the redeeming client downloads for its exclusive
-//! read, the bytes it uploads to commit, and how many of `CONCURRENT`
-//! simultaneous redemptions of different invites conflict.
+//! The default run exposes one wall-time redemption to Divan. Set
+//! `JAZZ_EXCLUSIVE_NARROWING_RECEIPT=1` to print a JSON receipt instead: the
+//! bytes the redeeming client downloads for its exclusive read, the bytes it
+//! uploads to commit, and how many of `CONCURRENT` simultaneous redemptions
+//! of different invites conflict.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
@@ -50,17 +52,14 @@ const MAX_TURNS: usize = 400;
 fn main() {
     jazz_benchmark_guard::refuse_contaminated_measurement();
     if std::env::var_os("JAZZ_EXCLUSIVE_NARROWING_RECEIPT").is_some() {
-        for narrowed in [false, true] {
-            run_receipt(narrowed);
-        }
+        run_receipt();
         return;
     }
     divan::main();
 }
 
-#[divan::bench(args = [false, true], sample_count = 10, sample_size = 1)]
-fn exclusive_join_redemption(bencher: divan::Bencher<'_, '_>, narrowed: bool) {
-    jazz::node::set_exclusive_source_narrowing_for_test(narrowed);
+#[divan::bench(sample_count = 10, sample_size = 1)]
+fn exclusive_join_redemption(bencher: divan::Bencher<'_, '_>) {
     bencher
         .with_inputs(|| {
             let net = Net::new(2);
@@ -74,10 +73,7 @@ fn exclusive_join_redemption(bencher: divan::Bencher<'_, '_>, narrowed: bool) {
         });
 }
 
-fn run_receipt(narrowed: bool) {
-    jazz::node::set_exclusive_source_narrowing_for_test(narrowed);
-    let mode = if narrowed { "narrowed" } else { "whole_table" };
-
+fn run_receipt() {
     let net = Net::new(2);
     net.seed(JOINED_ROWS, &["target"]);
     net.hold_invite(1, "target");
@@ -112,7 +108,6 @@ fn run_receipt(narrowed: bool) {
         "{}",
         json!({
             "bench": "exclusive_join_narrowing",
-            "mode": mode,
             "joined_rows": JOINED_ROWS,
             "read_download_bytes": read_down,
             "commit_upload_bytes": commit_up,

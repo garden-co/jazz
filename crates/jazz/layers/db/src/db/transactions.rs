@@ -45,16 +45,21 @@ where
     }
 
     /// The queries an exclusive read of `prepared` in `id` hydrates for the
-    /// sources it reads beyond its root: each source's narrowed read, or its
-    /// whole table.
+    /// sources it reads beyond its root: each source's narrowed read. Fails
+    /// when a source has none.
     pub(super) async fn exclusive_source_hydration_queries(
         &self,
         id: OpenTransactionId,
         prepared: &PreparedQuery,
+        include_deleted: bool,
     ) -> Result<Vec<Query>, Error> {
         self.lock_for_transaction_operation(id)
             .await?
-            .exclusive_source_hydration_queries(prepared.shape(), prepared.binding())
+            .exclusive_source_hydration_queries(
+                prepared.shape(),
+                prepared.binding(),
+                include_deleted,
+            )
             .map_err(Into::into)
     }
 

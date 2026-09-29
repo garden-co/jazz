@@ -172,6 +172,19 @@ impl Net {
         tier: DurabilityTier,
         open_tx: Option<OpenTransactionId>,
     ) -> Vec<RowUuid> {
+        root_rows(
+            query,
+            self.try_read(client, query, tier, open_tx).expect("read"),
+        )
+    }
+
+    fn try_read(
+        &self,
+        client: usize,
+        query: &Query,
+        tier: DurabilityTier,
+        open_tx: Option<OpenTransactionId>,
+    ) -> Result<SerializedReadResult, jazz::db::Error> {
         let db = self.db(client);
         let bytes = postcard::to_allocvec(query).unwrap();
         let read = db.all_serialized_query(
@@ -187,7 +200,7 @@ impl Net {
             || false,
             |attachment| db.detach_query(attachment),
         );
-        root_rows(query, self.drive(read).expect("read"))
+        self.drive(read)
     }
 
     /// Poll a one-shot local exclusive read without pumping anything,
@@ -1099,4 +1112,27 @@ fn include_commits_despite_an_unrelated_revocation() {
 #[test]
 fn include_conflicts_when_the_included_row_is_revoked() {
     assert_eq!(redeem_grant_while_revoking(true), Redeem::Conflict);
+}
+
+/// A read whose joined source has no narrowed read fails with the read
+/// pattern it attempted, instead of recording (and hydrating) the whole
+/// joined table.
+#[test]
+fn exclusive_read_through_a_flat_join_is_unsupported() {
+    let net = Net::new(&[0x0a, 0x0b]);
+    net.create_invite(OWNER, "abc");
+
+    let open = OpenTransactionId::new();
+    block_on(net.db(BACKEND).begin_exclusive(open)).unwrap();
+    let query = Query::from("invites").flat_join("members", "invites.code", "members.code");
+    let Err(error) = net.try_read(BACKEND, &query, DurabilityTier::Local, Some(open)) else {
+        panic!("a flat join is not supported in exclusive transactions");
+    };
+    assert!(
+        error.to_string().contains(
+            "Reading a flat join of `invites` with `members` is not supported in exclusive \
+             transactions yet"
+        ),
+        "{error}"
+    );
 }

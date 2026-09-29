@@ -2880,7 +2880,7 @@ fn assert_narrowed_reads(
         BTreeMap::new()
     };
     let binding = shape.bind(values).unwrap();
-    let reads = node.narrowed_source_reads(&shape, &binding).unwrap();
+    let reads = node.exclusive_source_reads(&shape, &binding, false).unwrap();
     assert_eq!(
         reads.keys().cloned().collect::<Vec<_>>(),
         expected
@@ -3075,8 +3075,20 @@ fn narrowed_reads_follow_nested_arrays_to_the_root() {
 /// A flat join routes its filters per source, so its root rows are not
 /// constrained by the root's own filters alone: it narrows nothing.
 #[test]
-fn narrowed_reads_skip_a_flat_join() {
-    let query =
-        crate::query::Query::from("todos").flat_join("comments", "todos._id", "comments.todo");
-    assert_narrowed_reads(query, Vec::new());
+fn exclusive_reads_reject_a_flat_join() {
+    let schema = narrowing_hierarchy_schema();
+    let (_dir, node) = open_node_with_schema(node(1), schema.clone());
+    let shape = crate::query::Query::from("todos")
+        .flat_join("comments", "todos._id", "comments.todo")
+        .validate(&schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let Err(error) = node.exclusive_source_reads(&shape, &binding, false) else {
+        panic!("a flat join has no narrowed reads");
+    };
+    assert_eq!(
+        error.to_string(),
+        "Reading a flat join of `todos` with `comments` is not supported in exclusive \
+         transactions yet"
+    );
 }

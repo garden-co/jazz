@@ -162,7 +162,6 @@ where
                 row_reads: Vec::new(),
                 absent_reads: Vec::new(),
                 predicate_reads: Vec::new(),
-                visible_table_reads: BTreeSet::new(),
                 source_narrowing: SourceNarrowing::default(),
                 narrowed_predicate_reads: BTreeSet::new(),
                 writes: Vec::new(),
@@ -371,55 +370,44 @@ where
         Ok(narrowing.claimed)
     }
 
-    /// Decide how a transaction query reads `source`, a source beyond its
-    /// root: through the narrowed read offered for it, as a whole table, or
-    /// not at all while a narrowed read is being recorded.
+    /// Claim the read of `source`, a source beyond its query's root: the
+    /// narrowed read offered for it, or nothing while a narrowed read is being
+    /// recorded. An exclusive transaction reads such a source no other way:
+    /// its query already failed with [`Error::UnsupportedExclusiveRead`] if a
+    /// source had no narrowed read (garden-co/jazz#3694).
     pub(super) fn claim_tx_source_read(
         &mut self,
         tx_id: OpenTransactionId,
         source: &crate::node::query_engine::SourceId,
-    ) -> Result<TxSourceRead, Error> {
+    ) -> Result<(), Error> {
+        let exclusive = self.transaction_is_exclusive(tx_id)?;
         let narrowing = &mut self.open_tx_mut(tx_id)?.source_narrowing;
         if narrowing.recording {
-            return Ok(TxSourceRead::Correlation);
+            return Ok(());
         }
-        let Some(read) = narrowing.offered.get(source) else {
-            return Ok(TxSourceRead::WholeTable);
-        };
-        let read = read.clone();
-        narrowing.claimed.push(read);
-        Ok(TxSourceRead::Narrowed)
-    }
-
-    /// Note that a query read `table` beyond its root through the reader's
-    /// read policy. Its rows are proven once the query finishes, as the rows
-    /// the reader can see, so rows the reader cannot see never enter the
-    /// read set.
-    pub(super) fn defer_tx_visible_table_read(
-        &mut self,
-        tx_id: OpenTransactionId,
-        schema_version: SchemaVersionId,
-        table: &str,
-    ) -> Result<(), Error> {
-        self.open_tx_mut(tx_id)?
-            .visible_table_reads
-            .insert((schema_version, table.to_owned()));
-        Ok(())
+        match narrowing.offered.get(source) {
+            Some(read) => {
+                let read = read.clone();
+                narrowing.claimed.push(read);
+                Ok(())
+            }
+            None if exclusive => Err(Error::UnsupportedExclusiveRead(format!(
+                "`{}` beyond the root of its query",
+                source.table
+            ))),
+            None => Ok(()),
+        }
     }
 
     /// Read transaction rows through a registered schema view, optionally
-    /// retaining root rows whose deletion register wins.
-    ///
-    /// `record_table_read` records the scan as a read of the whole table,
-    /// proving every row it returned (garden-co/jazz#3694); query source
-    /// resolution decides which sources need it.
+    /// retaining root rows whose deletion register wins. Records no read:
+    /// query source resolution records its sources' reads itself.
     pub async fn tx_current_rows_in_schema_with_options(
         &mut self,
         tx_id: OpenTransactionId,
         schema_version: SchemaVersionId,
         table: &str,
         include_deleted: bool,
-        record_table_read: bool,
     ) -> Result<Vec<CurrentRow>, Error> {
         let table_schema = self.table_in_schema(table, schema_version)?;
         self.tx_current_rows_with_table(
@@ -428,7 +416,7 @@ where
             table,
             table_schema,
             include_deleted,
-            record_table_read,
+            false,
         )
         .await
     }
@@ -2129,9 +2117,6 @@ pub(super) struct OpenTransaction {
     pub(super) absent_reads: Vec<AbsentRead>,
     /// Predicate reads recorded by the transaction.
     pub(super) predicate_reads: Vec<PredicateRead>,
-    /// Policy-filtered tables a query read beyond its root, still to be
-    /// recorded as reads of the rows the reader can see (garden-co/jazz#3694).
-    pub(super) visible_table_reads: BTreeSet<(SchemaVersionId, String)>,
     /// Narrowed reads offered to and claimed by the sources of the query
     /// being evaluated (garden-co/jazz#3694).
     pub(super) source_narrowing: SourceNarrowing,
@@ -2146,10 +2131,9 @@ pub(super) struct OpenTransaction {
 }
 
 /// Narrowed reads for the non-root sources of the query an open transaction
-/// is evaluating (garden-co/jazz#3694). The query offers one per source it
-/// can narrow; a source that resolves claims its offer instead of recording
-/// a read of its whole table, and the query records each claimed read once it
-/// finishes.
+/// is evaluating (garden-co/jazz#3694). The query offers one per source
+/// beyond its root; a source that resolves claims its offer, and the query
+/// records each claimed read once it finishes.
 #[derive(Clone, Default)]
 pub(super) struct SourceNarrowing {
     /// Set while a narrowed read itself is evaluated: the sources beyond its
@@ -2158,17 +2142,6 @@ pub(super) struct SourceNarrowing {
     pub(super) recording: bool,
     pub(super) offered: BTreeMap<crate::node::query_engine::SourceId, NarrowedSourceRead>,
     pub(super) claimed: Vec<NarrowedSourceRead>,
-}
-
-/// How an open transaction reads a source beyond its query's root.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum TxSourceRead {
-    /// Record a read of the whole table.
-    WholeTable,
-    /// The source claimed a narrowed read; record nothing for it now.
-    Narrowed,
-    /// The source only correlates a narrowed read; record nothing.
-    Correlation,
 }
 
 impl OpenTransaction {

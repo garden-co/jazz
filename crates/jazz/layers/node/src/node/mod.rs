@@ -357,8 +357,6 @@ pub use query_engine::{
 #[cfg(feature = "testing")]
 pub use query_eval::LocalMaintainedViewSubscriptionFootprint;
 #[cfg(any(test, feature = "testing"))]
-pub use query_eval::set_exclusive_source_narrowing_for_test;
-#[cfg(any(test, feature = "testing"))]
 pub use query_eval::take_client_physical_row_query_calls_for_test;
 pub use query_eval::{
     CoveredInputReceiver, LocalAuthorityReconciliation, LocalMaintainedViewSubscription,
@@ -3283,6 +3281,11 @@ pub enum Error {
     /// Exact branch selector is missing, malformed, or inconsistent with row cells.
     #[error("invalid branch key: {0}")]
     InvalidBranchKey(String),
+    /// An exclusive transaction read a pattern whose read set it cannot
+    /// record precisely. It is rejected rather than recorded as a read of
+    /// whole tables (garden-co/jazz#3694).
+    #[error("Reading {0} is not supported in exclusive transactions yet")]
+    UnsupportedExclusiveRead(String),
     /// An exclusive transaction no longer matches its fixed local snapshot.
     #[error("row visible parent changed since transaction write was staged")]
     TransactionConflict,

@@ -257,8 +257,6 @@ use normalization::*;
 mod narrowed_reads;
 
 pub(in crate::node) use narrowed_reads::NarrowedSourceRead;
-#[cfg(any(test, feature = "testing"))]
-pub use narrowed_reads::set_exclusive_source_narrowing_for_test;
 
 mod subscriptions;
 
@@ -3609,8 +3607,6 @@ where
         }
         self.record_tx_narrowed_source_reads(tx_id, narrowed_reads, identity, authorization_mode)
             .await?;
-        self.record_tx_visible_table_reads(tx_id, identity, authorization_mode)
-            .await?;
         Ok(snapshot)
     }
 
@@ -3684,8 +3680,6 @@ where
         }
         self.record_tx_narrowed_source_reads(tx_id, narrowed_reads, identity, authorization_mode)
             .await?;
-        self.record_tx_visible_table_reads(tx_id, identity, authorization_mode)
-            .await?;
         self.finish_engine_query_rows_in_schema(query, shape.schema_version(), &mut rows)?;
         if query.array_subqueries.is_empty() {
             self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
@@ -3734,34 +3728,23 @@ where
     /// The queries a partial node hydrates before an exclusive read of
     /// `shape`: for each source it reads beyond its root (joined, included,
     /// correlated and relation sources), the narrowed read the transaction
-    /// records for that source, or its whole table where the source has none
-    /// (garden-co/jazz#3694). Rows the replica never received there then do
-    /// not make the read conflict.
+    /// records for that source (garden-co/jazz#3694). Rows the replica never
+    /// received there then do not make the read conflict. Fails with
+    /// [`Error::UnsupportedExclusiveRead`] before anything is hydrated when a
+    /// source has no narrowed read.
     #[doc(hidden)]
     pub fn exclusive_source_hydration_queries(
         &self,
         shape: &ValidatedQuery,
         binding: &Binding,
+        include_deleted: bool,
     ) -> Result<Vec<JazzQuery>, Error> {
-        use crate::node::query_engine::{RowSetExpr, SourceRole};
-        let normalized = self.normalized_row_set_shape(shape, binding)?;
-        let narrowed = self.narrowed_source_reads(shape, binding)?;
-        let sources = normalized
-            .nodes
-            .values()
-            .filter_map(|node| match node {
-                RowSetExpr::Source { source, .. } => Some(source),
-                _ => None,
-            })
-            .chain(&normalized.auxiliary_sources)
-            .filter(|source| source.path.components != [SourceRole::Root])
-            .collect::<BTreeSet<_>>();
         let mut queries = Vec::new();
-        for source in sources {
-            let query = match narrowed.get(source) {
-                Some(read) => read.shape.query().clone(),
-                None => JazzQuery::from(source.table.as_str()),
-            };
+        for read in self
+            .exclusive_source_reads(shape, binding, include_deleted)?
+            .into_values()
+        {
+            let query = read.shape.query().clone();
             if !queries.contains(&query) {
                 queries.push(query);
             }
@@ -3771,9 +3754,8 @@ where
 
     /// Offer the narrowed reads of `shape`'s non-root sources to the sources
     /// of an exclusive transaction query about to be compiled. Returns the
-    /// narrowing to restore once it is compiled. A query that returns deleted
-    /// root rows narrows nothing: a narrowed read correlates only with the
-    /// root rows that are visible.
+    /// narrowing to restore once it is compiled. Fails with
+    /// [`Error::UnsupportedExclusiveRead`] when a source has none.
     fn offer_tx_query_narrowed_reads(
         &mut self,
         tx_id: OpenTransactionId,
@@ -3781,11 +3763,10 @@ where
         binding: &Binding,
         include_deleted: bool,
     ) -> Result<SourceNarrowing, Error> {
-        let reads = if !include_deleted
-            && self.transaction_is_exclusive(tx_id)?
+        let reads = if self.transaction_is_exclusive(tx_id)?
             && !self.open_tx(tx_id)?.source_narrowing.recording
         {
-            self.narrowed_source_reads(shape, binding)?
+            self.exclusive_source_reads(shape, binding, include_deleted)?
         } else {
             BTreeMap::new()
         };
@@ -3795,9 +3776,8 @@ where
     /// Record the narrowed reads a transaction query's sources claimed. Each
     /// runs as its own query in the transaction, which records its predicate
     /// read and proves the rows it returns; the sources beyond its root only
-    /// correlate it with the outer query's root and record nothing. A read
-    /// that cannot be evaluated falls back to a read of its whole table as
-    /// the reader sees it (garden-co/jazz#3694).
+    /// correlate it with the outer query's root and record nothing
+    /// (garden-co/jazz#3694).
     async fn record_tx_narrowed_source_reads(
         &mut self,
         tx_id: OpenTransactionId,
@@ -3808,9 +3788,6 @@ where
         if reads.is_empty() || !self.transaction_is_exclusive(tx_id)? {
             return Ok(());
         }
-        // The outer query's own deferred reads are recorded after these, by
-        // its own call, not by the narrowed reads' queries.
-        let deferred = std::mem::take(&mut self.open_tx_mut(tx_id)?.visible_table_reads);
         for read in reads {
             let key = (read.shape.shape_id(), read.binding.binding_id());
             if self.open_tx(tx_id)?.narrowed_predicate_reads.contains(&key) {
@@ -3826,55 +3803,11 @@ where
                 authorization_mode,
             ))
             .await;
-            let open_tx = self.open_tx_mut(tx_id)?;
-            open_tx.source_narrowing.recording = false;
-            if recorded.is_ok() {
-                open_tx.narrowed_predicate_reads.insert(key);
-            } else {
-                open_tx.visible_table_reads.insert((
-                    read.shape.schema_version(),
-                    read.shape.query().table.clone(),
-                ));
-            }
-        }
-        self.open_tx_mut(tx_id)?
-            .visible_table_reads
-            .extend(deferred);
-        Ok(())
-    }
-
-    /// Prove the rows of the policy-filtered tables a query read beyond its
-    /// root, as the rows the reader can see. Each becomes a whole-table read
-    /// run as the reader, so the authority's re-run under the same policies
-    /// compares like with like (garden-co/jazz#3694).
-    async fn record_tx_visible_table_reads(
-        &mut self,
-        tx_id: OpenTransactionId,
-        identity: AuthorSubject,
-        authorization_mode: QueryAuthorizationMode,
-    ) -> Result<(), Error> {
-        let tables = std::mem::take(&mut self.open_tx_mut(tx_id)?.visible_table_reads);
-        if !self.transaction_is_exclusive(tx_id)? {
-            return Ok(());
-        }
-        for (schema_version, table) in tables {
-            let schema = &self
-                .catalogue
-                .catalogue_schemas
-                .get(&schema_version)
-                .ok_or(Error::InvalidStoredValue("transaction schema is unknown"))?
-                .schema;
-            let shape = crate::query::Query::from(table.as_str()).validate(schema)?;
-            let binding = shape.bind(BTreeMap::new())?;
-            Box::pin(self.tx_query_in_authorization_mode(
-                tx_id,
-                &shape,
-                &binding,
-                identity,
-                false,
-                authorization_mode,
-            ))
-            .await?;
+            self.open_tx_mut(tx_id)?.source_narrowing.recording = false;
+            recorded?;
+            self.open_tx_mut(tx_id)?
+                .narrowed_predicate_reads
+                .insert(key);
         }
         Ok(())
     }

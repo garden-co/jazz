@@ -18,32 +18,73 @@
 //! when it correlates with a row the query could have consulted, including a
 //! correlated row that was absent. The parent filters kept on the chain only
 //! ever drop conjuncts, so the read covers a superset of the rows the engine
-//! joined. Sources whose shape has no such restriction keep the whole-table
-//! read.
+//! joined.
+//!
+//! A source with no narrowed read is not read at all: the query fails with
+//! [`Error::UnsupportedExclusiveRead`] naming the read pattern, rather than
+//! falling back to a read of the whole table, which does not scale.
 
 use super::*;
 use crate::query::JoinCorrelation;
 
-#[cfg(any(test, feature = "testing"))]
-thread_local! {
-    static NARROWING_DISABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Record every source beyond a query's root as a read of its whole table, as
-/// before narrowed reads existed, so a benchmark can compare both in one
-/// build. Applies to the current thread.
-#[cfg(any(test, feature = "testing"))]
-#[doc(hidden)]
-pub fn set_exclusive_source_narrowing_for_test(enabled: bool) {
-    NARROWING_DISABLED.with(|disabled| disabled.set(!enabled));
-}
-
-/// A narrowed read of one non-root source: a query the transaction runs and
-/// records in place of a read of the source's whole table.
+/// A narrowed read of one non-root source: the query the transaction runs
+/// and records as its read of that source.
 #[derive(Clone)]
 pub(in crate::node) struct NarrowedSourceRead {
     pub(in crate::node) shape: ValidatedQuery,
     pub(in crate::node) binding: Binding,
+}
+
+/// The narrowed reads of a query's non-root sources, and a description of
+/// the read pattern of each source that has none.
+#[derive(Default)]
+pub(in crate::node) struct NarrowedSources {
+    pub(in crate::node) reads: BTreeMap<SourceId, NarrowedSourceRead>,
+    unsupported: BTreeMap<SourceId, String>,
+    /// Set when no source of the query narrows.
+    unsupported_query: Option<String>,
+}
+
+impl NarrowedSources {
+    fn unsupported_query(pattern: String) -> Self {
+        Self {
+            unsupported_query: Some(pattern),
+            ..Self::default()
+        }
+    }
+
+    /// The read pattern of `source`, which has no narrowed read.
+    fn unsupported_pattern(&self, source: &SourceId, root: &str) -> String {
+        self.unsupported
+            .get(source)
+            .or(self.unsupported_query.as_ref())
+            .cloned()
+            .unwrap_or_else(|| {
+                format!(
+                    "`{}` as source `{}` of a query on `{root}`",
+                    source.table,
+                    describe_source_path(source),
+                )
+            })
+    }
+}
+
+fn describe_source_path(source: &SourceId) -> String {
+    use crate::node::query_engine::SourceRole;
+    source
+        .path
+        .components
+        .iter()
+        .map(|component| match component {
+            SourceRole::Root => "root".to_owned(),
+            SourceRole::Alias(name)
+            | SourceRole::RecursiveSeed(name)
+            | SourceRole::RecursiveStep(name)
+            | SourceRole::CorrelatedChild(name)
+            | SourceRole::Policy(name) => name.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// A row a narrowed source correlates with, and how that row is itself
@@ -181,37 +222,102 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    /// The narrowed read for each non-root source of `shape` that correlates
-    /// back to its root, keyed by the source it replaces. A source missing
-    /// here keeps its whole-table read. Shapes whose root rows are not a
-    /// subset of the rows its own filters select (policy branches, flat joins
-    /// and relation trees) narrow nothing.
-    pub(in crate::node) fn narrowed_source_reads(
+    /// The narrowed read of every source of `shape` beyond its root, keyed by
+    /// source, for an exclusive transaction query. Fails with
+    /// [`Error::UnsupportedExclusiveRead`] naming the read pattern of the
+    /// first source that has none. `include_deleted` reads narrow nothing: a
+    /// narrowed read correlates only with the root rows that are visible.
+    pub(in crate::node) fn exclusive_source_reads(
         &self,
         shape: &ValidatedQuery,
         binding: &Binding,
+        include_deleted: bool,
     ) -> Result<BTreeMap<SourceId, NarrowedSourceRead>, Error> {
-        #[cfg(any(test, feature = "testing"))]
-        if NARROWING_DISABLED.with(std::cell::Cell::get) {
+        use crate::node::query_engine::{RowSetExpr, SourceRole};
+        let normalized = self.normalized_row_set_shape(shape, binding)?;
+        let sources = normalized
+            .nodes
+            .values()
+            .filter_map(|node| match node {
+                RowSetExpr::Source { source, .. } => Some(source),
+                _ => None,
+            })
+            .chain(&normalized.auxiliary_sources)
+            .filter(|source| source.path.components != [SourceRole::Root])
+            .collect::<BTreeSet<_>>();
+        let Some(first) = sources.first() else {
             return Ok(BTreeMap::new());
-        }
-        let query = shape.query();
-        let mut candidates = Vec::<(SourceId, JazzQuery)>::new();
-        if !query.policy_branches.is_empty()
-            || query.flat_join.is_some()
-            || query.relation.is_some()
+        };
+        let root = &shape.query().table;
+        let narrowed = if include_deleted {
+            NarrowedSources::unsupported_query(format!(
+                "deleted `{root}` rows together with `{}`",
+                first.table
+            ))
+        } else {
+            self.narrowed_source_reads(shape, binding)?
+        };
+        if let Some(source) = sources
+            .iter()
+            .find(|source| !narrowed.reads.contains_key(source))
         {
-            return Ok(BTreeMap::new());
+            return Err(Error::UnsupportedExclusiveRead(
+                narrowed.unsupported_pattern(source, root),
+            ));
+        }
+        Ok(narrowed.reads)
+    }
+
+    /// The narrowed read for each non-root source of `shape` that correlates
+    /// back to its root, keyed by the source it replaces, and the read
+    /// pattern of each source that does not. Shapes whose root rows are not
+    /// a subset of the rows its own filters select (policy branches, flat
+    /// joins and retained relation trees) narrow nothing.
+    fn narrowed_source_reads(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+    ) -> Result<NarrowedSources, Error> {
+        let query = shape.query();
+        let root_table = &query.table;
+        if let Some(relation) = &query.relation {
+            return Ok(NarrowedSources::unsupported_query(
+                if crate::query::relation_union_parts(&relation.rel).is_some() {
+                    format!("a union of relations over `{root_table}`")
+                } else {
+                    format!("a relation over `{root_table}` that projects selected columns")
+                },
+            ));
+        }
+        if let Some(flat_join) = &query.flat_join {
+            let tables = flat_join
+                .sources
+                .iter()
+                .map(|source| format!("`{}`", source.table))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Ok(NarrowedSources::unsupported_query(format!(
+                "a flat join of `{root_table}` with {tables}"
+            )));
+        }
+        if !query.policy_branches.is_empty() {
+            return Ok(NarrowedSources::unsupported_query(format!(
+                "`{root_table}` through policy branches"
+            )));
         }
         let values = binding.values();
         let Some(root_filters) = bind_predicates(&query.filters, values) else {
-            return Ok(BTreeMap::new());
+            return Ok(NarrowedSources::unsupported_query(format!(
+                "`{root_table}` with a filter whose parameter is not bound"
+            )));
         };
         let root = CorrelationParent {
             table: query.table.clone(),
             filters: root_filters,
             up: None,
         };
+        let mut candidates = Vec::<(SourceId, JazzQuery)>::new();
+        let mut narrowed = NarrowedSources::default();
 
         for (index, join) in query.joins.iter().enumerate() {
             Self::narrow_join(
@@ -220,6 +326,7 @@ where
                 &format!("join_via:{index}"),
                 values,
                 &mut candidates,
+                &mut narrowed.unsupported,
             );
         }
 
@@ -231,12 +338,18 @@ where
             .filter_map(|include| include.path.split('.').next())
             .collect::<BTreeSet<_>>();
         for (column, target) in &root_schema.references {
-            if explicit_root_segments.contains(column.as_str())
-                || !self.column_is_scalar_reference(&query.table, column, schema_version)
-            {
+            if explicit_root_segments.contains(column.as_str()) {
                 continue;
             }
-            let (narrowed, _) = root.child(
+            let source = implicit_reference_source_id(target, column);
+            if !self.column_is_scalar_reference(&query.table, column, schema_version) {
+                narrowed.unsupported.insert(
+                    source,
+                    format!("`{target}` through the reference array `{root_table}.{column}`"),
+                );
+                continue;
+            }
+            let (read, _) = root.child(
                 target,
                 Vec::new(),
                 Some(Correlation {
@@ -245,7 +358,7 @@ where
                     extra: Vec::new(),
                 }),
             );
-            candidates.push((implicit_reference_source_id(target, column), narrowed));
+            candidates.push((source, read));
         }
         for (include_index, include) in query.includes.iter().enumerate() {
             let mut parent = root.clone();
@@ -258,10 +371,19 @@ where
                 else {
                     break;
                 };
+                let source =
+                    include_auxiliary_source_id(target.clone(), include_index, segment_index);
                 if !self.column_is_scalar_reference(&parent.table, segment, schema_version) {
+                    narrowed.unsupported.insert(
+                        source,
+                        format!(
+                            "`{target}` through the reference array `{}.{segment}`",
+                            parent.table
+                        ),
+                    );
                     break;
                 }
-                let (narrowed, child) = parent.child(
+                let (read, child) = parent.child(
                     &target,
                     Vec::new(),
                     Some(Correlation {
@@ -270,10 +392,7 @@ where
                         extra: Vec::new(),
                     }),
                 );
-                candidates.push((
-                    include_auxiliary_source_id(target, include_index, segment_index),
-                    narrowed,
-                ));
+                candidates.push((source, read));
                 parent = child;
             }
         }
@@ -287,6 +406,7 @@ where
                 &[index],
                 values,
                 &mut candidates,
+                &mut narrowed.unsupported,
             );
         }
 
@@ -296,18 +416,26 @@ where
             .get(&schema_version)
             .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?
             .schema;
-        let mut reads = BTreeMap::new();
-        for (source, narrowed) in candidates {
-            // A shape the query model rejects keeps its whole-table read.
-            let Ok(shape) = narrowed.validate(schema) else {
-                continue;
-            };
-            let Ok(binding) = shape.bind(BTreeMap::new()) else {
-                continue;
-            };
-            reads.insert(source, NarrowedSourceRead { shape, binding });
+        for (source, read) in candidates {
+            let bound = read
+                .validate(schema)
+                .and_then(|shape| shape.bind(BTreeMap::new()).map(|binding| (shape, binding)));
+            match bound {
+                Ok((shape, binding)) => {
+                    narrowed
+                        .reads
+                        .insert(source, NarrowedSourceRead { shape, binding });
+                }
+                Err(error) => {
+                    let pattern = format!(
+                        "`{}` correlated with `{root_table}` ({error})",
+                        source.table
+                    );
+                    narrowed.unsupported.insert(source, pattern);
+                }
+            }
         }
-        Ok(reads)
+        Ok(narrowed)
     }
 
     fn column_is_scalar_reference(
@@ -334,13 +462,32 @@ where
         path: &str,
         values: &BTreeMap<String, Value>,
         candidates: &mut Vec<(SourceId, JazzQuery)>,
+        unsupported: &mut BTreeMap<SourceId, String>,
     ) {
-        // A lookup join correlates through a third table; keep its source
-        // and everything below it whole.
+        // A lookup join correlates through a third table, which a reverse
+        // join cannot express; so does everything below it.
         if join.source_lookup.is_some() {
+            Self::decline_join(
+                join,
+                path,
+                &format!(
+                    "`{}` through a lookup join from `{}`",
+                    join.table, parent.table
+                ),
+                unsupported,
+            );
             return;
         }
         let Some(filters) = bind_predicates(&join.filters, values) else {
+            Self::decline_join(
+                join,
+                path,
+                &format!(
+                    "`{}` joined to `{}` with a filter whose parameter is not bound",
+                    join.table, parent.table
+                ),
+                unsupported,
+            );
             return;
         };
         let correlation = (join.target != JoinTarget::Uncorrelated).then(|| Correlation {
@@ -373,6 +520,26 @@ where
                 &format!("{path}:nested:{index}"),
                 values,
                 candidates,
+                unsupported,
+            );
+        }
+    }
+
+    /// Note `pattern` as the read of the join source at `path` and every
+    /// source nested below it.
+    fn decline_join(
+        join: &JoinVia,
+        path: &str,
+        pattern: &str,
+        unsupported: &mut BTreeMap<SourceId, String>,
+    ) {
+        unsupported.insert(nested_join_source_id(join, path), pattern.to_owned());
+        for (index, nested) in join.nested_joins.iter().enumerate() {
+            Self::decline_join(
+                nested,
+                &format!("{path}:nested:{index}"),
+                pattern,
+                unsupported,
             );
         }
     }
@@ -385,11 +552,19 @@ where
         path: &[usize],
         values: &BTreeMap<String, Value>,
         candidates: &mut Vec<(SourceId, JazzQuery)>,
+        unsupported: &mut BTreeMap<SourceId, String>,
     ) {
+        let source = correlated_child_source_id(owner, subquery, path);
         let Some(filters) = bind_predicates(&subquery.filters, values) else {
+            unsupported.insert(
+                source,
+                format!(
+                    "`{}` related to `{}` with a filter whose parameter is not bound",
+                    subquery.table, parent.table
+                ),
+            );
             return;
         };
-        let source = correlated_child_source_id(owner, subquery, path);
         let (narrowed, child) = parent.child(
             &subquery.table,
             filters,
@@ -403,7 +578,15 @@ where
         for (index, nested) in subquery.nested_arrays.iter().enumerate() {
             let mut nested_path = path.to_vec();
             nested_path.push(index);
-            Self::narrow_array_subquery(&child, &source, nested, &nested_path, values, candidates);
+            Self::narrow_array_subquery(
+                &child,
+                &source,
+                nested,
+                &nested_path,
+                values,
+                candidates,
+                unsupported,
+            );
         }
     }
 }
