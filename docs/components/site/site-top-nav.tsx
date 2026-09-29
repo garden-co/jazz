@@ -86,21 +86,27 @@ export function SiteTopNav() {
                 key={link.href}
                 label={link.label}
                 href={link.href}
+                // Labels stay on one line; the bar collapses search instead.
+                className="whitespace-nowrap"
                 isSelected={pathname === link.href || pathname.startsWith(`${link.href}/`)}
               />
             ))}
-            <TopNavItem label="Dashboard" href="https://v2.dashboard.jazz.tools" />
+            <TopNavItem
+              label="Dashboard"
+              href="https://v2.dashboard.jazz.tools"
+              className="whitespace-nowrap"
+            />
           </>
-        }
-        centerContent={
-          // The centred 320px field clears the nav links only from ~1120px
-          // wide; narrower bars use the search icon at the end instead.
-          <span className="site-search-field contents max-[1120px]:hidden">
-            <SearchField onOpen={openSearch} />
-          </span>
         }
         endContent={
           <HStack gap={1} vAlign="center">
+            {/* The search field sits at the end, not centred: centred, it
+              collided with the nav links on laptop widths. Below 1120px the
+              links and the field no longer fit side by side, so search
+              collapses to an icon. */}
+            <span className="site-search-field contents max-[1120px]:hidden">
+              <SearchField onOpen={openSearch} />
+            </span>
             <span className="contents min-[1120px]:hidden">
               <SearchIconButton onOpen={openSearch} />
             </span>

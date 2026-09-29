@@ -9,7 +9,8 @@
     "start": "next start",
     "test": "pnpm test:server && pnpm test:browser",
     "test:server": "vitest run --config vitest.config.server.ts",
-    "test:browser": "vitest run --config vitest.config.browser.ts"
+    "test:browser": "vitest run --config vitest.config.browser.ts",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "better-auth": "1.7.1",

@@ -392,8 +392,6 @@ pub struct NodeOpenReceipt {
     pub recover_global_times: Duration,
     /// Pending-edge and rejected-transaction recovery time.
     pub recover_pending_and_rejected: Duration,
-    /// Bounded unclean-close cleanup time.
-    pub recover_unclean_close: Duration,
     /// Persisted maintained-query known-state recovery time.
     pub recover_known_state: Duration,
     /// In-memory ahead-current index reconstruction time.
@@ -3176,6 +3174,24 @@ fn validate_mergeable_write_shape(cells_empty: bool, deletion_present: bool) -> 
             "mergeable commits must carry content cells or a deletion-register event",
         )),
     }
+}
+
+#[cfg(test)]
+#[test]
+fn mergeable_write_shape_requires_exactly_one_register() {
+    // Content-only and deletion-only writes are well formed.
+    assert!(validate_mergeable_write_shape(false, false).is_ok());
+    assert!(validate_mergeable_write_shape(true, true).is_ok());
+    // A write carrying neither stays invalid: inserts with every column
+    // omitted author explicit null cells instead of relaxing this check.
+    assert!(matches!(
+        validate_mergeable_write_shape(true, false),
+        Err(Error::InvalidMergeableCommit(message)) if message.contains("must carry content cells")
+    ));
+    assert!(matches!(
+        validate_mergeable_write_shape(false, true),
+        Err(Error::InvalidMergeableCommit(message)) if message.contains("cannot also carry deletion")
+    ));
 }
 
 #[cfg(test)]
