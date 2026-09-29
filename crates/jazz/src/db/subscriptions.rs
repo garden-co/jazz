@@ -1300,9 +1300,24 @@ where
             && remote_propagate_upstream
             && opts.read_view.is_default()
             && crate::node::simple_scalar_exit_query(state_shape.query());
+        // A stream that already opens settled rides a coverage that was live
+        // before it; only a fresh strict opening can miss a deletion.
+        let deletion_reconciliation = if read_tier >= DurabilityTier::Global
+            && !settled
+            && authorization_mode == QueryAuthorizationMode::ClientLocal
+            && remote_read_tier.is_some()
+            && remote_propagate_upstream
+            && opts.read_view.is_default()
+            && crate::node::single_table_scalar_query(state_shape.query())
+        {
+            DeletionReconciliation::Unchecked
+        } else {
+            DeletionReconciliation::Disabled
+        };
         let state = Rc::new(RefCell::new(SubscriptionState {
             closed: Rc::clone(&closed),
             terminal_rows,
+            deletion_reconciliation,
             scalar_reconciliation_enabled,
             scalar_authority_revision: 0,
             scalar_reconciliation: ScalarReconciliation::default(),

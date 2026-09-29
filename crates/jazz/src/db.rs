@@ -4882,12 +4882,59 @@ struct ScalarReconciliation {
     retry_delay_ms: u64,
 }
 
+/// First-settlement deletion reconciliation for one strict Global stream.
+///
+/// Query programs carry no deletion witnesses: a deletion reaches a client
+/// only as a row delta on a coverage that was live when it happened. A row
+/// this client retained from an earlier, closed read can therefore be live
+/// locally while the authority's settled answer omits it. Before such a
+/// stream first reports `settled`, exactly those omitted rows are probed
+/// through the ordinary current-rows path and their images (including
+/// deletions and policy exclusions) are ingested. A stream whose local and
+/// authority views agree never leaves `Unchecked` for `Probing`.
+/// Bound on how long a strict stream's first settlement may wait for local
+/// candidate discovery before settling on the authority's answer alone.
+const DELETION_DISCOVERY_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+#[derive(Default)]
+enum DeletionReconciliation {
+    /// The query shape or stream kind is outside the reconciled pilot, or
+    /// the stream settled before any check was needed.
+    #[default]
+    Disabled,
+    /// No settled authority answer has been compared yet.
+    Unchecked,
+    /// The authority answer settled while other query work was pending.
+    /// Candidate discovery waits for an idle runtime (a new graph must not
+    /// queue behind, e.g., large-value chunk hydration that this same turn
+    /// has to request) up to `DELETION_DISCOVERY_LIMIT` from `since`.
+    Deferred { since: web_time::Instant },
+    /// The authority answer settled; a cold Local-tier graph of the same
+    /// query is still producing the client's candidate inventory.
+    Discovering {
+        maintained: LocalMaintainedViewSubscription,
+        runtime_token: u64,
+        since: web_time::Instant,
+    },
+    /// Local rows the authority omitted. The runtime probes them in
+    /// `MAX_CURRENT_ROWS` batches; settlement is withheld until the last
+    /// batch resolves.
+    Pending {
+        rows: Vec<crate::protocol::CurrentRowCoordinate>,
+        active: Option<ScalarProbe>,
+        context: crate::protocol::PolicyBindingKey,
+    },
+    /// The probe resolved (or the views agreed); settle as usual.
+    Done,
+}
+
 struct SubscriptionState {
     /// Set synchronously by stream finalization, before its async cleanup is
     /// drained. Refresh observes this independently owned cell before it can
     /// install a replacement maintained subscription.
     closed: Rc<Cell<bool>>,
     terminal_rows: bool,
+    deletion_reconciliation: DeletionReconciliation,
     scalar_reconciliation_enabled: bool,
     scalar_authority_revision: u64,
     scalar_reconciliation: ScalarReconciliation,

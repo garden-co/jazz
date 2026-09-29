@@ -1508,6 +1508,15 @@ where
                 let owner = Rc::downgrade(&state);
                 let mut state = state.borrow_mut();
                 state.scalar_reconciliation = ScalarReconciliation::default();
+                if let DeletionReconciliation::Discovering {
+                    maintained,
+                    runtime_token,
+                    ..
+                } = std::mem::take(&mut state.deletion_reconciliation)
+                    && node.groove_runtime_token() == runtime_token
+                {
+                    node.unsubscribe_groove_subscription(maintained.subscription_id());
+                }
                 let mut upstream = std::mem::take(&mut state.upstream_subscription_handles);
                 upstream.append(&mut state.authority_witness);
                 (state.local_subscription_cleanup.take(), upstream, owner)
@@ -3315,6 +3324,7 @@ where
         }
         connections
             .retain(|connection| !retired.iter().any(|failed| Rc::ptr_eq(connection, failed)));
+        Box::pin(self.advance_deletion_reconciliations()).await?;
         Box::pin(self.reconcile_scalar_query_inputs()).await?;
         if !released_outbox_tx_ids.is_empty() {
             self.release_outbox_uploads(released_outbox_tx_ids);
@@ -3438,6 +3448,169 @@ where
                 .get_mut(&key)
             {
                 owner.scalar_reconciliation = reconciliation;
+            }
+        }
+        Ok(())
+    }
+
+    /// Re-run local subscription refresh on the next owner turn.
+    fn mark_local_subscriptions_dirty(&self) {
+        self.subscriber_dirty_epoch
+            .set(self.subscriber_dirty_epoch.get().wrapping_add(1));
+        self.local_subscription_dirty_generation.set(
+            self.local_subscription_dirty_generation
+                .get()
+                .wrapping_add(1),
+        );
+        self.schedule_tick(TickUrgency::Immediate);
+    }
+
+    /// Drive every strict stream's pending first-settlement deletion probe
+    /// (see [`DeletionReconciliation`]). Each stream probes its candidate rows
+    /// in `MAX_CURRENT_ROWS` batches through the ordinary current-rows path;
+    /// the router ingests each receipt's carriers (deleted images included)
+    /// before exposing it. Access loss is not applied as local redaction.
+    /// Discovery that cannot finish within `DELETION_DISCOVERY_LIMIT`, and
+    /// an unanswerable probe (no upstream, disconnect, timeout) releases the
+    /// stream to settle on the authority's answer alone, as before.
+    async fn advance_deletion_reconciliations(&self) -> Result<(), Error> {
+        let live = self.subscriptions.borrow().clone();
+        for weak in live {
+            let Some(owner) = weak.upgrade() else {
+                continue;
+            };
+            let waiting_since = {
+                let state = owner.borrow();
+                if state.closed.get() {
+                    continue;
+                }
+                match &state.deletion_reconciliation {
+                    DeletionReconciliation::Deferred { since }
+                    | DeletionReconciliation::Discovering { since, .. } => Some(*since),
+                    DeletionReconciliation::Pending { .. } => None,
+                    _ => continue,
+                }
+            };
+            if let Some(since) = waiting_since {
+                // Discovery progresses in subscription refresh; this pass
+                // only bounds it and re-arms refresh once the runtime idles.
+                let elapsed = since.elapsed();
+                if elapsed >= DELETION_DISCOVERY_LIMIT {
+                    let abandoned = std::mem::replace(
+                        &mut owner.borrow_mut().deletion_reconciliation,
+                        DeletionReconciliation::Done,
+                    );
+                    if let DeletionReconciliation::Discovering {
+                        maintained,
+                        runtime_token,
+                        ..
+                    } = abandoned
+                    {
+                        let mut node = self.node.lock().await;
+                        if node.groove_runtime_token() == runtime_token {
+                            node.unsubscribe_groove_subscription(maintained.subscription_id());
+                        }
+                    }
+                    self.mark_local_subscriptions_dirty();
+                } else {
+                    // Re-check on a short cadence (not a hot loop) once the
+                    // runtime idles, and always at the deadline.
+                    let idle = !self.node.lock().await.has_pending_query_runtime();
+                    if idle {
+                        self.local_subscription_dirty_generation.set(
+                            self.local_subscription_dirty_generation
+                                .get()
+                                .wrapping_add(1),
+                        );
+                    }
+                    if let Some(scheduler) = self.scheduler.borrow().as_ref() {
+                        let remaining =
+                            u64::try_from((DELETION_DISCOVERY_LIMIT - elapsed).as_millis())
+                                .unwrap_or(u64::MAX)
+                                .max(1);
+                        scheduler.schedule_tick_after(if idle {
+                            remaining.min(50)
+                        } else {
+                            remaining
+                        });
+                    }
+                }
+                continue;
+            }
+            let mut reconciliation =
+                std::mem::take(&mut owner.borrow_mut().deletion_reconciliation);
+            let DeletionReconciliation::Pending {
+                rows,
+                active,
+                context,
+            } = &mut reconciliation
+            else {
+                unreachable!("only pending reconciliations are taken");
+            };
+            let mut resolved = false;
+            if let Some(probe) = active {
+                let waker = self.query_runtime_waker();
+                let mut cx = std::task::Context::from_waker(
+                    waker.as_ref().unwrap_or(std::task::Waker::noop()),
+                );
+                let result = match probe.future.as_mut().poll(&mut cx) {
+                    std::task::Poll::Ready(result) => Some(result),
+                    std::task::Poll::Pending if web_time::Instant::now() >= probe.deadline => {
+                        Some(row_availability::CurrentRowsResult::Unknown)
+                    }
+                    std::task::Poll::Pending => None,
+                };
+                match result {
+                    None => {}
+                    Some(row_availability::CurrentRowsResult::Applied(receipt))
+                        if receipt.context == *context =>
+                    {
+                        // The router ingested the receipt's carriers before
+                        // exposing it: a deleted image now deletes the row
+                        // locally. A `CurrentUnavailable` outcome is only
+                        // access loss, which settled Global results already
+                        // omit; it never redacts the local copy
+                        // (INV-SYNC-14), so no availability is applied here.
+                        *active = None;
+                    }
+                    Some(_) => {
+                        // Without an answer there is nothing further to
+                        // learn from this link; settle on the authority's
+                        // answer alone rather than stall the read.
+                        *active = None;
+                        rows.clear();
+                    }
+                }
+            }
+            if active.is_none() {
+                if rows.is_empty() {
+                    resolved = true;
+                } else {
+                    let count = rows.len().min(crate::protocol::MAX_CURRENT_ROWS);
+                    let batch = rows.drain(..count).collect::<Vec<_>>();
+                    *active = Some(ScalarProbe {
+                        deadline: web_time::Instant::now() + std::time::Duration::from_secs(5),
+                        rows: batch.iter().map(|row| row.row).collect(),
+                        future: Box::pin(self.request_current_rows(batch, context.clone())),
+                    });
+                    if let Some(scheduler) = self.scheduler.borrow().as_ref() {
+                        scheduler.schedule_tick_after(5_000);
+                    }
+                    self.schedule_tick(TickUrgency::Immediate);
+                }
+            }
+            let mut state = owner.borrow_mut();
+            if state.closed.get() {
+                continue;
+            }
+            if resolved {
+                state.deletion_reconciliation = DeletionReconciliation::Done;
+                drop(state);
+                // Ingested images changed local storage; the withheld
+                // stream now refreshes and settles.
+                self.mark_local_subscriptions_dirty();
+            } else {
+                state.deletion_reconciliation = reconciliation;
             }
         }
         Ok(())
@@ -3849,6 +4022,229 @@ fn subscription_needs_targeted_refresh(
 
 /// Re-evaluate live subscriptions whose maintained logical inputs may have
 /// changed. Protocol and lifecycle refreshes use the unfiltered wrapper below.
+/// Compare a fresh strict stream's first settled authority answer with the
+/// rows this client holds live for the same query, and return whether the
+/// stream must withhold publication for a probe of the difference.
+///
+/// Local candidates come from an ordinary Local-tier maintained graph of the
+/// same query, never a blocking one-shot evaluation: this runs inside the
+/// sync turn that must itself send any large-value chunk requests. A cold
+/// discovery graph withholds settlement and is drained on later turns. Only
+/// rows whose current local winner is an accepted Global transaction are
+/// candidates: pending local writes are legitimately absent from the
+/// authority's answer. The comparison runs once per stream; agreeing views
+/// with a warm discovery graph settle in this same refresh, as before.
+async fn check_deletion_reconciliation<S>(
+    node: &SharedNodeState<S>,
+    state: &Rc<RefCell<SubscriptionState>>,
+    stream_graph: Option<&LocalMaintainedViewSubscription>,
+    progress_waker: Option<&Waker>,
+) -> Result<bool, Error>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    let (shape, binding, subscription, author, request_claims, previous) = {
+        let mut state_ref = state.borrow_mut();
+        match &state_ref.deletion_reconciliation {
+            DeletionReconciliation::Disabled | DeletionReconciliation::Done => return Ok(false),
+            DeletionReconciliation::Pending { .. } => return Ok(true),
+            DeletionReconciliation::Unchecked
+            | DeletionReconciliation::Deferred { .. }
+            | DeletionReconciliation::Discovering { .. } => {}
+        }
+        let Some(subscription) = state_ref
+            .upstream_subscription_handles
+            .first()
+            .map(|handle| handle.subscription)
+        else {
+            return Ok(false);
+        };
+        let previous = std::mem::replace(
+            &mut state_ref.deletion_reconciliation,
+            DeletionReconciliation::Unchecked,
+        );
+        let SubscriptionKind::Prepared { shape, binding, .. } = &state_ref.kind;
+        (
+            shape.clone(),
+            binding.clone(),
+            subscription,
+            state_ref.author,
+            state_ref.request_identity_claims.clone(),
+            previous,
+        )
+    };
+    let restore = |reconciliation| {
+        state.borrow_mut().deletion_reconciliation = reconciliation;
+    };
+    let mut owner = node.lock().await;
+    let runtime_token = owner.groove_runtime_token();
+    let previous = match previous {
+        // A runtime rebuild retired the old discovery graph with its IDs.
+        DeletionReconciliation::Discovering {
+            runtime_token: token,
+            since,
+            ..
+        } if token != runtime_token => DeletionReconciliation::Deferred { since },
+        previous => previous,
+    };
+    let settled_key = owner
+        .authority_result_key_for_subscription(subscription)
+        .ok()
+        .filter(|key| {
+            owner.has_settled_authority_result(key)
+                && !owner.opening_pending_for_authority_result(key)
+                && !owner.publication_deferred_for_authority_result(key)
+                && owner.authority_source_closure_generation(key).is_some()
+        });
+    let Some(key) = settled_key else {
+        // Nothing can claim settlement yet; compare once an answer settles.
+        let withheld = !matches!(previous, DeletionReconciliation::Unchecked);
+        restore(previous);
+        return Ok(withheld);
+    };
+    let (identity, claims) =
+        request_claims.unwrap_or_else(|| (author, owner.session_claims_for(author)));
+    let local_snapshot = match previous {
+        DeletionReconciliation::Discovering {
+            mut maintained,
+            since,
+            ..
+        } => {
+            owner
+                .drive_ready_query_runtime_with_waker(progress_waker)
+                .await?;
+            owner
+                .drain_local_maintained_view_subscription_preserving_rows_with_waker(
+                    &mut maintained,
+                    None,
+                    &BTreeSet::new(),
+                    progress_waker,
+                )
+                .await?;
+            if !maintained.initial_snapshot_received() {
+                drop(owner);
+                restore(DeletionReconciliation::Discovering {
+                    maintained,
+                    runtime_token,
+                    since,
+                });
+                return Ok(true);
+            }
+            let materialized = owner
+                .materialize_local_maintained_relation_snapshot_with_occurrences(&maintained)
+                .await;
+            owner.unsubscribe_groove_subscription(maintained.subscription_id());
+            materialized?.snapshot
+        }
+        previous => {
+            let since = match previous {
+                DeletionReconciliation::Deferred { since } => since,
+                _ => web_time::Instant::now(),
+            };
+            // The stream's own receiver graph must have installed and fully
+            // evaluated this closure (large-value chunks included) before a
+            // discovery graph reads the same rows from local storage.
+            let stream_graph_ready = stream_graph.is_some_and(|maintained| {
+                maintained.has_covered_input_sources()
+                    && owner
+                        .authority_source_closure_generation(&key)
+                        .is_some_and(|generation| {
+                            maintained.has_installed_covered_closure(&key, generation)
+                        })
+                    && !owner.subscription_has_pending_query_runtime(maintained.subscription_id())
+            });
+            if !stream_graph_ready || owner.has_pending_query_runtime() {
+                // Opening a discovery graph now could queue it behind work
+                // (such as chunk hydration) that only this turn can advance.
+                drop(owner);
+                restore(DeletionReconciliation::Deferred { since });
+                return Ok(true);
+            }
+            let (mut maintained, snapshot) = {
+                let mut scoped = owner.scoped_optional_session_claims(author, Some(claims.clone()));
+                scoped
+                    .open_maintained_view_subscription_in_authorization_mode_with_waker(
+                        &shape,
+                        &binding,
+                        author,
+                        DurabilityTier::Local,
+                        &ReadViewSpec::default(),
+                        None,
+                        QueryAuthorizationMode::ClientLocal,
+                        false,
+                        progress_waker,
+                    )
+                    .await?
+            };
+            if maintained.initial_snapshot_received() {
+                owner.unsubscribe_groove_subscription(maintained.subscription_id());
+                snapshot
+            } else {
+                // A cold opening needs only local storage work here: the
+                // stream graph and the runtime are idle, so no chunk demand
+                // is outstanding. Finish it now so agreeing views need not
+                // wait for another turn.
+                owner.drive_query_runtime().await?;
+                owner
+                    .drain_local_maintained_view_subscription_preserving_rows_with_waker(
+                        &mut maintained,
+                        None,
+                        &BTreeSet::new(),
+                        progress_waker,
+                    )
+                    .await?;
+                if !maintained.initial_snapshot_received() {
+                    drop(owner);
+                    restore(DeletionReconciliation::Discovering {
+                        maintained,
+                        runtime_token,
+                        since,
+                    });
+                    return Ok(true);
+                }
+                let materialized = owner
+                    .materialize_local_maintained_relation_snapshot_with_occurrences(&maintained)
+                    .await;
+                owner.unsubscribe_groove_subscription(maintained.subscription_id());
+                materialized?.snapshot
+            }
+        }
+    };
+    let table = shape.query().table.clone();
+    let authoritative = owner.scalar_authority_input_rows(&key, &table);
+    let mut rows = Vec::new();
+    for row in local_snapshot.rows.iter().take(local_snapshot.root_count) {
+        let row = row.row_uuid();
+        if authoritative.contains(&row) {
+            continue;
+        }
+        let Some(tx) = owner.local_content_winner_tx_id(&table, row).await? else {
+            continue;
+        };
+        if owner.transaction_record(tx).await.is_some_and(|record| {
+            matches!(record.fate, crate::tx::Fate::Accepted)
+                && record.durability >= DurabilityTier::Global
+        }) && let Ok(coordinate) = owner.current_row_coordinate(&table, row)
+        {
+            rows.push(coordinate);
+        }
+    }
+    drop(owner);
+    if rows.is_empty() {
+        restore(DeletionReconciliation::Done);
+        return Ok(false);
+    }
+    restore(DeletionReconciliation::Pending {
+        rows,
+        active: None,
+        context: crate::protocol::PolicyBindingKey {
+            identity,
+            canonical_claims: crate::protocol::CanonicalPolicyClaims::new(claims),
+        },
+    });
+    Ok(true)
+}
+
 pub(super) async fn refresh_subscriptions_in<S>(
     node: &SharedNodeState<S>,
     subscriptions: &SubscriptionList,
@@ -3962,6 +4358,18 @@ where
                 continue;
             }
         }
+        // A settled strict answer may omit rows this client still holds
+        // live. Until those rows are discovered and probed, the stream keeps
+        // draining its graph but must not report settlement.
+        // The first check runs before this refresh drains the stream's own
+        // graph; the check after that drain can then discover candidates.
+        let mut deletion_withheld = Box::pin(check_deletion_reconciliation(
+            node,
+            &state,
+            None,
+            progress_waker,
+        ))
+        .await?;
         let request_claims = state
             .borrow()
             .request_identity_claims
@@ -4222,17 +4630,18 @@ where
                 .into_iter()
                 .map(|(occurrence, _)| occurrence.clone())
                 .collect::<Vec<_>>();
-            let settled = subscription_is_settled(
-                &node.borrow(),
-                active_authority_view_receipts,
-                &shape,
-                &binding,
-                settled_tier,
-                read_view.clone(),
-                remote_propagate_upstream,
-                requires_authority_receipt,
-                settled_authority_result.as_ref(),
-            );
+            let settled = !deletion_withheld
+                && subscription_is_settled(
+                    &node.borrow(),
+                    active_authority_view_receipts,
+                    &shape,
+                    &binding,
+                    settled_tier,
+                    read_view.clone(),
+                    remote_propagate_upstream,
+                    requires_authority_receipt,
+                    settled_authority_result.as_ref(),
+                );
             let mut event = subscription_delta_event_with_reset(
                 read_tier,
                 settled,
@@ -4458,17 +4867,18 @@ where
                     retained.push(Rc::downgrade(&state));
                     continue;
                 }
-                let settled = subscription_is_settled(
-                    &node.borrow(),
-                    active_authority_view_receipts,
-                    &shape,
-                    &binding,
-                    settled_tier,
-                    read_view,
-                    remote_propagate_upstream,
-                    requires_authority_receipt,
-                    settled_authority_result.as_ref(),
-                );
+                let settled = !deletion_withheld
+                    && subscription_is_settled(
+                        &node.borrow(),
+                        active_authority_view_receipts,
+                        &shape,
+                        &binding,
+                        settled_tier,
+                        read_view,
+                        remote_propagate_upstream,
+                        requires_authority_receipt,
+                        settled_authority_result.as_ref(),
+                    );
                 (
                     snapshot,
                     SubscriptionSnapshotSource::LocalMaintained,
@@ -4532,6 +4942,15 @@ where
                 } else {
                     (None, false)
                 };
+                if deletion_withheld {
+                    deletion_withheld = Box::pin(check_deletion_reconciliation(
+                        node,
+                        &state,
+                        refresh.maintained.as_ref(),
+                        progress_waker,
+                    ))
+                    .await?;
+                }
                 // A reset claims an authority successor, but it is publishable
                 // only after the receiver has installed that exact closure
                 // and drained the same local graph. `Pending` is not empty:
@@ -4615,17 +5034,18 @@ where
                         .as_ref()
                         .expect("pending initial snapshot restored maintained subscription")
                         .decoded_terminal_records()?;
-                    let settled = subscription_is_settled(
-                        &node.borrow(),
-                        active_authority_view_receipts,
-                        &shape,
-                        &binding,
-                        settled_tier,
-                        read_view,
-                        remote_propagate_upstream,
-                        requires_authority_receipt,
-                        settled_authority_result.as_ref(),
-                    );
+                    let settled = !deletion_withheld
+                        && subscription_is_settled(
+                            &node.borrow(),
+                            active_authority_view_receipts,
+                            &shape,
+                            &binding,
+                            settled_tier,
+                            read_view,
+                            remote_propagate_upstream,
+                            requires_authority_receipt,
+                            settled_authority_result.as_ref(),
+                        );
                     refresh.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
                     refresh.settled = settled;
                     {
@@ -4681,17 +5101,18 @@ where
                             terminal_operations,
                         } => {
                             if !terminal_operations.is_empty() {
-                                let settled = subscription_is_settled(
-                                    &node.borrow(),
-                                    active_authority_view_receipts,
-                                    &shape,
-                                    &binding,
-                                    settled_tier,
-                                    read_view,
-                                    remote_propagate_upstream,
-                                    requires_authority_receipt,
-                                    settled_authority_result.as_ref(),
-                                );
+                                let settled = !deletion_withheld
+                                    && subscription_is_settled(
+                                        &node.borrow(),
+                                        active_authority_view_receipts,
+                                        &shape,
+                                        &binding,
+                                        settled_tier,
+                                        read_view,
+                                        remote_propagate_upstream,
+                                        requires_authority_receipt,
+                                        settled_authority_result.as_ref(),
+                                    );
                                 let terminal_layout = refresh
                                     .maintained
                                     .as_ref()
@@ -4813,22 +5234,24 @@ where
                                 None,
                             )?;
                             state_ref.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
-                            let settled = subscription_is_settled(
-                                &node.borrow(),
-                                active_authority_view_receipts,
-                                &shape,
-                                &binding,
-                                settled_tier,
-                                read_view,
-                                remote_propagate_upstream,
-                                requires_authority_receipt,
-                                settled_authority_result.as_ref(),
-                            ) && node
-                                .borrow()
-                                .relation_snapshot_has_materialized_required_cells(
+                            let settled = !deletion_withheld
+                                && subscription_is_settled(
+                                    &node.borrow(),
+                                    active_authority_view_receipts,
                                     &shape,
-                                    &state_ref.snapshot,
-                                )?;
+                                    &binding,
+                                    settled_tier,
+                                    read_view,
+                                    remote_propagate_upstream,
+                                    requires_authority_receipt,
+                                    settled_authority_result.as_ref(),
+                                )
+                                && node
+                                    .borrow()
+                                    .relation_snapshot_has_materialized_required_cells(
+                                        &shape,
+                                        &state_ref.snapshot,
+                                    )?;
                             if authoritative_reset {
                                 event = subscription_delta_event_with_reset(
                                     snapshot_tier,
@@ -4921,17 +5344,18 @@ where
                         };
                         refresh.snapshot = materialized.snapshot;
                     }
-                    let settled = subscription_is_settled(
-                        &node.borrow(),
-                        active_authority_view_receipts,
-                        &shape,
-                        &binding,
-                        settled_tier,
-                        read_view,
-                        remote_propagate_upstream,
-                        requires_authority_receipt,
-                        settled_authority_result.as_ref(),
-                    );
+                    let settled = !deletion_withheld
+                        && subscription_is_settled(
+                            &node.borrow(),
+                            active_authority_view_receipts,
+                            &shape,
+                            &binding,
+                            settled_tier,
+                            read_view,
+                            remote_propagate_upstream,
+                            requires_authority_receipt,
+                            settled_authority_result.as_ref(),
+                        );
                     // A complete closure can be observably unchanged (for
                     // example an empty grouped aggregate). It is still the
                     // exact authority boundary for this receiver and must
@@ -5029,17 +5453,18 @@ where
                         SubscriptionSnapshotSource::LinkSnapshot,
                     )
                 };
-                let settled = subscription_is_settled(
-                    &node.borrow(),
-                    active_authority_view_receipts,
-                    &shape,
-                    &binding,
-                    settled_tier,
-                    read_view,
-                    remote_propagate_upstream,
-                    requires_authority_receipt,
-                    settled_authority_result.as_ref(),
-                );
+                let settled = !deletion_withheld
+                    && subscription_is_settled(
+                        &node.borrow(),
+                        active_authority_view_receipts,
+                        &shape,
+                        &binding,
+                        settled_tier,
+                        read_view,
+                        remote_propagate_upstream,
+                        requires_authority_receipt,
+                        settled_authority_result.as_ref(),
+                    );
                 (
                     snapshot,
                     snapshot_source,

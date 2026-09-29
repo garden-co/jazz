@@ -217,6 +217,12 @@ fn content_row_members_for_bundle(
 }
 
 pub(crate) fn simple_scalar_exit_query(query: &crate::query::Query) -> bool {
+    !query.filters.is_empty() && single_table_scalar_query(query)
+}
+
+/// One unprojected table with only scalar filters (possibly none): its
+/// authority input rows are exactly its result roots.
+pub(crate) fn single_table_scalar_query(query: &crate::query::Query) -> bool {
     use crate::query::{Operand, Predicate};
     fn scalar(operand: &Operand) -> bool {
         !matches!(operand, Operand::Column(name) if name.contains('.') || name.starts_with('$'))
@@ -237,8 +243,7 @@ pub(crate) fn simple_scalar_exit_query(query: &crate::query::Query) -> bool {
             Predicate::EnumMatch { .. } => false,
         }
     }
-    !query.filters.is_empty()
-        && query.filters.iter().all(predicate)
+    query.filters.iter().all(predicate)
         && query.joins.is_empty()
         && query.flat_join.is_none()
         && query.policy_branches.is_empty()
