@@ -186,10 +186,9 @@ describe("StagePlan permissions", () => {
     await expect(tabA.all(app.showCrew.where({ showId: show.id }), global)).resolves.toHaveLength(
       1,
     );
-    const [invite] = await tabA.all(app.showInvites.where({ showId: show.id }), global);
-    await expect(
-      tabA.all(app.showInvites.where({ showId: show.id }), global),
-    ).resolves.toHaveLength(1);
+    const invites = await tabA.all(app.showInvites.where({ showId: show.id }), global);
+    expect(invites).toHaveLength(1);
+    const [invite] = invites;
 
     // A later repair from a fresh tab leaves the existing code (and any link
     // already copied from it) alone.
