@@ -3575,8 +3575,12 @@ fn load_authenticated_node_attempt(
         object_hash: node_ref.object_hash.0,
         locator: node_ref.locator,
     };
-    let encoded = inputs.chunk(request.clone())?;
-    let node = decode_node_for_format(format_version, kind, node_ref.object_hash, encoded)?;
+    let chunk = inputs.loaded_chunk(request)?;
+    let node = if chunk.verifies_object_hash(&node_ref.object_hash.0) {
+        decode_object_verified_node_for_format(format_version, kind, chunk.bytes())?
+    } else {
+        decode_node_for_format(format_version, kind, node_ref.object_hash, chunk.bytes())?
+    };
     if node_logical_hash(&node) != expected_logical_hash {
         return Err(Error::DescriptorMismatch.into());
     }
@@ -3720,6 +3724,19 @@ fn decode_node_for_format(
     }
     if object_hash(encoded) != expected_hash {
         return Err(Error::ObjectHashMismatch);
+    }
+    decode_object_verified_node_for_format(format_version, kind, encoded)
+}
+
+/// The bytes have already passed object-hash verification. Descriptor format,
+/// canonical encoding, and kind remain independent checks on every access.
+fn decode_object_verified_node_for_format(
+    format_version: u8,
+    kind: LargeValueKind,
+    encoded: &[u8],
+) -> Result<ChunkNode, Error> {
+    if encoded.len() > MAX_ENCODED_NODE_BYTES {
+        return Err(Error::MalformedNode);
     }
     // Select both contracts before V1 binds any variable node field. In
     // particular, a descriptor-led upload must not classify a hash-valid
@@ -4059,6 +4076,8 @@ fn validate_untyped_node_structure(node: &ChunkNode) -> Result<(), Error> {
 }
 
 pub fn object_hash(encoded: &[u8]) -> ContentHash {
+    #[cfg(test)]
+    lease_proof_tests::record_object_hash();
     hash_domain(b"groove-large-object-v1", encoded)
 }
 
@@ -9365,3 +9384,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "large_values/lease_proof_tests.rs"]
+mod lease_proof_tests;
