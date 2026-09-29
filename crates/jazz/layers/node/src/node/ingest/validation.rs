@@ -551,8 +551,8 @@ where
     ) -> Result<(), Error> {
         let batch = self.database.open_batch();
         self.ingest_transaction_and_versions_with_current_indexes_in_batch(
-            batch, tx, versions, fate, global_time, durability, update_current_indexes,
-            view_scoped_cardinality,
+            batch, tx, versions, Vec::new(), fate, global_time, durability,
+            update_current_indexes, view_scoped_cardinality,
         ).await
     }
 
@@ -561,6 +561,7 @@ where
         mut batch: DatabaseBatch,
         tx: Transaction,
         versions: Vec<VersionRecord>,
+        previously_stored: Vec<VersionRow>,
         fate: Fate,
         global_time: Option<GlobalTime>,
         durability: DurabilityTier,
@@ -596,13 +597,35 @@ where
             None,
         ))
         .await?;
+        // `previously_stored` are versions of this transaction that an earlier
+        // ingest (typically a Pending view-scoped fragment) already wrote to
+        // history; only the missing versions were staged above. When this
+        // ingest settles the transaction as globally accepted, those earlier
+        // versions need the same global-current installation and ahead-current
+        // cleanup as the staged ones, in this batch. Otherwise they stay
+        // ahead-only with a stale global current, and an identical receipt
+        // replay (which skips durable work) can no longer repair them.
+        let mut settled_versions = staged_versions;
+        if update_current_indexes
+            && matches!(fate, Fate::Accepted)
+            && let Some(global_time) = global_time
+            && !previously_stored.is_empty()
+        {
+            for version in self
+                .global_current_updates_for_versions(tx_id, &previously_stored)
+                .await?
+            {
+                self.write_global_current_update(&mut batch, &version, global_time)?;
+            }
+            settled_versions.extend(previously_stored);
+        }
         let mut staged_global_times = Vec::new();
         self.finalize_staged_transaction_ingest(
             &mut batch,
             fate,
             global_time,
             &mut staged_global_times,
-            &staged_versions,
+            &settled_versions,
         )
         .await?;
         batch.deliver_notifications(groove::db::NotificationTiming::AfterPersistence);
