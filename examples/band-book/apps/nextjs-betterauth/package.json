@@ -1,0 +1,40 @@
+{
+  "name": "band-book-nextjs-betterauth",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "prebuild": "node src/lib/build-config.mjs",
+    "build": "jazz-tools validate && next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:e2e": "node tests/e2e/flows.mjs"
+  },
+  "dependencies": {
+    "@astryxdesign/core": "0.6.3",
+    "@garden-co/design": "github:garden-co/design#fe96522c2484b894380fab7f0217b76ee4bda3a2",
+    "better-auth": "1.7.1",
+    "jazz-napi": "workspace:*",
+    "jazz-tools": "workspace:*",
+    "lucide-react": "^0.563.0",
+    "next": "catalog:default",
+    "react": "19.2.4",
+    "react-dom": "19.2.4"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:default",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "catalog:default",
+    "@vitest/browser": "catalog:default",
+    "@vitest/browser-playwright": "catalog:default",
+    "playwright": "1.58.2",
+    "typescript": "catalog:default",
+    "vite": "catalog:default",
+    "vite-plugin-top-level-await": "catalog:default",
+    "vite-plugin-wasm": "catalog:default",
+    "vitest": "catalog:default"
+  }
+}
