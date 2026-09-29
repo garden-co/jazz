@@ -1,6 +1,7 @@
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
+import { PersistedWriteRejectedError } from "./client.js";
 import { createDb } from "./default-create-db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
@@ -86,7 +87,15 @@ it.each(["local", "global"] as const)(
         .insert(app.notes, { bucket: "destination", title: "Concurrent insert" })
         .wait({ tier });
       tx.insert(app.notes, { bucket: "destination", title: "Must not publish" });
-      await expect(tx.commit().wait()).rejects.toThrow(/transaction_conflict/);
+      const conflict = await tx
+        .commit()
+        .wait()
+        .then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+      expect(conflict).toBeInstanceOf(PersistedWriteRejectedError);
+      expect(conflict).toMatchObject({ code: "transaction_conflict" });
       expect(await db.all(app.notes, { tier: "local" })).toEqual([
         { id: phantom.id, bucket: "destination", title: "Concurrent insert" },
       ]);
