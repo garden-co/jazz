@@ -414,12 +414,16 @@ h6 {
   background-color: var(--color-background-card);
   overflow: hidden;
 }
-.home-code-window > [role="tablist"] {
+.home-code-window > nav {
+  padding-top: var(--spacing-2);
   padding-inline: var(--spacing-3);
 }
+/* The code sits on the window's own card background, not the tinted
+   code-block surface. */
 .home-code-window .home-code {
   border: 0;
   border-radius: 0;
+  background-color: var(--color-background-card);
 }
 .home-video-figure .home-figure {
   display: flex;

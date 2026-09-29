@@ -246,13 +246,11 @@ function SectionHeader({
   children?: ReactNode;
 }) {
   return (
-    <div className="grid gap-6 lg:grid-cols-12">
-      <Heading level={2} type="display-3" id={id} className="home-anchor lg:col-span-6">
+    <div className="grid gap-4">
+      <Heading level={2} type="display-3" id={id} className="home-anchor max-w-3xl">
         {title}
       </Heading>
-      {children ? (
-        <div className="home-prose lg:col-span-5 lg:col-start-8 lg:pt-2">{children}</div>
-      ) : null}
+      {children ? <div className="home-prose max-w-2xl">{children}</div> : null}
     </div>
   );
 }
@@ -262,11 +260,14 @@ function Figure({
   caption,
   className,
   number,
+  after,
 }: {
   children: ReactNode;
   caption?: string;
   className?: string;
   number?: number;
+  /** Rendered below the caption, such as a follow-up link. */
+  after?: ReactNode;
 }) {
   return (
     <figure className={`home-figure-frame ${className ?? ""}`}>
@@ -277,6 +278,7 @@ function Figure({
           {caption}
         </figcaption>
       ) : null}
+      {after}
     </figure>
   );
 }
@@ -372,6 +374,11 @@ export default function HomePage() {
               className="home-video-figure"
               number={2}
               caption="The todo example on two devices, recorded from the running app."
+              after={
+                <AppLink href="/examples" className="home-video-link font-medium">
+                  More examples and benchmarks →
+                </AppLink>
+              }
             >
               <video
                 className="home-video"
@@ -383,9 +390,6 @@ export default function HomePage() {
                 playsInline
                 aria-label="Two browser windows running the todo example. A todo added or checked off in one appears in the other."
               />
-              <AppLink href="/examples" className="home-video-link font-medium">
-                More examples and benchmarks →
-              </AppLink>
             </Figure>
           </div>
           <Text as="p" display="block" color="secondary" className="mt-6">
