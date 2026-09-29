@@ -9,11 +9,7 @@ const excludes = [
   "Network and subscription delivery",
 ];
 
-const oneShot = (
-  name: string,
-  title: string,
-  predicate: string,
-): BenchmarkMetadata => ({
+const oneShot = (name: string, title: string, predicate: string): BenchmarkMetadata => ({
   name: `${name}[100000]`,
   title,
   description: `First page of 50 pages, newest first: ${predicate}. Admitted non-SYSTEM member, Global one-shot read, no network.`,
@@ -60,7 +56,8 @@ export const bandBookBenchmarks: BenchmarkMetadata[] = [
     work: {
       count: 1,
       unit: "subscriptions/s",
-      explanation: "One subscription opened through its first published page; not update throughput.",
+      explanation:
+        "One subscription opened through its first published page; not update throughput.",
     },
     source,
   },
