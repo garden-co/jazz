@@ -4,12 +4,11 @@ import { bearer, jwt } from "better-auth/plugins";
 import { jazzAdapter } from "jazz-tools/better-auth-adapter";
 import { app } from "@/schema";
 import { backendJazzClient } from "./auth-jazz-client";
-import { appOrigin, LOCAL_ORIGIN, serverSecret } from "./config";
+import { appOrigin, serverSecret, trustedOrigins } from "./config";
 
 export const auth = betterAuth({
   baseURL: appOrigin,
-  trustedOrigins:
-    appOrigin === LOCAL_ORIGIN ? [LOCAL_ORIGIN, "http://127.0.0.1:3000"] : [appOrigin],
+  trustedOrigins,
   secret: serverSecret("BETTER_AUTH_SECRET"),
   database: jazzAdapter({ db: async () => (await backendJazzClient()).db, schema: app.wasmSchema }),
   emailAndPassword: {

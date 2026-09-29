@@ -6,6 +6,14 @@
 export const LOCAL_ORIGIN = "http://localhost:3000";
 
 export const appOrigin = process.env.NEXT_PUBLIC_APP_ORIGIN ?? LOCAL_ORIGIN;
+
+/** True for a development origin on this machine, on any port. */
+export const isLocalOrigin = ["localhost", "127.0.0.1"].includes(new URL(appOrigin).hostname);
+
+/** The origins Better Auth trusts: both local spellings in development. */
+export const trustedOrigins = isLocalOrigin
+  ? [appOrigin.replace("127.0.0.1", "localhost"), appOrigin.replace("localhost", "127.0.0.1")]
+  : [appOrigin];
 export const jazzAppId = process.env.NEXT_PUBLIC_JAZZ_APP_ID ?? "jamazon-warehouse-local";
 export const jazzServerUrl = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL ?? "http://127.0.0.1:4200";
 
@@ -13,7 +21,7 @@ export const jazzServerUrl = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL ?? "http://
 export function serverSecret(name: "BACKEND_SECRET" | "BETTER_AUTH_SECRET"): string {
   const configured = process.env[name];
   if (configured) return configured;
-  if (appOrigin !== LOCAL_ORIGIN) {
+  if (!isLocalOrigin) {
     throw new Error(`${name} must be configured when NEXT_PUBLIC_APP_ORIGIN is not local`);
   }
   return LOCAL_SECRETS[name];
