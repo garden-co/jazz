@@ -24,9 +24,7 @@ function historyStore(): ParamStore {
   const listeners = new Set<() => void>();
   return {
     get: (name) =>
-      typeof window === "undefined"
-        ? null
-        : new URLSearchParams(window.location.search).get(name),
+      typeof window === "undefined" ? null : new URLSearchParams(window.location.search).get(name),
     set(name, value) {
       const url = new URL(window.location.href);
       if (value) url.searchParams.set(name, value);
@@ -65,7 +63,13 @@ export function memoryStore(initial: Record<string, string> = {}): ParamStore {
 const defaultStore = historyStore();
 const ParamStoreContext = createContext<ParamStore>(defaultStore);
 
-export function ParamStoreProvider({ store, children }: { store: ParamStore; children: ReactNode }) {
+export function ParamStoreProvider({
+  store,
+  children,
+}: {
+  store: ParamStore;
+  children: ReactNode;
+}) {
   return <ParamStoreContext.Provider value={store}>{children}</ParamStoreContext.Provider>;
 }
 

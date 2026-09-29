@@ -18,9 +18,7 @@ export function JoinRoom({
   onDismiss: () => void;
 }) {
   const db = useDb();
-  const { data: requests } = useAll(
-    app.joinRequests.where({ roomId, requester: profile.author }),
-  );
+  const { data: requests } = useAll(app.joinRequests.where({ roomId, requester: profile.author }));
   const pending = requests?.[0];
 
   return (

@@ -141,9 +141,8 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
               key={member.id}
               size="sm"
               profile={
-                (member.memberProfileId
-                  ? directory.byId.get(member.memberProfileId)
-                  : undefined) ?? directory.byAuthor.get(member.memberAuthor)
+                (member.memberProfileId ? directory.byId.get(member.memberProfileId) : undefined) ??
+                directory.byAuthor.get(member.memberAuthor)
               }
             />
           ))}

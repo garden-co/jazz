@@ -127,8 +127,8 @@ export function ProfileSetup({
         <VStack gap={2}>
           <Heading level={1}>Set up your profile</Heading>
           <Text color="secondary">
-            Your name and photo are shared only with people in your rooms and with room creators
-            you ask to join.
+            Your name and photo are shared only with people in your rooms and with room creators you
+            ask to join.
           </Text>
         </VStack>
         <Card width="100%">

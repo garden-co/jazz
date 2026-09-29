@@ -42,7 +42,12 @@ function AudioAttachment({ message }: { message: MessageSummary }) {
   if (!src) return <Skeleton width={240} height={40} />;
   return (
     // eslint-disable-next-line jsx-a11y/media-has-caption -- user-shared audio has no captions
-    <audio className="attachment-audio" controls src={src} aria-label={message.attachmentName ?? "Audio"} />
+    <audio
+      className="attachment-audio"
+      controls
+      src={src}
+      aria-label={message.attachmentName ?? "Audio"}
+    />
   );
 }
 

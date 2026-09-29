@@ -202,7 +202,9 @@ it("negotiates persistent browser workers and renders the owner, join-request, m
     15_000,
   );
 
-  await preview(owner).getByRole("button", { name: /^Invite( \d+)?$/ }).click();
+  await preview(owner)
+    .getByRole("button", { name: /^Invite( \d+)?$/ })
+    .click();
   await waitFor(
     () => hasText(openDialog().element() as HTMLElement, "Gus Guest"),
     "owner should see the join request with the guest's name",
@@ -229,7 +231,9 @@ it("negotiates persistent browser workers and renders the owner, join-request, m
     15_000,
   );
 
-  await preview(owner).getByRole("button", { name: /^Invite( \d+)?$/ }).click();
+  await preview(owner)
+    .getByRole("button", { name: /^Invite( \d+)?$/ })
+    .click();
   await waitFor(() => document.querySelector("dialog[open]") !== null, "members dialog opens");
   const dialog = openDialog().element() as HTMLElement;
   const guestRow = [...dialog.querySelectorAll("li")].find((row) => hasText(row, "Gus Guest"))!;
@@ -274,9 +278,7 @@ it("creates a local room, sends and reacts to a message, and applies client-side
   const attachment = element.querySelector<HTMLInputElement>("input[aria-label='Attachment']")!;
   Object.defineProperty(attachment, "files", {
     configurable: true,
-    value: [
-      new File([new Uint8Array(10 * 1024 * 1024 + 1)], "too-big.png", { type: "image/png" }),
-    ],
+    value: [new File([new Uint8Array(10 * 1024 * 1024 + 1)], "too-big.png", { type: "image/png" })],
   });
   await act(async () => attachment.dispatchEvent(new Event("change", { bubbles: true })));
   await waitFor(

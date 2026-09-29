@@ -48,9 +48,7 @@ export function RoomNav({
       header={
         <SideNavHeading
           heading="BandChat"
-          headerEndContent={
-<Button label="New room" size="sm" onClick={onNewRoom} />
-          }
+          headerEndContent={<Button label="New room" size="sm" onClick={onNewRoom} />}
         />
       }
       footer={

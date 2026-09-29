@@ -2,7 +2,15 @@
 
 import { useState, type FormEvent } from "react";
 import { useDb } from "jazz-tools/react";
-import { Banner, Button, Dialog, DialogHeader, HStack, TextInput, VStack } from "@astryxdesign/core";
+import {
+  Banner,
+  Button,
+  Dialog,
+  DialogHeader,
+  HStack,
+  TextInput,
+  VStack,
+} from "@astryxdesign/core";
 import { app, type Profile } from "../../schema";
 
 export function NewRoomDialog({

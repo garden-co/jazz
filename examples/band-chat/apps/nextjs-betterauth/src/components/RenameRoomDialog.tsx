@@ -19,12 +19,22 @@ export function RenameRoomDialog({
   return (
     <Dialog isOpen={isOpen} onOpenChange={onOpenChange} purpose="form">
       <DialogHeader title="Rename room" onOpenChange={onOpenChange} />
-      {isOpen ? <RenameForm roomId={roomId} name={name} onDone={() => onOpenChange(false)} /> : null}
+      {isOpen ? (
+        <RenameForm roomId={roomId} name={name} onDone={() => onOpenChange(false)} />
+      ) : null}
     </Dialog>
   );
 }
 
-function RenameForm({ roomId, name, onDone }: { roomId: string; name: string; onDone: () => void }) {
+function RenameForm({
+  roomId,
+  name,
+  onDone,
+}: {
+  roomId: string;
+  name: string;
+  onDone: () => void;
+}) {
   const db = useDb();
   const [value, setValue] = useState(name);
   function save(event: FormEvent<HTMLFormElement>) {

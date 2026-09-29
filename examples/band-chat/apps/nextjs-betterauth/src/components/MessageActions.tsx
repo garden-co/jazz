@@ -2,7 +2,15 @@
 
 import { useState } from "react";
 import { useDb } from "jazz-tools/react";
-import { Button, HStack, MoreMenu, Popover, TextInput, ToggleButton, VStack } from "@astryxdesign/core";
+import {
+  Button,
+  HStack,
+  MoreMenu,
+  Popover,
+  TextInput,
+  ToggleButton,
+  VStack,
+} from "@astryxdesign/core";
 import { app, type Reaction } from "../../schema";
 import { displayNameFor, useDirectory } from "../lib/profiles";
 import type { MessageSummary } from "./RoomView";
@@ -32,7 +40,9 @@ export function MessageActions({
   }
 
   function toggle(emoji: string) {
-    const mine = reactions.find((reaction) => reaction.emoji === emoji && reaction.author === author);
+    const mine = reactions.find(
+      (reaction) => reaction.emoji === emoji && reaction.author === author,
+    );
     if (mine) db.delete(app.reactions, mine.id);
     else db.insert(app.reactions, { roomId: message.roomId, messageId: message.id, author, emoji });
   }
@@ -40,7 +50,9 @@ export function MessageActions({
   return (
     <HStack gap={1} wrap="wrap" vAlign="center" className="message-actions">
       {[...byEmoji.entries()].map(([emoji, list]) => {
-        const names = list.map((reaction) => displayNameFor(directory, { author: reaction.author }));
+        const names = list.map((reaction) =>
+          displayNameFor(directory, { author: reaction.author }),
+        );
         return (
           <ToggleButton
             key={emoji}

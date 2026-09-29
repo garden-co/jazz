@@ -20,7 +20,7 @@ product slice, not another generic Todo tutorial.
   first-run step.
 - **Creator-managed admission.** A room creator bootstraps their own membership
   and is the only identity that admits or removes others. A room link
-  (`?join=<room id>`) does not grant anything: it lets a signed-in person *ask* to
+  (`?join=<room id>`) does not grant anything: it lets a signed-in person _ask_ to
   join by writing a `joinRequests` row that only they and the room creator can
   read. The creator admits a request, or adds someone they already share a room
   with. A guest cannot add themself, and a membership may only name a profile

@@ -101,7 +101,11 @@ export function MembersDialog({
                 key={member.id}
                 data-member-author={member.memberAuthor}
                 startContent={<ProfileAvatar profile={profile} size="md" />}
-                label={isMe ? `${profile?.displayName ?? "You"} (you)` : (profile?.displayName ?? "Bandmate")}
+                label={
+                  isMe
+                    ? `${profile?.displayName ?? "You"} (you)`
+                    : (profile?.displayName ?? "Bandmate")
+                }
                 endContent={
                   isMe && isCreator ? (
                     <Badge label="Creator" />

@@ -131,9 +131,7 @@ describe("BandChat room admission and authorship", () => {
       .wait({ tier: "global" });
 
     // Nobody but yourself sees your profile before you share a room or ask to join.
-    expect((await owner.all(app.profiles)).map((profile) => profile.id)).toEqual([
-      ownerProfile.id,
-    ]);
+    expect((await owner.all(app.profiles)).map((profile) => profile.id)).toEqual([ownerProfile.id]);
 
     // A join request must name the requester's own profile.
     await guest.expectDenied((db) =>
@@ -198,12 +196,12 @@ describe("BandChat room admission and authorship", () => {
         memberProfileId: strangerProfile.id,
       }),
     );
-    const ownerMembership = (await guest.all(app.roomMembers.where({ memberAuthor: ownerAuthor })))[0]!;
+    const ownerMembership = (
+      await guest.all(app.roomMembers.where({ memberAuthor: ownerAuthor }))
+    )[0]!;
     await guest.expectDenied((db) => db.delete(app.roomMembers, ownerMembership.id));
     // A member records activity but cannot rename the room.
-    await guest
-      .update(app.rooms, room.id, { lastActivityAt: new Date() })
-      .wait({ tier: "global" });
+    await guest.update(app.rooms, room.id, { lastActivityAt: new Date() }).wait({ tier: "global" });
     await guest.expectDenied((db) => db.update(app.rooms, room.id, { name: "Renamed" }));
     await owner.update(app.rooms, room.id, { name: "Setlist v2" }).wait({ tier: "global" });
 
