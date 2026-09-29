@@ -1,9 +1,14 @@
 import { definePermissions } from "jazz-tools/permissions";
 import { permissions as betterAuthPermissions } from "./schema-better-auth/schema";
 import { app } from "./schema.js";
+import { catalogueEditors } from "./src/roles.js";
 
-/** Tenant admission has one authority: the app-owned backend bootstrap route. */
-const tenantPermissions = definePermissions(app, ({ policy, session, allowedTo, allOf }) => {
+/**
+ * Tenant admission has one authority: the app-owned backend bootstrap route.
+ * Roles (see src/roles.ts): admins run the organization, editors maintain the
+ * catalogue, viewers read it.
+ */
+const tenantPermissions = definePermissions(app, ({ policy, session, allowedTo, allOf, anyOf }) => {
   // userId is deliberately denormalized so this is an indexed membership lookup.
   const member = (organizationId: unknown) =>
     policy.memberships.exists.where({
@@ -16,6 +21,16 @@ const tenantPermissions = definePermissions(app, ({ policy, session, allowedTo, 
       userId: session.user.account,
       role: "admin",
     });
+  const editor = (organizationId: unknown) =>
+    anyOf(
+      catalogueEditors.map((role) =>
+        policy.memberships.exists.where({
+          organizationId: organizationId as never,
+          userId: session.user.account,
+          role,
+        }),
+      ),
+    );
   const personMatchesMembership = (row: { personId: unknown; userId: unknown }) =>
     policy.people.exists.where({ id: row.personId as never, userId: row.userId as never });
   const artistBelongsToRelease = (row: { artistId: unknown; organizationId: unknown }) =>
@@ -23,6 +38,14 @@ const tenantPermissions = definePermissions(app, ({ policy, session, allowedTo, 
       id: row.artistId as never,
       organizationId: row.organizationId as never,
     });
+  const catalogueBelongsToRelease = (row: { catalogueId: unknown; organizationId: unknown }) =>
+    anyOf([
+      { catalogueId: { isNull: true } },
+      policy.catalogues.exists.where({
+        id: row.catalogueId as never,
+        organizationId: row.organizationId as never,
+      }),
+    ]);
   const teamMatchesAssignment = (row: { teamId: unknown; organizationId: unknown }) =>
     policy.teams.exists.where({
       id: row.teamId as never,
@@ -76,19 +99,32 @@ const tenantPermissions = definePermissions(app, ({ policy, session, allowedTo, 
   policy.teams.allowDelete.where((row) => admin(row.organizationId));
 
   policy.artists.allowRead.where((row) => member(row.organizationId));
-  policy.artists.allowInsert.where((row) => admin(row.organizationId));
+  policy.artists.allowInsert.where((row) => editor(row.organizationId));
   policy.artists.allowUpdate
-    .whereOld((row) => admin(row.organizationId))
-    .whereNew((row) => admin(row.organizationId));
+    .whereOld((row) => editor(row.organizationId))
+    .whereNew((row) => editor(row.organizationId));
   policy.artists.allowDelete.where((row) => admin(row.organizationId));
 
+  policy.catalogues.allowRead.where((row) => member(row.organizationId));
+  policy.catalogues.allowInsert.where((row) => admin(row.organizationId));
+  policy.catalogues.allowUpdate
+    .whereOld((row) => admin(row.organizationId))
+    .whereNew((row) => admin(row.organizationId));
+  policy.catalogues.allowDelete.where((row) => admin(row.organizationId));
+
+  // Every relation a release points at must live in the release's tenant.
+  const releaseRelationsInTenant = (row: {
+    artistId: unknown;
+    catalogueId: unknown;
+    organizationId: unknown;
+  }) => allOf([artistBelongsToRelease(row), catalogueBelongsToRelease(row)]);
   policy.releases.allowRead.where((row) => member(row.organizationId));
   policy.releases.allowInsert.where((row) =>
-    allOf([admin(row.organizationId), artistBelongsToRelease(row)]),
+    allOf([editor(row.organizationId), releaseRelationsInTenant(row)]),
   );
   policy.releases.allowUpdate
-    .whereOld((row) => admin(row.organizationId))
-    .whereNew((row) => allOf([admin(row.organizationId), artistBelongsToRelease(row)]));
+    .whereOld((row) => editor(row.organizationId))
+    .whereNew((row) => allOf([editor(row.organizationId), releaseRelationsInTenant(row)]));
   policy.releases.allowDelete.where((row) => admin(row.organizationId));
 
   policy.teamAssignments.allowRead.where(allowedTo.read("team"));
@@ -123,6 +159,14 @@ const tenantPermissions = definePermissions(app, ({ policy, session, allowedTo, 
       ]),
     );
   policy.releaseAssignments.allowDelete.where(allowedTo.delete("release"));
+
+  // Editors staff releases with teams; the team must belong to the same tenant.
+  policy.releaseTeams.allowRead.where((row) => member(row.organizationId));
+  policy.releaseTeams.allowInsert.where((row) =>
+    allOf([editor(row.organizationId), releaseMatchesAssignment(row), teamMatchesAssignment(row)]),
+  );
+  policy.releaseTeams.allowUpdate.never();
+  policy.releaseTeams.allowDelete.where((row) => editor(row.organizationId));
 });
 
 export default {

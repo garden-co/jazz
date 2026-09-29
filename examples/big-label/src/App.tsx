@@ -1,100 +1,189 @@
 "use client";
 
-import { useAll, useDb, useSession } from "jazz-tools/react";
+import { useEffect, useState } from "react";
+import {
+  AppShell,
+  Button,
+  EmptyState,
+  Icon,
+  LayoutContent,
+  NavHeadingMenu,
+  NavHeadingMenuItem,
+  SideNav,
+  SideNavHeading,
+  SideNavItem,
+  SideNavSection,
+  Text,
+  TopNav,
+  TopNavHeading,
+} from "@astryxdesign/core";
+import { Disc3, LayoutGrid, Library, Mic2, Settings, Users, UsersRound } from "lucide-react";
+import { useAll, useSession } from "jazz-tools/react";
 import { app } from "../schema";
+import { OrganizationProvider, type CurrentOrganization } from "./lib/organization";
+import { href, useRoute, type Route } from "./lib/route";
+import { isRole, roleLabels } from "./roles";
+import { ArtistPage, ArtistsPage } from "./pages/artists";
+import { CataloguePage, CataloguesPage } from "./pages/catalogues";
+import { OverviewPage } from "./pages/overview";
+import { PeoplePage } from "./pages/people";
+import { ReleasePage, ReleasesPage } from "./pages/releases";
+import { SettingsPage } from "./pages/settings";
+import { TeamPage, TeamsPage } from "./pages/teams";
 
-export function Operations({ onSignOut }: { onSignOut: () => void }) {
+const selectedOrganizationKey = "big-label-organization";
+
+const navigation = [
+  { label: "Overview", href: href.overview, icon: LayoutGrid, pages: ["overview"] },
+  { label: "Artists", href: href.artists, icon: Mic2, pages: ["artists", "artist"] },
+  { label: "Releases", href: href.releases, icon: Disc3, pages: ["releases", "release"] },
+  { label: "Catalogues", href: href.catalogues, icon: Library, pages: ["catalogues", "catalogue"] },
+  { label: "Teams", href: href.teams, icon: UsersRound, pages: ["teams", "team"] },
+  { label: "People", href: href.people, icon: Users, pages: ["people"] },
+  { label: "Settings", href: href.settings, icon: Settings, pages: ["settings"] },
+] as const;
+
+export function Operations({ email, onSignOut }: { email: string; onSignOut: () => void }) {
   const session = useSession();
-  const db = useDb();
-  const { data: memberships = [] } = useAll(
-    app.memberships
-      .where({ userId: session?.user.account ?? "00000000-0000-0000-0000-000000000000" })
-      .include({ organization: true })
-      .limit(50),
+  const route = useRoute();
+  const account = session?.user.account;
+  // Every label this account belongs to: an indexed lookup on the denormalized userId.
+  const { data: memberships, isLoading } = useAll(
+    account
+      ? app.memberships.where({ userId: account }).include({ organization: true }).limit(100)
+      : undefined,
   );
-  const organization = memberships[0]?.organization as { id: string; name: string } | undefined;
-  const { data: artists = [] } = useAll(
-    app.artists.where({ organizationId: organization?.id ?? "__none__" }).limit(100),
+  const organizations: CurrentOrganization[] = (memberships ?? [])
+    .flatMap((membership) =>
+      membership.organization && isRole(membership.role)
+        ? [
+            {
+              id: membership.organization.id,
+              name: membership.organization.name,
+              membershipId: membership.id,
+              personId: membership.personId,
+              role: membership.role,
+            },
+          ]
+        : [],
+    )
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  useEffect(() => {
+    try {
+      setSelectedId(localStorage.getItem(selectedOrganizationKey));
+    } catch {}
+  }, []);
+  const selectOrganization = (id: string) => {
+    setSelectedId(id);
+    try {
+      localStorage.setItem(selectedOrganizationKey, id);
+    } catch {}
+    window.location.hash = href.overview;
+  };
+  const organization = organizations.find((entry) => entry.id === selectedId) ?? organizations[0];
+
+  const topNav = (
+    <TopNav
+      label="BigLabel"
+      heading={<TopNavHeading heading="BigLabel" headingHref={href.overview} />}
+      endContent={
+        <>
+          <Text type="supporting" color="secondary" maxLines={1} className="account-email">
+            {email}
+          </Text>
+          <Button label="Sign out" variant="ghost" size="sm" onClick={onSignOut} />
+        </>
+      }
+    />
   );
-  const { data: releases = [] } = useAll(
-    app.releases
-      .where({ organizationId: organization?.id ?? "__none__" })
-      .include({ artist: true })
-      .limit(100),
-  );
+
   if (!organization)
     return (
-      <main className="shell">
-        <h1>BigLabel</h1>
-        <p>
-          No organization is assigned to this identity. Provision an organization and its first
-          admin through the server-authorized bootstrap flow.
-        </p>
-      </main>
+      <AppShell topNav={topNav} height="auto" variant="section">
+        <LayoutContent padding={8}>
+          {!isLoading && (
+            <EmptyState
+              title="No label yet"
+              description="Your personal label is created when you first sign in. Reload to try again."
+            />
+          )}
+        </LayoutContent>
+      </AppShell>
     );
-  const addArtist = () =>
-    void db.insert(app.artists, {
-      organizationId: organization.id,
-      name: `New artist ${artists.length + 1}`,
-      genre: "Electronic",
-      status: "developing",
-    });
+
   return (
-    <main className="shell">
-      <header>
-        <div>
-          <small>BIGLABEL / OPERATIONS</small>
-          <h1>{organization.name}</h1>
-          <p>Artists, releases, teams, and tenant-safe workflows.</p>
-        </div>
-        <div>
-          <span className="pill">{session?.user ? "connected" : "connecting"}</span>
-          <button onClick={onSignOut}>Sign out</button>
-        </div>
-      </header>
-      <section className="metrics">
-        <Metric label="Artists" value={artists.length} />
-        <Metric
-          label="Scheduled releases"
-          value={releases.filter((r) => r.status === "scheduled").length}
-        />
-        <Metric label="Team members" value={memberships.length} />
-      </section>
-      <section className="grid">
-        <article>
-          <h2>
-            Artist roster <button onClick={addArtist}>Add artist</button>
-          </h2>
-          {artists.map((artist) => (
-            <div className="row" key={artist.id}>
-              <strong>{artist.name}</strong>
-              <span>{artist.genre}</span>
-              <em>{artist.status}</em>
-            </div>
-          ))}
-        </article>
-        <article>
-          <h2>Release pipeline</h2>
-          {releases.map((release) => (
-            <div className="row" key={release.id}>
-              <strong>{release.title}</strong>
-              <span>{(release.artist as { name?: string } | undefined)?.name}</span>
-              <em>{release.status}</em>
-            </div>
-          ))}
-        </article>
-      </section>
-      <footer>
-        Live receipt: {artists.length} owned artists and {releases.length} related releases.
-      </footer>
-    </main>
+    <AppShell
+      topNav={topNav}
+      height="auto"
+      variant="section"
+      sideNav={
+        <SideNav
+          header={
+            <SideNavHeading
+              heading={organization.name}
+              subheading={roleLabels[organization.role]}
+              menu={
+                <NavHeadingMenu>
+                  {organizations.map((entry) => (
+                    <NavHeadingMenuItem
+                      key={entry.id}
+                      label={entry.name}
+                      description={roleLabels[entry.role]}
+                      onClick={() => selectOrganization(entry.id)}
+                    />
+                  ))}
+                </NavHeadingMenu>
+              }
+            />
+          }
+        >
+          <SideNavSection title="Label" isHeaderHidden>
+            {navigation.map((item) => (
+              <SideNavItem
+                key={item.label}
+                label={item.label}
+                href={item.href}
+                icon={<Icon icon={item.icon} size="sm" />}
+                isSelected={(item.pages as readonly string[]).includes(route.page)}
+              />
+            ))}
+          </SideNavSection>
+        </SideNav>
+      }
+    >
+      <LayoutContent padding={8} isScrollable={false}>
+        <OrganizationProvider organization={organization}>
+          <Page key={organization.id} route={route} />
+        </OrganizationProvider>
+      </LayoutContent>
+    </AppShell>
   );
 }
-function Metric({ label, value }: { label: string; value: number }) {
-  return (
-    <div>
-      <small>{label}</small>
-      <b>{value}</b>
-    </div>
-  );
+
+function Page({ route }: { route: Route }) {
+  switch (route.page) {
+    case "overview":
+      return <OverviewPage />;
+    case "artists":
+      return <ArtistsPage />;
+    case "artist":
+      return <ArtistPage key={route.id} id={route.id} />;
+    case "releases":
+      return <ReleasesPage />;
+    case "release":
+      return <ReleasePage key={route.id} id={route.id} />;
+    case "catalogues":
+      return <CataloguesPage />;
+    case "catalogue":
+      return <CataloguePage key={route.id} id={route.id} />;
+    case "teams":
+      return <TeamsPage />;
+    case "team":
+      return <TeamPage key={route.id} id={route.id} />;
+    case "people":
+      return <PeoplePage />;
+    case "settings":
+      return <SettingsPage />;
+  }
 }

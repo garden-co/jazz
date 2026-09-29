@@ -9,7 +9,60 @@ personal organization and its first admin membership for the stable Better Auth
 user ID. The browser then obtains a short-lived Better Auth JWT and mounts the
 operations UI inside `JazzProvider`; token expiry is handled by fetching a fresh
 JWT. Browser clients never receive the backend secret, and normal membership
-and tenant mutations remain admin-policy checked at the Jazz edge.
+and tenant mutations remain policy checked at the Jazz edge.
+
+## The app
+
+The UI is built from [Astryx](https://astryx.atmeta.com) components with the
+Jazz theme from `garden-co/design`, and every page reads live Jazz queries:
+
+- **Label switcher** at the top of the side navigation lists every organization
+  the signed-in account belongs to (`memberships.where({ userId })`).
+- **Overview**: big-number counts and the label's latest releases, newest first
+  (the benchmark's `label_load` shape).
+- **Artists** and **Releases**: compact tables with search as you type, a status
+  filter, sortable columns and pagination. Each page is one bounded, ordered
+  query (`orderBy(...).orderBy("id").limit(pageSize + 1).offset(...)`); the
+  extra row tells the pager whether a next page exists.
+- **Artist** page: the artist's releases newest first (`artist_load`).
+- **Release** page: catalogue number, catalogue, format, date, status, and the
+  teams working on it.
+- **Catalogues**: series that group and number releases; a catalogue page pages
+  through its releases (`catalog_load`).
+- **Teams** and **People**: team membership, release staffing, member roles and
+  a table of what each role may do.
+- **Settings**: rename the label, and load demo data.
+
+Search matches a lower-cased `searchKey` column, because `contains` is
+case-sensitive.
+
+## Roles
+
+| Role   | Can                                                                |
+| ------ | ------------------------------------------------------------------ |
+| admin  | everything: members and roles, teams, catalogues, deleting records |
+| editor | add and edit artists and releases, assign releases to teams        |
+| viewer | read the label                                                     |
+
+`src/roles.ts` describes the roles for the UI, which hides or disables what a
+role can't do. `permissions.ts` enforces the same rules at the Jazz edge, so a
+write sent anyway is refused. `tests/roles.server.test.ts` proves it against a
+real local server: no self-promotion, no admin inserts, no cross-tenant team or
+catalogue references, viewers can't write, editors can't manage teams or
+members, and foreign labels read as empty.
+
+Catalogue numbers are unique per label. The release form checks locally for
+instant feedback, then writes in an exclusive transaction that re-checks at the
+authority, so two people can't take the same number concurrently.
+
+## Demo data
+
+Settings → Demo data calls `POST /api/demo-data` with the `smoke` or `small`
+profile. Like the bootstrap route, it verifies the caller's JWT and writes with
+the backend secret: it loads `createFixture(profile)` as extra organizations
+with the caller as admin, plus synthetic members, teams, catalogues, artists and
+releases. Fixture IDs map to UUIDs derived from the caller, so loading twice is
+a no-op and callers never share demo tenants.
 
 ## Fixtures and headless scenarios
 
