@@ -1510,8 +1510,23 @@ test("CodSpeed baselines every main merge and runs only for benchmark-labeled PR
   assert.deepEqual(document.on.pull_request, {
     types: ["labeled", "synchronize", "reopened"],
   });
-  assert.equal(document.on.schedule, undefined, "per-merge runs replace the nightly baseline");
-  assert.equal(document.on.workflow_dispatch, null);
+  // One daily schedule, and it runs only the nightly suite (the per-merge
+  // cases plus the nightly extras). It is not a main baseline: merges still
+  // baseline themselves, and nightly runs use their own concurrency group, so
+  // they never replace or delay a pending merge run.
+  assert.equal(document.on.schedule.length, 1, "one nightly schedule");
+  assert.match(document.on.schedule[0].cron, /^\d+ \d+ \* \* \*$/, "daily");
+  assert.deepEqual(document.on.workflow_dispatch.inputs.suite.options, ["merge", "nightly"]);
+  assert.equal(document.on.workflow_dispatch.inputs.suite.default, "merge");
+  const nightly = "(github.event_name == 'schedule' || inputs.suite == 'nightly')";
+  assert.equal(
+    document.env.JAZZ_CODSPEED_SUITE,
+    `\${{ ${nightly} && 'nightly' || 'merge' }}`,
+    "the schedule, and only it or an explicit dispatch, selects the nightly suite",
+  );
+  for (const [name, job] of Object.entries(document.jobs)) {
+    assert.equal(job.env?.JAZZ_CODSPEED_SUITE, undefined, `${name} must not override the suite`);
+  }
   // Every root job carries the label gate; dependent jobs inherit its skip.
   const labelGate =
     "github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark')";
@@ -1523,15 +1538,16 @@ test("CodSpeed baselines every main merge and runs only for benchmark-labeled PR
   rootJobsAreGated(document.jobs);
   // Main runs share one group and are never cancelled mid-run, so a burst of
   // merges coalesces to the running commit plus the latest. PR runs cancel
-  // superseded pushes.
+  // superseded pushes. Nightly runs get a separate group, so a merge never
+  // replaces a pending nightly run and a nightly run never holds up a merge.
   assert.deepEqual(document.concurrency, {
-    group: "codspeed-example-benchmarks-${{ github.event.pull_request.number || github.ref }}",
+    group: `codspeed-example-benchmarks-\${{ github.event.pull_request.number || github.ref }}\${{ ${nightly} && '-nightly' || '' }}`,
     "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
   });
   assert.throws(() => {
     // Keying main runs by commit would run every merge of a burst in parallel.
     const thrash = parse(codspeedWorkflow.replace("|| github.ref }}", "|| github.sha }}"));
-    assert.match(thrash.concurrency.group, /github\.ref \}\}$/);
+    assert.match(thrash.concurrency.group, /github\.ref \}\}\$\{\{/);
   }, /match/);
 
   assert.throws(() => {
