@@ -20,6 +20,7 @@ import { type App, createApp, defineComponent, h } from "vue";
 import {
   type JazzClient,
   JazzClientProvider,
+  createAccountManager,
   createJazzClient,
   useAll,
   useDb,
@@ -104,10 +105,12 @@ afterEach(async () => {
 });
 
 async function mount(child: ReturnType<typeof defineComponent>): Promise<Mounted> {
+  const accounts = await createAccountManager({ appId: APP_ID, serverUrl: SERVER_URL });
   const client = await createJazzClient({
     appId: APP_ID,
     serverUrl: SERVER_URL,
     driver: { type: "memory" },
+    account: accounts.createLocalFirst(),
   });
 
   const el = document.createElement("div");

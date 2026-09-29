@@ -1,10 +1,15 @@
 import { schema as s } from "jazz-tools";
+import type { RowContext } from "jazz-tools/permissions";
 import { app } from "./schema.js";
+
+type BandScoped = RowContext<{ bandId: string }>;
 
 export default s.definePermissions(app, ({ policy, session, anyOf, allOf }) => {
   const me = session.user.account;
-  const isMemberOf = (bandId: string) => policy.members.exists.where({ bandId, userId: me });
-  const isOwnerOf = (bandId: string) => policy.bands.exists.where({ id: bandId, ownerId: me });
+  const isMemberOf = (bandId: BandScoped["bandId"]) =>
+    policy.members.exists.where({ bandId, userId: me });
+  const isOwnerOf = (bandId: BandScoped["bandId"]) =>
+    policy.bands.exists.where({ id: bandId, ownerId: me });
 
   // Bands: the name is public. Members can rename the band; only the owner deletes
   // it, and nobody can hand ownership to someone else by editing the row.
@@ -44,14 +49,10 @@ export default s.definePermissions(app, ({ policy, session, anyOf, allOf }) => {
 
   // Venues: public places. The creator owns a venue, and so do the members of the
   // band it was added for.
-  const managesVenue = (venue: { ownerId: string; bandId: string | null | undefined }) =>
-    anyOf([{ ownerId: me }, isMemberOf(venue.bandId as string)]);
+  const managesVenue = (venue: BandScoped) => anyOf([{ ownerId: me }, isMemberOf(venue.bandId)]);
   policy.venues.allowRead.always();
   policy.venues.allowInsert.where((venue) =>
-    allOf([
-      { ownerId: me },
-      anyOf([{ bandId: { isNull: true } }, isMemberOf(venue.bandId as string)]),
-    ]),
+    allOf([{ ownerId: me }, anyOf([{ bandId: { isNull: true } }, isMemberOf(venue.bandId)])]),
   );
   policy.venues.allowUpdate
     .whereOld(managesVenue)
@@ -64,7 +65,7 @@ export default s.definePermissions(app, ({ policy, session, anyOf, allOf }) => {
   policy.venues.allowDelete.where(managesVenue);
 
   // Stops: the public sees confirmed dates; the band sees and edits everything.
-  const onMyBand = (row: { bandId: string }) => isMemberOf(row.bandId);
+  const onMyBand = (row: BandScoped) => isMemberOf(row.bandId);
   policy.stops.allowRead.where((stop) => anyOf([{ status: "confirmed" }, onMyBand(stop)]));
   policy.stops.allowInsert.where(onMyBand);
   policy.stops.allowUpdate.whereOld(onMyBand).whereNew(onMyBand);
