@@ -9,6 +9,6 @@
 export const NATIVE_RELAY_ABI_V1 = 3 as const;
 
 export const NATIVE_RELAY_ABI = {
-  minimum: NATIVE_RELAY_ABI_V2,
-  maximum: NATIVE_RELAY_ABI_V2,
+  minimum: NATIVE_RELAY_ABI_V1,
+  maximum: NATIVE_RELAY_ABI_V1,
 } as const;

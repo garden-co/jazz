@@ -1,5 +1,5 @@
 import type { ScenarioResult } from "./protocol";
-import { NATIVE_RELAY_ABI_V2 } from "jazz-rn/native-relay-abi";
+import { NATIVE_RELAY_ABI_V1 } from "jazz-rn/native-relay-abi";
 
 /**
  * The acceptance matrix requires two UI peers and one native durable relay.
@@ -11,12 +11,9 @@ import { NATIVE_RELAY_ABI_V2 } from "jazz-rn/native-relay-abi";
 export const scenarioPlan: readonly ScenarioResult[] = [
   [
     "linked-abi-admission",
-    `Installed relay admits an opaque scope and reports ABI V${NATIVE_RELAY_ABI_V2}`,
+    `Installed relay admits an opaque scope and reports ABI V${NATIVE_RELAY_ABI_V1}`,
   ],
-  [
-    "foreground-byte-abi",
-    "Installed JSI foreground executes ABI v2 Probe, Tick, Close, and revoke",
-  ],
+  ["foreground-byte-abi", "Installed JSI foreground executes ABI 3 Probe, Tick, Close, and revoke"],
   [
     "foreground-write-transaction",
     "JSI foreground commits and rolls back native mergeable/exclusive transactions",

@@ -218,6 +218,10 @@ coded operation errors (response 25) as answers to existing commands; see
 §19.6 ("Coded operation errors"). The exported constant keeps its `NATIVE_RELAY_ABI_V1` name and carries
 the current version.
 
+Numeric ABI 3 adds the versioned terminal-event envelope and descriptor-owned
+logical layouts for descendant row payloads. The stable `NATIVE_RELAY_ABI_V1`
+export name remains unchanged; its value and accepted JavaScript range are 3.
+
 The ABI stays coarse and binary:
 
 - open/close relay scope and attach/detach UI client;

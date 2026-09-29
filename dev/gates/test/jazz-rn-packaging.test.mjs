@@ -452,7 +452,7 @@ function assertExactTsRelaySurface(nativeSpec, relay, index) {
     indexExports[0],
     [
       "NATIVE_RELAY_ABI",
-      "NATIVE_RELAY_ABI_V2",
+      "NATIVE_RELAY_ABI_V1",
       "decodeNativeForegroundResponse",
       "encodeNativeForegroundCommand",
       "executeNativeRelayCommand",
@@ -896,7 +896,7 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
     );
     assert.match(
       await readFile(join(packageSourceDirectory, "src", "index.tsx"), "utf8"),
-      /NATIVE_RELAY_ABI_V2/,
+      /NATIVE_RELAY_ABI_V1/,
       "the isolated package source must contain the current ABI export before building",
     );
     execFileSync(
@@ -913,14 +913,14 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
     );
     assert.match(
       compiledEntry,
-      /NATIVE_RELAY_ABI_V2/,
+      /NATIVE_RELAY_ABI_V1/,
       "the source build must publish the current ABI export before npm packs it",
     );
     assert.throws(
       () =>
         assert.match(
-          compiledEntry.replace("NATIVE_RELAY_ABI_V2", "NATIVE_RELAY_ABI_VERSION"),
-          /NATIVE_RELAY_ABI_V2/,
+          compiledEntry.replace("NATIVE_RELAY_ABI_V1", "NATIVE_RELAY_ABI_VERSION"),
+          /NATIVE_RELAY_ABI_V1/,
         ),
       /did not match/,
       "a stale compiled relay entry must fail before the tarball is packed",
@@ -1018,9 +1018,9 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
     await writeFile(
       join(appDirectory, "App.tsx"),
       [
-        'import { NATIVE_RELAY_ABI, NATIVE_RELAY_ABI_V2 } from "jazz-rn";',
+        'import { NATIVE_RELAY_ABI, NATIVE_RELAY_ABI_V1 } from "jazz-rn";',
 
-        "export const relayAbi: number = NATIVE_RELAY_ABI.maximum + NATIVE_RELAY_ABI_V2;",
+        "export const relayAbi: number = NATIVE_RELAY_ABI.maximum + NATIVE_RELAY_ABI_V1;",
         "",
       ].join("\n"),
     );
@@ -1094,10 +1094,10 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
         },
       );
     // Ask the packed JavaScript entry point for both its ABI range and the
-    // source-only V2 symbol. The latter makes a stale lib/ entry fail even
+    // source-only NATIVE_RELAY_ABI_V1 symbol. The latter makes a stale lib/ entry fail even
     // when an older ABI range happened to remain import-compatible.
     const sourceRelayAbi = Number(
-      /export const NATIVE_RELAY_ABI_V2 = (\d+) as const;/.exec(
+      /export const NATIVE_RELAY_ABI_V1 = (\d+) as const;/.exec(
         await readFile(join(packageSourceDirectory, "src", "native-relay-abi.ts"), "utf8"),
       )?.[1],
     );
@@ -1107,7 +1107,7 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
           JAZZ_RN_PACKED_NATIVE_AVAILABLE: "0",
           JAZZ_RN_PACKED_NATIVE_ABI: "0",
         },
-        'const { NATIVE_RELAY_ABI, NATIVE_RELAY_ABI_V2 } = await import("jazz-rn"); process.stdout.write(JSON.stringify({ maximum: NATIVE_RELAY_ABI.maximum, v2: NATIVE_RELAY_ABI_V2 }));',
+        'const { NATIVE_RELAY_ABI, NATIVE_RELAY_ABI_V1 } = await import("jazz-rn"); process.stdout.write(JSON.stringify({ maximum: NATIVE_RELAY_ABI.maximum, v1: NATIVE_RELAY_ABI_V1 }));',
       ),
     );
     const packedRelayAbi = Number(packedRelayExports.maximum);
@@ -1116,14 +1116,14 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
       "the packed relay must export a positive ABI version for its native fixture",
     );
     assert.equal(
-      packedRelayExports.v2,
+      packedRelayExports.v1,
       sourceRelayAbi,
-      "the packed relay's ABI V2 export must be rebuilt from this checkout's source",
+      "the packed relay's NATIVE_RELAY_ABI_V1 export must be rebuilt from this checkout's source",
     );
     assert.equal(
       packedRelayAbi,
-      packedRelayExports.v2,
-      "the packed relay ABI range and V2 export must come from the same source build",
+      packedRelayExports.v1,
+      "the packed relay ABI range and NATIVE_RELAY_ABI_V1 export must come from the same source build",
     );
     assert.equal(
       runPackedRelay(
@@ -1236,10 +1236,10 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
       join(bareAppDirectory, "App.tsx"),
       [
         'import { Text } from "react-native";',
-        'import { NATIVE_RELAY_ABI, NATIVE_RELAY_ABI_V2 } from "jazz-rn";',
+        'import { NATIVE_RELAY_ABI, NATIVE_RELAY_ABI_V1 } from "jazz-rn";',
 
         "export default function App() {",
-        "  return <Text>Jazz Relay ABI {NATIVE_RELAY_ABI.maximum + NATIVE_RELAY_ABI_V2}</Text>;",
+        "  return <Text>Jazz Relay ABI {NATIVE_RELAY_ABI.maximum + NATIVE_RELAY_ABI_V1}</Text>;",
         "}",
         "",
       ].join("\n"),
@@ -2369,7 +2369,7 @@ test("relay verification rejects a manifest-sealed XCFramework without its devic
     encoding: "utf8",
   }).trim();
   const nativeRelayAbi = Number(
-    /pub const NATIVE_RELAY_ABI_V2: u16 = (\d+);/.exec(
+    /pub const NATIVE_RELAY_ABI_V1: u16 = (\d+);/.exec(
       readFileSync(
         new URL("../../../crates/jazz-native-relay/src/lib.rs", import.meta.url),
         "utf8",

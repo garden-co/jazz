@@ -5,4 +5,4 @@
 "jazz-napi": patch
 ---
 
-Publish descriptor-identified terminal payload layouts for native subscription events. React Native relay ABI V2 adds event envelopes and maps inserted or updated row fields by logical identity instead of physical slot order.
+Publish descriptor-identified terminal payload layouts for native subscription events. Numeric React Native relay ABI 3 adds event envelopes and maps inserted or updated row fields by logical identity instead of physical slot order; the stable `NATIVE_RELAY_ABI_V1` export name carries the current numeric version.
