@@ -251,6 +251,7 @@ mod read_sources;
 use read_sources::*;
 
 mod normalization;
+mod policy_factoring;
 
 use normalization::*;
 

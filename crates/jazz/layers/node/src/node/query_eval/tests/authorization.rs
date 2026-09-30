@@ -1571,3 +1571,116 @@ fn nullable_json_policy_candidates_preserve_logical_wrappers() {
         "runtime nullable JSON failures: {failures:#?}"
     );
 }
+
+/// A read policy that is an AND of two ORs of correlated grants expands to
+/// four branches, which lowering factors back into two unions. A row must be
+/// visible exactly once when each OR has a matching grant, however many
+/// alternatives match.
+#[test]
+fn and_of_or_grant_policy_authorizes_each_row_once_per_satisfied_factor() {
+    let member = author(0xb1);
+    let other = author(0xb2);
+    let grant = |table: &str| {
+        public_outer_exists(table, "doc", "id", [public_claim_eq("member", "user_id")])
+    };
+    let grant_tables = ["grants_0_a", "grants_0_b", "grants_1_a", "grants_1_b"];
+    let mut builder = PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("docs")
+            .column("title", PublicColumnType::Text)
+            .policies(
+                PublicTablePolicies::new().with_select(PublicPolicyExpr::And(vec![
+                    PublicPolicyExpr::Or(vec![grant("grants_0_a"), grant("grants_0_b")]),
+                    PublicPolicyExpr::Or(vec![grant("grants_1_a"), grant("grants_1_b")]),
+                ])),
+            ),
+    );
+    for table in grant_tables {
+        builder = builder.table(
+            PublicTableSchemaBuilder::new(table)
+                .fk_column("doc", "docs")
+                .column("member", PublicColumnType::Text)
+                .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+        );
+    }
+    let schema = public_query_eval_schema(builder);
+    let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xb0; 16]), schema.clone());
+    for identity in [member, other] {
+        node.set_test_provider_claims(
+            identity,
+            BTreeMap::from([(
+                crate::query::provider_claim_key("user_id"),
+                Value::String(identity.test_uuid().to_string()),
+            )]),
+        );
+    }
+
+    // Doc 1: one grant per factor. Doc 2: only the first factor. Doc 3: only
+    // the second. Doc 4: both alternatives of both factors. Doc 5: no grants.
+    // Doc 6: grants for both factors, but held by someone else.
+    let grants: [(usize, &[(&str, AuthorSubject)]); 6] = [
+        (1, &[("grants_0_a", member), ("grants_1_b", member)]),
+        (2, &[("grants_0_a", member), ("grants_0_b", member)]),
+        (3, &[("grants_1_a", member), ("grants_1_b", member)]),
+        (
+            4,
+            &[
+                ("grants_0_a", member),
+                ("grants_0_b", member),
+                ("grants_1_a", member),
+                ("grants_1_b", member),
+            ],
+        ),
+        (5, &[]),
+        (6, &[("grants_0_b", other), ("grants_1_a", other)]),
+    ];
+    let mut timestamp = 2_000;
+    let mut grant_id = 0x40;
+    for (doc, doc_grants) in grants {
+        timestamp += 1;
+        node.commit_mergeable_unit_settled(
+            MergeableCommit::new("docs", row(doc), timestamp)
+                .made_by(AuthorSubject::SYSTEM)
+                .cells(BTreeMap::from([(
+                    "title".to_owned(),
+                    Value::String(format!("doc {doc}")),
+                )])),
+        )
+        .unwrap();
+        for (table, holder) in doc_grants {
+            timestamp += 1;
+            grant_id += 1;
+            node.commit_mergeable_unit_settled(
+                MergeableCommit::new(*table, row(grant_id), timestamp)
+                    .made_by(AuthorSubject::SYSTEM)
+                    .cells(BTreeMap::from([
+                        ("doc".to_owned(), Value::Uuid(row(doc).0)),
+                        (
+                            "member".to_owned(),
+                            Value::String((*holder).test_uuid().to_string()),
+                        ),
+                    ])),
+            )
+            .unwrap();
+        }
+    }
+
+    let shape = Query::from("docs").validate_runtime(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let mut visible = node
+        .query_rows_for_link(&shape, &binding, DurabilityTier::Local, member)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<Vec<_>>();
+    visible.sort();
+    assert_eq!(visible, vec![row(1), row(4)]);
+
+    let mut visible_to_other = node
+        .query_rows_for_link(&shape, &binding, DurabilityTier::Local, other)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<Vec<_>>();
+    visible_to_other.sort();
+    assert_eq!(visible_to_other, vec![row(6)]);
+}
