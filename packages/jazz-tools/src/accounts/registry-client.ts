@@ -2,7 +2,11 @@ import { withAuthRequestDeadline } from "../runtime/auth-request-deadline.js";
 import type { AccountIdentity } from "./state.js";
 
 export class AccountAuthError extends Error {
-  constructor(readonly code: string) {
+  constructor(
+    readonly code: string,
+    /** The registry's HTTP status when it answered with an error. */
+    readonly status?: number,
+  ) {
     super(code);
     this.name = "AccountAuthError";
   }
@@ -27,7 +31,10 @@ export async function requestAccountRegistry(
     });
     if (!response.ok) {
       const code = await response.text();
-      throw new AccountAuthError(/^[a-z_]{1,80}$/.test(code) ? code : "account_request_failed");
+      throw new AccountAuthError(
+        /^[a-z_]{1,80}$/.test(code) ? code : "account_request_failed",
+        response.status,
+      );
     }
     return response.json();
   }, new AccountAuthError("account_request_timeout"));

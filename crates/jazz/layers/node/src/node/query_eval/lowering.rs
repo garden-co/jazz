@@ -724,6 +724,10 @@ where
             .await
     }
 
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.query_compile")
+    )]
     pub(super) async fn compile_query_program_request_with_access_paths(
         &mut self,
         request: QueryProgramRequest,
@@ -807,6 +811,10 @@ where
     /// source occurrence. This is intentionally separate from ordinary inline
     /// snapshots: the caller can atomically replace these records after the
     /// graph is subscribed.
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.query_compile")
+    )]
     pub(super) async fn compile_query_program_request_with_inline_sources_access_paths_and_covered_inputs(
         &mut self,
         request: QueryProgramRequest,
@@ -1348,6 +1356,10 @@ where
         }
     }
 
+    /// Subscribes with every root value materialized. Production retained
+    /// views choose their representation from the projection through
+    /// [`Self::subscribe_lowered_program_with_root_values`].
+    #[cfg(test)]
     pub(super) async fn subscribe_lowered_program(
         &mut self,
         program: QueryProgram,
@@ -1356,6 +1368,35 @@ where
         prepared_claim_binding_mode: PreparedClaimBindingMode,
         progress_waker: Option<&std::task::Waker>,
     ) -> Result<MultisinkSubscription, Error> {
+        self.subscribe_lowered_program_with_root_values(
+            program,
+            binding,
+            binding_source_shape,
+            prepared_claim_binding_mode,
+            progress_waker,
+            RootIndirectValues::Materialize,
+        )
+        .await
+    }
+
+    /// Like [`Self::subscribe_lowered_program`], choosing which root fields
+    /// the retained subscription rebuilds into logical large values. The
+    /// choice holds for its initial snapshot and every later update. Fields
+    /// kept physical must be dropped, or hydrated, before rows cross a public
+    /// boundary.
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.query_subscribe")
+    )]
+    pub(super) async fn subscribe_lowered_program_with_root_values(
+        &mut self,
+        program: QueryProgram,
+        binding: &Binding,
+        binding_source_shape: String,
+        prepared_claim_binding_mode: PreparedClaimBindingMode,
+        progress_waker: Option<&std::task::Waker>,
+        root_indirect_values: RootIndirectValues,
+    ) -> Result<MultisinkSubscription, Error> {
         self.install_lowered_program_subscription(
             program,
             binding,
@@ -1363,7 +1404,7 @@ where
             prepared_claim_binding_mode,
             progress_waker,
             SubscriptionLifetime::Retained,
-            RootIndirectValues::Materialize,
+            root_indirect_values,
             None,
         )
         .await
