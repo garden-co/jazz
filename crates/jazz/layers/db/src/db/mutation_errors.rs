@@ -79,6 +79,12 @@ fn mutation_error_details(reason: &RejectionReason) -> (String, String) {
             "cascade_rejected".to_owned(),
             format!("Transaction was rejected because ancestor {root:?} was rejected"),
         ),
+        // A well-formed transaction whose shape the authority does not
+        // support yet carries its own "... is not supported yet" sentence;
+        // it is not malformed, so it is reported verbatim.
+        RejectionReason::MalformedCommit(reason) if reason.ends_with("is not supported yet") => {
+            ("write_rejected".to_owned(), reason.clone())
+        }
         RejectionReason::MalformedCommit(reason) => (
             "write_rejected".to_owned(),
             format!("Malformed transaction: {reason}"),

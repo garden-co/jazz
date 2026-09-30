@@ -35,7 +35,9 @@ Invariant digest:
   counts. The protected row itself, USING clauses and
   read-for-write checks read committed state, and writes of any other
   transaction are never evidence. A unit is accepted only if every WITH CHECK
-  clause also passes against the unit's full post-state.
+  clause also passes against the unit's full post-state; a write whose policy
+  is monotone in the rows present is re-checked there only when a table it
+  reads holds a unit update that was not yet grounded when it passed.
 - `INV-RLS-10`: Query-driven sync MUST compose the root table read policy into the subscribed query and bind policy claims from server-authenticated identity so a client cannot widen...
 - `INV-RLS-11`: Relay peer links MUST have an explicit relay transport capability and no permission subject; client-to-Core peer links MUST use the admitted client AuthorSubject for policy-composed reads.
 - `INV-RLS-12`: Exclusive transaction view shipping MUST be policy-atomic per recipient and maintained subscription view: a non-system recipient MUST NOT receive a result member or pr...
@@ -276,18 +278,39 @@ client made them, so the checks run in two stages:
 
 1. **Grounding.** Every write is checked against the evidence above. A row is
    grounded once every version the unit writes for it has passed, and from the
-   next round on it shows its post-transaction content. A failed write is
-   checked again only when a table its policy reads has gained grounded rows.
-   Because a row becomes evidence only after its own checks pass, writes
-   cannot justify each other in a cycle. If a round grounds no new row while a
-   write still fails, the unit is rejected.
-2. **Post-state.** When every write has passed, each write whose passing check
-   read a unit row that was not grounded yet is checked once more against the
-   unit's full post-state: committed rows with all of the unit's updates
-   applied and its inserts and restores added, committed rows it deletes still
-   visible, rows it inserts and deletes left out, and the protected row left
-   out as above. A write that passed while every unit row it reads was
-   grounded has already been checked against that post-state.
+   next round on it shows its post-transaction content. The first round has
+   nothing grounded, and an ungrounded row shows exactly what committed state
+   shows, so the first round runs every check on committed state alone, with
+   no overlaid rows. A failed write is checked again only when a table its
+   policy reads has gained grounded rows. Because a row becomes evidence only
+   after its own checks pass, writes cannot justify each other in a cycle. If a
+   round grounds no new row while a write still fails, the unit is rejected.
+2. **Post-state.** When every write has passed, a write whose passing check
+   could have seen a different result in the unit's full post-state is
+   checked once more against that post-state: committed rows with all of the
+   unit's updates applied and its inserts and restores added, committed rows
+   it deletes still visible, rows it inserts and deletes left out, and the
+   protected row left out as above. Which writes are re-checked depends on the
+   policy:
+   - A **monotone** policy (see below) can only grant more as rows are added,
+     so grounding an insert or a restore cannot turn its pass into a failure;
+     only an update can, by replacing committed content. Such a write is
+     re-checked only when a table its policy reads holds a unit update that
+     was not grounded when the write passed.
+   - Any other policy is re-checked when a table it reads holds any unit row
+     that was not grounded when the write passed.
+
+**Monotonicity assumption.** The fate authority treats a WITH CHECK policy as
+monotone in the rows present when it is built only from positive evidence:
+existential joins (`exists`, `exists` over relations with inner joins),
+reachability, inheritance through a schema whose policies are all monotone,
+and row-level filters without `NOT`. A policy is treated as non-monotone, and
+keeps the full post-state pass, if any part of it uses `NOT` (on any operand),
+a non-inner relation join, an aggregate, or a limit or offset, or anything else
+that could grant on the absence of a row. Public schemas cannot currently
+express `NOT` around `exists` or non-inner relation joins, so the conservative
+rules only cost an extra pass; they are what keeps the narrowed pass sound if
+such constructs are ever admitted.
 
 The unit is accepted exactly when grounding passes every write and every write
 passes against the post-state. So no write is accepted on evidence the
@@ -297,15 +320,20 @@ rejected, although the insert's check passes while the demotion is not yet
 grounded. Both stages run over the canonical set, so the decision does not
 depend on the order in which the client made its writes.
 
-Each round builds one overlay per table and shares it among its checks; a check
-overlays only the tables its policy reads. A check still reads every unit row
-in those tables, so a unit whose policies read a large share of its own rows
-costs time quadratic in its size. The rows a unit's checks read are summed
-over every check, and a unit whose checks would read more than 262,144 of its
-own rows is rejected with `MalformedCommit` ("Reading more than 262144 rows of
-a transaction's own writes in its write-policy checks is not supported yet")
-instead of being evaluated at unbounded cost. A unit whose policies read no
-table it writes reads no overlaid rows and is never bounded this way.
+The first round reads no overlaid rows. Later rounds build one overlay per
+table and share it among their checks; a check overlays only the tables its
+policy reads, and still reads every unit row in those tables. A unit whose
+writes depend on each other's rows (a self-dependent chain) or whose
+post-state pass re-checks many writes therefore costs time quadratic in its
+size. The overlaid rows the unit's checks read are summed over every check
+after the first round, and a unit whose checks would read more than 262,144 of
+its own rows is rejected instead of being evaluated at unbounded cost. The
+rejection is `MalformedCommit` carrying "Reading more than 262144 rows of a
+transaction's own writes in its write-policy checks is not supported yet";
+applications receive it as a `write_rejected` rejection with that sentence as
+its reason. An import whose rows all rest on committed evidence and whose
+policies are monotone is decided in the first round, one check per write, and
+is never bounded this way.
 
 USING clauses (`update_using`, `delete_using`) and read-for-write checks judge
 the rows the transaction acts on, which are the committed rows, so they read

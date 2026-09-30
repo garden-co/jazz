@@ -149,9 +149,12 @@ themselves allowed. Every write must also still be allowed by the state the whol
 leaves behind, so demoting your own membership from admin in the same transaction as creating a
 document that requires admin is rejected. The order in which you make the writes doesn't matter.
 
-A transaction whose checks would have to read more than 262,144 of its own rows (for example,
-importing thousands of folders into a table whose policy reads that same table) is rejected as not
-supported yet. Split such an import into smaller transactions.
+Importing many rows whose permissions rest on rows that already exist (for example, thousands of
+folders under existing parents) is checked once per row. A transaction whose rows mostly depend on
+each other (for example, thousands of folders nested inside one another in the same transaction)
+is rejected with the `write_rejected` code and a reason ending in "is not supported yet" once its
+checks would have to read more than 262,144 of its own rows. Split such an import into smaller
+transactions.
 
 <Accordions type="single">
 <Accordion title="Recursive inheritance">

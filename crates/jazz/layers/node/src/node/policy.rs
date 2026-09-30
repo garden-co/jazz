@@ -78,6 +78,12 @@ struct CandidateEvidenceRow {
 }
 
 impl CandidateEvidenceRow {
+    /// Whether this row is an update: its post-state replaces committed
+    /// content that ungrounded checks still read.
+    fn replaces_committed(&self) -> bool {
+        self.before.is_some() && self.after.is_some() && self.before != self.after
+    }
+
     fn table_key(&self) -> (SchemaVersionId, String) {
         (self.policy_schema, self.policy_table.clone())
     }
@@ -137,6 +143,102 @@ impl CandidateUnitEvidence {
         for (key, rows) in rebuilt {
             tables.insert(key, Arc::new(TransactionOverlayTable::new(rows)));
         }
+    }
+}
+
+/// Whether a write-policy clause can only grant more as rows are added:
+/// existential joins, inner relation joins, reachability, inheritance and
+/// row-level filters. `NOT` anywhere, a non-inner relation join, aggregates
+/// and limits or offsets count as non-monotone, conservatively.
+fn write_policy_query_is_monotone(query: &crate::query::Query) -> bool {
+    query.aggregate.is_none()
+        && query.limit.is_none()
+        && query.offset == 0
+        && query.array_subqueries.is_empty()
+        && predicates_are_monotone(&query.filters)
+        && query.joins.iter().all(join_is_monotone)
+        && query.reachable.iter().all(reachable_is_monotone)
+        && query.policy_branches.iter().all(|branch| {
+            predicates_are_monotone(&branch.filters)
+                && branch.joins.iter().all(join_is_monotone)
+                && branch.reachable.iter().all(reachable_is_monotone)
+        })
+        && query
+            .relation
+            .as_ref()
+            .is_none_or(|relation| relation_is_monotone(&relation.rel))
+}
+
+fn query_inherits(query: &crate::query::Query) -> bool {
+    !query.inherits.is_empty()
+        || query
+            .policy_branches
+            .iter()
+            .any(|branch| !branch.inherits.is_empty())
+}
+
+fn predicates_are_monotone(predicates: &[crate::query::Predicate]) -> bool {
+    predicates.iter().all(predicate_is_monotone)
+}
+
+fn predicate_is_monotone(predicate: &crate::query::Predicate) -> bool {
+    use crate::query::Predicate;
+    match predicate {
+        Predicate::Not(_) => false,
+        Predicate::All(predicates) | Predicate::Any(predicates) => {
+            predicates_are_monotone(predicates)
+        }
+        Predicate::EnumMatch { payload, .. } => predicate_is_monotone(payload),
+        _ => true,
+    }
+}
+
+fn join_is_monotone(join: &crate::query::JoinVia) -> bool {
+    predicates_are_monotone(&join.filters) && join.nested_joins.iter().all(join_is_monotone)
+}
+
+fn reachable_is_monotone(reachable: &crate::query::ReachableVia) -> bool {
+    predicates_are_monotone(&reachable.access_filters)
+        && predicates_are_monotone(&reachable.edge_filters)
+}
+
+fn relation_is_monotone(relation: &crate::query::RelationExpr) -> bool {
+    use crate::query::{RelationExpr, RelationJoinKind};
+    match relation {
+        RelationExpr::TableScan { .. } => true,
+        RelationExpr::Filter { input, predicate } => {
+            relation_is_monotone(input) && relation_predicate_is_monotone(predicate)
+        }
+        RelationExpr::Union { inputs } => inputs.iter().all(|arm| relation_is_monotone(&arm.input)),
+        RelationExpr::Join {
+            left,
+            right,
+            join_kind,
+            ..
+        } => {
+            matches!(join_kind, RelationJoinKind::Inner)
+                && relation_is_monotone(left)
+                && relation_is_monotone(right)
+        }
+        RelationExpr::Project { input, .. }
+        | RelationExpr::Distinct { input, .. }
+        | RelationExpr::OrderBy { input, .. } => relation_is_monotone(input),
+        RelationExpr::Gather { seed, step, .. } => {
+            relation_is_monotone(seed) && relation_is_monotone(step)
+        }
+        RelationExpr::Offset { .. } | RelationExpr::Limit { .. } => false,
+    }
+}
+
+fn relation_predicate_is_monotone(predicate: &crate::query::RelationPredicate) -> bool {
+    use crate::query::RelationPredicate;
+    match predicate {
+        RelationPredicate::Not(_) => false,
+        RelationPredicate::And(predicates) | RelationPredicate::Or(predicates) => {
+            predicates.iter().all(relation_predicate_is_monotone)
+        }
+        RelationPredicate::EnumMatch { payload, .. } => relation_predicate_is_monotone(payload),
+        _ => true,
     }
 }
 
@@ -343,30 +445,55 @@ where
         for own in own_row.iter().flatten() {
             unpassed[*own] += 1;
         }
+        // `ungrounded_live`: rows whose post-state differs from what they show
+        // while ungrounded (inserts, restores and updates). `ungrounded_updates`:
+        // the subset that replaces committed content (updates), the only rows
+        // whose grounding can take evidence away from a monotone policy.
         let mut ungrounded_live = BTreeMap::<(SchemaVersionId, String), usize>::new();
+        let mut ungrounded_updates = BTreeMap::<(SchemaVersionId, String), usize>::new();
         for row in &evidence.rows {
             if row.after.is_some() {
                 *ungrounded_live.entry(row.table_key()).or_default() += 1;
             }
+            if row.replaces_committed() {
+                *ungrounded_updates.entry(row.table_key()).or_default() += 1;
+            }
         }
+        // Whether a passing check already saw everything the post-state
+        // could change for it. A monotone policy can only lose a pass to an
+        // update grounded later; any other policy to any ungrounded row.
         let saw_post_state =
             |own: Option<usize>,
+             monotone: bool,
              reads: &BTreeSet<(SchemaVersionId, String)>,
              grounded: &[bool],
-             ungrounded_live: &BTreeMap<(SchemaVersionId, String), usize>| {
+             ungrounded_live: &BTreeMap<(SchemaVersionId, String), usize>,
+             ungrounded_updates: &BTreeMap<(SchemaVersionId, String), usize>| {
                 reads.iter().all(|table| {
-                    let own_counted = own.is_some_and(|own| {
-                        let row = &evidence.rows[own];
-                        !grounded[own] && row.after.is_some() && row.table_key() == *table
-                    });
-                    ungrounded_live.get(table).copied().unwrap_or(0) == usize::from(own_counted)
+                    let own_row = own
+                        .filter(|own| !grounded[*own])
+                        .map(|own| &evidence.rows[own])
+                        .filter(|row| row.table_key() == *table);
+                    if monotone {
+                        let own_counted = own_row.is_some_and(|row| row.replaces_committed());
+                        ungrounded_updates.get(table).copied().unwrap_or(0)
+                            == usize::from(own_counted)
+                    } else {
+                        let own_counted = own_row.is_some_and(|row| row.after.is_some());
+                        ungrounded_live.get(table).copied().unwrap_or(0) == usize::from(own_counted)
+                    }
                 })
             };
+        let monotone = self.unit_write_policies_monotone(versions)?;
         let mut grounded = vec![false; evidence.rows.len()];
         let mut post_state_checked = vec![false; versions.len()];
         let mut reads = vec![BTreeSet::<(SchemaVersionId, String)>::new(); versions.len()];
+        // The first round has nothing grounded, so every unit row shows what
+        // committed state already shows: it runs on committed state alone,
+        // with no overlaid rows and nothing charged to the evidence budget,
+        // and only records which tables each policy reads.
         let mut tables = OverlayTables::new();
-        evidence.rebuild_tables(&mut tables, &grounded, None);
+        let mut first_round = true;
         let mut spent = 0usize;
         let mut failed = BTreeSet::new();
         let mut pending = (0..versions.len()).collect::<Vec<_>>();
@@ -391,8 +518,14 @@ where
                 };
                 if allowed {
                     failed.remove(&index);
-                    post_state_checked[index] =
-                        saw_post_state(own_row[index], &reads[index], &grounded, &ungrounded_live);
+                    post_state_checked[index] = saw_post_state(
+                        own_row[index],
+                        monotone[index],
+                        &reads[index],
+                        &grounded,
+                        &ungrounded_live,
+                        &ungrounded_updates,
+                    );
                     // A row is grounded once every version the unit writes
                     // for it has passed; it becomes evidence next round.
                     if let Some(own) = own_row[index] {
@@ -418,13 +551,23 @@ where
                         *count -= 1;
                     }
                 }
+                if row.replaces_committed()
+                    && let Some(count) = ungrounded_updates.get_mut(&row.table_key())
+                {
+                    *count -= 1;
+                }
             }
             // Only a table that gained grounded rows can change a failed
             // check's evidence. Without one, every failure is final.
             if changed.is_empty() {
                 return Ok(UnitWritePolicyDecision::Denied);
             }
-            evidence.rebuild_tables(&mut tables, &grounded, Some(&changed));
+            if first_round {
+                evidence.rebuild_tables(&mut tables, &grounded, None);
+                first_round = false;
+            } else {
+                evidence.rebuild_tables(&mut tables, &grounded, Some(&changed));
+            }
             pending = failed
                 .iter()
                 .copied()
@@ -465,6 +608,65 @@ where
             }
         }
         Ok(UnitWritePolicyDecision::Allowed)
+    }
+
+    /// Whether each version's WITH CHECK policies are monotone in the rows
+    /// present (`INV-RLS-9`), decided statically per policy table and cached
+    /// per unit. A table whose insert or update check uses a non-monotone
+    /// construct, or inherits through a schema that has one, is not.
+    fn unit_write_policies_monotone(
+        &mut self,
+        versions: &[VersionRecord],
+    ) -> Result<Vec<bool>, Error> {
+        let mut by_table = BTreeMap::<(SchemaVersionId, String), bool>::new();
+        let mut monotone = Vec::with_capacity(versions.len());
+        for version in versions {
+            let key = (version.schema_version(), version.table().to_owned());
+            if let Some(known) = by_table.get(&key) {
+                monotone.push(*known);
+                continue;
+            }
+            let (policy_schema, table, _) = self.policy_projection_for_version_record(version)?;
+            let checks = [
+                table.write_policies.insert_check.as_ref(),
+                table.write_policies.update_check.as_ref(),
+            ];
+            let mut known = checks
+                .iter()
+                .flatten()
+                .all(|policy| write_policy_query_is_monotone(policy));
+            if known && checks.iter().flatten().any(|policy| query_inherits(policy)) {
+                // An inherited clause evaluates another table's policy; accept
+                // it as monotone only when every policy of the schema is.
+                known = self
+                    .policy_schema_for_monotonicity(policy_schema)
+                    .is_some_and(|schema| {
+                        schema.tables.iter().all(|table| {
+                            table
+                                .read_policy
+                                .iter()
+                                .chain(table.write_policies.iter().map(|(_, policy)| policy))
+                                .all(write_policy_query_is_monotone)
+                        })
+                    });
+            }
+            by_table.insert(key, known);
+            monotone.push(known);
+        }
+        Ok(monotone)
+    }
+
+    fn policy_schema_for_monotonicity(&self, schema: SchemaVersionId) -> Option<&JazzSchema> {
+        if schema == self.catalogue.active_schema.schema {
+            Some(&self.catalogue.active_schema.compiled)
+        } else if schema == self.catalogue.local_schema_version_id {
+            Some(&self.catalogue.schema)
+        } else {
+            self.catalogue
+                .catalogue_schemas
+                .get(&schema)
+                .map(|entry| &entry.schema)
+        }
     }
 
     /// Check one write of a unit against a round's shared overlay, leaving

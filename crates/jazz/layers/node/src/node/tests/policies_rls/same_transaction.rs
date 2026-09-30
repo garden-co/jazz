@@ -619,8 +619,192 @@ fn import_sized_same_table_unit_is_decided_at_bounded_cost() {
         panic!("an over-budget unit is rejected as not supported yet");
     };
     assert!(reason.contains("is not supported yet"), "{reason}");
+    // The first round runs every check on committed state at no charge;
+    // the budget then stops the overlaid re-checks after a few hundred.
     assert!(
-        evaluations < FOLDERS as usize,
+        evaluations <= FOLDERS as usize + 200,
         "the budget stops evaluation early, after {evaluations} checks"
     );
+}
+
+/// The common import shape: thousands of rows whose policy reads their own
+/// table, all nesting under committed parents. Every check passes on
+/// committed state in the first round, which reads no overlaid rows, and the
+/// monotone policy needs no post-state pass because the unit updates nothing.
+///
+/// ```text
+/// alice ──tx{ 2000 folders(parent: committed root) }► core ──► Accepted, 2000 checks
+/// ```
+#[test]
+fn import_sized_unit_under_committed_parents_is_checked_once_per_row() {
+    const FOLDERS: u128 = 2_000;
+    let alice = user(0xa1);
+    let schema = folder_schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    install_test_uuid_sub_claim(&mut core, alice);
+    let root = row(0x91);
+    committed_root_folder(&mut writer, &mut core, root, alice);
+
+    let tx_id = writer
+        .commit_mergeable_many_settled(
+            (0..FOLDERS)
+                .map(|index| folder_insert(chain_folder(index), root, alice, 11))
+                .collect(),
+        )
+        .unwrap();
+    let unit = writer.commit_unit_for(tx_id).unwrap();
+    crate::node::WRITE_POLICY_VERSION_EVALUATIONS.with(|count| count.set(0));
+    let updates = core.apply_sync_message_settled(unit).unwrap();
+    let evaluations = crate::node::WRITE_POLICY_VERSION_EVALUATIONS.with(|count| count.get());
+
+    assert_eq!(reported_fate(&updates, tx_id), Fate::Accepted);
+    assert_eq!(evaluations, FOLDERS as usize, "one check per row, no final pass");
+}
+
+/// A bulk update that takes away the evidence the same unit's inserts rely
+/// on is rejected: each child passes against its committed parent, and the
+/// post-state pass re-checks it against the parent's new owner.
+///
+/// ```text
+/// alice ──tx{ 20 folders(parent: root) }────────────────────► core ──► Accepted
+/// alice ──tx{ 20 folders keep owner, 20 children }──────────► core ──► Accepted
+/// alice ──tx{ 20 folders → owner bob, 20 children }─────────► core ──► Rejected
+/// ```
+#[test]
+fn bulk_update_removing_evidence_for_same_unit_inserts_is_rejected() {
+    const PARENTS: u128 = 20;
+    let alice = user(0xa1);
+    let bob = user(0xb0);
+    let schema = folder_schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    install_test_uuid_sub_claim(&mut core, alice);
+    let root = row(0x92);
+    committed_root_folder(&mut writer, &mut core, root, alice);
+    let parent = |index: u128| RowUuid(uuid::Uuid::from_u128(0x0a00_0000 + index));
+    let child = |round: u128, index: u128| {
+        RowUuid(uuid::Uuid::from_u128(0x0b00_0000 + round * 0x1000 + index))
+    };
+    let reparent = |index: u128, owner: AuthorSubject, now_ms: u64| {
+        MergeableCommit::new("folders", parent(index), now_ms)
+            .made_by(alice)
+            .cells(BTreeMap::from([
+                ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
+                ("parent".to_owned(), Value::Uuid(root.0)),
+            ]))
+    };
+
+    let (_, fate) = deliver_mergeable_transaction(
+        &mut writer,
+        &mut core,
+        (0..PARENTS)
+            .map(|index| folder_insert(parent(index), root, alice, 11))
+            .collect(),
+    );
+    assert_eq!(fate, Fate::Accepted);
+
+    // Planted positive: rewriting the parents without changing their owner
+    // still passes the post-state pass.
+    let (_, fate) = deliver_mergeable_transaction(
+        &mut writer,
+        &mut core,
+        (0..PARENTS)
+            .flat_map(|index| {
+                [
+                    reparent(index, alice, 12),
+                    folder_insert(child(0, index), parent(index), alice, 12),
+                ]
+            })
+            .collect(),
+    );
+    assert_eq!(fate, Fate::Accepted);
+
+    let (_, fate) = deliver_mergeable_transaction(
+        &mut writer,
+        &mut core,
+        (0..PARENTS)
+            .flat_map(|index| {
+                [
+                    reparent(index, bob, 13),
+                    folder_insert(child(1, index), parent(index), alice, 13),
+                ]
+            })
+            .collect(),
+    );
+    assert_eq!(fate, Fate::Rejected(RejectionReason::AuthorizationDenied));
+}
+
+/// Folders nest under a folder their writer owns, and only while not
+/// archived: the `NOT` makes the policy non-monotone as far as the fate
+/// authority's static analysis is concerned.
+fn archivable_folder_schema() -> JazzSchema {
+    let policy = PublicPolicyExpr::And(vec![
+        public_outer_exists("folders", "id", "parent", [public_claim_eq("owner", "sub")]),
+        PublicPolicyExpr::Not(Box::new(public_literal_eq(
+            "archived",
+            PublicValue::Boolean(true),
+        ))),
+    ]);
+    build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("folders")
+                .column("owner", PublicColumnType::Uuid)
+                .column("archived", PublicColumnType::Boolean)
+                .fk_column("parent", "folders")
+                .policies(public_write_policies(policy).with_select(PublicPolicyExpr::True)),
+        ),
+    )
+}
+
+/// Two writes, a mid folder under a committed root and a leaf under the mid
+/// folder, checked with and without a `NOT` in the policy. The mid folder
+/// passes in the first round while the leaf is still ungrounded. A monotone
+/// policy can't lose that pass to an added row, so it is not re-checked
+/// (3 checks). A `NOT` policy keeps the full post-state pass (4 checks).
+#[test]
+fn not_policy_keeps_the_full_post_state_pass() {
+    let alice = user(0xa1);
+    let (mid, leaf) = (row(0xa2), row(0xa3));
+    for (schema, archivable, expected_evaluations) in [
+        (folder_schema(), false, 3),
+        (archivable_folder_schema(), true, 4),
+    ] {
+        let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
+        let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+        install_test_uuid_sub_claim(&mut core, alice);
+        let root = row(0x93);
+        // Folder cells for either schema: `archived` exists only in the
+        // archivable one.
+        let folder = |folder: RowUuid, parent: RowUuid, now_ms: u64| {
+            let mut cells = BTreeMap::from([
+                ("owner".to_owned(), Value::Uuid(alice.test_uuid())),
+                ("parent".to_owned(), Value::Uuid(parent.0)),
+            ]);
+            if archivable {
+                cells.insert("archived".to_owned(), Value::Bool(false));
+            }
+            MergeableCommit::new("folders", folder, now_ms).cells(cells)
+        };
+        let (_, fate) =
+            deliver_mergeable_transaction(&mut writer, &mut core, vec![folder(root, root, 10)]);
+        assert_eq!(fate, Fate::Accepted);
+
+        let tx_id = writer
+            .commit_mergeable_many_settled(vec![
+                folder(mid, root, 11).made_by(alice),
+                folder(leaf, mid, 11).made_by(alice),
+            ])
+            .unwrap();
+        let unit = writer.commit_unit_for(tx_id).unwrap();
+        crate::node::WRITE_POLICY_VERSION_EVALUATIONS.with(|count| count.set(0));
+        let updates = core.apply_sync_message_settled(unit).unwrap();
+        let evaluations = crate::node::WRITE_POLICY_VERSION_EVALUATIONS.with(|count| count.get());
+
+        assert_eq!(reported_fate(&updates, tx_id), Fate::Accepted);
+        assert_eq!(
+            evaluations, expected_evaluations,
+            "archivable={archivable}: checks including the post-state pass"
+        );
+    }
 }
