@@ -1796,6 +1796,14 @@ where
                 subscription: update.subscription,
                 transition: message.to_owned(),
             };
+            tracing::debug!(
+                "DIAG3816 receiver closure sub={:?} reset={} opening_pending={} adds={:?} removes={:?}",
+                update.subscription,
+                update.reset_input_set,
+                update.opening_pending,
+                update.supporting_adds(),
+                update.supporting_removes()
+            );
             for (rows, adding) in [
                 (update.supporting_removes(), false),
                 (update.supporting_adds(), true),
@@ -1816,6 +1824,17 @@ where
                     };
                     if adding {
                         if current.is_some() {
+                            tracing::warn!(
+                                "DIAG3816 duplicate coordinate sub={:?} reset={} opening_pending={} cleared={} retained={:?} added={:?} adds={:?} removes={:?}",
+                                update.subscription,
+                                update.reset_input_set,
+                                update.opening_pending,
+                                *cleared,
+                                current,
+                                row,
+                                update.supporting_adds(),
+                                update.supporting_removes()
+                            );
                             return Err(invalid(
                                 "scope addition duplicates a retained physical coordinate",
                             ));
