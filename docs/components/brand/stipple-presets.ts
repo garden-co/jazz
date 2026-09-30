@@ -32,17 +32,25 @@ export const stripePattern: StipplePattern = {
   radius: 0.0025,
   gain: 1.4,
   seed: 3,
+  points: "blue-noise",
   layers: stripes({ type: "flute", angle: 60, period: 0.16, falloff: 2.5 }, 1.4, 0.12),
 };
 
-/** Horizontal stripes plus a copy turned 90°, combined before sampling. */
+/**
+ * Stripes across and down, each with its own fluting width, combined per ink
+ * before sampling. "screen" keeps both sets of lines visible where they
+ * cross; "multiply" would keep only the crossings (a checkerboard).
+ */
 export const gridPattern: StipplePattern = {
   inks,
   spacing: 0.006,
   radius: 0.0025,
-  gain: 2.4,
+  gain: 1.2,
   seed: 7,
-  blend: "multiply",
-  copies: [90],
-  layers: stripes({ type: "flute", angle: 90, period: 0.12, falloff: 1.2 }, 1.8, 0.12),
+  points: "blue-noise",
+  blend: "screen",
+  layers: [
+    ...stripes({ type: "flute", angle: 0, period: 0.12, falloff: 4 }, 1.4, 0.12),
+    ...stripes({ type: "flute", angle: 90, period: 0.12, falloff: 4 }, 1.4, 0.12),
+  ],
 };

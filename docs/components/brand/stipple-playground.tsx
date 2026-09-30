@@ -27,15 +27,27 @@ const flutesOf = (pattern: StipplePattern) =>
 
 /**
  * Sets a flute setting on every layer at once, keeping each layer's sign for
- * scale and shift so mirrored inks stay mirrored and ribs stay aligned.
+ * scale and shift so mirrored inks stay mirrored and ribs stay aligned. The
+ * angle turns all flutes together, so a grid's two directions stay crossed.
  */
 function setFlutes(pattern: StipplePattern, key: keyof Flute, value: number): StipplePattern {
   const signed = key === "scale" || key === "shift";
+  const turn = key === "angle" ? value - (flutesOf(pattern)[0]?.angle ?? 0) : 0;
   return mapFlutes(pattern, (flute) => {
+    if (key === "angle") return { ...flute, angle: flute.angle + turn };
     const sign = signed && ((flute[key] as number | undefined) ?? 1) < 0 ? -1 : 1;
     return { ...flute, [key]: sign * value };
   });
 }
+
+/** Ribs repeat along the flute's angle: 0° is x, 90° is y. */
+const axisName = (angle: number) =>
+  (({ 0: "x", 90: "y" }) as Record<number, string>)[((angle % 180) + 180) % 180] ?? `at ${angle}°`;
+
+/** The distinct flute directions, each with its own width. */
+const directionsOf = (pattern: StipplePattern) => [
+  ...new Map(flutesOf(pattern).map((flute) => [flute.angle, flute.period])).entries(),
+];
 
 function mapFlutes(pattern: StipplePattern, update: (flute: Flute) => Flute): StipplePattern {
   return {
@@ -65,7 +77,6 @@ function setRadials(
 type Projection = NonNullable<Flute["projection"]>;
 
 const fluteSliders = [
-  { key: "period", label: "Fluting width", min: 0.02, max: 0.5, step: 0.005 },
   { key: "angle", label: "Fluting angle", min: 0, max: 180, step: 1 },
   { key: "falloff", label: "Fluting falloff", min: 0.1, max: 6, step: 0.1, only: "orthographic" },
   { key: "scale", label: "Fluting strength", min: 0, max: 30, step: 0.25, only: "perspective" },
@@ -222,6 +233,7 @@ export function StipplePlayground() {
           [
             ["blend", ["screen", "max", "multiply"]],
             ["sampling", ["independent", "shared"]],
+            ["points", ["grid", "blue-noise"]],
           ] as const
         ).map(([key, options]) => (
           <label key={key} className="block space-y-1">
@@ -266,6 +278,28 @@ export function StipplePlayground() {
             onClick={() => commit(mapFlutes(pattern, (f) => ({ ...f, mirror: !f.mirror })))}
           />
         )}
+        {directionsOf(pattern).map(([angle, period], _, all) => (
+          <label key={angle} className="block space-y-1">
+            <Text weight="medium">
+              Fluting width{all.length > 1 ? ` ${axisName(angle)}` : ""} {period}
+            </Text>
+            <input
+              type="range"
+              className="w-full"
+              min={0.02}
+              max={0.5}
+              step={0.005}
+              value={period}
+              onChange={(event) =>
+                commit(
+                  mapFlutes(pattern, (f) =>
+                    f.angle === angle ? { ...f, period: Number(event.target.value) } : f,
+                  ),
+                )
+              }
+            />
+          </label>
+        ))}
         {flute &&
           fluteSliders.map(({ key, label, min, max, step, ...rest }) =>
             "only" in rest && rest.only !== projection ? null : (

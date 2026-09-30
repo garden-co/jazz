@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  blueNoiseTile,
   densitiesAt,
   expandCopies,
   layerAt,
@@ -165,11 +166,49 @@ describe("stipple", () => {
   });
 
   it("puts at most one dot in each cell when sampling is shared", () => {
-    const pattern: StipplePattern = { ...gridPattern, gain: 10, sampling: "shared" };
+    const pattern: StipplePattern = {
+      ...gridPattern,
+      gain: 10,
+      sampling: "shared",
+      points: "grid",
+    };
     const dots = collect(pattern, -0.3, -0.3, 0.3, 0.3);
     const cells = new Set(
       dots.map((d) => `${Math.floor(d.x / pattern.spacing)},${Math.floor(d.y / pattern.spacing)}`),
     );
     expect(cells.size).toBe(dots.length);
+  });
+
+  it("puts at most one dot on each blue-noise point when sampling is shared", () => {
+    const pattern: StipplePattern = { ...gridPattern, gain: 10, sampling: "shared" };
+    const dots = collect(pattern, -0.3, -0.3, 0.3, 0.3).map((d) => `${d.x},${d.y}`);
+    expect(new Set(dots).size).toBe(dots.length);
+  });
+});
+
+describe("blueNoiseTile", () => {
+  // Smallest wrap-around distance between the first `n` points, in cells.
+  const minDistance = (tile: Float64Array, n: number) => {
+    let best = Infinity;
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        let dx = Math.abs(tile[2 * i] - tile[2 * j]);
+        let dy = Math.abs(tile[2 * i + 1] - tile[2 * j + 1]);
+        dx = Math.min(dx, 64 - dx);
+        dy = Math.min(dy, 64 - dy);
+        best = Math.min(best, Math.hypot(dx, dy));
+      }
+    }
+    return best;
+  };
+
+  it("spreads every prefix evenly, so sparse regions have no clumps", () => {
+    const tile = blueNoiseTile(1);
+    expect(tile.length).toBe(64 * 64 * 2);
+    // n points evenly spread on the 64×64 tile sit about 64/√n apart; white
+    // noise would put some almost on top of each other.
+    for (const n of [64, 256, 1024]) {
+      expect(minDistance(tile, n)).toBeGreaterThan(0.5 * (64 / Math.sqrt(n)));
+    }
   });
 });

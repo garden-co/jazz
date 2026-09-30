@@ -10,9 +10,12 @@
 // so its sharp edges meet the first's; a grid is the stripes again, turned
 // 90°.
 //
-// The resulting densities are sampled into dots on jittered grids, one grid
-// per ink (dots of different inks may overlap, as in print) or one shared
-// grid (at most one dot per cell).
+// The resulting densities are sampled into dots, either on jittered grids or
+// on a tiled blue-noise point set whose points are ranked so any prefix is
+// evenly spread: a point becomes a dot where its rank is below the density,
+// which keeps dots evenly spaced at every density and edges crisp. Each ink
+// gets its own points (dots of different inks may overlap, as in print), or
+// the inks share one set (at most one dot per point).
 
 export type Ink = "a" | "b";
 
@@ -71,7 +74,7 @@ export type StipplePattern = {
   spacing: number;
   /** Dot radius, in pattern units. */
   radius: number;
-  /** 0 = dots on a regular grid, 1 = anywhere in their cell. */
+  /** For grid points: 0 = a regular grid, 1 = anywhere in their cell. */
   jitter?: number;
   /** Scales both densities before sampling. */
   gain?: number;
@@ -82,8 +85,13 @@ export type StipplePattern = {
   copies?: number[];
   /** How layers of the same ink combine; defaults to "screen". */
   blend?: Blend;
-  /** "independent" samples each ink on its own grid; "shared" allows one dot per cell. */
+  /** "independent" samples each ink on its own points; "shared" allows one dot per point. */
   sampling?: "independent" | "shared";
+  /**
+   * Where dots can go: "grid" is one candidate per cell, moved by `jitter`;
+   * "blue-noise" is an evenly spread random point set with no grid to it.
+   */
+  points?: "grid" | "blue-noise";
   seed?: number;
 };
 
@@ -200,43 +208,137 @@ export type Dot = { x: number; y: number; ink: Ink };
 
 /**
  * Samples the pattern over a rectangle (pattern units, centre at the origin)
- * and calls `emit` per dot. Each cell's randomness is a hash of its index,
- * so the same seed gives the same dots wherever the rectangle falls.
+ * and calls `emit` per dot. Candidate points depend only on the seed, never
+ * on the rectangle, so the same seed gives the same dots wherever it falls.
  */
 export function stipple(
   pattern: StipplePattern,
   bounds: { left: number; top: number; right: number; bottom: number },
   emit: (dot: Dot) => void,
 ) {
-  const { spacing } = pattern;
   const layers = expandCopies(pattern);
-  const jitter = pattern.jitter ?? 1;
   const gain = pattern.gain ?? 1;
-  const seed = pattern.seed ?? 1;
-  const shared = pattern.sampling === "shared";
-  const i0 = Math.floor(bounds.left / spacing);
-  const i1 = Math.ceil(bounds.right / spacing);
-  const j0 = Math.floor(bounds.top / spacing);
-  const j1 = Math.ceil(bounds.bottom / spacing);
-  const r = [0, 0, 0];
-  const passes: (Ink | "both")[] = shared ? ["both"] : ["a", "b"];
+  const passes: (Ink | "both")[] = pattern.sampling === "shared" ? ["both"] : ["a", "b"];
+  const each = pattern.points === "blue-noise" ? blueNoisePoints : gridPoints;
   for (const pass of passes) {
-    const passSeed = pass === "b" ? seed + 0x51ed27 : seed;
-    for (let j = j0; j <= j1; j++) {
-      for (let i = i0; i <= i1; i++) {
-        cellRandom(passSeed, i, j, r);
-        const x = (i + 0.5 + (r[0] - 0.5) * jitter) * spacing;
-        const y = (j + 0.5 + (r[1] - 0.5) * jitter) * spacing;
-        const d = densitiesAt(layers, x, y, pattern.blend);
-        let a = pass === "b" ? 0 : clamp01(d.a * gain);
-        let b = pass === "a" ? 0 : clamp01(d.b * gain);
-        const sum = a + b;
-        if (sum > 1) {
-          a /= sum;
-          b /= sum;
+    each(pattern, bounds, pass === "b" ? 1 : 0, (x, y, rank) => {
+      const d = densitiesAt(layers, x, y, pattern.blend);
+      let a = pass === "b" ? 0 : clamp01(d.a * gain);
+      let b = pass === "a" ? 0 : clamp01(d.b * gain);
+      const sum = a + b;
+      if (sum > 1) {
+        a /= sum;
+        b /= sum;
+      }
+      if (rank < a) emit({ x, y, ink: "a" });
+      else if (rank < a + b) emit({ x, y, ink: "b" });
+    });
+  }
+}
+
+type Bounds = { left: number; top: number; right: number; bottom: number };
+type Visit = (x: number, y: number, rank: number) => void;
+
+/** One jittered candidate per grid cell, with a random rank. */
+function gridPoints(pattern: StipplePattern, bounds: Bounds, pass: number, visit: Visit) {
+  const { spacing } = pattern;
+  const jitter = pattern.jitter ?? 1;
+  const seed = (pattern.seed ?? 1) + pass * 0x51ed27;
+  const r = [0, 0, 0];
+  const j1 = Math.ceil(bounds.bottom / spacing);
+  const i1 = Math.ceil(bounds.right / spacing);
+  for (let j = Math.floor(bounds.top / spacing); j <= j1; j++) {
+    for (let i = Math.floor(bounds.left / spacing); i <= i1; i++) {
+      cellRandom(seed, i, j, r);
+      visit(
+        (i + 0.5 + (r[0] - 0.5) * jitter) * spacing,
+        (j + 0.5 + (r[1] - 0.5) * jitter) * spacing,
+        r[2],
+      );
+    }
+  }
+}
+
+/** Side of the repeating blue-noise tile, in cells (one point per cell). */
+const TILE = 64;
+const tiles = new Map<number, Float64Array>();
+
+/**
+ * A tileable set of TILE² points in [0, TILE)², ordered so every prefix is
+ * evenly spread (Mitchell's best candidate on a torus): point k is the
+ * candidate farthest from points 0..k-1. Stored as x, y pairs in rank order.
+ */
+export function blueNoiseTile(seed: number): Float64Array {
+  const cached = tiles.get(seed);
+  if (cached) return cached;
+  const count = TILE * TILE;
+  const out = new Float64Array(count * 2);
+  // Buckets of one cell each, for nearest-point queries.
+  const buckets: number[][] = Array.from({ length: count }, () => []);
+  const r = [0, 0, 0];
+  const nearest = (x: number, y: number) => {
+    const cx = Math.floor(x);
+    const cy = Math.floor(y);
+    let best = Infinity;
+    for (let ring = 0; ring <= TILE / 2; ring++) {
+      if (best < (ring - 1) * (ring - 1)) break;
+      for (let dy = -ring; dy <= ring; dy++) {
+        for (let dx = -ring; dx <= ring; dx++) {
+          if (Math.max(Math.abs(dx), Math.abs(dy)) !== ring) continue;
+          const bucket = buckets[((cy + dy + TILE) % TILE) * TILE + ((cx + dx + TILE) % TILE)];
+          for (const k of bucket) {
+            let ex = Math.abs(out[2 * k] - x);
+            let ey = Math.abs(out[2 * k + 1] - y);
+            if (ex > TILE / 2) ex = TILE - ex;
+            if (ey > TILE / 2) ey = TILE - ey;
+            best = Math.min(best, ex * ex + ey * ey);
+          }
         }
-        if (r[2] < a) emit({ x, y, ink: "a" });
-        else if (r[2] < a + b) emit({ x, y, ink: "b" });
+      }
+    }
+    return best;
+  };
+  for (let k = 0; k < count; k++) {
+    let bx = 0;
+    let by = 0;
+    let bestDistance = -1;
+    for (let c = 0; c < 32; c++) {
+      cellRandom(seed, k, c, r);
+      const x = r[0] * TILE;
+      const y = r[1] * TILE;
+      const distance = k === 0 ? 0 : nearest(x, y);
+      if (distance > bestDistance) {
+        bestDistance = distance;
+        bx = x;
+        by = y;
+      }
+    }
+    out[2 * k] = bx;
+    out[2 * k + 1] = by;
+    buckets[Math.floor(by) * TILE + Math.floor(bx)].push(k);
+  }
+  tiles.set(seed, out);
+  return out;
+}
+
+/** Blue-noise candidates repeated over the plane; rank is the point's order in its tile. */
+function blueNoisePoints(pattern: StipplePattern, bounds: Bounds, pass: number, visit: Visit) {
+  const { spacing } = pattern;
+  const tile = blueNoiseTile(pattern.seed ?? 1);
+  const count = tile.length / 2;
+  const size = TILE * spacing;
+  // The second ink reads the same tile shifted, so its dots fall elsewhere.
+  const ox = pass * 0.37 * size;
+  const oy = pass * 0.61 * size;
+  const ty1 = Math.floor((bounds.bottom - oy) / size);
+  const tx1 = Math.floor((bounds.right - ox) / size);
+  for (let ty = Math.floor((bounds.top - oy) / size); ty <= ty1; ty++) {
+    for (let tx = Math.floor((bounds.left - ox) / size); tx <= tx1; tx++) {
+      for (let k = 0; k < count; k++) {
+        const x = ox + tx * size + tile[2 * k] * spacing;
+        const y = oy + ty * size + tile[2 * k + 1] * spacing;
+        if (x < bounds.left || x > bounds.right || y < bounds.top || y > bounds.bottom) continue;
+        visit(x, y, (k + 0.5) / count);
       }
     }
   }
