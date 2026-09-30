@@ -515,6 +515,9 @@ class BackendDb extends Db implements BackendMutationErrorSink {
    *
    * The context holds this `Db` only weakly, so its listeners are released
    * when the `Db` is dropped, when it shuts down, or via the returned callback.
+   * `context.db()` returns a new `Db` on each call, so keep a reference to the
+   * `Db` you register on (for example a long-lived `const db = context.db()`);
+   * a listener on a `Db` you don't keep stops firing once it is collected.
    *
    * @returns an unsubscribe callback
    */

@@ -288,7 +288,10 @@ of writes made through any of them, for every session, so a per-request handler 
 against its own transaction IDs. Rejections that arrive before any listener exists, such as writes
 that were still in flight when the process stopped and are settled on restart, go to whichever `Db`
 registers a listener first. Jazz keeps up to 256 of them and reports how many it dropped beyond
-that. A dropped or shut-down `Db` releases its listeners.
+that. A dropped or shut-down `Db` releases its listeners. `context.db()` returns a new `Db` on each
+call, so keep a reference to the `Db` you register on, for example a long-lived
+`const db = context.db()`. A listener on a `Db` you don't keep stops firing once that `Db` is
+garbage-collected.
 
 ## Transactions
 
