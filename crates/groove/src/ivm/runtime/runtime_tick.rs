@@ -1057,7 +1057,7 @@ impl<'a> IncrementalEvaluation<'a> {
         if self.discarded {
             return;
         }
-        let mut installed = HashSet::default();
+        let mut installed: HashSet<NodeId> = HashSet::default();
         for node in nodes {
             if !self.early_installed.insert(node) {
                 continue;
@@ -1073,7 +1073,7 @@ impl<'a> IncrementalEvaluation<'a> {
                 runtime.operator_states.insert(key, state);
             }
             if let Some(keys) = self.arrangement_keys_by_input.get(&node) {
-                let mut live_keys = HashSet::default();
+                let mut live_keys: HashSet<ArrangementKey> = HashSet::default();
                 for key in keys.iter().filter(|key| key.scope == ScopeId::root()) {
                     if let Some(state) = self.arrangement_states.get(key) {
                         let mut state = state.clone();
@@ -1142,7 +1142,7 @@ impl<'a> IncrementalEvaluation<'a> {
                     .insert(key.clone());
             }
         }
-        carry_live_node_lifecycle(&mut self.node_meta, runtime, &HashSet::from_iter([node]));
+        carry_live_node_lifecycle(&mut self.node_meta, runtime, &HashSet::from([node]));
         self.eval_memo.retain(|key, _| key.node != node);
         self.eval_memo_bytes = self
             .eval_memo
@@ -3754,12 +3754,24 @@ fn bump_input_frontiers_staged(
 /// is written to the live runtime.
 fn commit_operator_state(state: &mut OperatorState) {
     match state {
-        OperatorState::Recursive(recursive) => recursive.value_mut().commit_staged_positive(),
-        OperatorState::TopBy(top_by) => top_by.value_mut().commit_overlays(),
-        OperatorState::ArgBy(arg_by) => arg_by.value_mut().commit_overlay(),
-        OperatorState::SemiJoin(semi_join) => semi_join.commit_published_overlay(),
-        OperatorState::AntiJoin(anti_join) => anti_join.commit_published_overlay(),
-        OperatorState::CollectBy(collect_by) => collect_by.groups.commit_overlay(),
+        OperatorState::Recursive(recursive) => {
+            recursive.value_mut().commit_staged_positive();
+        }
+        OperatorState::TopBy(top_by) => {
+            top_by.value_mut().commit_overlays();
+        }
+        OperatorState::ArgBy(arg_by) => {
+            arg_by.value_mut().commit_overlay();
+        }
+        OperatorState::SemiJoin(semi_join) => {
+            semi_join.commit_published_overlay();
+        }
+        OperatorState::AntiJoin(anti_join) => {
+            anti_join.commit_published_overlay();
+        }
+        OperatorState::CollectBy(collect_by) => {
+            collect_by.groups.commit_overlay();
+        }
         OperatorState::Stateless | OperatorState::Join(_) | OperatorState::StreamingChecksum(_) => {
         }
     }
