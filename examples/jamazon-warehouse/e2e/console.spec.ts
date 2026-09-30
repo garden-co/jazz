@@ -13,13 +13,22 @@ async function operator(browser: Browser, name: string): Promise<Page> {
   await expect(page.getByRole("heading", { name: "Choose your warehouse" })).toBeVisible({
     timeout: TIMEOUT,
   });
-  await page.getByRole("button", { name: "Join warehouse" }).click();
+  // On a fresh database the seeded warehouses arrive after the join screen
+  // mounts; the first one must still be preselected so joining is one click.
+  await expect(page.getByRole("combobox", { name: "Warehouse" })).toHaveText(/East instruments/, {
+    timeout: TIMEOUT,
+  });
+  const join = page.getByRole("button", { name: "Join warehouse" });
+  await expect(join).toBeEnabled({ timeout: TIMEOUT });
+  await join.click();
   await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible({ timeout: TIMEOUT });
   return page;
 }
 
 async function choose(page: Page, label: string, option: string | RegExp) {
-  await page.getByRole("combobox", { name: label }).click();
+  // Searchable selectors render their trigger as a labelled button; the
+  // combobox role moves to the search input inside the popup.
+  await page.getByRole("button", { name: label, exact: true }).click();
   await page.getByRole("option", { name: option }).click();
 }
 
