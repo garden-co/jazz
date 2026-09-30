@@ -3,7 +3,10 @@
 //! The benchmark intentionally duplicates this small schema surface rather
 //! than importing application runtime or fixture helpers.
 
+pub mod announcements;
 mod fast_resume;
+pub mod live_rooms;
+pub mod membership_room;
 
 pub use fast_resume::{FastResumeFixture, FastResumeReceipt};
 

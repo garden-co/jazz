@@ -14,7 +14,7 @@ fn main() {
 
 /// Opening a poster: subscribe to all five canvas surfaces and receive their
 /// first results.
-#[divan::bench(args = [512, 4096], sample_count = 20)]
+#[divan::bench(args = [4096], sample_count = 20)]
 fn poster_shop_open_canvas(bencher: divan::Bencher<'_, '_>, shapes: usize) {
     let fixture = Fixture::new(shapes);
     bencher.bench_local(|| divan::black_box(fixture.open_canvas()));

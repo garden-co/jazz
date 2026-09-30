@@ -3,7 +3,7 @@ import type { BenchmarkMetadata } from "../../../dev/benchmarks/metadata/types.t
 const source = "examples/world-tour/benchmarks/benches/walltime.rs";
 
 export const worldTourBenchmarks: BenchmarkMetadata[] = [];
-for (const stops of [128, 4096]) {
+for (const stops of [4096]) {
   const fixture = `One band with ${stops.toLocaleString("en-US")} dated tour stops, each at its own venue. 22 stops fall inside the three-week window; about 1 in 5 are tentative and 1 in 7 cancelled.`;
   const shared = {
     fixture,

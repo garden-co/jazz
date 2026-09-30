@@ -1,3 +1,4 @@
+import { stitchedFormerNames } from "../../../dev/benchmarks/metadata/index.ts";
 import type { Benchmark, Point } from "../perf-timeline/model.ts";
 
 export type HistoryEntry = { label: string; point: Point };
@@ -58,4 +59,39 @@ export function summarize(bench: Benchmark, historyLength = 10): MetricSummary |
 /** Relative change of `current` against `previous`, negative when faster. */
 export function change(previous: number, current: number): number {
   return (current - previous) / previous;
+}
+
+/**
+ * Continue each declared-equivalent former name's history under its current
+ * name (`stitchedFormerNames`), so a renamed metric card keeps its release
+ * history. The current name's benchmark gains the former's points, oldest
+ * first; if the current name has no results yet, the former's stand in under
+ * the current name. Other benchmarks are returned unchanged, and renames whose
+ * numbers changed are never stitched.
+ */
+export function stitchFormerHistory(
+  benchmarks: readonly Benchmark[],
+  stitched: ReadonlyMap<string, string> = stitchedFormerNames,
+): Benchmark[] {
+  const formerOf = new Map([...stitched].map(([current, former]) => [former, current]));
+  const formerPoints = new Map<string, { id: string; points: Point[] }>();
+  for (const bench of benchmarks) {
+    const current = formerOf.get(bench.name);
+    if (!current) continue;
+    const previous = formerPoints.get(current);
+    formerPoints.set(current, {
+      id: previous?.id ?? bench.id,
+      points: [...(previous?.points ?? []), ...bench.points],
+    });
+  }
+  const byDate = (a: Point, b: Point) => a.date.localeCompare(b.date);
+  const result = benchmarks.map((bench) => {
+    const former = formerPoints.get(bench.name);
+    if (!former) return bench;
+    formerPoints.delete(bench.name);
+    return { ...bench, points: [...former.points, ...bench.points].sort(byDate) };
+  });
+  for (const [current, former] of formerPoints)
+    result.push({ id: former.id, name: current, points: [...former.points].sort(byDate) });
+  return result;
 }
