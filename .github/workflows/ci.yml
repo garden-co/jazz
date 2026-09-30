@@ -66,7 +66,6 @@ jobs:
           test "${UNTRUSTED_RESULT}:${TRUSTED_RESULT}" = "success:skipped" || \
             test "${UNTRUSTED_RESULT}:${TRUSTED_RESULT}" = "skipped:success"
 
-
   # Check runs from workflow_dispatch are not associated with any pull request,
   # so they never satisfy the required `test-rust` check. The release workflow
   # dispatches CI on the bot-opened Version Packages PR, whose own pull_request
