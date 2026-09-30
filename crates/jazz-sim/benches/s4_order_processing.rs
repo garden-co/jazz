@@ -511,9 +511,9 @@ struct SqliteSummary {
 
 struct ClientHarness {
     _dir: tempfile::TempDir,
-    db: Db<RocksDbStorage>,
+    db: Db,
     _relay_dir: tempfile::TempDir,
-    relay: NodeState<RocksDbStorage>,
+    relay: NodeState,
     relay_peer: PeerState,
     client_peer: PeerState,
     query_server: DirectDbQueryServer,
@@ -523,7 +523,7 @@ struct ClientHarness {
     hydration_rows: usize,
     outbound: Rc<RefCell<VecDeque<SyncMessage>>>,
     inbound: Rc<RefCell<VecDeque<SyncMessage>>>,
-    _upstream: Rc<futures::lock::Mutex<jazz::db::PeerConnection<RocksDbStorage>>>,
+    _upstream: Rc<futures::lock::Mutex<jazz::db::PeerConnection>>,
 }
 
 struct QueueTransport {
@@ -806,7 +806,7 @@ fn run_jazz_contention(config: &Config, level: ContentionLevel) -> JazzSummary {
 
 async fn apply_jazz_op(
     client: &mut ClientHarness,
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     op: &Op,
     now_ms: u64,
     relay_acceptance: &mut Histogram<u64>,
@@ -1124,7 +1124,7 @@ fn open_clients(
     count: usize,
     base_node: u8,
     schema: &JazzSchema,
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
 ) -> Vec<ClientHarness> {
     (0..count)
         .map(|idx| {
@@ -1176,13 +1176,13 @@ fn open_clients(
         .collect()
 }
 
-fn refresh_clients(core: &mut NodeState<RocksDbStorage>, clients: &mut [ClientHarness]) {
+fn refresh_clients(core: &mut NodeState, clients: &mut [ClientHarness]) {
     for client in clients {
         refresh_client(core, client);
     }
 }
 
-fn refresh_client(core: &mut NodeState<RocksDbStorage>, client: &mut ClientHarness) {
+fn refresh_client(core: &mut NodeState, client: &mut ClientHarness) {
     for table in TABLES {
         let shape = Query::from(table).validate(&schema()).unwrap();
         let binding = shape.bind(BTreeMap::new()).unwrap();
@@ -1241,7 +1241,7 @@ fn refresh_client(core: &mut NodeState<RocksDbStorage>, client: &mut ClientHarne
     jazz::db::block_on(client.db.tick()).unwrap();
 }
 
-fn seed_jazz_fixture(config: &Config, core: &mut NodeState<RocksDbStorage>) {
+fn seed_jazz_fixture(config: &Config, core: &mut NodeState) {
     let mut global = 1;
     for w in 0..config.warehouses {
         accept_merge(
@@ -1313,7 +1313,7 @@ fn seed_jazz_fixture(config: &Config, core: &mut NodeState<RocksDbStorage>) {
 }
 
 fn accept_merge(
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     table: &str,
     row: RowUuid,
     values: BTreeMap<String, Value>,
@@ -1583,11 +1583,7 @@ fn apply_sqlite_op(conn: &Connection, op: &Op) {
     tx.commit().unwrap();
 }
 
-fn jazz_totals(
-    config: &Config,
-    schema: &JazzSchema,
-    core: &mut NodeState<RocksDbStorage>,
-) -> Totals {
+fn jazz_totals(config: &Config, schema: &JazzSchema, core: &mut NodeState) -> Totals {
     let warehouse_ytd = (0..config.warehouses)
         .map(|w| row_f64(core, WAREHOUSES, warehouse_row(w), "ytd"))
         .collect();
@@ -2046,10 +2042,7 @@ fn next_op(config: &Config, rng: &mut Lcg, warehouse: usize) -> Op {
     }
 }
 
-fn open_node(
-    node_uuid: NodeUuid,
-    schema: JazzSchema,
-) -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
+fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, NodeState) {
     let dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -2066,7 +2059,7 @@ fn open_db(
     node_uuid: NodeUuid,
     schema: JazzSchema,
     author: AuthorSubject,
-) -> (tempfile::TempDir, Db<RocksDbStorage>) {
+) -> (tempfile::TempDir, Db) {
     let dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -2201,7 +2194,7 @@ fn f64_cell(cells: &BTreeMap<String, Value>, name: &str) -> f64 {
     value_f64(cells.get(name).unwrap().clone())
 }
 
-fn row_u64(core: &mut NodeState<RocksDbStorage>, table: &str, row: RowUuid, column: &str) -> u64 {
+fn row_u64(core: &mut NodeState, table: &str, row: RowUuid, column: &str) -> u64 {
     let schema = schema();
     let table_schema = table_schema(&schema, table);
     let row = jazz::db::block_on(core.current_rows(table, DurabilityTier::Global))
@@ -2212,7 +2205,7 @@ fn row_u64(core: &mut NodeState<RocksDbStorage>, table: &str, row: RowUuid, colu
     value_u64(row.cell(table_schema, column).unwrap())
 }
 
-fn row_f64(core: &mut NodeState<RocksDbStorage>, table: &str, row: RowUuid, column: &str) -> f64 {
+fn row_f64(core: &mut NodeState, table: &str, row: RowUuid, column: &str) -> f64 {
     let schema = schema();
     let table_schema = table_schema(&schema, table);
     let row = jazz::db::block_on(core.current_rows(table, DurabilityTier::Global))

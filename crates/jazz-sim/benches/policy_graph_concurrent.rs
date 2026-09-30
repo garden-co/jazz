@@ -428,7 +428,7 @@ impl BenchIdentity {
 
 struct Seeded {
     _core_dir: Rc<tempfile::TempDir>,
-    core: Db<RocksDbStorage>,
+    core: Db,
     schema: JazzSchema,
     member: AuthorSubject,
     claims: BTreeMap<String, Value>,
@@ -445,7 +445,7 @@ impl Seeded {
 
 struct DbNode {
     _dir: Rc<tempfile::TempDir>,
-    db: Db<RocksDbStorage>,
+    db: Db,
 }
 
 struct OpenSubscription {
@@ -643,7 +643,7 @@ fn seed_core(schema: &JazzSchema, config: &Config) -> Seeded {
     }
 }
 
-fn write_seed_rows(core: &Node<RocksDbStorage>, schema: &JazzSchema, rows: &[SeedRow]) {
+fn write_seed_rows(core: &Node, schema: &JazzSchema, rows: &[SeedRow]) {
     let node = core.node();
     for (idx, row) in rows.iter().enumerate() {
         let table = find_table(schema, &row.table);
@@ -1333,15 +1333,11 @@ fn open_history_complete_db_at(
     schema: JazzSchema,
     node_uuid: NodeUuid,
     author: AuthorSubject,
-) -> Db<RocksDbStorage> {
+) -> Db {
     open_db_at(path, schema, node_uuid, author, true)
 }
 
-fn open_history_complete_node_at(
-    path: &Path,
-    schema: JazzSchema,
-    node_uuid: NodeUuid,
-) -> Node<RocksDbStorage> {
+fn open_history_complete_node_at(path: &Path, schema: JazzSchema, node_uuid: NodeUuid) -> Node {
     let storage = open_storage_at(path, &schema);
     let state = jazz::db::block_on(NodeState::new_history_complete(node_uuid, schema, storage))
         .expect("open seed node");
@@ -1354,7 +1350,7 @@ fn open_db_at(
     node_uuid: NodeUuid,
     author: AuthorSubject,
     history_complete: bool,
-) -> Db<RocksDbStorage> {
+) -> Db {
     let storage = open_storage_at(path, &schema);
     let config = DbConfig {
         schema,

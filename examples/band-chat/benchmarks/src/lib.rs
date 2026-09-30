@@ -3,7 +3,10 @@
 //! The benchmark intentionally duplicates this small schema surface rather
 //! than importing application runtime or fixture helpers.
 
+pub mod announcements;
 mod fast_resume;
+pub mod live_rooms;
+pub mod membership_room;
 
 pub use fast_resume::{FastResumeFixture, FastResumeReceipt};
 
@@ -24,7 +27,7 @@ const HOT_ROOM_MESSAGES: usize = 100;
 const TIMELINE_OFFSET: usize = 25;
 const TIMELINE_PAGE: usize = 25;
 
-type BenchDb = Db<MemoryStorage>;
+type BenchDb = Db;
 
 pub struct Fixture {
     db: BenchDb,

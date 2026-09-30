@@ -11,10 +11,13 @@
     "test": "vitest run",
     "types:check": "fumadocs-mdx && next typegen && tsc --noEmit",
     "postinstall": "fumadocs-mdx",
-    "test:perf-timeline": "node --experimental-strip-types --test lib/perf-timeline/*.test.ts ../dev/benchmarks/metadata/metadata.test.ts",
-    "test:perf-timeline:e2e": "node tests/perf-timeline.browser.mjs"
+    "test:perf-timeline": "node --experimental-strip-types --test lib/perf-timeline/*.test.ts lib/showcase/*.test.ts ../dev/benchmarks/metadata/metadata.test.ts",
+    "capture:example-videos": "node scripts/example-videos/todo-two-devices.mjs",
+    "test:examples:e2e": "node --experimental-strip-types tests/examples.browser.mjs"
   },
   "dependencies": {
+    "@astryxdesign/core": "0.6.3",
+    "@garden-co/design": "github:garden-co/design#0f3e9cac427ed0072ea264d73fbe1ffd1ee87227",
     "@vercel/analytics": "^2.0.1",
     "feed": "^5.2.1",
     "fumadocs-core": "16.6.2",
@@ -22,6 +25,7 @@
     "fumadocs-ui": "16.6.2",
     "lucide-react": "^0.563.0",
     "next": "catalog:default",
+    "next-themes": "^0.4.6",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "simple-icons": "^16.17.0",

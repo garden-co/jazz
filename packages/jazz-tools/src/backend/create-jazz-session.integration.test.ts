@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
 import { deploy, startLocalJazzServer, startTestJwtIssuer } from "../testing/index.js";
@@ -337,4 +340,157 @@ describe("Node shared backend session", () => {
       await server.stop();
     }
   }, 30_000);
+  it("reads inside attributed transactions with the attributed Db's backend authority", async () => {
+    const appId = randomUUID();
+    const backendSecret = "attributed-tx-service-secret";
+    const adminSecret = "attributed-tx-publication-secret";
+    const server = await startLocalJazzServer({ appId, backendSecret, adminSecret });
+    const session = await createJazzSession({
+      appId,
+      serverUrl: server.url,
+      app,
+      permissions,
+      driver: { type: "memory" },
+    });
+    const user = await createJazzSession({
+      appId,
+      serverUrl: server.url,
+      app,
+      permissions,
+      driver: { type: "memory" },
+      initial: "local-first",
+    });
+    try {
+      await deploy({
+        serverUrl: server.url,
+        appId,
+        adminSecret,
+        schema: resolveSchemaSource(app),
+        permissions,
+      });
+      await session.becomeBackend({ backendSecret });
+      const backend = session.getSnapshot().client!;
+      const account = user.getSnapshot().account!;
+      const note = await backend.db.insert(app.notes, { text: "invite" }).wait({ tier: "global" });
+      const attributed = await backend.withAttribution(account);
+
+      const exclusive = await attributed.exclusiveTransaction(async (tx) => {
+        const read = await tx.one(app.notes.where({ id: note.id }));
+        return { read, id: tx.insert(app.posts, { text: "exclusive" }).id };
+      });
+      await exclusive.wait();
+      expect(exclusive.value.read).toMatchObject({ text: "invite" });
+
+      const mergeable = await attributed.transaction(async (tx) => {
+        const read = await tx.one(app.notes.where({ id: note.id }));
+        return { read, id: tx.insert(app.posts, { text: "mergeable" }).id };
+      });
+      await mergeable.wait({ tier: "global" });
+      expect(mergeable.value.read).toMatchObject({ text: "invite" });
+
+      // Users may not insert notes; the attributed transaction admits the
+      // write as the backend while recording the user as its author.
+      const admitted = await attributed.exclusiveTransaction(async (tx) => {
+        await tx.one(app.notes.where({ id: note.id }));
+        return tx.insert(app.notes, { text: "backend admitted" }).id;
+      });
+      await admitted.wait();
+      expect(
+        await backend.db.one(app.notes.select("$createdBy").where({ id: admitted.value })),
+      ).toMatchObject({ $createdBy: { account: account.id, identity: account.identity } });
+
+      await expect(
+        attributed.exclusiveTransaction(async (tx) => {
+          await tx.one(app.notes.where({ id: note.id }));
+          tx.insert(app.posts, { text: "rolled back" });
+          throw new Error("abort redeem");
+        }),
+      ).rejects.toThrow("abort redeem");
+      expect(await backend.db.all(app.posts.where({ text: "rolled back" }))).toEqual([]);
+
+      for (const id of [exclusive.value.id, mergeable.value.id]) {
+        expect(await backend.db.one(app.posts.select("$createdBy").where({ id }))).toMatchObject({
+          $createdBy: { account: account.id, identity: account.identity },
+        });
+      }
+    } finally {
+      await user.close();
+      await session.close();
+      await server.stop();
+    }
+  }, 30_000);
+  it("reconnects and syncs queued writes after a sync-server outage longer than ten seconds", async () => {
+    const appId = randomUUID();
+    const backendSecret = "outage-service-secret";
+    const dataDir = await mkdtemp(join(tmpdir(), "jazz-outage-"));
+    let server = await startLocalJazzServer({ appId, backendSecret, dataDir });
+    const open = () =>
+      createJazzSession({
+        appId,
+        serverUrl: server.url,
+        app,
+        permissions,
+        driver: { type: "memory" },
+        initial: { backendSecret },
+      });
+    const writer = await open();
+    let observer: Awaited<ReturnType<typeof open>> | undefined;
+    try {
+      await deploy({
+        serverUrl: server.url,
+        appId,
+        adminSecret: server.adminSecret,
+        schema: resolveSchemaSource(app),
+        permissions,
+      });
+      const db = writer.getSnapshot().client!.db;
+      await db.insert(app.posts, { text: "before outage" }).wait({ tier: "global" });
+
+      const port = server.port;
+      await server.stop();
+      const during = db.insert(app.posts, { text: "during outage" });
+      await during.wait({ tier: "local" });
+      const globalRead = db.all(app.posts, { tier: "global" }).then(
+        () => "resolved",
+        (error: unknown) => error,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 12_000));
+      // The outage is reported to Global readers (a rejection, never an
+      // uncaught error), while the session stays usable for local work.
+      expect(await globalRead).toBeInstanceOf(Error);
+      expect(writer.getSnapshot().status).toBe("ready");
+      await db.insert(app.posts, { text: "late in outage" }).wait({ tier: "local" });
+
+      server = await startLocalJazzServer({ appId, port, backendSecret, dataDir });
+      // The client reconnects by itself within one capped backoff interval;
+      // until then Global reads keep reporting the outage.
+      await vi.waitFor(() => db.all(app.posts, { tier: "global" }), {
+        timeout: 15_000,
+        interval: 250,
+      });
+      await db.insert(app.posts, { text: "after outage" }).wait({ tier: "global" });
+      observer = await open();
+      await vi.waitFor(
+        async () => {
+          const texts = (
+            await observer!.getSnapshot().client!.db.all(app.posts, { tier: "global" })
+          )
+            .map((row) => row.text)
+            .sort();
+          expect(texts).toEqual([
+            "after outage",
+            "before outage",
+            "during outage",
+            "late in outage",
+          ]);
+        },
+        { timeout: 15_000, interval: 250 },
+      );
+    } finally {
+      await observer?.close();
+      await writer.close();
+      await server.stop();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  }, 60_000);
 });

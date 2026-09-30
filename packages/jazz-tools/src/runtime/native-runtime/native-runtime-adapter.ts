@@ -73,6 +73,7 @@ import {
 import { exactSignedI64 } from "./exact-integer.js";
 import { encodeSchema } from "./schema-codec.js";
 import { nativeRowFieldPlanCacheKey } from "./native-row-descriptor-key.js";
+import { nativeCoreErrorCode } from "./native-error-code.js";
 import {
   WebSocketCarrier,
   WIRE_PROTOCOL_VERSION,
@@ -109,7 +110,23 @@ const MAX_CANONICAL_SIGNED_I64_LENGTH = 20;
 const CANONICAL_SIGNED_I64_DECIMAL = /^(?:0|[1-9][0-9]*|-[1-9][0-9]*)$/;
 
 const SERVER_PUMP_DEBOUNCE_MS = 16;
-const NETWORK_RETRY_LIMIT = 10;
+// An established upstream is retried until it reconnects or the runtime is
+// explicitly disconnected/closed: a local-first client must survive an outage
+// of any length. Backoff doubles to a cap and is jittered so a fleet of
+// clients does not reconnect in lockstep after a server restart.
+const NETWORK_RETRY_INITIAL_DELAY_MS = 100;
+const NETWORK_RETRY_MAX_DELAY_MS = 5_000;
+// Until an outage is published, retry at least once a second (the pre-#3565
+// cadence). A server that returns within the reporting window is then found
+// before the report fires, so no Global wait inherits a stale outage.
+const NETWORK_RETRY_UNREPORTED_MAX_DELAY_MS = 1_000;
+// Once an established link has been down this long, the next failed reconnect
+// attempt publishes the outage like a transport error so Global reads and
+// waits reject instead of hanging. Publication is failure-triggered, never a
+// timer: a wall-clock report could fire after the server is back but before
+// the pending retry reconnects, rejecting a Global wait whose write then syncs.
+// Retries continue, and a reconnect clears the published outage.
+const NETWORK_OUTAGE_REPORT_MS = 7_500;
 const PRE_HELLO_RETRY_INITIAL_DELAY_MS = 25;
 const PRE_HELLO_RETRY_MAX_DELAY_MS = 1_000;
 /** Runtime read tier whose empty opening the core Db may hold for the server. */
@@ -121,6 +138,12 @@ const REMOTE_LINK_HINTS: Record<RemoteLinkState, string> = {
   unavailable: "failed",
 };
 const NATIVE_LINK_POLL_MS = 250;
+
+/** Capped exponential backoff with equal jitter: [cap/2, cap] of each step. */
+function networkRetryDelay(retry: number, maxDelayMs: number): number {
+  const ceiling = Math.min(NETWORK_RETRY_INITIAL_DELAY_MS * 2 ** Math.min(retry, 16), maxDelayMs);
+  return Math.round(ceiling / 2 + Math.random() * (ceiling / 2));
+}
 // Amortize scheduler overhead without allowing a ready evaluator to monopolize
 // the browser task queue. Transport pumps never add a second inner tick loop.
 const MAX_CORE_TICKS_PER_TURN = 4;
@@ -712,6 +735,9 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverReconnectReject: ((error: Error) => void) | null = null;
   private preHelloRetryCount = 0;
   private networkRetryCount = 0;
+  /** The current `serverTransportError` is a published outage, not a terminal failure. */
+  private serverOutageReported = false;
+  private serverOutageStartedAt: number | null = null;
   private serverLinkRequested = false;
   private nativeLinkEverConnected = false;
   private nativeLinkPoll: ReturnType<typeof setInterval> | null = null;
@@ -1239,7 +1265,17 @@ export class NativeRuntimeAdapter implements Runtime {
       if (this.serverTransportError) throw this.serverTransportError;
       return;
     }
-    await this.serverCarrierPromise;
+    // Reconnects continue through an outage; once it is published, callers
+    // waiting for the link reject instead of waiting for the recovery.
+    if (this.serverOutageReported && this.serverTransportError) throw this.serverTransportError;
+    const outage = this.networkRetryCount > 0 ? this.waitForServerTransportError("global") : null;
+    try {
+      await (outage
+        ? Promise.race([this.serverCarrierPromise, outage.promise])
+        : this.serverCarrierPromise);
+    } finally {
+      outage?.cancel();
+    }
   }
 
   /** @internal */
@@ -1934,7 +1970,7 @@ export class NativeRuntimeAdapter implements Runtime {
     for (;;) {
       this.throwServerTransportErrorForTier(tier);
       const observedServerWorkEpoch = this.serverTransportWorkEpoch;
-      void this.pumpServerTransport();
+      this.startServerPump();
       this.throwServerTransportErrorForTier(tier);
       const transportError = this.waitForServerTransportError(tier);
       const transportWork = this.waitForServerTransportWork(tier, observedServerWorkEpoch);
@@ -2213,7 +2249,9 @@ export class NativeRuntimeAdapter implements Runtime {
   private async startServerConnection(intent: ServerReplacementIntent): Promise<WebSocketCarrier> {
     const { generation, url, authJson: normalizedAuthJson, features } = intent;
     const transportIdentity = peerIdentityForWebSocketAuth(normalizedAuthJson, this.peerIdentity);
-    this.serverTransportError = null;
+    // A published outage stays visible to Global readers until a retry
+    // actually reconnects; each failed attempt must not hide it again.
+    if (!this.serverOutageReported) this.serverTransportError = null;
     this.serverEndpointUrl = url;
     this.serverAuthJson = normalizedAuthJson;
     this.remoteLink.changed();
@@ -2339,6 +2377,7 @@ export class NativeRuntimeAdapter implements Runtime {
           return carrier;
         }
         this.networkRetryCount = 0;
+        this.clearServerOutage();
         attempt.transport = transport;
         this.serverTransport = transport;
         this.remoteLink.changed();
@@ -2442,6 +2481,8 @@ export class NativeRuntimeAdapter implements Runtime {
       this.preHelloRetryCount = 0;
       this.networkRetryCount = 0;
     }
+    this.serverOutageReported = false;
+    this.serverOutageStartedAt = null;
     this.clearServerReconnectTimer();
     if (!this.serverReplacementRetirement) this.serverTransportError = null;
     if (options.rejectWaiters) {
@@ -2545,6 +2586,8 @@ export class NativeRuntimeAdapter implements Runtime {
   /** Clear a terminal remote-peer error after its replacement transport is ready. */
   clearRemoteServerTransportError(): void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.clearRemoteServerTransportError();
+    // Armed waiters without a latched error keep their channel for a later one.
+    if (!this.serverTransportError) return;
     this.serverTransportError = null;
     this.clearServerTransportErrorWaiters();
     this.remoteLink.changed();
@@ -2562,7 +2605,7 @@ export class NativeRuntimeAdapter implements Runtime {
       throw new Error("Native runtime lacks graceful sync shutdown; rebuild its bindings");
     await this.flushLocalSettlements();
     this.throwServerTransportErrorForTier(tier);
-    void this.pumpServerTransport();
+    this.startServerPump();
     const failure = this.waitForServerTransportError(tier);
     try {
       const wait = this.awaitNativeRead(
@@ -2783,7 +2826,7 @@ export class NativeRuntimeAdapter implements Runtime {
         if (bytes !== null) return bytes;
         // Keep polling while a core pass waits for large-value chunks: the
         // read itself may be what lets that pass resume.
-        this.pumpServerTransport();
+        this.startServerPump();
         if (tier) this.throwServerTransportErrorForTier(tier);
         await sleep(0);
       }
@@ -2934,6 +2977,8 @@ export class NativeRuntimeAdapter implements Runtime {
     // await the in-flight connection instead of falling through to a local
     // materialization merely because the transport has not been installed yet.
     while (!this.hasUpstream()) {
+      // A published outage rejects the read even while reconnects continue.
+      this.throwServerTransportErrorForTier("global");
       const pendingConnection = this.serverCarrierPromise;
       if (!pendingConnection) return;
       const attempt = this.serverConnectionAttempt;
@@ -2941,10 +2986,20 @@ export class NativeRuntimeAdapter implements Runtime {
         () => null,
         (error: unknown) => (error instanceof Error ? error : new Error(errorMessage(error))),
       );
-      const terminal =
-        attempt?.carrier === this.serverCarrier
-          ? await Promise.race([connectionOutcome, attempt.terminal])
-          : await connectionOutcome;
+      const outage = this.waitForServerTransportError("global");
+      const outageOutcome = outage?.promise.catch((error: unknown) =>
+        error instanceof Error ? error : new Error(errorMessage(error)),
+      );
+      let terminal: Error | null;
+      try {
+        terminal = await Promise.race([
+          connectionOutcome,
+          ...(attempt?.carrier === this.serverCarrier ? [attempt.terminal] : []),
+          ...(outageOutcome ? [outageOutcome] : []),
+        ]);
+      } finally {
+        outage?.cancel();
+      }
       if (this.closed) return;
       const activeIntent = this.serverReplacementIntent;
       const activeEndpoint = activeIntent?.url ?? this.serverEndpointUrl;
@@ -3004,13 +3059,11 @@ export class NativeRuntimeAdapter implements Runtime {
       );
     };
 
-    void refresh().catch((error: unknown) => {
-      if (this.closed || this.ownerRuntime.closed) return;
-      if (error instanceof Error && error.message === "Timed out waiting for query coverage") {
-        return;
-      }
-      this.handleServerTransportError(error);
-    });
+    // Best effort: the foreground read has already answered. Only the carrier
+    // and the pump decide that the server transport has failed; a refresh
+    // failure (a coverage timeout, a rejected read) must never become the
+    // terminal transport error, or the next real drop is not retried (#3692).
+    void refresh().catch(() => undefined);
   }
 
   admitLocalFirstSession(session: Session, token: string, appId: string): void {
@@ -3420,8 +3473,17 @@ export class NativeRuntimeAdapter implements Runtime {
     setTimeout(() => {
       this.serverPumpScheduled = false;
       if (this.closed) return;
-      void this.pumpServerTransport().catch((error) => this.handleServerTransportError(error));
+      this.startServerPump();
     }, SERVER_PUMP_DEBOUNCE_MS);
+  }
+
+  /** Run a pump without awaiting it. A failure becomes the connection's
+   * terminal error rather than an unhandled rejection that crashes Node. */
+  private startServerPump(): void {
+    const generation = this.serverConnectionGeneration;
+    void this.pumpServerTransport().catch((error) =>
+      this.handleServerTransportError(error, generation),
+    );
   }
 
   private notifyPeerTransportWork(requiresDistinctPass = false): void {
@@ -3654,15 +3716,14 @@ export class NativeRuntimeAdapter implements Runtime {
   private canRetryNetworkConnection(attempt: ServerConnectionAttempt, error: WireError): boolean {
     return (
       !this.closed &&
-      this.serverTransportError === null &&
+      (this.serverTransportError === null || this.serverOutageReported) &&
       attempt === this.serverConnectionAttempt &&
       attempt.generation === this.serverConnectionGeneration &&
       error.retry === "later" &&
       (error.code === "websocket_closed" ||
         error.code === "websocket_error" ||
         error.code === "not_ready") &&
-      (attempt.carrier.hasNegotiated || this.networkRetryCount > 0) &&
-      this.networkRetryCount < NETWORK_RETRY_LIMIT
+      (attempt.carrier.hasNegotiated || this.networkRetryCount > 0)
     );
   }
 
@@ -3674,7 +3735,12 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!this.serverEndpointUrl || !this.serverAuthJson) return null;
     const url = this.serverEndpointUrl;
     const authJson = this.serverAuthJson;
-    const delay = Math.min(100 * 2 ** this.networkRetryCount++, 1_000);
+    const delay = networkRetryDelay(
+      this.networkRetryCount++,
+      this.serverOutageReported
+        ? NETWORK_RETRY_MAX_DELAY_MS
+        : NETWORK_RETRY_UNREPORTED_MAX_DELAY_MS,
+    );
     this.remoteLink.changed();
     // Retire this generation before any suspended pump or handshake can report
     // its close as a terminal failure. Native subscriptions survive the detach.
@@ -3684,6 +3750,10 @@ export class NativeRuntimeAdapter implements Runtime {
     this.finishServerConnectionAttempt(attempt, new Error(error.message));
     const generation = this.serverConnectionGeneration;
     this.resolveServerTransportWorkWaiters();
+    const now = Date.now();
+    this.serverOutageStartedAt ??= now;
+    const publishOutage =
+      !this.serverOutageReported && now - this.serverOutageStartedAt >= NETWORK_OUTAGE_REPORT_MS;
     const recovery = new Promise<WebSocketCarrier>((resolve, reject) => {
       this.serverReconnectReject = reject;
       this.serverReconnectTimer = setTimeout(() => {
@@ -3709,6 +3779,10 @@ export class NativeRuntimeAdapter implements Runtime {
     // Each attempt's catch already reports terminal failures. Cancellation by
     // explicit disconnect/close must not publish a historical transport error.
     void recovery.catch(() => undefined);
+    if (publishOutage) {
+      this.serverOutageReported = true;
+      this.handleServerTransportError(new Error(error.message));
+    }
     return recovery;
   }
 
@@ -3756,6 +3830,15 @@ export class NativeRuntimeAdapter implements Runtime {
         void reconnect.then(resolve, reject);
       }, delay);
     });
+  }
+
+  private clearServerOutage(): void {
+    this.serverOutageStartedAt = null;
+    if (!this.serverOutageReported) return;
+    this.serverOutageReported = false;
+    this.serverTransportError = null;
+    this.clearServerTransportErrorWaiters();
+    this.remoteLink.changed();
   }
 
   private clearServerReconnectTimer(): void {
@@ -4774,9 +4857,38 @@ function rejectedWaitError(
   /** An Error-compatible diagnostic for direct native callers. */
   message: string;
 } | null {
-  const message = errorMessage(error);
-  if (extractWriteRejectedReason(message) === null) return null;
+  if (isCoreTransactionConflict(error)) return transactionConflictRejection(transactionId, error);
+  if (!isCoreWriteRejection(error)) return null;
   return queuedWriteRejection(transactionId, error);
+}
+
+/**
+ * A queued exclusive commit that fails its local serializability check settles
+ * its reserved transaction with core `TransactionConflict`. Surface it as the
+ * same structured rejection an authority rejection produces, keeping the
+ * `transaction_conflict` code so callers can tell a local conflict from an
+ * authority `exclusive_conflict`.
+ */
+function transactionConflictRejection(
+  transactionId: TxId,
+  error: unknown,
+): {
+  kind: "rejected";
+  transactionId: TxId;
+  code: string;
+  reason: string;
+  message: string;
+} {
+  const message = errorMessage(error);
+  const rejection = {
+    kind: "rejected" as const,
+    transactionId,
+    code: "transaction_conflict",
+    reason: /^\(transaction_conflict\):\s*(.*)$/s.exec(message)?.[1] || message,
+    message,
+  };
+  Object.defineProperty(rejection, "message", { enumerable: false });
+  return rejection;
 }
 
 function queuedWriteRejection(
@@ -4818,9 +4930,9 @@ function writeOrNormalizeRejection<T>(
   try {
     return write();
   } catch (error) {
-    const message = errorMessage(error);
-    const reason = extractWriteRejectedReason(message);
-    if (reason !== null) {
+    if (isCoreWriteRejection(error)) {
+      const message = errorMessage(error);
+      const reason = extractWriteRejectedReason(message) ?? message;
       throw new Error(`${operation} failed: WriteError("${reason}")`);
     }
     throw error;
@@ -4875,6 +4987,16 @@ function rejectionReason(message: string): string {
   if (reason === null) return message;
   if (reason.includes("AuthorizationDenied")) return "Write rejected by server authorization";
   return reason || "Write rejected";
+}
+
+/** Whether a native error is a core `TransactionConflict` error, decided by its stable core code. */
+function isCoreTransactionConflict(error: unknown): boolean {
+  return nativeCoreErrorCode(error) === "transaction_conflict";
+}
+
+/** Whether a native error is a core `WriteRejected` error, decided by its stable core code. */
+function isCoreWriteRejection(error: unknown): boolean {
+  return nativeCoreErrorCode(error) === "write_rejected";
 }
 
 /** Parse the exact stable Rust `Error` display prefix without matching quoted diagnostics. */

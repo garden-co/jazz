@@ -17,4 +17,5 @@ These examples are intentionally allowed to optimize for documentation clarity a
 - `todo-client-localfirst-expo`
 - `todo-client-localfirst-svelte`
 - `todo-server-ts`
+- `todo-effect` (Effect v4 versions of the TypeScript client and server snippets)
 - `todo-server-rs`

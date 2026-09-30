@@ -25,7 +25,7 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_node(byte: u8) -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
+fn open_node(byte: u8) -> (tempfile::TempDir, NodeState) {
     let schema = schema();
     let temp_dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();

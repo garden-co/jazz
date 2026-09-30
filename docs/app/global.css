@@ -1,168 +1,9 @@
+/* Astryx layers sit below Tailwind utilities so utility classes still win. */
+@layer reset, theme, base, astryx-base, astryx-theme, components, utilities;
+
 @import "tailwindcss";
 @import "fumadocs-ui/css/neutral.css";
 @import "fumadocs-ui/css/preset.css";
-
-@font-face {
-  font-family: "main_font";
-  src: url("/fonts/main-font-latin-400-normal.woff2") format("woff2");
-  font-style: normal;
-  font-weight: 400;
-  font-display: swap;
-  unicode-range:
-    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+2000-206F, U+2074,
-    U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
-}
-
-@font-face {
-  font-family: "main_font";
-  src: url("/fonts/main-font-latin-400-italic.woff2") format("woff2");
-  font-style: italic;
-  font-weight: 400;
-  font-display: swap;
-  unicode-range:
-    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+2000-206F, U+2074,
-    U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
-}
-
-@font-face {
-  font-family: "main_font";
-  src: url("/fonts/main-font-latin-500-normal.woff2") format("woff2");
-  font-style: normal;
-  font-weight: 500;
-  font-display: swap;
-  unicode-range:
-    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+2000-206F, U+2074,
-    U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
-}
-
-@font-face {
-  font-family: "main_font";
-  src: url("/fonts/main-font-latin-500-italic.woff2") format("woff2");
-  font-style: italic;
-  font-weight: 500;
-  font-display: swap;
-  unicode-range:
-    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+2000-206F, U+2074,
-    U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
-}
-
-@font-face {
-  font-family: "main_font";
-  src: url("/fonts/main-font-latin-700-normal.woff2") format("woff2");
-  font-style: normal;
-  font-weight: 700;
-  font-display: swap;
-  unicode-range:
-    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+2000-206F, U+2074,
-    U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
-}
-
-@font-face {
-  font-family: "main_font";
-  src: url("/fonts/main-font-latin-700-italic.woff2") format("woff2");
-  font-style: italic;
-  font-weight: 700;
-  font-display: swap;
-  unicode-range:
-    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+2000-206F, U+2074,
-    U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
-}
-
-@font-face {
-  font-family: "Geist Mono";
-  src: url("/fonts/geist-mono/GeistMono[wght].woff2") format("woff2");
-  font-style: normal;
-  font-weight: 100 900;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "Geist Mono";
-  src: url("/fonts/geist-mono/GeistMono-Italic[wght].woff2") format("woff2");
-  font-style: italic;
-  font-weight: 100 900;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "body_font";
-  src: url("/fonts/body-font-latin-300-normal.woff2") format("woff2");
-  font-style: normal;
-  font-weight: 300;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "body_font";
-  src: url("/fonts/body-font-latin-300-italic.woff2") format("woff2");
-  font-style: italic;
-  font-weight: 300;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "body_font";
-  src: url("/fonts/body-font-latin-400-normal.woff2") format("woff2");
-  font-style: normal;
-  font-weight: 400;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "body_font";
-  src: url("/fonts/body-font-latin-400-italic.woff2") format("woff2");
-  font-style: italic;
-  font-weight: 400;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "body_font";
-  src: url("/fonts/body-font-latin-700-normal.woff2") format("woff2");
-  font-style: normal;
-  font-weight: 700;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "body_font";
-  src: url("/fonts/body-font-latin-700-italic.woff2") format("woff2");
-  font-style: italic;
-  font-weight: 700;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "code_font";
-  src: url("/fonts/code-font-latin-400-normal.woff2") format("woff2");
-  font-style: normal;
-  font-weight: 400;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "code_font";
-  src: url("/fonts/code-font-latin-400-italic.woff2") format("woff2");
-  font-style: italic;
-  font-weight: 400;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "code_font";
-  src: url("/fonts/code-font-latin-700-normal.woff2") format("woff2");
-  font-style: normal;
-  font-weight: 700;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "code_font";
-  src: url("/fonts/code-font-latin-700-italic.woff2") format("woff2");
-  font-style: italic;
-  font-weight: 700;
-  font-display: swap;
-}
 
 :root {
   --font-sans:
@@ -221,4 +62,637 @@ h6 {
   --diagram-card-muted: var(--color-fd-muted);
   --diagram-fg: var(--color-fd-foreground);
   --diagram-muted: var(--color-fd-muted-foreground);
+}
+
+/* Docs pages (Astryx). Astryx components carry no outer margins, so the
+   article sets the vertical rhythm between MDX blocks here. */
+.docs-body {
+  max-width: 46rem;
+}
+
+.docs-body :is(.docs-heading, [id]) {
+  scroll-margin-top: 5rem;
+}
+
+.docs-body h2.docs-heading {
+  margin-top: 2.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.docs-body :is(h3, h4, h5, h6).docs-heading {
+  margin-top: 2rem;
+  margin-bottom: 0.5rem;
+}
+
+.docs-body .docs-block {
+  margin-block: 1rem;
+}
+
+.docs-body :is(ul, ol) {
+  margin-block: 1rem;
+  padding-inline-start: 1.5rem;
+  line-height: 1.6;
+}
+
+.docs-body ul {
+  list-style: disc;
+}
+
+.docs-body ol {
+  list-style: decimal;
+}
+
+.docs-body li + li,
+.docs-body li > :is(ul, ol) {
+  margin-top: 0.375rem;
+}
+
+.docs-body .docs-callout > :first-child {
+  margin-top: 0;
+}
+
+.docs-body .docs-callout > :last-child {
+  margin-bottom: 0;
+}
+
+.docs-body img {
+  border-radius: 0.5rem;
+}
+
+/* The outline follows the reader; it needs the width of a wide screen. */
+.docs-toc-panel {
+  position: sticky;
+  top: 5rem;
+  align-self: start;
+  padding-top: 2rem;
+}
+
+@media (max-width: 1279px) {
+  .docs-toc-panel {
+    display: none;
+  }
+}
+
+/* Astryx tables bleed into their container's padding (for tables flush with
+   a card edge). Docs tables sit in the article text column, so they keep to
+   it; otherwise every table overflows by the layout's 32px padding on each
+   side and scrolls in both directions. */
+.docs-table {
+  --container-padding-inline-start: 0px;
+  --container-padding-inline-end: 0px;
+  --container-padding-block-start: 0px;
+  --container-padding-block-end: 0px;
+}
+
+/* The top nav's search trigger reads as a field: label left, shortcut right. */
+.site-search-field > button {
+  justify-content: flex-start;
+}
+.site-search-field > button > span > span:last-child {
+  flex: 1;
+}
+
+/* Homepage and blog: the site's page background (not Astryx's surface) and
+   the 1400px layout width their sections centre within. */
+.site-page-shell {
+  --fd-layout-width: 1400px;
+}
+.site-page-shell .astryx-app-shell,
+.site-page-shell .astryx-app-shell-header {
+  background-color: var(--color-background-body);
+}
+
+/* Callout bodies written in MDX use the Banner's own description style
+   (size, leading, colour), like callouts built in components. */
+.docs-callout .astryx-text {
+  font-size: inherit;
+  line-height: inherit;
+  color: inherit;
+}
+/* Banner descriptions default to the secondary text colour, which drops below
+   AA on the tinted warning and error backgrounds; callout prose is primary
+   text, and its links keep that colour with an underline to stand out. */
+.docs-callout {
+  color: var(--color-text-primary);
+}
+.docs-callout a {
+  color: inherit;
+  text-decoration-line: underline;
+}
+.docs-callout .astryx-code {
+  font-size: inherit;
+}
+
+/* Homepage diagrams (components/home/diagrams.tsx), in the style of the
+   Jazz print material: square boxes, mono labels, thin wires with open
+   arrowheads. Blue = local, green = global. Sizes are SVG user units. */
+.home-diagram {
+  font-family: var(--font-family-code);
+}
+.home-diagram .dg-stroke-ink {
+  stroke: var(--color-text-primary);
+}
+.home-diagram .dg-stroke-blue {
+  stroke: var(--color-jazz-blue);
+}
+.home-diagram .dg-stroke-green {
+  stroke: var(--color-jazz-green);
+}
+.home-diagram .dg-stroke-muted {
+  stroke: var(--color-text-secondary);
+}
+.home-diagram .dg-fill-ink {
+  fill: var(--color-text-primary);
+}
+.home-diagram .dg-fill-blue {
+  fill: var(--color-jazz-blue);
+}
+.home-diagram .dg-fill-green {
+  fill: var(--color-jazz-green);
+}
+.home-diagram .dg-fill-muted {
+  fill: var(--color-text-secondary);
+}
+.home-diagram .dg-box {
+  fill: var(--color-background-card);
+  stroke-width: 2;
+}
+.home-diagram .dg-box-dash {
+  fill: none;
+  stroke-width: 2;
+  stroke-dasharray: 6 6;
+}
+.home-diagram .dg-wire,
+.home-diagram .dg-chevron {
+  fill: none;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.home-diagram .dg-wire-dashed {
+  stroke-dasharray: 4 4;
+}
+.home-diagram .dg-lane {
+  fill: none;
+  stroke-width: 2.5;
+}
+.home-diagram .dg-region {
+  fill: none;
+  stroke: var(--color-text-secondary);
+  stroke-width: 1;
+  stroke-dasharray: 3 5;
+}
+.home-diagram .dg-bracket {
+  fill: none;
+  stroke: var(--color-text-secondary);
+  stroke-width: 1;
+}
+.home-diagram .dg-title {
+  font-size: 15px;
+  font-weight: var(--font-weight-medium);
+}
+.home-diagram .dg-detail {
+  font-size: 12px;
+  font-weight: var(--font-weight-normal);
+}
+/* Low specificity, so a dg-fill-* tone can highlight a detail line. */
+.home-diagram :where(.dg-detail) {
+  fill: var(--color-text-secondary);
+}
+.home-diagram .dg-label {
+  font-size: 12px;
+}
+.home-diagram .dg-struck {
+  text-decoration: line-through;
+}
+.home-diagram .dg-grid {
+  stroke: var(--color-border);
+  stroke-width: 1;
+}
+.home-diagram .dg-rule {
+  stroke-width: 1.5;
+}
+.home-diagram .dg-hot {
+  fill: var(--color-jazz-blue-tint);
+}
+
+/* Site footer (components/site/site-footer.tsx). */
+.site-footer {
+  border-top: 1px solid var(--color-border);
+}
+.site-footer-base {
+  border-top: 1px solid var(--color-border);
+}
+.site-footer-link {
+  text-decoration: none;
+}
+.site-footer-link:hover {
+  text-decoration: underline;
+}
+.site-footer-maker {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--spacing-2);
+  color: var(--color-text-secondary);
+  transition: color 150ms;
+}
+.site-footer-maker:hover {
+  color: var(--color-text-primary);
+}
+
+/* Homepage sections below the hero (app/(home)/page.tsx). */
+.home-container {
+  margin-inline: auto;
+  width: 100%;
+  max-width: var(--fd-layout-width);
+  padding-inline: var(--spacing-4);
+}
+.home-section {
+  border-top: 1px solid var(--color-border);
+  padding-block: var(--spacing-12) calc(var(--spacing-12) * 1.5);
+}
+.home-anchor {
+  scroll-margin-top: 5rem;
+}
+.home-prose {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-3);
+  color: var(--color-text-secondary);
+  max-width: 38rem;
+}
+.home-prose p,
+.home-prose li {
+  font-size: var(--text-body-size);
+  line-height: var(--text-body-leading);
+}
+.home-prose ul {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-1);
+  padding-left: 1.25em;
+  list-style: disc;
+}
+.home-figure {
+  margin: 0;
+  padding: var(--spacing-6);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-container);
+  background-color: var(--color-background-card);
+}
+.home-facts {
+  display: grid;
+  gap: var(--spacing-8);
+}
+@media (min-width: 768px) {
+  .home-facts {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+.home-fact {
+  border-top: 1px solid var(--color-border-emphasized);
+  padding-top: var(--spacing-4);
+}
+.home-feature {
+  display: grid;
+  gap: var(--spacing-8);
+  border-top: 1px solid var(--color-border);
+  padding-block: var(--spacing-10);
+}
+.home-feature:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+@media (min-width: 1024px) {
+  .home-feature {
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+    align-items: start;
+  }
+  .home-feature-text {
+    grid-column: span 5;
+  }
+  .home-feature-figure {
+    grid-column: 6 / span 7;
+  }
+}
+.home-code {
+  height: 100%;
+}
+/* Figures: the frame holds the figure surface and its caption. The margin
+   reset sits in the base layer so spacing utilities such as mt-12 on a
+   figure still apply. */
+@layer base {
+  .home-figure-frame {
+    margin: 0;
+  }
+}
+.home-figure-frame {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-3);
+  min-width: 0;
+}
+.home-figcaption {
+  display: flex;
+  gap: var(--spacing-3);
+  font-size: var(--text-supporting-size);
+  line-height: 1.5;
+  color: var(--color-text-secondary);
+}
+.home-figcaption-number {
+  flex: none;
+  font-family: var(--font-family-code);
+  color: var(--color-text-primary);
+}
+.home-statement {
+  max-width: 56rem;
+}
+.home-statement-muted {
+  color: var(--color-text-secondary);
+}
+.home-code-grid {
+  display: grid;
+  gap: var(--spacing-6);
+}
+@media (min-width: 1024px) {
+  .home-code-grid {
+    grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+    align-items: start;
+  }
+}
+.home-code-window {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-container);
+  background-color: var(--color-background-card);
+  overflow: hidden;
+}
+.home-code-window > nav {
+  padding-top: var(--spacing-2);
+  padding-inline: var(--spacing-3);
+}
+/* The code sits on the window's own card background, not the tinted
+   code-block surface. */
+.home-code-window .home-code {
+  border: 0;
+  border-radius: 0;
+  background-color: var(--color-background-card);
+}
+.home-video-figure .home-figure {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-4);
+  padding: 0;
+  border: 0;
+  background: none;
+  overflow: visible;
+}
+.home-video {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: var(--radius-element);
+  background-color: var(--color-background-muted);
+}
+.home-posts {
+  display: grid;
+  gap: var(--spacing-8);
+  list-style: none;
+  padding: 0;
+}
+@media (min-width: 768px) {
+  .home-posts {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+.home-post {
+  position: relative;
+  border-top: 1px solid var(--color-border-emphasized);
+  padding-top: var(--spacing-5);
+}
+.home-post-link {
+  color: inherit;
+  text-decoration: none;
+}
+.home-post-link::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+}
+.home-post:hover .home-post-link {
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+@media (max-width: 767px) {
+  /* Keep diagram text legible on phones: scroll the figure sideways
+     instead of shrinking it. */
+  .home-figure {
+    padding: var(--spacing-4);
+    overflow-x: auto;
+  }
+  .home-figure > svg {
+    min-width: 34rem;
+  }
+  .home-figure-wide .home-figure > svg {
+    min-width: 44rem;
+  }
+  .home-table table {
+    min-width: 44rem;
+  }
+}
+.home-figure-wide .home-figure > svg {
+  max-width: 64rem;
+  margin-inline: auto;
+}
+.home-table {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-container);
+  overflow-x: auto;
+  background-color: var(--color-background-card);
+}
+.home-logos {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-3) var(--spacing-6);
+  list-style: none;
+  padding: 0;
+}
+.home-logo {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  color: var(--color-text-secondary);
+  font-size: var(--text-supporting-size);
+  text-decoration: none;
+  transition: color var(--duration-fast);
+}
+.home-logo:hover {
+  color: var(--color-text-primary);
+}
+.home-logo-mark {
+  width: 1.25rem;
+  height: 1.25rem;
+  fill: currentColor;
+}
+.home-command {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-3);
+  padding: var(--spacing-2) var(--spacing-2) var(--spacing-2) var(--spacing-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-element);
+  background-color: var(--color-background-card);
+  font-family: var(--font-family-code);
+}
+.home-command-prompt {
+  color: var(--color-text-secondary);
+}
+
+/* Blog index and posts (app/(home)/blog). */
+.blog-list {
+  border-top: 1px solid var(--color-border-emphasized);
+}
+.blog-list-item {
+  position: relative;
+  display: grid;
+  gap: var(--spacing-2);
+  padding-block: var(--spacing-6);
+  border-bottom: 1px solid var(--color-border);
+}
+@media (min-width: 768px) {
+  .blog-list-item {
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+    gap: var(--spacing-8);
+  }
+  .blog-list-meta {
+    grid-column: span 3;
+  }
+  .blog-list-body {
+    grid-column: span 8;
+  }
+}
+.blog-list-link {
+  text-decoration: none;
+}
+.blog-list-link::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+}
+.blog-list-item:hover .blog-list-link {
+  text-decoration: underline;
+}
+.blog-post-header {
+  max-width: 52rem;
+}
+.blog-post-layout {
+  display: grid;
+  gap: var(--spacing-12);
+}
+@media (min-width: 1280px) {
+  .blog-post-layout {
+    grid-template-columns: minmax(0, 46rem) 15rem;
+    justify-content: space-between;
+  }
+  .blog-post-toc {
+    position: sticky;
+    top: 5rem;
+    align-self: start;
+  }
+}
+@media (max-width: 1279px) {
+  .blog-post-toc {
+    display: none;
+  }
+}
+
+/* Adopter quotes: one featured quote at statement size, the rest in a row. */
+.home-quotes {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-12);
+}
+.home-quote {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: var(--spacing-6);
+}
+.home-quote blockquote {
+  margin: 0;
+}
+.home-quote blockquote p {
+  font-size: var(--text-large-size);
+  line-height: 1.5;
+  color: var(--color-text-primary);
+}
+.home-quote-featured blockquote p {
+  max-width: 52rem;
+  font-size: clamp(1.5rem, 1.1rem + 1.4vw, 2.25rem);
+  line-height: 1.25;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  text-wrap: balance;
+  /* Hang the opening quote mark so the text edge stays on the grid. */
+  text-indent: -0.4em;
+}
+.home-quote-row {
+  display: grid;
+  gap: var(--spacing-8);
+}
+@media (min-width: 768px) {
+  .home-quote-row {
+    grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  }
+}
+.home-quote-row .home-quote {
+  border-top: 1px solid var(--color-border-emphasized);
+  padding-top: var(--spacing-5);
+}
+.home-quote-attribution {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-3);
+}
+.home-quote-source {
+  color: inherit;
+  text-decoration: none;
+}
+.home-quote-source:hover {
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+.home-quote-portrait {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  overflow: hidden;
+  background-color: var(--color-background-muted);
+  color: var(--color-text-secondary);
+  font-size: var(--text-supporting-size);
+  font-weight: 500;
+}
+.home-quote-portrait-avatar {
+  border-radius: 999px;
+}
+.home-quote-portrait-logo {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-element);
+  padding: var(--spacing-1-5);
+}
+.home-quote-portrait img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.home-quote-portrait-logo img {
+  object-fit: contain;
+  filter: grayscale(1);
 }
