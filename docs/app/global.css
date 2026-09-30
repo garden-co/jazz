@@ -312,26 +312,49 @@ h6 {
   border-top: 1px solid var(--color-border);
   padding-block: var(--spacing-12) calc(var(--spacing-12) * 1.5);
 }
+/* Hero pattern placement. Tune these in devtools on `.home-hero`:
+   --pattern-x / --pattern-y: where the pattern's centre sits in the hero
+   (0% 0% = top-left, 100% 0% = top-right); --pattern-width: its width at
+   scale 1; --pattern-scale: multiplies the width; --pattern-fade: how far
+   from the centre it starts fading out (100% = no fade); --pattern-opacity. */
 .home-hero {
+  --pattern-x: 100%;
+  --pattern-y: 0%;
+  --pattern-width: max(72rem, 110vw);
+  --pattern-scale: 1;
+  --pattern-fade: 45%;
+  --pattern-opacity: 1;
   position: relative;
   overflow: clip;
   isolation: isolate;
 }
-/* Stippled pattern centred on the hero's top-right corner, fading out
-   towards the headline in the bottom-left. */
+@media (max-width: 1023px) {
+  .home-hero {
+    --pattern-x: 100%;
+    --pattern-y: 0%;
+    --pattern-scale: 1;
+  }
+}
+@media (max-width: 639px) {
+  .home-hero {
+    --pattern-x: 100%;
+    --pattern-y: 0%;
+    --pattern-scale: 1;
+  }
+}
 .home-hero-pattern {
   position: absolute;
   z-index: -1;
-  top: 0;
-  left: 100%;
-  width: max(72rem, 110vw);
+  left: var(--pattern-x);
+  top: var(--pattern-y);
+  width: calc(var(--pattern-width) * var(--pattern-scale));
   max-width: none;
   height: auto;
-  aspect-ratio: 11 / 10;
   transform: translate(-50%, -50%);
+  opacity: var(--pattern-opacity);
   pointer-events: none;
   user-select: none;
-  mask-image: radial-gradient(closest-side, #000 45%, transparent 100%);
+  mask-image: radial-gradient(closest-side, #000 var(--pattern-fade), transparent 100%);
 }
 .home-anchor {
   scroll-margin-top: 5rem;
