@@ -3304,15 +3304,18 @@ async fn local_write_does_not_wait_on_a_hydration_parked_on_a_remote_chunk() {
         "objects",
         vec![Value::U64(1), Value::Large(Box::new(staged.value_ref))],
     );
+    first.insert("objects", vec![Value::U64(3), Value::Bytes(vec![3; 8])]);
     first.accept_large_value(staged.id);
-    let first = within("row 1's write", database.apply_batch(first))
+    let first = within("rows 1 and 3's write", database.apply_batch(first))
         .await
         .unwrap();
-    let persisted = within("row 1's persistence", first.persist()).await;
+    let persisted = within("rows 1 and 3's persistence", first.persist()).await;
     database.finish_persistence(persisted).unwrap();
+    let mut initial = ids.try_recv().unwrap().to_values().unwrap();
+    initial.sort_by_key(|(row, _)| sort_key(&row[0]));
     assert_eq!(
-        ids.try_recv().unwrap().to_values().unwrap(),
-        vec![(vec![Value::U64(1)], 1)]
+        initial,
+        vec![(vec![Value::U64(1)], 1), (vec![Value::U64(3)], 1)]
     );
 
     // Row 1's payload is now known only upstream, and upstream is gone.
@@ -3361,8 +3364,10 @@ async fn local_write_does_not_wait_on_a_hydration_parked_on_a_remote_chunk() {
     assert!(payloads.try_recv().is_err());
     assert!(database.subscription_has_pending_evaluation(payloads.id()));
 
+    // The write both inserts and retracts a row.
     let mut second = database.open_batch();
     second.insert("objects", vec![Value::U64(2), Value::Bytes(vec![2; 8])]);
+    second.delete("objects", PrimaryKeyValue::U64(3));
     let second = within(
         "a local write overlapping a hydration parked on a remote chunk",
         database.apply_batch(second),
@@ -3377,15 +3382,16 @@ async fn local_write_does_not_wait_on_a_hydration_parked_on_a_remote_chunk() {
         while let Ok(update) = ids.try_recv() {
             published.extend(update.to_values().unwrap());
         }
-        if !published.is_empty() {
+        if published.len() >= 2 {
             break;
         }
         let _ = database.poll_progress(&mut cx);
     }
+    published.sort_by_key(|(row, _)| sort_key(&row[0]));
     assert_eq!(
         published,
-        vec![(vec![Value::U64(2)], 1)],
-        "the committed row is visible while the chunk is still missing"
+        vec![(vec![Value::U64(2)], 1), (vec![Value::U64(3)], -1)],
+        "the committed write is visible while the chunk is still missing"
     );
     assert!(
         payloads.try_recv().is_err(),
@@ -3406,11 +3412,237 @@ async fn local_write_does_not_wait_on_a_hydration_parked_on_a_remote_chunk() {
         .into_iter()
         .map(|(row, weight)| (row[0].clone(), weight))
         .collect::<Vec<_>>();
-    rows.sort_by_key(|(id, _)| match id {
+    rows.sort_by_key(|(id, _)| sort_key(id));
+    assert_eq!(rows, vec![(Value::U64(1), 1), (Value::U64(2), 1)]);
+    // The first result already holds the write, so nothing repeats it.
+    for _ in 0..16 {
+        let _ = database.poll_progress(&mut cx);
+    }
+    assert!(
+        payloads.try_recv().is_err(),
+        "no delta follows the first result"
+    );
+    assert!(ids.try_recv().is_err());
+}
+
+fn sort_key(id: &Value) -> u64 {
+    match id {
         Value::U64(id) => *id,
         _ => u64::MAX,
-    });
+    }
+}
+
+/// The `id` field and weight of each delta, ordered by id.
+fn ids_with_weights(deltas: &RecordDeltas) -> Vec<(Value, i64)> {
+    let id = deltas
+        .descriptor
+        .field_index("id")
+        .expect("output carries an id field");
+    let mut rows = deltas
+        .to_values()
+        .unwrap()
+        .into_iter()
+        .map(|(row, weight)| (row[id].clone(), weight))
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|(id, _)| sort_key(id));
+    rows
+}
+
+/// #3901 through a prepared, routed shape, as Jazz subscribes. A binding for
+/// owner 8 is live. A binding for owner 7 hydrates over row 1, whose payload
+/// is cold and never arrives, so it parks on the chunk. A write inserts row 2
+/// for owner 7, retracts row 3 for owner 7 and inserts row 4 for owner 8.
+/// Storage is evicted first, so the write's first frame may detach and route
+/// its barriers in a later frame, after owner 7's hydration has restarted.
+/// The write must reach owner 8 while the chunk is missing, and owner 7's
+/// first result must hold the write exactly once, with no later delta.
+#[futures_test::test]
+async fn routed_write_does_not_wait_on_or_repeat_into_a_hydration_parked_on_a_chunk() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("owner", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = TestStorage::new(&schema.column_families());
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let mut database = Database::new(schema, storage.clone()).await.unwrap();
+    database.set_chunk_storage(chunks.clone());
+    let binding = RecordDescriptor::new([("owner", ColumnType::U64)]);
+    let shape = within(
+        "the shape",
+        database.prepare_one_sink(
+            GraphBuilder::join(
+                GraphBuilder::binding_source("owner_params", binding.clone()),
+                GraphBuilder::table("objects"),
+                ["owner"],
+                ["owner"],
+            )
+            .project_fields([
+                ProjectField::renamed("left.owner", "owner"),
+                ProjectField::renamed("right.id", "id"),
+                ProjectField::renamed("right.payload", "payload"),
+            ]),
+            "owner_params",
+            binding,
+            ["owner"],
+        ),
+    )
+    .await
+    .unwrap();
+
+    let prepared = crate::large_values::prepare(
+        crate::large_values::LargeValueKind::Bytes,
+        &vec![9; crate::large_values::INLINE_VALUE_MAX_BYTES * 4],
+    )
+    .unwrap();
+    let staged = within(
+        "the large value",
+        database.stage_large_value_preparation(prepared.clone()),
+    )
+    .await
+    .unwrap();
+    let mut first = database.open_batch();
+    first.insert(
+        "objects",
+        vec![
+            Value::U64(1),
+            Value::U64(7),
+            Value::Large(Box::new(staged.value_ref)),
+        ],
+    );
+    first.insert(
+        "objects",
+        vec![Value::U64(3), Value::U64(7), Value::Bytes(vec![3; 8])],
+    );
+    first.accept_large_value(staged.id);
+    let first = within("the first write", database.apply_batch(first))
+        .await
+        .unwrap();
+    let persisted = within("the first persistence", first.persist()).await;
+    database.finish_persistence(persisted).unwrap();
+
+    let observer = within(
+        "owner 8's binding",
+        database.bind_shape_one_sink(shape.id(), &[Value::U64(8)]),
+    )
+    .await
+    .unwrap();
+    within("owner 8's hydration", database.drive_progress())
+        .await
+        .unwrap();
+    assert!(observer.try_recv().unwrap().is_empty());
+
+    let root = prepared
+        .staged_chunks
+        .iter()
+        .find(|chunk| chunk.node_ref == prepared.value_ref.root)
+        .unwrap()
+        .clone();
+    within(
+        "deleting the root chunk",
+        crate::chunks::ChunkStorage::delete(
+            &*chunks,
+            root.node_ref.locator,
+            root.node_ref.object_hash,
+        ),
+    )
+    .await
+    .unwrap();
+    within(
+        "deleting the root metadata",
+        database.storage.delete(
+            LARGE_VALUE_METADATA_CF.to_owned(),
+            large_value_node_key(&root.node_ref).unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    let resolver_ready = Rc::new(Cell::new(false));
+    database.set_missing_chunk_resolver(Rc::new(DeferredFixtureChunkResolver {
+        chunks: Rc::new(std::collections::BTreeMap::from([(
+            crate::chunks::ChunkRequest {
+                object_hash: root.node_ref.object_hash.0,
+                locator: root.node_ref.locator,
+            },
+            Bytes::from(root.encoded),
+        )])),
+        ready: Rc::clone(&resolver_ready),
+    }));
+
+    let parked = within(
+        "owner 7's binding",
+        database.bind_shape_one_sink(shape.id(), &[Value::U64(7)]),
+    )
+    .await
+    .unwrap();
+    let mut cx = std::task::Context::from_waker(Waker::noop());
+    for _ in 0..64 {
+        let _ = database.poll_progress(&mut cx);
+    }
+    assert!(parked.try_recv().is_err());
+    assert!(database.subscription_has_pending_evaluation(parked.id()));
+
+    storage.evict_all();
+    let mut second = database.open_batch();
+    second.insert(
+        "objects",
+        vec![Value::U64(2), Value::U64(7), Value::Bytes(vec![2; 8])],
+    );
+    second.delete("objects", PrimaryKeyValue::U64(3));
+    second.insert(
+        "objects",
+        vec![Value::U64(4), Value::U64(8), Value::Bytes(vec![4; 8])],
+    );
+    let second = within(
+        "a routed write overlapping a hydration parked on a chunk",
+        database.apply_batch(second),
+    )
+    .await
+    .unwrap();
+    let persisted = within("the second persistence", second.persist()).await;
+    database.finish_persistence(persisted).unwrap();
+
+    let mut published = Vec::new();
+    for _ in 0..256 {
+        while let Ok(update) = observer.try_recv() {
+            published.extend(ids_with_weights(&update));
+        }
+        if !published.is_empty() {
+            break;
+        }
+        let _ = database.poll_progress(&mut cx);
+    }
+    assert_eq!(
+        published,
+        vec![(Value::U64(4), 1)],
+        "owner 8 sees the write while owner 7's chunk is missing"
+    );
+    for _ in 0..64 {
+        let _ = database.poll_progress(&mut cx);
+    }
+    assert!(
+        parked.try_recv().is_err(),
+        "owner 7 still waits only for the missing payload"
+    );
+
+    resolver_ready.set(true);
+    within("owner 7's hydration", database.drive_progress())
+        .await
+        .unwrap();
+    let rows = ids_with_weights(&parked.try_recv().unwrap());
     assert_eq!(rows, vec![(Value::U64(1), 1), (Value::U64(2), 1)]);
+    for _ in 0..16 {
+        let _ = database.poll_progress(&mut cx);
+    }
+    assert!(
+        parked.try_recv().is_err(),
+        "no routed frame repeats the write into owner 7"
+    );
+    assert!(observer.try_recv().is_err());
 }
 
 /// #3815: A's cold root parks its evaluation, and A is persisted, so no
