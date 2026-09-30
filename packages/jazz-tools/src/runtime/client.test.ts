@@ -15,7 +15,9 @@ import {
   type MutationErrorEvent,
   type OpenTransactionId,
   type WriteReceipt,
+  type QueryExecutionOptions,
 } from "./client.js";
+import type { QueryOptions } from "./db.js";
 import type { AppContext } from "./context.js";
 import type { RuntimeSubscriptionDelta, WasmSchema } from "../drivers/types.js";
 
@@ -615,23 +617,76 @@ describe("public read tiers", () => {
   it("lowers each new public tier to the existing native durability contract", () => {
     expect(resolveReadTier("local-first")).toBe("local");
     expect(resolveReadTier("remote")).toBe("global");
-    // The core Db gates the empty opening.
-    expect(resolveReadTier("local-first-unless-empty")).toBe("local-first-unless-empty");
     expect(resolveReadTier(ReadTier.LocalFirst)).toBe("local");
     expect(resolveReadTier(ReadTier.Remote)).toBe("global");
-    expect(resolveReadTier(ReadTier.LocalFirstUnlessEmpty)).toBe("local-first-unless-empty");
+    expect(Object.values(ReadTier)).toEqual(["local-first", "remote"]);
   });
 
-  it("rejects the removed remote-if-possible tier", () => {
-    expect("RemoteIfPossible" in ReadTier).toBe(false);
-    const removed = "remote-if-possible" as never;
-    expect(() => resolveReadTier(removed)).toThrow('The "remote-if-possible" tier was removed');
-    expect(() => publicQueryExecutionOptions({ tier: removed })).toThrow(
-      'The "remote-if-possible" tier was removed',
+  it.each(["remote-if-possible", "local-first-unless-empty", "local", "global", "core", "edge"])(
+    "rejects the removed %s read tier with a migration message",
+    (name) => {
+      const removed = name as never;
+      expect(() => publicQueryExecutionOptions({ tier: removed })).toThrow(
+        `The "${name}" ${name === "local" || name === "global" || name === "core" ? "read " : ""}tier was removed`,
+      );
+    },
+  );
+
+  it("rejects an unknown read tier", () => {
+    expect(() => publicQueryExecutionOptions({ tier: "fast" as never })).toThrow(
+      'Unknown read tier "fast"; expected "local-first" or "remote".',
     );
   });
 
-  it("keeps legacy read durability controls byte-for-byte compatible", () => {
+  it("types a first-load wait as local-first only", () => {
+    const local: QueryExecutionOptions = { tier: ReadTier.LocalFirst, firstLoadRemoteWaitMs: 500 };
+    const defaultTier: QueryOptions = { firstLoadRemoteWaitMs: 500 };
+    const remote: QueryOptions = { tier: ReadTier.Remote };
+    // @ts-expect-error Only local-first reads wait for the server on their first load.
+    const remoteWait: QueryExecutionOptions = { tier: ReadTier.Remote, firstLoadRemoteWaitMs: 500 };
+    // @ts-expect-error The Db read options discriminate on the tier too.
+    const dbRemoteWait: QueryOptions = { tier: "remote", firstLoadRemoteWaitMs: 500 };
+    expect([local, defaultTier, remote, remoteWait, dbRemoteWait]).toHaveLength(5);
+  });
+
+  it("passes a local-first server wait to the runtime and ignores it elsewhere", async () => {
+    const runtime = makeFakeRuntime();
+    runtime.query.mockResolvedValue([]);
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const reads = [
+      [
+        { tier: ReadTier.LocalFirst, firstLoadRemoteWaitMs: 500 },
+        "local",
+        '{"first_load_remote_wait_ms":500}',
+      ],
+      [
+        { tier: "local-first", firstLoadRemoteWaitMs: 250.9 },
+        "local",
+        '{"first_load_remote_wait_ms":250}',
+      ],
+      [{ tier: ReadTier.LocalFirst, firstLoadRemoteWaitMs: 0 }, "local", undefined],
+      [
+        { tier: ReadTier.Remote, firstLoadRemoteWaitMs: 500 },
+        "global",
+        JSON.stringify({ local_updates: "deferred" }),
+      ],
+    ] as const;
+    for (const [options, nativeTier, optionsJson] of reads) {
+      runtime.query.mockClear();
+      // The Remote case is a JavaScript caller: the types reject its wait.
+      await client.query('{"relation_ir":{"table":"todos"}}', options as QueryExecutionOptions);
+      expect(runtime.query.mock.calls[0]?.[2]).toBe(nativeTier);
+      expect(runtime.query.mock.calls[0]?.[3]).toBe(optionsJson);
+    }
+    expect(publicQueryExecutionOptions({ firstLoadRemoteWaitMs: 300 })).toEqual({
+      firstLoadRemoteWaitMs: 300,
+    });
+    expect(() => publicQueryExecutionOptions({ firstLoadRemoteWaitMs: -1 })).toThrow(
+      "firstLoadRemoteWaitMs must be a non-negative number of milliseconds",
+    );
+  });
+
+  it("keeps the runtime's internal durability read names byte-for-byte compatible", () => {
     for (const tier of ["local", "global"] as const) {
       expect(resolveReadTier(tier)).toBe(tier);
       expect(resolveEffectiveQueryExecutionOptions({}, { tier })).toMatchObject({
@@ -650,18 +705,11 @@ describe("public read tiers", () => {
       tier: "global",
       localUpdates: "deferred",
     });
-    expect(
-      resolveEffectiveQueryExecutionOptions({}, { tier: ReadTier.LocalFirstUnlessEmpty }),
-    ).toMatchObject({
-      tier: "local-first-unless-empty",
-      localUpdates: "immediate",
-    });
   });
 
   it.each([
     [ReadTier.LocalFirst, "local", undefined],
     [ReadTier.Remote, "global", JSON.stringify({ local_updates: "deferred" })],
-    [ReadTier.LocalFirstUnlessEmpty, "local-first-unless-empty", undefined],
   ] as const)(
     "keeps public %s reads full and derives their own-write policy",
     async (tier, nativeTier, expectedOptionsJson) => {
@@ -1028,7 +1076,7 @@ describe("JazzClient mutation error handling", () => {
 });
 
 it("rejects the removed edge read tier instead of silently choosing a local read", () => {
-  const legacy = "edge" as "global";
+  const legacy = "edge" as never;
   expect(() => resolveReadTier(legacy)).toThrow('The "edge" tier was removed');
   expect(() => publicQueryExecutionOptions({ tier: legacy })).toThrow(
     'The "edge" tier was removed',

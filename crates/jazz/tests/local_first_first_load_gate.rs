@@ -1,5 +1,12 @@
-//! The core `Db` local-first-unless-empty gate (`EmptyOpening::AwaitRemote`)
-//! and the host remote-link hint.
+//! The machinery behind the core `Db` first-load gate
+//! (`FirstLoad::WaitForRemote`) and the host remote-link hint: link hints and
+//! the attempt window, release on link failure or loss, strict remote offset
+//! windows with their local fallback, and the non-durable foreground's
+//! authority witness through its storage owner.
+//!
+//! Every read here asks for a server wait far longer than any test runs, so
+//! each release is caused by the link or by the server's answer, never by the
+//! timeout. The timeout itself is covered by `local_first_server_wait.rs`.
 //!
 //! Every client here is a core `Db` connected to a history-complete server
 //! `Db` over an in-memory duplex transport, with ticks driven explicitly, so
@@ -22,7 +29,7 @@ mod common;
 use duplex_transport::duplex;
 use jazz::block_on;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, EmptyOpening, LocalUpdates, REMOTE_LINK_ATTEMPT_WINDOW, ReadOpts,
+    Db, DbConfig, DbIdentity, FirstLoad, LocalUpdates, REMOTE_LINK_ATTEMPT_WINDOW, ReadOpts,
     RemoteLinkHint, SerializedReadResult, SubscriptionEvent, SubscriptionStream, TickScheduler,
     TickUrgency,
 };
@@ -116,11 +123,23 @@ fn turn(client: &Db, server: Option<&Db>) {
     }
 }
 
-fn unless_empty() -> ReadOpts {
+/// Long enough that no test here reaches it by accident.
+const LONG: Duration = Duration::from_secs(60);
+/// Short enough to sleep through.
+const SHORT: Duration = Duration::from_millis(200);
+
+fn wait_for_remote(timeout: Duration) -> ReadOpts {
     ReadOpts {
-        empty_opening: EmptyOpening::AwaitRemote,
+        first_load: FirstLoad::WaitForRemote {
+            timeout_ms: timeout.as_millis() as u64,
+        },
         ..ReadOpts::default()
     }
+}
+
+/// A read that waits for the server's answer while the remote could answer.
+fn gated() -> ReadOpts {
+    wait_for_remote(LONG)
 }
 
 fn items() -> Query {
@@ -165,7 +184,7 @@ fn assert_withheld(
     for _ in 0..turns {
         turn(client, server);
         if let Some(event) = stream.try_next_event() {
-            panic!("the empty opening was published while it should be withheld: {event:?}");
+            panic!("the opening was published while it should be withheld: {event:?}");
         }
     }
 }
@@ -230,8 +249,20 @@ fn all_rows() -> Vec<RowUuid> {
     (0..LABELS.len()).map(row).collect()
 }
 
+fn seed(server: &Db, index: usize, label: &str) {
+    server
+        .seed_settled_mergeable_for_bootstrap(
+            "items",
+            row(index),
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([("label".to_owned(), Value::String(label.to_owned()))]),
+        )
+        .expect("seed server row");
+}
+
 /// A host that reports an attempt, attaches its transport, and then reports
-/// the link live gets the server's rows as the opening, never an empty frame.
+/// the link live gets the server's rows as the opening, never its unsettled
+/// local one.
 ///
 /// ```text
 /// alice: hint Attempting ─ subscribe ─ (withheld) ─ connect ─ hint Live
@@ -243,7 +274,7 @@ fn attempting_then_live_opening_waits_for_the_servers_rows() {
     let server = seeded_server();
     let alice = fresh_client(0x61);
     alice.set_remote_link_hint(RemoteLinkHint::Attempting);
-    let mut stream = subscribe(&alice, &items(), unless_empty());
+    let mut stream = subscribe(&alice, &items(), gated());
     assert_withheld(&mut stream, &alice, None, 5);
 
     connect(&alice, &server);
@@ -259,91 +290,53 @@ fn attempting_then_live_opening_waits_for_the_servers_rows() {
     bob.set_remote_link_hint(RemoteLinkHint::Attempting);
     connect(&bob, &server);
     bob.set_remote_link_hint(RemoteLinkHint::Live);
-    let mut rows = one_shot(&bob, Some(&server), &items(), unless_empty(), MAX_TURNS);
+    let mut rows = one_shot(&bob, Some(&server), &items(), gated(), MAX_TURNS);
     rows.sort();
     assert_eq!(rows, all_rows());
 }
 
-/// An attempt that neither succeeds nor fails holds an empty opening only
-/// for `REMOTE_LINK_ATTEMPT_WINDOW` from the attempt's start. A read that
-/// starts after the window has elapsed does not wait at all.
+/// An attempt that neither succeeds nor fails holds an opening only for
+/// `REMOTE_LINK_ATTEMPT_WINDOW` from the attempt's start, however long the
+/// read's own server wait. A read that starts after the window has elapsed
+/// does not wait at all.
 ///
 /// ```text
-/// alice: hint Attempting ─ subscribe ─ (withheld) ── 5 s ──► empty opening
-///        subscribe / one-shot after the window ─────────────► empty at once
+/// alice: hint Attempting ─ subscribe (wait 60 s) ─ (withheld) ── 5 s ──► local opening
+///        subscribe / one-shot after the window ──────────────────────► local at once
 /// ```
 #[test]
-fn an_attempt_that_outlives_its_window_releases_the_empty_opening() {
+fn an_attempt_that_outlives_its_window_releases_the_held_opening() {
     let alice = fresh_client(0x63);
     alice.set_remote_link_hint(RemoteLinkHint::Attempting);
-    let mut held = subscribe(&alice, &items(), unless_empty());
+    let mut held = subscribe(&alice, &items(), gated());
     assert_withheld(&mut held, &alice, None, 3);
 
     std::thread::sleep(REMOTE_LINK_ATTEMPT_WINDOW + Duration::from_millis(100));
     let (reset, rows, settled) = opening(first_event(&mut held, &alice, None));
     assert!(
         reset && rows.is_empty() && !settled,
-        "held opening released empty"
+        "held opening released as the unsettled local result"
     );
 
     // The attempt is still reported, but its window is spent: no new wait.
-    let mut late = subscribe(&alice, &items(), unless_empty());
+    let mut late = subscribe(&alice, &items(), gated());
     let (reset, rows, settled) = opening(first_event(&mut late, &alice, None));
     assert!(reset && rows.is_empty() && !settled);
-    assert!(one_shot(&alice, None, &items(), unless_empty(), 3).is_empty());
+    assert!(one_shot(&alice, None, &items(), gated(), 3).is_empty());
 }
 
-/// `Failed` (or `NoServer`) means nothing can answer: the empty local
-/// opening is delivered at once, even with a connected upstream relay.
+/// Leaving `Live` for a new attempt is a link loss: an opening held on the
+/// lost link is released at once and does not start waiting again on the new
+/// attempt's window.
 ///
 /// ```text
-/// alice ══ upstream ══ server(a..j)      hint Failed
-/// alice: subscribe ─► empty opening (server not consulted first)
+/// bob: hint Live ─ subscribe (wait 60 s) ─ (withheld) ─ hint Attempting (reconnect) ─► local opening
 /// ```
 #[test]
-fn a_failed_link_delivers_the_empty_opening_immediately() {
-    let server = seeded_server();
-    for (node, hint) in [
-        (0x64, RemoteLinkHint::Failed),
-        (0x65, RemoteLinkHint::NoServer),
-    ] {
-        let alice = fresh_client(node);
-        connect(&alice, &server);
-        alice.set_remote_link_hint(hint);
-        let mut stream = subscribe(&alice, &items(), unless_empty());
-        let (reset, rows, settled) = opening(first_event(&mut stream, &alice, None));
-        assert!(reset && rows.is_empty() && !settled, "{hint:?}");
-        assert!(one_shot(&alice, None, &items(), unless_empty(), 3).is_empty());
-    }
-}
-
-/// A held opening is released as soon as the host reports the link failed,
-/// or reports that a live link was lost and a new attempt started.
-///
-/// ```text
-/// alice: hint Live ─ subscribe ─ (withheld, server silent) ─ hint Failed ─► empty opening
-/// bob:   hint Live ─ subscribe ─ (withheld) ─ hint Attempting (reconnect) ─► empty opening
-/// ```
-#[test]
-fn a_held_opening_is_released_when_the_host_reports_failure() {
-    let alice = fresh_client(0x66);
-    alice.set_remote_link_hint(RemoteLinkHint::Live);
-    let mut stream = subscribe(&alice, &items(), unless_empty());
-    assert_withheld(&mut stream, &alice, None, 5);
-
-    alice.set_remote_link_hint(RemoteLinkHint::Failed);
-    let (reset, rows, settled) = opening(
-        stream
-            .try_next_event()
-            .expect("the failure report publishes the opening"),
-    );
-    assert!(reset && rows.is_empty() && !settled);
-
-    // Leaving `Live` for a new attempt is a link loss too: an opening held
-    // on the lost link does not start waiting again on the new attempt.
+fn leaving_a_live_link_for_a_new_attempt_releases_a_held_opening() {
     let bob = fresh_client(0x6a);
     bob.set_remote_link_hint(RemoteLinkHint::Live);
-    let mut stream = subscribe(&bob, &items(), unless_empty());
+    let mut stream = subscribe(&bob, &items(), gated());
     assert_withheld(&mut stream, &bob, None, 5);
     bob.set_remote_link_hint(RemoteLinkHint::Attempting);
     let (reset, rows, settled) = opening(
@@ -355,14 +348,14 @@ fn a_held_opening_is_released_when_the_host_reports_failure() {
 }
 
 /// Without any host report the core derives reachability from its own
-/// upstream: a live link holds the empty opening, and losing that link
-/// releases it. Detaching the own upstream is a loss even while the host
+/// upstream: a live link holds the opening, and losing that link releases
+/// it. Detaching the own upstream is a loss even while the host
 /// still reports the path live.
 ///
 /// ```text
 /// alice ══ upstream ══ server (never ticked)
-/// alice: subscribe ─ (withheld) ─ detach upstream ─► empty opening
-/// bob (hint Live): same ─────────────────────────────► empty opening
+/// alice: subscribe ─ (withheld) ─ detach upstream ─► local opening
+/// bob (hint Live): same ─────────────────────────────► local opening
 /// ```
 #[test]
 fn losing_the_own_upstream_releases_a_held_opening() {
@@ -371,7 +364,7 @@ fn losing_the_own_upstream_releases_a_held_opening() {
     let (client_transport, server_transport) = duplex();
     let upstream = block_on(alice.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, AuthorSubject::SYSTEM);
-    let mut stream = subscribe(&alice, &items(), unless_empty());
+    let mut stream = subscribe(&alice, &items(), gated());
     assert_withheld(&mut stream, &alice, None, 5);
 
     assert!(alice.detach_connection(&upstream));
@@ -385,7 +378,7 @@ fn losing_the_own_upstream_releases_a_held_opening() {
     let upstream = block_on(bob.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, AuthorSubject::SYSTEM);
     bob.set_remote_link_hint(RemoteLinkHint::Live);
-    let mut stream = subscribe(&bob, &items(), unless_empty());
+    let mut stream = subscribe(&bob, &items(), gated());
     assert_withheld(&mut stream, &bob, None, 5);
     assert!(bob.detach_connection(&upstream));
     let (reset, rows, settled) = opening(first_event(&mut stream, &bob, None));
@@ -397,8 +390,8 @@ fn losing_the_own_upstream_releases_a_held_opening() {
 ///
 /// ```text
 /// alice: remote read of window ─► [e, f]    (local cache now holds e, f only)
-/// alice: subscribe window (unless-empty) ─► first delivery [e, f]
-/// alice: one-shot window (unless-empty)  ─► [e, f]
+/// alice: subscribe window (wait 60 s) ─► first delivery [e, f]
+/// alice: one-shot window (wait 60 s)  ─► [e, f]
 /// ```
 #[test]
 fn an_offset_window_reads_the_remote_page_after_a_partial_sync() {
@@ -437,13 +430,13 @@ fn an_offset_window_reads_the_remote_page_after_a_partial_sync() {
     };
     assert_eq!(remote_rows, expected, "the server's window");
 
-    let mut stream = subscribe(&alice, &window(), unless_empty());
+    let mut stream = subscribe(&alice, &window(), gated());
     let (reset, rows, settled) = opening(first_event(&mut stream, &alice, Some(&server)));
     assert!(reset && settled);
     assert_eq!(rows, expected, "the first delivery is the server's page");
 
     assert_eq!(
-        one_shot(&alice, Some(&server), &window(), unless_empty(), MAX_TURNS),
+        one_shot(&alice, Some(&server), &window(), gated(), MAX_TURNS),
         expected
     );
 }
@@ -455,9 +448,9 @@ fn an_offset_window_reads_the_remote_page_after_a_partial_sync() {
 /// ```text
 /// alice ══ upstream ══ server(a..j): remote read of all items (cache warm)
 /// alice: detach, hint Attempting
-/// alice: subscribe window (unless-empty) ─ (withheld) ── 5 s ──► [e, f]
+/// alice: subscribe window (wait 60 s) ─ (withheld) ── 5 s ──► [e, f]
 /// alice: subscribe window, then hint Failed ────────────────────► [e, f]
-/// alice: one-shot window (unless-empty) ────────────────────────► [e, f]
+/// alice: one-shot window (wait 60 s) ────────────────────────► [e, f]
 /// ```
 #[test]
 fn an_offset_window_falls_back_to_the_warm_cache_when_the_remote_cannot_answer() {
@@ -490,7 +483,7 @@ fn an_offset_window_falls_back_to_the_warm_cache_when_the_remote_cannot_answer()
     assert_eq!(plain_page, expected, "the plain local-first page is cached");
 
     alice.set_remote_link_hint(RemoteLinkHint::Attempting);
-    let mut held = subscribe(&alice, &window(), unless_empty());
+    let mut held = subscribe(&alice, &window(), gated());
     assert_withheld(&mut held, &alice, None, 3);
     std::thread::sleep(REMOTE_LINK_ATTEMPT_WINDOW + Duration::from_millis(100));
     let (reset, rows) = page(first_event(&mut held, &alice, None));
@@ -498,17 +491,14 @@ fn an_offset_window_falls_back_to_the_warm_cache_when_the_remote_cannot_answer()
     assert_eq!(rows, expected, "the cached page, not an empty one");
 
     alice.set_remote_link_hint(RemoteLinkHint::Attempting);
-    let mut released = subscribe(&alice, &window(), unless_empty());
+    let mut released = subscribe(&alice, &window(), gated());
     assert_withheld(&mut released, &alice, None, 3);
     alice.set_remote_link_hint(RemoteLinkHint::Failed);
     let (reset, rows) = page(first_event(&mut released, &alice, None));
     assert!(reset);
     assert_eq!(rows, expected, "a failed link releases to the cached page");
 
-    assert_eq!(
-        one_shot(&alice, None, &window(), unless_empty(), 10),
-        expected
-    );
+    assert_eq!(one_shot(&alice, None, &window(), gated(), 10), expected);
     block_on(released.close()).expect("close the fallen-back window");
 }
 
@@ -526,7 +516,7 @@ fn a_fallen_back_window_switches_to_the_servers_page_once_it_answers() {
     let server = seeded_server();
     let alice = fresh_client(0x6a);
     alice.set_remote_link_hint(RemoteLinkHint::Attempting);
-    let mut stream = subscribe(&alice, &window(), unless_empty());
+    let mut stream = subscribe(&alice, &window(), gated());
     std::thread::sleep(REMOTE_LINK_ATTEMPT_WINDOW + Duration::from_millis(100));
     let (reset, rows, settled) = opening(first_event(&mut stream, &alice, None));
     assert!(reset && rows.is_empty() && !settled, "the empty local page");
@@ -608,7 +598,7 @@ impl Foreground {
         let bytes = postcard::to_allocvec(query).expect("encode query");
         let read = self.tab.all_serialized_query(
             &bytes,
-            unless_empty(),
+            gated(),
             None,
             None,
             None,
@@ -657,7 +647,7 @@ fn a_foreground_opening_waits_for_the_servers_rows_through_its_owner() {
     let foreground = foreground_over(0x71, worker_connected_to(0x70, &server));
     foreground.tab.set_remote_link_hint(RemoteLinkHint::Live);
 
-    let mut stream = subscribe(&foreground.tab, &items(), unless_empty());
+    let mut stream = subscribe(&foreground.tab, &items(), gated());
     for _ in 0..6 {
         foreground.turn(None);
         assert!(
@@ -708,7 +698,7 @@ fn an_empty_authority_answer_releases_a_foreground_opening() {
     let foreground = foreground_over(0x75, worker_connected_to(0x74, &server));
     foreground.tab.set_remote_link_hint(RemoteLinkHint::Live);
 
-    let mut stream = subscribe(&foreground.tab, &items(), unless_empty());
+    let mut stream = subscribe(&foreground.tab, &items(), gated());
     for _ in 0..6 {
         foreground.turn(None);
         assert!(stream.try_next_event().is_none());
@@ -720,55 +710,107 @@ fn an_empty_authority_answer_releases_a_foreground_opening() {
 }
 
 /// When the owner's server link has failed and the host reports that, a
-/// foreground opens with the owner's (empty) local answer at once.
+/// foreground opens with the owner's local answer at once.
 ///
 /// ```text
 /// server(a..j)    worker(cold, link failed) ══ tab (hint Failed)
-/// tab: subscribe ─► empty opening, no witness coverage
+/// tab: subscribe ─► the owner's (empty) local opening, no witness coverage
 /// ```
 #[test]
-fn a_foreground_whose_owner_link_failed_opens_empty_at_once() {
+fn a_foreground_whose_owner_link_failed_opens_at_once() {
     let foreground = foreground_over(0x77, fresh_client(0x76));
     foreground.tab.set_remote_link_hint(RemoteLinkHint::Failed);
 
-    let mut stream = subscribe(&foreground.tab, &items(), unless_empty());
+    let mut stream = subscribe(&foreground.tab, &items(), gated());
     let (reset, rows, _) = opening(foreground.first_event(&mut stream, None));
     assert!(reset && rows.is_empty());
     assert_eq!(foreground.coverage_groups(), 1, "no authority witness");
     assert!(foreground.one_shot(None, &items()).is_empty());
 }
 
-/// A warm owner cache is the foreground's local answer: it opens the stream
-/// at once even while the owner is still attempting to reach the server.
+/// A storage owner connected to `server` whose cache holds `a..j`.
+fn warm_worker(node: u8, server: &Db) -> Db {
+    let worker = worker_connected_to(node, server);
+    let remote = ReadOpts {
+        tier: DurabilityTier::Global,
+        local_updates: LocalUpdates::Immediate,
+        ..ReadOpts::default()
+    };
+    let mut cache = subscribe(&worker, &items(), remote);
+    let (_, mut cached, settled) = opening(first_event(&mut cache, &worker, Some(server)));
+    cached.sort();
+    assert!(settled);
+    assert_eq!(cached, all_rows(), "the worker cached a..j");
+    block_on(cache.close()).expect("close the warming read");
+    worker
+}
+
+/// A warm owner cache does not open a foreground early: unlike the removed
+/// unless-empty gate, a non-empty owner answer is withheld too, and the first
+/// delivery is the authority's answer relayed by the owner, including a row
+/// the owner has not cached. The wait stays bounded by the read's timeout:
+/// with the server silent, the owner's cached rows open the stream once it
+/// elapses.
 ///
 /// ```text
-/// server(a..j) ══ worker ─ caches a..j ─ loses its server link
-/// worker(a..j) ══ tab (hint Attempting)
-/// tab: subscribe ─► opening a..j from the worker, without waiting
+/// server(a..j, k) ══ worker(cache a..j) ══ tab (hint Live)
+/// tab: subscribe (wait 60 s) ─ (withheld, server silent) ─ server answers ─► opening a..k
+///
+/// quiet(a..j, silent from here) ══ worker(cache a..j) ══ tab (hint Live)
+/// tab: subscribe (wait 200 ms) ─ (withheld) ── 200 ms ──► opening a..j from the owner
 /// ```
 #[test]
-fn a_warm_owner_cache_opens_a_foreground_at_once() {
+fn a_warm_owner_cache_waits_for_the_authority_answer() {
     let server = seeded_server();
-    let worker = fresh_client(0x78);
-    let (worker_transport, server_transport) = duplex();
-    let upstream = block_on(worker.connect_upstream(worker_transport));
-    let _subscriber = server.accept_subscriber(server_transport, AuthorSubject::SYSTEM);
-    let mut cache = subscribe(&worker, &items(), unless_empty());
-    let (_, cached, _) = opening(first_event(&mut cache, &worker, Some(&server)));
-    assert_eq!(cached.len(), LABELS.len(), "the worker cached a..j");
-    assert!(worker.detach_connection(&upstream));
+    let answered = foreground_over(0x79, warm_worker(0x78, &server));
+    seed(&server, 10, "k");
+    answered.tab.set_remote_link_hint(RemoteLinkHint::Live);
+    let mut stream = subscribe(&answered.tab, &items(), gated());
+    for _ in 0..6 {
+        answered.turn(None);
+        assert!(
+            stream.try_next_event().is_none(),
+            "the owner's cached answer must not open the stream"
+        );
+    }
+    assert_eq!(
+        answered.coverage_groups(),
+        2,
+        "owner-local coverage plus the gate's authority witness"
+    );
+    let (reset, mut rows, _) = opening(answered.first_event(&mut stream, Some(&server)));
+    rows.sort();
+    assert!(reset);
+    assert_eq!(
+        rows,
+        (0..11).map(row).collect::<Vec<_>>(),
+        "the first delivery is the authority's answer"
+    );
+    answered.turn(Some(&server));
+    assert_eq!(answered.coverage_groups(), 1);
 
-    let foreground = foreground_over(0x79, worker);
-    foreground
-        .tab
-        .set_remote_link_hint(RemoteLinkHint::Attempting);
-    let mut stream = subscribe(&foreground.tab, &items(), unless_empty());
-    let (reset, mut rows, _) = opening(foreground.first_event(&mut stream, None));
+    // A second server stays silent once it has warmed its owner: the
+    // foreground's timeout releases the owner's cached rows.
+    let quiet_server = seeded_server();
+    let silent = foreground_over(0x7e, warm_worker(0x7d, &quiet_server));
+    silent.tab.set_remote_link_hint(RemoteLinkHint::Live);
+    let mut stream = subscribe(&silent.tab, &items(), wait_for_remote(SHORT));
+    for _ in 0..3 {
+        silent.turn(None);
+        assert!(stream.try_next_event().is_none());
+    }
+    std::thread::sleep(SHORT + Duration::from_millis(50));
+    let (reset, mut rows, _) = opening(silent.first_event(&mut stream, None));
     rows.sort();
     assert!(reset);
     assert_eq!(rows, all_rows(), "the owner's cached rows");
-    foreground.turn(None);
-    assert_eq!(foreground.coverage_groups(), 1);
+    silent.turn(None);
+    silent.turn(None);
+    assert_eq!(
+        silent.coverage_groups(),
+        1,
+        "the released witness is retired"
+    );
 }
 
 /// A held foreground opening is released when the host reports that the
@@ -783,7 +825,7 @@ fn a_held_foreground_opening_is_released_when_its_owner_link_fails() {
     let server = seeded_server();
     let foreground = foreground_over(0x7b, worker_connected_to(0x7a, &server));
     foreground.tab.set_remote_link_hint(RemoteLinkHint::Live);
-    let mut stream = subscribe(&foreground.tab, &items(), unless_empty());
+    let mut stream = subscribe(&foreground.tab, &items(), gated());
     for _ in 0..6 {
         foreground.turn(None);
         assert!(stream.try_next_event().is_none());
@@ -842,17 +884,17 @@ fn a_host_shutdown_link_sequence_releases_held_reads_and_closes_cleanly() {
     let _subscriber = server.accept_subscriber(server_transport, AuthorSubject::SYSTEM);
     alice.set_remote_link_hint(RemoteLinkHint::Live);
 
-    let mut answered = subscribe(&alice, &items(), unless_empty());
+    let mut answered = subscribe(&alice, &items(), gated());
     let (_, mut rows, _) = opening(first_event(&mut answered, &alice, Some(&server)));
     rows.sort();
     assert_eq!(rows, all_rows());
 
     // The server stays silent from here on: both window reads are held.
-    let mut held = subscribe(&alice, &window(), unless_empty());
+    let mut held = subscribe(&alice, &window(), gated());
     let bytes = postcard::to_allocvec(&window()).expect("encode window");
     let one_shot = alice.all_serialized_query(
         &bytes,
-        unless_empty(),
+        gated(),
         None,
         None,
         None,

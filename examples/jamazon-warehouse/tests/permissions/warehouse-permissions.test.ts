@@ -338,11 +338,11 @@ describe("stock contention", () => {
     expect(reason).toMatchObject({ onHand: 1, requested: 4 });
 
     const [stock] = await manager.db.all(app.stock.where({ id: east.stock.id }).limit(1), {
-      tier: "global",
+      tier: "remote",
     });
     expect(stock?.on_hand).toBe(1);
     const orders = await manager.db.all(app.orders.where({ warehouse_id: east.warehouse.id }), {
-      tier: "global",
+      tier: "remote",
     });
     expect(orders).toHaveLength(1);
   });
@@ -361,7 +361,7 @@ describe("stock contention", () => {
     const again = await purchase(asDb(manager.db), request);
     expect(again).toEqual(first);
     const [stock] = await manager.db.all(app.stock.where({ id: east.stock.id }).limit(1), {
-      tier: "global",
+      tier: "remote",
     });
     expect(stock?.on_hand).toBe(3);
   });
@@ -380,7 +380,7 @@ describe("stock contention", () => {
       idempotencyKey: "two-phase",
     });
 
-    const read = { tier: "global" } as const;
+    const read = { tier: "remote" } as const;
     const [order] = await manager.db.all(app.orders.where({ id: receipt.orderId }).limit(1), read);
     expect(order).toMatchObject({
       status: ORDER_STATUS.pending,
@@ -416,7 +416,7 @@ describe("stock contention", () => {
     // and balance already taken, and no lines or payment yet.
     const reserved = await reserveOrder(asDb(manager.db), request);
     if (!("draft" in reserved)) throw new Error("expected a draft");
-    const read = { tier: "global" } as const;
+    const read = { tier: "remote" } as const;
     expect(
       await manager.db.all(app.order_lines.where({ order_id: reserved.draft.id }).limit(5), read),
     ).toEqual([]);
@@ -455,7 +455,7 @@ describe("stock contention", () => {
     await expect(
       purchase(asDb(manager.db), { ...request, lines: [{ itemId: east.item.id, quantity: 1 }] }),
     ).rejects.toBeInstanceOf(RequestMismatchError);
-    const read = { tier: "global" } as const;
+    const read = { tier: "remote" } as const;
     const [order] = await manager.db.all(
       app.orders.where({ id: reserved.draft.id }).limit(1),
       read,
@@ -504,7 +504,7 @@ describe("stock contention", () => {
     ).rejects.toBe(rejection);
     expect(exclusiveCalls).toBe(3);
 
-    const read = { tier: "global" } as const;
+    const read = { tier: "remote" } as const;
     const [order] = await manager.db.all(
       app.orders.where({ idempotency_key: "rejected-placement" }).limit(1),
       read,
@@ -605,7 +605,7 @@ describe("stock contention", () => {
     // The operator reserves, then loses their staffing before placing.
     const reserved = await reserveOrder(asDb(operator.db), request);
     if (!("draft" in reserved)) throw new Error("expected a draft");
-    const read = { tier: "global" } as const;
+    const read = { tier: "remote" } as const;
     const [taken] = await manager.db.all(app.stock.where({ id: east.stock.id }).limit(1), read);
     expect(taken?.on_hand).toBe(1);
     await manager.db.delete(app.warehouse_operators, membership.id).wait({ tier: "global" });

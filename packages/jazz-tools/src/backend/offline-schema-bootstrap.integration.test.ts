@@ -79,7 +79,7 @@ describe("offline persistent schema bootstrap", () => {
             .wait({ tier: "global" });
           await close(seed.session);
           const original = await open(oldApp, "reader");
-          expect(await original.db.all(oldApp.entries, { tier: "global" })).toHaveLength(1);
+          expect(await original.db.all(oldApp.entries, { tier: "remote" })).toHaveLength(1);
           await close(original.session);
           await deploy({
             ...settings,
@@ -98,23 +98,23 @@ describe("offline persistent schema bootstrap", () => {
             server = await startLocalJazzServer({ ...settings, port });
           }
           const upgraded = await open(newApp, "reader");
-          expect(await upgraded.db.all(newApp.entries, { tier: "global" })).toMatchObject([
+          expect(await upgraded.db.all(newApp.entries, { tier: "remote" })).toMatchObject([
             { text: "retained row" },
           ]);
-          expect(await upgraded.db.all(newApp.controls, { tier: "global" })).toEqual([]);
+          expect(await upgraded.db.all(newApp.controls, { tier: "remote" })).toEqual([]);
           await close(upgraded.session);
           const reopened = await open(newApp, "reader");
-          expect(await reopened.db.all(newApp.entries, { tier: "local" })).toHaveLength(1);
+          expect(await reopened.db.all(newApp.entries, { tier: "local-first" })).toHaveLength(1);
           await close(reopened.session);
           // An incompatible, unpublished target cannot borrow B's admission.
           const incompatible = s.defineApp({ entries: s.table({ text: s.boolean() }, {}) });
           const rejected = await open(incompatible, "reader");
-          await expect(rejected.db.all(incompatible.entries, { tier: "global" })).rejects.toThrow(
+          await expect(rejected.db.all(incompatible.entries, { tier: "remote" })).rejects.toThrow(
             /awaiting published catalogue admission/,
           );
           await close(rejected.session);
           const retained = await open(newApp, "reader");
-          expect(await retained.db.all(newApp.entries, { tier: "local" })).toHaveLength(1);
+          expect(await retained.db.all(newApp.entries, { tier: "local-first" })).toHaveLength(1);
           await close(retained.session);
         } finally {
           for (const session of sessions) await close(session);

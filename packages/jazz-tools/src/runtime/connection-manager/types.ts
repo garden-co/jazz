@@ -164,9 +164,9 @@ export abstract class ConnectionManager {
   abstract waitForReconnect(signal?: AbortSignal): Promise<void>;
 
   /**
-   * Live reachability of the configured server. Only
-   * `ReadTier.LocalFirstUnlessEmpty` consults it, to decide whether an empty
-   * local opening may wait for a remote answer.
+   * Live reachability of the configured server. Only `ReadTier.LocalFirst`
+   * reads with a `firstLoadRemoteWaitMs` consult it, to decide whether their
+   * first load may wait (bounded by that timeout) for a remote answer.
    */
   remoteLinkState(): RemoteLinkState {
     const { config, runtimeSource } = this.host;
@@ -200,7 +200,7 @@ export abstract class ConnectionManager {
 
   /**
    * Keep the runtime's core read gate informed of {@link remoteLinkState}. The
-   * core decides whether an empty local-first-unless-empty opening may wait;
+   * core decides whether a local-first read's first load may wait;
    * this host only reports whether the server is being reached, reachable, or
    * not.
    */

@@ -332,7 +332,7 @@ describe("Db runtime schema order", () => {
         }),
     } satisfies QueryBuilder<{ id: string; title: string; done: boolean }>;
 
-    const rows = await db.all(builder, { tier: "local" });
+    const rows = await db.all(builder, { tier: "local-first" });
 
     expect(query).toHaveBeenCalledTimes(1);
     expect(rows).toEqual([

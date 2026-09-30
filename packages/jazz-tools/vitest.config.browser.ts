@@ -20,6 +20,9 @@ import {
   jazzServerJwtForUser,
   stopJazzServerByUrl,
   unblockJazzServerNetwork,
+  setJazzServerAnswersHeld,
+  startJazzServerHoldingProxy,
+  stopJazzServerHoldingProxy,
 } from "./tests/browser/testing-server-node.js";
 import {
   closeRemoteBrowserDb,
@@ -171,6 +174,12 @@ export default defineConfig({
           blockJazzServerNetwork(context, serverUrl),
         jazzServerUnblockNetwork: async ({ context }, serverUrl) =>
           unblockJazzServerNetwork(context, serverUrl),
+        jazzServerHoldingProxyStart: async (_context, serverUrl) =>
+          startJazzServerHoldingProxy(serverUrl),
+        jazzServerHoldingProxySetHeld: async (_context, proxyUrl, held) =>
+          setJazzServerAnswersHeld(proxyUrl, held),
+        jazzServerHoldingProxyStop: async (_context, proxyUrl) =>
+          stopJazzServerHoldingProxy(proxyUrl),
         createRemoteBrowserDb: async ({ context, page }, input) =>
           createRemoteBrowserDb(context, page, input),
         waitForRemoteBrowserDbTitle: async (_commandContext, input) =>

@@ -163,7 +163,7 @@ it("keeps canvas ordering and history markers behind the same membership boundar
   const ordered = await viewer.all(
     app.layers.where({ canvasId: canvas.id }).orderBy("zIndex", "asc"),
     {
-      tier: "global",
+      tier: "remote",
     },
   );
   expect(ordered.map((layer) => [layer.id, layer.zIndex])).toEqual([
@@ -397,7 +397,7 @@ it("lets editors upload immutable image assets as large values", async () => {
     .wait({ tier: "global" });
   const [page] = await viewer.all(
     app.assets.where({ id: asset.id }).select({ bytes: { from: 100, to: 110 } }),
-    { tier: "global" },
+    { tier: "remote" },
   );
   expect(Array.from(page!.bytes)).toEqual(Array.from(bytes.slice(100, 110)));
   await editor.expectDenied((db) => db.update(app.assets, asset.id, { name: "renamed.png" }));
@@ -422,10 +422,10 @@ it("keeps invites visible to and issued by admins only", async () => {
     }),
   );
   expect(
-    await editor.all(app.canvasInvites.where({ canvasId: canvas.id }), { tier: "global" }),
+    await editor.all(app.canvasInvites.where({ canvasId: canvas.id }), { tier: "remote" }),
   ).toEqual([]);
   const listed = await owner.all(app.canvasInvites.where({ canvasId: canvas.id }), {
-    tier: "global",
+    tier: "remote",
   });
   expect(listed.map((row) => [row.id, row.singleUse])).toEqual([[invite.id, false]]);
   await editor.expectDenied((db) => db.delete(app.canvasInvites, invite.id));

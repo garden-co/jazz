@@ -270,7 +270,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
         (rows) => rows[0]?.id === invitation.id && rows[0]?.status === "pending",
         "RecordPlayer recipient observes pending invitation",
         15_000,
-        "global",
+        "remote",
       ),
       waitForQuery(
         secondRecipient,
@@ -278,7 +278,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
         (rows) => rows[0]?.id === secondInvitation.id && rows[0]?.status === "pending",
         "second RecordPlayer recipient observes pending invitation",
         15_000,
-        "global",
+        "remote",
       ),
     ]);
   });
@@ -318,7 +318,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
       (rows) => rows[0]?.id === invitation.id && rows[0]?.status === "pending",
       "recipient observes pending invitation before accepting it",
       15_000,
-      "global",
+      "remote",
     );
     const acceptance = recipient.update(app.invitations, invitation.id, { status: "accepted" });
     await expect(acceptance.txId).resolves.toEqual(expect.any(String));
@@ -426,7 +426,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
         (rows) => rows.length === 1 && rows[0]?.id === invite.id,
         "external-JWT scalar recipient receives invitation",
         15_000,
-        "global",
+        "remote",
       ),
     ).resolves.toEqual([
       {
@@ -501,7 +501,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                     (rows) => rows.length === 1 && rows[0]?.id === invite.id,
                     "external-JWT recipient receives scalar grant with correlated owner branch",
                     15_000,
-                    "global",
+                    "remote",
                   ),
                   waitForQuery(
                     secondRecipient,
@@ -511,7 +511,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                     (rows) => rows.length === 1 && rows[0]?.id === secondInvite.id,
                     "second external-JWT recipient receives scalar grant with correlated owner branch",
                     15_000,
-                    "global",
+                    "remote",
                   ),
                 ]),
               ).resolves.toHaveLength(2);
@@ -601,7 +601,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 (rows) => rows.length === 1 && rows[0]?.id === invite.id,
                 "full-phase external-JWT recipient receives scalar grant",
                 15_000,
-                "global",
+                "remote",
               );
             },
           },
@@ -679,7 +679,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
         (rows) => rows.length === 1 && rows[0]?.playlist_id === playlistA.id,
         "rejected invitation transfers roll back",
         15_000,
-        "global",
+        "remote",
       ),
     ).resolves.toEqual([inviteOnA]);
     await expect(
@@ -692,7 +692,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
         .wait({ tier: "global" }),
     ).rejects.toThrow(/AuthorizationDenied|Write rejected/);
     await expect(
-      ownerB.all(app.invitations.where({ playlist_id: playlistB.id }), { tier: "global" }),
+      ownerB.all(app.invitations.where({ playlist_id: playlistB.id }), { tier: "remote" }),
     ).resolves.toEqual([]);
 
     // Positive controls: the owner still manages invitations on their own
@@ -707,7 +707,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
       (rows) => rows[0]?.id === inviteOnA.id && rows[0]?.role === "editor",
       "recipient observes owner-managed pending invitation",
       15_000,
-      "global",
+      "remote",
     );
     await recipient
       .update(app.invitations, inviteOnA.id, { status: "accepted" })
@@ -722,7 +722,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
         (rows) => rows[0]?.status === "accepted",
         "owner observes recipient acceptance",
         15_000,
-        "global",
+        "remote",
       ),
     ).resolves.toEqual([
       {
@@ -897,7 +897,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   (rows) => rows[0]?.id === editorInvite.id && rows[0]?.status === "pending",
                   "editor observes pending invitation",
                   15_000,
-                  "global",
+                  "remote",
                 ),
                 waitForQuery(
                   listener,
@@ -905,7 +905,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   (rows) => rows[0]?.id === listenerInvite.id && rows[0]?.status === "pending",
                   "listener observes pending invitation",
                   15_000,
-                  "global",
+                  "remote",
                 ),
               ]);
               console.info("[record-player-topology] recipient invitations observed");
@@ -997,11 +997,11 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 "offline streamed audio track did not settle locally",
               );
               await expect(
-                listener.all(app.tracks.where({ id: streamedTrack.value.id }), { tier: "global" }),
+                listener.all(app.tracks.where({ id: streamedTrack.value.id }), { tier: "remote" }),
               ).resolves.toEqual([]);
               await delay(100);
               await expect(
-                listener.all(app.tracks.where({ id: streamedTrack.value.id }), { tier: "global" }),
+                listener.all(app.tracks.where({ id: streamedTrack.value.id }), { tier: "remote" }),
               ).resolves.toEqual([]);
               await owner.reconnect();
               await withTimeout(
@@ -1062,11 +1062,11 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 ),
               ).rejects.toThrow("record-player injected audio source failure");
               await expect(
-                owner.all(app.tracks.where({ id: failedTrackId }), { tier: "local" }),
+                owner.all(app.tracks.where({ id: failedTrackId }), { tier: "local-first" }),
               ).resolves.toEqual([]);
               await delay(100);
               await expect(
-                owner.all(app.tracks.where({ id: failedTrackId }), { tier: "local" }),
+                owner.all(app.tracks.where({ id: failedTrackId }), { tier: "local-first" }),
               ).resolves.toEqual([]);
 
               // Advance both peers through a later accepted edge mutation.
@@ -1083,17 +1083,17 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 (rows) => rows[0]?.id === failureBarrier.id,
                 "listener advances beyond failed streamed mutation",
                 15_000,
-                "global",
+                "remote",
               );
               for (const db of [owner, listener]) {
                 await expect(
-                  db.all(app.tracks.where({ id: failedTrackId }), { tier: "global" }),
+                  db.all(app.tracks.where({ id: failedTrackId }), { tier: "remote" }),
                 ).resolves.toEqual([]);
               }
               await delay(100);
               for (const db of [owner, listener]) {
                 await expect(
-                  db.all(app.tracks.where({ id: failedTrackId }), { tier: "global" }),
+                  db.all(app.tracks.where({ id: failedTrackId }), { tier: "remote" }),
                 ).resolves.toEqual([]);
               }
             },
@@ -1146,7 +1146,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 (rows) => rows.length >= 2,
                 "listener catalogue visibility",
                 15_000,
-                "global",
+                "remote",
               );
               expect(catalogue.map((row) => row.title)).toEqual(
                 catalogue.map((row) => row.title).sort(),
@@ -1173,7 +1173,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                     expectedRenderedWindow.map((entry) => entry.position).join(","),
                 "listener rendered playlist window",
                 15_000,
-                "global",
+                "remote",
               );
               expect(visibleWindow.map((row) => row.track_id)).toEqual(
                 expectedRenderedWindow.map((entry) => entry.trackId),
@@ -1193,7 +1193,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   !Object.hasOwn(rows[0], "audio_bytes"),
                 "streamed track metadata without audio materialization",
                 15_000,
-                "global",
+                "remote",
               );
               expect(Object.hasOwn(projectedTrack[0]!, "audio_bytes")).toBe(false);
               expect("audio_bytes" in projectedTrack[0]!).toBe(false);
@@ -1213,7 +1213,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   rows[0].audio_bytes.at(-1) === streamedAudioPayload.at(-1),
                 "listener receives intact streamed audio after owner reconnect",
                 15_000,
-                "global",
+                "remote",
               );
               expect(playbackTrack[0]!.audio_bytes).toEqual(streamedAudioPayload);
 
@@ -1230,7 +1230,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 (rows) => rows.length === ALBUM_TRACK_LIMIT + 1,
                 "listener receives the complete streamed-album metadata set",
                 15_000,
-                "global",
+                "remote",
               );
 
               // Exercise the app's actual persistence boundary after the
@@ -1301,7 +1301,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 (rows) => rows[0]?.role === "editor" && rows[0]?.playlist_id === playlist.id,
                 "rejected acceptance rolls back",
                 15_000,
-                "global",
+                "remote",
               );
             },
             faultsAfter: [
@@ -1376,7 +1376,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   expected,
                   "owner exact convergence",
                   20_000,
-                  "global",
+                  "remote",
                 ),
                 waitForQuery(
                   editor,
@@ -1386,7 +1386,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   expected,
                   "editor exact convergence",
                   20_000,
-                  "global",
+                  "remote",
                 ),
               ]);
               // This production schema keeps permissions separate from row
@@ -1401,7 +1401,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 (rows) => rows[0]?.id === belowWindowEntryId,
                 "authorized editor reads exact child through edge coverage",
                 15_000,
-                "global",
+                "remote",
               );
               expect(authorizedExactChild.map((row) => row.id)).toEqual([belowWindowEntryId]);
               await owner.delete(app.invitations, editorInvite.id).wait({ tier: "global" });
@@ -1416,7 +1416,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   (rows) => rows.length === 0,
                   "revoked editor loses rendered playlist window",
                   15_000,
-                  "global",
+                  "remote",
                 ),
                 waitForQuery(
                   editor,
@@ -1424,7 +1424,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   (rows) => rows.length === 0,
                   "revoked editor loses a child below the rendered window",
                   15_000,
-                  "global",
+                  "remote",
                 ),
                 waitForQuery(
                   editor,
@@ -1432,7 +1432,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   (rows) => rows.length === 0,
                   "revoked editor loses the playlist root",
                   15_000,
-                  "global",
+                  "remote",
                 ),
                 waitForQuery(
                   editor,
@@ -1440,7 +1440,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   (rows) => rows.length === 0,
                   "revoked editor loses the revoked invitation",
                   15_000,
-                  "global",
+                  "remote",
                 ),
               ]);
               // The invitation was actually deleted, not merely withdrawn
@@ -1488,7 +1488,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   (rows) => rows.length === 0,
                   "persistent reopen retains playlist-entry revocation",
                   15_000,
-                  "global",
+                  "remote",
                 ),
                 waitForQuery(
                   editor,
@@ -1496,7 +1496,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   (rows) => rows.length === 0,
                   "persistent reopen retains below-window child revocation",
                   15_000,
-                  "global",
+                  "remote",
                 ),
                 waitForQuery(
                   editor,
@@ -1504,7 +1504,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   (rows) => rows.length === 0,
                   "persistent reopen retains root-row revocation",
                   15_000,
-                  "global",
+                  "remote",
                 ),
                 waitForQuery(
                   editor,
@@ -1512,7 +1512,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   (rows) => rows.length === 0,
                   "persistent reopen retains invitation revocation",
                   15_000,
-                  "global",
+                  "remote",
                 ),
               ]);
             },

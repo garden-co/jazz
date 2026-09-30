@@ -90,16 +90,16 @@ async function setUpShow() {
 
 /** The demo show exactly once: chief, invite, eight tasks and one comment. */
 async function expectCompleteDemoShow(chief: ReturnType<PolicyTestApp["as"]>) {
-  const global = { tier: "global" } as const;
-  const shows = await chief.all(app.shows.where({ chiefAccount }), global);
+  const remote = { tier: "remote" } as const;
+  const shows = await chief.all(app.shows.where({ chiefAccount }), remote);
   expect(shows).toHaveLength(1);
   const showId = shows[0]!.id;
-  await expect(chief.all(app.showCrew.where({ showId }), global)).resolves.toEqual([
+  await expect(chief.all(app.showCrew.where({ showId }), remote)).resolves.toEqual([
     expect.objectContaining({ account: chiefAccount, role: "chief" }),
   ]);
-  await expect(chief.all(app.showInvites.where({ showId }), global)).resolves.toHaveLength(1);
-  await expect(chief.all(app.tasks.where({ showId }), global)).resolves.toHaveLength(8);
-  await expect(chief.all(app.comments, global)).resolves.toHaveLength(1);
+  await expect(chief.all(app.showInvites.where({ showId }), remote)).resolves.toHaveLength(1);
+  await expect(chief.all(app.tasks.where({ showId }), remote)).resolves.toHaveLength(8);
+  await expect(chief.all(app.comments, remote)).resolves.toHaveLength(1);
 }
 
 async function joinAsCrew(ctx: Awaited<ReturnType<typeof setUpShow>>) {
@@ -182,11 +182,11 @@ describe("StagePlan permissions", () => {
     ]);
     await Promise.all([...a, ...b].map((write) => write.wait({ tier: "global" })));
 
-    const global = { tier: "global" } as const;
-    await expect(tabA.all(app.showCrew.where({ showId: show.id }), global)).resolves.toHaveLength(
+    const remote = { tier: "remote" } as const;
+    await expect(tabA.all(app.showCrew.where({ showId: show.id }), remote)).resolves.toHaveLength(
       1,
     );
-    const invites = await tabA.all(app.showInvites.where({ showId: show.id }), global);
+    const invites = await tabA.all(app.showInvites.where({ showId: show.id }), remote);
     expect(invites).toHaveLength(1);
     const [invite] = invites;
 
@@ -195,7 +195,7 @@ describe("StagePlan permissions", () => {
     const tabC = testApp.as(session("chiara", chiefAccount));
     const later = await ensureChiefSetup(tabC, me, show.id);
     await Promise.all(later.map((write) => write.wait({ tier: "global" })));
-    await expect(tabA.all(app.showInvites.where({ showId: show.id }), global)).resolves.toEqual([
+    await expect(tabA.all(app.showInvites.where({ showId: show.id }), remote)).resolves.toEqual([
       expect.objectContaining({ id: invite!.id, code: invite!.code }),
     ]);
   });
@@ -266,7 +266,7 @@ describe("StagePlan permissions", () => {
     // Joining clears the code from the membership, so other crew can't read it.
     const membership = await ctx.chief.one(
       app.showCrew.where({ showId: ctx.show.id, account: crewAccount }),
-      { tier: "global" },
+      { tier: "remote" },
     );
     expect(membership).toMatchObject({ role: "crew", inviteCode: null });
 
@@ -345,19 +345,19 @@ describe("StagePlan permissions", () => {
     await ctx.chief
       .update(app.tasks, ctx.task.id, { assigneeId: ctx.crewProfile.id })
       .wait({ tier: "global" });
-    await ctx.chief.all(app.tasks.where({ showId: ctx.show.id }), { tier: "global" });
+    await ctx.chief.all(app.tasks.where({ showId: ctx.show.id }), { tier: "remote" });
 
     const removal = await removeFromCrew(ctx.chief, membership);
     await removal.wait({ tier: "global" });
     await expect(
-      ctx.chief.one(app.tasks.where({ id: ctx.task.id }), { tier: "global" }),
+      ctx.chief.one(app.tasks.where({ id: ctx.task.id }), { tier: "remote" }),
     ).resolves.toMatchObject({ assigneeId: null });
 
     await ctx.chief
       .update(app.tasks, ctx.task.id, { title: "Load-in at the dock" })
       .wait({ tier: "global" });
     await expect(
-      ctx.chief.one(app.tasks.where({ id: ctx.task.id }), { tier: "global" }),
+      ctx.chief.one(app.tasks.where({ id: ctx.task.id }), { tier: "remote" }),
     ).resolves.toMatchObject({ assigneeId: null, title: "Load-in at the dock" });
   });
 
@@ -367,17 +367,17 @@ describe("StagePlan permissions", () => {
     await ctx.crew
       .update(app.tasks, ctx.task.id, { assigneeId: ctx.crewProfile.id })
       .wait({ tier: "global" });
-    await ctx.crew.all(app.tasks.where({ showId: ctx.show.id }), { tier: "global" });
+    await ctx.crew.all(app.tasks.where({ showId: ctx.show.id }), { tier: "remote" });
 
     const leaving = await removeFromCrew(ctx.crew, membership);
     await leaving.wait({ tier: "global" });
 
     await expect(
-      ctx.chief.one(app.tasks.where({ id: ctx.task.id }), { tier: "global" }),
+      ctx.chief.one(app.tasks.where({ id: ctx.task.id }), { tier: "remote" }),
     ).resolves.toMatchObject({ assigneeId: null });
     await expect(
       ctx.chief.all(app.showCrew.where({ showId: ctx.show.id, account: crewAccount }), {
-        tier: "global",
+        tier: "remote",
       }),
     ).resolves.toEqual([]);
     await ctx.chief

@@ -270,7 +270,7 @@ where
     /// operation. The next tick detaches them once those owners are released.
     pending_detaches: RefCell<Vec<Rc<LocalMutex<PeerConnection<S>>>>>,
     pub(super) scheduler: SharedTickScheduler,
-    /// Remote reachability for `EmptyOpening::AwaitRemote` reads.
+    /// Remote reachability for `FirstLoad::WaitForRemote` reads.
     pub(super) remote_link: Rc<RemoteLinkTracker>,
     query_runtime_wake_pending: Arc<AtomicBool>,
     query_runtime_waker: Rc<RefCell<Option<Waker>>>,
@@ -3212,7 +3212,7 @@ where
         drop(connections);
         let detached = true;
         if upstream_epoch.is_some() {
-            // Releases empty openings that were waiting on this link.
+            // Releases openings that were waiting on this link.
             self.remote_link.upstream_detached();
             // Commits that link sent are resent by the next one; until then a
             // Global read must not treat them as ahead of its open.
@@ -3464,7 +3464,7 @@ where
         Ok(stats)
     }
 
-    /// Settle local-first-unless-empty authority witnesses after this turn's
+    /// Settle first-load authority witnesses after this turn's
     /// inputs were folded into every stream, and retire the witness coverage
     /// of every gate that has released.
     async fn resolve_authority_witnesses(&self) {
@@ -5434,7 +5434,7 @@ pub(super) fn route_upstream_subscription_rejection(
             let event = SubscriptionEvent::Rejected {
                 reason: reason.clone(),
             };
-            if state.borrow().sender.unbounded_send(event).is_ok() {
+            if state.borrow().send_rejection(event).is_ok() {
                 delivered += 1;
             }
         }
@@ -5466,7 +5466,7 @@ pub(super) fn route_upstream_subscription_rejection(
         let event = SubscriptionEvent::Rejected {
             reason: reason.clone(),
         };
-        if state_ref.sender.unbounded_send(event).is_ok() {
+        if state_ref.send_rejection(event).is_ok() {
             delivered += 1;
         }
     }

@@ -44,12 +44,12 @@ it("inserts an ordinary parent and child atomically after adding a table", async
       migration: s.defineMigration({ from: before, to: after, createTables: { notes: true } }),
     });
     db = await createDb(account);
-    await db.all(newApp.projects, { tier: "global" });
+    await db.all(newApp.projects, { tier: "remote" });
     const tx = db.beginExclusiveTransaction();
     const project = tx.insert(newApp.projects, { title: "New project" });
     const note = tx.insert(newApp.notes, { projectId: project.id, title: "New note" });
     await tx.commit().wait();
-    expect(await db.all(newApp.notes, { tier: "global" })).toEqual([
+    expect(await db.all(newApp.notes, { tier: "remote" })).toEqual([
       { id: note.id, projectId: project.id, title: "New note" },
     ]);
   } finally {
@@ -77,12 +77,12 @@ it.each(["local", "global"] as const)(
         permissions,
       });
       db = await createDb(await localAccountConfig(server.appId, server.url));
-      await db.all(app.notes, { tier: "global" });
+      await db.all(app.notes, { tier: "remote" });
       if (tier === "local") await db.disconnect();
       const tx = db.beginExclusiveTransaction();
-      expect(await tx.all(app.notes.where({ bucket: "destination" }), { tier: "local" })).toEqual(
-        [],
-      );
+      expect(
+        await tx.all(app.notes.where({ bucket: "destination" }), { tier: "local-first" }),
+      ).toEqual([]);
       const phantom = await db
         .insert(app.notes, { bucket: "destination", title: "Concurrent insert" })
         .wait({ tier });
@@ -96,7 +96,7 @@ it.each(["local", "global"] as const)(
         );
       expect(conflict).toBeInstanceOf(PersistedWriteRejectedError);
       expect(conflict).toMatchObject({ code: "transaction_conflict" });
-      expect(await db.all(app.notes, { tier: "local" })).toEqual([
+      expect(await db.all(app.notes, { tier: "local-first" })).toEqual([
         { id: phantom.id, bucket: "destination", title: "Concurrent insert" },
       ]);
     } finally {
@@ -124,7 +124,7 @@ it("does not reject a filtered transaction read when an unrelated row is inserte
       permissions,
     });
     db = await createDb(await localAccountConfig(server.appId, server.url));
-    await db.all(app.notes, { tier: "global" });
+    await db.all(app.notes, { tier: "remote" });
     const tx = db.beginExclusiveTransaction();
     expect(await tx.all(app.notes.where({ bucket: "destination" }))).toEqual([]);
     await db
@@ -132,7 +132,7 @@ it("does not reject a filtered transaction read when an unrelated row is inserte
       .wait({ tier: "global" });
     const note = tx.insert(app.notes, { bucket: "destination", title: "Intended write" });
     await tx.commit().wait();
-    expect(await db.all(app.notes.where({ bucket: "destination" }), { tier: "global" })).toEqual([
+    expect(await db.all(app.notes.where({ bucket: "destination" }), { tier: "remote" })).toEqual([
       { id: note.id, bucket: "destination", title: "Intended write" },
     ]);
   } finally {
@@ -186,7 +186,7 @@ it.each(["offline", "synced"] as const)(
       let reads = 0;
       const race = (title: string) =>
         db!.exclusiveTransaction(async (tx) => {
-          await tx.one(app.notes.where({ id: row.id }), { tier: "local" });
+          await tx.one(app.notes.where({ id: row.id }), { tier: "local-first" });
           if (++reads === 2) releaseWrites();
           await bothRead;
           tx.update(app.notes, row.id, { title });

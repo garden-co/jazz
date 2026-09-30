@@ -954,7 +954,7 @@ where
         allow_pending_overlay: bool,
     ) -> Result<SubscriptionStream, Error> {
         let local_first_opts = ReadOpts {
-            empty_opening: super::EmptyOpening::Deliver,
+            first_load: super::FirstLoad::Deliver,
             ..opts.clone()
         };
         // Boxed so this wrapper adds no inline opener frame to its callers.
@@ -997,7 +997,7 @@ where
         ensure_supported_subscription_read_opts(&opts)?;
         self.validate_prepared_shape_for_registration(prepared)
             .await?;
-        let (opts, opening_gate) = self.resolve_empty_opening(prepared, opts, authorization_mode);
+        let (opts, opening_gate) = self.resolve_first_load(prepared, opts, authorization_mode);
         let requested_read_tier = effective_read_tier(&opts);
         // A non-durable foreground (a browser tab over its worker, an RN
         // foreground over the relay) registers Local coverage, which settles
@@ -1005,10 +1005,10 @@ where
         // tell a gated opening that the authority answered. While the gate is
         // armed it also holds `Global` witness coverage for the same read; the
         // witness's settled authority answer, relayed by the owner, is what
-        // may release an empty opening. The owner-local coverage still
-        // delivers a warm owner cache at once. The host link hint (the owner's
-        // server link) bounds the wait, and the witness is retired when the
-        // gate releases, leaving an ordinary local-first stream.
+        // may release the withheld opening. The host link hint (the owner's
+        // server link) and the read's timeout bound the wait, and the witness
+        // is retired when the gate releases, leaving an ordinary local-first
+        // stream.
         let mut opening_gate = opening_gate;
         let authority_witnessed = opts.propagation == Propagation::Full
             && self.node.upstream_durability_floor.get() == DurabilityTier::Local

@@ -261,7 +261,7 @@ describe("Wequencer cross-topology recovery", () => {
                 (rows) => rows.length === trackNames.length,
                 "editor receives session tracks",
                 15_000,
-                "global",
+                "remote",
               );
             },
             faultsAfter: [{ kind: "failure", target: "authorization" }],
@@ -328,8 +328,8 @@ describe("Wequencer cross-topology recovery", () => {
             name: "concurrent ordered sequencer edits and presence",
             run: async () => {
               const [ownerSteps, editorSteps] = await Promise.all([
-                owner.all(trackSteps(tracks[0].id, pattern.id), { tier: "global" }),
-                editor.all(trackSteps(tracks[1].id, pattern.id), { tier: "global" }),
+                owner.all(trackSteps(tracks[0].id, pattern.id), { tier: "remote" }),
+                editor.all(trackSteps(tracks[1].id, pattern.id), { tier: "remote" }),
               ]);
               const ownerStepId = ownerSteps[1]!.id;
               subscribedOwnerStepId = ownerStepId;
@@ -382,7 +382,7 @@ describe("Wequencer cross-topology recovery", () => {
                 (rows) => rows.length === stepsPerTrack && rows[1]?.enabled === true,
                 "editor receives owner's ordered step edit",
                 15_000,
-                "global",
+                "remote",
               );
               expect(ownerTrackSteps.map((step) => step.position)).toEqual(
                 Array.from({ length: stepsPerTrack }, (_, position) => position),
@@ -403,7 +403,7 @@ describe("Wequencer cross-topology recovery", () => {
                 (rows) => rows.length === stepsPerTrack && rows[2]?.enabled === true,
                 "owner receives editor's ordered step edit",
                 15_000,
-                "global",
+                "remote",
               );
               const presence = await waitForQuery(
                 editor,
@@ -411,7 +411,7 @@ describe("Wequencer cross-topology recovery", () => {
                 (rows) => rows.some((row) => row.id === ownerPresence.id && row.cursor_step === 1),
                 "editor receives concurrent owner presence",
                 15_000,
-                "global",
+                "remote",
               );
               expect(presence.find((row) => row.id === editorPresence.id)).toMatchObject({
                 cursor_step: 2,
@@ -423,16 +423,16 @@ describe("Wequencer cross-topology recovery", () => {
             name: "offline local edit and deterministic transport retry",
             run: async () => {
               const ownerSteps = await owner.all(trackSteps(tracks[2].id, pattern.id), {
-                tier: "local",
+                tier: "local-first",
               });
               offlineStep = { id: ownerSteps[3].id };
               await owner
                 .update(app.steps, offlineStep.id, { enabled: true })
                 .wait({ tier: "local" });
               expect(
-                (await owner.all(trackSteps(tracks[2].id, pattern.id), { tier: "local" })).find(
-                  (step) => step.id === offlineStep.id,
-                ),
+                (
+                  await owner.all(trackSteps(tracks[2].id, pattern.id), { tier: "local-first" })
+                ).find((step) => step.id === offlineStep.id),
               ).toMatchObject({ enabled: true, position: 3 });
 
               // Repeated edge reads on the still-connected editor prove that
@@ -440,7 +440,7 @@ describe("Wequencer cross-topology recovery", () => {
               // of the partition, rather than merely losing a race once.
               for (let attempt = 0; attempt < 3; attempt += 1) {
                 const peerSteps = await editor.all(trackSteps(tracks[2].id, pattern.id), {
-                  tier: "global",
+                  tier: "remote",
                 });
                 expect(peerSteps.find((step) => step.id === offlineStep.id)).toMatchObject({
                   enabled: false,
@@ -484,7 +484,7 @@ describe("Wequencer cross-topology recovery", () => {
                 (rows) => rows.length === trackNames.length,
                 "persistent owner reopens session tracks",
                 20_000,
-                "global",
+                "remote",
               );
               expect(ownerTracks.map((row) => row.position)).toEqual([0, 1, 2, 3]);
               const replayedSteps = await waitForQuery(
@@ -493,7 +493,7 @@ describe("Wequencer cross-topology recovery", () => {
                 (rows) => rows.some((step) => step.id === offlineStep.id && step.enabled),
                 "editor receives owner offline step",
                 20_000,
-                "global",
+                "remote",
               );
               expect(replayedSteps).toHaveLength(stepsPerTrack);
               expect(subscribedTrackSteps).toHaveLength(stepsPerTrack);
@@ -503,7 +503,7 @@ describe("Wequencer cross-topology recovery", () => {
                 (rows) => rows.some((step) => step.id === subscribedOwnerStepId),
                 "persistent owner reopens target track steps",
                 20_000,
-                "global",
+                "remote",
               );
               // The collaborator's subscription was established before the
               // owner's partition. A later update after reconnect *and*
@@ -523,7 +523,7 @@ describe("Wequencer cross-topology recovery", () => {
                 "existing TrackLane subscription receives owner update after recovery",
               );
               expect(
-                await editor.all(sessionQueries(session.id).presence, { tier: "global" }),
+                await editor.all(sessionQueries(session.id).presence, { tier: "remote" }),
               ).toHaveLength(2);
               await waitForQuery(
                 owner,
@@ -531,7 +531,7 @@ describe("Wequencer cross-topology recovery", () => {
                 (rows) => rows.some((row) => row.id === ownerPresence.id),
                 "persistent owner reopens presence",
                 20_000,
-                "global",
+                "remote",
               );
               // This directly exercises the durable row/sync contract used by
               // the app heartbeat. Its cadence and timer cleanup have a
@@ -550,7 +550,7 @@ describe("Wequencer cross-topology recovery", () => {
                 (rows) => rows.some((row) => row.id === ownerPresence.id && row.cursor_step === 7),
                 "editor receives reopened owner's heartbeat update",
                 20_000,
-                "global",
+                "remote",
               );
               expect(refreshedPresence).toHaveLength(2);
               const observations = await waitForQuery(
@@ -559,7 +559,7 @@ describe("Wequencer cross-topology recovery", () => {
                 (rows) => rows.some((row) => row.id === transport!.id),
                 "editor reads retried transport observation",
                 20_000,
-                "global",
+                "remote",
               );
               expect(observations).toHaveLength(1);
               expect(observations[0]).toMatchObject({
@@ -579,7 +579,7 @@ describe("Wequencer cross-topology recovery", () => {
                 (rows) => rows.length === trackNames.length,
                 "offline persistent editor reopens session tracks from local storage",
                 20_000,
-                "local",
+                "local-first",
               );
               expect(restoredTracks.map((track) => track.position)).toEqual([0, 1, 2, 3]);
 
@@ -589,14 +589,14 @@ describe("Wequencer cross-topology recovery", () => {
               // does not accidentally materialize unrelated track fields.
               const projectedWindow = await editor.all(
                 sessionQueries(session.id).tracks.limit(2).select("id", "position", "name"),
-                { tier: "local" },
+                { tier: "local-first" },
               );
               expect(projectedWindow.map((track) => track.position)).toEqual([0, 1]);
               expect(projectedWindow).toHaveLength(2);
               expect("color" in projectedWindow[0]!).toBe(false);
 
               const restoredOfflineStep = await editor.all(trackSteps(tracks[2].id, pattern.id), {
-                tier: "local",
+                tier: "local-first",
               });
               expect(restoredOfflineStep.find((step) => step.id === offlineStep.id)).toMatchObject({
                 enabled: true,
@@ -611,7 +611,7 @@ describe("Wequencer cross-topology recovery", () => {
                 (rows) => rows.length === 2 && rows[0]?.position === 0 && rows[1]?.position === 1,
                 "reconnected editor settles the exact projected track window at edge",
                 20_000,
-                "global",
+                "remote",
               );
               expect(settledProjectedWindow.map((track) => track.id)).toEqual(
                 projectedWindow.map((track) => track.id),
@@ -708,7 +708,7 @@ describe("Wequencer cross-topology recovery", () => {
             run: async () => {
               await owner.delete(app.session_members, editorMembership.id).wait({ tier: "global" });
               const editorSteps = await editor.all(trackSteps(tracks[1].id, pattern.id), {
-                tier: "local",
+                tier: "local-first",
               });
               await expect(
                 editor

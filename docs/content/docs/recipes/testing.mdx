@@ -386,7 +386,7 @@ describe("migrations", () => {
 
     await vi.waitFor(async () => {
       const rows = await newDb.all(newApp.todos.where({ id: { eq: created.id } }), {
-        tier: "global",
+        tier: "remote",
       });
 
       expect(rows).toEqual([

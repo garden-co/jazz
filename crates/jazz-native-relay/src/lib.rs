@@ -1534,7 +1534,7 @@ impl NativeRelayHost {
     }
 
     /// Report the relay-owned native socket's reachability to the foreground
-    /// `Db`, which drives its `local-first-unless-empty` reads. The foreground's
+    /// `Db`, which drives its local-first reads that wait for the server. The foreground's
     /// own upstream is the local relay core, which is always attached, so it
     /// cannot tell whether the authoritative server could answer. Only a
     /// change is reported, so an `Attempting` report timestamps the start of
@@ -6844,8 +6844,23 @@ fn foreground_read_opts_from_json(json: &str) -> Result<ReadOpts, RelayError> {
     let object = supplied
         .as_object()
         .ok_or_else(|| failure("expected object".to_owned()))?;
+    let mut first_load_remote_wait_ms = None;
     for (key, item) in object {
         if item.is_null() {
+            continue;
+        }
+        if key == "first_load_remote_wait_ms" {
+            first_load_remote_wait_ms = Some(
+                item.as_f64()
+                    .filter(|ms| ms.is_finite() && *ms >= 0.0)
+                    .map(|ms| ms.floor() as u64)
+                    .ok_or_else(|| {
+                        failure(
+                            "first_load_remote_wait_ms must be a non-negative number of milliseconds"
+                                .to_owned(),
+                        )
+                    })?,
+            );
             continue;
         }
         let key = if key == "readView" {
@@ -6859,7 +6874,7 @@ fn foreground_read_opts_from_json(json: &str) -> Result<ReadOpts, RelayError> {
                 Some("remote-if-possible" | "RemoteIfPossible")
             )
         {
-            return Err(failure("the remote-if-possible tier was removed; use local-first-unless-empty, or remote for server-confirmed reads".to_owned()));
+            return Err(failure("the remote-if-possible tier was removed; use local-first with first_load_remote_wait_ms, or remote for server-confirmed reads".to_owned()));
         }
         if key == "tier" && matches!(item.as_str(), Some("edge" | "Edge")) {
             return Err(failure(
@@ -6872,15 +6887,14 @@ fn foreground_read_opts_from_json(json: &str) -> Result<ReadOpts, RelayError> {
                 Some("local-first-unless-empty" | "LocalFirstUnlessEmpty")
             )
         {
-            // The core owns the local-first-unless-empty gate.
-            value["tier"] = serde_json::Value::String("Local".to_owned());
-            value["empty_opening"] = serde_json::Value::String("AwaitRemote".to_owned());
-            continue;
+            return Err(failure(
+                "the local-first-unless-empty tier was removed; use local-first with first_load_remote_wait_ms".to_owned(),
+            ));
         }
         let normalized = match (key, item.as_str()) {
             ("tier", Some("local" | "Local" | "local-first" | "LocalFirst")) => Some("Local"),
             ("tier", Some("remote" | "Remote")) => Some("Global"),
-            ("tier", Some("global" | "Global" | "core" | "Core")) => Some("Global"),
+            ("tier", Some("global" | "Global")) => Some("Global"),
             ("tier", Some("none" | "None")) => Some("None"),
             ("local_updates", Some("immediate" | "Immediate")) => Some("Immediate"),
             ("local_updates", Some("deferred" | "Deferred")) => Some("Deferred"),
@@ -6894,7 +6908,14 @@ fn foreground_read_opts_from_json(json: &str) -> Result<ReadOpts, RelayError> {
             .map(|s| serde_json::Value::String(s.to_owned()))
             .unwrap_or_else(|| item.clone());
     }
-    serde_json::from_value(value).map_err(|e| failure(e.to_string()))
+    let mut opts: ReadOpts = serde_json::from_value(value).map_err(|e| failure(e.to_string()))?;
+    // A local-first read's server-wait timeout. `Remote` reads ignore it.
+    if let Some(timeout_ms) = first_load_remote_wait_ms
+        && opts.tier == CoreDurabilityTier::Local
+    {
+        opts.first_load = jazz::db::FirstLoad::WaitForRemote { timeout_ms };
+    }
+    Ok(opts)
 }
 
 #[derive(serde::Deserialize)]

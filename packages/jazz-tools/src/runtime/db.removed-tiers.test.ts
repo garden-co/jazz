@@ -6,10 +6,15 @@ import type { Db, QueryOptions } from "./db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 
-// Plain JavaScript (or a cast) can still pass tiers removed in alpha.57.
+// Plain JavaScript (or a cast) can still pass removed read tiers. Reads accept
+// only "local-first" and "remote"; "local" and "global" remain write tiers.
 const removedReadTiers = [
   ["remote-if-possible", 'The "remote-if-possible" tier was removed'],
   ["edge", 'The "edge" tier was removed'],
+  ["local-first-unless-empty", 'The "local-first-unless-empty" tier was removed'],
+  ["local", 'The "local" read tier was removed'],
+  ["global", 'The "global" read tier was removed'],
+  ["core", 'The "core" read tier was removed'],
 ] as const;
 
 const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) });
@@ -65,7 +70,7 @@ it("waits for global instead of rejecting an already committed write at the remo
     // Resolving at edge means the write reached the server: a fresh client sees
     // exactly one row, so a caller never has a reason to retry it.
     reader = await createDb(await localAccountConfig(server.appId, server.url));
-    expect(await reader.all(app.notes, { tier: "global" })).toEqual([
+    expect(await reader.all(app.notes, { tier: "remote" })).toEqual([
       { id: inserted.id, title: "Final" },
     ]);
   } finally {

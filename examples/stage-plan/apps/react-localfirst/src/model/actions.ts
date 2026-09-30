@@ -35,8 +35,8 @@ function activityEntry(
   };
 }
 
-/** Local rows and unsynced writes; asks the server only when there are none. */
-const LOCAL_OR_SERVER = "local-first-unless-empty";
+/** Local rows and unsynced writes, after waiting up to 5 s for the server while online. */
+const LOCAL_OR_SERVER = { tier: "local-first", firstLoadRemoteWaitMs: 5_000 } as const;
 
 export function newInviteCode() {
   // Full UUID entropy: the link is a reusable bearer capability.
@@ -96,8 +96,8 @@ function chiefMembership(showId: string, me: Me) {
  */
 export async function ensureChiefSetup(db: Db, me: Me, showId: string) {
   const [membership, invites] = await Promise.all([
-    db.one(app.showCrew.where({ showId, account: me.account }), { tier: LOCAL_OR_SERVER }),
-    db.all(app.showInvites.where({ showId }), { tier: LOCAL_OR_SERVER }),
+    db.one(app.showCrew.where({ showId, account: me.account }), LOCAL_OR_SERVER),
+    db.all(app.showInvites.where({ showId }), LOCAL_OR_SERVER),
   ]);
   if (membership && invites.length > 0) return [];
   // The invite code may already be out in a copied link, and an upsert would

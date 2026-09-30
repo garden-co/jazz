@@ -374,8 +374,8 @@ describe("History & Conflict Management", () => {
     let convergedTitle = "";
     await waitForCondition(
       async () => {
-        const aliceRows = await dbAlice.all(allTodos, { tier: "global" });
-        const bobRows = await dbBob.all(allTodos, { tier: "global" });
+        const aliceRows = await dbAlice.all(allTodos, { tier: "remote" });
+        const bobRows = await dbBob.all(allTodos, { tier: "remote" });
         const aliceTodo = aliceRows.find((r) => r.id === id);
         const bobTodo = bobRows.find((r) => r.id === id);
         if (!aliceTodo || !bobTodo) return false;
@@ -402,7 +402,7 @@ describe("History & Conflict Management", () => {
       (rows) => rows.some((row) => row.id === id && row.title === convergedTitle),
       "Charlie sees converged title",
       20000,
-      "global",
+      "remote",
     );
     const charlieTodo = charlieRows.find((r) => r.id === id);
     expect(charlieTodo?.title).toBe(convergedTitle);
@@ -506,7 +506,7 @@ async function waitForPeerSync(dbAlice: Db, dbBob: Db, label: string): Promise<v
     (rows) => rows.some((row) => row.id === aliceToBobId),
     `${label} Alice->Bob peer sync should reach Bob`,
     20_000,
-    "global",
+    "remote",
   );
 
   const { id: bobToAliceId } = await withTimeout(
@@ -523,6 +523,6 @@ async function waitForPeerSync(dbAlice: Db, dbBob: Db, label: string): Promise<v
     (rows) => rows.some((row) => row.id === bobToAliceId),
     `${label} Bob->Alice peer sync should reach Alice`,
     20_000,
-    "global",
+    "remote",
   );
 }

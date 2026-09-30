@@ -29,12 +29,12 @@ describe("React Native structured reads", () => {
     await withNativeRelayFixture(app, {}, async (fixture) => {
       const db = await fixture.createDb();
       const related = app.tasks.where({ title: "included" }).hopTo("group").orderBy("name");
-      expect(await db.all(related, { tier: "local" })).toEqual([]);
+      expect(await db.all(related, { tier: "local-first" })).toEqual([]);
       const group = db.insert(app.groups, { name: "group" }).value;
       const task = db.insert(app.tasks, { title: "included", group_id: group.id }).value;
-      expect(await db.all(related, { tier: "local" })).toEqual([group]);
+      expect(await db.all(related, { tier: "local-first" })).toEqual([group]);
       db.delete(app.tasks, task.id);
-      expect(await db.all(related, { tier: "local" })).toEqual([]);
+      expect(await db.all(related, { tier: "local-first" })).toEqual([]);
     });
   });
 

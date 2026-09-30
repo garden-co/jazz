@@ -18,12 +18,20 @@ const canonicalQueryExecutionOptions: QueryExecutionOptions = {
   base: "main",
 };
 const remoteQueryExecutionOptions: QueryExecutionOptions = { tier: "remote" };
-const localFirstUnlessEmptyQueryExecutionOptions: QueryExecutionOptions = {
+const localFirstServerWaitQueryExecutionOptions: QueryExecutionOptions = {
+  tier: "local-first",
+  firstLoadRemoteWaitMs: 2_000,
+};
+// @ts-expect-error Only local-first reads wait for the server on their first load.
+const remoteFirstLoadWait: QueryExecutionOptions = { tier: "remote", firstLoadRemoteWaitMs: 2_000 };
+const defaultTierFirstLoadWait: QueryExecutionOptions = { firstLoadRemoteWaitMs: 2_000 };
+const removedLocalFirstUnlessEmptyTier: QueryExecutionOptions = {
+  // @ts-expect-error local-first-unless-empty was removed; use local-first with firstLoadRemoteWaitMs.
   tier: "local-first-unless-empty",
 };
-const removedRemoteIfPossibleTier: QueryExecutionOptions = {
-  // @ts-expect-error remote-if-possible was removed; use local-first-unless-empty.
-  tier: "remote-if-possible",
+const removedGlobalReadTier: QueryExecutionOptions = {
+  // @ts-expect-error "global" is a write tier only; reads use "remote".
+  tier: "global",
 };
 const removedQueryExecutionOptions: QueryExecutionOptions = {
   // @ts-expect-error propagate is not a public query option.
@@ -48,8 +56,11 @@ const internalLocalOnlyTier: QueryExecutionOptions = {
 
 void canonicalQueryExecutionOptions;
 void remoteQueryExecutionOptions;
-void localFirstUnlessEmptyQueryExecutionOptions;
-void removedRemoteIfPossibleTier;
+void localFirstServerWaitQueryExecutionOptions;
+void remoteFirstLoadWait;
+void defaultTierFirstLoadWait;
+void removedLocalFirstUnlessEmptyTier;
+void removedGlobalReadTier;
 void removedQueryExecutionOptions;
 void removedLocalUpdatesOption;
 void removedPropagationOption;

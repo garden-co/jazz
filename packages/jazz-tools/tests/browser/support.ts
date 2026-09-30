@@ -70,7 +70,7 @@ export async function waitForQuery<T>(
   predicate: (rows: T[]) => boolean,
   label: string,
   timeoutMs = 15000,
-  tier?: "local" | "global",
+  tier?: "local-first" | "remote",
 ): Promise<T[]> {
   const deadline = Date.now() + timeoutMs;
   let lastRows: T[] = [];

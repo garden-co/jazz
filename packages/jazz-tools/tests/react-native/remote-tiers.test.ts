@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { schema } from "../../src/schema-namespace.js";
 import { ReadTier } from "../../src/runtime/client.js";
+import { startHoldingProxy } from "../../src/runtime/testing/holding-proxy.js";
 import { withNativeRelayFixture } from "./fixture.js";
 
 const app = schema.defineApp({
@@ -99,10 +100,13 @@ it("resumes strict remote reads and Global write waits after native reconnect", 
         await db.disconnect();
         const write = db.insert(app.todos, { title: "offline queued", done: false });
         const row = await write.wait({ tier: "local" });
-        expect(await db.all(app.todos, { tier: ReadTier.LocalFirstUnlessEmpty })).toEqual([row]);
+        expect(
+          await db.all(app.todos, { tier: ReadTier.LocalFirst, firstLoadRemoteWaitMs: 60_000 }),
+        ).toEqual([row]);
         const fallback: unknown[][] = [];
         const stopFallback = db.subscribe(app.todos, (rows) => fallback.push(rows), {
-          tier: ReadTier.LocalFirstUnlessEmpty,
+          tier: ReadTier.LocalFirst,
+          firstLoadRemoteWaitMs: 60_000,
         });
         await expect.poll(() => fallback.at(-1)).toEqual([row]);
         stopFallback();
@@ -135,9 +139,9 @@ it("resumes strict remote reads and Global write waits after native reconnect", 
         const stoppedCount = strictSnapshots.length;
         await db.update(app.todos, row.id, { title: "after detach" }).wait({ tier: "global" });
         expect(strictSnapshots).toHaveLength(stoppedCount);
-        expect(await db.all(app.todos, { tier: ReadTier.LocalFirstUnlessEmpty })).toEqual([
-          { ...row, title: "after detach", done: true },
-        ]);
+        expect(
+          await db.all(app.todos, { tier: ReadTier.LocalFirst, firstLoadRemoteWaitMs: 60_000 }),
+        ).toEqual([{ ...row, title: "after detach", done: true }]);
       },
       {
         appId: server.appId,
@@ -201,11 +205,14 @@ it("keeps local work usable while remote read tiers recover from an established 
 
         // Local knowledge answers immediately during the outage; only a
         // strict remote read waits for the server to come back.
-        expect(await db.all(app.todos, { tier: ReadTier.LocalFirstUnlessEmpty })).toEqual([local]);
+        expect(
+          await db.all(app.todos, { tier: ReadTier.LocalFirst, firstLoadRemoteWaitMs: 60_000 }),
+        ).toEqual([local]);
         // An empty local result must not hang on the unreachable server.
         expect(
           await db.all(app.todos.where({ title: "not synced anywhere" }), {
-            tier: ReadTier.LocalFirstUnlessEmpty,
+            tier: ReadTier.LocalFirst,
+            firstLoadRemoteWaitMs: 60_000,
           }),
         ).toEqual([]);
         let strictSettled = false;
@@ -253,3 +260,99 @@ it("keeps local work usable while remote read tiers recover from an established 
     await rm(dataDir, { recursive: true, force: true });
   }
 }, 45_000);
+
+it("shows local rows at the deadline when a live server has not answered", async () => {
+  const { startLocalJazzServer, startTestJwtIssuer, deploy } =
+    await import("../../src/testing/index.js");
+  const issuer = await startTestJwtIssuer();
+  const server = await startLocalJazzServer({
+    inMemory: true,
+    jwksUrl: issuer.jwksUrl,
+    jwtIssuer: issuer.issuer,
+    jwtAudience: issuer.audience,
+  });
+  const proxy = await startHoldingProxy(server.url);
+  try {
+    const permissions = schema.definePermissions(app, ({ policy }) => [
+      policy.todos.allowRead.always(),
+      policy.todos.allowInsert.always(),
+    ]);
+    await deploy({
+      appId: server.appId,
+      serverUrl: server.url,
+      adminSecret: server.adminSecret,
+      schema: app,
+      permissions,
+    });
+    const nativeOptions = (userId: string, serverUrl: string) => ({
+      appId: server.appId,
+      session: {
+        issuer: issuer.issuer,
+        user_id: userId,
+        claims: {},
+        authMode: "external" as const,
+      },
+      upstream: { serverUrl, jwt: issuer.jwtForUser(userId) },
+    });
+    await withNativeRelayFixture(
+      app,
+      permissions,
+      async (writerFixture) => {
+        const writer = await writerFixture.createDb();
+        await writer
+          .insert(app.todos, { title: "Only on the server", done: false })
+          .wait({ tier: "global" });
+      },
+      nativeOptions("rn-deadline-writer", server.url),
+    );
+    await withNativeRelayFixture(
+      app,
+      permissions,
+      async (fixture) => {
+        const db = await fixture.createDb();
+        // The reader's own write reaching the server proves its link is live.
+        await db
+          .insert(app.todos, { title: "Written by the reader", done: false })
+          .wait({ tier: "global" });
+
+        proxy.hold();
+        const waitMs = 1_500;
+        const started = Date.now();
+        const deliveries: string[][] = [];
+        const stop = db.subscribe(
+          app.todos,
+          (rows) => deliveries.push(rows.map((row) => row.title).sort()),
+          { tier: ReadTier.LocalFirst, firstLoadRemoteWaitMs: waitMs },
+        );
+        try {
+          await expect.poll(() => deliveries.length, { timeout: 10_000 }).toBeGreaterThan(0);
+          // The opening waited for the whole timeout, then showed the local rows.
+          expect(Date.now() - started).toBeGreaterThanOrEqual(waitMs - 50);
+          expect(deliveries[0]).toEqual(["Written by the reader"]);
+
+          const oneShotStarted = Date.now();
+          expect(
+            (
+              await db.all(app.todos, { tier: ReadTier.LocalFirst, firstLoadRemoteWaitMs: waitMs })
+            ).map((row) => row.title),
+          ).toEqual(["Written by the reader"]);
+          expect(Date.now() - oneShotStarted).toBeGreaterThanOrEqual(waitMs - 50);
+
+          // The late answer arrives as an ordinary change.
+          proxy.release();
+          await expect
+            .poll(() => deliveries.at(-1), { timeout: 10_000 })
+            .toEqual(["Only on the server", "Written by the reader"]);
+        } finally {
+          stop();
+        }
+      },
+      nativeOptions("rn-deadline-reader", proxy.url),
+    );
+  } finally {
+    proxy.release();
+    await proxy.stop();
+    await server.stop();
+    await issuer.stop();
+  }
+}, 30_000);

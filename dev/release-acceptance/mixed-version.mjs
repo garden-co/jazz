@@ -329,8 +329,8 @@ async function syncCell(name, sv, va, vb, { deployer = sv, upgradeTo } = {}) {
     await check(name, `open-a-${va.key}`, async () => open(A), { fatal: true });
     await check(name, `open-b-${vb.key}`, async () => open(B), { fatal: true });
     await check(name, "subscribe-both", async () => {
-      await A.call("subscribe", { sub: "all", tier: "global" });
-      await B.call("subscribe", { sub: "all", tier: "global" });
+      await A.call("subscribe", { sub: "all", tier: "remote" });
+      await B.call("subscribe", { sub: "all", tier: "remote" });
     });
 
     const ids = {};
@@ -341,7 +341,7 @@ async function syncCell(name, sv, va, vb, { deployer = sv, upgradeTo } = {}) {
           wait: "global",
         })
       ).id;
-      const row = await B.call("one", { id: ids.r1, tier: "global" });
+      const row = await B.call("one", { id: ids.r1, tier: "remote" });
       assert.equal(row?.body, "from-a");
       return {
         sub: await B.call("expectSub", {
@@ -357,7 +357,7 @@ async function syncCell(name, sv, va, vb, { deployer = sv, upgradeTo } = {}) {
         values: { body: "edited-by-b" },
         wait: "global",
       });
-      const row = await A.call("one", { id: ids.r1, tier: "global" });
+      const row = await A.call("one", { id: ids.r1, tier: "remote" });
       assert.equal(row?.body, "edited-by-b");
       return {
         sub: await A.call("expectSub", {
@@ -377,8 +377,8 @@ async function syncCell(name, sv, va, vb, { deployer = sv, upgradeTo } = {}) {
       await A.call("expectSub", { sub: "all", id: ids.r2, body: "to-delete" });
       await A.call("delete", { id: ids.r2, wait: "global" });
       await B.call("expectSub", { sub: "all", id: ids.r2, absent: true });
-      assert.equal(await B.call("one", { id: ids.r2, tier: "global" }), null);
-      assert.equal((await B.call("one", { id: ids.r1, tier: "global" }))?.body, "edited-by-b");
+      assert.equal(await B.call("one", { id: ids.r2, tier: "remote" }), null);
+      assert.equal((await B.call("one", { id: ids.r1, tier: "remote" }))?.body, "edited-by-b");
     });
     if (!input.skipLarge)
       await check(name, "a-large-800KB-value->b", async () => {
@@ -392,7 +392,7 @@ async function syncCell(name, sv, va, vb, { deployer = sv, upgradeTo } = {}) {
         ).id;
         const row = await B.call("one", {
           id: ids.big,
-          tier: "global",
+          tier: "remote",
           ms: 60000,
         });
         assert.equal(row?.body?.length, body.length);
@@ -408,7 +408,7 @@ async function syncCell(name, sv, va, vb, { deployer = sv, upgradeTo } = {}) {
             ms: 60000,
           })
         ).id;
-        const row = await A.call("one", { id, tier: "global", ms: 60000 });
+        const row = await A.call("one", { id, tier: "remote", ms: 60000 });
         assert.equal(row?.body, body);
       });
     for (const [c, v] of [
@@ -438,10 +438,10 @@ async function syncCell(name, sv, va, vb, { deployer = sv, upgradeTo } = {}) {
         })
       ).id;
       await delay(500);
-      assert.equal(await B.call("one", { id: ids.r3, tier: "global" }), null);
+      assert.equal(await B.call("one", { id: ids.r3, tier: "remote" }), null);
       await A.call("reconnect");
       await B.call("expectSub", { sub: "all", id: ids.r3, body: "offline" });
-      assert.equal((await B.call("one", { id: ids.r3, tier: "global" }))?.body, "offline");
+      assert.equal((await B.call("one", { id: ids.r3, tier: "remote" }))?.body, "offline");
     });
     await check(name, "b-offline-write->reconnect->a-sees", async () => {
       await B.call("disconnect");
@@ -466,11 +466,11 @@ async function syncCell(name, sv, va, vb, { deployer = sv, upgradeTo } = {}) {
       });
       const point = await C.call("one", {
         id: ids.r1,
-        tier: "global",
+        tier: "remote",
         ms: 30000,
       });
       assert.equal(point?.body, "edited-by-b", "fresh client point read");
-      await C.call("subscribe", { sub: "all", tier: "global" });
+      await C.call("subscribe", { sub: "all", tier: "remote" });
       await C.call("expectSub", { sub: "all", id: expectId, ms: 45000 });
       await C.call("expectSub", { sub: "all", id: ids.r2, absent: true });
       await C.close();
@@ -503,19 +503,19 @@ async function syncCell(name, sv, va, vb, { deployer = sv, upgradeTo } = {}) {
         ms: 45000,
       });
       assert.equal(
-        (await B.call("one", { id: ids.r4, tier: "global", ms: 30000 }))?.body,
+        (await B.call("one", { id: ids.r4, tier: "remote", ms: 30000 }))?.body,
         "while-down",
       );
     });
     await check(name, `${label}:history-readable`, async () => {
       assert.equal(
-        (await A.call("one", { id: ids.r1, tier: "global", ms: 30000 }))?.body,
+        (await A.call("one", { id: ids.r1, tier: "remote", ms: 30000 }))?.body,
         "edited-by-b",
       );
-      assert.equal(await A.call("one", { id: ids.r2, tier: "global" }), null);
+      assert.equal(await A.call("one", { id: ids.r2, tier: "remote" }), null);
       if (ids.big)
         assert.equal(
-          (await A.call("one", { id: ids.big, tier: "global", ms: 60000 }))?.label,
+          (await A.call("one", { id: ids.big, tier: "remote", ms: 60000 }))?.label,
           "big",
         );
     });
@@ -576,7 +576,7 @@ async function largeValueCell(name, sv, writer, reader) {
     const probe = async (label, size, id) => {
       await check(name, `${label}-${size}B`, async () => {
         const R = await open(reader, `r-${label}-${size}`);
-        await R.call("subscribe", { sub: "all", tier: "global" });
+        await R.call("subscribe", { sub: "all", tier: "remote" });
         await R.call("expectSub", { sub: "all", id, ms: 20000 });
         await R.close();
       });
@@ -674,7 +674,7 @@ async function exclusiveCell(name, sv, cv) {
     const accepted = { outcome: "accepted" };
     const conflict = { outcome: "rejected", code: "exclusive_conflict" };
     const edit = (id) => async () => {
-      await B.call("one", { id, tier: "global" });
+      await B.call("one", { id, tier: "remote" });
       await B.call("update", { id, values: { body: "changed-by-b" }, wait: "global" });
     };
     // Only alpha.58 clients prove the rows their reads return (#3694). A new
@@ -692,7 +692,7 @@ async function exclusiveCell(name, sv, cv) {
     );
     if (!legacy)
       await check(name, "read-by-id+update:visible", async () => {
-        const row = await B.call("one", { id: rows[0], tier: "global" });
+        const row = await B.call("one", { id: rows[0], tier: "remote" });
         assert.equal(row?.body, "read-then-updated");
       });
     await exclusive(
@@ -796,7 +796,7 @@ async function oversizedCell(name, sv, writer, readers) {
       for (const v of readers)
         await check(name, `${label}-${v.key}-reader-gets-all-${count}`, async () => {
           const R = await open(v, `r-${label}-${v.key}`);
-          await R.call("subscribe", { sub: "all", tier: "global" });
+          await R.call("subscribe", { sub: "all", tier: "remote" });
           const got = await R.call("expectSubCount", { sub: "all", count, prefix: "bulk-", ms });
           await R.close();
           return got;

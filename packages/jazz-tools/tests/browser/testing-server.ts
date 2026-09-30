@@ -1,4 +1,7 @@
-import { jazzServerBrowserCommands } from "./browser-commands.js";
+import {
+  jazzServerBrowserCommands,
+  jazzServerHoldingProxyBrowserCommands,
+} from "./browser-commands.js";
 
 export interface JazzServerInfo {
   appId: string;
@@ -43,4 +46,28 @@ export async function getJazzServerJwtForUser(
     claims ?? { role: "user" },
     appId,
   );
+}
+
+/**
+ * A proxy in front of a test server that can hold back everything the server
+ * sends while keeping the client's connection open (see `startHoldingProxy`).
+ */
+export interface JazzServerHoldingProxy {
+  url: string;
+  hold(): Promise<void>;
+  release(): Promise<void>;
+  stop(): Promise<void>;
+}
+
+export async function startJazzServerHoldingProxy(
+  serverUrl: string,
+): Promise<JazzServerHoldingProxy> {
+  const commands = jazzServerHoldingProxyBrowserCommands();
+  const url = await commands.jazzServerHoldingProxyStart(serverUrl);
+  return {
+    url,
+    hold: () => commands.jazzServerHoldingProxySetHeld(url, true),
+    release: () => commands.jazzServerHoldingProxySetHeld(url, false),
+    stop: () => commands.jazzServerHoldingProxyStop(url),
+  };
 }

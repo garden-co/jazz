@@ -150,7 +150,7 @@ async function settle(): Promise<void> {
 }
 
 describe("Db read tiers and connection controls", () => {
-  it("keeps explicit Local reads propagating whether connected or explicitly offline", async () => {
+  it("keeps explicit local-first reads propagating whether connected or explicitly offline", async () => {
     const client = makeClient();
     const db = await createDbWithRuntimeSource(
       {
@@ -167,8 +167,8 @@ describe("Db read tiers and connection controls", () => {
     expect(client.query.mock.calls.at(-1)?.[1]).not.toHaveProperty("propagation");
 
     await db.disconnect();
-    await db.all(query(), { tier: "local" });
-    expect(client.query.mock.calls.at(-1)?.[1]).toMatchObject({ tier: "local" });
+    await db.all(query(), { tier: "local-first" });
+    expect(client.query.mock.calls.at(-1)?.[1]).toMatchObject({ tier: "local-first" });
     expect(client.query.mock.calls.at(-1)?.[1]).not.toHaveProperty("propagation");
 
     await db.reconnect();
@@ -290,7 +290,8 @@ describe("Db read tiers and connection controls", () => {
     await db.disconnect();
 
     const unsubscribe = db.subscribe(query(), () => undefined, {
-      tier: ReadTier.LocalFirstUnlessEmpty,
+      tier: ReadTier.LocalFirst,
+      firstLoadRemoteWaitMs: 2_000,
     });
     const reconnect = db.reconnect();
     await settle();
@@ -470,7 +471,7 @@ function emptyOpening(): RuntimeSubscriptionDelta {
   return { added: [], removed: [], updated: [], reset: true };
 }
 
-async function openUnlessEmptyDb(
+async function openServerWaitDb(
   client: ReturnType<typeof makeClient>,
   appId: string,
   serverUrl: string | undefined = "https://example.test",
@@ -487,22 +488,24 @@ async function openUnlessEmptyDb(
   return db;
 }
 
-describe("Db ReadTier.LocalFirstUnlessEmpty", () => {
-  // The core Db owns the opening gate. Db passes the tier through unchanged
+describe("Db local-first reads with firstLoadRemoteWaitMs", () => {
+  // The core Db owns the opening gate. Db passes the wait through unchanged
   // and keeps the core informed of the server link; it never withholds,
   // probes or re-reads on its own.
 
-  it("passes the tier to one runtime subscription and publishes its opening as delivered", async () => {
+  it("passes the wait to one runtime subscription and publishes its opening as delivered", async () => {
     const client = makeClient("connected");
-    const db = await openUnlessEmptyDb(client, "unless-empty-subscription");
+    const db = await openServerWaitDb(client, "server-wait-subscription");
     const updates: string[][] = [];
 
     const unsubscribe = db.subscribe(query(), (rows) => updates.push(publicationTitles(rows)), {
-      tier: ReadTier.LocalFirstUnlessEmpty,
+      tier: ReadTier.LocalFirst,
+      firstLoadRemoteWaitMs: 2_000,
     });
     expect(client.subscribe).toHaveBeenCalledOnce();
     expect(client.subscribe.mock.calls[0]?.[2]).toMatchObject({
-      tier: "local-first-unless-empty",
+      tier: "local-first",
+      firstLoadRemoteWaitMs: 2_000,
     });
     client.subscriptionCallbacks.get(1)!(emptyOpening());
     await settle();
@@ -514,7 +517,7 @@ describe("Db ReadTier.LocalFirstUnlessEmpty", () => {
     unsubscribe();
   });
 
-  it("passes the tier to one runtime read and returns its rows", async () => {
+  it("passes the wait to one runtime read and returns its rows", async () => {
     const client = makeClient("connecting");
     client.query.mockResolvedValueOnce([
       {
@@ -522,18 +525,21 @@ describe("Db ReadTier.LocalFirstUnlessEmpty", () => {
         values: [{ type: "Text", value: "remote" }],
       },
     ]);
-    const db = await openUnlessEmptyDb(client, "unless-empty-one-shot");
+    const db = await openServerWaitDb(client, "server-wait-one-shot");
 
-    const rows = await db.all(query(), { tier: ReadTier.LocalFirstUnlessEmpty });
+    const rows = await db.all(query(), { tier: ReadTier.LocalFirst, firstLoadRemoteWaitMs: 2_000 });
 
     expect(publicationTitles(rows)).toEqual(["remote"]);
     expect(client.query).toHaveBeenCalledOnce();
-    expect(client.query.mock.calls[0]?.[1]).toMatchObject({ tier: "local-first-unless-empty" });
+    expect(client.query.mock.calls[0]?.[1]).toMatchObject({
+      tier: "local-first",
+      firstLoadRemoteWaitMs: 2_000,
+    });
   });
 
   it("reports the server link to the runtime as it changes", async () => {
     const client = makeClient("connecting");
-    const db = await openUnlessEmptyDb(client, "unless-empty-link-hints");
+    const db = await openServerWaitDb(client, "server-wait-link-hints");
     // The runtime client is created by the first operation.
     await db.all(query());
     expect(client.linkHints.mock.calls.at(-1)).toEqual(["connecting"]);
@@ -553,7 +559,7 @@ describe("Db ReadTier.LocalFirstUnlessEmpty", () => {
 
   it("reports no server when none is configured", async () => {
     const client = makeClient("connected");
-    const db = await openUnlessEmptyDb(client, "unless-empty-no-server", "");
+    const db = await openServerWaitDb(client, "server-wait-no-server", "");
     await db.all(query());
 
     expect(client.linkHints.mock.calls).toEqual([["none"]]);

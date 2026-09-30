@@ -258,9 +258,9 @@ where
     /// release callback lets a host defer attachment cleanup when dropping a
     /// pending operation while its runtime owner is already borrowed.
     ///
-    /// An [`EmptyOpening::AwaitRemote`] request from a client-local read
+    /// A [`FirstLoad::WaitForRemote`] request from a client-local read
     /// outside a transaction applies the shared one-shot rule of
-    /// [`Db::read_local_first_unless_empty`]: the local-first read runs with
+    /// [`Db::read_local_first_within`]: the local-first read runs with
     /// the caller's coverage requirement, and the strict remote read (Global
     /// tier, immediate local updates) always requires coverage. Each phase
     /// releases its own attachment through `release_coverage`.
@@ -281,68 +281,65 @@ where
         F: Fn(QueryAttachment),
         E: Fn() -> bool,
     {
-        let await_remote = std::mem::take(&mut opts.empty_opening) == EmptyOpening::AwaitRemote
-            && open_tx.is_none()
+        let first_load = std::mem::take(&mut opts.first_load);
+        let gated = open_tx.is_none()
             && author.is_none()
             && opts.propagation == Propagation::Full
             && effective_read_tier(&opts) == DurabilityTier::Local;
-        if !await_remote {
-            return self
-                .all_serialized_query_once(
-                    query,
-                    opts,
-                    open_tx,
-                    request_scope,
-                    author,
-                    require_coverage,
-                    &coverage_expired,
-                    &release_coverage,
-                )
-                .await;
-        }
-        let windowed = crate::wire::decode_postcard_exact::<Query>(query)
-            .map_err(|error| Error::new(ErrorCode::Query, format!("decode query: {error}")))?
-            .offset
-            > 0;
-        let remote_opts = ReadOpts {
-            tier: DurabilityTier::Global,
-            local_updates: LocalUpdates::Immediate,
-            ..opts.clone()
+        let wait_timeout = match first_load {
+            FirstLoad::WaitForRemote { timeout_ms } if gated && timeout_ms > 0 => {
+                Some(std::time::Duration::from_millis(timeout_ms))
+            }
+            _ => None,
         };
-        let remote_scope = request_scope.clone();
-        // Boxed: the gated read nests two full one-shot reads, which would
-        // otherwise multiply this future's size and every host poll frame.
-        Box::pin(self.read_local_first_unless_empty(
-            windowed,
-            || {
-                self.all_serialized_query_once(
-                    query,
-                    opts,
-                    None,
-                    request_scope,
-                    None,
-                    require_coverage,
-                    &coverage_expired,
-                    &release_coverage,
-                )
-            },
-            || {
-                self.all_serialized_query_once(
-                    query,
-                    remote_opts,
-                    None,
-                    remote_scope,
-                    None,
-                    true,
-                    &coverage_expired,
-                    &release_coverage,
-                )
-            },
-            |result| match result {
-                SerializedReadResult::Rows(rows) => rows.is_empty(),
-                SerializedReadResult::Relation(snapshot) => snapshot.root_count == 0,
-            },
-        ))
+        if let Some(timeout) = wait_timeout {
+            let remote_opts = ReadOpts {
+                tier: DurabilityTier::Global,
+                local_updates: LocalUpdates::Immediate,
+                ..opts.clone()
+            };
+            let remote_scope = request_scope.clone();
+            // Boxed: the gated read nests two full one-shot reads, which would
+            // otherwise multiply this future's size and every host poll frame.
+            return Box::pin(self.read_local_first_within(
+                timeout,
+                || {
+                    self.all_serialized_query_once(
+                        query,
+                        opts,
+                        None,
+                        request_scope,
+                        None,
+                        require_coverage,
+                        &coverage_expired,
+                        &release_coverage,
+                    )
+                },
+                || {
+                    self.all_serialized_query_once(
+                        query,
+                        remote_opts,
+                        None,
+                        remote_scope,
+                        None,
+                        true,
+                        &coverage_expired,
+                        &release_coverage,
+                    )
+                },
+            ))
+            .await;
+        }
+        self.all_serialized_query_once(
+            query,
+            opts,
+            open_tx,
+            request_scope,
+            author,
+            require_coverage,
+            &coverage_expired,
+            &release_coverage,
+        )
         .await
     }
 
@@ -692,7 +689,7 @@ where
         let mut coverage = None;
         let hydrate =
             exclusive_snapshot_read && effective_read_tier(&opts) < DurabilityTier::Global;
-        if hydrate && let Some(epoch) = self.node.remote_link.arm() {
+        if hydrate && let Some(epoch) = self.node.remote_link.arm_until_loss() {
             let mut hydration_opts = opts.clone();
             hydration_opts.tier = DurabilityTier::Global;
             let hydration = SerializedReadCoverage {
@@ -703,7 +700,7 @@ where
                 release: Some(release_coverage),
             };
             let covered = self.wait_for_serialized_read_coverage(&hydration, coverage_expired);
-            match self.race_remote_answer(epoch, covered).await {
+            match self.race_remote_answer(epoch, None, covered).await {
                 Some(result) => {
                     result?;
                     coverage = Some(hydration);
@@ -731,7 +728,7 @@ where
             && let Some(open_tx) = open_tx
         {
             for query in source_queries {
-                let Some(epoch) = self.node.remote_link.arm() else {
+                let Some(epoch) = self.node.remote_link.arm_until_loss() else {
                     break;
                 };
                 let source_query = self.prepare_query_async(&query).await?;
@@ -750,7 +747,7 @@ where
                     release: Some(release_coverage),
                 };
                 let covered = self.wait_for_serialized_read_coverage(&hydration, coverage_expired);
-                match self.race_remote_answer(epoch, covered).await {
+                match self.race_remote_answer(epoch, None, covered).await {
                     Some(result) => {
                         result?;
                         table_coverage.push(hydration);

@@ -237,10 +237,10 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     });
 
     try {
-      const key = harness.manager.makeQueryKey(query, { tier: "global" });
+      const key = harness.manager.makeQueryKey(query, { tier: "remote" });
       expect(key).toBe(
         `app-so-u07:${JSON.stringify({
-          tier: "global",
+          tier: "remote",
         })}:${query._build()}`,
       );
     } finally {
