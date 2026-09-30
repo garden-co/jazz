@@ -462,7 +462,7 @@ fn failed_large_value_upload_rejects_a_waiting_global_read() {
 struct StalledUpload {
     writer: Db,
     writer_transport: Option<Box<dyn Transport>>,
-    _server_end: Box<dyn Transport>,
+    server_end: Box<dyn Transport>,
     clock: Rc<Cell<u64>>,
 }
 
@@ -487,21 +487,26 @@ impl StalledUpload {
         Self {
             writer,
             writer_transport: Some(writer_transport),
-            _server_end: server_end,
+            server_end,
             clock,
         }
     }
 
     /// Queue a large track and a plain one behind it, and start the upload.
-    fn queue_tracks(&self) {
+    fn queue_tracks(&mut self) {
         self.writer
-            .insert("tracks", large_title("stalled"), Default::default())
+            .insert("tracks", large_title("stalled-upload"), Default::default())
             .unwrap();
         self.writer
             .insert("tracks", title("behind it"), Default::default())
             .unwrap();
         self.writer.tick().unwrap();
         self.writer.tick().unwrap();
+        let mut started = false;
+        while let Some(message) = self.server_end.try_recv() {
+            started |= matches!(message, SyncMessage::ChunkUploadStart(_));
+        }
+        assert!(started, "the track travels as a large value");
     }
 }
 
