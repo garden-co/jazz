@@ -100,69 +100,127 @@ export type Densities = { a: number; b: number };
 const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
 const rad = (deg: number) => (deg * Math.PI) / 180;
 
-/** Maps a page point towards the source; the third value dims the reading. */
-function warp(w: Warp, x: number, y: number): [number, number, number] {
+/** A point on its way from the page to the source, and how much it is dimmed. */
+type Probe = { x: number; y: number; weight: number };
+
+/**
+ * Compiles a warp into a function that moves a probe towards the source.
+ * Everything that depends only on the warp's settings is worked out here,
+ * once, rather than per point.
+ */
+function compileWarp(w: Warp): (p: Probe) => void {
   switch (w.type) {
     case "flute": {
       const cos = Math.cos(rad(w.angle));
       const sin = Math.sin(rad(w.angle));
-      // Across the ribs (t) and along them (s).
-      const t = x * cos + y * sin;
-      const s = -x * sin + y * cos;
-      const u = t / w.period + (w.phase ?? 0);
-      const rib = Math.floor(u);
-      const local = u - rib - 0.5;
+      const phase = w.phase ?? 0;
       if ((w.projection ?? "orthographic") === "orthographic") {
-        const along = w.mirror ? 0.5 - local : local + 0.5;
-        return [x, y, Math.pow(1 - along, w.falloff ?? 1)];
+        const falloff = w.falloff ?? 1;
+        const mirror = w.mirror ?? false;
+        return (p) => {
+          const u = (p.x * cos + p.y * sin) / w.period + phase;
+          const local = u - Math.floor(u) - 0.5;
+          // How far across the rib from its lit edge, 0 to 1.
+          const along = mirror ? 0.5 - local : local + 0.5;
+          const lit = 1 - along;
+          p.weight *= falloff === 1 ? lit : Math.pow(lit, falloff);
+        };
       }
-      const bend = 1 + (w.bend ?? 0) * 4 * local * local;
-      const t2 =
-        (rib + 0.5 + local * (w.scale ?? 1) * bend + (w.shift ?? 0) - (w.phase ?? 0)) * w.period;
-      return [t2 * cos - s * sin, t2 * sin + s * cos, 1];
+      const scale = w.scale ?? 1;
+      const shift = w.shift ?? 0;
+      const bend = w.bend ?? 0;
+      return (p) => {
+        // Across the ribs (t) and along them (s).
+        const t = p.x * cos + p.y * sin;
+        const s = -p.x * sin + p.y * cos;
+        const u = t / w.period + phase;
+        const rib = Math.floor(u);
+        const local = u - rib - 0.5;
+        const lens = 1 + bend * 4 * local * local;
+        const t2 = (rib + 0.5 + local * scale * lens + shift - phase) * w.period;
+        p.x = t2 * cos - s * sin;
+        p.y = t2 * sin + s * cos;
+      };
     }
     case "mirror": {
       const c = Math.cos(rad(2 * w.angle));
       const s = Math.sin(rad(2 * w.angle));
-      return [x * c + y * s, x * s - y * c, 1];
+      return (p) => {
+        const x = p.x;
+        p.x = x * c + p.y * s;
+        p.y = x * s - p.y * c;
+      };
     }
     case "rotate": {
       const c = Math.cos(rad(-w.angle));
       const s = Math.sin(rad(-w.angle));
-      return [x * c - y * s, x * s + y * c, 1];
+      return (p) => {
+        const x = p.x;
+        p.x = x * c - p.y * s;
+        p.y = x * s + p.y * c;
+      };
     }
     case "translate":
-      return [x - w.x, y - w.y, 1];
+      return (p) => {
+        p.x -= w.x;
+        p.y -= w.y;
+      };
   }
 }
 
-function source(src: Source, x: number, y: number) {
-  let v: number;
+function compileSource(src: Source): (x: number, y: number) => number {
+  const gamma = src.gamma ?? 1;
+  const shape = (v: number) => (v <= 0 ? 0 : v >= 1 ? 1 : gamma === 1 ? v : Math.pow(v, gamma));
   if (src.type === "radial") {
-    v = 1 - Math.hypot(x - (src.x ?? 0), y - (src.y ?? 0)) / src.radius;
-  } else {
-    const t = x * Math.cos(rad(src.angle)) + y * Math.sin(rad(src.angle));
-    v = (t - src.from) / (src.to - src.from);
+    const cx = src.x ?? 0;
+    const cy = src.y ?? 0;
+    const r2 = src.radius * src.radius;
+    return (x, y) => {
+      const d2 = (x - cx) * (x - cx) + (y - cy) * (y - cy);
+      return d2 >= r2 ? 0 : shape(1 - Math.sqrt(d2 / r2));
+    };
   }
-  v = clamp01(v);
-  return src.gamma ? Math.pow(v, src.gamma) : v;
+  const cos = Math.cos(rad(src.angle));
+  const sin = Math.sin(rad(src.angle));
+  return (x, y) => shape((x * cos + y * sin - src.from) / (src.to - src.from));
+}
+
+/** Compiles one layer into a density function of a page point. */
+export function compileLayer(layer: Layer): (x: number, y: number) => number {
+  const warps = (layer.warps ?? []).map(compileWarp);
+  const read = compileSource(layer.source);
+  const gain = layer.gain ?? 1;
+  const probe: Probe = { x: 0, y: 0, weight: 1 };
+  return (x, y) => {
+    probe.x = x;
+    probe.y = y;
+    probe.weight = 1;
+    for (const warp of warps) warp(probe);
+    if (probe.weight <= 0) return 0;
+    return clamp01(read(probe.x, probe.y) * probe.weight * gain);
+  };
 }
 
 /** Density of one layer at a page point. */
 export function layerAt(layer: Layer, x: number, y: number) {
-  let px = x;
-  let py = y;
-  let weight = 1;
-  for (const w of layer.warps ?? []) {
-    const [nx, ny, dim] = warp(w, px, py);
-    px = nx;
-    py = ny;
-    weight *= dim;
-  }
-  return clamp01(source(layer.source, px, py) * weight * (layer.gain ?? 1));
+  return compileLayer(layer)(x, y);
 }
 
 export type Blend = "screen" | "max" | "multiply";
+
+/** Compiles the layers of one ink into its combined density; 0 if it has none. */
+function compileInk(layers: Layer[], ink: Ink, blend: Blend): (x: number, y: number) => number {
+  const parts = layers.filter((layer) => layer.ink === ink).map(compileLayer);
+  if (parts.length === 0) return () => 0;
+  return (x, y) => {
+    let d = parts[0](x, y);
+    for (let i = 1; i < parts.length; i++) {
+      const v = parts[i](x, y);
+      d = blend === "screen" ? 1 - (1 - d) * (1 - v) : blend === "max" ? Math.max(d, v) : d * v;
+    }
+    return d;
+  };
+}
 
 /**
  * Ink densities (0–1 each) at a page point in pattern units, centre at the
@@ -175,20 +233,7 @@ export function densitiesAt(
   y: number,
   blend: Blend = "screen",
 ): Densities {
-  const d = { a: -1, b: -1 };
-  for (const layer of layers) {
-    const v = layerAt(layer, x, y);
-    const prev = d[layer.ink];
-    d[layer.ink] =
-      prev < 0
-        ? v
-        : blend === "screen"
-          ? 1 - (1 - prev) * (1 - v)
-          : blend === "max"
-            ? Math.max(prev, v)
-            : prev * v;
-  }
-  return { a: Math.max(d.a, 0), b: Math.max(d.b, 0) };
+  return { a: compileInk(layers, "a", blend)(x, y), b: compileInk(layers, "b", blend)(x, y) };
 }
 
 /** Stateless hash of a grid cell to three uniform numbers in [0, 1). */
@@ -217,14 +262,17 @@ export function stipple(
   emit: (dot: Dot) => void,
 ) {
   const layers = expandCopies(pattern);
+  const blend = pattern.blend ?? "screen";
+  const inkA = compileInk(layers, "a", blend);
+  const inkB = compileInk(layers, "b", blend);
   const gain = pattern.gain ?? 1;
   const passes: (Ink | "both")[] = pattern.sampling === "shared" ? ["both"] : ["a", "b"];
   const each = pattern.points === "blue-noise" ? blueNoisePoints : gridPoints;
   for (const pass of passes) {
     each(pattern, bounds, pass === "b" ? 1 : 0, (x, y, rank) => {
-      const d = densitiesAt(layers, x, y, pattern.blend);
-      let a = pass === "b" ? 0 : clamp01(d.a * gain);
-      let b = pass === "a" ? 0 : clamp01(d.b * gain);
+      // Each pass reads only the inks it can place.
+      let a = pass === "b" ? 0 : clamp01(inkA(x, y) * gain);
+      let b = pass === "a" ? 0 : clamp01(inkB(x, y) * gain);
       const sum = a + b;
       if (sum > 1) {
         a /= sum;

@@ -2,11 +2,66 @@
 
 import { type CSSProperties, useEffect, useRef } from "react";
 import { stipple, type StipplePattern } from "./stipple";
+import type { StippleRequest, StippleResponse } from "./stipple.worker";
+
+type Dots = { a: Float32Array; b: Float32Array };
+type Bounds = StippleRequest["bounds"];
+
+let worker: Worker | undefined;
+let busy = false;
+type Job = { pattern: StipplePattern; bounds: Bounds; done: (dots: Dots | undefined) => void };
+let current: Job | undefined;
+let waiting: Job | undefined;
+
+/**
+ * Computes dots in a shared worker, one job at a time. A job that is still
+ * waiting when a newer one arrives is dropped (resolves to undefined), so
+ * dragging a slider never queues up stale work.
+ */
+function computeDots(pattern: StipplePattern, bounds: Bounds): Promise<Dots | undefined> {
+  if (typeof Worker === "undefined") return Promise.resolve(collectDots(pattern, bounds));
+  return new Promise((done) => {
+    waiting?.done(undefined);
+    waiting = { pattern, bounds, done };
+    runNext();
+  });
+}
+
+function runNext() {
+  if (busy || !waiting) return;
+  if (!worker) {
+    worker = new Worker(new URL("./stipple.worker.ts", import.meta.url), { type: "module" });
+    worker.onmessage = ({ data }: MessageEvent<StippleResponse>) => {
+      busy = false;
+      current?.done(data);
+      runNext();
+    };
+  }
+  current = waiting;
+  waiting = undefined;
+  busy = true;
+  const request: StippleRequest = { pattern: current.pattern, bounds: current.bounds };
+  worker.postMessage(request);
+}
+
+function collectDots(pattern: StipplePattern, bounds: Bounds): Dots {
+  const dots = { a: [] as number[], b: [] as number[] };
+  stipple(pattern, bounds, (dot) => dots[dot.ink].push(dot.x, dot.y));
+  return { a: Float32Array.from(dots.a), b: Float32Array.from(dots.b) };
+}
+
+/** The pattern area a canvas shows: one unit is half its height, centre in the middle. */
+function boundsOf(width: number, height: number): Bounds {
+  const halfWidth = width / height;
+  return { left: -halfWidth, right: halfWidth, top: -1, bottom: 1 };
+}
 
 /**
  * Draws a stipple pattern into a canvas that fills its box. The pattern's
  * centre sits at the box centre and one pattern unit is half the box height,
- * so the dots scale with the box and stay put as it resizes.
+ * so the dots scale with the box and stay put as it resizes. Dots are worked
+ * out in a worker and kept while only the box's size changes; the canvas
+ * gets `data-drawn` once it shows the pattern.
  */
 export function StippleCanvas({
   pattern,
@@ -22,22 +77,34 @@ export function StippleCanvas({
   useEffect(() => {
     const canvas = ref.current;
     if (!canvas) return;
+    let cancelled = false;
     let frame = 0;
-    const draw = () => {
+    let cached: { key: string; dots: Dots } | undefined;
+    const draw = async () => {
       const dpr = window.devicePixelRatio || 1;
       const width = Math.round(canvas.clientWidth * dpr);
       const height = Math.round(canvas.clientHeight * dpr);
       if (!width || !height) return;
+      const bounds = boundsOf(width, height);
+      // Dots depend on the aspect ratio, not the pixel size.
+      const key = (width / height).toFixed(3);
+      if (cached?.key !== key) {
+        const dots = await computeDots(pattern, bounds);
+        if (cancelled || !dots) return;
+        cached = { key, dots };
+      }
       canvas.width = width;
       canvas.height = height;
-      drawStipple(canvas, pattern);
+      paint(canvas, pattern, cached.dots);
+      canvas.dataset.drawn = "";
     };
     const observer = new ResizeObserver(() => {
       cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(draw);
+      frame = requestAnimationFrame(() => void draw());
     });
     observer.observe(canvas);
     return () => {
+      cancelled = true;
       cancelAnimationFrame(frame);
       observer.disconnect();
     };
@@ -46,25 +113,28 @@ export function StippleCanvas({
   return <canvas ref={ref} aria-hidden className={className} style={style} />;
 }
 
-/** Renders `pattern` over the whole canvas at its current pixel size. */
-export function drawStipple(canvas: HTMLCanvasElement, pattern: StipplePattern) {
+function paint(canvas: HTMLCanvasElement, pattern: StipplePattern, dots: Dots) {
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
   const { width, height } = canvas;
   const scale = height / 2;
-  const halfWidth = width / 2 / scale;
   const radius = Math.max(pattern.radius * scale, 0.5);
-  const paths = { a: new Path2D(), b: new Path2D() };
-  stipple(pattern, { left: -halfWidth, right: halfWidth, top: -1, bottom: 1 }, (dot) => {
-    const x = width / 2 + dot.x * scale;
-    const y = height / 2 + dot.y * scale;
-    const path = paths[dot.ink];
-    path.moveTo(x + radius, y);
-    path.arc(x, y, radius, 0, Math.PI * 2);
-  });
   ctx.clearRect(0, 0, width, height);
-  ctx.fillStyle = pattern.inks.a;
-  ctx.fill(paths.a);
-  ctx.fillStyle = pattern.inks.b;
-  ctx.fill(paths.b);
+  for (const ink of ["a", "b"] as const) {
+    const path = new Path2D();
+    const xy = dots[ink];
+    for (let i = 0; i < xy.length; i += 2) {
+      const x = width / 2 + xy[i] * scale;
+      const y = height / 2 + xy[i + 1] * scale;
+      path.moveTo(x + radius, y);
+      path.arc(x, y, radius, 0, Math.PI * 2);
+    }
+    ctx.fillStyle = pattern.inks[ink];
+    ctx.fill(path);
+  }
+}
+
+/** Renders `pattern` over the whole canvas at its current pixel size, in place. */
+export function drawStipple(canvas: HTMLCanvasElement, pattern: StipplePattern) {
+  paint(canvas, pattern, collectDots(pattern, boundsOf(canvas.width, canvas.height)));
 }

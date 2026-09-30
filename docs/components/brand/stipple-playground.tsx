@@ -6,9 +6,13 @@ import { Heading } from "@astryxdesign/core/Heading";
 import { Text } from "@astryxdesign/core/Text";
 import type { Flute, Layer, StipplePattern } from "./stipple";
 import { drawStipple, StippleCanvas } from "./stipple-canvas";
-import { gridPattern, stripePattern } from "./stipple-presets";
+import { gridPattern, heroPattern, stripePattern } from "./stipple-presets";
 
-const presets: Record<string, StipplePattern> = { stripes: stripePattern, grid: gridPattern };
+const presets: Record<string, StipplePattern> = {
+  stripes: stripePattern,
+  grid: gridPattern,
+  hero: heroPattern,
+};
 
 const sliders = [
   { key: "spacing", min: 0.002, max: 0.03, step: 0.0005 },
@@ -229,6 +233,21 @@ export function StipplePlayground() {
             ))}
           </select>
         </label>
+        <div className="flex gap-4">
+          {(["a", "b"] as const).map((ink) => (
+            <label key={ink} className="flex items-center gap-2">
+              <input
+                type="color"
+                className="h-9 w-12 cursor-pointer rounded border border-(--color-border) bg-transparent"
+                value={pattern.inks[ink]}
+                onChange={(event) =>
+                  commit({ ...pattern, inks: { ...pattern.inks, [ink]: event.target.value } })
+                }
+              />
+              <Text weight="medium">Ink {ink === "a" ? "1" : "2"}</Text>
+            </label>
+          ))}
+        </div>
         {(
           [
             ["blend", ["screen", "max", "multiply"]],

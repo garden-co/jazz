@@ -31,6 +31,8 @@ import { FrameworkLogos } from "@/components/home/framework-logos";
 import { pricingMeters } from "@/lib/home-pricing";
 import { adopterQuotes } from "@/lib/home-quotes";
 import { blogSource } from "@/lib/source";
+import { StippleCanvas } from "@/components/brand/stipple-canvas";
+import { heroPattern } from "@/components/brand/stipple-presets";
 
 export const metadata: Metadata = {
   title: "Jazz - The database that syncs.",
@@ -357,16 +359,7 @@ export default function HomePage() {
   return (
     <div className="w-full">
       <section className="home-hero h-[80vh] w-full">
-        <img
-          src="/home/hero-pattern-2400.webp"
-          srcSet="/home/hero-pattern-1200.webp 1200w, /home/hero-pattern-2400.webp 2400w"
-          sizes="max(72rem, 110vw)"
-          width={2400}
-          height={2182}
-          alt=""
-          aria-hidden
-          className="home-hero-pattern"
-        />
+        <StippleCanvas pattern={heroPattern} className="home-hero-pattern" />
         <div className="mx-auto flex h-full w-full max-w-(--fd-layout-width) items-end px-4 relative">
           <aside className="absolute right-4 top-4 z-30 max-w-sm">
             <Card className="border-fd-border/70 shadow dark:border-white/50">
