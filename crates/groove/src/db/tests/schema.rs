@@ -38,7 +38,7 @@ async fn enum_tag_direct_store_keys_round_trip() {
         ("enum_tag_key", vec![Value::EnumTag(1)]),
         (
             "tuple_enum_tag_key",
-            vec![Value::Tuple(vec![Value::EnumTag(2), Value::U64(7)])],
+            vec![Value::Tuple(vec![Value::EnumTag(0), Value::U64(7)])],
         ),
     ];
     let storage = MemoryStorage::new(&schema.column_families()).expect("valid storage families");

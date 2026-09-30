@@ -43,7 +43,8 @@ fn is_supported_direct_store_tuple_member(value_type: &ValueType) -> bool {
         | ValueType::I32
         | ValueType::I64
         | ValueType::Bool
-        | ValueType::Uuid => true,
+        | ValueType::Uuid
+        | ValueType::EnumTag(_) => true,
         ValueType::Tuple(members) => members.iter().all(is_supported_direct_store_tuple_member),
         _ => false,
     }
