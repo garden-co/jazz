@@ -189,6 +189,12 @@ pub struct IvmRuntime {
     /// `poll_incremental` temporarily owns its queue outside the shared slot.
     /// Lifecycle reclamation must wait until that queue is visible again.
     pending_incremental_polling: bool,
+    /// The most recent durable wake bridge a runtime owner supplied, and the
+    /// cached fan-out waker for the latest non-owner poller (see
+    /// `poll_incremental`). A suspended cold evaluation keeps only its latest
+    /// poller's waker, so every poll must still reach this owner.
+    owner_progress_waker: Option<std::task::Waker>,
+    owner_fanout_waker: Option<(std::task::Waker, std::task::Waker)>,
     /// A lifecycle operation released retainers while queued work may still
     /// reference the released graph slice.
     ephemeral_graph_gc_pending: bool,
@@ -338,6 +344,8 @@ impl IvmRuntime {
             subscriptions_by_output_node: HashMap::default(),
             pending_incremental: runtime_tick::PendingIncrementalEvaluation::default(),
             pending_incremental_polling: false,
+            owner_progress_waker: None,
+            owner_fanout_waker: None,
             ephemeral_graph_gc_pending: false,
             gc_candidates: HashSet::default(),
             operator_states: HashMap::default(),

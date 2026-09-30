@@ -3499,6 +3499,9 @@ impl IvmRuntime {
             "DIAG3816 subscribe polls pending work with_waker={}",
             progress_waker.is_some()
         );
+        if let Some(owner) = progress_waker {
+            self.retain_owner_progress_waker(owner);
+        }
         let mut cx = Context::from_waker(progress_waker.unwrap_or(Waker::noop()));
         match self.poll_pending_incremental(&mut cx) {
             Poll::Ready(result) => result,

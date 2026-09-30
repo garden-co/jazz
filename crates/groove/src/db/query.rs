@@ -344,6 +344,7 @@ impl Database {
         );
         let progress = match progress_waker {
             Some(progress_waker) => {
+                self.ivm_runtime.retain_owner_progress_waker(progress_waker);
                 std::future::poll_fn(|_| {
                     let mut progress_cx = std::task::Context::from_waker(progress_waker);
                     std::task::Poll::Ready(self.poll_progress(&mut progress_cx))
