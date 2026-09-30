@@ -8,14 +8,14 @@
 //! estimate unbiased whatever the mix of allocation sizes.
 //!
 //! Unsampled calls pay one thread-local subtraction on allocation and one
-//! load from a 64 KiB counting filter on deallocation; only samples and
+//! load from a 128 KiB counting filter on deallocation; only samples and
 //! frees that hit the filter take the lock on the table of live samples.
 
 use std::alloc::{GlobalAlloc, Layout};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 
 /// Mean bytes allocated between samples unless [`set_sample_interval`]
 /// changes it.
@@ -71,11 +71,12 @@ pub struct LiveSample {
 static LIVE: Mutex<Option<HashMap<usize, LiveSample>>> = Mutex::new(None);
 
 /// Live samples per hash slot, so that freeing unsampled memory skips the
-/// table without locking.
-static FILTER: [AtomicU8; FILTER_SLOTS] = [const { AtomicU8::new(0) }; FILTER_SLOTS];
+/// table without locking. A slot that reaches `u16::MAX` stays there, so
+/// frees hashing to it always check the table.
+static FILTER: [AtomicU16; FILTER_SLOTS] = [const { AtomicU16::new(0) }; FILTER_SLOTS];
 
 #[inline(always)]
-fn filter_slot(ptr: usize) -> &'static AtomicU8 {
+fn filter_slot(ptr: usize) -> &'static AtomicU16 {
     let hash = (ptr as u64 >> 4).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     &FILTER[(hash >> (64 - FILTER_SLOTS.trailing_zeros())) as usize]
 }
@@ -172,7 +173,9 @@ fn crossed_interval(ptr: usize, size: usize) {
     };
     let mut live = LIVE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     live.get_or_insert_with(HashMap::new).insert(ptr, sample);
-    filter_slot(ptr).fetch_add(1, Ordering::Relaxed);
+    let _ = filter_slot(ptr).fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+        count.checked_add(1)
+    });
     drop(live);
     IN_SAMPLER.set(false);
 }
@@ -188,7 +191,9 @@ fn forget(ptr: usize) {
     IN_SAMPLER.set(true);
     let mut live = LIVE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if live.as_mut().and_then(|live| live.remove(&ptr)).is_some() {
-        filter_slot(ptr).fetch_sub(1, Ordering::Relaxed);
+        let _ = filter_slot(ptr).fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+            (count != u16::MAX).then(|| count - 1)
+        });
     }
     drop(live);
     IN_SAMPLER.set(false);
@@ -203,7 +208,8 @@ fn next_interval(mean: u64) -> i64 {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |since| since.as_nanos() as u64);
-        x = (&RNG as *const _ as u64) ^ nanos | 1;
+        let thread = RNG.with(|rng| rng as *const Cell<u64> as u64);
+        x = thread ^ nanos | 1;
     }
     x ^= x << 13;
     x ^= x >> 7;
