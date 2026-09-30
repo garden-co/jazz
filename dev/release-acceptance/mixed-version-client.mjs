@@ -180,6 +180,9 @@ const ops = {
   async txReadById({ tx, id }) {
     return project_(await txs.get(tx).one(app.docs.where({ id })));
   },
+  async txAllByLabel({ tx, label }) {
+    return (await txs.get(tx).all(app.docs.where({ label }))).map(project_);
+  },
   async txInsert({ tx, values }) {
     txs.get(tx).insert(app.docs, values);
     return null;

@@ -614,7 +614,8 @@ async function largeValueCell(name, sv, writer, reader) {
 /**
  * Exclusive transactions from a `cv` client against an `sv` server: reads of a
  * row by id, and updates and upserts of an existing row, commit while their
- * rows are unchanged and conflict once another client changed them.
+ * rows are unchanged and conflict once another client changed them. A query
+ * that matched rows conflicts only for an old client on a new server.
  */
 async function exclusiveCell(name, sv, cv) {
   const cell = newCell(name);
@@ -672,8 +673,10 @@ async function exclusiveCell(name, sv, cv) {
     };
     const accepted = { outcome: "accepted" };
     const conflict = { outcome: "rejected", code: "exclusive_conflict" };
-    const edit = (id) => () =>
-      B.call("update", { id, values: { body: "changed-by-b" }, wait: "global" });
+    const edit = (id) => async () => {
+      await B.call("one", { id, tier: "global" });
+      await B.call("update", { id, values: { body: "changed-by-b" }, wait: "global" });
+    };
     await exclusive(
       "read-by-id+update",
       [
@@ -703,6 +706,16 @@ async function exclusiveCell(name, sv, cv) {
       "blind-upsert-existing",
       [["txUpsert", { id: rows[2], values: { body: "upserted" } }]],
       accepted,
+    );
+    // A query that returned rows carries row proofs only from alpha.58 on, so
+    // an older client's commit conflicts on a newer server (#3694).
+    await exclusive(
+      "matching-query+insert",
+      [
+        ["txAllByLabel", { label: "x0" }],
+        ["txInsert", { values: { label: "after-query", body: "saw", author: cv.key } }],
+      ],
+      sv === V.new && cv === V.old ? conflict : accepted,
     );
     await exclusive(
       "stale-read-by-id-conflicts",
