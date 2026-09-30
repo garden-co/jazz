@@ -13,7 +13,9 @@ import {
   type JazzSession,
   type JazzClient,
 } from "jazz-tools/react";
+import { Banner, Button, Center, Spinner } from "@astryxdesign/core";
 import { authClient, getJwtFromBetterAuth } from "@/src/lib/auth-client";
+import { JAZZ_ENV } from "@/src/lib/jazz-env";
 const APP_ID = process.env.NEXT_PUBLIC_JAZZ_APP_ID;
 const SERVER_URL = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL;
 const registerIntentKey = "band-chat-register-jwt";
@@ -25,19 +27,44 @@ export function useBandChatLifecycle(): AuthActions {
   return actions;
 }
 export function JazzProvider({ children }: React.PropsWithChildren) {
-  const {
-    session: jazz,
-    error,
-    retry,
-  } = useJazzSessionOwner({ appId: APP_ID!, serverUrl: SERVER_URL! });
+  // Fail closed: `withJazz` sets both in development; deployments set them.
+  if (!APP_ID || !SERVER_URL)
+    return (
+      <StatusScreen>
+        <Banner
+          status="error"
+          collapsible={false}
+          title="BandChat is not configured"
+          description="Set NEXT_PUBLIC_JAZZ_APP_ID and NEXT_PUBLIC_JAZZ_SERVER_URL."
+        />
+      </StatusScreen>
+    );
+  return (
+    <ConfiguredJazzProvider appId={APP_ID} serverUrl={SERVER_URL}>
+      {children}
+    </ConfiguredJazzProvider>
+  );
+}
+
+function ConfiguredJazzProvider({
+  appId,
+  serverUrl,
+  children,
+}: React.PropsWithChildren<{ appId: string; serverUrl: string }>) {
+  const { session: jazz, error, retry } = useJazzSessionOwner({ appId, serverUrl, env: JAZZ_ENV });
   if (error)
     return (
-      <section>
-        <p role="alert">{error.message}</p>
-        <button onClick={() => void retry().catch(() => {})}>Retry</button>
-      </section>
+      <StatusScreen>
+        <Banner
+          status="error"
+          collapsible={false}
+          title="Could not open BandChat"
+          description={<span role="alert">{error.message}</span>}
+          endContent={<Button label="Retry" onClick={() => void retry().catch(() => {})} />}
+        />
+      </StatusScreen>
     );
-  if (!jazz) return <p>Loading...</p>;
+  if (!jazz) return <LoadingScreen label="Loading…" />;
   return <AccountContext jazz={jazz}>{children}</AccountContext>;
 }
 
@@ -118,22 +145,27 @@ function AccountContext({
   };
   const failure = error ?? snapshot.error;
   const fallback = failure ? (
-    <section>
-      <p role="alert">
-        {failedAction === "signout"
-          ? "Could not sign out of BandChat"
-          : "Could not connect BandChat"}
-        : {failure.message}
-      </p>
-      <button
-        onClick={() => void (failedAction === "signout" ? actions.signOut() : connect(true))}
-        disabled={snapshot.status === "transitioning"}
-      >
-        {failedAction === "signout" ? "Retry sign out" : "Retry connection"}
-      </button>
-    </section>
+    <StatusScreen>
+      <Banner
+        status="error"
+        collapsible={false}
+        title={
+          failedAction === "signout"
+            ? "Could not sign out of BandChat"
+            : "Could not connect BandChat"
+        }
+        description={<span role="alert">{failure.message}</span>}
+        endContent={
+          <Button
+            label={failedAction === "signout" ? "Retry sign out" : "Retry connection"}
+            onClick={() => void (failedAction === "signout" ? actions.signOut() : connect(true))}
+            isDisabled={snapshot.status === "transitioning"}
+          />
+        }
+      />
+    </StatusScreen>
   ) : (
-    <p className="loading-state">Connecting BandChat…</p>
+    <LoadingScreen label="Connecting BandChat…" />
   );
   const ready =
     !isPending && key && admitted === key && snapshot.account?.identity.subject === principal;
@@ -142,7 +174,15 @@ function AccountContext({
       <JazzSessionProvider session={jazz} fallback={fallback}>
         {ready ? (
           <>
-            {failure && <p role="alert">Could not update BandChat: {failure.message}</p>}
+            {failure && (
+              <Banner
+                status="error"
+                collapsible={false}
+                container="section"
+                title="Could not update BandChat"
+                description={<span role="alert">{failure.message}</span>}
+              />
+            )}
             {children}
           </>
         ) : (
@@ -152,6 +192,22 @@ function AccountContext({
     </AuthContext.Provider>
   );
 }
+function StatusScreen({ children }: React.PropsWithChildren) {
+  return (
+    <Center axis="both" padding={4} className="page-fill">
+      {children}
+    </Center>
+  );
+}
+
+function LoadingScreen({ label }: { label: string }) {
+  return (
+    <StatusScreen>
+      <Spinner label={label} />
+    </StatusScreen>
+  );
+}
+
 async function requireBetterAuthToken(): Promise<string> {
   const token = await getJwtFromBetterAuth();
   if (!token) throw new Error("Better Auth did not provide a Jazz session token.");
