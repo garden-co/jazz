@@ -1,5 +1,31 @@
 impl PeerState {
+    #[track_caller]
     fn record_outgoing_view_update_metadata(&mut self, update: &SyncMessage) {
+        if let SyncMessage::ViewUpdate(view) = update {
+            let summarize = |rows: &[crate::protocol::SupportingRow]| {
+                rows.iter()
+                    .map(|row| {
+                        let time = format!("{:?}", row.version.tx.time);
+                        format!(
+                            "{}:{}:{}",
+                            &*row.version_table,
+                            &format!("{:?}", row.row)[..16],
+                            &time[time.len().saturating_sub(8)..]
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            eprintln!(
+                "DIAG3816S out sub={:?} at={} snapshot={} opening_pending={} adds=[{}] removes=[{}]",
+                view.subscription,
+                std::panic::Location::caller(),
+                view.supporting_rows.is_snapshot(),
+                view.peer_payload_inventory.opening_pending,
+                summarize(view.supporting_rows.added_rows()),
+                summarize(view.supporting_rows.removed_rows()),
+            );
+        }
         if let SyncMessage::ViewUpdate(view) = update
             && view.supporting_rows.is_snapshot()
             && !view.peer_payload_inventory.opening_pending
