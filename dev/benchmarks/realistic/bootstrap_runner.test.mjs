@@ -97,8 +97,16 @@ test("runner manifest detects modified, missing, and unmanifested package files"
   fs.writeFileSync(path.join(packageDir, "config.sh"), "verified config\n");
   fs.writeFileSync(path.join(packageDir, "bin", "Runner.Listener"), "verified listener\n");
 
+  fs.chmodSync(path.join(packageDir, "bin"), 0o755);
+  fs.chmodSync(path.join(packageDir, "config.sh"), 0o644);
+  fs.chmodSync(path.join(packageDir, "bin", "Runner.Listener"), 0o644);
   try {
     assert.equal(helper(root, "manifest", packageDir, manifest).status, 0);
+    assert.equal(
+      fs.readFileSync(manifest, "utf8"),
+      fs.readFileSync(new URL("./bootstrap_runner_manifest_v1.json", import.meta.url), "utf8"),
+      "format-1 manifest bytes remain canonical",
+    );
     const verified = helper(root, "verify", packageDir, manifest);
     assert.equal(verified.status, 0, verified.stderr);
     fs.writeFileSync(path.join(packageDir, "config.sh"), "changed config\n");
@@ -155,6 +163,45 @@ test("archive extraction rejects traversal and refuses a nonempty staging direct
     assert.notEqual(traversal.status, 0, "path traversal archive is rejected");
     assert.equal(fs.existsSync(outside), false, "rejected archive created no file outside staging");
   } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("archive extraction accepts one trailing slash on directories only", () => {
+  const root = temporaryDirectory("jazz-bootstrap-directory-slash-");
+  const archive = path.join(root, "directory.tar.gz");
+  const staging = path.join(root, "staging");
+  const source = `import io, tarfile
+t = tarfile.open(${JSON.stringify(archive)}, "w:gz")
+directory = tarfile.TarInfo("bin/")
+directory.type = tarfile.DIRTYPE
+t.addfile(directory)
+payload = tarfile.TarInfo("bin/tool")
+payload.size = 4
+t.addfile(payload, io.BytesIO(b"safe"))
+t.close()`;
+  const created = spawnSync("python3", ["-c", source], { encoding: "utf8" });
+  assert.equal(created.status, 0, created.stderr);
+
+  try {
+    const extracted = helper(root, "extract", archive, staging);
+    assert.equal(extracted.status, 0, extracted.stderr);
+    assert.equal(fs.readFileSync(path.join(staging, "bin", "tool"), "utf8"), "safe");
+
+    const fileArchive = path.join(root, "file-slash.tar.gz");
+    const fileSource = `import io, tarfile
+t = tarfile.open(${JSON.stringify(fileArchive)}, "w:gz")
+payload = tarfile.TarInfo("file/")
+payload.size = 4
+t.addfile(payload, io.BytesIO(b"evil"))
+t.close()`;
+    const fileCreated = spawnSync("python3", ["-c", fileSource], { encoding: "utf8" });
+    assert.equal(fileCreated.status, 0, fileCreated.stderr);
+    const rejected = helper(root, "extract", fileArchive, path.join(root, "file-staging"));
+    assert.notEqual(rejected.status, 0, "trailing slash is not normalized for regular files");
+    assert.equal(fs.existsSync(path.join(root, "file-staging", "file")), false);
+  } finally {
+    makeRemovable(root);
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
@@ -330,7 +377,31 @@ function bootstrapFixture() {
     "#!/bin/sh\necho 'wasm-pack 0.13.1'\n",
     { mode: 0o755 },
   );
-  fs.mkdirSync(path.join(root, "var", "lib", "actions-runner"), { recursive: true });
+  const rustupHome = path.join(home, ".rustup");
+  fs.mkdirSync(path.join(rustupHome, "toolchains", "1.93.1", "lib"), { recursive: true });
+  fs.writeFileSync(path.join(rustupHome, "settings.toml"), 'default_toolchain = "1.93.1"\n');
+  fs.writeFileSync(
+    path.join(rustupHome, "toolchains", "1.93.1", "lib", "toolchain"),
+    "pinned toolchain fixture\n",
+  );
+  const toolchainManifestDir = path.join(
+    root,
+    "var",
+    "lib",
+    "actions-runner",
+    ".toolchain-integrity",
+  );
+  fs.mkdirSync(toolchainManifestDir, { recursive: true });
+  for (const [name, directory] of [
+    ["cargo-bin", path.join(home, ".cargo", "bin")],
+    ["rustup-home", rustupHome],
+  ]) {
+    const manifestPath = path.join(toolchainManifestDir, `${name}.json`);
+    const manifest = helper(root, "manifest", directory, manifestPath);
+    assert.equal(manifest.status, 0, manifest.stderr);
+    fs.chmodSync(manifestPath, 0o444);
+  }
+  fs.chmodSync(toolchainManifestDir, 0o755);
   fs.writeFileSync(path.join(root, "var", "lib", "actions-runner", ".os-dependencies-v1"), "");
   for (const directory of [
     path.join(root, "opt"),
@@ -655,6 +726,70 @@ test("bootstrap entry reuses complete pinned state offline without changing its 
     assert.doesNotMatch(events, /^(curl|apt-get):/m);
     assert.match(events, /^svc:start$/m);
     assert.equal(fs.readFileSync(manifestPath, "utf8"), manifestBefore);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("bootstrap refuses a modified same-version Rustup before invoking it", () => {
+  const fixture = bootstrapFixture();
+  try {
+    const rustup = path.join(
+      fixture.root,
+      "home",
+      os.userInfo().username,
+      ".cargo",
+      "bin",
+      "rustup",
+    );
+    const marker = path.join(fixture.root, "rustup-executed");
+    fs.writeFileSync(
+      rustup,
+      `#!/bin/sh\nprintf executed > '${marker}'\ncase "$*" in *'toolchain list'*) echo 1.93.1;; *'target list'*) echo wasm32-unknown-unknown;; *) exit 92;; esac\n`,
+      { mode: 0o755 },
+    );
+
+    const result = fixture.invoke({}, fixture.recordAllowlist());
+    assert.notEqual(
+      result.status,
+      0,
+      "modified Rustup is rejected despite reporting the pinned version",
+    );
+    assert.equal(fs.existsSync(marker), false, "modified Rustup is never invoked");
+    assert.doesNotMatch(fs.readFileSync(fixture.trace, "utf8"), /^svc:start$/m);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("bootstrap refuses a modified same-version wasm-pack before invoking it", () => {
+  const fixture = bootstrapFixture();
+  try {
+    const wasmPack = path.join(
+      fixture.root,
+      "home",
+      os.userInfo().username,
+      ".cargo",
+      "bin",
+      "wasm-pack",
+    );
+    const marker = path.join(fixture.root, "wasm-pack-executed");
+    fs.writeFileSync(
+      wasmPack,
+      `#!/bin/sh\nprintf executed > '${marker}'\necho 'wasm-pack 0.13.1'\n`,
+      {
+        mode: 0o755,
+      },
+    );
+
+    const result = fixture.invoke({}, fixture.recordAllowlist());
+    assert.notEqual(
+      result.status,
+      0,
+      "modified wasm-pack is rejected despite reporting the pinned version",
+    );
+    assert.equal(fs.existsSync(marker), false, "modified wasm-pack is never invoked");
+    assert.doesNotMatch(fs.readFileSync(fixture.trace, "utf8"), /^svc:start$/m);
   } finally {
     fixture.cleanup();
   }
