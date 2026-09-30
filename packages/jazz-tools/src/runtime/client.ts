@@ -1321,7 +1321,7 @@ export class JazzClient {
     return this;
   }
 
-  private updateAuthSnapshot(update: AuthUpdate): void {
+  private updateAuthSnapshot(update: AuthUpdate, updateRuntime = true): void {
     const previousJwtToken = this.context.jwtToken;
     const previousCookieSession = this.context.cookieSession;
     const previousTrustedReservedSession = getTrustedReservedSession(this.context);
@@ -1339,7 +1339,9 @@ export class JazzClient {
 
     try {
       this.resolvedSession = this.resolveSessionFromContext();
-      this.runtime.updateAuth(JSON.stringify(this.buildTransportAuthPayload()));
+      if (updateRuntime) {
+        this.runtime.updateAuth(JSON.stringify(this.buildTransportAuthPayload()));
+      }
     } catch (error) {
       this.context.jwtToken = previousJwtToken;
       this.context.cookieSession = previousCookieSession;
@@ -1351,6 +1353,11 @@ export class JazzClient {
 
   updateAuthToken(jwtToken?: string): void {
     this.updateAuthSnapshot({ mode: "bearer", jwtToken });
+  }
+
+  /** @internal Accept an auth update already applied by the owning connection. */
+  acceptAuthUpdate(update: AuthUpdate): void {
+    this.updateAuthSnapshot(update, false);
   }
 
   /** @internal Update a token minted by a dedicated first-party reserved auth flow. */

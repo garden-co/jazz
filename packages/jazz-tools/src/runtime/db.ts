@@ -279,13 +279,11 @@ export interface DbSubscriptionSource {
   all?<T extends { id: string }>(
     query: QueryBuilder<T>,
     options?: QueryOptions,
-    session?: Session,
   ): Promise<T[]> | T[];
   subscribeDelta<T extends { id: string }>(
     query: QueryBuilder<T>,
     callbacks: ((delta: SubscriptionDelta<T>) => void) | DbDeltaSubscriptionCallbacks<T>,
     options?: QueryOptions,
-    session?: Session,
   ): SubscriptionHandle;
 }
 
@@ -1678,10 +1676,10 @@ export class Db {
         inspectorAttachmentRequested
           ? this.allFromInspectorAttachment(query, options)
           : this.allInternal(query, lowerPublicDbQueryOptions(options)),
-      subscribeDelta: (query, callback, options, session) =>
+      subscribeDelta: (query, callback, options) =>
         inspectorAttachmentRequested
-          ? this.subscribeFromInspectorAttachment(query, callback, options, session)
-          : this.subscribeDelta(query, callback, lowerPublicDbQueryOptions(options), session),
+          ? this.subscribeFromInspectorAttachment(query, callback, options)
+          : this.subscribeDelta(query, callback, lowerPublicDbQueryOptions(options)),
     });
   }
 
@@ -1746,13 +1744,12 @@ export class Db {
     query: QueryBuilder<T>,
     callback: ((delta: SubscriptionDelta<T>) => void) | DbDeltaSubscriptionCallbacks<T>,
     options?: QueryOptions,
-    session?: Session,
   ): SubscriptionHandle {
     let inner: SubscriptionHandle | null = null;
     let cancelled = false;
     const ready = this.inspectorAttachmentOptions(query, options).then((prepared) => {
       if (cancelled) return;
-      inner = this.subscribeDelta(query, callback, prepared, session);
+      inner = this.subscribeDelta(query, callback, prepared);
       return inner.ready;
     });
     const handle = (() => {
@@ -1829,37 +1826,27 @@ export class Db {
     publish();
   }
 
-  protected applyAuthUpdate(
-    token: string | null,
-    trustedReservedSession?: Session,
-    nativeAccountRefresh = false,
-  ): boolean {
-    if (!nativeAccountRefresh) this.runtimeSource.assertAuthUpdateAllowed();
+  protected applyAuthUpdate(token: string | null, trustedReservedSession?: Session): boolean {
+    this.runtimeSource.assertAuthUpdateAllowed();
     const jwtToken = token ?? undefined;
     const previousToken = this.config.jwtToken;
     const previousCookieSession = this.config.cookieSession;
     const previousTrustedReservedSession = getTrustedReservedSession(this.config);
-    const nextConfig = {
-      ...this.config,
-      jwtToken,
-      cookieSession: undefined,
-    } as DbConfig;
-    setTrustedReservedSession(nextConfig, trustedReservedSession);
     const credentialsChanged =
-      previousToken !== nextConfig.jwtToken ||
+      previousToken !== jwtToken ||
       previousCookieSession !== undefined ||
       JSON.stringify(previousTrustedReservedSession) !== JSON.stringify(trustedReservedSession);
     if (!credentialsChanged && this.authStateStore.getState().error === undefined) return false;
 
-    if (!nativeAccountRefresh) {
-      if (!this.authStateStore.validateJwtToken(jwtToken, trustedReservedSession)) return false;
-      this.connection.updateAuth({
-        mode: "bearer",
-        jwtToken,
-        trustedReservedSession,
-      });
-    }
+    if (!this.authStateStore.validateJwtToken(jwtToken, trustedReservedSession)) return false;
+    this.connection.updateAuth({ mode: "bearer", jwtToken, trustedReservedSession });
+    this.publishAuthUpdate(jwtToken, trustedReservedSession);
+    return true;
+  }
 
+  private publishAuthUpdate(jwtToken?: string, trustedReservedSession?: Session): void {
+    const nextConfig = { ...this.config, jwtToken, cookieSession: undefined } as DbConfig;
+    setTrustedReservedSession(nextConfig, trustedReservedSession);
     const nextInternalSession = resolveClientInternalSessionSync(nextConfig);
     this.config.jwtToken = jwtToken;
     this.config.cookieSession = undefined;
@@ -1867,7 +1854,6 @@ export class Db {
     this.publishAuthStateWithInternalSession(nextInternalSession, () => {
       this.authStateStore.applyJwtToken(jwtToken, trustedReservedSession);
     });
-    return true;
   }
 
   protected applyCookieSessionUpdate(session: Session | null): boolean {
@@ -1990,8 +1976,9 @@ export class Db {
               "local-first",
             )
           : undefined;
-      const nativeRefresh = this.runtimeSource.refreshAccountToken(token);
-      this.applyAuthUpdate(token, reserved ?? undefined, nativeRefresh);
+      if (!this.authStateStore.validateJwtToken(token, reserved ?? undefined)) return token;
+      this.connection.refreshAccountAuth(token, reserved ?? undefined);
+      this.publishAuthUpdate(token, reserved ?? undefined);
       return token;
     } catch (error) {
       this.markUnauthenticated("invalid");
@@ -2736,7 +2723,7 @@ export class Db {
     const bufferedDeltas: SubscriptionDelta<T>[] = [];
 
     const queryOptions = nativeDbQueryOptions(query._schema, builtQuery.table, options);
-    const context = this.getAccessContext();
+    const readSession = this.getAccessContext()?.readSession ?? session;
     type NativeSubscription = {
       id: number | null;
       installing: boolean;
@@ -2878,7 +2865,7 @@ export class Db {
             },
           },
           subscriptionOptions,
-          context?.readSession ?? session,
+          readSession,
         );
       } catch (error) {
         subscription.installing = false;
