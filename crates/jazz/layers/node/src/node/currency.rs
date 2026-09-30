@@ -590,7 +590,9 @@ where
         // for it; each is one exact history point read. A listed row that is
         // no longer stored (evicted) is skipped.
         let mut versions = Vec::new();
-        let touched_rows = tx.touched_rows.decode()?;
+        let touched_rows = self
+            .load_tx_touched_rows(None, tx_id.time, tx.node_alias, &tx.touched_rows)
+            .await?;
         for (table_id, branch_key, row_uuid) in touched_rows.iter() {
             let storage_table = physical_history_table_name(table_id);
             let Some(record) = self
@@ -713,8 +715,10 @@ where
         {
             self.history_tx_authors.clear();
         }
-        self.history_tx_authors
-            .insert((tx_time, tx_node_alias), row_author_value(made_by)?);
+        self.history_tx_authors.insert(
+            (tx_time, tx_node_alias),
+            encode_history_updated_by(row_author_value(made_by)?)?,
+        );
         Ok(())
     }
 
@@ -748,20 +752,16 @@ where
         }
         let key = (version.tx_time(), version.tx_node_alias());
         let author = match self.history_tx_authors.get(&key) {
-            Some(author) => author.clone(),
+            Some(author) => Rc::clone(author),
             None => self.load_history_tx_author(batch, key).await?,
         };
         let input = version.record.borrowed();
         let descriptor = input.descriptor();
         let raw = descriptor.create_with_encoded_fields::<Error>(
-            input.raw().len() + 96,
+            input.raw().len() + author.len(),
             |index, output| {
                 if index == HistoryRowRecord::FIELD_UPDATED_BY_IDX {
-                    descriptor.encode_field_into(
-                        index,
-                        &Value::Nullable(Some(Box::new(author.clone()))),
-                        output,
-                    )?;
+                    output.extend_from_slice(&author);
                 } else {
                     let span = descriptor.field_span(input.raw(), index)?;
                     output.extend_from_slice(&input.raw()[span]);
@@ -780,7 +780,7 @@ where
         &mut self,
         batch: Option<&DatabaseBatch>,
         key: (TxTime, NodeAlias),
-    ) -> Result<Value, Error> {
+    ) -> Result<Rc<[u8]>, Error> {
         let primary_key = [Value::U64(key.0.0), Value::U64(key.1.0)];
         let raw = match batch {
             Some(batch) => {
@@ -797,13 +797,14 @@ where
         .ok_or(Error::InvalidStoredValue(
             "a history image without updated_by needs its transaction record",
         ))?;
-        let author = raw
-            .record()
-            .get_idx(TransactionRowRecord::FIELD_MADE_BY_IDX)?;
+        let author = encode_history_updated_by(
+            raw.record()
+                .get_idx(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
+        )?;
         if self.history_tx_authors.len() >= HISTORY_TX_AUTHOR_CACHE_MAX_ENTRIES {
             self.history_tx_authors.clear();
         }
-        self.history_tx_authors.insert(key, author.clone());
+        self.history_tx_authors.insert(key, Rc::clone(&author));
         Ok(author)
     }
 
@@ -1245,4 +1246,19 @@ where
             .await
             .map(Some)
     }
+}
+
+/// The encoded history `updated_by` field (`Nullable<RowAuthor>`) holding
+/// `author`. A variable field's bytes do not depend on its position, so one
+/// encoding serves every history table's field
+/// `HistoryRowRecord::FIELD_UPDATED_BY_IDX`, and resolving an image copies it
+/// instead of re-encoding the author.
+fn encode_history_updated_by(author: Value) -> Result<Rc<[u8]>, Error> {
+    let descriptor = records::RecordDescriptor::new([(
+        "updated_by",
+        crate::ids::RowAuthor::value_type().nullable(),
+    )]);
+    let mut encoded = Vec::new();
+    descriptor.encode_field_into(0, &Value::Nullable(Some(Box::new(author))), &mut encoded)?;
+    Ok(encoded.into())
 }

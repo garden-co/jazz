@@ -1072,10 +1072,63 @@ where
         Ok(self.database.apply_batch(batch).await?)
     }
 
-    /// Bring each transaction record touched by the open batch's history
-    /// writes up to date: its stored `touched_rows` (as staged in this batch)
-    /// plus the rows written since. A transaction without a record is
-    /// skipped: a history row is only reachable through its transaction.
+    /// The history rows a stored transaction lists: its inline cell, or its
+    /// `jazz_tx_touched_rows` prefix when the list spilled.
+    pub(in crate::node) async fn load_tx_touched_rows(
+        &self,
+        batch: Option<&DatabaseBatch>,
+        tx_time: TxTime,
+        node_alias: NodeAlias,
+        stored: &StoredTouchedRows,
+    ) -> Result<TouchedRows, Error> {
+        match stored.decode_inline()? {
+            Some(inline) => Ok(inline),
+            None => {
+                self.load_spilled_touched_rows(batch, tx_time, node_alias)
+                    .await
+            }
+        }
+    }
+
+    async fn load_spilled_touched_rows(
+        &self,
+        batch: Option<&DatabaseBatch>,
+        tx_time: TxTime,
+        node_alias: NodeAlias,
+    ) -> Result<TouchedRows, Error> {
+        let prefix = [Value::U64(tx_time.0), Value::U64(node_alias.0)];
+        let raws = match batch {
+            Some(batch) => {
+                self.database
+                    .primary_key_scan_raw_in_batch(batch, TX_TOUCHED_ROWS_TABLE, &prefix)
+                    .await?
+            }
+            None => {
+                self.database
+                    .primary_key_scan_raw(TX_TOUCHED_ROWS_TABLE, &prefix)
+                    .await?
+            }
+        };
+        let mut touched = TouchedRows::default();
+        for raw in raws {
+            let record = raw.record();
+            touched.insert(
+                PhysicalTableId(record.get_u64(2)?),
+                record.get_bytes(3)?.to_vec(),
+                RowUuid(record.get_uuid(4)?),
+            );
+        }
+        Ok(touched)
+    }
+
+    /// Bring each transaction's touched-row list up to date with the open
+    /// batch's history writes: its stored list (as staged in this batch)
+    /// plus the rows written since. A list of at most
+    /// `TOUCHED_ROWS_INLINE_MAX` rows is the record's `touched_rows` cell; a
+    /// longer one moves, whole, to `jazz_tx_touched_rows` and the cell becomes
+    /// null. Once spilled, new rows are added there without rewriting the
+    /// record. A transaction without a record is skipped: a history row is
+    /// only reachable through its transaction.
     async fn flush_tx_touched_rows(
         &mut self,
         batch: &mut DatabaseBatch,
@@ -1097,18 +1150,47 @@ where
             else {
                 continue;
             };
-            let stored = TouchedRows::from_transaction_record(record.borrowed())?;
-            let mut touched = if delta.clear {
-                TouchedRows::default()
+            let inline = TouchedRows::from_transaction_record(record.borrowed())?;
+            if delta.clear && inline.is_none() {
+                let spilled = self
+                    .load_spilled_touched_rows(Some(batch), tx_time, node_alias)
+                    .await?;
+                for (table_id, branch_key, row_uuid) in spilled.iter() {
+                    batch.delete(
+                        TX_TOUCHED_ROWS_TABLE,
+                        PrimaryKeyValue::Composite(vec![
+                            PrimaryKeyValue::U64(tx_time.0),
+                            PrimaryKeyValue::U64(node_alias.0),
+                            PrimaryKeyValue::U64(table_id.0),
+                            PrimaryKeyValue::Bytes(branch_key.to_vec()),
+                            PrimaryKeyValue::Uuid(row_uuid.0),
+                        ]),
+                    );
+                }
+            }
+            let stored = if delta.clear {
+                Some(TouchedRows::default())
             } else {
-                stored.clone()
+                inline
             };
+            let Some(stored) = stored else {
+                // Already spilled: add the new rows beside the old ones.
+                write_spilled_touched_rows(batch, tx_time, node_alias, &delta.rows);
+                continue;
+            };
+            let mut touched = stored.clone();
             touched.extend(&delta.rows);
-            if touched == stored {
+            if !delta.clear && touched == stored {
                 continue;
             }
             let mut values = record.to_values()?;
-            values[TransactionRowRecord::FIELD_TOUCHED_ROWS_IDX] = touched.to_value()?;
+            values[TransactionRowRecord::FIELD_TOUCHED_ROWS_IDX] =
+                if touched.len() <= TOUCHED_ROWS_INLINE_MAX {
+                    touched.inline_cell()?
+                } else {
+                    write_spilled_touched_rows(batch, tx_time, node_alias, &touched);
+                    Value::Nullable(None)
+                };
             batch.update("jazz_transactions", values);
         }
         Ok(())
@@ -1529,4 +1611,26 @@ fn coalesce_same_row_commits(
         }
     }
     merged
+}
+
+/// Stage one `jazz_tx_touched_rows` row per touched row (an upsert, so a row
+/// listed twice stays one row).
+fn write_spilled_touched_rows(
+    batch: &mut DatabaseBatch,
+    tx_time: TxTime,
+    node_alias: NodeAlias,
+    rows: &TouchedRows,
+) {
+    for (table_id, branch_key, row_uuid) in rows.iter() {
+        batch.update(
+            TX_TOUCHED_ROWS_TABLE,
+            vec![
+                Value::U64(tx_time.0),
+                Value::U64(node_alias.0),
+                Value::U64(table_id.0),
+                Value::Bytes(branch_key.to_vec()),
+                Value::Uuid(row_uuid.0),
+            ],
+        );
+    }
 }

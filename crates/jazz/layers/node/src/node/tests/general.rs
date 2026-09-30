@@ -1685,8 +1685,9 @@ fn every_history_write_is_listed_in_its_transaction_by_the_same_batch() {
             .unwrap()
             .unwrap()
             .touched_rows
-            .decode()
+            .decode_inline()
             .unwrap()
+            .expect("a one-row list is inline")
             .iter()
             .map(|(table, branch, row)| (table, branch.to_vec(), row))
             .collect::<Vec<_>>()
@@ -1704,6 +1705,56 @@ fn every_history_write_is_listed_in_its_transaction_by_the_same_batch() {
     assert!(node.tx_touched_dirty.is_empty());
     assert_eq!(listed(&mut node, tx_id), expected);
     assert_eq!(node.query_versions_for_tx(tx_id).unwrap().len(), 1);
+}
+
+#[test]
+fn a_transaction_touching_many_rows_spills_its_list_and_keeps_its_record_small() {
+    // Internal receipt for SPEC 2 §2.8: transaction records are read on hot
+    // paths, so a list longer than `TOUCHED_ROWS_INLINE_MAX` moves to
+    // `jazz_tx_touched_rows` rather than growing the record, and a
+    // rejection removes it with the history rows it lists.
+    let (_temp_dir, mut node) = open_node();
+    let rows = (0..=TOUCHED_ROWS_INLINE_MAX as u8)
+        .map(|byte| row(byte.wrapping_add(0x40)))
+        .collect::<Vec<_>>();
+    let tx_id = node
+        .commit_mergeable_many_settled(
+            rows.iter()
+                .map(|row| {
+                    MergeableCommit::new("todos", *row, 10).cells(title_cells("spilled"))
+                })
+                .collect(),
+        )
+        .unwrap();
+    assert!(node.tx_touched_dirty.is_empty());
+    let stored = node.query_transaction(tx_id).unwrap().unwrap();
+    assert!(stored.touched_rows.decode_inline().unwrap().is_none());
+    let spilled = |node: &mut NodeState| {
+        node.database
+            .primary_key_scan_raw(TX_TOUCHED_ROWS_TABLE, &[])
+            .unwrap()
+            .len()
+    };
+    assert_eq!(spilled(&mut node), rows.len());
+    assert_eq!(
+        node.query_versions_for_tx(tx_id)
+            .unwrap()
+            .into_iter()
+            .map(|version| version.row_uuid())
+            .collect::<Vec<_>>(),
+        rows
+    );
+
+    node.apply_fate_update(
+        tx_id,
+        Fate::Rejected(RejectionReason::ExclusiveConflict),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(node.tx_touched_dirty.is_empty());
+    assert_eq!(spilled(&mut node), 0);
+    assert!(node.query_versions_for_tx(tx_id).unwrap().is_empty());
 }
 
 #[test]

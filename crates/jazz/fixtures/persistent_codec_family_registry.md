@@ -39,4 +39,6 @@ in favour of `jazz.history-version-current.v3`, whose `jazz_transactions`
 records list the rows each transaction touched. Implicit history
 `updated_by` (2026-09-30) then retired the unreleased `v3` in favour of
 `jazz.history-version-current.v4`: a history image stores `updated_by` only
-when it differs from its transaction's `made_by`.
+when it differs from its transaction's `made_by`, and a transaction's
+`touched_rows` list longer than 32 rows moves to `jazz_tx_touched_rows` so
+transaction records stay small.

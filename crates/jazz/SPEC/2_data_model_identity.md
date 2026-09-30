@@ -411,17 +411,26 @@ and a receiver never infers one from durability alone. A malformed or stale
 receipt that happens to carry a global-time field with a rejection still cannot
 make that transaction a content or deletion winner (ch. 3).
 
-`touched_rows` (position 19, `Array<{physical_table_id: U64, branch_key:
-Bytes, row_uuids: Array<Uuid>}>`) is node-local storage, never part of a
-receipt. It lists the history rows this node stored for the transaction,
-grouped by physical table and branch in ascending order with strictly
-ascending, unique row UUIDs per group; empty groups and any other order are
-rejected at decode. It is a superset: a listed row whose history image was
-later evicted is skipped on read, and rejection clears the list together with
-the rejected images. Its size is bounded by the transaction's writes (at most
-`MAX_COMMIT_UNIT_VERSIONS` rows, about 16 bytes per row plus about 20 bytes
-per group), so pending history stays findable by transaction until its fate
-arrives without a per-version index.
+`touched_rows` (position 19, `Nullable<Array<{physical_table_id: U64,
+branch_key: Bytes, row_uuids: Array<Uuid>}>>`) is node-local storage, never
+part of a receipt. It lists the history rows this node stored for the
+transaction, grouped by physical table and branch in ascending order with
+strictly ascending, unique row UUIDs per group; empty groups and any other
+order are rejected at decode. It is a superset: a listed row whose history
+image was later evicted is skipped on read, and rejection clears the list
+together with the rejected images. The cell holds at most 32 rows (about 16
+bytes per row plus about 20 bytes per group); a longer list is refused at
+decode. A transaction that touches more rows stores a null cell and lists
+every row in the node-local table `jazz_tx_touched_rows`, keyed `(tx_time:
+U64, tx_node_id: U64, physical_table_id: U64, branch_key: Bytes, row_uuid:
+Uuid)` with no other columns, so the transaction's rows are that key prefix.
+The list moves there whole when it outgrows the cell and stays there,
+growing in place; rejection deletes those rows with the images. Transaction
+records are read on hot paths (fates, view updates, covered-input checks),
+so their size stays bounded however many rows the transaction wrote, while
+pending history stays findable by transaction until its fate arrives without
+a per-version index. The list is written in the same batch as the history
+rows it names.
 
 Positions 5 through 8 are retained nullable layout slots, but the durable audit
 row writes them null in epoch 1. Exclusive snapshot/read/CAS evidence belongs to

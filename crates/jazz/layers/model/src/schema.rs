@@ -479,6 +479,7 @@ impl RuntimeSchema {
             catalogue_table(),
             catalogue_pointer_table(),
             transactions_table(),
+            tx_touched_rows_table(),
             rejected_transactions_table(),
         ]
     }
@@ -1463,7 +1464,8 @@ fn transactions_table() -> GrooveTableSchema {
             // node-local-derived: the history rows this node stored for the
             // transaction, grouped by physical lineage and branch. It replaces a
             // `by_tx` index over every history version (see `touched_rows_column`).
-            column("touched_rows", touched_rows_column()),
+            // Null when the list spilled to `jazz_tx_touched_rows`.
+            column("touched_rows", touched_rows_column().nullable()),
         ],
     )
     .with_primary_key(PrimaryKey::composite([
@@ -1471,6 +1473,31 @@ fn transactions_table() -> GrooveTableSchema {
         PrimaryKeyColumn::integer("node_id", IntegerKeyType::U64),
     ]))
     .with_index(GrooveIndexSchema::new("by_global_time", ["global_time"]))
+}
+
+/// `jazz_tx_touched_rows`: the touched-row list of a transaction that wrote
+/// more rows than its record lists inline, one row per touched history row.
+/// Its null `jazz_transactions.touched_rows` cell says the list lives here; a
+/// transaction's rows are the key prefix `(tx_time, tx_node_id)`. Keeping large
+/// lists out of the transaction record keeps every transaction read small.
+fn tx_touched_rows_table() -> GrooveTableSchema {
+    GrooveTableSchema::new(
+        "jazz_tx_touched_rows",
+        [
+            column("tx_time", GrooveColumnType::U64),
+            column("tx_node_id", GrooveColumnType::U64),
+            column("physical_table_id", GrooveColumnType::U64),
+            column("branch_key", GrooveColumnType::Bytes),
+            column("row_uuid", GrooveColumnType::Uuid),
+        ],
+    )
+    .with_primary_key(PrimaryKey::composite([
+        PrimaryKeyColumn::integer("tx_time", IntegerKeyType::U64),
+        PrimaryKeyColumn::integer("tx_node_id", IntegerKeyType::U64),
+        PrimaryKeyColumn::integer("physical_table_id", IntegerKeyType::U64),
+        PrimaryKeyColumn::bytes("branch_key"),
+        PrimaryKeyColumn::uuid("row_uuid"),
+    ]))
 }
 
 /// `jazz_transactions.touched_rows`: the rows this node stored in history for

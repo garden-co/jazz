@@ -610,7 +610,8 @@ pub struct NodeState<S = BoxedStorage> {
     /// `made_by` of transactions whose history images omitted `updated_by`
     /// (`resolve_history_updated_by`). Bounded; transaction authors never
     /// change, so entries never go stale.
-    history_tx_authors: BTreeMap<(TxTime, NodeAlias), Value>,
+    /// Each entry is the encoded field, ready to splice into an image.
+    history_tx_authors: BTreeMap<(TxTime, NodeAlias), Rc<[u8]>>,
     /// Set while this node (Core) mints a seq for an incoming patch.
     minting_global_time: bool,
 
