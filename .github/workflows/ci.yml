@@ -57,7 +57,6 @@ jobs:
     timeout-minutes: 2
     permissions:
       contents: read
-      statuses: write
     steps:
       - name: Require the selected CI suite
         env:
@@ -67,24 +66,31 @@ jobs:
           test "${UNTRUSTED_RESULT}:${TRUSTED_RESULT}" = "success:skipped" || \
             test "${UNTRUSTED_RESULT}:${TRUSTED_RESULT}" = "skipped:success"
 
-      # Check runs from workflow_dispatch are not associated with any pull
-      # request, so they never satisfy the required `test-rust` check. The
-      # release workflow dispatches CI on the bot-opened Version Packages PR,
-      # whose own pull_request runs wait for manual approval (#3790). Mirror
-      # this job's result as a commit status on the same SHA, which rulesets
-      # match regardless of which event produced it.
-      - name: Report test-rust as a commit status for dispatched runs
-        if: always() && github.event_name == 'workflow_dispatch'
+
+  # Check runs from workflow_dispatch are not associated with any pull request,
+  # so they never satisfy the required `test-rust` check. The release workflow
+  # dispatches CI on the bot-opened Version Packages PR, whose own pull_request
+  # runs wait for manual approval (#3790). Mirror the dispatched result as a
+  # commit status on the same SHA, which rulesets match whatever event ran it.
+  report-dispatched-test-rust:
+    if: always() && github.event_name == 'workflow_dispatch'
+    needs: [test-rust]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 2
+    permissions:
+      statuses: write
+    steps:
+      - name: Report test-rust as a commit status
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}
-          JOB_STATUS: ${{ job.status }}
+          RESULT: ${{ needs.test-rust.result }}
           TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          if [ "${JOB_STATUS}" = success ]; then state=success; else state=failure; fi
+          if [ "${RESULT}" = success ]; then state=success; else state=failure; fi
           gh api --method POST "repos/${REPO}/statuses/${SHA}" \
             -f state="${state}" \
             -f context=test-rust \
-            -f description="Dispatched CI ${state}" \
+            -f description="Dispatched CI: ${RESULT}" \
             -f target_url="${TARGET_URL}"
