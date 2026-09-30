@@ -66,7 +66,8 @@ async function invite(page: Page, accountId: string, role: "editor" | "viewer") 
     await page.getByRole("option", { name: /Viewer/ }).click();
   }
   await dialog.getByRole("button", { name: "Add collaborator" }).click();
-  await expect(dialog.getByText(`Account ${accountId.slice(0, 8)}`)).toBeVisible({
+  // Exact: the member row's "Remove" button carries the same name in its tooltip.
+  await expect(dialog.getByText(`Account ${accountId.slice(0, 8)}`, { exact: true })).toBeVisible({
     timeout: TIMEOUT,
   });
   await page.keyboard.press("Escape");
@@ -74,7 +75,12 @@ async function invite(page: Page, accountId: string, role: "editor" | "viewer") 
 
 async function openSession(page: Page) {
   await page.reload();
-  await page.getByRole("link", { name: "Late-night rehearsal" }).click();
+  // ClickableCard's link is a visually hidden 1px element (the card surface
+  // handles pointer clicks), so it never receives a pointer hit and a mouse
+  // click on it cannot land. Activate it the way keyboard and screen reader
+  // users do.
+  await page.getByRole("link", { name: "Late-night rehearsal" }).press("Enter");
+  await expect(page).toHaveURL(/\/dashboard\/[^/]+$/, { timeout: TIMEOUT });
   await expect(page.getByRole("heading", { name: "Late-night rehearsal" })).toBeVisible({
     timeout: TIMEOUT,
   });
@@ -220,7 +226,7 @@ test("editor edit burst preserves a readable pattern", async ({ browser }) => {
 
     const edits = TRACKS.flatMap(({ label: name }) =>
       Array.from({ length: 8 }, (_, step) =>
-        editor.page.getByRole("button", { name: `${name}, step ${step + 1}` }),
+        editor.page.getByRole("button", { name: `${name}, step ${step + 1}`, exact: true }),
       ),
     );
     await Promise.all(edits.map((pad) => pad.click()));
