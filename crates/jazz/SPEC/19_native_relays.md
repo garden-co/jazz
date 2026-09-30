@@ -215,12 +215,13 @@ The first public ABI is V1. It includes host-generated opaque admission
 capabilities and trusted revocation; no earlier implementation number or
 compatibility path is part of the released contract. ABI 2 (alpha.58) adds
 coded operation errors (response 25) as answers to existing commands; see
-§19.6 ("Coded operation errors"). The exported constant keeps its `NATIVE_RELAY_ABI_V1` name and carries
-the current version.
+§19.6 ("Coded operation errors").
 
 Numeric ABI 3 adds the versioned terminal-event envelope and descriptor-owned
-logical layouts for descendant row payloads. The stable `NATIVE_RELAY_ABI_V1`
-export name remains unchanged; its value and accepted JavaScript range are 3.
+logical layouts for descendant row payloads. `NATIVE_RELAY_ABI_VERSION` carries
+the current numeric version; its value and accepted JavaScript range are 3.
+`NATIVE_RELAY_ABI_V1` remains a deprecated alias for source compatibility.
+Native hosts continue to query `jazz_native_relay_abi_version()`.
 
 The ABI stays coarse and binary:
 

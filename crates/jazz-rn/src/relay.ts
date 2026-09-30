@@ -1,5 +1,5 @@
 import nativeRelay from "./NativeJazzRelay";
-import { NATIVE_RELAY_ABI, NATIVE_RELAY_ABI_V1 } from "./native-relay-abi";
+import { NATIVE_RELAY_ABI } from './native-relay-abi';
 import { isRecord } from "./type-guards";
 
 /**
@@ -17,7 +17,11 @@ export interface NativeRelayAbiRange {
   maximum: number;
 }
 
-export { NATIVE_RELAY_ABI, NATIVE_RELAY_ABI_V1 };
+export {
+  NATIVE_RELAY_ABI,
+  NATIVE_RELAY_ABI_V1,
+  NATIVE_RELAY_ABI_VERSION,
+} from './native-relay-abi';
 
 function requireNativeRelay() {
   if (nativeRelay == null) {
