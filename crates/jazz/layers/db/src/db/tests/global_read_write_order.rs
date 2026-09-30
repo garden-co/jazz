@@ -4,9 +4,11 @@
 //! node's own writes only when they reach the authority first. An ordinary
 //! commit queued behind a large value that is still uploading is held back
 //! while an open is not (garden-co/jazz#3839). These tests drive the upload at
-//! the peer protocol boundary to hold it deterministically.
+//! the peer protocol boundary to hold it deterministically: the public client
+//! API cannot pause a large value mid-upload or script an upload rejection.
 
 use super::*;
+use crate::model::test_support::AllowAll;
 
 fn music_schema() -> JazzSchema {
     build_public_db_test_schema(
@@ -139,6 +141,15 @@ impl Fixture {
     }
 }
 
+/// alice streams a track, then writes another; her Global read of `tracks`
+/// waits until both are on the wire, without spending its coverage budget,
+/// and then sees both.
+///
+/// ```text
+/// alice ──large track──► (held by core) ··· release ──► core
+/// alice ──plain track──────────────────────────────────► core
+/// alice ──read tracks── waits ─────────────── open ────► core ──► 2 rows
+/// ```
 #[test]
 fn same_table_global_read_waits_for_a_held_large_value_and_then_sees_it() {
     let fixture = Fixture::holding_large_values(0xd1);
@@ -193,6 +204,8 @@ fn same_table_global_read_waits_for_a_held_large_value_and_then_sees_it() {
     );
 }
 
+/// alice's Global read of `albums` answers while her `tracks` large value is
+/// still held: writes to other tables never delay a read.
 #[test]
 fn global_read_of_an_unrelated_table_proceeds_while_a_large_value_uploads() {
     let fixture = Fixture::holding_large_values(0xd3);
@@ -219,6 +232,9 @@ fn global_read_of_an_unrelated_table_proceeds_while_a_large_value_uploads() {
     );
 }
 
+/// alice imports albums and streamed tracks in turn. A Global read of
+/// `albums` waits for the album written before it, not for the writes the
+/// import issues after the read started, so a long import cannot starve it.
 #[test]
 fn interleaved_import_read_waits_only_for_the_writes_before_it() {
     let fixture = Fixture::holding_large_values(0xd5);
@@ -265,6 +281,9 @@ fn interleaved_import_read_waits_only_for_the_writes_before_it() {
     let _ = later_track;
 }
 
+/// When the upstream rejects alice's large value, her Global read of that
+/// table, waiting on it, fails at once with an explicit error rather than
+/// answering without the write.
 #[test]
 fn failed_large_value_upload_rejects_a_waiting_global_read() {
     let schema = music_schema();
