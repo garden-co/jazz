@@ -65,6 +65,10 @@ struct EvaluationSession<'a> {
     work_queue: EvaluationWorkQueue,
     /// How root outputs present indirect values to the caller.
     root_indirect_values: RootIndirectValues,
+    /// Roots hydrated only to order another output's terminal. Their records
+    /// are read for row identity alone and never published, so their
+    /// indirect values stay physical whatever `root_indirect_values` says.
+    ordering_only_roots: HashSet<NodeId>,
     /// Nodes that stay owned by the live runtime rather than this session.
     /// A binding attached to an already-maintained prepared shape brings the
     /// shared nodes up to date through an ordinary binding tick, then hydrates
@@ -1759,6 +1763,7 @@ impl<'a> EvaluationSession<'a> {
             evaluation_inputs: EvaluationInputs::default(),
             work_queue,
             root_indirect_values: RootIndirectValues::Materialize,
+            ordering_only_roots: HashSet::default(),
             borrowed: HashSet::default(),
         })
     }
@@ -1865,9 +1870,12 @@ impl<'a> EvaluationSession<'a> {
                 match result {
                     Ok(records) => {
                         if self.work_queue.is_root(node) {
-                            let materialized_fields = self
-                                .root_indirect_values
-                                .materialized_field_indices(&records.descriptor);
+                            let materialized_fields = if self.ordering_only_roots.contains(&node) {
+                                Some(Vec::new())
+                            } else {
+                                self.root_indirect_values
+                                    .materialized_field_indices(&records.descriptor)
+                            };
                             let mut materialized = Vec::with_capacity(records.deltas.len());
                             let mut blocked = false;
                             for delta in &records.deltas {
@@ -2090,8 +2098,17 @@ impl IvmRuntime {
             && roots.iter().copied().try_fold(false, |found, root| {
                 Ok::<_, IvmRuntimeError>(found || self.output_depends_on_aggregate(root)?)
             })?;
+        // A collector's ordering root carries every source field, but only
+        // its row identity orders the terminal snapshot. Rebuilding its large
+        // values would fetch every chunk of columns the output drops (#3830).
+        let ordering_only_roots = outputs
+            .values()
+            .filter_map(|output| output.root_ordering_node)
+            .filter(|ordering| outputs.values().all(|output| output.node != *ordering))
+            .collect::<HashSet<_>>();
         let mut session = EvaluationSession::hydration(self, roots, storage)?;
         session.root_indirect_values = root_indirect_values;
+        session.ordering_only_roots = ordering_only_roots;
         if !borrowed.is_empty() {
             // The attach tick advanced every shared node. The subscription's
             // own nodes may be resident from an earlier binding of the same
