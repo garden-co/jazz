@@ -65,12 +65,49 @@ struct EvaluationSession<'a> {
     work_queue: EvaluationWorkQueue,
     /// How root outputs present indirect values to the caller.
     root_indirect_values: RootIndirectValues,
+    /// Roots hydrated only to order another output's terminal. Their records
+    /// are read for row identity alone and never published, so their
+    /// indirect values stay physical whatever `root_indirect_values` says.
+    ordering_only_roots: HashSet<NodeId>,
     /// Nodes that stay owned by the live runtime rather than this session.
     /// A binding attached to an already-maintained prepared shape brings the
     /// shared nodes up to date through an ordinary binding tick, then hydrates
     /// against only its own binding. Those nodes' session state then covers
     /// one binding, so it must never replace the live state for all of them.
     borrowed: HashSet<NodeId>,
+}
+
+/// One root node's relational output retained while its publication waits
+/// for immutable chunks, with the materialized forms loaded so far.
+struct PendingSubscriptionOutput {
+    physical: Arc<RecordDeltas>,
+    materialized: Vec<(RootIndirectValues, Arc<RecordDeltas>)>,
+}
+
+impl PendingSubscriptionOutput {
+    fn new(physical: Arc<RecordDeltas>) -> Self {
+        Self {
+            physical,
+            materialized: Vec::new(),
+        }
+    }
+
+    fn materialized_as(&self, representation: &RootIndirectValues) -> Option<Arc<RecordDeltas>> {
+        self.materialized
+            .iter()
+            .find(|(candidate, _)| candidate == representation)
+            .map(|(_, records)| Arc::clone(records))
+    }
+
+    fn record_materialized(
+        &mut self,
+        representation: &RootIndirectValues,
+        records: Arc<RecordDeltas>,
+    ) {
+        if self.materialized_as(representation).is_none() {
+            self.materialized.push((representation.clone(), records));
+        }
+    }
 }
 
 pub(super) struct IncrementalEvaluation<'a> {
@@ -95,8 +132,9 @@ pub(super) struct IncrementalEvaluation<'a> {
     /// for immutable chunks. Re-evaluating after operator state advances can
     /// correctly yield an empty delta, so publication owns this exact value.
     /// Each entry is the physical output and, once loaded, its materialized
-    /// form. TopBy root keys are taken from the physical form (#3309).
-    pending_subscription_outputs: HashMap<NodeId, (Arc<RecordDeltas>, Option<Arc<RecordDeltas>>)>,
+    /// form for each root representation a subscriber of that node asked for.
+    /// TopBy root keys are taken from the physical form (#3309).
+    pending_subscription_outputs: HashMap<NodeId, PendingSubscriptionOutput>,
     terminal_deltas: HashMap<NodeId, TerminalDeltas>,
     root_ordering_windows: HashMap<NodeId, RootOrderingWindows>,
     notification_publication: Option<PublicationId>,
@@ -124,6 +162,14 @@ pub(super) struct IncrementalEvaluation<'a> {
     /// Affected shared terminals whose route barriers await this tick's
     /// deltas (#3288). Taken once the first frame completes.
     routed_terminals: Vec<NodeId>,
+    /// Completed nodes whose state this evaluation already wrote back to the
+    /// runtime while parked (#3815). A later evaluation may since have
+    /// advanced that live state, so the final install must skip them.
+    early_installed: HashSet<NodeId>,
+    /// Completed nodes this evaluation registered as temporal barriers
+    /// instead of writing them back (see [`Self::writes_back`]). Released to
+    /// their successors only once this evaluation installs or fails.
+    held_barriers: HashSet<NodeId>,
 }
 
 #[derive(Clone)]
@@ -225,6 +271,7 @@ impl PendingIncrementalState {
     /// installed; incremental evaluations can release nodes as they complete.
     fn release_temporal_successors(
         &mut self,
+        runtime: &IvmRuntime,
         evaluation_id: u64,
         nodes: impl IntoIterator<Item = NodeId>,
     ) {
@@ -241,7 +288,7 @@ impl PendingIncrementalState {
             if let Some(successor) = successor
                 && let Some(later) = self.evaluations.get_mut(&successor)
             {
-                later.work_queue_mut().temporal_ready(node);
+                later.temporal_ready(runtime, node);
             }
         }
     }
@@ -281,6 +328,19 @@ impl PendingEvaluation {
 
     fn has_resident_continuation(&self) -> bool {
         self.work_queue().has_resident_continuation()
+    }
+
+    /// Release this evaluation's temporal wait on `node`. The predecessor has
+    /// written its state for `node` back to `runtime` (or failed without
+    /// changing it), so an incremental evaluation first replaces the copy it
+    /// staged when it began, which predates that predecessor (#3815).
+    fn temporal_ready(&mut self, runtime: &IvmRuntime, node: NodeId) {
+        if let Self::Incremental(evaluation) = self
+            && evaluation.work_queue.is_temporally_waiting(node)
+        {
+            evaluation.restage_released_node(runtime, node);
+        }
+        self.work_queue_mut().temporal_ready(node);
     }
 }
 
@@ -728,6 +788,16 @@ impl EvaluationWorkQueue {
         }
     }
 
+    /// Whether `node` still waits on a predecessor and has not been evaluated.
+    /// A durable node is evaluated as the tick begins, before its temporal
+    /// blockers are attached, so it can carry a wait count while complete.
+    fn is_temporally_waiting(&self, node: NodeId) -> bool {
+        self.layout.slots.get(&node).is_some_and(|&slot| {
+            self.temporal_waiting[slot] > 0
+                && self.entries[self.task_slots[slot]] != EvaluationEntry::Complete
+        })
+    }
+
     fn temporal_ready(&mut self, node: NodeId) {
         let Some(&slot) = self.layout.slots.get(&node) else {
             return;
@@ -808,6 +878,10 @@ impl<'a> IncrementalEvaluation<'a> {
     ) -> Result<(), IvmRuntimeError> {
         let closure = runtime.graph.downstream_through_routes(touched);
         self.stage_newly_relevant_state(runtime, &closure)?;
+        // Nothing is written back while route barriers are pending (see
+        // `writes_back`), so this frame cannot evaluate a node that a later
+        // evaluation has already advanced from a written-back state.
+        debug_assert!(self.early_installed.is_empty());
         let mut roots = self.work_queue.layout.roots.clone();
         for node in &closure {
             let mut meta = self
@@ -1014,6 +1088,144 @@ impl<'a> IncrementalEvaluation<'a> {
             .retain(|node, _| !nodes.contains(node));
     }
 
+    /// Whether a completed node's state may be handed to later evaluations
+    /// while this one stays parked. A recursive node's body state lives in
+    /// child scopes it owns, and a first frame's nodes may be evaluated again
+    /// once its route barriers activate (#3288). Both stay temporal barriers
+    /// until the final install instead.
+    fn writes_back(&self, runtime: &IvmRuntime, node: NodeId) -> bool {
+        self.routed_terminals.is_empty()
+            && !runtime.graph.node(node).is_some_and(|graph_node| {
+                matches!(graph_node.descriptor.operator, OpType::Recursive(_))
+            })
+    }
+
+    /// Hand completed `nodes` to later evaluations while this one stays
+    /// parked (#3815). Nodes that can be written back are written back and
+    /// returned, to be released to their temporal successors. The others are
+    /// held until this evaluation installs.
+    fn write_back_or_hold(
+        &mut self,
+        runtime: &mut IvmRuntime,
+        nodes: impl IntoIterator<Item = NodeId>,
+    ) -> Vec<NodeId> {
+        let (written, held): (Vec<_>, Vec<_>) = nodes
+            .into_iter()
+            .partition(|node| self.writes_back(runtime, *node));
+        self.held_barriers.extend(held);
+        self.install_completed_nodes(runtime, written.iter().copied());
+        written
+    }
+
+    /// Write the state of completed `nodes` back to `runtime` while the rest
+    /// of this evaluation stays parked (#3815). A later evaluation then sees
+    /// these nodes as of this one, as it would had this evaluation installed.
+    ///
+    /// The state is written with this evaluation's overlays still layered on
+    /// their shared bases. Folding them here would copy every base still
+    /// shared with this evaluation's staged copy. The next evaluation that
+    /// installs the node folds them instead. The staged copies stay in place:
+    /// this evaluation's own incomplete consumers and its pending publication
+    /// still read their transitions. The final install skips these nodes.
+    fn install_completed_nodes(
+        &mut self,
+        runtime: &mut IvmRuntime,
+        nodes: impl IntoIterator<Item = NodeId>,
+    ) {
+        if self.discarded {
+            return;
+        }
+        let mut installed: HashSet<NodeId> = HashSet::default();
+        for node in nodes {
+            if !self.early_installed.insert(node) {
+                continue;
+            }
+            installed.insert(node);
+            let key = OperatorStateKey {
+                scope: ScopeId::root(),
+                node,
+            };
+            if let Some(state) = self.operator_states.get(&key) {
+                runtime.operator_states.insert(key, state.clone());
+            }
+            if let Some(keys) = self.arrangement_keys_by_input.get(&node) {
+                let mut live_keys: HashSet<ArrangementKey> = HashSet::default();
+                for key in keys.iter().filter(|key| key.scope == ScopeId::root()) {
+                    if let Some(state) = self.arrangement_states.get(key) {
+                        let mut state = state.clone();
+                        // The producer's transition belongs to this tick.
+                        state.value_mut().release_changes();
+                        runtime.arrangement_states.insert(key.clone(), state);
+                        live_keys.insert(key.clone());
+                    }
+                }
+                if !live_keys.is_empty() {
+                    runtime
+                        .arrangement_keys_by_input
+                        .entry(node)
+                        .or_default()
+                        .extend(live_keys);
+                }
+            }
+        }
+        if installed.is_empty() {
+            return;
+        }
+        let mut node_meta = installed
+            .iter()
+            .filter_map(|node| self.node_meta.get(node).map(|meta| (*node, meta.clone())))
+            .collect::<HashMap<_, _>>();
+        carry_live_node_lifecycle(&mut node_meta, runtime, &installed);
+        runtime.node_meta.extend(node_meta);
+    }
+
+    /// Replace the state staged for `node` with the live runtime's, once the
+    /// predecessor this evaluation waited on has written it back or installed
+    /// it (#3815). This evaluation has not evaluated `node` yet, so nothing it
+    /// staged for the node is its own work, except the input generation it
+    /// bumped. A recursive node also owns the arrangements of its child
+    /// scopes, and memo entries under them.
+    fn restage_released_node(&mut self, runtime: &IvmRuntime, node: NodeId) {
+        let key = OperatorStateKey {
+            scope: ScopeId::root(),
+            node,
+        };
+        match runtime.operator_states.get(&key) {
+            Some(state) => {
+                self.operator_states.insert(key, state.clone());
+            }
+            None => {
+                self.operator_states.remove(&key);
+            }
+        }
+        let owned = |key: &ArrangementKey| arrangement_owner(key) == node;
+        self.arrangement_states.retain(|key, _| !owned(key));
+        for keys in self.arrangement_keys_by_input.values_mut() {
+            keys.retain(|key| !owned(key));
+        }
+        // Child-scope arrangements are keyed by their body inputs, so find
+        // them by owner. This runs only when a temporal wait is released.
+        for (key, state) in runtime
+            .arrangement_states
+            .iter()
+            .filter(|&(key, _)| owned(key))
+        {
+            self.arrangement_states.insert(key.clone(), state.clone());
+            self.arrangement_keys_by_input
+                .entry(key.input)
+                .or_default()
+                .insert(key.clone());
+        }
+        carry_live_node_lifecycle(&mut self.node_meta, runtime, &HashSet::from([node]));
+        self.eval_memo
+            .retain(|key, _| key.node != node && key.scope.outermost() != Some(node));
+        self.eval_memo_bytes = self
+            .eval_memo
+            .values()
+            .map(|entry| entry.payload_bytes)
+            .sum();
+    }
+
     fn install(&mut self, runtime: &mut IvmRuntime) {
         if self.discarded {
             return;
@@ -1026,29 +1238,27 @@ impl<'a> IncrementalEvaluation<'a> {
         // than scanning every installed state afterwards.
         self.operator_states
             .retain(|key, _| key.scope == ScopeId::root());
+        // Nodes written back while this evaluation was parked may since have
+        // been advanced by a later evaluation. Their staged copies predate
+        // that, so installing them again would lose its changes (#3815).
+        let early_installed = std::mem::take(&mut self.early_installed);
+        if !early_installed.is_empty() {
+            self.operator_states
+                .retain(|key, _| !early_installed.contains(&key.node));
+            self.arrangement_states
+                .retain(|key, _| !early_installed.contains(&arrangement_owner(key)));
+            for keys in self.arrangement_keys_by_input.values_mut() {
+                keys.retain(|key| !early_installed.contains(&arrangement_owner(key)));
+            }
+            self.node_meta
+                .retain(|node, _| !early_installed.contains(node));
+        }
         // Drop the committed entries before folding staged COW state. This
         // makes recursive closures and arrangement bases uniquely owned while
         // leaving unrelated graph state untouched.
         for (key, state) in &mut self.operator_states {
             runtime.operator_states.remove(key);
-            if let OperatorState::Recursive(recursive) = state {
-                recursive.value_mut().commit_staged_positive();
-            }
-            if let OperatorState::TopBy(top_by) = state {
-                top_by.value_mut().commit_overlays();
-            }
-            if let OperatorState::ArgBy(arg_by) = state {
-                arg_by.value_mut().commit_overlay();
-            }
-            if let OperatorState::SemiJoin(semi_join) = state {
-                semi_join.commit_published_overlay();
-            }
-            if let OperatorState::AntiJoin(anti_join) = state {
-                anti_join.commit_published_overlay();
-            }
-            if let OperatorState::CollectBy(collect_by) = state {
-                collect_by.groups.commit_overlay();
-            }
+            commit_operator_state(state);
         }
         runtime
             .operator_states
@@ -1061,12 +1271,20 @@ impl<'a> IncrementalEvaluation<'a> {
         runtime
             .arrangement_states
             .extend(std::mem::take(&mut self.arrangement_states));
-        for node in self.arrangement_keys_by_input.keys() {
-            runtime.arrangement_keys_by_input.remove(node);
+        // Each input's key set is replaced, except for the keys of nodes
+        // written back earlier, which the live set keeps.
+        for (node, keys) in std::mem::take(&mut self.arrangement_keys_by_input) {
+            match runtime.arrangement_keys_by_input.get_mut(&node) {
+                Some(live) if !early_installed.is_empty() => {
+                    live.retain(|key| early_installed.contains(&arrangement_owner(key)));
+                    live.extend(keys);
+                }
+                _ => {
+                    runtime.arrangement_keys_by_input.insert(node, keys);
+                }
+            }
         }
-        runtime
-            .arrangement_keys_by_input
-            .extend(std::mem::take(&mut self.arrangement_keys_by_input));
+        self.early_installed = early_installed;
 
         // Tick deltas belong to the frame, not the retained hydration cache.
         // Previously we hashed/copied them into runtime only to evict them at
@@ -1280,10 +1498,13 @@ impl<'a> IncrementalEvaluation<'a> {
                 if !self.affected_nodes.contains(&output.node) {
                     continue;
                 }
-                let (physical_records, materialized) = if let Some((physical, materialized)) =
+                let (physical_records, materialized) = if let Some(pending) =
                     self.pending_subscription_outputs.get(&output.node)
                 {
-                    (Arc::clone(physical), materialized.clone())
+                    (
+                        Arc::clone(&pending.physical),
+                        pending.materialized_as(&subscription.root_indirect_values),
+                    )
                 } else {
                     let records = {
                         let mut future = evaluator.update_node(output.node);
@@ -1294,20 +1515,37 @@ impl<'a> IncrementalEvaluation<'a> {
                             }
                         }
                     };
-                    self.pending_subscription_outputs
-                        .insert(output.node, (Arc::clone(&records), None));
+                    self.pending_subscription_outputs.insert(
+                        output.node,
+                        PendingSubscriptionOutput::new(Arc::clone(&records)),
+                    );
                     (records, None)
                 };
+                // Each subscription publishes in the representation its
+                // initial snapshot used, so fields it keeps physical are never
+                // rebuilt, nor fetched, only to be dropped by its consumer.
                 let materialized = match materialized {
                     Some(records) => Ok(records),
-                    None => evaluator.materialize_indirect_input(&physical_records),
+                    None => match subscription
+                        .root_indirect_values
+                        .materialized_field_indices(&physical_records.descriptor)
+                    {
+                        None => evaluator.materialize_indirect_input(&physical_records),
+                        Some(fields) => {
+                            evaluator.materialize_indirect_field_indices(&physical_records, &fields)
+                        }
+                    },
                 };
                 let records = match materialized {
                     Ok(records) => {
-                        self.pending_subscription_outputs.insert(
-                            output.node,
-                            (Arc::clone(&physical_records), Some(Arc::clone(&records))),
-                        );
+                        if let Some(pending) =
+                            self.pending_subscription_outputs.get_mut(&output.node)
+                        {
+                            pending.record_materialized(
+                                &subscription.root_indirect_values,
+                                Arc::clone(&records),
+                            );
+                        }
                         records
                     }
                     Err(IvmRuntimeError::EvaluationBlocked) => {
@@ -1534,8 +1772,17 @@ impl<'a> IncrementalEvaluation<'a> {
         for subscription_id in dropped_subscriptions {
             runtime.unsubscribe(subscription_id);
         }
+        // A later evaluation may already have advanced a written-back node.
         debug_assert!(
-            runtime.affected_recursive_nodes_are_current(&self.affected_nodes, self.current_tick)
+            runtime.affected_recursive_nodes_are_current(
+                &self
+                    .affected_nodes
+                    .iter()
+                    .filter(|node| !self.early_installed.contains(*node))
+                    .copied()
+                    .collect(),
+                self.current_tick,
+            )
         );
         runtime.evict_eval_memo();
         if let Some(pending) = &self.pending_resident_publication
@@ -1705,6 +1952,7 @@ impl<'a> EvaluationSession<'a> {
             evaluation_inputs: EvaluationInputs::default(),
             work_queue,
             root_indirect_values: RootIndirectValues::Materialize,
+            ordering_only_roots: HashSet::default(),
             borrowed: HashSet::default(),
         })
     }
@@ -1811,9 +2059,12 @@ impl<'a> EvaluationSession<'a> {
                 match result {
                     Ok(records) => {
                         if self.work_queue.is_root(node) {
-                            let materialized_fields = self
-                                .root_indirect_values
-                                .materialized_field_indices(&records.descriptor);
+                            let materialized_fields = if self.ordering_only_roots.contains(&node) {
+                                Some(Vec::new())
+                            } else {
+                                self.root_indirect_values
+                                    .materialized_field_indices(&records.descriptor)
+                            };
                             let mut materialized = Vec::with_capacity(records.deltas.len());
                             let mut blocked = false;
                             for delta in &records.deltas {
@@ -2036,8 +2287,17 @@ impl IvmRuntime {
             && roots.iter().copied().try_fold(false, |found, root| {
                 Ok::<_, IvmRuntimeError>(found || self.output_depends_on_aggregate(root)?)
             })?;
+        // A collector's ordering root carries every source field, but only
+        // its row identity orders the terminal snapshot. Rebuilding its large
+        // values would fetch every chunk of columns the output drops (#3830).
+        let ordering_only_roots = outputs
+            .values()
+            .filter_map(|output| output.root_ordering_node)
+            .filter(|ordering| outputs.values().all(|output| output.node != *ordering))
+            .collect::<HashSet<_>>();
         let mut session = EvaluationSession::hydration(self, roots, storage)?;
         session.root_indirect_values = root_indirect_values;
+        session.ordering_only_roots = ordering_only_roots;
         if !borrowed.is_empty() {
             // The attach tick advanced every shared node. The subscription's
             // own nodes may be resident from an earlier binding of the same
@@ -2092,10 +2352,28 @@ impl IvmRuntime {
     }
 
     fn fail_evaluation_nodes(&mut self, failure: &EvaluationFailure) {
+        let affected = &failure.affected_nodes;
+        // A recursive node also owns the state of its child scopes, whose
+        // arrangements are keyed by their body inputs.
+        let owned_by_affected = |scope: ScopeId| {
+            scope
+                .outermost()
+                .is_some_and(|node| affected.contains(&node))
+        };
         self.operator_states
-            .retain(|key, _| !failure.affected_nodes.contains(&key.node));
-        self.remove_retained_eval_memos_for_nodes(&failure.affected_nodes);
-        for node in &failure.affected_nodes {
+            .retain(|key, _| !affected.contains(&key.node) && !owned_by_affected(key.scope));
+        self.remove_retained_eval_memos_for_nodes(affected);
+        let scoped_memos = self
+            .eval_memo_keys_by_node
+            .values()
+            .flatten()
+            .filter(|key| owned_by_affected(key.scope))
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in scoped_memos {
+            self.remove_retained_eval_memo(&key);
+        }
+        for node in affected {
             if let Some(keys) = self.arrangement_keys_by_input.remove(node) {
                 for key in keys {
                     self.arrangement_states.remove(&key);
@@ -2104,6 +2382,21 @@ impl IvmRuntime {
             if let Some(meta) = self.node_meta.get_mut(node) {
                 meta.input_signature = None;
                 meta.input_generation = meta.input_generation.saturating_add(1);
+            }
+        }
+        let scoped = self
+            .arrangement_states
+            .keys()
+            .filter(|key| owned_by_affected(key.scope))
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in scoped {
+            self.arrangement_states.remove(&key);
+            if let Some(keys) = self.arrangement_keys_by_input.get_mut(&key.input) {
+                keys.remove(&key);
+                if keys.is_empty() {
+                    self.arrangement_keys_by_input.remove(&key.input);
+                }
             }
         }
         for subscription in self.multisink_subscriptions.values_mut() {
@@ -2392,10 +2685,26 @@ impl IvmRuntime {
             Poll::Pending => {
                 evaluation.work_queue.discard_unregistered_completions();
                 evaluation.install_input_frontiers(self);
+                // Nothing waits on a node this evaluation completed before it
+                // parked, so the next write evaluates that node from the live
+                // runtime. Write the finished state back now, or that write
+                // would rerun its transitions from pre-park state (#3815).
+                let completed = evaluation.work_queue.complete_nodes().collect::<Vec<_>>();
+                evaluation.write_back_or_hold(self, completed);
+                // State this evaluation writes back or installs later is
+                // stamped at its tick. A later evaluation restages it, so it
+                // must begin at a later tick, or `Accumulate` would take that
+                // state for its own already-applied input and drop its delta.
+                self.current_tick = self.current_tick.max(evaluation.current_tick);
                 let mut pending = self.pending_incremental.0.borrow_mut();
                 let evaluation_id = pending.next_id;
                 pending.next_id = pending.next_id.saturating_add(1);
-                for node in evaluation.work_queue.incomplete_nodes() {
+                let registered = evaluation
+                    .work_queue
+                    .incomplete_nodes()
+                    .chain(evaluation.held_barriers.iter().copied())
+                    .collect::<Vec<_>>();
+                for node in registered {
                     pending
                         .waiters_by_node
                         .entry(node)
@@ -2565,9 +2874,26 @@ impl IvmRuntime {
             // a later incremental evaluation would run against the old live
             // runtime, then lose its changes when hydration installs. Treat
             // the whole session as one temporal barrier instead.
-            if matches!(evaluation, PendingEvaluation::Incremental(_)) {
-                let completed = evaluation.work_queue_mut().drain_completed_events();
-                state.release_temporal_successors(evaluation_id, completed);
+            if let PendingEvaluation::Incremental(incremental) = &mut evaluation {
+                let completed = incremental.work_queue.drain_completed_events();
+                // Successors resume from the live runtime, so a node's state
+                // must be there before its waiters are released (#3815).
+                match &progress {
+                    Poll::Ready(Ok(())) => {
+                        // Installed: every node, held ones included, is live.
+                        let mut released = completed;
+                        released.extend(incremental.held_barriers.drain());
+                        state.release_temporal_successors(self, evaluation_id, released);
+                    }
+                    Poll::Pending => {
+                        let released = incremental.write_back_or_hold(self, completed);
+                        state.release_temporal_successors(self, evaluation_id, released);
+                    }
+                    // A failed evaluation writes nothing more back. Its
+                    // failure branch resets and releases these with the
+                    // nodes it held.
+                    Poll::Ready(Err(_)) => incremental.held_barriers.extend(completed),
+                }
             }
             match progress {
                 Poll::Ready(Ok(())) => {
@@ -2585,7 +2911,7 @@ impl IvmRuntime {
                         if hydration.lifetime == SubscriptionLifetime::Retained {
                             hydration.session.install(self);
                         }
-                        state.release_temporal_successors(evaluation_id, completed);
+                        state.release_temporal_successors(self, evaluation_id, completed);
                         self.record_hydration_memo_metrics(&hydration.metrics);
                         self.evict_eval_memo();
                         match snapshot {
@@ -2612,7 +2938,7 @@ impl IvmRuntime {
                         }
                     }
                 }
-                Poll::Ready(Err(failure)) => {
+                Poll::Ready(Err(mut failure)) => {
                     if let PendingEvaluation::SubscriptionHydration(hydration) = &evaluation {
                         if let Some(subscription) =
                             self.multisink_subscriptions.get(&hydration.subscription_id)
@@ -2637,6 +2963,16 @@ impl IvmRuntime {
                             Poll::Ready(Err(failure.into_error())),
                         );
                     }
+                    // Held nodes were never installed, while the nodes this
+                    // evaluation wrote back carry its rows. Reset the held
+                    // ones too, or a later write would derive from their
+                    // state as of before this evaluation beside inputs as of
+                    // after it. Resetting makes that write rehydrate them.
+                    if let PendingEvaluation::Incremental(incremental) = &evaluation {
+                        failure
+                            .affected_nodes
+                            .extend(incremental.held_barriers.iter().copied());
+                    }
                     // A failed first-result session has not published mutable
                     // state. Its scoped error cannot invalidate live siblings.
                     if !matches!(&evaluation, PendingEvaluation::SubscriptionHydration(hydration)
@@ -2644,15 +2980,19 @@ impl IvmRuntime {
                     {
                         self.fail_evaluation_nodes(&failure);
                     }
-                    let released_nodes =
-                        if matches!(&evaluation, PendingEvaluation::SubscriptionHydration(_)) {
-                            evaluation.work_queue().registered_nodes()
-                        } else {
-                            evaluation
-                                .work_queue()
+                    let released_nodes = match &mut evaluation {
+                        PendingEvaluation::SubscriptionHydration(hydration) => {
+                            hydration.session.work_queue.registered_nodes()
+                        }
+                        PendingEvaluation::Incremental(incremental) => {
+                            let mut nodes = incremental
+                                .work_queue
                                 .incomplete_nodes()
-                                .collect::<Vec<_>>()
-                        };
+                                .collect::<Vec<_>>();
+                            nodes.extend(incremental.held_barriers.drain());
+                            nodes
+                        }
+                    };
                     for node in released_nodes {
                         let Some(waiters) = state.waiters_by_node.get_mut(&node) else {
                             continue;
@@ -2665,7 +3005,7 @@ impl IvmRuntime {
                         if let Some(successor) = successor
                             && let Some(later) = state.evaluations.get_mut(&successor)
                         {
-                            later.work_queue_mut().temporal_ready(node);
+                            later.temporal_ready(self, node);
                         }
                     }
                 }
@@ -2865,7 +3205,7 @@ impl IvmRuntime {
                     && let Some(successor) = successor
                     && let Some(later) = state.evaluations.get_mut(&successor)
                 {
-                    later.work_queue_mut().temporal_ready(node);
+                    later.temporal_ready(self, node);
                 }
             }
         }
@@ -3157,6 +3497,8 @@ impl IvmRuntime {
             persist_flush: None,
             discarded: false,
             routed_terminals: activation.routed.clone(),
+            early_installed: HashSet::default(),
+            held_barriers: HashSet::default(),
         })
     }
 
@@ -3541,8 +3883,14 @@ fn touched_route_barriers(
                 _ => None,
             }
         };
-        let records =
-            records.and_then(|records| evaluator.materialize_indirect_input(&records).ok());
+        // Only the route fields key a barrier. Rebuilding the rest of the
+        // record would read, and on a miss request, large values that no
+        // barrier inspects.
+        let records = records.and_then(|records| {
+            evaluator
+                .materialize_indirect_field_indices(&records, &table.field_indices)
+                .ok()
+        });
         let Some(records) = records else {
             touched.extend(table.barriers());
             continue;
@@ -3608,6 +3956,39 @@ fn bump_input_frontiers_staged(
         let meta = node_meta.entry(node).or_default();
         meta.input_generation = meta.input_generation.wrapping_add(1);
     }
+}
+
+/// Fold an operator state's uncommitted overlays into its base, as the state
+/// is written to the live runtime.
+fn commit_operator_state(state: &mut OperatorState) {
+    match state {
+        OperatorState::Recursive(recursive) => {
+            recursive.value_mut().commit_staged_positive();
+        }
+        OperatorState::TopBy(top_by) => {
+            top_by.value_mut().commit_overlays();
+        }
+        OperatorState::ArgBy(arg_by) => {
+            arg_by.value_mut().commit_overlay();
+        }
+        OperatorState::SemiJoin(semi_join) => {
+            semi_join.commit_published_overlay();
+        }
+        OperatorState::AntiJoin(anti_join) => {
+            anti_join.commit_published_overlay();
+        }
+        OperatorState::CollectBy(collect_by) => {
+            collect_by.groups.commit_overlay();
+        }
+        OperatorState::Stateless | OperatorState::Join(_) | OperatorState::StreamingChecksum(_) => {
+        }
+    }
+}
+
+/// The component a written-back arrangement belongs to: its recursive owner
+/// for a child scope, else its own `Arrange` node.
+fn arrangement_owner(key: &ArrangementKey) -> NodeId {
+    key.scope.outermost().unwrap_or(key.input)
 }
 
 /// Fold graph-lifecycle state into an evaluation's `node_meta` snapshot just

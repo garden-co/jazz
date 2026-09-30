@@ -111,6 +111,20 @@ export const ciPartitions = Object.freeze({
       "--features",
       RUST_CI_FEATURES,
     ]),
+    // Cold-load phase attribution is opt-in and off in every other build, so
+    // without this its cfg'd spans and counters would rot unnoticed.
+    command("cold-settle attribution compile", "cargo", [
+      "check",
+      "-p",
+      "jazz-sim",
+      "-p",
+      "jazz-example-permissioned-resources-benchmark",
+      "--lib",
+      "--bins",
+      "--tests",
+      "--features",
+      "cold-settle-attribution",
+    ]),
   ]),
   "rust-workspace": Object.freeze([
     command("workspace Rust tests", "node", [
