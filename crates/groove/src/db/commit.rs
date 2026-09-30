@@ -323,7 +323,13 @@ impl Database {
             if roots.is_empty() || self.large_value_publication_lifecycle_guard.is_some() {
                 None
             } else {
-                Some(self.large_value_lifecycle.clone().lock_owned().await)
+                tracing::debug!(
+                    "DIAG3816 publication awaits lifecycle roots={}",
+                    roots.len()
+                );
+                let guard = self.large_value_lifecycle.clone().lock_owned().await;
+                tracing::debug!("DIAG3816 publication has lifecycle");
+                Some(guard)
             };
         if !roots.is_empty() {
             let mut node_transitions = Vec::<(crate::large_values::NodeRef, i8)>::new();
@@ -406,6 +412,7 @@ impl Database {
             if let Some(guard) = lifecycle_guard {
                 self.large_value_publication_lifecycle_guard = Some(guard);
                 self.large_value_lifecycle_held.set(true);
+                tracing::debug!("DIAG3816 publication {} retains lifecycle", publication.0);
             }
             self.large_value_lifecycle_publications.insert(publication);
         }
@@ -474,6 +481,9 @@ impl Database {
         }
         if self.large_value_lifecycle_publications.is_empty() {
             let guard = self.large_value_publication_lifecycle_guard.take();
+            if guard.is_some() {
+                tracing::debug!("DIAG3816 publications durable; lifecycle released");
+            }
             self.large_value_lifecycle_held.set(false);
             drop(guard);
         }

@@ -1207,6 +1207,13 @@ impl crate::chunks::ChunkInstallObserver for MetadataChunkInstallObserver {
                 )
             })?;
             let resident_install = self.resident_install.clone();
+            tracing::debug!(
+                "DIAG3816 observer install resident={} held={}",
+                resident_install.is_some(),
+                resident_install
+                    .as_ref()
+                    .is_some_and(|install| install.lifecycle_held.get())
+            );
             let _lifecycle = if resident_install
                 .as_ref()
                 .is_none_or(|install| !install.lifecycle_held.get())
@@ -1225,6 +1232,7 @@ impl crate::chunks::ChunkInstallObserver for MetadataChunkInstallObserver {
             } else {
                 None
             };
+            tracing::debug!("DIAG3816 observer has lifecycle");
             let read_storage: &dyn OrderedKvStorage = match resident_install.as_ref() {
                 Some(install) if !install.durable.get() => install.storage.as_ref(),
                 _ => storage.as_ref(),

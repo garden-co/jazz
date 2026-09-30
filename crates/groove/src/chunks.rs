@@ -745,7 +745,9 @@ where
                     Ok(bytes)
                 }
                 Err(ChunkStorageError::Unavailable) => {
+                    tracing::debug!("DIAG3816 provider resolves a missing chunk");
                     let bytes = self.resolver.resolve(request.clone()).await?;
+                    tracing::debug!("DIAG3816 provider resolved bytes={}", bytes.len());
                     // Resolver failure has no byte-store side effect, so do
                     // not create a durable recovery obligation until it has
                     // supplied mechanically valid bytes. This keeps a
@@ -762,6 +764,7 @@ where
                     // that it must finish the install rather than treating
                     // resident bytes as a complete mapping.
                     self.journal.mark_pending(node_ref.clone()).await?;
+                    tracing::debug!("DIAG3816 provider marked install pending");
                     self.storage
                         .stage(vec![StagedChunk {
                             node_ref: node_ref.clone(),
@@ -769,6 +772,7 @@ where
                         }])
                         .await
                         .map_err(ChunkError::from)?;
+                    tracing::debug!("DIAG3816 provider staged bytes");
                     self.reconcile_pending_install(
                         request,
                         node_ref,
@@ -810,7 +814,9 @@ where
                 self.settled_installs.borrow_mut().insert(request);
                 return Ok(());
             }
+            tracing::debug!("DIAG3816 reconcile calls observer newly_staged={newly_staged}");
             observer.installed(node_ref.clone(), bytes).await?;
+            tracing::debug!("DIAG3816 reconcile observer done");
             // If the process stops after metadata is durable but before this
             // compare-and-delete, the next opener retries an idempotent
             // install.  It can never lose the recovery obligation.
