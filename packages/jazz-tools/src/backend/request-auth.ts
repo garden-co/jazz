@@ -1,6 +1,10 @@
 import { verifyLocalFirstIdentityProof as verifyNativeLocalFirstIdentityProof } from "jazz-napi";
 import { withAuthRequestDeadline } from "../runtime/auth-request-deadline.js";
-import { requestAccountRegistry, readAccountAssignment } from "../accounts/registry-client.js";
+import {
+  AccountAuthError,
+  requestAccountRegistry,
+  readAccountAssignment,
+} from "../accounts/registry-client.js";
 import {
   compactVerify,
   decodeProtectedHeader,
@@ -22,6 +26,48 @@ import {
 import type { Session } from "../runtime/context.js";
 import { localFirstAccountId } from "../accounts/local-first.js";
 import type { BackendJwtPublicKey } from "./create-jazz-context.js";
+
+/**
+ * The request's credential was missing, malformed, unverifiable, expired, for
+ * another issuer or audience, or not admitted by the account registry: the
+ * caller should authenticate (HTTP 401).
+ *
+ * Every other failure of `resolveRequestSession` (an unusable `jwksUrl` or
+ * `jwtPublicKey`, a JWKS or account-registry outage, a malformed registry
+ * answer) is the server's problem and stays a plain `Error`.
+ *
+ * `jazz-tools/backend` is often loaded outside an app's bundle, so a caller
+ * can see this error from a different copy of the class: match it with
+ * `isRequestAuthenticationError`, which also compares the name.
+ */
+export class RequestAuthenticationError extends Error {
+  readonly name = "RequestAuthenticationError";
+
+  constructor(
+    message: string,
+    options: {
+      /** The account registry's rejection code, when the registry refused the identity. */
+      code?: string;
+      cause?: unknown;
+    } = {},
+  ) {
+    super(message, options.cause === undefined ? undefined : { cause: options.cause });
+    if (options.code !== undefined) this.code = options.code;
+  }
+
+  readonly code?: string;
+}
+
+/** Whether `error` is a `RequestAuthenticationError`, from any copy of jazz-tools. */
+export function isRequestAuthenticationError(error: unknown): error is RequestAuthenticationError {
+  return (
+    error instanceof RequestAuthenticationError ||
+    (error instanceof Error && error.name === "RequestAuthenticationError")
+  );
+}
+
+// Registry answers that reject the caller's identity rather than fail on the server.
+const REGISTRY_REJECTION_STATUSES = new Set([401, 403, 404]);
 
 // Only verified requests that completed account admission receive this capability.
 const localFirstProofs = new WeakMap<Session, Readonly<{ token: string; appId: string }>>();
@@ -106,12 +152,12 @@ function readHeader(request: RequestLike, name: string): string | undefined {
 function readBearerToken(request: RequestLike): string {
   const authHeader = readHeader(request, "authorization");
   if (!authHeader?.startsWith("Bearer ")) {
-    throw new Error("Missing or invalid Authorization header");
+    throw new RequestAuthenticationError("Missing or invalid Authorization header");
   }
 
   const token = authHeader.slice("Bearer ".length).trim();
   if (!token) {
-    throw new Error("Empty bearer token");
+    throw new RequestAuthenticationError("Empty bearer token");
   }
 
   return token;
@@ -354,22 +400,28 @@ async function verifyJwtSignatureWithStaticKey(
   try {
     header = decodeProtectedHeader(token);
   } catch {
-    throw new Error("Invalid JWT header");
+    throw new RequestAuthenticationError("Invalid JWT: Invalid JWT header");
   }
 
   const algorithm = readString(header.alg);
   if (!algorithm) {
-    throw new Error("Invalid JWT header");
+    throw new RequestAuthenticationError("Invalid JWT: Invalid JWT header");
   }
 
+  // An unusable configured key is the server's problem, not the caller's.
   const key = await getStaticJwtPublicKey(jwtPublicKey, algorithm);
-  await compactVerify(token, key);
+  try {
+    await compactVerify(token, key);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new RequestAuthenticationError(`Invalid JWT: ${message}`, { cause: error });
+  }
 }
 
 function requireJwtPayload(token: string): JwtPayload {
   const payload = parseJwtPayload(token);
   if (!payload) {
-    throw new Error("Invalid JWT payload");
+    throw new RequestAuthenticationError("Invalid JWT payload");
   }
   return payload;
 }
@@ -377,7 +429,7 @@ function requireJwtPayload(token: string): JwtPayload {
 function requireJwtSession(payload: JwtPayload): Session {
   const session = internalSessionFromJwtPayload(payload);
   if (!session) {
-    throw new Error("Invalid JWT payload");
+    throw new RequestAuthenticationError("Invalid JWT payload");
   }
   return session;
 }
@@ -389,7 +441,7 @@ function rejectReservedExternalJwtIssuer(session: Session): void {
     session.issuer === ANONYMOUS_JWT_ISSUER ||
     session.issuer === "urn:jazz:static-bearer"
   ) {
-    throw new Error("Invalid JWT payload");
+    throw new RequestAuthenticationError("Invalid JWT payload");
   }
 }
 
@@ -398,18 +450,18 @@ function ensureJwtNotExpired(payload: JwtPayload): void {
     return;
   }
   if (typeof payload.exp !== "number" || !Number.isInteger(payload.exp) || payload.exp < 0) {
-    throw new Error("Invalid JWT payload");
+    throw new RequestAuthenticationError("Invalid JWT payload");
   }
 
   const nowSeconds = Math.floor(Date.now() / 1000);
   if (payload.exp <= nowSeconds) {
-    throw new Error("JWT has expired");
+    throw new RequestAuthenticationError("JWT has expired");
   }
 }
 
 function ensureJwtDomain(payload: JwtPayload, config: BackendRequestAuthConfig): void {
   if (config.jwtIssuer !== undefined && payload.iss !== config.jwtIssuer) {
-    throw new Error("JWT issuer does not match the configured issuer");
+    throw new RequestAuthenticationError("JWT issuer does not match the configured issuer");
   }
 
   if (config.jwtAudience === undefined) {
@@ -423,7 +475,7 @@ function ensureJwtDomain(payload: JwtPayload, config: BackendRequestAuthConfig):
         ? payload.aud
         : [];
   if (!expected.some((audience) => actual.includes(audience))) {
-    throw new Error("JWT audience does not match the configured audience");
+    throw new RequestAuthenticationError("JWT audience does not match the configured audience");
   }
 }
 
@@ -431,7 +483,7 @@ async function verifyLocalFirstIdentityProof(token: string, appId: string): Prom
   const { verifyLocalFirstIdentityProof: verifyToken } = await import("jazz-napi");
   const result = verifyToken(token, appId);
   if (!result.ok) {
-    throw new Error("Invalid local-first identity proof");
+    throw new RequestAuthenticationError("Invalid local-first identity proof");
   }
 
   return result.id;
@@ -443,12 +495,7 @@ async function verifyExternalJwt(
   config: BackendRequestAuthConfig,
 ): Promise<void> {
   if (config.jwtPublicKey !== undefined) {
-    try {
-      await verifyJwtSignatureWithStaticKey(token, config.jwtPublicKey);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new Error(`Invalid JWT: ${message}`);
-    }
+    await verifyJwtSignatureWithStaticKey(token, config.jwtPublicKey);
 
     ensureJwtNotExpired(payload);
     ensureJwtDomain(payload, config);
@@ -456,16 +503,18 @@ async function verifyExternalJwt(
   }
 
   if (config.jwksUrl) {
+    // Fetching the JWKS can fail on the server's side (a bad jwksUrl, a
+    // provider outage); only a token that fails verification is the caller's.
     let jwks = await getRemoteJwksDocument(config.jwksUrl);
     try {
       await verifyJwtSignatureWithJwks(token, jwks);
     } catch {
+      jwks = await getRemoteJwksDocument(config.jwksUrl, true);
       try {
-        jwks = await getRemoteJwksDocument(config.jwksUrl, true);
         await verifyJwtSignatureWithJwks(token, jwks);
       } catch (refreshError) {
         const message = refreshError instanceof Error ? refreshError.message : String(refreshError);
-        throw new Error(`Invalid JWT: ${message}`);
+        throw new RequestAuthenticationError(`Invalid JWT: ${message}`, { cause: refreshError });
       }
     }
 
@@ -482,10 +531,10 @@ async function verifyExternalJwt(
 function localFirstSessionFromVerifiedProof(payload: JwtPayload, verifiedUserId: string): Session {
   const session = internalSessionFromVerifiedReservedJwtPayload(payload, "local-first");
   if (!session) {
-    throw new Error("Invalid JWT payload");
+    throw new RequestAuthenticationError("Invalid JWT payload");
   }
   if (session.user_id !== verifiedUserId) {
-    throw new Error("Invalid local-first identity proof");
+    throw new RequestAuthenticationError("Invalid local-first identity proof");
   }
   return session;
 }
@@ -531,13 +580,26 @@ export async function resolveRequestSession(
   const allowLocalFirstAuth = config.allowLocalFirstAuth ?? true;
   const admit = async (session: Session): Promise<Session> => {
     if (!config.accountRegistry) return session; // standalone signature-verification helper
-    const assignment = await requestAccountRegistry(
-      config.accountRegistry,
-      session.issuer === LOCAL_FIRST_JWT_ISSUER
-        ? "found-local-first"
-        : (options.account ?? "login"),
-      token,
-    );
+    let assignment: unknown;
+    try {
+      assignment = await requestAccountRegistry(
+        config.accountRegistry,
+        session.issuer === LOCAL_FIRST_JWT_ISSUER
+          ? "found-local-first"
+          : (options.account ?? "login"),
+        token,
+      );
+    } catch (error) {
+      // The registry refused this identity (unknown, revoked, not admitted).
+      // A registry that is down, slow or failing stays a server error.
+      if (
+        error instanceof AccountAuthError &&
+        error.status !== undefined &&
+        REGISTRY_REJECTION_STATUSES.has(error.status)
+      )
+        throw new RequestAuthenticationError(error.message, { code: error.code, cause: error });
+      throw error;
+    }
     session.account_id = readAccountAssignment(assignment, {
       issuer: session.issuer,
       subject: session.user_id,
@@ -547,7 +609,7 @@ export async function resolveRequestSession(
 
   if (payload.iss === LOCAL_FIRST_JWT_ISSUER) {
     if (!allowLocalFirstAuth) {
-      throw new Error(
+      throw new RequestAuthenticationError(
         "Received local-first JWT, but createJazzSession() has allowLocalFirstAuth disabled.",
       );
     }
