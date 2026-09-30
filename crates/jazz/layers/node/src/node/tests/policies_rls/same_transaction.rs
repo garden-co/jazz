@@ -154,23 +154,23 @@ fn other_uncommitted_transaction_parent_does_not_satisfy_child_exists_policy() {
     ));
 }
 
-/// A parent the same transaction deletes is not evidence for a child, whether
-/// the parent was committed before the transaction or inserted by it.
+/// A committed parent that the same transaction deletes is still evidence for
+/// a child: a unit's deletes do not hide committed rows from its own checks.
+/// Once the deletion commits, the show no longer justifies later tasks.
 ///
 /// ```text
-/// alice ──tx{ show }──────────────────────────► core ──► Accepted
-/// alice ──tx{ delete show, task(show) }───────► core ──► Rejected
-/// alice ──tx{ show2, task(show2), delete show2 }► core ──► Rejected
+/// alice ──tx{ show }────────────────────────► core ──► Accepted
+/// alice ──tx{ delete show, task(show) }─────► core ──► Accepted
+/// alice ──tx{ task(show) }──────────────────► core ──► Rejected
 /// ```
 #[test]
-fn parent_deleted_in_same_transaction_does_not_satisfy_child_exists_policy() {
+fn committed_parent_deleted_in_same_transaction_still_satisfies_child_exists_policy() {
     let alice = user(0xa1);
     let schema = show_task_schema();
     let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     install_test_uuid_sub_claim(&mut core, alice);
     let show = row(0x30);
-    let later_show = row(0x31);
 
     let (_, fate) =
         deliver_mergeable_transaction(&mut writer, &mut core, vec![show_insert(show, alice, 10)]);
@@ -186,26 +186,55 @@ fn parent_deleted_in_same_transaction_does_not_satisfy_child_exists_policy() {
             task_insert(row(0x32), show, alice, 11),
         ],
     );
+    assert_eq!(fate, Fate::Accepted);
+
+    // The committed deletion now hides the show from later transactions.
+    let (_, fate) = deliver_mergeable_transaction(
+        &mut writer,
+        &mut core,
+        vec![task_insert(row(0x34), show, alice, 12)],
+    );
     assert_eq!(fate, Fate::Rejected(RejectionReason::AuthorizationDenied));
+}
+
+/// A parent the same transaction both inserts and deletes never existed as
+/// far as the unit's checks are concerned, so it justifies nothing.
+///
+/// ```text
+/// alice ──tx{ show, task(show), delete show }► core ──► Rejected
+/// alice ──tx{ show2, task(show2) }───────────► core ──► Accepted
+/// ```
+#[test]
+fn parent_inserted_and_deleted_in_same_transaction_does_not_satisfy_child_exists_policy() {
+    let alice = user(0xa1);
+    let schema = show_task_schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    install_test_uuid_sub_claim(&mut core, alice);
+    let transient_show = row(0x31);
 
     let (_, fate) = deliver_mergeable_transaction(
         &mut writer,
         &mut core,
         vec![
-            show_insert(later_show, alice, 12),
-            task_insert(row(0x33), later_show, alice, 12),
-            MergeableCommit::new("shows", later_show, 12)
+            show_insert(transient_show, alice, 12),
+            task_insert(row(0x33), transient_show, alice, 12),
+            MergeableCommit::new("shows", transient_show, 12)
                 .made_by(alice)
                 .deletion(DeletionEvent::Deleted),
         ],
     );
     assert_eq!(fate, Fate::Rejected(RejectionReason::AuthorizationDenied));
 
-    // Planted positive: the committed show still authorizes a task on its own.
+    // Planted positive: without the delete, the same pair is accepted.
+    let kept_show = row(0x35);
     let (_, fate) = deliver_mergeable_transaction(
         &mut writer,
         &mut core,
-        vec![task_insert(row(0x34), show, alice, 13)],
+        vec![
+            show_insert(kept_show, alice, 13),
+            task_insert(row(0x36), kept_show, alice, 13),
+        ],
     );
     assert_eq!(fate, Fate::Accepted);
 }

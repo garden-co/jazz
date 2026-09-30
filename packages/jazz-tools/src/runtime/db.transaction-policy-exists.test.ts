@@ -6,9 +6,10 @@ import { createDb } from "./default-create-db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 
-// garden-co/jazz#3755: a policy `exists` sees rows written earlier in the same
-// transaction, so the server accepts the transaction the client already applied
-// optimistically, and rejects it only when the client's own view would too.
+// garden-co/jazz#3755: a policy `exists` sees committed rows plus the rows the
+// same transaction inserts or updates, so the server accepts the transaction the
+// client already applied optimistically. A committed row the transaction deletes
+// still counts; a row it both inserts and deletes never does.
 const app = s.defineApp({
   shows: s.table({ chiefAccount: s.uuid() }, {}),
   tasks: s.table({ showId: s.uuid(), title: s.string() }, { show: s.rel("shows", "showId") }),
@@ -75,7 +76,7 @@ it("accepts the same rows in one exclusive transaction", async () => {
   });
 }, 60_000);
 
-it("rejects a task whose show the same transaction deletes, on client and server", async () => {
+it("rejects a task whose show the same transaction inserts and deletes, on client and server", async () => {
   await withChief(async (db, me) => {
     const result = await db.transaction((tx) => {
       const show = tx.insert(app.shows, { chiefAccount: me });
@@ -91,5 +92,23 @@ it("rejects a task whose show the same transaction deletes, on client and server
     expect(rejection).toMatchObject({ code: "permission_denied" });
     expect(await db.all(app.tasks, { tier: "global" })).toEqual([]);
     await expect.poll(() => db.all(app.tasks)).toEqual([]);
+  });
+}, 60_000);
+
+it("accepts a task whose committed show the same transaction deletes", async () => {
+  await withChief(async (db, me) => {
+    const show = await db.insert(app.shows, { chiefAccount: me }).wait({ tier: "global" });
+
+    const result = await db.transaction((tx) => {
+      const task = tx.insert(app.tasks, { showId: show.id, title: "Strike" });
+      tx.delete(app.shows, show.id);
+      return task;
+    });
+    const task = await result.wait({ tier: "global" });
+
+    expect(await db.all(app.tasks, { tier: "global" })).toEqual([
+      { id: task.id, showId: show.id, title: "Strike" },
+    ]);
+    expect(await db.all(app.shows, { tier: "global" })).toEqual([]);
   });
 }, 60_000);

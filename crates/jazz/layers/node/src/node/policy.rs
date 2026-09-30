@@ -68,7 +68,8 @@ struct CandidateEvidenceRow {
     /// Policy schema and table the row is projected into.
     policy_schema: SchemaVersionId,
     policy_table: String,
-    /// The row after the transaction, or `None` when the unit deletes it.
+    /// The row after the transaction. `None` only for a restore whose row
+    /// has no committed content to bring back.
     after: Option<CurrentRow>,
     /// The committed row an update replaces. It stays evidence until the
     /// update's own checks pass.
@@ -83,8 +84,10 @@ struct CandidateUnitEvidence {
 
 impl CandidateUnitEvidence {
     /// The overlay one write's WITH CHECK clause reads. The written row itself
-    /// is the inline candidate, so it is never overlaid. A deleted row is
-    /// hidden. A row whose checks have passed shows its post-transaction
+    /// is the inline candidate, so it is never overlaid. Rows the unit deletes
+    /// are not overlaid at all: a committed row stays visible as it was, and
+    /// a row the unit both inserts and deletes never counts. A row whose
+    /// checks have passed shows its post-transaction
     /// content; until then an updated row shows its committed content and an
     /// inserted or restored row is hidden, so writes cannot justify each
     /// other in a cycle.
@@ -225,7 +228,7 @@ where
     ///
     /// A transaction reads its own writes, so its policy checks do too. Each
     /// write's WITH CHECK clause (insert check, update check) reads committed
-    /// state overlaid with the unit's other writes, as described by
+    /// state overlaid with the unit's other inserts and updates, as described by
     /// [`CandidateUnitEvidence::overlay_for`]. A commit unit carries its
     /// writes as a canonical set, not in write order, so the checks run to a
     /// fixpoint: a row's post-transaction content becomes evidence once its
@@ -293,7 +296,9 @@ where
     }
 
     /// Prepare the main-branch rows of a candidate unit as evidence for its
-    /// other writes. A unit that writes one row has nothing to overlay.
+    /// other writes. A unit that writes one row has nothing to overlay. A row
+    /// the unit deletes contributes nothing, so committed state shows it as
+    /// committed (and a row the unit both inserts and deletes not at all).
     async fn candidate_unit_evidence(
         &mut self,
         versions: &[VersionRecord],
@@ -330,9 +335,10 @@ where
             let subject = content.unwrap_or(row_versions[0]);
             let (policy_schema, table, cells) =
                 self.policy_projection_for_version_record(subject)?;
-            let (after, before) = if deleted {
-                (None, None)
-            } else {
+            if deleted {
+                continue;
+            }
+            let (after, before) = {
                 let previous = self
                     .policy_previous_content_subject_row(
                         policy_schema,

@@ -26,11 +26,13 @@ Invariant digest:
   row that reaches the protected row and whose filters pass for the same
   authenticated identity. Joined rows are read from committed state, except
   that a WITH CHECK clause (insert check, update check) of a write in a commit
-  unit reads committed state overlaid with the unit's other writes: a row the
-  unit deletes is absent, and a row the unit inserts, restores or updates
-  contributes its post-transaction content once that row's own write checks
-  pass (until then an inserted or restored row is absent and an updated row
-  keeps its committed content). The protected row itself, USING clauses and
+  unit reads committed main-branch state overlaid with the unit's other
+  inserts, restores and updates: such a row contributes its post-transaction
+  content once that row's own write checks pass (until then an inserted or
+  restored row is absent and an updated row keeps its committed content). The
+  unit's deletes are not overlaid: a committed row the unit deletes stays
+  visible as committed, and a row the unit both inserts and deletes never
+  counts. The protected row itself, USING clauses and
   read-for-write checks read committed state, and writes of any other
   transaction are never evidence.
 - `INV-RLS-10`: Query-driven sync MUST compose the root table read policy into the subscribed query and bind policy claims from server-authenticated identity so a client cannot widen...
@@ -252,11 +254,13 @@ reject the same transaction, for example a task inserted together with the show
 its insert policy requires.
 
 A WITH CHECK clause judges the row a write leaves behind, so the rows its policy
-joins read are committed state overlaid, row by row, with the unit's other
-writes:
+joins read are committed main-branch state overlaid, row by row, with the unit's
+other inserts, restores and updates:
 
-- a row the unit deletes is absent, so a parent deleted anywhere in the unit
-  never satisfies a child's `exists`;
+- the unit's deletes are not overlaid. A committed row the unit deletes stays
+  visible as it was committed, so an admission can consume the request that
+  justifies it in the same transaction. A row the unit both inserts and deletes
+  has no committed state and so never satisfies an `exists`;
 - a row the unit inserts, restores or updates shows its post-transaction content
   once every version the unit writes for that row has passed its own write
   checks; until then an inserted or restored row is absent and an updated row

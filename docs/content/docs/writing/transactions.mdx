@@ -8,9 +8,9 @@ A transaction groups related writes under one commit. Reads made through the tra
 its staged writes, while code outside the transaction cannot see them until it commits.
 
 Permission checks follow the same rule. When the authority checks a write, its policy's `exists`
-sees the transaction's other writes, so you can create a row and the rows that depend on it for
-permissions in one transaction. Writes from other transactions stay invisible until they are
-accepted. See [Permissions](/docs/auth/permissions#share-based-access).
+sees the rows the transaction creates or updates, so you can create a row and the rows that depend
+on it for permissions in one transaction. A row the transaction deletes is still seen as it was
+before the transaction. Writes from other transactions stay invisible until they are accepted. See [Permissions](/docs/auth/permissions#share-based-access).
 
 Jazz has two transaction types. The difference is how they handle concurrent changes:
 
