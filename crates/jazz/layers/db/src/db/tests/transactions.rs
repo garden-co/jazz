@@ -840,6 +840,46 @@ fn abandoned_transaction_releases_its_staged_splices() {
     }
 }
 
+/// Bindings roll back through the queued cleanup (wasm, React Native) or the
+/// synchronous handle abandon (napi); both release the staged roots.
+#[test]
+fn binding_rollback_paths_release_staged_splices() {
+    for queued in [false, true] {
+        let db = block_on(doctest_support::open_todos_db()).unwrap();
+        let base = "f".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 32);
+        let row = db
+            .insert(
+                "todos",
+                doctest_support::todo_cells(&base, false),
+                Default::default(),
+            )
+            .unwrap()
+            .row_uuid();
+        let open = OpenTransactionId::new();
+        block_on(db.begin_exclusive(open)).unwrap();
+        block_on(db.stage_transaction_large_value_update(
+            open,
+            "todos",
+            row,
+            BTreeMap::new(),
+            append_text("title", base.len() as u64, "tail"),
+            None,
+        ))
+        .unwrap();
+        assert_ne!(staged_large_value_count(&db), 0);
+        if queued {
+            db.enqueue_abandon_transaction_handle(open);
+            while db.queued_mutation_count() > 0 {
+                db.drive_queued_mutation_once();
+            }
+        } else {
+            db.abandon_transaction_handle(open).unwrap();
+            block_on(db.tick()).unwrap();
+        }
+        assert_eq!(staged_large_value_count(&db), 0, "queued: {queued}");
+    }
+}
+
 /// Deleting a row after splicing it in the same transaction leaves no staged
 /// root behind once the transaction commits.
 #[test]

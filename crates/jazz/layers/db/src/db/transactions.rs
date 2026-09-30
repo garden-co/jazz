@@ -843,10 +843,7 @@ where
                 Ok(()) | Err(crate::node::Error::MissingOpenBatch(_)) => {}
                 Err(error) => return Err(error.into()),
             }
-            let mut node = db.node.lock_for_large_value_staging().await?;
-            if node.has_released_large_values() {
-                node.evict_released_large_values().await;
-            }
+            db.node.evict_released_large_values().await;
             Ok(())
         }));
     }

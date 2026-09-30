@@ -1501,8 +1501,26 @@ where
     }
 
     pub(super) async fn finish_transaction_abandonment_shutdown(&self) -> Result<usize, Error> {
-        let mut node = self.node.lock().await;
-        self.finish_transaction_abandonment_shutdown_in(&mut node)
+        let drained = {
+            let mut node = self.node.lock().await;
+            self.finish_transaction_abandonment_shutdown_in(&mut node)
+        };
+        // No later owner turn runs after close, so release now what the
+        // retired transactions staged.
+        self.evict_released_large_values().await;
+        drained
+    }
+
+    /// Best-effort eviction of Groove roots staged by abandoned transactions,
+    /// after settling earlier local publications so Groove does not defer it.
+    /// Whatever this misses is reclaimed by the staging TTL.
+    pub(super) async fn evict_released_large_values(&self) {
+        if !self.node.lock().await.has_released_large_values() {
+            return;
+        }
+        if let Ok(mut node) = self.lock_for_large_value_staging().await {
+            node.evict_released_large_values().await;
+        }
     }
 
     #[cfg(test)]
