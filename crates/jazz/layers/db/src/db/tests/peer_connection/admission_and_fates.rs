@@ -3108,6 +3108,120 @@ fn terminal_core_write_fates_prove_exact_insert_update_and_delete_actions() {
     );
 }
 
+fn subscriber_proofs_and_support_views(
+    subscriber: &Rc<LocalMutex<PeerConnection>>,
+) -> (u64, usize) {
+    match &subscriber.borrow().link {
+        ConnectionLink::Subscriber(SubscriberConnectionState { peer, .. }) => (
+            peer.terminal_authority_scope_proof_count(),
+            peer.maintained_subscription_count(),
+        ),
+        ConnectionLink::Upstream(_) => unreachable!("server link is a subscriber"),
+    }
+}
+
+/// Alice's writes under `owner = session.sub` are proven without hydrating the
+/// rows that policy matches. The policy reads only the candidate row and her
+/// claims, so it has no support inputs. A support view over it would hold
+/// every todo Alice ever wrote for the life of her connection, so an import
+/// through one session would grow server memory with the whole dataset.
+///
+/// ```text
+/// alice ──insert × N──► core ──proof: no support inputs──► Accepted × N
+///                         └── retains no support view
+/// ```
+#[test]
+fn row_only_write_policy_proofs_retain_no_support_views() {
+    let schema = owner_write_schema();
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xa1, alice, &schema);
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        alice,
+        NodeUuid::from_bytes([0xa1; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
+    let subscriber = server.accept_subscriber(server_transport, alice);
+
+    let writes = (0..8)
+        .map(|index| {
+            let write = client
+                .insert(
+                    "todos",
+                    cells(&format!("todo {index}"), false, alice),
+                    Default::default(),
+                )
+                .unwrap();
+            client.tick().unwrap();
+            server.tick().unwrap();
+            client.tick().unwrap();
+            write
+        })
+        .collect::<Vec<_>>();
+
+    for write in &writes {
+        assert!(matches!(write.write_state().unwrap().fate, Fate::Accepted));
+    }
+    assert_eq!(
+        subscriber_proofs_and_support_views(&subscriber),
+        (8, 0),
+        "every insert is proven, and no proof keeps the rows its policy matches"
+    );
+}
+
+/// Bob's child insert inherits the parent's select policy, so its proof has a
+/// real dependency input (the parent row) and still hydrates support.
+///
+/// ```text
+/// bob ──insert child──► core ──proof: hydrate parent support──► Accepted
+/// ```
+#[test]
+fn dependency_write_policy_proofs_still_hydrate_support() {
+    let schema = inherited_insert_policy_schema();
+    let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
+    let server = open_core(0x65, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0x66, bob, &schema);
+    let parent = row(0xf1);
+    server
+        .insert_with_id(
+            "parents",
+            parent,
+            BTreeMap::from([
+                ("owner".to_owned(), Value::Uuid(bob.test_uuid())),
+                ("locked".to_owned(), Value::Bool(false)),
+            ]),
+        )
+        .unwrap();
+    let (client_transport, server_transport) = duplex();
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
+    let subscriber = server.accept_subscriber(server_transport, bob);
+
+    let child = client
+        .insert(
+            "children",
+            BTreeMap::from([
+                ("parent_id".to_owned(), Value::Uuid(parent.0)),
+                ("label".to_owned(), Value::String("child".to_owned())),
+            ]),
+            Default::default(),
+        )
+        .unwrap();
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+
+    assert!(matches!(child.write_state().unwrap().fate, Fate::Accepted));
+    let (proofs, support_views) = subscriber_proofs_and_support_views(&subscriber);
+    assert_eq!(proofs, 1);
+    assert!(
+        support_views > 0,
+        "an inherited policy must still hydrate its parent support"
+    );
+}
+
 /// A scope-isolated relay carries one binding selected by server admission. A
 /// raw `SessionClaims` frame must neither replace that binding nor make the
 /// later terminal write proof use the forged editor role.
