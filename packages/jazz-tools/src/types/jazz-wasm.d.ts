@@ -182,6 +182,14 @@ declare module "jazz-wasm" {
       descriptors: unknown,
       updatedAtMs?: number | null,
     ): WasmWrite;
+    updateLargeValuesInTransaction(
+      openTransactionId: string,
+      table: string,
+      rowId: Uint8Array,
+      patch: Uint8Array,
+      descriptors: unknown,
+      updatedAtMs?: number | null,
+    ): void;
     requestUpdatePermissionAdvice(
       table: string,
       rowId: Uint8Array,

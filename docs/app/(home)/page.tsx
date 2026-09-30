@@ -258,7 +258,7 @@ const hostingRows: {
     topic: "Setup",
     selfHosted: "One open-source, single-tenant server binary",
     cloud: "Zero config; create an app from the CLI or dashboard",
-    enterprise: "Dedicated deployment, set up with you",
+    enterprise: "Dedicated deployment or bring your own cloud, set up with you",
   },
   {
     topic: "Topology",
@@ -419,7 +419,7 @@ export default function HomePage() {
 
       <section className="home-section">
         <div className="home-container">
-          <SectionHeader id="code" title="In the client: feels like simple reactive state">
+          <SectionHeader id="code" title="Use straight from the client as simple reactive state">
             <Text as="p" display="block" type="large" color="secondary" weight="normal">
               Define tables and permissions in TypeScript, then query from any component. Writes
               apply locally at once and sync in the background.
@@ -473,7 +473,7 @@ export default function HomePage() {
       <section className="home-section">
         <div className="home-container">
           <Heading level={2} type="display-3" id="features" className="home-anchor home-statement">
-            Built into the database.{" "}
+            A database responsible for more.{" "}
             <span className="home-statement-muted">
               The hard parts of shared, live data, handled once instead of in every app.
             </span>
@@ -523,27 +523,27 @@ export default function HomePage() {
             <Table density="balanced" verticalAlign="top">
               <TableHeader>
                 <TableRow>
-                  <TableHeaderCell> </TableHeaderCell>
                   <TableHeaderCell>Self-hosted</TableHeaderCell>
                   <TableHeaderCell>Jazz Cloud</TableHeaderCell>
                   <TableHeaderCell>Enterprise</TableHeaderCell>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {hostingRows.map((row) => (
-                  <TableRow key={row.topic}>
-                    <TableCell>
+                {hostingRows.flatMap((row) => [
+                  <TableRow key={`${row.topic}-topic`}>
+                    <TableCell colSpan={3}>
                       <Text weight="medium">{row.topic}</Text>
                     </TableCell>
+                  </TableRow>,
+                  <TableRow key={row.topic}>
                     <TableCell>
                       <Text color="secondary">{row.selfHosted}</Text>
                     </TableCell>
                     <TableCell>{row.cloud}</TableCell>
                     <TableCell>{row.enterprise}</TableCell>
-                  </TableRow>
-                ))}
+                  </TableRow>,
+                ])}
                 <TableRow>
-                  <TableCell> </TableCell>
                   <TableCell>
                     <Button
                       label="How to self-host"
