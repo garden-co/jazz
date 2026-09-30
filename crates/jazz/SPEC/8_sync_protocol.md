@@ -28,7 +28,7 @@ Invariant digest:
 - `INV-SYNC-21`: Wire `TxId` and row-version payloads MUST use node UUIDs and schema version IDs, not node-local integer aliases.
 - `INV-SYNC-23`: A serving peer MUST reject a capability-gapped live subscription with `SyncMessage::SubscribeRejected` addressed to the requested `SubscriptionKey`; the rejected subscription MUST NOT become active, `Unsubscribe` for it is a no-op, and the connection MUST keep serving other subscriptions.
 - `INV-SYNC-24`: Known-state payload dedup may omit only native bodies, never required physical snapshot membership or delta additions/removals. Fresh subscriptions and recovery require a full snapshot; retained transport revisions are not durable coverage receipts.
-- `INV-SYNC-25`: A stream served under known-state dedup followed by its known-state-miss resends MUST be observationally equivalent to the same stream served without dedup.
+- `INV-SYNC-25`: A view served under known-state dedup, followed when needed by the full resend after a known-state miss (`INV-SYNC-26`), MUST leave the reader with the same rows as the same view served without dedup.
 - `INV-SYNC-26`: A receiver that finds an update naming a held row whose body it no longer has MUST reopen that view without known state, and the serving peer MUST then resend every row of the view with its body under ordinary read policy. There is no per-version fetch: rows are identified by `(row, row_seq)` and resent whole. A second such update for the same view before it settles is a protocol error rather than a resend loop.
 - `INV-SYNC-27`: A fast known-state declaration MUST only be made for contiguously applied, unevicted served streams in the current process; eviction invalidates its in-memory cursor, and restart never recovers a declaration.
 - `INV-SYNC-29`: A fast known-state declaration carrying authorization progress may affect native-body dedup only when its server-stamped progress matches the serving peer’s current token for that reader and binding view. It MUST NOT replace the complete supporting set or the fresh selected-authority confirmation.
@@ -43,9 +43,9 @@ Invariant digest:
 - `INV-TX-2`: Committing an exclusive transaction MUST store the commit locally as `Fate::Pending` with `DurabilityTier::Local` and emit exactly one `SyncMessage::CommitUnit`.
 - `INV-TX-3`: A commit unit whose Transaction.ntotalwrites does not equal the delivered version count MUST be rejected by the fate authority as RejectionReason::MalformedCommit(...)...
 - `INV-TX-4`: Duplicate commit units with identical payloads MUST be idempotent and return the already-known fate; duplicate units with conflicting payloads MUST fail as Error::Conf...
-- `INV-TX-5`: The authority MUST park a commit unit with missing parent/schema/content prerequisites and MUST decide it only after all prerequisites are present.
+- `INV-TX-5`: Core MUST park a commit unit authored under a schema version it does not yet know, with no fate, seq or visible rows, parking a resent copy only once, and MUST decide it exactly once after that schema arrives. Linear history has no version parents, so a unit has no parent prerequisites.
 - `INV-TX-11`: Accepted core commits MUST receive a strictly increasing authority-minted `GlobalTime`; accepted state and the core committed frontier MUST become durable atomically before publication.
-- `INV-TX-23`: Fate authority MUST be structurally wired by the host. Applying a bare unfated commit unit on a non-authority sync path MUST stage or park it pending remote fate; it MUST NOT accept, assign global timestamp, or create merge versions from that payload.
+- `INV-TX-23`: Fate authority MUST be structurally wired by the host. A node that receives a downstream commit unit as a local receiver (relay) MUST store it through the relay path as `Fate::Pending` at `DurabilityTier::Local`; it MUST NOT emit a fate, assign a seq, or make the write visible at the `Global` tier until Core's fate arrives.
 
 - `INV-SYNC-37`: LocalOnly propagation MUST remain on the calling node. Every remote subscription with propagate_upstream=false MUST be rejected regardless of identity, trust, role or worker transport.
 - `INV-SYNC-38`: An extra local query input absent from a completed selected-authority scope MUST be revalidated; scope absence or Unknown MUST NOT assert deletion or access loss. Bounded batches MUST preserve eventual retry/progression for supported active queries.
@@ -463,14 +463,15 @@ transaction travels as one atomic commit unit
 Commit-unit delivery is idempotent by `tx_id`. If a known `tx_id` arrives with a
 conflicting payload, the receiver rejects it as `ConflictingCommitUnit`
 (`INV-TX-4`). The transaction's `n_total_writes` must equal the number of version
-records in the unit (`INV-TX-3`). If the unit references parents, schema
-versions, or content that the receiver does not yet know, the receiver parks the
-unit until those dependencies arrive (`INV-TX-5`).
+records in the unit (`INV-TX-3`). If the unit is authored under a schema
+version the authority does not yet know, the authority parks the unit until
+that schema arrives (`INV-TX-5`).
 
-Receiving a bare unfated commit unit is not authority. On a non-authority node,
-`apply_sync_message` stages or parks that commit unit as pending remote fate and
-waits for a `FateUpdate`; it must not accept the unit, assign global timestamp, or
-create merge versions from it (`INV-TX-23`). Only a structurally wired fate
+Receiving a bare unfated commit unit is not authority. A node that the host
+wires as a local receiver (a relay) stores a downstream commit unit through the
+relay path as `Fate::Pending` at `DurabilityTier::Local`, forwards it upstream
+and waits for Core's `FateUpdate`; it must not emit a fate, assign a seq, or make
+the write visible at the `Global` tier (`INV-TX-23`). Only a structurally wired fate
 authority path may decide fate (ch. 3 §3.6, ch. 9).
 
 ### 8.3 Fates downstream
@@ -919,7 +920,8 @@ the serving peer resends every row with its body under ordinary read policy
 (`INV-SYNC-26`). There is no per-version fetch; rows are identified by
 `(row, row_seq)` and resent whole. Convergence is preserved: a stream served
 under known-state dedup followed by that resend MUST be observationally
-equivalent to the same stream served without dedup (`INV-SYNC-25`, cf.
+equivalent to the same stream served without dedup: the reader ends with the
+same rows (`INV-SYNC-25`, cf.
 `INV-SYNC-20`). A receiver must not fill a gap from another binding's
 authority receipt or claim settlement while a supporting body is unavailable.
 The canonical miss is visibility gained without a new row seq: a policy or
@@ -941,8 +943,8 @@ mechanism for non-declared streams, and it is retired rather than extended as
 known-state coverage grows.
 
 _Further invariants._ `INV-SYNC-24` — fast and slow declarations omit only
-eligible version bodies; `INV-SYNC-25` — dedup + repairs converge to the
-undeduped stream; `INV-SYNC-26` — a known-state miss reopens the view for a full resend;
+eligible version bodies; `INV-SYNC-25` — dedup plus miss resends converge to
+the undeduped stream; `INV-SYNC-26` — a known-state miss reopens the view for a full resend;
 `INV-SYNC-27` — process-local fast declarations require contiguous application
 and no eviction; eviction invalidates the in-memory fact. Neither fast cursors
 nor slow exact declarations are persisted; restart restores native data only.

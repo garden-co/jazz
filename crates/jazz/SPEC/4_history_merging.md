@@ -13,22 +13,18 @@ Invariant digest:
 
 - `INV-HIST-1`: A row version that lists a parent MUST dominate that parent for content-current selection when both versions are present in the same layer.
 - `INV-HIST-2`: Among content heads not dominated by known parents, the current content version MUST be the head with the greatest made-at/`TxId` sort key.
-- `INV-HIST-5`: An upstream node that observes two or more concurrent mergeable content heads for a row MUST create an accepted mergeable merge version with those heads as parents, unless a content version with the same sorted parent set already exists.
 - `INV-HIST-6`: A merge version MUST dominate all of its parent heads and become the current content winner when present and accepted.
-- `INV-HIST-7`: A merge version's transaction time MUST be strictly after the maximum made-at time of the observed heads.
-- `INV-HIST-8`: For `MergeStrategy::Lww`, a merged column MUST take the value from the highest made-at/`TxId` head that sets the column, and if no head sets it, from the highest made-at/`TxId` parent-union version that sets it.
+- `INV-HIST-8`: For a plain (`MergeStrategy::Lww`) column, Core MUST merge each accepted write into the row's post-image column by column: the write sets a column it authored iff its stamp (`min(tx_time ms, seq ms)`) is `>=` the column's stored stamp, a tie going to the later seq. Concurrent writes to different columns of one row therefore all survive, and on a shared column the higher stamp wins whatever order Core sequences them in.
 - `INV-HIST-9`: `MergeStrategy::Counter` MUST be declared only on non-nullable integer user columns.
-- `INV-HIST-10`: For `MergeStrategy::Counter`, concurrent integer deltas from their observed parent bases MUST be summed exactly.
+- `INV-HIST-10`: For `MergeStrategy::Counter`, a write MUST travel as its delta from the row image it was made over, and Core MUST add each accepted delta to the current value, so concurrent increments from the same base sum exactly.
 - `INV-HIST-11`: Content and deletion state MUST be separate layers; content writes MUST NOT change the deletion register, and a current `DeletionEvent::Deleted` MUST hide the content-current row until a current `DeletionEvent::Restored` reveals it.
 - `INV-HIST-12`: Accepted globally settled versions that become per-layer winners MUST be reflected in `jazz_{table}_global_current` or `jazz_{table}_register_global_current`.
 - `INV-HIST-13`: Re-ingesting the same commit unit with identical version rows in a different order MUST be idempotent and MUST NOT create a conflict.
 - `INV-HIST-14`: Rejected transactions MUST NOT appear as accepted row-history entries and MUST NOT participate in currentness/domination.
-- `INV-HIST-15`: Merge strategy behavior MUST be deterministic and grouping-insensitive over the parent/head set; write-time canonicalization remains validation and rejects loudly.
-- `INV-HIST-16`: A merge value MUST be the deterministic fold over the de-duplicated raw head set, never a fold of already-merged values. Combining divergent merge versions MUST fold the union of their raw parent-closures de-duplicated by version identity (LWW argmax; `Counter` sums per-`TxId` deltas so shared ancestors count once), so divergent merges converge to the single-merger-over-the-union result.
+- `INV-HIST-15`: Core's post-image for a set of concurrent writes with distinct stamps MUST NOT depend on the order Core receives them: plain columns are decided by stamps, not by the seq Core assigns, and merge-strategy ops commute. Merged values MUST NOT depend on wall-clock or node-local state.
 - `INV-HIST-17`: Content and deletion history MUST remain independently immutable and independently selected; a combined current row is a derived cache over their winners and MUST be reproducible from retained histories after restart or rebuild.
 - `INV-HIST-18`: A version parent MUST identify an exact prior version of the same physical table, branch key, row, and content/deletion layer; it MUST NOT encode a cross-row transaction dependency or a dependency between the content and deletion layers.
-- `INV-HIST-19`: A node-local content-frontier helper, if retained, MUST be keyed by the complete physical content-row coordinate and encode a strictly increasing, duplicate-free canonical `TxId` array using Groove values rather than an opaque collection payload.
-- `INV-TX-6`: A commit unit MUST be rejected with RejectionReason::CausalityViolation if its txid.time is less than or equal to any same-row/layer history parent's txid.time, and its versions...
+- `INV-TX-6`: A write made on a node after it has applied a row state MUST carry a transaction time at least that state's highest column stamp, so it overrides every value it observed even when the node's clock is behind. Core orders writes by its own seq and does not reject a write because its clock is behind; such a write that observed nothing simply loses per column.
 
 ## Details
 
@@ -49,10 +45,13 @@ later restore parents `D` rather than `C` (covered by
 `known_parent_must_match_exact_row_coordinate_and_layer`). Ordering is based on `TxId.time`, the HLC input, with the full
 sort key `(time, node)` used for deterministic tie-breaking.
 
-Causality is enforced at acceptance time. A causal child has a strictly greater
-time than every parent; the authority rejects a violation as
-`CausalityViolation` (ch. 3, `INV-TX-6`). Within accepted history, therefore, a
-parent always precedes its children.
+On the linear-history line versions carry no parents, and Core's seq, not
+the writer's clock, orders accepted writes. Causality is kept by the clock
+instead of by an admission check: a node merges the highest column stamp of
+every row state it applies into its HLC, so a write made after observing a
+value is stamped at least as high as that value and overrides it even when
+the writer's clock is behind (`INV-TX-6`, §4.6). Core no longer rejects a
+write as `CausalityViolation`.
 
 A version **dominates** the parents it lists, and by transitivity it dominates
 their ancestors. When both a version and its parent are present in the same
@@ -82,87 +81,36 @@ current rows, not proportional to history depth. The overlay still applies the
 same known-history domination and argmax rules (`INV-HIST-1`, `INV-HIST-2`); it
 is a bounded currentness computation over the ahead set, not a history scan.
 
-### 4.3 Merging concurrent heads
+### 4.3 Merging concurrent writes
 
-Concurrent writes are reconciled by adding a version that records the frontier it
-merged. When **Core** observes two or
-more concurrent mergeable content heads for a row, it creates one accepted
-mergeable **merge version** whose `parents` are those heads sorted, unless a
-content version with the same sorted parent set already exists (`INV-HIST-5`).
-The merge version dominates all of its parent heads and becomes the current
-content winner when present and accepted (`INV-HIST-6`).
+On the linear-history line there are no merge heads and no merge versions.
+Core sequences every accepted write and merges it into the row's post-image
+as it accepts it; the post-image is what Core stores and ships. Clients and
+local persistence relays preserve authored patches, sync them to Core, and
+store Core's post-images when they arrive; they never merge on Core's behalf.
 
-Clients and local persistence relays preserve authored versions and sync them
-to Core; they do not generate authoritative merge versions. Core reconciles
-concurrent writes during admission, including independent inserts of the same
-row ID, and persists the resulting merge with Global durability. Replaying a
-commit already accepted by Core must not generate a redundant merge.
-
-The cells of a merge version are computed per column. The default strategy
-(`MergeStrategy::Lww`) fills each column independently: it takes the value from
-the highest-sort-key head that sets that column; if no head sets it, it falls
-back to the **parent-union** — the set of all direct parents of the merge's heads
-— and takes the value from the highest-sort-key version in that set that sets it
-(`INV-HIST-8`). For example, with two concurrent heads `A (t=5)` setting
-`title="x"` and `B (t=7)` setting `body="y"`, the merge is `{title:"x",
-body:"y"}`: each column comes from the head that set it. If both had set
-`title`, `B`'s higher sort key would win.
+The cells of a post-image are computed per column. A plain column
+(`MergeStrategy::Lww`) takes a write's value iff the write authored it and
+its stamp is at least the column's stored stamp, a tie going to the later
+seq (`INV-HIST-8`, §4.6). For example, with a base row and two concurrent
+writes `A (t=30)` setting `title="x"` and `B (t=20)` setting `title="y",
+body="z"`, the post-image is `{title:"x", body:"z"}` whichever of them Core
+sequences first: `B`'s body has no competitor and `A`'s title carries the
+higher stamp.
 
 Counter columns use delta summation instead of last-writer selection. The counter
 strategy (`MergeStrategy::Counter`) may be declared only on non-nullable integer
-columns (`INV-HIST-9`, ch. 2). It computes each
-concurrent writer's delta from its observed base and sums those deltas exactly
-(`INV-HIST-10`). Concurrent increments therefore converge to the exact total:
-from a base of `10`, a concurrent `+3` and `+5` merge to `18`, not to a single
-last-writer value.
+columns (`INV-HIST-9`, ch. 2). A counter write travels as its delta from the
+row image it was made over, and Core adds each accepted delta to the current
+value (`INV-HIST-10`). Concurrent increments therefore converge to the exact
+total: from a base of `10`, a concurrent `+3` and `+5` merge to `18`, not to a
+single last-writer value. A redelivered commit unit is the same transaction
+and is not applied again, so a retried increment counts once (`INV-EDGE-16`).
 
-_Further invariants._ `INV-HIST-7` — a merge version's transaction time is
-strictly after the maximum made-at time of the observed heads. `INV-HIST-15` —
-merge-strategy output is deterministic and grouping-insensitive over the
-head/parent set, with no wall-clock or node-local state in merged values.
-
-**Merging merges.** Distinct upstream nodes may each mint merge versions for the
-same row. If those nodes observed different frontiers, one merge may include a
-concurrent head the other has not yet seen. Such divergent merges reconcile by
-the same rule that defines every merge: a merge value is the deterministic fold
-over the **de-duplicated raw head set**, never a fold of already-merged values. A
-merge version is therefore a _cache_ over its sorted raw parent set, not an
-opaque value that is itself re-merged.
-
-To combine two merge versions, an authority folds over the union of their raw
-parent-closures, de-duplicated by version identity. LWW takes the argmax raw head
-with the parent-union fallback; `Counter` sums each raw version's delta keyed by
-its `TxId`, so a shared ancestor is counted exactly once and never
-double-counted. Consequently, duplicate merges over the _same_ frontier carry
-identical cells, with the deterministic `(time, node)` tie-break picking one.
-Merges over divergent frontiers converge to exactly what a single merger over
-the union would have produced (`INV-HIST-16`). Reconciliation re-folds the
-underlying versions, deltas, and ops, which are replicated history and so always
-on hand.
-
-#### Durable content-frontier helper
-
-An implementation may retain a node-local derived content-frontier helper to
-avoid rewalking history while accepting a new content version or preparing a
-merge. The helper belongs to the **content** layer only: deletion is an
-independent register (§4.4) and has no merge-head row. Its complete physical
-key is `(PhysicalTableId, canonical BranchKey, RowUuid)`; omitting a branch or
-using a logical table name would alias independent histories.
-
-The helper's `heads` field is one normal Groove `Array<Tuple<U64, Uuid>>`: one
-canonical `(TxTime, NodeUuid)` tuple per `TxId`, in strictly increasing
-canonical `TxId` order with no duplicate. It is neither a `Bytes` wrapper nor
-a serde/postcard collection. For example, concurrent `A=(10, node-a)` and
-`B=(10, node-b)` with `node-a < node-b` are stored as `[A, B]`; replaying `A`
-does not append a second `A`. A malformed, out-of-order, duplicate, or
-wrongly typed value fails closed before it affects a merge.
-
-This helper is derived local state, never a wire identity or source of history
-truth. Immutable content history remains authoritative and can rebuild the
-helper. The helper is nevertheless durable whenever retained, so an existing
-storage root must first pass the top-level epoch-manifest admission gate before
-any row is decoded: an unsupported former-alpha opaque payload must not be
-guessed as the new untagged array (`INV-HIST-19`; Groove storage §2).
+_Further invariants._ `INV-HIST-15` — for writes with distinct stamps the
+post-image does not depend on the order Core receives them (stamps decide plain
+columns, merge-strategy ops commute), with no wall-clock or node-local state in
+merged values.
 
 ### Durable codec profile
 
