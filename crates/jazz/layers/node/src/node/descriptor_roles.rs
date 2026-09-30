@@ -323,28 +323,67 @@ pub(super) struct CurrentPayloadEncodePlan {
     descriptor: Vec<u8>,
 }
 
+#[cfg(any(test, feature = "testing"))]
+thread_local! {
+    static OMIT_NEXT_CURRENT_RESULT_UNION_ARM: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+#[cfg(any(test, feature = "testing"))]
+pub fn omit_next_current_result_union_arm_for_test() {
+    OMIT_NEXT_CURRENT_RESULT_UNION_ARM.with(|next| next.set(true));
+}
+
+#[cfg(any(test, feature = "testing"))]
+fn take_omitted_current_result_union_arm_for_test(
+    schema: &super::query_engine::ResultMembershipSchema,
+) -> Option<String> {
+    OMIT_NEXT_CURRENT_RESULT_UNION_ARM.with(|next| {
+        if next.get() {
+            let omitted = schema.occurrence_union_arm_fields.values().next().cloned();
+            if omitted.is_some() {
+                next.set(false);
+            }
+            omitted
+        } else {
+            None
+        }
+    })
+}
+
 impl CurrentPayloadEncodePlan {
     pub(super) fn new(
         descriptor: RecordDescriptor,
         schema: &super::query_engine::ResultMembershipSchema,
     ) -> Result<Self, Error> {
-        let selected = std::iter::once(schema.row_field.as_str())
+        #[cfg(any(test, feature = "testing"))]
+        let omitted_field = take_omitted_current_result_union_arm_for_test(schema);
+        #[cfg(not(any(test, feature = "testing")))]
+        let omitted_field: Option<String> = None;
+
+        let mut projected_schema = schema.clone();
+        if let Some(omitted_field) = omitted_field {
+            projected_schema
+                .occurrence_union_arm_fields
+                .retain(|_, name| name != &omitted_field);
+        }
+        let selected = std::iter::once(projected_schema.row_field.as_str())
             .chain(
-                schema
+                projected_schema
                     .payload_fields
                     .iter()
-                    .filter(|field| field.name != schema.row_field)
+                    .filter(|field| field.name != projected_schema.row_field)
                     .map(|field| field.name.as_str()),
             )
             .chain(
-                schema
+                projected_schema
                     .occurrence_id_fields
                     .iter()
                     .skip(1)
                     .map(String::as_str),
             )
             .chain(
-                schema
+                projected_schema
                     .occurrence_union_arm_fields
                     .values()
                     .map(String::as_str),
@@ -371,7 +410,7 @@ impl CurrentPayloadEncodePlan {
             runtime_fields.push(descriptor.fields()[index].clone());
         }
         let runtime = RecordDescriptor::new_with_fields(runtime_fields);
-        let canonical = current_role_schema(schema)?;
+        let canonical = current_role_schema(&projected_schema)?;
         // A complete named/type tree comparison precedes any byte-layout reuse.
         for (source, target) in runtime.fields().iter().zip(canonical.fields()) {
             let source_type = RecordDescriptor::new([("value", source.value_type.clone())]);

@@ -323,6 +323,11 @@ mod codec;
 mod currency;
 mod database_slot;
 mod descriptor_roles;
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+pub fn omit_next_current_result_union_arm_for_test() {
+    descriptor_roles::omit_next_current_result_union_arm_for_test();
+}
 mod eviction;
 mod global_state;
 mod ingest;

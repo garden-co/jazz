@@ -3774,3 +3774,229 @@ fn invalidated_owner_delivery_cannot_cover_a_waiting_local_read() {
     foreground.detach_query(waiting);
     foreground.detach_query(refreshed);
 }
+/// Contract: a prepared owner-or-editor union projection failure rejects only
+/// its browser query, retires that exact route, and does not alter the fate of
+/// the Core transaction that supplied the result.
+///
+/// Actors: `reader` subscribes in the browser; Edge relays the subscription;
+/// Core owns the row and serves its owner/editor policy branches.
+///
+/// ```text
+/// browser ──query──► Edge ──query──► Core
+/// browser ◄─reject── Edge ◄─reject── Core
+/// ```
+#[test]
+fn prepared_union_result_projection_failure_is_terminal_and_query_scoped() {
+    let reader = AuthorSubject::for_test_bytes([0x91; 16]);
+    let claims = test_provider_claims(reader);
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("owner", PublicColumnType::Uuid)
+                .column("editor", PublicColumnType::Uuid)
+                .policies(
+                    PublicTablePolicies::new().with_select(PublicPolicyExpr::Or(vec![
+                        public_session_eq("owner", &["claims", "sub"]),
+                        public_session_eq("editor", &["claims", "sub"]),
+                    ])),
+                ),
+        ),
+    );
+    let core = open_core_with_claims(0x91, AuthorSubject::SYSTEM, &schema, claims.clone());
+    let edge = open_db(0x92, reader, &schema);
+    let browser = open_db(0x93, reader, &schema);
+    edge.set_relay_authority_session_owner_for_test();
+    edge.set_test_provider_claims(reader, claims.clone());
+    browser.set_non_durable_client();
+    browser.set_test_provider_claims(reader, claims.clone());
+
+    let (edge_core, core_transport, core_sent) = duplex_with_server_outbound_tap();
+    block_on(edge.connect_upstream(edge_core));
+    let core_connection =
+        core.accept_scope_isolated_relay_subscriber(core_transport, reader, claims.clone(), 1);
+    let (browser_edge, edge_transport) = duplex();
+    block_on(browser.connect_upstream(browser_edge));
+    edge.accept_subscriber_with_claims(edge_transport, reader, claims);
+
+    let failed_query = Query::from("todos").filter(eq(col("title"), lit("union-target")));
+    let sibling_query = Query::from("todos").filter(eq(col("title"), lit("sibling")));
+    let failed_shape = prepared(&browser, &failed_query).shape.shape_id();
+    let mut failed = prepared_subscribe(&browser, &failed_query, global_subscribe_opts()).unwrap();
+    let mut sibling =
+        prepared_subscribe(&browser, &sibling_query, global_subscribe_opts()).unwrap();
+    let drive = || {
+        for _ in 0..16 {
+            browser.tick().unwrap();
+            edge.tick().unwrap();
+            core.tick().unwrap();
+        }
+    };
+    drive();
+    while failed.try_next_event().is_some() {}
+    while sibling.try_next_event().is_some() {}
+    let failed_subscription = {
+        let connection = core_connection.borrow();
+        let ConnectionLink::Subscriber(state) = &connection.link else {
+            unreachable!("Core retains the Edge subscriber connection");
+        };
+        *state
+            .served
+            .keys()
+            .find(|subscription| subscription.shape_id == failed_shape)
+            .expect("the failed browser query has one Core-served route")
+    };
+    let active_browser_queries = browser.active_groove_subscriptions_for_test();
+
+    let sibling_row = row(0x94);
+    core.insert_with_id(
+        "todos",
+        sibling_row,
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("sibling".to_owned())),
+            ("owner".to_owned(), Value::Uuid(reader.test_uuid())),
+            ("editor".to_owned(), Value::Uuid(reader.test_uuid())),
+        ]),
+    )
+    .unwrap();
+    drive();
+    assert!(
+        sibling.try_next_event().is_some(),
+        "the sibling query must establish its own healthy result before fault injection"
+    );
+    while sibling.try_next_event().is_some() {}
+
+    crate::node::omit_next_current_result_union_arm_for_test();
+    let failed_row = row(0x95);
+    let target_write = core
+        .insert_with_id(
+            "todos",
+            failed_row,
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("union-target".to_owned())),
+                ("owner".to_owned(), Value::Uuid(reader.test_uuid())),
+                ("editor".to_owned(), Value::Uuid(reader.test_uuid())),
+            ]),
+        )
+        .unwrap();
+    let fate_before = block_on(target_write.write_state()).unwrap();
+    assert_eq!(fate_before.fate, Fate::Accepted);
+    assert_eq!(fate_before.durability, DurabilityTier::Global);
+    drive();
+
+    let rejection = failed
+        .try_next_event()
+        .expect("the malformed prepared result must reach the browser as a rejection");
+    let SubscriptionEvent::Rejected { reason } = rejection else {
+        panic!("the failed owner/editor query must reject, not publish a partial result");
+    };
+    let SubscribeRejectReason::ServerFailure { code } = reason else {
+        panic!("the failed prepared projection must produce a bounded server rejection");
+    };
+    assert_eq!(
+        format!("{code:?}"),
+        "QueryResultProtocol",
+        "the maintained result protocol failure must use its dedicated bounded code"
+    );
+
+    assert_eq!(
+        core_sent
+            .borrow()
+            .iter()
+            .filter(|message| matches!(
+                message,
+                SyncMessage::SubscribeRejected { subscription, .. }
+                    if *subscription == failed_subscription
+            ))
+            .count(),
+        1,
+        "one failed query key receives one bounded rejection"
+    );
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(
+        matches!(
+            futures::Stream::poll_next(std::pin::Pin::new(&mut failed), &mut context),
+            Poll::Ready(None)
+        ),
+        "the browser stream must become terminal after delivering its rejection"
+    );
+    {
+        let connection = core_connection.borrow();
+        let ConnectionLink::Subscriber(state) = &connection.link else {
+            unreachable!("Core retains the Edge subscriber connection");
+        };
+        assert!(!state.served.contains_key(&failed_subscription));
+        assert!(
+            state
+                .coverage_groups
+                .values()
+                .all(|group| !group.subscribers.contains(&failed_subscription)),
+            "the failed key must leave its exact served group"
+        );
+        assert!(!state.peer.has_maintained_subscription(failed_subscription));
+    }
+    assert!(
+        edge.node
+            .relay_upstream_subscription_owners
+            .borrow()
+            .keys()
+            .all(|(subscription, _, _)| *subscription != failed_subscription),
+        "Edge must release the failed upstream query pin"
+    );
+    assert_eq!(
+        browser.active_groove_subscriptions_for_test() + 1,
+        active_browser_queries,
+        "the browser must retire only the failed local maintained query"
+    );
+
+    let healthy_row = row(0x96);
+    let sibling_write = core
+        .insert_with_id(
+            "todos",
+            healthy_row,
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("sibling".to_owned())),
+                ("owner".to_owned(), Value::Uuid(reader.test_uuid())),
+                ("editor".to_owned(), Value::Uuid(reader.test_uuid())),
+            ]),
+        )
+        .unwrap();
+    drive();
+    assert!(
+        matches!(
+            sibling.try_next_event(),
+            Some(SubscriptionEvent::Delta { added, .. })
+                if added.iter().any(|added| added.row.row_uuid() == healthy_row)
+        ),
+        "the sibling subscription remains live and publishes a later matching row"
+    );
+    assert_eq!(
+        block_on(target_write.write_state()).unwrap(),
+        fate_before,
+        "serving failure must not change the target transaction's persisted fate"
+    );
+    assert_eq!(
+        block_on(sibling_write.write_state()).unwrap().fate,
+        Fate::Accepted
+    );
+    assert!(
+        core.read(&Query::from("todos").filter(eq(col("title"), lit("union-target"))))
+            .unwrap()
+            .iter()
+            .any(|row| row.row_uuid() == failed_row),
+        "the committed row remains persisted despite the subscription failure"
+    );
+    assert_eq!(
+        core_sent
+            .borrow()
+            .iter()
+            .filter(|message| matches!(
+                message,
+                SyncMessage::SubscribeRejected { subscription, .. }
+                    if *subscription == failed_subscription
+            ))
+            .count(),
+        1,
+        "later Core ticks must not repeat the failed query rejection"
+    );
+}
