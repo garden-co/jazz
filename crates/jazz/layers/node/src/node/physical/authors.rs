@@ -307,6 +307,21 @@ where
         &mut self,
         record: OwnedRecord,
     ) -> Result<OwnedRecord, Error> {
+        self.expand_physical_row_authors_filling(record, None)
+    }
+
+    /// [`Self::expand_physical_row_authors`], also filling a null (implicit)
+    /// history `updated_by` with `implicit_updated_by`, the field's encoded
+    /// logical value. Expanding and filling in one pass copies the row once.
+    ///
+    /// The row is copied field by field: aliases are read from their raw
+    /// little-endian bytes and replaced by the dictionary's author bytes, so
+    /// no field is decoded into a `Value`.
+    pub(super) fn expand_physical_row_authors_filling(
+        &mut self,
+        record: OwnedRecord,
+        implicit_updated_by: Option<&[u8]>,
+    ) -> Result<OwnedRecord, Error> {
         let physical = *record.descriptor();
         if !descriptor_has_author_aliases(&physical) {
             return Ok(record);
@@ -314,56 +329,57 @@ where
         let expanded = self
             .author_aliases
             .expanded_descriptor(physical, &ROW_AUTHOR_FIELDS);
-        let input = record.borrowed();
+        let input = record.raw();
         let aliases = &self.author_aliases;
         let raw = expanded.create_with_encoded_fields::<Error>(
-            input.raw().len() + 128,
+            input.len() + 128,
             |index, output| {
-                if ROW_AUTHOR_FIELDS.contains(&index) {
-                    let alias = match input.get_idx(index)? {
-                        Value::U32(alias) => AuthorAlias(alias),
-                        // History `updated_by` is null when it is the author
-                        // of the image's own transaction; a read fills it in.
-                        Value::Nullable(None) => {
-                            expanded.encode_field_into(index, &Value::Nullable(None), output)?;
-                            return Ok(());
-                        }
-                        Value::Nullable(Some(inner)) => match *inner {
-                            Value::U32(alias) => AuthorAlias(alias),
-                            _ => {
-                                return Err(Error::InvalidStoredValue(
-                                    "stored row author alias is not a U32",
-                                ));
-                            }
-                        },
-                        _ => {
-                            return Err(Error::InvalidStoredValue(
-                                "stored row author alias is not a U32",
-                            ));
-                        }
-                    };
-                    let author = aliases.author_record(alias).ok_or(
-                        Error::InvalidStoredValue("stored row author alias is not in jazz_authors"),
-                    )?;
-                    if matches!(
-                        expanded.fields()[index].value_type,
-                        records::ValueType::Nullable(_)
-                    ) {
-                        expanded.encode_field_into(
-                            index,
-                            &Value::Nullable(Some(Box::new(Value::Record(OwnedRecord::new(
-                                author.to_vec(),
-                                row_author_descriptor(),
-                            ))))),
-                            output,
-                        )?;
-                    } else {
-                        output.extend_from_slice(&author);
-                    }
+                let span = physical.field_span(input, index)?;
+                let bytes = &input[span];
+                if !ROW_AUTHOR_FIELDS.contains(&index) {
+                    output.extend_from_slice(bytes);
                     return Ok(());
                 }
-                let span = physical.field_span(input.raw(), index)?;
-                output.extend_from_slice(&input.raw()[span]);
+                let nullable = matches!(
+                    physical.fields()[index].value_type,
+                    records::ValueType::Nullable(_)
+                );
+                let alias_bytes = if nullable {
+                    match bytes.split_first() {
+                        // History `updated_by` is null when it is the author
+                        // of the image's own transaction.
+                        Some((0, padding)) if padding.iter().all(|byte| *byte == 0) => {
+                            match implicit_updated_by {
+                                Some(author) => output.extend_from_slice(author),
+                                None => expanded.encode_field_into(
+                                    index,
+                                    &Value::Nullable(None),
+                                    output,
+                                )?,
+                            }
+                            return Ok(());
+                        }
+                        Some((1, alias)) => alias,
+                        _ => {
+                            return Err(Error::InvalidStoredValue(
+                                "stored row author alias has an invalid null flag",
+                            ));
+                        }
+                    }
+                } else {
+                    bytes
+                };
+                let alias = AuthorAlias(u32::from_le_bytes(alias_bytes.try_into().map_err(
+                    |_| Error::InvalidStoredValue("stored row author alias is not a U32"),
+                )?));
+                let author = aliases.author_record(alias).ok_or(Error::InvalidStoredValue(
+                    "stored row author alias is not in jazz_authors",
+                ))?;
+                if nullable {
+                    // A present nullable value is its flag then the value.
+                    output.push(1);
+                }
+                output.extend_from_slice(&author);
                 Ok(())
             },
         )?;

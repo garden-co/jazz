@@ -715,8 +715,51 @@ where
         storage_table: &str,
         record: OwnedRecord,
     ) -> Result<VersionRow, Error> {
+        // A physical image with an implicit `updated_by` is expanded and
+        // filled in one copy; `resolve_history_updated_by` then has nothing
+        // left to do.
+        let record = match self.implicit_physical_history_tx_key(&record)? {
+            Some(key) => {
+                let author = self.history_tx_author(batch, key).await?;
+                self.expand_physical_row_authors_filling(record, Some(&author))?
+            }
+            None => record,
+        };
         let version = self.decode_history_owned_record(requested_table, storage_table, record)?;
         self.resolve_history_updated_by(batch, version).await
+    }
+
+    /// The `(tx_time, tx_node)` key of a physical (author-aliased) history
+    /// image whose `updated_by` is implicit, if `record` is one.
+    fn implicit_physical_history_tx_key(
+        &self,
+        record: &OwnedRecord,
+    ) -> Result<Option<(TxTime, NodeAlias)>, Error> {
+        let descriptor = record.descriptor();
+        if !descriptor_has_author_aliases(descriptor) {
+            return Ok(None);
+        }
+        let record = record.borrowed();
+        if !history_updated_by_is_null(record)? {
+            return Ok(None);
+        }
+        Ok(Some((
+            TxTime(record.get_u64(HistoryRowRecord::FIELD_TX_TIME_IDX)?),
+            NodeAlias(record.get_u64(HistoryRowRecord::FIELD_TX_NODE_ID_IDX)?),
+        )))
+    }
+
+    /// Encoded `updated_by` of a history image written by transaction `key`:
+    /// the transaction's author, cached.
+    async fn history_tx_author(
+        &mut self,
+        batch: Option<&DatabaseBatch>,
+        key: (TxTime, NodeAlias),
+    ) -> Result<Rc<[u8]>, Error> {
+        match self.history_tx_authors.get(&key) {
+            Some(author) => Ok(Rc::clone(author)),
+            None => self.load_history_tx_author(batch, key).await,
+        }
     }
 
     /// Cache a transaction's author for `resolve_history_updated_by`.
@@ -769,10 +812,7 @@ where
             return Ok(version);
         }
         let key = (version.tx_time(), version.tx_node_alias());
-        let author = match self.history_tx_authors.get(&key) {
-            Some(author) => Rc::clone(author),
-            None => self.load_history_tx_author(batch, key).await?,
-        };
+        let author = self.history_tx_author(batch, key).await?;
         let input = version.record.borrowed();
         let descriptor = input.descriptor();
         let raw = descriptor.create_with_encoded_fields::<Error>(

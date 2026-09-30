@@ -2515,12 +2515,7 @@ impl VersionRow {
     /// Whether this image still lacks `updated_by`: it was read from history
     /// storage, which omits the transaction's own author.
     pub(super) fn updated_by_is_implicit(&self) -> Result<bool, Error> {
-        Ok(matches!(
-            self.record
-                .borrowed()
-                .get_idx(HistoryRowRecord::FIELD_UPDATED_BY_IDX)?,
-            Value::Nullable(None)
-        ))
+        history_updated_by_is_null(self.record.borrowed())
     }
 
     pub(super) fn updated_at(&self) -> TxTime {
@@ -4720,5 +4715,31 @@ mod active_schema_tests {
         let mut unsupported = golden.clone();
         unsupported[0] = 2;
         assert!(decode_active_schema(&unsupported).is_err());
+    }
+}
+
+/// Whether the `updated_by` of a history-shaped image (logical or physical)
+/// is null, read from its null flag without decoding the author. A layout
+/// whose `updated_by` is not nullable (a current image) is never null.
+pub(super) fn history_updated_by_is_null(
+    record: groove::records::BorrowedRecord<'_>,
+) -> Result<bool, Error> {
+    let index = HistoryRowRecord::FIELD_UPDATED_BY_IDX;
+    let descriptor = record.descriptor();
+    if !matches!(
+        descriptor
+            .fields()
+            .get(index)
+            .map(|field| &field.value_type),
+        Some(groove::records::ValueType::Nullable(_))
+    ) {
+        return Ok(false);
+    }
+    match record.raw()[descriptor.field_span(record.raw(), index)?].first() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(Error::InvalidStoredValue(
+            "history updated_by has an invalid null flag",
+        )),
     }
 }
