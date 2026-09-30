@@ -523,27 +523,27 @@ export default function HomePage() {
             <Table density="balanced" verticalAlign="top">
               <TableHeader>
                 <TableRow>
-                  <TableHeaderCell> </TableHeaderCell>
                   <TableHeaderCell>Self-hosted</TableHeaderCell>
                   <TableHeaderCell>Jazz Cloud</TableHeaderCell>
                   <TableHeaderCell>Enterprise</TableHeaderCell>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {hostingRows.map((row) => (
-                  <TableRow key={row.topic}>
-                    <TableCell>
+                {hostingRows.flatMap((row) => [
+                  <TableRow key={`${row.topic}-topic`}>
+                    <TableCell colSpan={3}>
                       <Text weight="medium">{row.topic}</Text>
                     </TableCell>
+                  </TableRow>,
+                  <TableRow key={row.topic}>
                     <TableCell>
                       <Text color="secondary">{row.selfHosted}</Text>
                     </TableCell>
                     <TableCell>{row.cloud}</TableCell>
                     <TableCell>{row.enterprise}</TableCell>
-                  </TableRow>
-                ))}
+                  </TableRow>,
+                ])}
                 <TableRow>
-                  <TableCell> </TableCell>
                   <TableCell>
                     <Button
                       label="How to self-host"
