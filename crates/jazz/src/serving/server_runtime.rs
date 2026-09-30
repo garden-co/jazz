@@ -1188,8 +1188,12 @@ impl ServerRuntimeHandle {
         schema: SchemaVersionId,
         lens: crate::ids::MigrationLensId,
     ) -> Result<(bool, bool), String> {
-        self.run(move |shell| Ok(shell.runtime_catalogue_contains(schema, lens)))
-            .await
+        self.run(move |shell| {
+            shell
+                .runtime_catalogue_contains(schema, lens)
+                .map_err(|error| error.to_string())
+        })
+        .await
     }
 
     #[doc(hidden)]
@@ -1197,8 +1201,12 @@ impl ServerRuntimeHandle {
         &self,
         schema: SchemaVersionId,
     ) -> Result<bool, String> {
-        self.run(move |shell| Ok(shell.runtime_catalogue_contains_schema(schema)))
-            .await
+        self.run(move |shell| {
+            shell
+                .runtime_catalogue_contains_schema(schema)
+                .map_err(|error| error.to_string())
+        })
+        .await
     }
 
     /// Start a core runtime over the selected storage configuration.

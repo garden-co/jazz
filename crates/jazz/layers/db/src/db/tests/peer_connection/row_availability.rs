@@ -72,7 +72,9 @@ fn core_current_rows_same_row_revocation_has_no_hidden_payload() {
     let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
     let bob = AuthorSubject::for_test_bytes([0xb1; 16]);
     let core = open_core(0xc1, AuthorSubject::SYSTEM, &schema);
-    core.server.enable_authoritative_scalar_exit_refresh();
+    core.server
+        .enable_authoritative_scalar_exit_refresh()
+        .expect("enable authoritative scalar exit refresh");
     let target = row(0xd1);
     core.insert_with_id("todos", target, cells("before", false, alice))
         .unwrap();
@@ -174,7 +176,9 @@ fn relay_proxies_current_rows_after_related_grant_revocation() {
     let alice = AuthorSubject::for_test_bytes([0xa2; 16]);
     let mallory = AuthorSubject::for_test_bytes([0xa3; 16]);
     let core = open_core(0xc2, AuthorSubject::SYSTEM, &schema);
-    core.server.enable_authoritative_scalar_exit_refresh();
+    core.server
+        .enable_authoritative_scalar_exit_refresh()
+        .expect("enable authoritative scalar exit refresh");
     let target = row(0xd2);
     let grant = row(0xd3);
     core.insert_with_id("todos", target, cells("before", false, alice))
@@ -302,7 +306,9 @@ fn current_rows_readable_tombstone_is_not_generic_unavailable() {
     let schema = owner_read_schema();
     let alice = AuthorSubject::for_test_bytes([0xa4; 16]);
     let core = open_core(0xc4, AuthorSubject::SYSTEM, &schema);
-    core.server.enable_authoritative_scalar_exit_refresh();
+    core.server
+        .enable_authoritative_scalar_exit_refresh()
+        .expect("enable authoritative scalar exit refresh");
     let target = row(0xd4);
     core.insert_with_id("todos", target, cells("readable preimage", false, alice))
         .unwrap();
@@ -482,7 +488,9 @@ fn current_rows_reject_wrong_context_partial_receipt_and_cancel() {
 fn current_rows_more_than_64_sequential_contexts_remain_functional() {
     let schema = owner_read_schema();
     let core = open_core(0xc8, AuthorSubject::SYSTEM, &schema);
-    core.server.enable_authoritative_scalar_exit_refresh();
+    core.server
+        .enable_authoritative_scalar_exit_refresh()
+        .expect("enable authoritative scalar exit refresh");
     let target = row(0xd8);
     core.insert_with_id(
         "todos",
@@ -540,7 +548,9 @@ fn current_rows_reject_deletion_only_readable_receipt() {
     let schema = owner_read_schema();
     let alice = AuthorSubject::for_test_bytes([0xa4; 16]);
     let core = open_core(0xc4, AuthorSubject::SYSTEM, &schema);
-    core.server.enable_authoritative_scalar_exit_refresh();
+    core.server
+        .enable_authoritative_scalar_exit_refresh()
+        .expect("enable authoritative scalar exit refresh");
     let target = row(0xd4);
     core.insert_with_id("todos", target, cells("readable preimage", false, alice))
         .unwrap();
@@ -617,7 +627,9 @@ fn current_rows_reject_deletion_only_readable_receipt() {
 fn backend_own_system_scalar_query_reconciles_after_reconnect() {
     let schema = owner_read_schema();
     let core = open_core(0xc4, AuthorSubject::SYSTEM, &schema);
-    core.server.enable_authoritative_scalar_exit_refresh();
+    core.server
+        .enable_authoritative_scalar_exit_refresh()
+        .expect("enable authoritative scalar exit refresh");
     let backend = open_db(0xe4, AuthorSubject::SYSTEM, &schema);
     let target = row(0xd4);
     core.insert_with_id(
@@ -745,7 +757,9 @@ fn scalar_unavailability_receipt_preserves_inflight_local_edit() {
     let alice = AuthorSubject::for_test_bytes([0xa5; 16]);
     let bob = AuthorSubject::for_test_bytes([0xb5; 16]);
     let core = open_core(0xc5, AuthorSubject::SYSTEM, &schema);
-    core.server.enable_authoritative_scalar_exit_refresh();
+    core.server
+        .enable_authoritative_scalar_exit_refresh()
+        .expect("enable authoritative scalar exit refresh");
     let client = open_db(0xe5, alice, &schema);
     client
         .node

@@ -637,7 +637,9 @@ macro_rules! flush_subscriber_controls_or_stop {
             $connection.transport.as_mut(),
             &mut $connection.pending_control_responses,
             &$connection.scheduler,
-        )? {
+        )
+        .await?
+        {
             return Ok(true);
         }
     };
@@ -950,7 +952,7 @@ where
     /// upstream propagation. Read compilation uses the scoped context above,
     /// so this author-keyed compatibility state cannot select another live
     /// session's maintained view.
-    fn bind_subscriber_session_claims(&self) {
+    async fn bind_subscriber_session_claims(&self) {
         if matches!(
             &self.link,
             ConnectionLink::Subscriber(SubscriberConnectionState { peer, .. })
@@ -964,7 +966,7 @@ where
         let Some((identity, claims)) = self.subscriber_session_claim_binding() else {
             return;
         };
-        self.node.borrow_mut().set_session_claims(identity, claims);
+        self.node.lock().await.set_session_claims(identity, claims);
     }
 
     fn subscriber_session_claim_revision(&self) -> u64 {
@@ -1097,7 +1099,7 @@ where
         // Groove subscription remain live under the old policy snapshot.
         for stale_subscription in stale_maintained_subscriptions {
             peer.note_claim_refresh_full_diff(stale_subscription);
-            let mut node = self.node.borrow_mut();
+            let mut node = self.node.lock().await;
             node.apply_unsubscribe(stale_subscription);
             peer.forget_subscription_with_node(&mut node, stale_subscription);
         }
@@ -1219,7 +1221,7 @@ where
             // fresh exact U settles.
             let maintained_subscription = coverage_group_subscription_key(&coverage);
             {
-                let mut node = self.node.borrow_mut();
+                let mut node = self.node.lock().await;
                 node.apply_unsubscribe(maintained_subscription);
                 peer.forget_subscription_with_node(&mut node, maintained_subscription);
             }
@@ -1234,13 +1236,14 @@ where
             // queued wire unsubscribe remains responsible for the remote
             // receiver; `apply_unsubscribe` is idempotent when the old open
             // had not left the pending queue yet.
-            let mut pending = upstream_subscriptions.borrow_mut();
             if old_owner.is_some() {
                 self.node
-                    .borrow_mut()
+                    .lock()
+                    .await
                     .apply_unsubscribe(old_upstream_subscription);
-                // If admission had not reached the upstream owner yet, removing
-                // the retained old open is sufficient. Otherwise its local and
+            }
+            let mut pending = upstream_subscriptions.borrow_mut();
+            if old_owner.is_some() {
                 // remote receiver both need the normal unsubscribe lifecycle.
                 let old_open_was_pending = pending.iter().any(|command| {
                     matches!(
@@ -1412,12 +1415,13 @@ where
                     &mut update,
                 );
                 let prior_scope = scope_purposes.get(&subscription).cloned();
+                let observed_node = self.node.lock().await;
                 let refreshed_scope = (binding_origin
                     == CoveragePolicyBindingOrigin::DirectAdmitted)
                     .then(|| {
                         prior_scope.as_ref().and_then(|prior| {
                             refresh_authorized_scope_purpose(
-                                &self.node.borrow(),
+                                &observed_node,
                                 identity,
                                 &session_claim_binding.as_ref().expect("subscriber claims").1,
                                 subscription,
@@ -1428,6 +1432,7 @@ where
                         })
                     })
                     .flatten();
+                drop(observed_node);
                 if let Some(refreshed) = &refreshed_scope {
                     move_scope_aggregate_member(
                         scope_aggregates,
@@ -1441,17 +1446,20 @@ where
                 {
                     remove_scope_aggregate_member(scope_aggregates, &prior.key, subscription);
                 }
-                let receipt = refreshed_scope.as_ref().and_then(|purpose| {
-                    aggregate_authorization_scope_receipt_for_view(
-                        scope_aggregates,
-                        &self.node.borrow(),
-                        peer,
-                        identity,
-                        connection_epoch,
-                        purpose,
-                        &update,
-                    )
-                });
+                let receipt = {
+                    let observed_node = self.node.lock().await;
+                    refreshed_scope.as_ref().and_then(|purpose| {
+                        aggregate_authorization_scope_receipt_for_view(
+                            scope_aggregates,
+                            &observed_node,
+                            peer,
+                            identity,
+                            connection_epoch,
+                            purpose,
+                            &update,
+                        )
+                    })
+                };
                 send_subscriber_with_sync_context(
                     &self.node,
                     peer,
@@ -1459,7 +1467,8 @@ where
                     &self.local_fate_routes,
                     &self.downstream_fates,
                     update,
-                )?;
+                )
+                .await?;
                 coverage_groups
                     .get_mut(&coverage)
                     .expect("claim-refresh coverage group remains registered")
@@ -1632,12 +1641,13 @@ where
         ) in groups
         {
             let group_subscription = coverage_group_subscription_key(&coverage);
-            let scope_relay = self.node.borrow().client_relay_scope().is_some();
+            let scope_relay = self.node.lock().await.client_relay_scope().is_some();
             peer.set_subscription_policy_binding(group_subscription, policy_binding);
             if awaiting_upstream_settlement {
                 let authority_result_source = self
                     .node
-                    .borrow()
+                    .lock()
+                    .await
                     .authority_result_key_for_subscription(authority_result_subscription)
                     .ok();
                 let Some(authority_result_source) = authority_result_source else {
@@ -1650,7 +1660,8 @@ where
                 if scope_relay
                     && !self
                         .node
-                        .borrow()
+                        .lock()
+                        .await
                         .has_settled_authority_result(&authority_result_source)
                 {
                     // Recovery cannot turn an unsettled strict relay read into
@@ -1705,9 +1716,10 @@ where
                 );
                 self.last_resume_bytes = Some(serialized_sync_message_len(&update));
                 let prior_scope = scope_purposes.get(&subscription).cloned();
+                let observed_node = self.node.lock().await;
                 let refreshed_scope = prior_scope.as_ref().and_then(|prior| {
                     refresh_authorized_scope_purpose(
-                        &self.node.borrow(),
+                        &observed_node,
                         ingest_context.identity,
                         &session_claim_binding.as_ref().expect("subscriber claims").1,
                         subscription,
@@ -1716,6 +1728,7 @@ where
                         &prior,
                     )
                 });
+                drop(observed_node);
                 if let Some(refreshed) = &refreshed_scope {
                     move_scope_aggregate_member(
                         scope_aggregates,
@@ -1727,17 +1740,20 @@ where
                 } else if let Some(prior) = scope_purposes.remove(&subscription) {
                     remove_scope_aggregate_member(scope_aggregates, &prior.key, subscription);
                 }
-                let receipt = refreshed_scope.as_ref().and_then(|purpose| {
-                    aggregate_authorization_scope_receipt_for_view(
-                        scope_aggregates,
-                        &self.node.borrow(),
-                        peer,
-                        ingest_context.identity,
-                        connection_epoch,
-                        purpose,
-                        &update,
-                    )
-                });
+                let receipt = {
+                    let observed_node = self.node.lock().await;
+                    refreshed_scope.as_ref().and_then(|purpose| {
+                        aggregate_authorization_scope_receipt_for_view(
+                            scope_aggregates,
+                            &observed_node,
+                            peer,
+                            ingest_context.identity,
+                            connection_epoch,
+                            purpose,
+                            &update,
+                        )
+                    })
+                };
                 send_subscriber_with_sync_context(
                     &self.node,
                     peer,
@@ -1745,7 +1761,8 @@ where
                     &self.local_fate_routes,
                     &self.downstream_fates,
                     update,
-                )?;
+                )
+                .await?;
                 if let Some((subscription, receipt)) = receipt {
                     queue_direct_control(
                         &mut self.pending_control_responses,
@@ -1817,13 +1834,76 @@ where
                     break;
                 }
                 Err(error)
-                    if handle_transport_backpressure(&self.node, &self.scheduler, &error) =>
+                    if handle_transport_backpressure_sync(&self.node, &self.scheduler, &error) =>
                 {
                     self.inbound_authority_receipt_quarantine = true;
                     break;
                 }
                 Err(error) => {
                     self.startup_error = Some(transport_error(error));
+                    break;
+                }
+            }
+        }
+    }
+
+    async fn stage_inbound_without_authority_receipt_async(&mut self) {
+        for staged in &mut self.staged_inbound {
+            staged.authority_receipt_eligible = false;
+        }
+
+        if let ConnectionLink::Upstream(UpstreamConnectionState {
+            pending_row_version_repairs,
+            deferred_repair_fates,
+            sent_subscriptions,
+            awaiting_support_snapshots,
+            pending,
+            ..
+        }) = &mut self.link
+        {
+            for staged in deferred_repair_fates {
+                staged.authority_receipt_eligible = false;
+            }
+            for repair in pending_row_version_repairs {
+                repair.authority_receipt_eligible = false;
+            }
+            for (key, request) in sent_subscriptions {
+                if pending.iter().any(|command| {
+                    matches!(command,
+                    PendingUpstreamCommand::Unsubscribe(subscription) if subscription == key)
+                }) {
+                    continue;
+                }
+                awaiting_support_snapshots.entry(*key).or_default();
+                if !pending.iter().any(|command| {
+                    matches!(command,
+                    PendingUpstreamCommand::Subscribe(open) if open.subscription == *key)
+                }) {
+                    pending.push(PendingUpstreamCommand::Subscribe(request.clone()));
+                }
+            }
+        }
+
+        loop {
+            match self.transport.try_recv_owned_result() {
+                Ok(Some(message)) => self.staged_inbound.push_back(StagedInboundMessage {
+                    message: message.message,
+                    lease: message.lease,
+                    authority_receipt_eligible: false,
+                    receipts_validated: message.receipts_validated,
+                }),
+                Ok(None) => {
+                    self.inbound_authority_receipt_quarantine = false;
+                    break;
+                }
+                Err(error) => {
+                    if handle_transport_backpressure_async(&self.node, &self.scheduler, &error)
+                        .await
+                    {
+                        self.inbound_authority_receipt_quarantine = true;
+                    } else {
+                        self.startup_error = Some(transport_error(error));
+                    }
                     break;
                 }
             }
@@ -1904,7 +1984,7 @@ where
         // reissued opens. Otherwise a fast confirming snapshot can join that
         // backlog and be discarded as an ineligible pre-handoff receipt.
         if self.inbound_authority_receipt_quarantine {
-            self.stage_inbound_without_authority_receipt();
+            self.stage_inbound_without_authority_receipt_async().await;
             if let Some(error) = self.startup_error.take() {
                 return Err(error);
             }
@@ -1917,6 +1997,8 @@ where
             &self.query_runtime_wake_pending,
             &self.query_runtime_waker,
         );
+        #[cfg(any(test, feature = "testing"))]
+        let node_runtime_token = self.node.lock().await.groove_runtime_token();
         let connection_epoch = self.connection_epoch;
         // The host-admitted scope-isolated worker owns one immutable foreground
         // session and may forward that exact binding upstream. A generic
@@ -1924,14 +2006,14 @@ where
         // forward rather than select a user binding. Raw wire input cannot
         // enable either path.
         let permits_delegated_sessions = self.transport.permits_delegated_sessions()
-            || self.node.borrow().client_relay_scope().is_some();
+            || self.node.lock().await.client_relay_scope().is_some();
         self.observe_shared_subscriber_dirty_epoch();
         self.retry_local_replay_after_progress().await?;
         let session_claim_binding = self.subscriber_session_claim_binding();
-        self.bind_subscriber_session_claims();
+        self.bind_subscriber_session_claims().await;
         self.rebind_subscriber_views_after_claim_change(progress_waker.as_ref())
             .await?;
-        self.pump_current_rows()?;
+        self.pump_current_rows().await?;
         match &mut self.link {
             ConnectionLink::Upstream(UpstreamConnectionState {
                 local_receiver,
@@ -1970,7 +2052,7 @@ where
                                     claims: policy_binding.1,
                                 });
                             #[cfg(any(test, feature = "testing"))]
-                            crate::delivery_diagnostics::record(|| format!("repair_fetch_send runtime={} count={sent_count} delegated={}", self.node.borrow().groove_runtime_token(), delegated_session.is_some()));
+                            crate::delivery_diagnostics::record(|| format!("repair_fetch_send runtime={} count={sent_count} delegated={}", node_runtime_token, delegated_session.is_some()));
                             if let Err(error) = self
                                 .transport
                                 .send(SyncMessage::FetchRowVersions {
@@ -1978,11 +2060,13 @@ where
                                     delegated_session,
                                 })
                             {
-                                if handle_transport_backpressure(
+                                if handle_transport_backpressure_async(
                                     &self.node,
                                     &self.scheduler,
                                     &error,
-                                ) {
+                                )
+                                .await
+                                {
                                     return Ok(true);
                                 }
                                 return Err(transport_error(error));
@@ -1992,11 +2076,13 @@ where
                         if let Some(message) = self.auxiliary_pump.take_outbound(64) {
                             if let Err(error) = self.transport.send(message.clone()) {
                                 self.auxiliary_pump.restore_outbound(message);
-                                if handle_transport_backpressure(
+                                if handle_transport_backpressure_async(
                                     &self.node,
                                     &self.scheduler,
                                     &error,
-                                ) {
+                                )
+                                .await
+                                {
                                     return Ok(true);
                                 }
                                 return Err(transport_error(error));
@@ -2005,7 +2091,7 @@ where
                         }
                         pending.extend(upstream_subscriptions.borrow_mut().drain(..));
                         if permits_delegated_sessions {
-                            let claims = self.node.borrow().session_claims_with_revisions();
+                            let claims = self.node.lock().await.session_claims_with_revisions();
                             for (identity, claims, revision) in claims {
                                 if sent_session_claim_revisions
                                     .get(&identity)
@@ -2017,11 +2103,13 @@ where
                                     .transport
                                     .send(SyncMessage::SessionClaims { identity, claims })
                                 {
-                                    if handle_transport_backpressure(
+                                    if handle_transport_backpressure_async(
                                         &self.node,
                                         &self.scheduler,
                                         &error,
-                                    ) {
+                                    )
+                                    .await
+                                    {
                                         return Ok(true);
                                     }
                                     return Err(transport_error(error));
@@ -2072,11 +2160,13 @@ where
                                             })
                                         {
                                             announced_shapes.remove(&registration_key);
-                                            if handle_transport_backpressure(
+                                            if handle_transport_backpressure_async(
                                                 &self.node,
                                                 &self.scheduler,
                                                 &error,
-                                            ) {
+                                            )
+                                            .await
+                                            {
                                                 return Ok(true);
                                             }
                                             return Err(transport_error(error));
@@ -2121,7 +2211,7 @@ where
                                         summarize_subscription_key(subscribe.subscription)
                                     ));
                                     #[cfg(any(test, feature = "testing"))]
-                                    crate::delivery_diagnostics::record(|| format!("upstream_subscribe_apply runtime={} subscription={:?}", self.node.borrow().groove_runtime_token(), subscribe.subscription));
+                                    crate::delivery_diagnostics::record(|| format!("upstream_subscribe_apply runtime={} subscription={:?}", node_runtime_token, subscribe.subscription));
                                     let outcome = self
                                         .node
                                         .lock()
@@ -2142,17 +2232,19 @@ where
                                     if let Err(error) =
                                         self.transport.send(SyncMessage::Subscribe(subscribe))
                                     {
-                                        if handle_transport_backpressure(
+                                        if handle_transport_backpressure_async(
                                             &self.node,
                                             &self.scheduler,
                                             &error,
-                                        ) {
+                                        )
+                                        .await
+                                        {
                                             return Ok(true);
                                         }
                                         return Err(transport_error(error));
                                     }
                                     #[cfg(any(test, feature = "testing"))]
-                                    crate::delivery_diagnostics::record(|| format!("upstream_subscribe_sent runtime={} subscription={:?}", self.node.borrow().groove_runtime_token(), pending_subscription.subscription));
+                                    crate::delivery_diagnostics::record(|| format!("upstream_subscribe_sent runtime={} subscription={:?}", node_runtime_token, pending_subscription.subscription));
                                     sent_subscriptions.insert(pending_subscription.subscription, pending_subscription.clone());
                                 }
                                 PendingUpstreamCommand::Unsubscribe(subscription) => {
@@ -2169,17 +2261,19 @@ where
                                     // applied this retirement. Reapplying is
                                     // idempotent, and the command remains in
                                     // `pending` until the send succeeds.
-                                    self.node.borrow_mut().apply_unsubscribe(*subscription);
+                                    self.node.lock().await.apply_unsubscribe(*subscription);
                                     if let Err(error) =
                                         self.transport.send(SyncMessage::Unsubscribe {
                                             subscription: *subscription,
                                         })
                                     {
-                                        if handle_transport_backpressure(
+                                        if handle_transport_backpressure_async(
                                             &self.node,
                                             &self.scheduler,
                                             &error,
-                                        ) {
+                                        )
+                                        .await
+                                        {
                                             return Ok(true);
                                         }
                                         return Err(transport_error(error));
@@ -2230,29 +2324,30 @@ where
                                         let Some(expected) = expected_scope_authority else {
                                             continue;
                                         };
-                                        let session_claim_binding = pending_session_claim_binding
-                                            .clone()
-                                            .or_else(|| {
-                                                scope_lease_manager
-                                                    .requests
-                                                    .get(request_id)
-                                                    .map(|request| {
-                                                        request.session_claim_binding.clone()
-                                                    })
-                                            })
-                                            .unwrap_or_else(|| {
-                                                let identity = expected.link;
-                                                let claims = self
-                                                    .node
-                                                    .borrow()
-                                                    .session_claims_with_revisions()
-                                                    .into_iter()
-                                                    .find_map(|(subject, claims, _)| {
-                                                        (subject == identity).then_some(claims)
-                                                    })
-                                                    .unwrap_or_default();
-                                                (identity, claims)
-                                            });
+                                        let session_claim_binding = if let Some(binding) =
+                                            pending_session_claim_binding.clone()
+                                        {
+                                            binding
+                                        } else if let Some(binding) = scope_lease_manager
+                                            .requests
+                                            .get(request_id)
+                                            .map(|request| request.session_claim_binding.clone())
+                                        {
+                                            binding
+                                        } else {
+                                            let identity = expected.link;
+                                            let claims = self
+                                                .node
+                                                .lock()
+                                                .await
+                                                .session_claims_with_revisions()
+                                                .into_iter()
+                                                .find_map(|(subject, claims, _)| {
+                                                    (subject == identity).then_some(claims)
+                                                })
+                                                .unwrap_or_default();
+                                            (identity, claims)
+                                        };
                                         // Allocation establishes the immutable
                                         // request binding before the first wire
                                         // send. A backpressured command remains
@@ -2262,7 +2357,8 @@ where
                                             Some(session_claim_binding.clone());
                                         let claims_still_bound = self
                                             .node
-                                            .borrow()
+                                            .lock()
+                                            .await
                                             .session_claims_with_revisions()
                                             .into_iter()
                                             .find_map(|(identity, claims, _)| {
@@ -2322,11 +2418,13 @@ where
                                                         delegated_session: delegated_session.clone(),
                                                     },
                                                 ) {
-                                                    if handle_transport_backpressure(
+                                                    if handle_transport_backpressure_async(
                                                         &self.node,
                                                         &self.scheduler,
                                                         &error,
-                                                    ) {
+                                                    )
+                                                    .await
+                                                    {
                                                         return Ok(true);
                                                     }
                                                     return Err(transport_error(error));
@@ -2356,11 +2454,13 @@ where
                                                     delegated_session: delegated_session.clone(),
                                                 },
                                             ) {
-                                                if handle_transport_backpressure(
+                                                if handle_transport_backpressure_async(
                                                     &self.node,
                                                     &self.scheduler,
                                                     &error,
-                                                ) {
+                                                )
+                                                .await
+                                                {
                                                     return Ok(true);
                                                 }
                                                 return Err(transport_error(error));
@@ -2514,11 +2614,13 @@ where
                                     )
                                 };
                                 if let Err(error) = self.transport.send(message) {
-                                    if handle_transport_backpressure(
+                                    if handle_transport_backpressure_async(
                                         &self.node,
                                         &self.scheduler,
                                         &error,
-                                    ) {
+                                    )
+                                    .await
+                                    {
                                         return Ok(true);
                                     }
                                     return Err(transport_error(error));
@@ -2547,7 +2649,7 @@ where
                                 self.transport.as_mut(),
                                 unit,
                             ) {
-                                if handle_db_backpressure(&self.node, &self.scheduler, &error) {
+                                if handle_db_backpressure(&self.node, &self.scheduler, &error).await {
                                     return Ok(true);
                                 }
                                 return Err(error);
@@ -2584,17 +2686,19 @@ where
                                     self.inbound_authority_receipt_quarantine = false;
                                     None
                                 }
-                                Err(error)
-                                    if handle_transport_backpressure(
+                                Err(error) => {
+                                    if handle_transport_backpressure_async(
                                         &self.node,
                                         &self.scheduler,
                                         &error,
-                                    ) =>
-                                {
-                                    deferred_stop = true;
-                                    break;
+                                    )
+                                    .await
+                                    {
+                                        deferred_stop = true;
+                                        break;
+                                    }
+                                    return Err(transport_error(error));
                                 }
-                                Err(error) => return Err(transport_error(error)),
                             },
                         };
                         let Some(StagedInboundMessage {
@@ -2632,7 +2736,7 @@ where
                                 continue;
                             }
                             SyncMessage::ChunkRequestBatch(_) => {
-                                drop_peer_request(&self.node);
+                                drop_peer_request(&self.node).await;
                                 continue;
                             }
                             SyncMessage::ChunkUploadResult(result) => {
@@ -2818,7 +2922,7 @@ where
                             }
                             SyncMessage::RowVersionPayloads { version_bundles } => {
                                 #[cfg(any(test, feature = "testing"))]
-                                crate::delivery_diagnostics::record(|| format!("repair_payload_received runtime={} bundles={} pending_repairs={} sent_count={:?}", self.node.borrow().groove_runtime_token(), version_bundles.len(), pending_row_version_repairs.len(), pending_row_version_fetches.front().map(|fetch| fetch.sent_count)));
+                                crate::delivery_diagnostics::record(|| format!("repair_payload_received runtime={} bundles={} pending_repairs={} sent_count={:?}", node_runtime_token, version_bundles.len(), pending_row_version_repairs.len(), pending_row_version_fetches.front().map(|fetch| fetch.sent_count)));
                                 if !pending_view_updates.is_empty() {
                                     apply_pending_authority_view_updates(
                                         &self.node,
@@ -2840,11 +2944,11 @@ where
                                     .await?;
                                 }
                                 let Some(repair) = pending_row_version_repairs.front() else {
-                                    drop_peer_request(&self.node);
+                                    drop_peer_request(&self.node).await;
                                     continue;
                                 };
                                 let Some(fetch) = pending_row_version_fetches.front().filter(|fetch| fetch.sent_count > 0) else {
-                                    drop_peer_request(&self.node);
+                                    drop_peer_request(&self.node).await;
                                     continue;
                                 };
                                 let batch = fetch.requests.iter().take(fetch.sent_count).cloned().collect::<Vec<_>>();
@@ -2926,7 +3030,7 @@ where
                                 ..
                             }) => {
                                 #[cfg(any(test, feature = "testing"))]
-                                crate::delivery_diagnostics::record(|| format!("foreground_view_received runtime={} subscription={subscription:?} eligible={authority_receipt_eligible}", self.node.borrow().groove_runtime_token()));
+                                crate::delivery_diagnostics::record(|| format!("foreground_view_received runtime={} subscription={subscription:?} eligible={authority_receipt_eligible}", node_runtime_token));
                                 if let Some(minimum_cut) = awaiting_support_snapshots.get_mut(&subscription) {
                                     if !authority_receipt_eligible {
                                         *minimum_cut = (*minimum_cut).max(settled_through);
@@ -2936,7 +3040,7 @@ where
                                             && !view.peer_payload_inventory.opening_pending)
                                         || settled_through < *minimum_cut {
                                         #[cfg(any(test, feature = "testing"))]
-                                        crate::delivery_diagnostics::record(|| format!("receiver_waiting_snapshot_skip runtime={} subscription={subscription:?} cut={} minimum={}", self.node.borrow().groove_runtime_token(), settled_through.0, minimum_cut.0));
+                                        crate::delivery_diagnostics::record(|| format!("receiver_waiting_snapshot_skip runtime={} subscription={subscription:?} cut={} minimum={}", node_runtime_token, settled_through.0, minimum_cut.0));
                                         if let SyncMessage::ViewUpdate(view) = &message {
                                             self.node.lock().await.remember_discarded_pending_view_transactions(&view.version_carriers).await?;
                                         }
@@ -3052,6 +3156,14 @@ where
                                         summarize_subscription_key(subscription),
                                         missing.len()
                                     ));
+                                    let session_claims = self
+                                        .node
+                                        .lock()
+                                        .await
+                                        .session_claims_with_revisions()
+                                        .into_iter()
+                                        .map(|(identity, claims, _)| (identity, claims))
+                                        .collect::<BTreeMap<_, _>>();
                                     let policy_binding = self
                                         .relay_upstream_subscription_owners
                                         .borrow()
@@ -3065,7 +3177,7 @@ where
                                             let request = &registration.subscription;
                                             Some(request.policy_binding.clone().unwrap_or_else(|| (
                                                 request.identity,
-                                                self.node.borrow().session_claims_for(request.identity),
+                                                session_claims.get(&request.identity).cloned().unwrap_or_default(),
                                             )))
                                         })
                                         .or_else(|| {
@@ -3078,12 +3190,12 @@ where
                                                     if state.closed.get() { return None; }
                                                     Some(state.request_identity_claims.clone().unwrap_or_else(|| (
                                                         state.author,
-                                                        self.node.borrow().session_claims_for(state.author),
+                                                        session_claims.get(&state.author).cloned().unwrap_or_default(),
                                                     )))
                                                 })
                                         });
                                     #[cfg(any(test, feature = "testing"))]
-                                    crate::delivery_diagnostics::record(|| format!("receiver_repair runtime={} subscription={subscription:?} missing={} predecessor_waiting={predecessor_is_waiting} owner={}", self.node.borrow().groove_runtime_token(), missing.len(), policy_binding.is_some()));
+                                    crate::delivery_diagnostics::record(|| format!("receiver_repair runtime={} subscription={subscription:?} missing={} predecessor_waiting={predecessor_is_waiting} owner={}", node_runtime_token, missing.len(), policy_binding.is_some()));
                                     let Some(policy_binding) = policy_binding else {
                                         // A queued complete snapshot may arrive after its
                                         // last reader has closed. Do not fetch bytes for a
@@ -3154,7 +3266,7 @@ where
                                 // They have no receipt-bound evidence and must
                                 // never influence a modern client.
                                 let _ = (request_id, advice);
-                                drop_peer_request(&self.node);
+                                drop_peer_request(&self.node).await;
                             }
                             SyncMessage::AuthorizationScopeView {
                                 request_id,
@@ -3164,7 +3276,7 @@ where
                                 view,
                             } => {
                                 let Some(_) = expected_scope_authority else {
-                                    drop_peer_request(&self.node);
+                                    drop_peer_request(&self.node).await;
                                     continue;
                                 };
                                 let subscription = view.subscription;
@@ -3174,7 +3286,7 @@ where
                                     .authorization_progress
                                     .unwrap_or_default();
                                 if clause_count == 0 || clause_index >= clause_count {
-                                    drop_peer_request(&self.node);
+                                    drop_peer_request(&self.node).await;
                                     continue;
                                 }
                                 let Some((session_claim_binding, delegated_session, key_mismatch, needs_acquire)) = scope_lease_manager
@@ -3201,12 +3313,13 @@ where
                                 // owns this support proof. The authority-selected
                                 // key must name that exact immutable binding.
                                 if key.subject != session_claim_binding.0 {
-                                    drop_peer_request(&self.node);
+                                    drop_peer_request(&self.node).await;
                                     continue;
                                 }
                                 let claims_still_bound = self
                                     .node
-                                    .borrow()
+                                    .lock()
+                                    .await
                                     .session_claims_with_revisions()
                                     .into_iter()
                                     .find_map(|(identity, claims, _)| {
@@ -3231,7 +3344,7 @@ where
                                     continue;
                                 }
                                 if key_mismatch {
-                                    drop_peer_request(&self.node);
+                                    drop_peer_request(&self.node).await;
                                     continue;
                                 }
                                 // The first authenticated view reveals the
@@ -3272,7 +3385,7 @@ where
                                     .get(&clause_index)
                                     .is_some_and(|(prior, _, _)| *prior != subscription);
                                 if duplicate {
-                                    drop_peer_request(&self.node);
+                                    drop_peer_request(&self.node).await;
                                     continue;
                                 }
                                 // The envelope remains a normal ViewUpdate; retain
@@ -3297,22 +3410,27 @@ where
                                 // scope views when this request's admitted
                                 // claims have changed. A B-scoped proof must
                                 // never materialize support for an A request.
-                                let claims_still_bound = scope_lease_manager
+                                let session_claim_binding = scope_lease_manager
                                     .requests
                                     .get(&request_id)
-                                    .is_none_or(|request| {
-                                        request.delegated_session.is_some() ||
-                                        self.node
-                                            .borrow()
-                                            .session_claims_with_revisions()
-                                            .into_iter()
-                                            .find_map(|(identity, claims, _)| {
-                                                (identity == request.session_claim_binding.0)
-                                                    .then_some(claims)
-                                            })
-                                            .unwrap_or_default()
-                                            == request.session_claim_binding.1
-                                    });
+                                    .filter(|request| request.delegated_session.is_none())
+                                    .map(|request| request.session_claim_binding.clone());
+                                let claims_still_bound = if let Some(binding) =
+                                    session_claim_binding
+                                {
+                                    self.node
+                                        .lock()
+                                        .await
+                                        .session_claims_with_revisions()
+                                        .into_iter()
+                                        .find_map(|(identity, claims, _)| {
+                                            (identity == binding.0).then_some(claims)
+                                        })
+                                        .unwrap_or_default()
+                                        == binding.1
+                                } else {
+                                    true
+                                };
                                 if scope_lease_manager
                                     .requests
                                     .get(&request_id)
@@ -3358,7 +3476,7 @@ where
                                     .await?;
                                 }
                                 let Some(expected) = expected_scope_authority.as_mut() else {
-                                    drop_peer_request(&self.node);
+                                    drop_peer_request(&self.node).await;
                                     continue;
                                 };
                                 let Some(request) =
@@ -3387,7 +3505,7 @@ where
                                         .map(|(_, cut, _)| *cut)
                                         .min()
                                 };
-                                let observed = self.node.borrow();
+                                let observed = self.node.lock().await;
                                 let observed_claims = if request.delegated_session.is_some() {
                                     // Delegated subjects have independent local and authority
                                     // claim counters. Only the admitted authority receipt can
@@ -3441,7 +3559,8 @@ where
                                 if !receipt_current {
                                     let claims_still_bound = self
                                         .node
-                                        .borrow()
+                                        .lock()
+                                        .await
                                         .session_claims_with_revisions()
                                         .into_iter()
                                         .find_map(|(identity, claims, _)| {
@@ -3500,7 +3619,7 @@ where
                                             delegated_session,
                                         },
                                     );
-                                    drop_peer_request(&self.node);
+                                    drop_peer_request(&self.node).await;
                                     continue;
                                 }
                                 // Transport admission retains its authority link,
@@ -3580,7 +3699,7 @@ where
                             }
                             SyncMessage::AuthorizationScopeDecision { request_id, advice } => {
                                 if expected_scope_authority.is_none() {
-                                    drop_peer_request(&self.node);
+                                    drop_peer_request(&self.node).await;
                                     continue;
                                 }
                                 if let Some(request) =
@@ -3602,7 +3721,7 @@ where
                                 receipt,
                             } => {
                                 let Some(expected) = expected_scope_authority else {
-                                    drop_peer_request(&self.node);
+                                    drop_peer_request(&self.node).await;
                                     continue;
                                 };
                                 if !authorization_scope_receipt_matches_transport_context(
@@ -3611,7 +3730,7 @@ where
                                     expected.link,
                                     scope_view_cuts.get(&subscription).copied(),
                                 ) {
-                                    drop_peer_request(&self.node);
+                                    drop_peer_request(&self.node).await;
                                     continue;
                                 }
                                 scope_receipts.insert(subscription, receipt);
@@ -3703,7 +3822,7 @@ where
                                 &self.browser_relay_recovered_tx_ids,
                                 &self.scheduler,
                                 tx_id,
-                            );
+                            ).await;
                         }
                         applied = true;
                     }
@@ -3814,7 +3933,7 @@ where
                 // reopening an unknown published schema cannot register that query
                 // until the catalogue arrives. A generic relay has no admitted
                 // application scope and retains its request-driven delivery.
-                let catalogue_ready = self.node.borrow().catalogue_bootstrap_state()
+                let catalogue_ready = self.node.lock().await.catalogue_bootstrap_state()
                     == crate::node::CatalogueBootstrapState::Ready;
                 let owner_admitted = self.open_schema_admission.borrow().as_ref()
                     .is_none_or(|pending| pending.authoritative_catalogue_received);
@@ -3824,7 +3943,7 @@ where
                             || (ingest_context.trust == CommitUnitTrust::Relay
                                 && peer.admitted_scope_relay_binding().is_some())));
                 if catalogue_ready && owner_admitted && catalogue_entitled {
-                    match send_catalogue_snapshot_if_needed(&self.node, peer, self.transport.as_mut()) {
+                    match send_catalogue_snapshot_if_needed(&self.node, peer, self.transport.as_mut()).await {
                         Ok(()) => {},
                         Err(error) if error.code == ErrorCode::Backpressure => {
                             schedule_tick_in(&self.scheduler, TickUrgency::Deferred);
@@ -3870,7 +3989,7 @@ where
                     }
                     if let Some(group) = coverage_groups.remove(&rejection.coverage) {
                         let group_subscription = coverage_group_subscription_key(&rejection.coverage);
-                        let mut node = self.node.borrow_mut();
+                        let mut node = self.node.lock().await;
                         // `group_subscription` owns the one shared maintained
                         // evaluator. The individual subscribers are still
                         // separately registered wire usage sites, including
@@ -3919,7 +4038,7 @@ where
                     self.transport.as_mut(),
                     &self.downstream_fates,
                     &self.scheduler,
-                )? {
+                ).await? {
                     return Ok(true);
                 }
                 if !flush_pending_chunk_response(
@@ -3935,13 +4054,13 @@ where
                     self.transport.as_mut(),
                     &mut self.pending_control_responses,
                     &self.scheduler,
-                )? {
+                ).await? {
                     return Ok(true);
                 }
                 if let Some(message) = self.auxiliary_pump.take_outbound(64) {
                     if let Err(error) = self.transport.send(message.clone()) {
                         self.auxiliary_pump.restore_outbound(message);
-                        if handle_transport_backpressure(&self.node, &self.scheduler, &error) {
+                        if handle_transport_backpressure_async(&self.node, &self.scheduler, &error).await {
                             return Ok(true);
                         }
                         return Err(transport_error(error));
@@ -3967,26 +4086,28 @@ where
                                     message.lease,
                                     message.receipts_validated,
                                 ),
-                                Err(error)
-                                    if handle_transport_backpressure(
+                                Err(error) => {
+                                    if handle_transport_backpressure_async(
                                         &self.node,
                                         &self.scheduler,
                                         &error,
-                                    ) =>
-                                {
-                                    return Ok(true);
+                                    )
+                                    .await
+                                    {
+                                        return Ok(true);
+                                    }
+                                    return Err(transport_error(error));
                                 }
-                                Err(error) => return Err(transport_error(error)),
                                 Ok(None) => {
+                                    let node = self.node.lock().await;
                                     let ready = pending_catalogue_subscriptions.iter().find_map(
                                         |(key, pending)| {
-                                            self.node
-                                                .borrow()
-                                                .registered_shape(pending.subscribe.shape_id)
+                                            node.registered_shape(pending.subscribe.shape_id)
                                                 .is_some()
                                                 .then_some(*key)
                                         },
                                     );
+                                    drop(node);
                                     let Some(key) = ready else {
                                         break;
                                     };
@@ -4013,7 +4134,7 @@ where
                         peer,
                     )
                     {
-                        drop_peer_request(&self.node);
+                        drop_peer_request(&self.node).await;
                         continue;
                     }
                     let previously_applied_inbound = applied_inbound;
@@ -4071,7 +4192,7 @@ where
                             continue;
                         }
                         SyncMessage::ChunkResponseBatch(_) => {
-                            drop_peer_request(&self.node);
+                            drop_peer_request(&self.node).await;
                             continue;
                         }
                         SyncMessage::CurrentRowsCancel { request_id } => {
@@ -4080,19 +4201,19 @@ where
                         }
                         SyncMessage::CurrentRowsRequest(request) => {
                             let Some(session) = self.transport.connection_session_context() else {
-                                drop_peer_request(&self.node);
+                                drop_peer_request(&self.node).await;
                                 continue;
                             };
                             if !row_availability::valid_request(&request) {
-                                drop_peer_request(&self.node);
+                                drop_peer_request(&self.node).await;
                                 continue;
                             }
                             let Some((identity, claims)) = admitted_request_policy_binding(*ingest_context, peer, session_claim_binding.clone(), request.delegated_session.clone()) else {
-                                drop_peer_request(&self.node);
+                                drop_peer_request(&self.node).await;
                                 continue;
                             };
                             let context = crate::protocol::PolicyBindingKey::from_canonical_parts(identity, claims.clone());
-                            if self.node.borrow().can_mint_current_row_receipts() {
+                            if self.node.lock().await.can_mint_current_row_receipts() {
                                 let progress = {
                                     let mut router = self.current_rows.borrow_mut();
                                     let progress = router.progress.entry(connection_epoch).or_default();
@@ -4132,7 +4253,7 @@ where
                                 },
                             );
                             if !admitted {
-                                drop_peer_request(&self.node);
+                                drop_peer_request(&self.node).await;
                                 continue;
                             }
                             let Some((scope_identity, scope_claims)) = admitted_request_policy_binding(
@@ -4141,7 +4262,7 @@ where
                                 session_claim_binding.clone(),
                                 delegated_session,
                             ) else {
-                                drop_peer_request(&self.node);
+                                drop_peer_request(&self.node).await;
                                 continue;
                             };
                             serve_authorization_scope_intent(
@@ -4176,7 +4297,7 @@ where
                         | SyncMessage::AuthorizationScopeAggregateReceipt { .. }
                         | SyncMessage::AuthorizationScopeUnavailable { .. }
                         | SyncMessage::AuthorizationScopeDecision { .. } => {
-                            drop_peer_request(&self.node);
+                            drop_peer_request(&self.node).await;
                             continue;
                         }
                         SyncMessage::RegisterShape {
@@ -4246,7 +4367,7 @@ where
                                 return Ok(true);
                             }
                             let shape_validation = {
-                                let node = self.node.borrow();
+                                let node = self.node.lock().await;
                                 validate_shape_ast_for_registration(&node, shape_id, &ast)
                             };
                             let shape = match shape_validation {
@@ -4267,7 +4388,7 @@ where
                                         flush_subscriber_controls_or_stop!(self, peer);
                                         return Ok(true);
                                     } else {
-                                        drop_peer_request(&self.node);
+                                        drop_peer_request(&self.node).await;
                                     }
                                     return Ok::<bool, Error>(true);
                                 }
@@ -4286,7 +4407,7 @@ where
                                     let binding = match binding {
                                         Ok(binding) => binding,
                                         Err(_) => {
-                                            drop_peer_request(&self.node);
+                                            drop_peer_request(&self.node).await;
                                             return Ok::<bool, Error>(true);
                                         }
                                     };
@@ -4354,7 +4475,7 @@ where
                                     | SubscriberShapeRegistration::PendingCatalogueAdmission(
                                         existing_opts,
                                     ) if existing_opts != &opts => {
-                                        drop_peer_request(&self.node);
+                                        drop_peer_request(&self.node).await;
                                         return Ok::<bool, Error>(true);
                                     }
                                     SubscriberShapeRegistration::RejectedUnsupportedCapability(
@@ -4418,7 +4539,7 @@ where
                             // so a commit uploaded on this same connection does not carry the
                             // inactive Subscribe arm on a normal two-megabyte executor stack.
                             #[cfg(any(test, feature = "testing"))]
-                            crate::delivery_diagnostics::record(|| format!("owner_subscribe_received runtime={} subscription={:?}", self.node.borrow().groove_runtime_token(), subscribe.subscription));
+                            crate::delivery_diagnostics::record(|| format!("owner_subscribe_received runtime={} subscription={:?}", node_runtime_token, subscribe.subscription));
                             let should_continue = Box::pin(async {
                             let subscription_has_delegated_session = subscribe.delegated_session.is_some();
                             let session_claim_binding = parked_policy_binding.or_else(|| admitted_request_policy_binding(
@@ -4432,8 +4553,8 @@ where
                                 // only carry the topology-assigned immutable
                                 // session snapshot for this request.
                                 #[cfg(any(test, feature = "testing"))]
-                                crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
-                                drop_peer_request(&self.node);
+                                crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", node_runtime_token, subscribe.subscription, line!()));
+                                drop_peer_request(&self.node).await;
                                 return Ok::<bool, Error>(true);
                             }
                             if let Err(message) =
@@ -4441,16 +4562,16 @@ where
                             {
                                 let _ = message;
                                 #[cfg(any(test, feature = "testing"))]
-                                crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
-                                drop_peer_request(&self.node);
+                                crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", node_runtime_token, subscribe.subscription, line!()));
+                                drop_peer_request(&self.node).await;
                                 return Ok::<bool, Error>(true);
                             }
                             let shape_id = subscribe.shape_id;
                             let subscription = subscribe.subscription;
                             if shape_id != subscription.shape_id {
                                 #[cfg(any(test, feature = "testing"))]
-                                crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
-                                drop_peer_request(&self.node);
+                                crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", node_runtime_token, subscribe.subscription, line!()));
+                                drop_peer_request(&self.node).await;
                                 return Ok::<bool, Error>(true);
                             }
                             // An incoming repeat can race catalogue activation.
@@ -4470,8 +4591,8 @@ where
                                 shape_registrations.get(&registration_key).cloned()
                             else {
                                 #[cfg(any(test, feature = "testing"))]
-                                crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
-                                drop_peer_request(&self.node);
+                                crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", node_runtime_token, subscribe.subscription, line!()));
+                                drop_peer_request(&self.node).await;
                                 return Ok::<bool, Error>(true);
                             };
                             let pending_catalogue_admission = matches!(
@@ -4503,7 +4624,7 @@ where
                                     opts
                                 }
                             };
-                            let Some(shape) = self.node.borrow().registered_shape(shape_id) else {
+                            let Some(shape) = self.node.lock().await.registered_shape(shape_id) else {
                                 if pending_catalogue_admission {
                                     let policy_binding = session_claim_binding.expect("admitted above");
                                     let encoded_bytes = postcard::experimental::serialized_size(&(&subscribe, &policy_binding))
@@ -4520,15 +4641,15 @@ where
                                     return Ok(true);
                                 } else {
                                     #[cfg(any(test, feature = "testing"))]
-                                    crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
-                                    drop_peer_request(&self.node);
+                                    crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", node_runtime_token, subscribe.subscription, line!()));
+                                    drop_peer_request(&self.node).await;
                                 }
                                 return Ok::<bool, Error>(true);
                             };
                             if values.len() != shape.params().len() {
                                 #[cfg(any(test, feature = "testing"))]
-                                crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
-                                drop_peer_request(&self.node);
+                                crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", node_runtime_token, subscribe.subscription, line!()));
+                                drop_peer_request(&self.node).await;
                                 return Ok::<bool, Error>(true);
                             }
                             let value_map = shape
@@ -4541,8 +4662,8 @@ where
                                 Ok(binding) => binding,
                                 Err(_) => {
                                     #[cfg(any(test, feature = "testing"))]
-                                    crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
-                                    drop_peer_request(&self.node);
+                                    crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", node_runtime_token, subscribe.subscription, line!()));
+                                    drop_peer_request(&self.node).await;
                                     return Ok::<bool, Error>(true);
                                 }
                             };
@@ -4555,8 +4676,8 @@ where
                             .is_err()
                             {
                                 #[cfg(any(test, feature = "testing"))]
-                                crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
-                                drop_peer_request(&self.node);
+                                crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", node_runtime_token, subscribe.subscription, line!()));
+                                drop_peer_request(&self.node).await;
                                 return Ok::<bool, Error>(true);
                             }
                             let subscription_policy_binding = session_claim_binding
@@ -4581,8 +4702,8 @@ where
                                 && existing_coverage != &coverage
                             {
                                 #[cfg(any(test, feature = "testing"))]
-                                crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
-                                drop_peer_request(&self.node);
+                                crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", node_runtime_token, subscribe.subscription, line!()));
+                                drop_peer_request(&self.node).await;
                                 return Ok::<bool, Error>(true);
                             }
                             if pending_catalogue_admission {
@@ -4594,7 +4715,8 @@ where
                             let scope_purpose = if let Some(purpose) = scope_purpose {
                                 let expected_result = self
                                     .node
-                                    .borrow()
+                                    .lock()
+                                    .await
                                     .authorization_support_scope_for_session(
                                         ingest_context.identity,
                                         Some(&session_claim_binding
@@ -4607,8 +4729,8 @@ where
                                     Ok(expected) => expected,
                                     Err(_) => {
                                         #[cfg(any(test, feature = "testing"))]
-                                        crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
-                                        drop_peer_request(&self.node);
+                                        crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", node_runtime_token, subscribe.subscription, line!()));
+                                        drop_peer_request(&self.node).await;
                                         return Ok::<bool, Error>(true);
                                     }
                                 };
@@ -4628,8 +4750,8 @@ where
                                     );
                                 if !exact_support {
                                     #[cfg(any(test, feature = "testing"))]
-                                    crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
-                                    drop_peer_request(&self.node);
+                                    crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", node_runtime_token, subscribe.subscription, line!()));
+                                    drop_peer_request(&self.node).await;
                                     return Ok::<bool, Error>(true);
                                 }
                                 Some(AuthorizedScopePurpose {
@@ -4652,8 +4774,8 @@ where
                                 && existing != purpose
                             {
                                 #[cfg(any(test, feature = "testing"))]
-                                crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
-                                drop_peer_request(&self.node);
+                                crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", node_runtime_token, subscribe.subscription, line!()));
+                                drop_peer_request(&self.node).await;
                                 return Ok::<bool, Error>(true);
                             }
                             let supported = {
@@ -4693,14 +4815,14 @@ where
                             }
                             let group_subscription = coverage_group_subscription_key(&coverage);
                             let local_subscriber = *local_receiver;
-                            let scope_relay = self.node.borrow().client_relay_scope().is_some();
+                            let scope_relay = self.node.lock().await.client_relay_scope().is_some();
                             let upstream_opts = if local_subscriber || scope_relay {
                                 let mut opts = upstream_register_shape_options(
                                     opts.tier,
                                     opts.read_view.clone(),
                                     DurabilityTier::Global,
                                 );
-                                if self.node.borrow().client_relay_scope().is_some() {
+                                if self.node.lock().await.client_relay_scope().is_some() {
                                     opts.binding_source = BindingSource::RelayAuthoritySession;
                                 }
                                 opts
@@ -4760,13 +4882,13 @@ where
                                 .get(&coverage)
                                 .is_none_or(|group| group.subscribers.is_empty());
                             let permissions_ready = subscriber_permissions_ready(
-                                self.node.borrow().permissions_ready(),
+                                self.node.lock().await.permissions_ready(),
                                 ingest_context.trust,
                             );
                             let opening_pending = if !permissions_ready {
                                 Some(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                                     subscription,
-                                    settled_through: self.node.borrow().committed_global_time(),
+                                    settled_through: self.node.lock().await.committed_global_time(),
                                     version_carriers: Vec::new(),
                                     peer_payload_inventory: crate::protocol::PeerPayloadInventory {
                                         opening_pending: true,
@@ -4870,7 +4992,8 @@ where
                                 // new relay authority registration receives a
                                 // current reset from upstream.
                                 self.node
-                                    .borrow_mut()
+                                    .lock()
+                                    .await
                                     .invalidate_ownerless_settled_result_view(upstream_binding_view);
                             }
                             let (_, changed, published) = finish_peer_publication_outcome_with_refresh(
@@ -4901,7 +5024,7 @@ where
                                         // This usage site owns a distinct
                                         // receipt. A same-shaped sibling must
                                         // neither settle nor block it.
-                                        let node = self.node.borrow();
+                                        let node = self.node.lock().await;
                                         let selected = selected_authority_result_key
                                             .as_ref()
                                             .cloned()
@@ -4930,8 +5053,8 @@ where
                                     )
                                 {
                                     #[cfg(any(test, feature = "testing"))]
-                                    crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", self.node.borrow().groove_runtime_token(), subscribe.subscription, line!()));
-                                    drop_peer_request(&self.node);
+                                    crate::delivery_diagnostics::record(|| format!("owner_subscribe_drop runtime={} subscription={:?} source_line={}", node_runtime_token, subscribe.subscription, line!()));
+                                    drop_peer_request(&self.node).await;
                                     return Ok::<bool, Error>(true);
                                 }
                                 scope_purposes.insert(subscription, purpose);
@@ -4964,7 +5087,7 @@ where
                             group.subscribers.insert(subscription);
                             group.pending_initial_subscribers.insert(subscription);
                             #[cfg(any(test, feature = "testing"))]
-                            crate::delivery_diagnostics::record(|| format!("owner_subscribe_admitted runtime={} subscription={subscription:?}", self.node.borrow().groove_runtime_token()));
+                            crate::delivery_diagnostics::record(|| format!("owner_subscribe_admitted runtime={} subscription={subscription:?}", node_runtime_token));
                             if let Some(selected) = selected_authority_result_key {
                                 // Keep the policy-scoped U source selected at
                                 // admission. A later owner-loop lookup must
@@ -5019,18 +5142,20 @@ where
                                     summarize_sync_message(&update)
                                 ));
                                 self.last_resume_bytes = Some(serialized_sync_message_len(&update));
-                                let receipt =
+                                let receipt = {
+                                    let observed_node = self.node.lock().await;
                                     scope_purposes.get(&subscription).and_then(|purpose| {
                                         aggregate_authorization_scope_receipt_for_view(
                                             scope_aggregates,
-                                            &self.node.borrow(),
+                                            &observed_node,
                                             peer,
                                             ingest_context.identity,
                                             connection_epoch,
                                             purpose,
                                             &update,
                                         )
-                                    });
+                                    })
+                                };
                                 send_subscriber_with_sync_context(
                                     &self.node,
                                     peer,
@@ -5038,7 +5163,7 @@ where
                                     &self.local_fate_routes,
                                     &self.downstream_fates,
                                     update,
-                                )?;
+                                ).await?;
                                 if let Some((subscription, receipt)) = receipt {
                                     queue_direct_control(&mut self.pending_control_responses,
                                         SyncMessage::AuthorizationScopeReceipt {
@@ -5091,7 +5216,7 @@ where
                                         identity, claims,
                                     )
                                 });
-                            let mut node = self.node.borrow_mut();
+                            let mut node = self.node.lock().await;
                             if let Some(policy_binding) = admitted_policy_binding {
                                 node.apply_unsubscribe_with_admitted_policy_binding(
                                     subscription,
@@ -5139,10 +5264,8 @@ where
                                         // stale source subscription instead of observing the
                                         // current authority membership. Tear down both pieces
                                         // together when the final usage site goes away.
-                                        peer.forget_subscription_with_node(
-                                            &mut self.node.borrow_mut(),
-                                            group_subscription,
-                                        );
+                                        let mut node = self.node.lock().await;
+                                        peer.forget_subscription_with_node(&mut node, group_subscription);
                                         coverage_groups.remove(&coverage);
                                         if propagated_upstream {
                                             if retire_relay_upstream_subscription(
@@ -5161,7 +5284,8 @@ where
                                                 // settled receipt until a
                                                 // later lifecycle sweep.
                                                 self.node
-                                                    .borrow_mut()
+                                                    .lock()
+                                                    .await
                                                     .apply_unsubscribe(upstream_subscription);
                                                 upstream_subscriptions.borrow_mut().push(
                                                     PendingUpstreamCommand::Unsubscribe(
@@ -5190,7 +5314,7 @@ where
                                     },
                                 )
                             {
-                                self.node.borrow_mut().release_shape_for_peer(
+                                self.node.lock().await.release_shape_for_peer(
                                     connection_epoch,
                                     subscription.shape_id,
                                 );
@@ -5201,12 +5325,12 @@ where
                             delegated_session,
                         } => {
                             #[cfg(any(test, feature = "testing"))]
-                            crate::delivery_diagnostics::record(|| format!("repair_fetch_received runtime={} requests={} local={local_receiver} delegated={} session_binding={}", self.node.borrow().groove_runtime_token(), requests.len(), delegated_session.is_some(), session_claim_binding.is_some()));
+                            crate::delivery_diagnostics::record(|| format!("repair_fetch_received runtime={} requests={} local={local_receiver} delegated={} session_binding={}", node_runtime_token, requests.len(), delegated_session.is_some(), session_claim_binding.is_some()));
                             if let Err(message) = validate_fetch_row_versions(&requests) {
                                 let _ = message;
                                 #[cfg(any(test, feature = "testing"))]
-                                crate::delivery_diagnostics::record(|| format!("repair_fetch_drop runtime={} source_line={}", self.node.borrow().groove_runtime_token(), line!()));
-                                drop_peer_request(&self.node);
+                                crate::delivery_diagnostics::record(|| format!("repair_fetch_drop runtime={} source_line={}", node_runtime_token, line!()));
+                                drop_peer_request(&self.node).await;
                                 continue;
                             }
                             let repair_context = if *local_receiver {
@@ -5221,20 +5345,21 @@ where
                                 let PeerRole::ClientLink { identity: peer_identity } = peer.role()
                                 else {
                                     #[cfg(any(test, feature = "testing"))]
-                                    crate::delivery_diagnostics::record(|| format!("repair_fetch_drop runtime={} source_line={}", self.node.borrow().groove_runtime_token(), line!()));
-                                    drop_peer_request(&self.node);
+                                    crate::delivery_diagnostics::record(|| format!("repair_fetch_drop runtime={} source_line={}", node_runtime_token, line!()));
+                                    drop_peer_request(&self.node).await;
                                     continue;
                                 };
                                 let Some((session_identity, _)) = session_claim_binding.as_ref()
                                 else {
                                     #[cfg(any(test, feature = "testing"))]
-                                    crate::delivery_diagnostics::record(|| format!("repair_fetch_drop runtime={} source_line={}", self.node.borrow().groove_runtime_token(), line!()));
-                                    drop_peer_request(&self.node);
+                                    crate::delivery_diagnostics::record(|| format!("repair_fetch_drop runtime={} source_line={}", node_runtime_token, line!()));
+                                    drop_peer_request(&self.node).await;
                                     continue;
                                 };
                                 let scope_matches = self
                                     .node
-                                    .borrow()
+                                    .lock()
+                                    .await
                                     .client_relay_scope()
                                     .is_some_and(|scope| {
                                         scope.admits_session(peer_identity)
@@ -5242,8 +5367,8 @@ where
                                     });
                                 if delegated_session.is_some() || !scope_matches {
                                     #[cfg(any(test, feature = "testing"))]
-                                    crate::delivery_diagnostics::record(|| format!("repair_fetch_drop runtime={} source_line={}", self.node.borrow().groove_runtime_token(), line!()));
-                                    drop_peer_request(&self.node);
+                                    crate::delivery_diagnostics::record(|| format!("repair_fetch_drop runtime={} source_line={}", node_runtime_token, line!()));
+                                    drop_peer_request(&self.node).await;
                                     continue;
                                 }
                                 crate::peer::RepairServingContext::ScopeIsolatedClientRelay
@@ -5256,8 +5381,8 @@ where
                                 );
                                 let Some(repair_policy_binding) = repair_policy_binding else {
                                     #[cfg(any(test, feature = "testing"))]
-                                    crate::delivery_diagnostics::record(|| format!("repair_fetch_drop runtime={} source_line={}", self.node.borrow().groove_runtime_token(), line!()));
-                                    drop_peer_request(&self.node);
+                                    crate::delivery_diagnostics::record(|| format!("repair_fetch_drop runtime={} source_line={}", node_runtime_token, line!()));
+                                    drop_peer_request(&self.node).await;
                                     continue;
                                 };
                                 crate::peer::RepairServingContext::Authority {
@@ -5304,7 +5429,7 @@ where
                                 // broaden itself, and a subjectless relay cannot mutate
                                 // the node-wide claim cache; delegated bindings are
                                 // request-local and topology-admitted instead.
-                                drop_peer_request(&self.node);
+                                drop_peer_request(&self.node).await;
                                 return Ok::<bool, Error>(true);
                             }
                             let local_upload = match &other {
@@ -5314,7 +5439,7 @@ where
                             if let Some((tx_id, _)) = &local_upload
                                 && !*local_receiver
                                 && !subscriber_permissions_ready(
-                                    self.node.borrow().permissions_ready(),
+                                    self.node.lock().await.permissions_ready(),
                                     ingest_context.trust,
                                 )
                             {
@@ -5327,7 +5452,7 @@ where
                                     global_time: None,
                                     durability: None,
                                 };
-                                self.downstream_fates.borrow_mut().push(response);
+                                self.downstream_fates.borrow_mut().push_back(response);
                                 return Ok::<bool, Error>(true);
                             }
                             let write_state_tx_id = write_state_update_tx_id(&other);
@@ -5382,7 +5507,7 @@ where
                                     &self.browser_relay_recovered_tx_ids,
                                     &self.scheduler,
                                     tx_id,
-                                );
+                                ).await;
                             }
                             // A declared root with no upstream that settled this
                             // upload terminally (the same predicate an upstream
@@ -5398,14 +5523,14 @@ where
                             });
                             for response in responses {
                                 if matches!(response, SyncMessage::FateUpdate { .. }) {
-                                    self.downstream_fates.borrow_mut().push(response);
+                                    self.downstream_fates.borrow_mut().push_back(response);
                                 } else {
                                     send_with_sync_context(
                                         &self.node,
                                         peer,
                                         self.transport.as_mut(),
                                         response,
-                                    )?;
+                                    ).await?;
                                 }
                             }
                             if let Some((tx_id, unit)) = local_upload {
@@ -5445,7 +5570,7 @@ where
                     self.transport.as_mut(),
                     &self.downstream_fates,
                     &self.scheduler,
-                )? {
+                ).await? {
                     return Ok(true);
                 }
                 if needs_subscription_refresh {
@@ -5481,13 +5606,13 @@ where
                 }
                 if *serve_dirty
                     && subscriber_permissions_ready(
-                        self.node.borrow().permissions_ready(),
+                        self.node.lock().await.permissions_ready(),
                         ingest_context.trust,
                     )
                 {
                     let mut serve_again = false;
                     for (coverage, group) in coverage_groups.iter_mut() {
-                        let runtime_token = self.node.borrow().groove_runtime_token();
+                        let runtime_token = self.node.lock().await.groove_runtime_token();
                         if group.publication_runtime_token.is_some_and(|saved| saved != runtime_token)
                             && (group.pending_initial_update.is_some() || !group.pending_incremental_updates.is_empty())
                         {
@@ -5520,19 +5645,21 @@ where
                         // subscription here: that can collapse a scoped U
                         // into a sibling/unscoped cache entry between
                         // registration and first publication.
-                        let upstream_authority_result_key = peer
-                            .subscription_authority_result_source(group_subscription)
-                            .cloned()
-                            .or_else(|| {
-                                self.node
-                                    .borrow()
-                                    .authority_result_key_for_subscription(
-                                        group.authority_result_subscription,
-                                    )
-                                    .ok()
-                            });
+                        let upstream_authority_result_key = if let Some(key) =
+                            peer.subscription_authority_result_source(group_subscription).cloned()
+                        {
+                            Some(key)
+                        } else {
+                            self.node
+                                .lock()
+                                .await
+                                .authority_result_key_for_subscription(
+                                    group.authority_result_subscription,
+                                )
+                                .ok()
+                        };
                         let upstream_authority_is_settled = {
-                            let node = self.node.borrow();
+                            let node = self.node.lock().await;
                             upstream_authority_result_key
                                 .as_ref()
                                 .is_some_and(|key| node.has_settled_authority_result(key))
@@ -5623,7 +5750,7 @@ where
                                             upstream_subscriptions,
                                             connection_epoch,
                                             subscription,
-                                        );
+                                        ).await;
                                         queue_direct_control(
                                             &mut self.pending_control_responses,
                                             unsupported_shape_capability_rejection_message(
@@ -5646,7 +5773,7 @@ where
                                             upstream_subscriptions,
                                             connection_epoch,
                                             subscription,
-                                        );
+                                        ).await;
                                         queue_direct_control(
                                             &mut self.pending_control_responses,
                                             server_subscription_failure_rejection_message(
@@ -5678,22 +5805,24 @@ where
                                         group_subscription,
                                         &mut sibling_update,
                                     );
-                                    stamp_subscriber_opening_state(&self.node, peer, &mut sibling_update);
+                                    stamp_subscriber_opening_state(&self.node, peer, &mut sibling_update).await;
                                     group.pending_incremental_updates.push_back((sibling, sibling_update));
                                 }
                                 while let Some((sibling, sibling_update)) = group.pending_incremental_updates.front().cloned() {
-                                    let receipt =
+                                    let receipt = {
+                                        let observed_node = self.node.lock().await;
                                         scope_purposes.get(&sibling).and_then(|purpose| {
                                             aggregate_authorization_scope_receipt_for_view(
                                                 scope_aggregates,
-                                                &self.node.borrow(),
+                                                &observed_node,
                                                 peer,
                                                 ingest_context.identity,
                                                 connection_epoch,
                                                 purpose,
                                                 &sibling_update,
                                             )
-                                        });
+                                        })
+                                    };
                                     if let Err(error) = send_prepared_subscriber_with_sync_context(
                                         &self.node,
                                         peer,
@@ -5701,7 +5830,7 @@ where
                                         &self.local_fate_routes,
                                         &self.downstream_fates,
                                         sibling_update,
-                                    ) {
+                                    ).await {
                                         if error.code == ErrorCode::Backpressure {
                                             schedule_tick_in(&self.scheduler, TickUrgency::Deferred);
                                             return Ok(true);
@@ -5789,7 +5918,7 @@ where
                                         upstream_subscriptions,
                                         connection_epoch,
                                         subscription,
-                                    );
+                                    ).await;
                                     queue_direct_control(&mut self.pending_control_responses,
                                         unsupported_shape_capability_rejection_message(
                                             subscription,
@@ -5811,7 +5940,7 @@ where
                                         upstream_subscriptions,
                                         connection_epoch,
                                         subscription,
-                                    );
+                                    ).await;
                                     queue_direct_control(&mut self.pending_control_responses,
                                         server_subscription_failure_rejection_message(
                                             subscription,
@@ -5828,7 +5957,7 @@ where
                                 group_subscription,
                                 &mut update,
                             );
-                                stamp_subscriber_opening_state(&self.node, peer, &mut update);
+                                stamp_subscriber_opening_state(&self.node, peer, &mut update).await;
                                 update
                             };
                             // Keep the exact generated opening until the semantic transport
@@ -5836,17 +5965,20 @@ where
                             group.pending_initial_update = Some((subscription, update.clone()));
                             self.last_resume_bytes =
                                 Some(serialized_sync_message_len(&update));
-                            let receipt = scope_purposes.get(&subscription).and_then(|purpose| {
-                                aggregate_authorization_scope_receipt_for_view(
-                                    scope_aggregates,
-                                    &self.node.borrow(),
-                                    peer,
-                                    ingest_context.identity,
-                                    connection_epoch,
-                                    purpose,
-                                    &update,
-                                )
-                            });
+                            let receipt = {
+                                let observed_node = self.node.lock().await;
+                                scope_purposes.get(&subscription).and_then(|purpose| {
+                                    aggregate_authorization_scope_receipt_for_view(
+                                        scope_aggregates,
+                                        &observed_node,
+                                        peer,
+                                        ingest_context.identity,
+                                        connection_epoch,
+                                        purpose,
+                                        &update,
+                                    )
+                                })
+                            };
                             if let Err(error) = send_prepared_subscriber_with_sync_context(
                                 &self.node,
                                 peer,
@@ -5854,7 +5986,7 @@ where
                                 &self.local_fate_routes,
                                 &self.downstream_fates,
                                 update,
-                            ) {
+                            ).await {
                                 if error.code == ErrorCode::Backpressure {
                                     schedule_tick_in(&self.scheduler, TickUrgency::Deferred);
                                     return Ok(true);
@@ -5986,24 +6118,26 @@ where
                                     group_subscription,
                                     &mut update,
                                 );
-                                stamp_subscriber_opening_state(&self.node, peer, &mut update);
+                                stamp_subscriber_opening_state(&self.node, peer, &mut update).await;
                                 group.pending_incremental_updates.push_back((subscription, update));
                             }
                         }
                         }
                         while let Some((subscription, update)) = group.pending_incremental_updates.front().cloned() {
-                                let receipt =
+                                let receipt = {
+                                    let observed_node = self.node.lock().await;
                                     scope_purposes.get(&subscription).and_then(|purpose| {
                                         aggregate_authorization_scope_receipt_for_view(
                                             scope_aggregates,
-                                            &self.node.borrow(),
+                                            &observed_node,
                                             peer,
                                             ingest_context.identity,
                                             connection_epoch,
                                             purpose,
                                             &update,
                                         )
-                                    });
+                                    })
+                                };
                                 #[cfg(feature = "sync-autopsy")]
                                 sync_autopsy::record(format!(
                                     "subscriber send group delta {}",
@@ -6016,7 +6150,7 @@ where
                                     &self.local_fate_routes,
                                     &self.downstream_fates,
                                     update,
-                                ) {
+                                ).await {
                                     if error.code == ErrorCode::Backpressure {
                                         schedule_tick_in(&self.scheduler, TickUrgency::Deferred);
                                         return Ok(true);
@@ -6052,7 +6186,7 @@ where
                         self.transport.as_mut(),
                         &mut self.pending_control_responses,
                         &self.scheduler,
-                    )? {
+                    ).await? {
                         return Ok(true);
                     }
                 }
@@ -6234,11 +6368,13 @@ where
         authority_link_selected && update.authority_receipt_eligible
     };
     #[cfg(any(test, feature = "testing"))]
+    let runtime_token = node.lock().await.groove_runtime_token();
+    #[cfg(any(test, feature = "testing"))]
     for update in pending.iter() {
         crate::delivery_diagnostics::record(|| {
             format!(
                 "receiver_batch_select runtime={} subscription={:?} selected={} epoch={connection_epoch} selected_epoch={:?}",
-                node.borrow().groove_runtime_token(),
+                runtime_token,
                 update.parts.subscription,
                 frame_is_selected(update),
                 active_authority_view_receipts
@@ -6280,7 +6416,7 @@ where
         .filter(|update| frame_is_selected(update))
         .map(|update| update.parts.subscription)
         .collect::<BTreeSet<_>>();
-    let node_ref = node.borrow();
+    let node_ref = node.lock().await;
     let relay_authority_session_owner = node_ref.client_relay_scope().is_some();
     let confirmed_binding_views = confirmed_subscriptions
         .iter()
@@ -6596,27 +6732,27 @@ pub async fn serve_authorization_scope_intent<S>(
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    if !node.borrow().is_history_complete()
-        || !subscriber_permissions_ready(node.borrow().permissions_ready(), trust)
-    {
-        queue_direct_control(
-            pending_control_responses,
-            SyncMessage::AuthorizationScopeUnavailable { request_id },
-        );
-        return Ok(());
-    }
-    let scope = match node.borrow().authorization_support_scope_for_session(
-        identity,
-        Some(&session_claims),
-        &action,
-    ) {
-        Ok(scope) => scope,
-        Err(_) => {
+    let scope = {
+        let node = node.lock().await;
+        if !node.is_history_complete()
+            || !subscriber_permissions_ready(node.permissions_ready(), trust)
+        {
             queue_direct_control(
                 pending_control_responses,
                 SyncMessage::AuthorizationScopeUnavailable { request_id },
             );
             return Ok(());
+        }
+        match node.authorization_support_scope_for_session(identity, Some(&session_claims), &action)
+        {
+            Ok(scope) => scope,
+            Err(_) => {
+                queue_direct_control(
+                    pending_control_responses,
+                    SyncMessage::AuthorizationScopeUnavailable { request_id },
+                );
+                return Ok(());
+            }
         }
     };
     let mut seen_support = BTreeSet::new();
@@ -6643,9 +6779,14 @@ where
         );
         return Ok(());
     }
-    let current_claims_revision = node.borrow().session_claim_revision(identity);
-    let current_policy_epoch = node.borrow().active_catalogue_seq();
-    let current_cut = node.borrow().committed_global_time();
+    let (current_claims_revision, current_policy_epoch, current_cut) = {
+        let node = node.lock().await;
+        (
+            node.session_claim_revision(identity),
+            node.active_catalogue_seq(),
+            node.committed_global_time(),
+        )
+    };
     // A cache entry is evidence, not a generic response cache.  Prune every
     // revision/cut mismatch before looking up this compiled support key.
     hydrations.retain(|_, hydration| {
@@ -7015,7 +7156,7 @@ pub(super) fn remove_scope_aggregate_member(
 /// accepted. A coverage group owns shared canonical state, so preserve it for
 /// siblings while removing every per-usage registration. If this was the last
 /// usage, retire the group and cancel (or withdraw) its upstream ownership too.
-fn rollback_rejected_subscriber_admission<S>(
+async fn rollback_rejected_subscriber_admission<S>(
     node: &SharedNodeState<S>,
     peer: &mut PeerState,
     served: &mut BTreeMap<SubscriptionKey, CoverageKey>,
@@ -7032,6 +7173,9 @@ fn rollback_rejected_subscriber_admission<S>(
 ) where
     S: OrderedKvStorage,
 {
+    // Acquire the node owner before the first mutation. There is no await
+    // after this point, so cancellation cannot leave admission half-rolled back.
+    let mut node = node.lock().await;
     let Some(coverage) = served.remove(&subscription) else {
         return;
     };
@@ -7043,7 +7187,6 @@ fn rollback_rejected_subscriber_admission<S>(
         // Admission always installs the group before `served`; avoid retaining
         // the usage-site state if an earlier invariant violation broke that
         // ordering.
-        let mut node = node.borrow_mut();
         node.apply_unsubscribe(subscription);
         peer.forget_subscription(subscription);
         return;
@@ -7077,7 +7220,6 @@ fn rollback_rejected_subscriber_admission<S>(
         group.upstream_opts.propagate_upstream,
     ));
 
-    let mut node = node.borrow_mut();
     node.apply_unsubscribe(subscription);
     peer.forget_subscription(subscription);
     if !retire_group {
@@ -7207,14 +7349,14 @@ fn operand_is_id(operand: &Operand) -> bool {
     matches!(operand, Operand::Column(column) if column == "id")
 }
 
-fn drop_peer_request<S>(node: &SharedNodeState<S>)
+async fn drop_peer_request<S>(node: &SharedNodeState<S>)
 where
     S: OrderedKvStorage,
 {
-    node.borrow_mut().record_dropped_peer_request();
+    node.lock().await.record_dropped_peer_request();
 }
 
-pub(super) fn handle_transport_backpressure<S>(
+pub(super) fn handle_transport_backpressure_sync<S>(
     node: &SharedNodeState<S>,
     scheduler: &SharedTickScheduler,
     error: &TransportError,
@@ -7231,8 +7373,25 @@ where
         TransportError::Failed(_) => false,
     }
 }
+pub(super) async fn handle_transport_backpressure_async<S>(
+    node: &SharedNodeState<S>,
+    scheduler: &SharedTickScheduler,
+    error: &TransportError,
+) -> bool
+where
+    S: OrderedKvStorage,
+{
+    match error {
+        TransportError::Backpressure => {
+            node.lock().await.record_transport_backpressure_retry();
+            schedule_tick_in(scheduler, TickUrgency::Deferred);
+            true
+        }
+        TransportError::Failed(_) => false,
+    }
+}
 
-fn handle_db_backpressure<S>(
+async fn handle_db_backpressure<S>(
     node: &SharedNodeState<S>,
     scheduler: &SharedTickScheduler,
     error: &Error,
@@ -7241,8 +7400,9 @@ where
     S: OrderedKvStorage,
 {
     if error.code == ErrorCode::Backpressure {
-        node.borrow_mut().record_transport_backpressure_retry();
+        // Preserve the retry boundary even if the owner remains busy.
         schedule_tick_in(scheduler, TickUrgency::Deferred);
+        node.lock().await.record_transport_backpressure_retry();
         true
     } else {
         false
@@ -7327,7 +7487,7 @@ fn summarize_sync_message(message: &SyncMessage) -> String {
     }
 }
 
-fn send_with_sync_context<S>(
+async fn send_with_sync_context<S>(
     node: &SharedNodeState<S>,
     peer: &mut PeerState,
     transport: &mut dyn Transport,
@@ -7336,7 +7496,7 @@ fn send_with_sync_context<S>(
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    send_catalogue_snapshot_if_needed(node, peer, transport)?;
+    send_catalogue_snapshot_if_needed(node, peer, transport).await?;
     let mut message = message;
     if let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
@@ -7357,9 +7517,10 @@ where
     if crate::debug_env::covered_input_trace()
         && let SyncMessage::ViewUpdate(payload) = &message
     {
+        let relay = node.lock().await.client_relay_scope().is_some();
         eprintln!(
             "JAZZ_COVERED_INPUT_TRACE stage=transport_send relay={} subscription={:?} pending={} rows={} carriers={}",
-            node.borrow().client_relay_scope().is_some(),
+            relay,
             payload.subscription,
             payload.peer_payload_inventory.opening_pending,
             payload.supporting_rows.added_rows().len(),
@@ -7368,10 +7529,11 @@ where
     }
     #[cfg(any(test, feature = "testing"))]
     if let SyncMessage::ViewUpdate(payload) = &message {
+        let runtime_token = node.lock().await.groove_runtime_token();
         crate::delivery_diagnostics::record(|| {
             format!(
                 "owner_view_send runtime={} subscription={:?} snapshot={} opening={}",
-                node.borrow().groove_runtime_token(),
+                runtime_token,
                 payload.subscription,
                 payload.supporting_rows.is_snapshot(),
                 payload.peer_payload_inventory.opening_pending
@@ -7381,7 +7543,7 @@ where
     send_sync_message_chunked(transport, message)
 }
 
-pub(super) fn send_subscriber_with_sync_context<S>(
+pub(super) async fn send_subscriber_with_sync_context<S>(
     node: &SharedNodeState<S>,
     peer: &mut PeerState,
     transport: &mut dyn Transport,
@@ -7392,7 +7554,7 @@ pub(super) fn send_subscriber_with_sync_context<S>(
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    stamp_subscriber_opening_state(node, peer, &mut message);
+    stamp_subscriber_opening_state(node, peer, &mut message).await;
     send_prepared_subscriber_with_sync_context(
         node,
         peer,
@@ -7401,9 +7563,10 @@ where
         downstream_fates,
         message,
     )
+    .await
 }
 
-fn stamp_subscriber_opening_state<S>(
+async fn stamp_subscriber_opening_state<S>(
     node: &SharedNodeState<S>,
     peer: &PeerState,
     message: &mut SyncMessage,
@@ -7418,9 +7581,11 @@ fn stamp_subscriber_opening_state<S>(
         let source = peer
             .subscription_authority_result_source(payload.subscription)
             .cloned();
-        let source_settled = source
-            .as_ref()
-            .is_some_and(|source| node.borrow().has_settled_authority_result(source));
+        let source_settled = if let Some(source) = source.as_ref() {
+            node.lock().await.has_settled_authority_result(source)
+        } else {
+            false
+        };
         if source.is_some() && !source_settled {
             // This D belongs to a non-authoritative scope relay. Its selected U
             // source exists conceptually at admission but has not delivered a
@@ -7548,7 +7713,7 @@ fn bound_view_update_inline_bodies(message: &mut SyncMessage) -> Result<(), Erro
 
 /// A retained publication already owns its opening/authorization envelope.
 /// Retry must not restamp it from a newer authority state before acceptance.
-fn send_prepared_subscriber_with_sync_context<S>(
+async fn send_prepared_subscriber_with_sync_context<S>(
     node: &SharedNodeState<S>,
     peer: &mut PeerState,
     transport: &mut dyn Transport,
@@ -7573,7 +7738,7 @@ where
         }
     }
 
-    send_with_sync_context(node, peer, transport, message)?;
+    send_with_sync_context(node, peer, transport, message).await?;
     for tx_id in pending_tx_ids {
         register_local_fate_observer(local_fate_routes, tx_id, downstream_fates);
     }
@@ -7611,7 +7776,7 @@ fn fate_update_settles_upload(message: &SyncMessage, tx_id: TxId) -> bool {
 /// binding wakes for transport capacity. We remove only after `send` accepts
 /// the logical message, so a retry neither duplicates a sent fate nor loses a
 /// later fate behind it.
-fn flush_downstream_fates<S>(
+async fn flush_downstream_fates<S>(
     node: &SharedNodeState<S>,
     peer: &mut PeerState,
     transport: &mut dyn Transport,
@@ -7621,29 +7786,21 @@ fn flush_downstream_fates<S>(
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    // Send from a detached batch so draining K queued fates is O(K), not the
-    // O(K²) of removing each sent fate from the front of the `Vec`. Whatever
-    // was not sent goes back ahead of anything queued meanwhile.
-    let mut pending = std::mem::take(&mut *fates.borrow_mut());
-    let mut sent = 0;
-    let result = loop {
-        let Some(fate) = pending.get(sent).cloned() else {
-            break Ok(true);
+    loop {
+        let Some(fate) = fates.borrow().front().cloned() else {
+            return Ok(true);
         };
-        match send_with_sync_context(node, peer, transport, fate) {
-            Ok(()) => sent += 1,
+        match send_with_sync_context(node, peer, transport, fate).await {
+            Ok(()) => {
+                fates.borrow_mut().pop_front();
+            }
             Err(error) if error.code == ErrorCode::Backpressure => {
                 schedule_tick_in(scheduler, TickUrgency::Deferred);
-                break Ok(false);
+                return Ok(false);
             }
-            Err(error) => break Err(error),
+            Err(error) => return Err(error),
         }
-    };
-    pending.drain(..sent);
-    let mut queue = fates.borrow_mut();
-    pending.append(&mut queue);
-    *queue = pending;
-    result
+    }
 }
 
 /// Retry the one ordinary-wire chunk response whose byte admission was refused.
@@ -7677,7 +7834,7 @@ fn flush_pending_chunk_response(
 /// a rejected byte admission as a completed reply would otherwise leave the
 /// requester waiting forever. One retained message bounds a stalled link; the
 /// subscriber tick stops as soon as it creates one.
-fn flush_pending_control_responses<S>(
+async fn flush_pending_control_responses<S>(
     node: &SharedNodeState<S>,
     peer: &mut PeerState,
     transport: &mut dyn Transport,
@@ -7696,7 +7853,7 @@ where
                 transport.send(response.clone()).map_err(transport_error)
             }
             PendingSubscriberControlResponse::WithSyncContext(response) => {
-                send_with_sync_context(node, peer, transport, response.clone())
+                send_with_sync_context(node, peer, transport, response.clone()).await
             }
             PendingSubscriberControlResponse::AuthorizationScopeSequence(sequence) => {
                 let Some(response) = sequence.next_message() else {
@@ -7706,7 +7863,7 @@ where
                 // Scope hydration carries native physical row identities just
                 // like ordinary subscriptions. Install the authority catalogue
                 // before delivering those rows to a newly connected client.
-                send_with_sync_context(node, peer, transport, response)
+                send_with_sync_context(node, peer, transport, response).await
             }
         };
         match send_result {
@@ -7738,7 +7895,7 @@ where
 /// Send an authority catalogue snapshot exactly once per peer fingerprint.
 /// Trusted relay links have no application subscription during bootstrap, so
 /// catalogue propagation must not depend on a later ViewUpdate or fate.
-fn send_catalogue_snapshot_if_needed<S>(
+async fn send_catalogue_snapshot_if_needed<S>(
     node: &SharedNodeState<S>,
     peer: &mut PeerState,
     transport: &mut dyn Transport,
@@ -7746,7 +7903,7 @@ fn send_catalogue_snapshot_if_needed<S>(
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    let snapshot = node.borrow().catalogue_snapshot()?;
+    let snapshot = node.lock().await.catalogue_snapshot()?;
     let catalogue_fingerprint = *blake3::hash(
         &serde_json::to_vec(&snapshot).expect("catalogue snapshot serialization is infallible"),
     )
@@ -7833,7 +7990,7 @@ fn write_state_update_tx_id(message: &SyncMessage) -> Option<TxId> {
     }
 }
 
-fn handle_write_state_update<S>(
+async fn handle_write_state_update<S>(
     node: &SharedNodeState<S>,
     waiters: &WriteStateWaiters,
     mutation_errors: &SharedMutationErrors,
@@ -7848,7 +8005,7 @@ fn handle_write_state_update<S>(
     // `LocalMutex` guard in an `if let` scrutinee spans the entire body, which
     // used to reenter the suspended node when an acknowledged rejection was
     // discarded below.
-    let rejected = node.borrow().rejected_transaction(tx_id);
+    let rejected = node.lock().await.rejected_transaction(tx_id);
     if let Some(rejected) = rejected {
         queue_mutation_error(
             mutation_errors,
@@ -7867,12 +8024,11 @@ fn handle_write_state_update<S>(
     // rejected. This ownership set is process-local and populated only by the
     // browser relay recovery path, so it cannot turn arbitrary foreign
     // history into callbacks or survive an app-less worker interval.
-    let Some(record) = browser_relay_recovered_tx_ids
-        .borrow()
-        .contains(&tx_id)
-        .then(|| crate::local_executor::block_on(node.borrow_mut().transaction_record(tx_id)))
-        .flatten()
-    else {
+    let recovered_upload = browser_relay_recovered_tx_ids.borrow().contains(&tx_id);
+    if !recovered_upload {
+        return;
+    }
+    let Some(record) = node.lock().await.transaction_record(tx_id).await else {
         return;
     };
 

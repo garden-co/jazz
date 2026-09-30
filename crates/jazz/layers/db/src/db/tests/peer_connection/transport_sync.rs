@@ -1798,7 +1798,10 @@ fn owner_local_subscription_reconciles_peer_delete_without_reset() {
     let owner = AuthorSubject::for_test_bytes([0x50; 16]);
     let client_author = owner;
     let server = open_core(0x52, AuthorSubject::SYSTEM, &schema);
-    server.server.enable_authoritative_scalar_exit_refresh();
+    server
+        .server
+        .enable_authoritative_scalar_exit_refresh()
+        .expect("enable authoritative scalar exit refresh");
     server
         .node()
         .borrow_mut()
@@ -1938,7 +1941,10 @@ fn assert_account_owned_subscription_reconciles_peer_delete(opts: ReadOpts) {
     let owner = AuthorSubject::for_test_bytes([0x50; 16]);
     let client_author = owner;
     let server = open_core(0x52, owner, &schema);
-    server.server.enable_authoritative_scalar_exit_refresh();
+    server
+        .server
+        .enable_authoritative_scalar_exit_refresh()
+        .expect("enable authoritative scalar exit refresh");
     server
         .node()
         .borrow_mut()

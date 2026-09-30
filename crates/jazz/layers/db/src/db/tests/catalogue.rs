@@ -899,6 +899,13 @@ fn old_enum_subscription_rebuilds_across_registry_and_layout_growth() {
     assert!(removed.is_empty());
 }
 
+/// A permission-head activation waits for the peer owner and rechecks inventory
+/// before committing, then rebuilds the live read view after the peer is released.
+///
+/// ```text
+/// alice view ──peer owner held──► activation pending
+/// new peer ──admitted while pending──► inventory retry ──release──► policy reset
+/// ```
 #[test]
 fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
     let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
@@ -988,7 +995,31 @@ fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
         vec![first]
     );
 
-    db.activate_schema_for_test(2, editor_head).unwrap();
+    let (peer_transport, _peer_remote) = duplex();
+    let peer = db
+        .node
+        .accept_subscriber(peer_transport, AuthorSubject::SYSTEM);
+    let peer_owner = block_on(peer.lock());
+    let write_schema_before = db.current_write_schema().unwrap();
+    let mut activation = Box::pin(db.activate_schema_for_test(2, editor_head));
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    assert!(matches!(
+        activation.as_mut().poll(&mut context),
+        Poll::Pending
+    ));
+    assert_eq!(
+        db.current_write_schema().unwrap(),
+        write_schema_before,
+        "active schema metadata remains unchanged while a peer owner is held"
+    );
+
+    let (late_transport, _late_peer_remote) = duplex();
+    let _late_peer = db
+        .node
+        .accept_subscriber(late_transport, AuthorSubject::SYSTEM);
+    drop(peer_owner);
+    block_on(activation).unwrap();
     db.seed_settled_mergeable_for_bootstrap(
         "todos",
         row(0xb2),

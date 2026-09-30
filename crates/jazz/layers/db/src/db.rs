@@ -1538,14 +1538,16 @@ fn pending_open_schema_error() -> Error {
     )
 }
 
-/// Temporary source-compatibility for node operations that are still wholly
-/// synchronous. Storage-facing call sites must use `lock().await` instead.
-/// Remove this trait as the remaining domains become suspendable.
+/// Synchronous owner access for legacy infallible internal/test paths.
+/// Fallible facade operations must use `try_borrow`/`try_borrow_mut` so owner
+/// contention is returned as `ErrorCode::Busy`; async operations use `lock().await`.
 trait LocalMutexBorrow<T> {
     #[track_caller]
     fn borrow(&self) -> futures::lock::MutexGuard<'_, T>;
     #[track_caller]
     fn borrow_mut(&self) -> futures::lock::MutexGuard<'_, T>;
+    fn try_borrow(&self) -> Result<futures::lock::MutexGuard<'_, T>, Error>;
+    fn try_borrow_mut(&self) -> Result<futures::lock::MutexGuard<'_, T>, Error>;
 }
 
 impl<T> LocalMutexBorrow<T> for Rc<LocalMutex<T>> {
@@ -1563,6 +1565,15 @@ impl<T> LocalMutexBorrow<T> for Rc<LocalMutex<T>> {
         self.try_lock().unwrap_or_else(|| {
             panic!("synchronous node operation at {caller} reentered a suspended operation")
         })
+    }
+    fn try_borrow(&self) -> Result<futures::lock::MutexGuard<'_, T>, Error> {
+        self.try_lock()
+            .ok_or_else(|| Error::new(ErrorCode::Busy, "database node owner is busy"))
+    }
+
+    fn try_borrow_mut(&self) -> Result<futures::lock::MutexGuard<'_, T>, Error> {
+        self.try_lock()
+            .ok_or_else(|| Error::new(ErrorCode::Busy, "database node owner is busy"))
     }
 }
 
@@ -1957,7 +1968,7 @@ type WriteStateWaiters = Rc<RefCell<BTreeMap<TxId, Vec<WriteStateWaiter>>>>;
 type TransactionAbandonmentTombstones = Rc<RefCell<BTreeSet<OpenTransactionId>>>;
 type PermissionAdviceWaiters =
     Rc<RefCell<BTreeMap<PermissionAdviceRequestId, oneshot::Sender<PermissionAdvice>>>>;
-type PendingDownstreamFates = Rc<RefCell<Vec<SyncMessage>>>;
+type PendingDownstreamFates = Rc<RefCell<VecDeque<SyncMessage>>>;
 struct PendingLocalPublication {
     published: Rc<PublishedTransaction>,
     upload_unit: Option<SyncMessage>,
@@ -1996,7 +2007,7 @@ struct PendingAuthorityViewUpdate {
 }
 
 pub(super) struct LocalFateRoute {
-    queue: Weak<RefCell<Vec<SyncMessage>>>,
+    queue: Weak<RefCell<VecDeque<SyncMessage>>>,
     local_acknowledged: bool,
     /// A replay route is admitted before its causal closure is available.
     /// Keep it alive across link replacement without allowing its queue to
@@ -2172,7 +2183,7 @@ where
                 return !route.replay_ready;
             };
             if route.replay_ready && locally_durable && !route.local_acknowledged {
-                queue.borrow_mut().push(SyncMessage::FateUpdate {
+                queue.borrow_mut().push_back(SyncMessage::FateUpdate {
                     tx_id: *tx_id,
                     fate: Fate::Pending,
                     global_time: None,
@@ -2213,7 +2224,7 @@ fn release_local_replay_fates(routes: &LocalFateRoutes) {
                 return true;
             };
             let terminal = local_fate_is_terminal(&fate);
-            queue.borrow_mut().push(fate);
+            queue.borrow_mut().push_back(fate);
             !terminal
         });
         !pending.is_empty()
@@ -2245,7 +2256,7 @@ fn route_local_fate(routes: &LocalFateRoutes, tx_id: TxId, fate: &SyncMessage) {
         let Some(queue) = candidate.queue.upgrade() else {
             return false;
         };
-        queue.borrow_mut().push(fate.clone());
+        queue.borrow_mut().push_back(fate.clone());
         !terminal
     });
     if pending.is_empty() {
@@ -2431,7 +2442,7 @@ where
         // A reopened main-thread runtime has no transaction history. Send
         // accepted causal ancestors before each pending unit so the latter
         // can be ingested before its Local ack or later authority fate.
-        downstream_fates.borrow_mut().push(unit.clone());
+        downstream_fates.borrow_mut().push_back(unit.clone());
         if pending_set.contains(&tx_id) && outbox_units.insert(tx_id) {
             // Durable recovery omits exclusive snapshot/read evidence. A live
             // sibling may already retain the exact authored unit; never

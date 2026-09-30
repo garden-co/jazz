@@ -4051,9 +4051,9 @@ fn reopened_local_subscriber_replays_after_complete_parent_repair() {
 #[test]
 fn local_replay_route_retains_terminal_fate_across_dead_queue() {
     let routes: LocalFateRoutes = Rc::new(RefCell::new(BTreeMap::new()));
-    let old_queue: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
-    let replacement_queue: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
-    let unrelated_queue: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    let old_queue: PendingDownstreamFates = Rc::new(RefCell::new(VecDeque::new()));
+    let replacement_queue: PendingDownstreamFates = Rc::new(RefCell::new(VecDeque::new()));
+    let unrelated_queue: PendingDownstreamFates = Rc::new(RefCell::new(VecDeque::new()));
     let author = AuthorSubject::for_test_bytes([0xd2; 16]);
     let tx_id = TxId::new(TxTime(1), NodeUuid::from_bytes([0xd3; 16]));
     let fate = SyncMessage::FateUpdate {
@@ -4076,7 +4076,7 @@ fn local_replay_route_retains_terminal_fate_across_dead_queue() {
     release_local_replay_fates(&routes);
 
     assert!(matches!(
-        replacement_queue.borrow().as_slice(),
+        replacement_queue.borrow().as_slices().0,
         [SyncMessage::FateUpdate {
             tx_id: received,
             fate: Fate::Accepted,
@@ -4089,8 +4089,8 @@ fn local_replay_route_retains_terminal_fate_across_dead_queue() {
 #[test]
 fn local_replay_routes_keep_independent_live_receivers() {
     let routes: LocalFateRoutes = Rc::new(RefCell::new(BTreeMap::new()));
-    let first_queue: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
-    let second_queue: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    let first_queue: PendingDownstreamFates = Rc::new(RefCell::new(VecDeque::new()));
+    let second_queue: PendingDownstreamFates = Rc::new(RefCell::new(VecDeque::new()));
     let author = AuthorSubject::for_test_bytes([0xd5; 16]);
     let tx_id = TxId::new(TxTime(3), NodeUuid::from_bytes([0xd6; 16]));
     let fate = SyncMessage::FateUpdate {
@@ -4109,7 +4109,7 @@ fn local_replay_routes_keep_independent_live_receivers() {
 
     for queue in [&first_queue, &second_queue] {
         assert!(matches!(
-            queue.borrow().as_slice(),
+            queue.borrow().as_slices().0,
             [SyncMessage::FateUpdate {
                 tx_id: received,
                 fate: Fate::Accepted,
@@ -4154,8 +4154,9 @@ fn local_replay_route_copies_terminal_fate_to_late_live_receiver() {
         .unwrap();
 
     let routes: LocalFateRoutes = Rc::new(RefCell::new(BTreeMap::new()));
-    let first_queue: PendingDownstreamFates = Rc::new(RefCell::new(vec![replay.clone()]));
-    let second_queue: PendingDownstreamFates = Rc::new(RefCell::new(vec![replay]));
+    let first_queue: PendingDownstreamFates =
+        Rc::new(RefCell::new(VecDeque::from([replay.clone()])));
+    let second_queue: PendingDownstreamFates = Rc::new(RefCell::new(VecDeque::from([replay])));
     let fate = SyncMessage::FateUpdate {
         tx_id,
         fate: Fate::Accepted,
@@ -4173,7 +4174,7 @@ fn local_replay_route_copies_terminal_fate_to_late_live_receiver() {
 
     for queue in [&first_queue, &second_queue] {
         assert!(matches!(
-            queue.borrow().as_slice(),
+            queue.borrow().as_slices().0,
             [
                 SyncMessage::CommitUnit { tx, .. },
                 SyncMessage::FateUpdate {
@@ -4208,8 +4209,8 @@ fn repaired_local_replay_reconnect_delivers_retained_terminal_fate() {
     worker.tick().unwrap();
     let tx_id = write.mergeable_tx_id();
     let routes: LocalFateRoutes = Rc::new(RefCell::new(BTreeMap::new()));
-    let old_queue: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
-    let replacement_queue: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    let old_queue: PendingDownstreamFates = Rc::new(RefCell::new(VecDeque::new()));
+    let replacement_queue: PendingDownstreamFates = Rc::new(RefCell::new(VecDeque::new()));
     register_local_replay_route(&routes, tx_id, &old_queue, author, None);
     drop(old_queue);
     let fate = SyncMessage::FateUpdate {
@@ -4275,7 +4276,7 @@ fn incomplete_retained_root_reloads_after_storage_repair() {
     tx.n_total_writes = tx.n_total_writes.saturating_add(1);
     let incomplete = SyncMessage::CommitUnit { tx, versions };
     let routes: LocalFateRoutes = Rc::new(RefCell::new(BTreeMap::new()));
-    let queue: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    let queue: PendingDownstreamFates = Rc::new(RefCell::new(VecDeque::new()));
     register_local_replay_route(&routes, tx_id, &queue, author, Some(incomplete));
 
     block_on(restore_local_subscriber_replay(
@@ -4342,7 +4343,7 @@ fn local_replay_restore_point_reads(chain_len: usize) -> usize {
     eviction.evict_all();
     let before = control.point_read_count();
     let routes: LocalFateRoutes = Rc::new(RefCell::new(BTreeMap::new()));
-    let downstream: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    let downstream: PendingDownstreamFates = Rc::new(RefCell::new(VecDeque::new()));
     block_on(restore_local_subscriber_replay(
         &worker.node.node,
         &worker.node.outbox,
@@ -4419,7 +4420,7 @@ fn local_acknowledgements_do_not_reprobe_retained_history() {
     }))
     .unwrap();
     let routes: LocalFateRoutes = Rc::new(RefCell::new(BTreeMap::new()));
-    let queue: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    let queue: PendingDownstreamFates = Rc::new(RefCell::new(VecDeque::new()));
     let mut samples = Vec::new();
     for i in 0..1500 {
         let write = db
@@ -4455,7 +4456,7 @@ fn local_acknowledgements_do_not_reprobe_retained_history() {
         "no duplicate local acknowledgements"
     );
     let tx_id = *routes.borrow().keys().next().unwrap();
-    let newcomer: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    let newcomer: PendingDownstreamFates = Rc::new(RefCell::new(VecDeque::new()));
     register_local_fate_route(&routes, tx_id, &newcomer);
     let before = control.point_read_count();
     block_on(queue_local_acknowledgements(&routes, &db.node.node));
@@ -4465,7 +4466,7 @@ fn local_acknowledgements_do_not_reprobe_retained_history() {
         "only the new queue needs a probe"
     );
     assert!(
-        matches!(newcomer.borrow().as_slice(), [SyncMessage::FateUpdate {
+        matches!(newcomer.borrow().as_slices().0, [SyncMessage::FateUpdate {
         tx_id: received, fate: Fate::Pending, durability: Some(DurabilityTier::Local), ..
     }] if *received == tx_id)
     );
@@ -4476,7 +4477,7 @@ fn local_acknowledgements_do_not_reprobe_retained_history() {
     assert_eq!(newcomer.borrow().len(), 1, "acknowledge each queue once");
 
     // A cancelled waiter must be pruned without reopening stored history.
-    let cancelled: PendingDownstreamFates = Rc::new(RefCell::new(Vec::new()));
+    let cancelled: PendingDownstreamFates = Rc::new(RefCell::new(VecDeque::new()));
     register_local_fate_route(&routes, tx_id, &cancelled);
     drop(cancelled);
     block_on(queue_local_acknowledgements(&routes, &db.node.node));
@@ -4492,14 +4493,14 @@ fn local_acknowledgements_do_not_reprobe_retained_history() {
     };
     route_local_fate(&routes, tx_id, &global);
     assert!(matches!(
-        queue.borrow().last(),
+        queue.borrow().back(),
         Some(SyncMessage::FateUpdate {
             durability: Some(DurabilityTier::Global),
             ..
         })
     ));
     assert!(matches!(
-        newcomer.borrow().last(),
+        newcomer.borrow().back(),
         Some(SyncMessage::FateUpdate {
             durability: Some(DurabilityTier::Global),
             ..
@@ -4515,7 +4516,7 @@ fn local_acknowledgements_do_not_reprobe_retained_history() {
     };
     route_local_fate(&routes, rejected_id, &rejected);
     assert!(matches!(
-        queue.borrow().last(),
+        queue.borrow().back(),
         Some(SyncMessage::FateUpdate {
             fate: Fate::Rejected(_),
             ..

@@ -145,7 +145,7 @@ fn synchronous_reservations_are_definitive_and_advance_the_shared_hlc() {
 }
 
 #[test]
-fn synchronous_owner_mutating_setters_do_not_panic_when_owner_is_busy() {
+fn synchronous_owner_mutating_setters_return_busy_when_owner_is_held() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
     let owner = db
         .node
@@ -153,21 +153,19 @@ fn synchronous_owner_mutating_setters_do_not_panic_when_owner_is_busy() {
         .try_lock()
         .expect("test must acquire the node owner before the setters");
 
-    let policy_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        db.set_large_value_staging_policy(crate::node::LargeValueStagingPolicy::default())
-    }));
-    assert!(
-        policy_result.is_ok(),
-        "staging policy setter must return Busy rather than panic under owner contention"
-    );
+    let policy_error = db
+        .set_large_value_staging_policy(crate::node::LargeValueStagingPolicy::default())
+        .expect_err("staging policy setter must return Busy while the owner is held");
+    assert_eq!(policy_error.code, ErrorCode::Busy);
 
-    let refresh_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        db.enable_authoritative_scalar_exit_refresh()
-    }));
-    assert!(
-        refresh_result.is_ok(),
-        "authoritative refresh setter must return Busy rather than panic under owner contention"
-    );
+    let refresh_error = db
+        .enable_authoritative_scalar_exit_refresh()
+        .expect_err("authoritative refresh setter must return Busy while the owner is held");
+    assert_eq!(refresh_error.code, ErrorCode::Busy);
 
     drop(owner);
+    db.set_large_value_staging_policy(crate::node::LargeValueStagingPolicy::default())
+        .expect("uncontended staging policy setter");
+    db.enable_authoritative_scalar_exit_refresh()
+        .expect("uncontended authoritative refresh setter");
 }

@@ -764,7 +764,7 @@ where
         } else {
             self.finish_publication_outcome(PublicationOutcome::published((), published))
                 .await?;
-            self.finalize_local_commit(tx_id)?;
+            self.finalize_local_commit(tx_id).await?;
         }
         Ok(tx_id)
     }
@@ -808,7 +808,7 @@ where
                 } else {
                     db.finish_publication_outcome(PublicationOutcome::published((), published))
                         .await?;
-                    db.finalize_local_commit(tx_id)?;
+                    db.finalize_local_commit(tx_id).await?;
                 }
                 Ok(())
             }),

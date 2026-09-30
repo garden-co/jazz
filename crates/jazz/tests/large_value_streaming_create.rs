@@ -136,7 +136,8 @@ fn streaming_create_validation_failure_publishes_no_row() {
         incoming_bytes_per_window: u64::MAX,
         window_ms: 60_000,
         max_age_ms: 0,
-    });
+    })
+    .expect("set staging policy");
     std::thread::sleep(std::time::Duration::from_millis(2));
     assert_eq!(
         jazz::block_on(db.evict_expired_staged_large_values()).expect("expiry pass"),
@@ -240,7 +241,8 @@ fn failed_streaming_publication_evicts_the_finalized_staged_root() {
         incoming_bytes_per_window: u64::MAX,
         window_ms: 60_000,
         max_age_ms: 0,
-    });
+    })
+    .expect("set staging policy");
     std::thread::sleep(std::time::Duration::from_millis(2));
     assert_eq!(
         jazz::block_on(db.evict_expired_staged_large_values()).expect("expiry pass"),
@@ -256,7 +258,8 @@ fn push_streaming_stops_at_the_ingress_limit_and_closes_the_upload() {
         incoming_bytes_per_window: 1,
         window_ms: 60_000,
         max_age_ms: 10 * 60 * 1_000,
-    });
+    })
+    .expect("set staging policy");
     let cells = BTreeMap::from([("done".to_owned(), Value::Bool(false))]);
     let mut upload = db
         .begin_streaming_value_upload("todos", &cells, "title")
@@ -302,7 +305,8 @@ fn maintenance_evicted_local_stream_handles_cannot_recreate_pending_uploads() {
         incoming_bytes_per_window: u64::MAX,
         window_ms: 60_000,
         max_age_ms: 0,
-    });
+    })
+    .expect("set staging policy");
     std::thread::sleep(std::time::Duration::from_millis(2));
     assert_eq!(
         jazz::block_on(db.evict_expired_staged_large_values()).expect("expiry pass"),
@@ -348,7 +352,8 @@ fn native_reader_streaming_uses_the_managed_ingress_and_cleanup_path() {
         // Keep this test isolated to ingress admission; expiry behavior is
         // exercised independently below.
         max_age_ms: 10 * 60 * 1_000,
-    });
+    })
+    .expect("set staging policy");
 
     let result = jazz::block_on(db.insert_streaming_value(
         "todos",
@@ -388,7 +393,8 @@ fn native_reader_failure_releases_its_pending_upload() {
         incoming_bytes_per_window: u64::MAX,
         window_ms: 60_000,
         max_age_ms: 0,
-    });
+    })
+    .expect("set staging policy");
     std::thread::sleep(std::time::Duration::from_millis(2));
     assert_eq!(
         jazz::block_on(db.evict_expired_staged_large_values()).expect("expiry pass"),
@@ -412,7 +418,8 @@ fn explicit_streaming_abort_releases_the_pending_upload_immediately() {
         incoming_bytes_per_window: u64::MAX,
         window_ms: 60_000,
         max_age_ms: 0,
-    });
+    })
+    .expect("set staging policy");
     std::thread::sleep(std::time::Duration::from_millis(2));
     assert_eq!(
         jazz::block_on(db.evict_expired_staged_large_values()).expect("expiry pass"),

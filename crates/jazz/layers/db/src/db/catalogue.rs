@@ -22,7 +22,7 @@ where
     ) -> Result<SchemaLineagePublication, Error> {
         self.node
             .node
-            .borrow()
+            .try_borrow()?
             .author_schema_lineage_publication(schema, lens, new_tables, dropped_tables)
             .map_err(Into::into)
     }
@@ -90,7 +90,7 @@ where
         self.check_catalogue_admin()?;
         self.node
             .node
-            .borrow()
+            .try_borrow()?
             .validate_schema_activation(revision, schema)?;
         Ok(())
     }
@@ -124,12 +124,8 @@ where
             )
         })?;
         self.node
-            .node
-            .lock()
-            .await
-            .activate_schema(revision, schema)
+            .activate_schema_with_permissions_ready(revision, schema)
             .await?;
-        self.node.set_permissions_ready(true)?;
         Ok(())
     }
 
@@ -139,9 +135,17 @@ where
         &self,
         pointer: CurrentWriteSchema,
     ) -> Result<(), Error> {
-        let schema = self.catalogue_schema(pointer.schema).ok_or(
-            crate::node::Error::InvalidCatalogueUpdate("fixture schema is not admitted"),
-        )?;
+        let schema = self
+            .node
+            .node
+            .lock()
+            .await
+            .catalogue_schemas()
+            .get(&pointer.schema)
+            .map(|schema| schema.schema.clone())
+            .ok_or(crate::node::Error::InvalidCatalogueUpdate(
+                "fixture schema is not admitted",
+            ))?;
         self.activate_schema_for_test(pointer.revision, schema)
             .await
     }
@@ -171,33 +175,37 @@ where
     pub fn current_write_schema(&self) -> Result<CurrentWriteSchema, Error> {
         self.node
             .node
-            .borrow()
-            .current_write_schema()
-            .map_err(Into::into)
+            .try_borrow()
+            .and_then(|node| node.current_write_schema().map_err(Into::into))
     }
 
     /// Return a published schema-version payload known to this database.
-    pub fn catalogue_schema(&self, schema: SchemaVersionId) -> Option<JazzSchema> {
-        self.node
+    pub fn catalogue_schema(&self, schema: SchemaVersionId) -> Result<Option<JazzSchema>, Error> {
+        Ok(self
             .node
-            .borrow()
+            .node
+            .try_borrow()?
             .catalogue_schemas()
             .get(&schema)
-            .map(|schema| schema.schema.clone())
+            .map(|schema| schema.schema.clone()))
     }
 
     /// Highest contiguously activated authoritative catalogue position.
-    pub fn active_catalogue_seq(&self) -> u64 {
-        self.node.node.borrow().active_catalogue_seq()
+    pub fn active_catalogue_seq(&self) -> Result<u64, Error> {
+        Ok(self.node.node.try_borrow()?.active_catalogue_seq())
     }
 
     /// Return a published migration lens known to this database.
-    pub fn catalogue_lens(&self, lens: crate::ids::MigrationLensId) -> Option<MigrationLens> {
-        self.node
+    pub fn catalogue_lens(
+        &self,
+        lens: crate::ids::MigrationLensId,
+    ) -> Result<Option<MigrationLens>, Error> {
+        Ok(self
             .node
-            .borrow()
+            .node
+            .try_borrow()?
             .catalogue_lenses()
             .get(&lens)
-            .cloned()
+            .cloned())
     }
 }
