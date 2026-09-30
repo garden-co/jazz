@@ -77,7 +77,10 @@ fn mutation_error_details(reason: &RejectionReason) -> (String, String) {
         ),
         RejectionReason::Cascade { root } => (
             "cascade_rejected".to_owned(),
-            format!("Transaction was rejected because ancestor {root:?} was rejected"),
+            format!(
+                "Transaction was rejected because ancestor transaction {} was rejected",
+                TransactionId::from_committed_tx(*root)
+            ),
         ),
         RejectionReason::MalformedCommit(reason) => (
             "write_rejected".to_owned(),

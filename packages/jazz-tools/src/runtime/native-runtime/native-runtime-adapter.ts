@@ -4982,10 +4982,26 @@ function rejectionCode(message: string): string {
   return "write_rejected";
 }
 
+/**
+ * Readable reasons for structured authority rejections. These follow the
+ * `reason` text the core attaches to the same codes on `onMutationError`
+ * events (`mutation_errors.rs`), so a wait rejection and a fallback event
+ * describe one rejection the same way. The Rust diagnostic (with its `TxId`/enum debug tokens) stays on
+ * the non-enumerable `message`.
+ */
+const READABLE_REJECTION_REASONS: Readonly<Record<string, string>> = {
+  permission_denied: "Write rejected by server authorization",
+  exclusive_conflict: "Exclusive transaction conflicted with another write",
+  causality_violation: "Transaction violated causal ordering",
+  client_clock_too_far_ahead: "Client clock is too far ahead",
+  cascade_rejected: "Transaction was rejected because an ancestor transaction was rejected",
+};
+
 function rejectionReason(message: string): string {
   const reason = extractWriteRejectedReason(message);
   if (reason === null) return message;
-  if (reason.includes("AuthorizationDenied")) return "Write rejected by server authorization";
+  const readable = READABLE_REJECTION_REASONS[rejectionCode(reason)];
+  if (readable) return readable;
   return reason || "Write rejected";
 }
 

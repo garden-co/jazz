@@ -4,7 +4,12 @@ import type { JWK } from "jose";
 import type { WasmSchema } from "../drivers/types.js";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { CompiledPermissions } from "../permissions/index.js";
-import { JazzClient, type RequestLike, type Runtime } from "../runtime/client.js";
+import {
+  JazzClient,
+  type MutationErrorEvent,
+  type RequestLike,
+  type Runtime,
+} from "../runtime/client.js";
 import type { AppContext, Session } from "../runtime/context.js";
 import { RuntimeSource, type RuntimeClientContext } from "../runtime/runtime-source.js";
 import { Db, type DbConfig } from "../runtime/db.js";
@@ -104,6 +109,15 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
   private shutdownState: "open" | "closing" | "closed" = "open";
   private shutdownPromise?: Promise<void>;
   private gracefulWait?: object;
+  /**
+   * Every backend `Db` facade shares this source's single runtime, so its
+   * mutation errors belong to the source rather than to whichever facade
+   * happened to be created last. Rejections that arrive before any listener
+   * (for example, persisted in-flight writes settled during startup replay)
+   * are buffered and handed to the first listener, like `Db.onMutationError`.
+   */
+  private readonly mutationErrorListeners = new Set<(event: MutationErrorEvent) => void>();
+  private readonly pendingMutationErrorEvents: MutationErrorEvent[] = [];
 
   constructor(
     private readonly config: ResolvedBackendContextConfig,
@@ -207,7 +221,30 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
       },
       { onAuthFailure },
     );
+    this.client.onMutationError((event) => this.handleMutationError(event));
     return this.client;
+  }
+
+  /** @internal Shared by every backend `Db` facade of this context. */
+  onMutationError(listener: (event: MutationErrorEvent) => void): () => void {
+    this.mutationErrorListeners.add(listener);
+    while (this.pendingMutationErrorEvents.length > 0) {
+      listener(this.pendingMutationErrorEvents.shift()!);
+    }
+    return () => {
+      this.mutationErrorListeners.delete(listener);
+    };
+  }
+
+  private handleMutationError(event: MutationErrorEvent): void {
+    if (this.mutationErrorListeners.size === 0) {
+      console.error("Unhandled Jazz mutation error", event);
+      this.pendingMutationErrorEvents.push(event);
+      return;
+    }
+    for (const listener of this.mutationErrorListeners) {
+      listener(event);
+    }
   }
 
   override async waitForPendingWrites(signal?: AbortSignal): Promise<void> {
@@ -257,6 +294,8 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
         signal.removeEventListener("abort", onAbort);
       }
       this.explicitOfflineListeners.clear();
+      this.mutationErrorListeners.clear();
+      this.pendingMutationErrorEvents.length = 0;
     });
     this.shutdownPromise = shutdown;
     // A failed native close may have partially torn down the runtime. Keep
@@ -420,6 +459,16 @@ class BackendDb extends Db {
     this.coreSource.assertOpen();
     this.assertOpen();
     return this.client;
+  }
+
+  /**
+   * Backend facades bypass the connection manager that wires a client's
+   * mutation errors into `Db`, and all of them share one runtime. Route
+   * listeners to the shared source so every facade observes that runtime's
+   * rejections, including ones settled before the listener was attached.
+   */
+  override onMutationError(listener: (event: MutationErrorEvent) => void): () => void {
+    return this.coreSource.onMutationError(listener);
   }
 }
 

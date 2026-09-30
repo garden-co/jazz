@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => {
     asBackend: ReturnType<typeof vi.fn>;
     connectTransport: ReturnType<typeof vi.fn>;
     shutdown: ReturnType<typeof vi.fn>;
+    onMutationError: ReturnType<typeof vi.fn>;
   }> = [];
   const connectWithRuntime = vi.fn((_runtime: unknown, _context: AppContext) => {
     const client = {
@@ -26,6 +27,7 @@ const mocks = vi.hoisted(() => {
       }),
       connectTransport: vi.fn(),
       shutdown: vi.fn(async () => undefined),
+      onMutationError: vi.fn(),
     };
     clients.push(client);
     return client;
@@ -724,6 +726,65 @@ describe("backend/create-jazz-context", () => {
       true,
       { readAuthorizationHost: "trusted-serving", backendMode: true },
     );
+  });
+
+  it("BC-U10: routes runtime mutation errors to every backend Db, including ones settled before a listener", () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const context = createJazzContext({
+        appId: "server-app",
+        app: { wasmSchema: SCHEMA_A },
+        permissions: {},
+        driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
+      });
+      const worker = context.asBackend();
+      const other = context.db();
+      expect(mocks.clients).toHaveLength(1);
+      expect(mocks.clients[0]!.onMutationError).toHaveBeenCalledTimes(1);
+      const emit = mocks.clients[0]!.onMutationError.mock.calls[0]![0] as (event: unknown) => void;
+      const event = (transactionId: string) => ({
+        code: "exclusive_conflict",
+        reason: "Exclusive transaction conflicted with another write",
+        transaction: {
+          transactionId,
+          kind: "exclusive",
+          sealed: true,
+          latestSettlement: {
+            kind: "rejected",
+            transactionId,
+            code: "exclusive_conflict",
+            reason: "Exclusive transaction conflicted with another write",
+          },
+        },
+      });
+
+      // A persisted in-flight write settled during startup replay, before the
+      // application attached its listener.
+      const replayed = event("00000000000070008000000000000001");
+      emit(replayed);
+
+      const workerListener = vi.fn();
+      worker.onMutationError(workerListener);
+      expect(workerListener).toHaveBeenCalledWith(replayed);
+
+      const otherListener = vi.fn();
+      const unsubscribe = other.onMutationError(otherListener);
+      const live = event("00000000000070008000000000000002");
+      emit(live);
+      expect(workerListener).toHaveBeenLastCalledWith(live);
+      expect(otherListener).toHaveBeenCalledTimes(1);
+      expect(otherListener).toHaveBeenCalledWith(live);
+
+      unsubscribe();
+      emit(event("00000000000070008000000000000003"));
+      expect(workerListener).toHaveBeenCalledTimes(3);
+      expect(otherListener).toHaveBeenCalledTimes(1);
+      // Only the rejection that arrived with no listener is reported unhandled.
+      expect(consoleError).toHaveBeenCalledTimes(1);
+      expect(consoleError).toHaveBeenCalledWith("Unhandled Jazz mutation error", replayed);
+    } finally {
+      consoleError.mockRestore();
+    }
   });
 
   it("BC-U09: rejects memory driver without serverUrl", () => {
