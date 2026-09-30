@@ -51,6 +51,17 @@ export function Composer({
     setFiles((current) => [...current, ...accepted]);
   }
 
+  // A send commits locally first, so it works offline and clears the draft
+  // at once. The server can still reject it later, for example if a policy
+  // denies it, so each write also waits for the global tier and reports a
+  // rejection here.
+  function reportRejection(handle: { wait(options: { tier: "global" }): Promise<unknown> }) {
+    handle.wait({ tier: "global" }).catch((cause: unknown) => {
+      const reason = cause instanceof Error ? cause.message : String(cause);
+      setError(`Message not sent: ${reason}`);
+    });
+  }
+
   // The draft and pending files are cleared only once they are written, so a
   // failed send keeps what the person typed and any files not yet sent.
   async function send(value: string) {
@@ -64,17 +75,18 @@ export function Composer({
       if (outgoing.length === 0) {
         // The message and the room's new activity commit together. Members
         // may record activity on the room; the policy keeps its name fixed.
-        await db.transaction((tx) => {
+        const committed = await db.transaction((tx) => {
           tx.insert(app.messages, { ...base, text: body });
           tx.update(app.rooms, roomId, { lastActivityAt: new Date() });
         });
+        reportRejection(committed);
         setText("");
         return;
       }
       // Each file becomes its own message; the text rides on the first one.
       // Bytes stream into the row instead of being copied through memory.
       for (const [index, { key, file }] of outgoing.entries()) {
-        await db.insertStreaming(app.messages, {
+        const inserted = await db.insertStreaming(app.messages, {
           ...base,
           text: index === 0 ? body : "",
           attachmentName: file.name,
@@ -82,10 +94,11 @@ export function Composer({
           attachmentSize: file.size,
           attachment: file.stream(),
         });
+        reportRejection(inserted);
         if (index === 0) setText("");
         setFiles((current) => current.filter((item) => item.key !== key));
       }
-      db.update(app.rooms, roomId, { lastActivityAt: new Date() });
+      reportRejection(db.update(app.rooms, roomId, { lastActivityAt: new Date() }));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
