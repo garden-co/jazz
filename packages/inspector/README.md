@@ -64,6 +64,24 @@ Outside that sealed run, `pnpm --filter inspector test:browser` builds the embed
 Inspector before running Playwright. Native correctness-artifact admission still
 applies to both paths.
 
+The real Playwright suites cover loading the built embedded bundle, switching
+between authenticated runtimes, reading and editing rows, and standalone
+connection flows through Vite's development server. They are not a production
+`build:web` acceptance test. Use these application tests as build/browser
+evidence; a fake builder or a copied HTML marker cannot prove the Inspector runs.
+
+To exercise both browser-command paths after producing correctness artifacts
+and building the Jazz Tools runtime and test exports:
+
+```sh
+pnpm --filter inspector test:browser
+JAZZ_TEST_SEALED_INSPECTOR_DIST=1 pnpm --filter inspector test:browser
+```
+
+The first command builds the embedded assets. The second consumes that same
+prepared build without rebuilding it. Neither command bypasses native artifact
+admission.
+
 ## Staging a release on Vercel
 
 The package-build workflow builds the web app against its already verified Jazz

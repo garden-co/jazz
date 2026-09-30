@@ -1478,7 +1478,6 @@ test("integration workspace check contract rejects planted failure suppression",
     /lint must not suppress job failures/,
   );
 });
-
 test("lint keeps its one workspace Clippy invocation inside pnpm lint", () => {
   const lint = job("lint");
   assert.match(lint, /local-ci-equivalent\.mjs --ci-partition lint/);
@@ -1960,47 +1959,6 @@ test("pkg.pr.new previews omit Windows while release package builds retain it", 
   }
 });
 
-test("TypeScript CI overlaps independent Node and browser suites after one artifact build", () => {
-  const typescript = job("test-ts");
-  const runner = fs.readFileSync(path.join(root, "dev/gates/run-ts-tests.sh"), "utf8");
-  const localCi = fs.readFileSync(path.join(root, "dev/gates/local-ci-equivalent.mjs"), "utf8");
-  assert.match(typescript, /local-ci-equivalent\.mjs --ci-partition typescript/);
-  assert.match(
-    localCi,
-    /native correctness-artifact producer[\s\S]*ensure-correctness-artifacts\.mjs/,
-  );
-  assert.match(localCi, /TypeScript consumers[\s\S]*test:typescript-consumers/);
-  assert.match(runner, /require\('\.\/crates\/jazz-napi'\)/);
-  assert.match(runner, /JAZZ_TEST_SEALED_TOOLS_DIST=1/);
-  assert.match(runner, /verify-jazz-tools-exports\.mjs/);
-  assert.match(runner, /public export surface is incomplete/);
-  assert.match(runner, /producer receipt is checked before either suite starts/);
-  assert.match(runner, /correctness-artifact-producer\.mjs/);
-  assert.match(runner, /--concurrency=2/);
-  assert.match(
-    runner,
-    /browser_tests_command=.*pnpm --parallel --filter jazz-tools --filter inspector --filter band-chat-nextjs-betterauth --filter record-player-next-betterauth --filter auth-workos-chat test:browser/,
-  );
-  assert.match(runner, /set -m/);
-  assert.match(runner, /bash -c "\$\{node_tests_command\}" >"\$\{node_tests_log\}" 2>&1 &/);
-  assert.match(runner, /bash -c "\$\{browser_tests_command\}" >"\$\{browser_tests_log\}" 2>&1 &/);
-  assert.match(runner, /browser_tests_pid=\$![\s\S]*log_monitor_pid=\$![\s\S]*set \+m/);
-  assert.doesNotMatch(runner, /^setsid /m);
-  assert.match(runner, /trap 'interrupt 130' INT/);
-  assert.match(runner, /trap 'interrupt 143' TERM/);
-  assert.match(runner, /kill -TERM -- "-\$\{child_pid\}"/);
-  assert.match(runner, /wait "\$\{node_tests_pid\}"/);
-  assert.match(runner, /node_tests_status=\$\?/);
-  assert.match(runner, /wait "\$\{browser_tests_pid\}"/);
-  assert.match(runner, /browser_tests_status=\$\?/);
-  assert.match(runner, /cat "\$\{node_tests_log\}"/);
-  assert.match(runner, /cat "\$\{browser_tests_log\}"/);
-  assert.match(runner, /Node test suite exit status:/);
-  assert.match(runner, /Browser test suite exit status:/);
-  assert.match(runner, /node_tests_status.*-ne 0 \|\|.*browser_tests_status.*-ne 0/);
-  assert.doesNotMatch(typescript, /rust-components: clippy,rustfmt/);
-});
-
 test("React Native CI has a separate bridge-enabled producer and real Vitest admission", () => {
   const reactNative = job("test-react-native");
   const localCi = fs.readFileSync(path.join(root, "dev/gates/local-ci-equivalent.mjs"), "utf8");
@@ -2079,6 +2037,59 @@ test("parallel TypeScript runner waits for both suites and combines their failur
     assert.equal(fs.existsSync(browserMarker), true, "browser suite was not reaped");
     assert.match(result.stdout, new RegExp(`Node test suite exit status: ${testCase.node}`));
     assert.match(result.stdout, new RegExp(`Browser test suite exit status: ${testCase.browser}`));
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("bounded browser runner completes dependent suites after a failure", () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-ts-ci-browser-continuation-"));
+  const packages = [
+    "jazz-tools",
+    "inspector",
+    "band-chat-nextjs-betterauth",
+    "record-player-next-betterauth",
+    "auth-workos-chat",
+  ];
+  try {
+    fs.writeFileSync(path.join(fixture, "package.json"), JSON.stringify({ private: true }));
+    fs.writeFileSync(path.join(fixture, "pnpm-workspace.yaml"), "packages:\n  - packages/*\n");
+    for (const name of packages) {
+      const directory = path.join(fixture, "packages", name);
+      const marker = path.join(fixture, `${name}-completed`);
+      const command = `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "completed"); process.exit(${name === "jazz-tools" ? 7 : 0});`;
+      fs.mkdirSync(directory, { recursive: true });
+      fs.writeFileSync(
+        path.join(directory, "package.json"),
+        JSON.stringify({
+          name,
+          version: "0.0.0",
+          private: true,
+          dependencies: name === "jazz-tools" ? {} : { "jazz-tools": "workspace:*" },
+          scripts: { "test:browser": `node -e ${JSON.stringify(command)}` },
+        }),
+      );
+    }
+    const env = {
+      ...process.env,
+      JAZZ_REQUIRE_CI_TEST_COMMANDS: "0",
+      JAZZ_SKIP_JAZZ_TOOLS_BUILD: "1",
+      JAZZ_NODE_TEST_COMMAND: "true",
+      RUNNER_TEMP: fixture,
+    };
+    delete env.JAZZ_BROWSER_TEST_COMMAND;
+    const result = spawnSync("bash", [path.join(root, "dev/gates/run-ts-tests.sh")], {
+      cwd: fixture,
+      encoding: "utf8",
+      env,
+      timeout: 30_000,
+    });
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.deepEqual(
+      packages.filter((name) => fs.existsSync(path.join(fixture, `${name}-completed`))),
+      packages,
+      "every selected browser suite must finish even when its workspace dependency fails",
+    );
+  } finally {
     fs.rmSync(fixture, { recursive: true, force: true });
   }
 });
@@ -2243,25 +2254,23 @@ test("missing public exports or inspector assets prevent both TypeScript suites 
       write(`packages/jazz-tools/${relative}`);
     }
 
-    const nodeMarker = path.join(fixture, "node-inspector.html");
-    const browserMarker = path.join(fixture, "browser-inspector.html");
-    const run = () =>
-      spawnSync("bash", ["dev/gates/run-ts-tests.sh"], {
-        cwd: fixture,
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          JAZZ_SKIP_JAZZ_TOOLS_BUILD: "0",
-          JAZZ_REQUIRE_CI_TEST_COMMANDS: "0",
-          JAZZ_CORRECTNESS_ARTIFACT_RUN: "1",
-          JAZZ_CORRECTNESS_WASM_PACKAGE: "/sealed/wasm",
-          JAZZ_CORRECTNESS_NAPI_BINDING: "/sealed/napi/index.js",
-          JAZZ_CORRECTNESS_NAPI_FINGERPRINT: "sealed",
-          JAZZ_NODE_TEST_COMMAND: `touch ${JSON.stringify(nodeMarker)}; test "$JAZZ_TEST_SEALED_INSPECTOR_DIST" = 1 && cp packages/inspector/dist-embedded/embedded.html ${JSON.stringify(nodeMarker)}`,
-          JAZZ_BROWSER_TEST_COMMAND: `touch ${JSON.stringify(browserMarker)}; test "$JAZZ_TEST_SEALED_INSPECTOR_DIST" = 1 && cp packages/inspector/dist-embedded/embedded.html ${JSON.stringify(browserMarker)}`,
-        },
-      });
-    const missing = run();
+    const nodeMarker = path.join(fixture, "node-inspector-started");
+    const browserMarker = path.join(fixture, "browser-inspector-started");
+    const missing = spawnSync("bash", ["dev/gates/run-ts-tests.sh"], {
+      cwd: fixture,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        JAZZ_SKIP_JAZZ_TOOLS_BUILD: "0",
+        JAZZ_REQUIRE_CI_TEST_COMMANDS: "0",
+        JAZZ_CORRECTNESS_ARTIFACT_RUN: "1",
+        JAZZ_CORRECTNESS_WASM_PACKAGE: "/sealed/wasm",
+        JAZZ_CORRECTNESS_NAPI_BINDING: "/sealed/napi/index.js",
+        JAZZ_CORRECTNESS_NAPI_FINGERPRINT: "sealed",
+        JAZZ_NODE_TEST_COMMAND: `touch ${JSON.stringify(nodeMarker)}`,
+        JAZZ_BROWSER_TEST_COMMAND: `touch ${JSON.stringify(browserMarker)}`,
+      },
+    });
     assert.notEqual(missing.status, 0, missing.stdout);
     assert.equal(fs.existsSync(nodeMarker), false, "node suite started without inspector assets");
     assert.equal(
@@ -2269,12 +2278,6 @@ test("missing public exports or inspector assets prevent both TypeScript suites 
       false,
       "browser suite started without inspector assets",
     );
-
-    write("packages/inspector/dist-embedded/embedded.html", "prepared inspector");
-    const prepared = run();
-    assert.equal(prepared.status, 0, `${prepared.stdout}\n${prepared.stderr}`);
-    assert.equal(fs.readFileSync(nodeMarker, "utf8"), "prepared inspector");
-    assert.equal(fs.readFileSync(browserMarker, "utf8"), "prepared inspector");
   } finally {
     fs.rmSync(fixture, { recursive: true, force: true });
   }

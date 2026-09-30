@@ -161,8 +161,9 @@ The near-term implementation plan is:
 - remove duplicate Clippy and duplicate named-test execution;
 - give setup, compilation, and execution coherent separate budgets and retain
   structured partial receipts on failure or cancellation;
-- use the existing fast, unoptimized WASM artifact for correctness tests while
-  retaining optimized WASM validation in package/publish workflows;
+- use fast dev-profile WASM with Cargo `opt-level=1`, retaining development
+  assertions and overflow checks, for correctness tests; retain fully optimized
+  release WASM validation in package/publish workflows;
 - build NAPI once, verifying it before any conditional repair;
 - run independent WASM and NAPI builds concurrently;
 - shard the complete Rust inventory after removing per-shard setup taxes, then
@@ -181,6 +182,39 @@ changes retain the same test selection and lint command; expected savings are
 roughly **two minutes** from the Rust test job plus one complete duplicate
 workspace-Clippy pass and the unneeded installer work in the Rust-only jobs.
 Follow-up receipts must replace these estimates with before/after step timings.
+
+**Correctness-capacity receipt (#3149, 2026-09-21).** The direct parent of the
+capacity change, `cbec4f49984d441be2845e1e5c4033083d1bb827`, and the completed
+PR head, `a73d5d801fb3fbc3527f96c8b1756fb2a59d14f5`, both passed the complete
+`trusted / test-ts` job on Blacksmith 16-vCPU Ubuntu 24.04 runners:
+
+| Source                       | Hosted job                                                                                                | Entire job | TypeScript/workspace partition step |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------- | ---------- | ----------------------------------- |
+| Before capacity, `cbec4f499` | [35613224062 / 106377304862](https://github.com/garden-co/jazz/actions/runs/35613224062/job/106377304862) | 17m59s     | 17m18s                              |
+| After capacity, `a73d5d801`  | [35651884905 / 106505992469](https://github.com/garden-co/jazz/actions/runs/35651884905/job/106505992469) | 16m26s     | 15m38s                              |
+
+Both successful logs include all five selected browser packages: Jazz Tools
+(334 passed, 10 skipped), Inspector (13 passed), band-chat (11 passed),
+record-player (9 passed), and auth-workos-chat (4 passed). The capacity bundle
+changes the dev-WASM recipe and worker limits; the later `--no-bail` change
+preserves package execution after failures rather than adding packages to this
+successful-path comparison.
+
+The observations are 93 seconds shorter for the job and 100 seconds shorter for
+the partition step, with one run per source. Different runner instances and
+cache/load conditions, and several changed settings, prevent attributing this
+difference to an individual change or claiming a stable speedup. Both jobs
+reported zero sccache hits and misses; that does not establish equal Turbo or
+other cache state. Test selection and native artifact admission remain intact.
+
+The 60-minute whole-job allowance is separate from that timing comparison.
+The downstream E9 workload at `293cdccc79b1cc50136b18c53f0564c75d137cd9`
+[completed successfully in 47m32s](https://github.com/garden-co/jazz/actions/runs/35990170294/job/107602110018),
+including 46m56s in the TypeScript/workspace partition. Its larger workload is
+evidence that the complete feature-stack job can exceed the former 20-minute
+allowance, not a before/after performance comparison or proof that 60 minutes
+is a minimum. The allowance does not change individual test assertions or
+polling deadlines.
 
 Cache correctness precedes cache scale. Turbo task inputs should describe each
 artifact's actual dependency closure rather than all `crates/**/*.rs`; native
