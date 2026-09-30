@@ -4531,13 +4531,27 @@ where
             .collect::<BTreeSet<_>>();
         #[cfg(any(test, feature = "testing"))]
         let compiled_authorization_mode = program.request.authorization_mode;
+        // A retained view never reads the stored columns its projection
+        // drops, so it keeps them physical for its whole lifetime. Rebuilding
+        // them made a listing fetch every chunk of a large value it excludes,
+        // and hold back its other rows until the last chunk arrived (#3830).
+        let root_indirect_values =
+            match self.projection_dropped_root_values(shape.query(), shape.schema_version()) {
+                Ok(root_indirect_values) => root_indirect_values,
+                Err(error) => {
+                    self.retire_covered_input_sources(&covered_input_sources)
+                        .await?;
+                    return Err(error);
+                }
+            };
         let subscription = match self
-            .subscribe_lowered_program(
+            .subscribe_lowered_program_with_root_values(
                 program,
                 &binding,
                 binding_source_shape,
                 prepared_claim_binding_mode,
                 progress_waker,
+                root_indirect_values,
             )
             .await
         {

@@ -73,6 +73,39 @@ struct EvaluationSession<'a> {
     borrowed: HashSet<NodeId>,
 }
 
+/// One root node's relational output retained while its publication waits
+/// for immutable chunks, with the materialized forms loaded so far.
+struct PendingSubscriptionOutput {
+    physical: Arc<RecordDeltas>,
+    materialized: Vec<(RootIndirectValues, Arc<RecordDeltas>)>,
+}
+
+impl PendingSubscriptionOutput {
+    fn new(physical: Arc<RecordDeltas>) -> Self {
+        Self {
+            physical,
+            materialized: Vec::new(),
+        }
+    }
+
+    fn materialized_as(&self, representation: &RootIndirectValues) -> Option<Arc<RecordDeltas>> {
+        self.materialized
+            .iter()
+            .find(|(candidate, _)| candidate == representation)
+            .map(|(_, records)| Arc::clone(records))
+    }
+
+    fn record_materialized(
+        &mut self,
+        representation: &RootIndirectValues,
+        records: Arc<RecordDeltas>,
+    ) {
+        if self.materialized_as(representation).is_none() {
+            self.materialized.push((representation.clone(), records));
+        }
+    }
+}
+
 pub(super) struct IncrementalEvaluation<'a> {
     table_deltas: Vec<TableDelta>,
     binding_deltas: Vec<BindingDelta>,
@@ -95,8 +128,9 @@ pub(super) struct IncrementalEvaluation<'a> {
     /// for immutable chunks. Re-evaluating after operator state advances can
     /// correctly yield an empty delta, so publication owns this exact value.
     /// Each entry is the physical output and, once loaded, its materialized
-    /// form. TopBy root keys are taken from the physical form (#3309).
-    pending_subscription_outputs: HashMap<NodeId, (Arc<RecordDeltas>, Option<Arc<RecordDeltas>>)>,
+    /// form for each root representation a subscriber of that node asked for.
+    /// TopBy root keys are taken from the physical form (#3309).
+    pending_subscription_outputs: HashMap<NodeId, PendingSubscriptionOutput>,
     terminal_deltas: HashMap<NodeId, TerminalDeltas>,
     root_ordering_windows: HashMap<NodeId, RootOrderingWindows>,
     notification_publication: Option<PublicationId>,
@@ -1280,10 +1314,13 @@ impl<'a> IncrementalEvaluation<'a> {
                 if !self.affected_nodes.contains(&output.node) {
                     continue;
                 }
-                let (physical_records, materialized) = if let Some((physical, materialized)) =
+                let (physical_records, materialized) = if let Some(pending) =
                     self.pending_subscription_outputs.get(&output.node)
                 {
-                    (Arc::clone(physical), materialized.clone())
+                    (
+                        Arc::clone(&pending.physical),
+                        pending.materialized_as(&subscription.root_indirect_values),
+                    )
                 } else {
                     let records = {
                         let mut future = evaluator.update_node(output.node);
@@ -1294,20 +1331,37 @@ impl<'a> IncrementalEvaluation<'a> {
                             }
                         }
                     };
-                    self.pending_subscription_outputs
-                        .insert(output.node, (Arc::clone(&records), None));
+                    self.pending_subscription_outputs.insert(
+                        output.node,
+                        PendingSubscriptionOutput::new(Arc::clone(&records)),
+                    );
                     (records, None)
                 };
+                // Each subscription publishes in the representation its
+                // initial snapshot used, so fields it keeps physical are never
+                // rebuilt, nor fetched, only to be dropped by its consumer.
                 let materialized = match materialized {
                     Some(records) => Ok(records),
-                    None => evaluator.materialize_indirect_input(&physical_records),
+                    None => match subscription
+                        .root_indirect_values
+                        .materialized_field_indices(&physical_records.descriptor)
+                    {
+                        None => evaluator.materialize_indirect_input(&physical_records),
+                        Some(fields) => {
+                            evaluator.materialize_indirect_field_indices(&physical_records, &fields)
+                        }
+                    },
                 };
                 let records = match materialized {
                     Ok(records) => {
-                        self.pending_subscription_outputs.insert(
-                            output.node,
-                            (Arc::clone(&physical_records), Some(Arc::clone(&records))),
-                        );
+                        if let Some(pending) =
+                            self.pending_subscription_outputs.get_mut(&output.node)
+                        {
+                            pending.record_materialized(
+                                &subscription.root_indirect_values,
+                                Arc::clone(&records),
+                            );
+                        }
                         records
                     }
                     Err(IvmRuntimeError::EvaluationBlocked) => {
@@ -3521,8 +3575,14 @@ fn touched_route_barriers(
                 _ => None,
             }
         };
-        let records =
-            records.and_then(|records| evaluator.materialize_indirect_input(&records).ok());
+        // Only the route fields key a barrier. Rebuilding the rest of the
+        // record would read, and on a miss request, large values that no
+        // barrier inspects.
+        let records = records.and_then(|records| {
+            evaluator
+                .materialize_indirect_field_indices(&records, &table.field_indices)
+                .ok()
+        });
         let Some(records) = records else {
             touched.extend(table.barriers());
             continue;

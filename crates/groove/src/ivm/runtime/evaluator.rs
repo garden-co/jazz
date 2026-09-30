@@ -3797,7 +3797,7 @@ impl TickEvaluator<'_> {
         self.materialize_indirect_field_indices(input, &indices)
     }
 
-    fn materialize_indirect_field_indices(
+    pub(super) fn materialize_indirect_field_indices(
         &mut self,
         input: &Arc<RecordDeltas>,
         indices: &[usize],
