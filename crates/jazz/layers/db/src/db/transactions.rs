@@ -819,12 +819,14 @@ where
     /// Abandon an owned open transaction handle.
     pub fn abandon_transaction_handle(&self, open_tx_id: OpenTransactionId) -> Result<(), Error> {
         self.node.mark_transaction_abandoned(open_tx_id);
-        let result = self
-            .node
-            .node
-            .borrow_mut()
-            .abandon_tx(open_tx_id)
-            .map_err(Into::into);
+        let mut node = self.node.node.borrow_mut();
+        let result = node.abandon_tx(open_tx_id).map_err(Into::into);
+        // Eviction is async: the next tick releases this transaction's
+        // staged large-value roots.
+        if node.has_released_large_values() {
+            self.node.schedule_tick(TickUrgency::Immediate);
+        }
+        drop(node);
         self.node.clear_transaction_abandonment(open_tx_id);
         result
     }
@@ -835,13 +837,17 @@ where
     pub fn enqueue_abandon_transaction_handle(&self, open_tx_id: OpenTransactionId) {
         let db = self.clone_for_owner_operation();
         self.node.enqueue_transaction_cleanup(Box::pin(async move {
-            let mut node = db.node.node.lock().await;
-            let result = match node.abandon_tx(open_tx_id) {
-                Ok(()) | Err(crate::node::Error::MissingOpenBatch(_)) => Ok(()),
-                Err(error) => Err(error.into()),
-            };
+            let abandoned = db.node.node.lock().await.abandon_tx(open_tx_id);
             db.node.retire_queued_transaction_error(open_tx_id);
-            result
+            match abandoned {
+                Ok(()) | Err(crate::node::Error::MissingOpenBatch(_)) => {}
+                Err(error) => return Err(error.into()),
+            }
+            let mut node = db.node.lock_for_large_value_staging().await?;
+            if node.has_released_large_values() {
+                node.evict_released_large_values().await;
+            }
+            Ok(())
         }));
     }
 

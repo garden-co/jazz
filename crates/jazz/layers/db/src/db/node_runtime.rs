@@ -1415,6 +1415,9 @@ where
         if let Some(mut node) = self.node.try_lock() {
             if Self::abandon_transaction_for_maintenance(&mut node, open_tx_id).is_ok() {
                 self.clear_transaction_abandonment(open_tx_id);
+                if node.has_released_large_values() {
+                    self.schedule_tick(TickUrgency::Immediate);
+                }
             } else {
                 self.schedule_tick(TickUrgency::Immediate);
             }
@@ -1474,7 +1477,13 @@ where
 
     async fn drain_transaction_abandonments(&self) -> Result<usize, Error> {
         let mut node = self.node.lock().await;
-        self.finish_transaction_abandonment_shutdown_in(&mut node)
+        let drained = self.finish_transaction_abandonment_shutdown_in(&mut node);
+        // Groove defers eviction while a local publication is resident; a
+        // later tick picks the released roots up once it has settled.
+        if node.has_released_large_values() && !self.has_pending_local_publications() {
+            node.evict_released_large_values().await;
+        }
+        drained
     }
 
     /// Close transaction admission and transfer the final open-transaction

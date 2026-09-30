@@ -1519,6 +1519,9 @@ struct OpenTxState {
     closed_batches: BTreeSet<OpenTransactionId>,
     /// Local-only permission subjects for transactions whose `made_by` keeps provenance.
     local_permission_subjects: BTreeMap<TxId, AuthorSubject>,
+    /// Groove roots staged by transactions that were abandoned before commit,
+    /// awaiting eviction by [`NodeState::evict_released_large_values`].
+    released_large_values: Vec<groove::large_values::StagedLargeValueId>,
 }
 
 /// Rejection records and derived indexes used for pending-cascade handling.

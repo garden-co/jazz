@@ -871,6 +871,7 @@ impl NodeState {
                 open_transactions: BTreeMap::new(),
                 closed_batches: BTreeSet::new(),
                 local_permission_subjects: BTreeMap::new(),
+                released_large_values: Vec::new(),
             },
             rejections: RejectionTracking::default(),
             database: DatabaseSlot::new(database),
