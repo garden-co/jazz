@@ -433,6 +433,11 @@ impl Database {
     /// again, and this write is the owner turn, so waiting on the mutex alone
     /// would never see it released. While the mutex is contended, keep
     /// driving suspended evaluations until their installs let it go.
+    ///
+    /// This is the deliberate exception to `poll_resident_progress`'s rule that
+    /// a direct operation must never repoll a storage-pending evaluation merely
+    /// because another direct operation started later: under contention, only
+    /// this owner turn can advance the evaluation that holds the mutex.
     async fn lock_large_value_lifecycle(
         &mut self,
     ) -> Result<futures::lock::OwnedMutexGuard<()>, Error> {
