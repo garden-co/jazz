@@ -1,0 +1,18 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`demo tour fixture > pins the default tour so fixture changes are deliberate 1`] = `
+[
+  "29 Los Angeles confirmed",
+  "30 Morrison confirmed",
+  "1 Toronto confirmed",
+  "3 New York confirmed",
+  "4 Buenos Aires tentative",
+  "5 São Paulo tentative",
+  "8 Paris confirmed",
+  "11 Amsterdam confirmed",
+  "12 Montreux confirmed",
+  "15 Berlin confirmed",
+  "16 Tokyo confirmed",
+  "18 Tokyo confirmed",
+]
+`;

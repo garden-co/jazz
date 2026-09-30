@@ -572,9 +572,7 @@ where
     pub(super) fn queued_mutation_barrier(
         &self,
     ) -> futures::channel::oneshot::Receiver<Result<(), Error>> {
-        if self.queued_mutations.borrow().is_empty()
-            && self.queued_mutation_active_leases.get() == 0
-        {
+        if self.owner_queue_is_quiescent() {
             let (sender, receiver) = futures::channel::oneshot::channel();
             let _ = sender.send(Ok(()));
             return receiver;
@@ -656,6 +654,17 @@ where
 
     pub(super) fn enqueue_transaction_cleanup(&self, future: QueuedMutationFuture) {
         self.enqueue_transaction_cleanup_with_completion(future, None);
+    }
+
+    /// Order a non-transactional owner operation behind every operation
+    /// already admitted. Like cleanup, it bypasses mutation admission.
+    pub(super) fn enqueue_owner_operation(&self, future: QueuedMutationFuture) {
+        self.enqueue_transaction_cleanup_with_completion(future, None);
+    }
+
+    /// Whether no admitted owner operation is queued or being drained.
+    pub(super) fn owner_queue_is_quiescent(&self) -> bool {
+        self.queued_mutations.borrow().is_empty() && self.queued_mutation_active_leases.get() == 0
     }
 
     pub(super) fn enqueue_transaction_cleanup_with_completion(
@@ -890,7 +899,7 @@ where
 
     /// Ordinary `Db::open` nodes are Local receivers. Only the structurally
     /// separate history-complete path acts as the Core fate authority.
-    fn receives_commits_as_local(&self) -> bool {
+    pub(super) fn receives_commits_as_local(&self) -> bool {
         self.receives_commits_as_local
     }
 
@@ -1456,10 +1465,7 @@ where
         // that accepted operation into a tombstoned transaction. Keep the
         // shutdown sweep pending until its own queue has completely drained;
         // a later owner turn or close will run this same idempotent sweep.
-        if self.transaction_abandonment_shutdown_pending.get()
-            && self.queued_mutations.borrow().is_empty()
-            && self.queued_mutation_active_leases.get() == 0
-        {
+        if self.transaction_abandonment_shutdown_pending.get() && self.owner_queue_is_quiescent() {
             self.transaction_abandonment_shutdown_pending.set(false);
             node.abandon_all_open_transactions();
         }

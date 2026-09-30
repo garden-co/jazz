@@ -225,6 +225,15 @@ impl RemoteLinkTracker {
         self.notify();
     }
 
+    fn reported_hint(&self) -> Option<RemoteLinkHint> {
+        self.hint.get().map(|host| match host {
+            HostLink::NoServer => RemoteLinkHint::NoServer,
+            HostLink::Attempting { .. } => RemoteLinkHint::Attempting,
+            HostLink::Live => RemoteLinkHint::Live,
+            HostLink::Failed => RemoteLinkHint::Failed,
+        })
+    }
+
     pub(super) fn upstream_attached(&self) {
         self.live_upstreams.set(self.live_upstreams.get() + 1);
     }
@@ -491,6 +500,12 @@ where
         self.node.remote_link.set_hint(hint);
     }
 
+    /// The last hint a host reported, if any.
+    #[doc(hidden)]
+    pub fn remote_link_hint_for_test(&self) -> Option<RemoteLinkHint> {
+        self.node.remote_link.reported_hint()
+    }
+
     /// Resolve an [`EmptyOpening::AwaitRemote`] subscription request: the
     /// effective read options and the gate to install, if any.
     pub(super) fn resolve_empty_opening(
@@ -579,7 +594,7 @@ where
 
     /// Poll `remote` until it completes or the remote can no longer answer.
     /// Returning `None` drops the pending remote read.
-    async fn race_remote_answer<T>(
+    pub(super) async fn race_remote_answer<T>(
         &self,
         epoch: u64,
         remote: impl Future<Output = T>,

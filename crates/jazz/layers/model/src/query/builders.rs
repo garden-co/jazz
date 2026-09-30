@@ -127,6 +127,22 @@ impl Query {
         }
     }
 
+    /// The row query an aggregate consumes: the same sources and filters,
+    /// without the aggregate, projection, ordering or pagination. Exclusive
+    /// transactions prove these rows so the authority can validate an
+    /// aggregate read row by row. `None` for a non-aggregate query.
+    pub fn aggregate_input(&self) -> Option<Self> {
+        self.aggregate.as_ref()?;
+        Some(Self {
+            aggregate: None,
+            select: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: 0,
+            ..self.clone()
+        })
+    }
+
     /// Add a policy-only OR branch. Runtime query evaluation ignores these;
     /// row policy checks treat the base query and every branch as alternatives.
     pub fn policy_branch(mut self, branch: PolicyBranch) -> Self {

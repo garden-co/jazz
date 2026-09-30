@@ -166,6 +166,11 @@ harness = false
 required-features = ["testing"]
 
 [[bench]]
+name = "exclusive_join_narrowing"
+harness = false
+required-features = ["testing"]
+
+[[bench]]
 name = "owner_filter_diagnostic"
 harness = false
 required-features = ["testing"]

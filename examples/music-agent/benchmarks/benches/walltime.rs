@@ -1,12 +1,11 @@
 //! MusicAgent wall-clock receipts for what a user of an agent chat notices:
 //! how fast a streamed reply lands, how quickly a long conversation opens
-//! (live and after an app restart), and how fast a seek into an audio
-//! attachment returns. Names are app-prefixed because the examples page
-//! matches CodSpeed results by exact name.
+//! (live and after an app restart). Seeking into audio is measured by
+//! RecordPlayer (`record_player_scrub_track_64mb`). Names are app-prefixed
+//! because the examples page matches CodSpeed results by exact name.
 
 use jazz_example_music_agent_benchmark::Fixture;
 
-const MIB: usize = 1024 * 1024;
 const TURNS: usize = 200;
 
 #[global_allocator]
@@ -43,11 +42,4 @@ fn music_agent_open_transcript_200_turns(bencher: divan::Bencher<'_, '_>) {
 fn music_agent_reopen_transcript_200_turns(bencher: divan::Bencher<'_, '_>) {
     let fixture = Fixture::with_shape(TURNS, 256 * 1024);
     bencher.bench_local(|| divan::black_box(fixture.restarted_transcript()));
-}
-
-/// Seek into the middle of an 8 MiB audio attachment and read 64 KiB.
-#[divan::bench]
-fn music_agent_attachment_seek_8mb(bencher: divan::Bencher<'_, '_>) {
-    let fixture = Fixture::with_shape(2, 8 * MIB);
-    bencher.bench_local(|| divan::black_box(fixture.attachment_seek()));
 }

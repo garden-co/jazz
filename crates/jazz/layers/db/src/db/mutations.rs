@@ -2618,16 +2618,38 @@ where
     }
 
     /// Attach process-local auth claims for `identity`.
+    ///
+    /// Queued mutations read ambient claims when the owner executes them, so
+    /// claims take effect in admission order: immediately while the owner
+    /// queue is quiescent and the node is free, otherwise as an owner
+    /// operation behind every operation already admitted. This synchronous
+    /// entry point therefore never re-enters a suspended owner operation.
     pub fn set_identity_claims(&self, identity: AuthorSubject, claims: BTreeMap<String, Value>) {
-        let changed = {
-            let mut node = self.node.node.borrow_mut();
+        if self.node.owner_queue_is_quiescent()
+            && let Some(mut node) = self.node.node.try_lock()
+        {
             let previous_revision = node.session_claim_revision(identity);
             node.set_session_claims(identity, claims);
-            node.session_claim_revision(identity) != previous_revision
-        };
-        if changed {
-            self.node.schedule_tick(TickUrgency::Deferred);
+            let changed = node.session_claim_revision(identity) != previous_revision;
+            drop(node);
+            if changed {
+                self.node.schedule_tick(TickUrgency::Deferred);
+            }
+            return;
         }
+        let runtime = Rc::clone(&self.node);
+        self.node.enqueue_owner_operation(Box::pin(async move {
+            let changed = {
+                let mut node = runtime.node.lock().await;
+                let previous_revision = node.session_claim_revision(identity);
+                node.set_session_claims(identity, claims);
+                node.session_claim_revision(identity) != previous_revision
+            };
+            if changed {
+                runtime.schedule_tick(TickUrgency::Deferred);
+            }
+            Ok(())
+        }));
     }
 
     /// Attach claims without synchronously reentering a suspended storage operation.
@@ -3185,6 +3207,41 @@ where
                         default_cell_for_column_type(&column.column_type, default),
                     );
                 }
+            }
+        }
+        if cells.is_empty() {
+            // A content version must carry at least one cell: the model reads
+            // an empty cell set as "no content", and node validation rejects
+            // it so an empty update can never masquerade as a write. A row
+            // written with every column omitted still has content (all
+            // null), so author that null explicitly. Only insert-shaped
+            // writes reach this path: inserts, upserts into an absent row,
+            // and restores that carry content. Updates never do.
+            for column in &table_schema.columns {
+                if matches!(
+                    crate::schema::storage_column_type(column),
+                    GrooveColumnType::Nullable(_)
+                ) {
+                    cells.insert(column.name.clone(), Value::Nullable(None));
+                }
+            }
+            // Nullable JSON's published storage type cannot carry SQL null
+            // yet (#2733, #3007), so it gets no explicit null above.
+            if cells.is_empty()
+                && !table_schema.columns.is_empty()
+                && table_schema.columns.iter().all(|column| {
+                    column.large_value_kind == crate::schema::LargeValueSemanticKind::Json
+                        && matches!(column.column_type, GrooveColumnType::Nullable(_))
+                })
+            {
+                return Err(Error::new(
+                    ErrorCode::Schema,
+                    format!(
+                        "inserting a row with every column omitted is not supported yet for \
+                         table `{table}`: its optional columns are all JSON, which cannot \
+                         store null until #3007 lands; set at least one column"
+                    ),
+                ));
             }
         }
         Ok(cells)

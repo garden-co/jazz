@@ -6,10 +6,14 @@
   "scripts": {
     "dev": "vite",
     "build": "node ../../packages/jazz-tools/dist/cli.js validate && vite build",
-    "test": "vitest run --config vitest.config.browser.ts",
-    "typecheck": "tsc --noEmit"
+    "test": "pnpm run test:permissions && pnpm run test:browser",
+    "typecheck": "tsc --noEmit",
+    "test:permissions": "vitest run --config vitest.config.ts",
+    "test:browser": "vitest run --config vitest.config.browser.ts"
   },
   "dependencies": {
+    "@astryxdesign/core": "0.6.3",
+    "@garden-co/design": "github:garden-co/design#fe96522c2484b894380fab7f0217b76ee4bda3a2",
     "jazz-tools": "workspace:*",
     "react": "19.2.4",
     "react-dom": "19.2.4"

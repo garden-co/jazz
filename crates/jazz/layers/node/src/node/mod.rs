@@ -3194,6 +3194,24 @@ fn validate_mergeable_write_shape(cells_empty: bool, deletion_present: bool) -> 
 }
 
 #[cfg(test)]
+#[test]
+fn mergeable_write_shape_requires_exactly_one_register() {
+    // Content-only and deletion-only writes are well formed.
+    assert!(validate_mergeable_write_shape(false, false).is_ok());
+    assert!(validate_mergeable_write_shape(true, true).is_ok());
+    // A write carrying neither stays invalid: inserts with every column
+    // omitted author explicit null cells instead of relaxing this check.
+    assert!(matches!(
+        validate_mergeable_write_shape(true, false),
+        Err(Error::InvalidMergeableCommit(message)) if message.contains("must carry content cells")
+    ));
+    assert!(matches!(
+        validate_mergeable_write_shape(false, true),
+        Err(Error::InvalidMergeableCommit(message)) if message.contains("cannot also carry deletion")
+    ));
+}
+
+#[cfg(test)]
 fn select_all(table: &str) -> Query {
     Query::Select(Box::new(
         Select::new([SelectItem::Wildcard]).from([TableRef::named(table)]),
@@ -3296,6 +3314,11 @@ pub enum Error {
     /// Exact branch selector is missing, malformed, or inconsistent with row cells.
     #[error("invalid branch key: {0}")]
     InvalidBranchKey(String),
+    /// An exclusive transaction read a pattern whose read set it cannot
+    /// record precisely. It is rejected rather than recorded as a read of
+    /// whole tables (garden-co/jazz#3694).
+    #[error("Reading {0} is not supported in exclusive transactions yet")]
+    UnsupportedExclusiveRead(String),
     /// An exclusive transaction no longer matches its fixed local snapshot.
     #[error("row visible parent changed since transaction write was staged")]
     TransactionConflict,

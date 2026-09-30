@@ -44,6 +44,9 @@ pub(super) struct JazzSourceGraphPreparer<'a, S> {
     /// a variant target invalidates table inputs, so reuse it across the main
     /// source, access path, and metadata sidecars of one compiled program.
     pub(super) current_projection_targets: BTreeMap<SourceId, String>,
+    /// Whether these sources feed a policy-authorization subplan, which an
+    /// exclusive transaction records no read for (garden-co/jazz#3694).
+    pub(super) policy_subplan: bool,
 }
 
 pub(super) struct CurrentSourceGraph {
@@ -1145,8 +1148,11 @@ where
                         .project(maintained_view_history_storage_field_names(&table)),
                     row_uuid_field: "row_uuid".to_owned(),
                 });
-            let graph = match &authorization {
-                SourceAuthorizationRequest::System => base,
+            // A prepared binding routes the policy proof by its claim and
+            // parameter fields, which later joins project, exactly as for a
+            // current source.
+            let (graph, routing_fields) = match &authorization {
+                SourceAuthorizationRequest::System => (base, BTreeSet::new()),
                 SourceAuthorizationRequest::PolicyFiltered {
                     permission_subject,
                     plan,
@@ -1189,19 +1195,39 @@ where
                     let output_fields = descriptor_field_names(&descriptor).map_err(|_| {
                         source_resolution_error(request, SourceGap::HistoricalStorageCut)
                     })?;
-                    self.node
+                    let filtered = self
+                        .node
                         .compose_policy_filtered_current_source_graph(
                             policy_request,
                             base,
                             &output_fields,
                         )
-                        .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
-                        .graph
+                        .map_err(|error| {
+                            source_resolution_error_from_policy_proof(request, error)
+                        })?;
+                    (filtered.graph, filtered.route_fields)
                 }
             };
-            (graph, descriptor, metadata, BTreeSet::new())
+            (graph, descriptor, metadata, routing_fields)
         } else if let Some(tx_id) = open_tx_overlay {
             let include_deleted = request.visibility == RowVisibility::IncludeDeleted;
+            // A query's root source needs no read of its own: the query
+            // records its predicate read and proves the rows it returns.
+            // Policy-subplan sources need none either: a policy only decides
+            // which rows the reader sees, and the authority re-runs every
+            // predicate read under the reader's policies. Any other source
+            // feeds the result and claims the narrowed read its query offers
+            // for it, which the query records once it finishes
+            // (garden-co/jazz#3694).
+            if !self.policy_subplan
+                && request.source.path.components != [crate::node::query_engine::SourceRole::Root]
+            {
+                self.node
+                    .claim_tx_source_read(tx_id, &request.source)
+                    .map_err(|_| {
+                        source_resolution_error(request, SourceGap::TransactionReadOverlay)
+                    })?;
+            }
             let rows = self
                 .node
                 .tx_current_rows_in_schema_with_options(
