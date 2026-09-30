@@ -509,12 +509,12 @@ export default function HomePage() {
               </TableHeader>
               <TableBody>
                 {hostingRows.flatMap((row) => [
-                  <TableRow key={`${row.topic}-topic`}>
+                  <TableRow key={`${row.topic}-topic`} className="home-table-topic">
                     <TableCell colSpan={3}>
                       <Text weight="medium">{row.topic}</Text>
                     </TableCell>
                   </TableRow>,
-                  <TableRow key={row.topic}>
+                  <TableRow key={row.topic} className="home-table-values">
                     <TableCell>
                       <Text color="secondary">{row.selfHosted}</Text>
                     </TableCell>
@@ -522,7 +522,7 @@ export default function HomePage() {
                     <TableCell>{row.enterprise}</TableCell>
                   </TableRow>,
                 ])}
-                <TableRow>
+                <TableRow className="home-table-actions">
                   <TableCell>
                     <Button
                       label="How to self-host"

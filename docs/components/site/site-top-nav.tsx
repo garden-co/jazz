@@ -37,7 +37,7 @@ function ThemeSwitch() {
   return (
     <SegmentedControl
       label="Colour theme"
-      size="sm"
+      size="lg"
       value={mounted ? (theme ?? "system") : "system"}
       onChange={setTheme}
     >
@@ -118,13 +118,13 @@ export function SiteTopNav() {
               collided with the nav links on laptop widths. Below 1120px the
               links and the field no longer fit side by side, so search
               collapses to an icon. */}
-            <ThemeSwitch />
             <span className="site-search-field contents max-[1120px]:hidden">
               <SearchField onOpen={openSearch} />
             </span>
             <span className="contents min-[1120px]:hidden">
               <SearchIconButton onOpen={openSearch} />
             </span>
+            <ThemeSwitch />
             {/* Below the drawer breakpoint the bar keeps only search, theme and
               the drawer toggle; the social links would push the toggle off screen. */}
             <span className="contents max-md:hidden">

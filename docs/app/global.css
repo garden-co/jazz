@@ -156,6 +156,9 @@ h6 {
    the 1400px layout width their sections centre within. */
 .site-page-shell {
   --fd-layout-width: 1400px;
+  /* The sticky top nav's height, including its bottom border, for content
+     that sticks below it. */
+  --site-nav-height: 65px;
 }
 .site-page-shell .astryx-app-shell,
 .site-page-shell .astryx-app-shell-header {
@@ -584,21 +587,68 @@ h6 {
    full-width row above its values: narrow enough for phones without sideways
    scrolling. Sticky needs the page as its scroller, so neither the frame nor
    the table's own scroll wrapper may scroll; clip keeps the rounded corners. */
+/* Pricing table: no outer card. The sticky header row and each row of
+   values are rounded boxes of three columns; the topic rows between them
+   ("Setup", "Topology", ...) and the call-to-action row sit on the page. */
 .home-table {
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-container);
-  overflow: clip;
-  background-color: var(--color-background-card);
+  --home-table-radius: var(--radius-container);
 }
 .home-table .astryx-table-scroll-wrapper,
 .home-table [data-scroll-content] {
   overflow: visible;
 }
+.home-table table {
+  border-collapse: separate;
+  border-spacing: 0;
+}
+.home-table th,
+.home-table td {
+  border-bottom: 0;
+}
+.home-table thead th,
+.home-table .home-table-values td {
+  background-color: var(--color-background-card);
+  border-block: 1px solid var(--color-border);
+}
+.home-table thead th:first-child,
+.home-table .home-table-values td:first-child {
+  border-inline-start: 1px solid var(--color-border);
+  border-start-start-radius: var(--home-table-radius);
+  border-end-start-radius: var(--home-table-radius);
+}
+.home-table thead th:last-child,
+.home-table .home-table-values td:last-child {
+  border-inline-end: 1px solid var(--color-border);
+  border-start-end-radius: var(--home-table-radius);
+  border-end-end-radius: var(--home-table-radius);
+}
+/* Sticks just below the site nav rather than under it. */
 .home-table thead th {
   position: sticky;
-  top: 0;
+  top: var(--site-nav-height);
   z-index: 1;
-  background-color: var(--color-background-card);
+}
+.home-table .home-table-topic td {
+  padding-block: var(--spacing-5) var(--spacing-2);
+}
+.home-table .home-table-actions td {
+  padding-block-start: var(--spacing-4);
+}
+/* Phones: the table runs edge to edge so the three columns get the room,
+   and the boxes lose their side borders and rounding at the screen edge. */
+@media (max-width: 639px) {
+  .home-table {
+    --home-table-radius: 0;
+    margin-inline: calc(-1 * var(--spacing-4));
+  }
+  .home-table thead th:first-child,
+  .home-table .home-table-values td:first-child {
+    border-inline-start: 0;
+  }
+  .home-table thead th:last-child,
+  .home-table .home-table-values td:last-child {
+    border-inline-end: 0;
+  }
 }
 /* Narrow columns: hyphenate long words instead of splitting them anywhere,
    and let the call-to-action labels wrap instead of being cut off. */
