@@ -90,3 +90,18 @@ fn a_pad_toggle_reaches_only_its_own_live_track() {
     // flipped once.
     assert_eq!(fixture.playhead_window(0, 2), [(0, false), (1, true)]);
 }
+
+#[test]
+fn pattern_views_hydrate_exact_pages_under_one_shape() {
+    use jazz_example_wequencer_benchmark::pattern_views::PatternViewsFixture;
+    for patterns in [1, 10] {
+        let open = PatternViewsFixture::seeded(patterns).open_all();
+        assert_eq!(open.streams.len(), patterns);
+        assert_eq!(open.runtime.active_subscriptions, patterns);
+    }
+}
+
+#[test]
+fn pad_history_reads_exact_local_edit_depth() {
+    jazz_example_wequencer_benchmark::pad_history::PadHistoryFixture::new(3).assert_receipt();
+}
