@@ -88,7 +88,7 @@ export function Inspector({
           </ToggleButtonGroup>
         </VStack>
       )}
-      <HStack gap={2}>
+      <div className="inspector-pair">
         <NumberInput
           label="X"
           value={shape.x}
@@ -101,8 +101,8 @@ export function Inspector({
           isDisabled={!canEdit}
           onChange={(y) => update({ y })}
         />
-      </HStack>
-      <HStack gap={2}>
+      </div>
+      <div className="inspector-pair">
         <NumberInput
           label="Width"
           value={shape.width}
@@ -117,7 +117,7 @@ export function Inspector({
           isDisabled={!canEdit}
           onChange={(height) => update({ height })}
         />
-      </HStack>
+      </div>
       <Slider
         label="Rotation"
         value={shape.rotation}
