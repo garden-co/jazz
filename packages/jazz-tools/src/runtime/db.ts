@@ -338,6 +338,8 @@ export interface DeleteOptions extends TimestampOverrideOptions {
 type DbRuntimeOperationContext = {
   session?: Session;
   attribution?: string;
+  // Attributed backend operations read with backend authority while `session`
+  // supplies write provenance. Otherwise reads use `session` as well.
   readSession?: Session;
 };
 
@@ -1232,14 +1234,10 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
   constructor(
     readonly kind: TKind,
     private readonly resolveClient: (schema: WasmSchema) => JazzClient,
-    private readonly session?: Session,
-    private readonly attribution?: string,
+    private readonly context: DbRuntimeOperationContext | null = null,
     ownerClient?: JazzClient,
-    // Reads authorize as the Db's read session, like reads outside the
-    // transaction. Attributed Dbs read with backend authority while their
-    // `session` only supplies write provenance.
-    private readonly readSession?: Session,
   ) {
+    this.context = context ? { ...context } : null;
     if (ownerClient) this.bindOwnerClient(ownerClient);
   }
 
@@ -1263,11 +1261,12 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
   }
 
   private bindOwnerClient(ownerClient: JazzClient): void {
+    const { session, attribution } = this.context ?? {};
     dbTxHandleBindings.set(this, {
       ownerClient,
-      openTransactionId: ownerClient.beginTransaction(this.kind, this.session, this.attribution),
-      session: this.session,
-      attribution: this.attribution,
+      openTransactionId: ownerClient.beginTransaction(this.kind, session, attribution),
+      session,
+      attribution,
     });
   }
 
@@ -1543,7 +1542,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
         localUpdates: "deferred",
         openTransactionId,
       },
-      this.readSession ?? session,
+      this.context?.readSession ?? session,
     );
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const outputTransforms = resolveOutputColumnTransforms(query, builtQuery.table, outputTable);
@@ -2495,23 +2494,13 @@ export class Db {
       return withTransactionAdmission(
         ownerClient,
         prerequisite,
-        () =>
-          new Transaction(
-            kind,
-            (schema) => this.getClient(schema),
-            context?.session,
-            context?.attribution,
-            ownerClient,
-            context?.readSession,
-          ),
+        () => new Transaction(kind, (schema) => this.getClient(schema), context, ownerClient),
       );
     return new Transaction(
       kind,
       (schema) => this.getClient(schema),
-      context?.session,
-      context?.attribution,
+      context,
       ownerClient ?? undefined,
-      context?.readSession,
     );
   }
 
