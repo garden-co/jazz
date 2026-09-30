@@ -13,3 +13,5 @@ Operator support by column type (TypeScript):
 | `s.enum(...)`                 | `eq`, `ne`, `in`                           |
 | `s.array(...)`                | `eq`, `contains`, `in`                     |
 | `s.json()` / `s.json(schema)` | `eq`, `ne`, `in`                           |
+
+Nullable columns with ordinary filter operators also support `isNull`. Required columns, `id`, and payload enums do not expose it.
