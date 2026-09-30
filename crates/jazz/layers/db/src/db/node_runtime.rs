@@ -5436,6 +5436,18 @@ pub(super) fn route_upstream_subscription_rejection(
 pub trait Transport {
     /// Hand an outbound message to the binding's wire.
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError>;
+    /// Like [`Self::send`], but backpressure hands the unsent message back
+    /// (`Ok(Some(message))`) so a caller that must retry it keeps no copy of
+    /// its own. The default copies the message before sending; bindings that
+    /// can return a rejected message override it.
+    fn try_send(&mut self, message: SyncMessage) -> Result<Option<SyncMessage>, TransportError> {
+        let retained = message.clone();
+        match self.send(message) {
+            Ok(()) => Ok(None),
+            Err(TransportError::Backpressure) => Ok(Some(retained)),
+            Err(error) => Err(error),
+        }
+    }
     /// Pull the next inbound message the binding has staged, if any.
     fn try_recv(&mut self) -> Option<SyncMessage>;
     /// Fallible receive poll for connection servicing.

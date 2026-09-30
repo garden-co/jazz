@@ -226,7 +226,7 @@ impl PendingPipeline {
         if let Some((_, error)) = self.error {
             return Err(error);
         }
-        let bytes = self.output.freeze();
+        let bytes = freeze_batch_buffer(self.output);
         let deltas = if self.spans.is_empty() {
             self.borrowed
         } else {
