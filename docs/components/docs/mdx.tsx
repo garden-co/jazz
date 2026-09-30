@@ -17,7 +17,7 @@ import { Accordion, Accordions, Callout, Card, Cards, CodeBlockPre, DocsLink } f
 
 type HeadingProps = ComponentProps<"h2">;
 
-function heading(level: 1 | 2 | 3 | 4 | 5 | 6) {
+export function heading(level: 1 | 2 | 3 | 4 | 5 | 6) {
   return function DocsHeading({ id, children }: HeadingProps) {
     return (
       <Heading level={level} id={id} className="docs-heading">

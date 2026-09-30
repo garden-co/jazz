@@ -1059,6 +1059,10 @@ impl LayoutStorage {
 }
 
 impl OrderedKvStorage for LayoutStorage {
+    fn permits_eager_read_retry(&self) -> bool {
+        self.inner.permits_eager_read_retry()
+    }
+
     fn compare_value(
         &self,
         cf: String,
@@ -1338,6 +1342,10 @@ impl BoxedStorage {
 }
 
 impl OrderedKvStorage for BoxedStorage {
+    fn permits_eager_read_retry(&self) -> bool {
+        self.inner.permits_eager_read_retry()
+    }
+
     fn compare_value(
         &self,
         cf: String,
@@ -2175,6 +2183,10 @@ impl<S> OrderedKvStorage for StorageTransaction<'_, S>
 where
     S: OrderedKvStorage,
 {
+    fn permits_eager_read_retry(&self) -> bool {
+        self.base.permits_eager_read_retry()
+    }
+
     fn put_if_absent(
         &self,
         _cf: String,
@@ -2785,6 +2797,23 @@ mod tests {
                 })
             })
         }
+    }
+
+    #[futures_test::test]
+    async fn wrappers_forward_eager_read_retry() {
+        let memory = || MemoryStorage::new(&["default"]).expect("memory storage opens");
+        assert!(memory().permits_eager_read_retry());
+        assert!(BoxedStorage::new(memory()).permits_eager_read_retry());
+        let layout = LayoutStorage::new(memory(), StorageLayout::Identity)
+            .await
+            .expect("identity layout opens");
+        assert!(layout.permits_eager_read_retry());
+        assert!(layout.begin_txn().permits_eager_read_retry());
+
+        let (backend, _) = MeteredStorage::new();
+        assert!(!BoxedStorage::new(backend).permits_eager_read_retry());
+        let (layout, _) = metered_class_layout().await;
+        assert!(!layout.permits_eager_read_retry());
     }
 
     async fn metered_class_layout() -> (LayoutStorage, Rc<RefCell<Vec<String>>>) {

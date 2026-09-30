@@ -796,9 +796,8 @@ where
             Value::Large(value_ref) => {
                 let staged = self
                     .node
-                    .node
-                    .lock()
-                    .await
+                    .lock_for_large_value_staging()
+                    .await?
                     .append_and_stage_large_value(*value_ref, bytes)
                     .await?;
                 self.write_staged_large_value_update(table, row, column, staged, nullable)
@@ -856,9 +855,8 @@ where
             Value::Large(value_ref) => {
                 let staged = self
                     .node
-                    .node
-                    .lock()
-                    .await
+                    .lock_for_large_value_staging()
+                    .await?
                     .edit_and_stage_large_value(*value_ref, offset, delete_length, insert)
                     .await?;
                 self.write_staged_large_value_update(table, row, column, staged, nullable)
@@ -982,7 +980,7 @@ where
                     .cells(cells)
                     .authored_columns(authored_columns);
             let published = {
-                let mut node = self.node.node.lock().await;
+                let mut node = self.node.lock_for_large_value_staging().await?;
                 let commit = if staged.is_empty() {
                     node.seal_inherited_large_values(commit, self.schema_version_id, true)
                         .await?
@@ -1186,9 +1184,8 @@ where
             };
             let staged = self
                 .node
-                .node
-                .lock()
-                .await
+                .lock_for_large_value_staging()
+                .await?
                 .edit_and_stage_large_value(current, offset, delete_length, splice.insert.clone())
                 .await?;
             if let Some(previous) = final_staged.replace(staged) {
@@ -1273,9 +1270,8 @@ where
         };
         let staged = self
             .node
-            .node
-            .lock()
-            .await
+            .lock_for_large_value_staging()
+            .await?
             .edit_and_stage_large_value(large.as_ref().clone(), 0, large.byte_length, replacement)
             .await?;
         Ok((
@@ -1328,7 +1324,7 @@ where
         nullable: bool,
     ) -> Result<WriteHandle<S>, Error> {
         let published = {
-            let mut node = self.node.node.lock().await;
+            let mut node = self.node.lock_for_large_value_staging().await?;
             let mut cells = node
                 .current_physical_cells_in_schema(self.schema_version_id, table, row)
                 .await?
@@ -1625,9 +1621,8 @@ where
         let initialized_now = !upload.initialized;
         if !upload.initialized {
             self.node
-                .node
-                .lock()
-                .await
+                .lock_for_large_value_staging()
+                .await?
                 .begin_streaming_large_value_upload(upload.id, upload.kind)
                 .await?;
             upload.initialized = true;
@@ -1640,9 +1635,8 @@ where
         if let Err(error) = push_result {
             upload.preparation.take();
             self.node
-                .node
-                .lock()
-                .await
+                .lock_for_large_value_staging()
+                .await?
                 .evict_pending_large_value_upload(upload.id)
                 .await?;
             return Err(crate::node::Error::from(error).into());
@@ -1655,19 +1649,15 @@ where
             return Ok(());
         }
         let stage_result = {
-            let node = self.node.node.lock().await;
+            let node = self.node.lock_for_large_value_staging().await?;
             node.stage_large_value_chunk_batch(upload.id, upload.kind, chunks)
                 .await
         };
         if let Err(error) = stage_result {
             upload.preparation.take();
-            let _ = self
-                .node
-                .node
-                .lock()
-                .await
-                .evict_pending_large_value_upload(upload.id)
-                .await;
+            if let Ok(node) = self.node.lock_for_large_value_staging().await {
+                let _ = node.evict_pending_large_value_upload(upload.id).await;
+            }
             return Err(error.into());
         }
         Ok(())
@@ -1681,9 +1671,8 @@ where
         self.ensure_mutation_operation_admitted()?;
         upload.preparation.take();
         self.node
-            .node
-            .lock()
-            .await
+            .lock_for_large_value_staging()
+            .await?
             .evict_pending_large_value_upload(upload.id)
             .await?;
         Ok(())
@@ -1723,9 +1712,8 @@ where
         };
         if !upload.initialized {
             self.node
-                .node
-                .lock()
-                .await
+                .lock_for_large_value_staging()
+                .await?
                 .begin_streaming_large_value_upload(upload.id, upload.kind)
                 .await?;
             upload.initialized = true;
@@ -1737,19 +1725,15 @@ where
         let (value_ref, _) = match preparation.finish() {
             Ok(finished) => finished,
             Err(error) => {
-                let _ = self
-                    .node
-                    .node
-                    .lock()
-                    .await
-                    .evict_pending_large_value_upload(upload.id)
-                    .await;
+                if let Ok(node) = self.node.lock_for_large_value_staging().await {
+                    let _ = node.evict_pending_large_value_upload(upload.id).await;
+                }
                 return Err(crate::node::Error::from(error).into());
             }
         };
         let chunks = std::mem::take(&mut *upload.emitted.borrow_mut());
         let staged_result = {
-            let node = self.node.node.lock().await;
+            let node = self.node.lock_for_large_value_staging().await?;
             match node
                 .stage_large_value_chunk_batch(upload.id, upload.kind, chunks)
                 .await
@@ -1763,13 +1747,9 @@ where
             Err(error) => {
                 // Cleanup is best-effort here so the terminal operation reports
                 // its original staging/finalization failure.
-                let _ = self
-                    .node
-                    .node
-                    .lock()
-                    .await
-                    .evict_pending_large_value_upload(upload.id)
-                    .await;
+                if let Ok(node) = self.node.lock_for_large_value_staging().await {
+                    let _ = node.evict_pending_large_value_upload(upload.id).await;
+                }
                 return Err(error.into());
             }
         };
@@ -2089,7 +2069,11 @@ where
             commit = commit.permission_subject(permission_subject);
         }
         let published = {
-            let mut node = self.node.node.lock().await;
+            let mut node = if commit.needs_large_value_staging() {
+                self.node.lock_for_large_value_staging().await?
+            } else {
+                self.node.node.lock().await
+            };
             let commit = node
                 .seal_inherited_large_values(commit, self.schema_version_id, true)
                 .await?
@@ -2587,16 +2571,38 @@ where
     }
 
     /// Attach process-local auth claims for `identity`.
+    ///
+    /// Queued mutations read ambient claims when the owner executes them, so
+    /// claims take effect in admission order: immediately while the owner
+    /// queue is quiescent and the node is free, otherwise as an owner
+    /// operation behind every operation already admitted. This synchronous
+    /// entry point therefore never re-enters a suspended owner operation.
     pub fn set_identity_claims(&self, identity: AuthorSubject, claims: BTreeMap<String, Value>) {
-        let changed = {
-            let mut node = self.node.node.borrow_mut();
+        if self.node.owner_queue_is_quiescent()
+            && let Some(mut node) = self.node.node.try_lock()
+        {
             let previous_revision = node.session_claim_revision(identity);
             node.set_session_claims(identity, claims);
-            node.session_claim_revision(identity) != previous_revision
-        };
-        if changed {
-            self.node.schedule_tick(TickUrgency::Deferred);
+            let changed = node.session_claim_revision(identity) != previous_revision;
+            drop(node);
+            if changed {
+                self.node.schedule_tick(TickUrgency::Deferred);
+            }
+            return;
         }
+        let runtime = Rc::clone(&self.node);
+        self.node.enqueue_owner_operation(Box::pin(async move {
+            let changed = {
+                let mut node = runtime.node.lock().await;
+                let previous_revision = node.session_claim_revision(identity);
+                node.set_session_claims(identity, claims);
+                node.session_claim_revision(identity) != previous_revision
+            };
+            if changed {
+                runtime.schedule_tick(TickUrgency::Deferred);
+            }
+            Ok(())
+        }));
     }
 
     /// Attach claims without synchronously reentering a suspended storage operation.
@@ -2741,7 +2747,14 @@ where
                 .deletion(DeletionEvent::Restored),
         ));
         let published = {
-            let mut node = self.node.node.lock().await;
+            let mut node = if commits
+                .iter()
+                .any(MergeableCommit::needs_large_value_staging)
+            {
+                self.node.lock_for_large_value_staging().await?
+            } else {
+                self.node.node.lock().await
+            };
             if let Some(reserved) = self.reserved_tx_id {
                 node.commit_mergeable_many_in_schema_at(self.schema_version_id, commits, reserved)
                     .await?
@@ -2835,7 +2848,11 @@ where
         // Db is an untrusted client: structurally valid writes are staged and
         // sent optimistically. A serving authority assigns the policy fate.
         let published = {
-            let mut node = self.node.node.lock().await;
+            let mut node = if commit.needs_large_value_staging() {
+                self.node.lock_for_large_value_staging().await?
+            } else {
+                self.node.node.lock().await
+            };
             let commit = node
                 .seal_inherited_large_values(
                     commit,
@@ -3140,6 +3157,41 @@ where
                 }
             }
         }
+        if cells.is_empty() {
+            // A content version must carry at least one cell: the model reads
+            // an empty cell set as "no content", and node validation rejects
+            // it so an empty update can never masquerade as a write. A row
+            // written with every column omitted still has content (all
+            // null), so author that null explicitly. Only insert-shaped
+            // writes reach this path: inserts, upserts into an absent row,
+            // and restores that carry content. Updates never do.
+            for column in &table_schema.columns {
+                if matches!(
+                    crate::schema::storage_column_type(column),
+                    GrooveColumnType::Nullable(_)
+                ) {
+                    cells.insert(column.name.clone(), Value::Nullable(None));
+                }
+            }
+            // Nullable JSON's published storage type cannot carry SQL null
+            // yet (#2733, #3007), so it gets no explicit null above.
+            if cells.is_empty()
+                && !table_schema.columns.is_empty()
+                && table_schema.columns.iter().all(|column| {
+                    column.large_value_kind == crate::schema::LargeValueSemanticKind::Json
+                        && matches!(column.column_type, GrooveColumnType::Nullable(_))
+                })
+            {
+                return Err(Error::new(
+                    ErrorCode::Schema,
+                    format!(
+                        "inserting a row with every column omitted is not supported yet for \
+                         table `{table}`: its optional columns are all JSON, which cannot \
+                         store null until #3007 lands; set at least one column"
+                    ),
+                ));
+            }
+        }
         Ok(cells)
     }
 
@@ -3370,6 +3422,22 @@ where
         Ok((content_parents, deletion_parents))
     }
 
+    /// Why a client-local UPDATE found no preimage. A row this replica never
+    /// received cannot be staged against, and saying so discloses nothing the
+    /// replica does not already hold. A resident row that the client query
+    /// still hides stays a read denial.
+    async fn client_update_target_missing(
+        &self,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<Error, Error> {
+        Ok(if self.local_current_row(table, row).await?.is_none() {
+            update_target_not_loaded("UPDATE", table, row)
+        } else {
+            read_for_write_denied("UPDATE", table)
+        })
+    }
+
     async fn local_row_for_client_identity(
         &self,
         table: &str,
@@ -3464,10 +3532,12 @@ where
         identity: AuthorSubject,
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row).await?;
-        let existing = self
+        let Some(existing) = self
             .local_row_for_client_identity(table, row, identity)
             .await?
-            .ok_or_else(|| read_for_write_denied("UPDATE", table))?;
+        else {
+            return Err(self.client_update_target_missing(table, row).await?);
+        };
         let tx_id = self
             .node
             .node
@@ -3545,22 +3615,26 @@ where
             // the cells it inherits. SYSTEM and policy-free tables are
             // unconditionally visible, so that query cannot change the answer.
             // Preserve indirect descriptors by reading the physical winner.
+            // With nothing able to hide the row, absence only means this
+            // replica has not loaded it.
             let (mut cells, parent) = {
                 let mut node = self.node.node.lock().await;
                 let (cells, parent) = node
                     .current_physical_cells_and_winner_in_schema(self.schema_version_id, table, row)
                     .await?
-                    .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
+                    .ok_or_else(|| update_target_not_loaded("partial UPDATE", table, row))?;
                 (cells, Some(parent))
             };
             let authored_columns = patch.keys().cloned().collect();
             cells.extend(patch);
             return Ok((cells, parent, authored_columns));
         }
-        let existing = self
+        let Some(existing) = self
             .local_row_for_client_identity(table, row, identity)
             .await?
-            .ok_or_else(|| read_for_write_denied("UPDATE", table))?;
+        else {
+            return Err(self.client_update_target_missing(table, row).await?);
+        };
         let (mut cells, parent) = {
             let mut node = self.node.node.lock().await;
             let cells = node

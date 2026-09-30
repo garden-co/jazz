@@ -1,0 +1,84 @@
+/*
+ * BandBook's only local styles. Everything else comes from Astryx components
+ * and the Jazz theme. Values are theme tokens; nothing here sets a colour,
+ * radius or font size of its own.
+ */
+
+html,
+body {
+  margin: 0;
+  background: var(--color-background-body);
+  color: var(--color-text-primary);
+}
+
+/*
+ * Inline editing: a borderless text area that reads as the text it edits.
+ * Astryx has no inline-editable text primitive (listed as a design-system gap).
+ */
+.bb-inline-text {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-family: var(--font-family-body);
+  font-size: var(--text-body-size);
+  font-weight: var(--text-body-weight);
+  line-height: var(--text-body-leading);
+  resize: none;
+  overflow: hidden;
+  field-sizing: content;
+  outline: none;
+}
+
+.bb-inline-text::placeholder {
+  color: var(--color-text-secondary);
+  opacity: 0.7;
+}
+
+.bb-inline-text[data-variant="title"] {
+  font-family: var(--font-family-heading);
+  font-size: var(--text-heading-1-size);
+  font-weight: var(--text-heading-1-weight);
+  line-height: var(--text-heading-1-leading);
+}
+
+.bb-inline-text[data-variant="heading"] {
+  font-family: var(--font-family-heading);
+  font-size: var(--text-heading-3-size);
+  font-weight: var(--text-heading-3-weight);
+  line-height: var(--text-heading-3-leading);
+}
+
+.bb-inline-text[data-checked="true"] {
+  color: var(--color-text-secondary);
+  text-decoration: line-through;
+}
+
+/* The block row's menu appears on hover and focus, and always on touch. */
+.bb-block-menu {
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--ease-standard);
+}
+
+.bb-block:hover .bb-block-menu,
+.bb-block:focus-within .bb-block-menu {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .bb-block-menu {
+    opacity: 1;
+  }
+}
+
+.bb-image {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--radius-container);
+}

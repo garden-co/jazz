@@ -155,6 +155,7 @@ where
     }
 
     /// The largest seq of any accepted change to `table`.
+    #[cfg(test)]
     pub(super) async fn global_table_seq(&mut self, table: &str) -> Result<GlobalTime, Error> {
         let table_id =
             self.physical_table_id_for_schema(self.catalogue.local_schema_version_id, table)?;
@@ -177,42 +178,13 @@ where
         ))
     }
 
+    #[cfg(test)]
     pub(super) async fn global_currency_changed_after(
         &mut self,
         table: &str,
         global_base: GlobalTime,
     ) -> Result<bool, Error> {
         Ok(self.global_table_seq(table).await? > global_base)
-    }
-
-    pub(super) async fn global_currency_changed_outside_snapshot(
-        &mut self,
-        table: &str,
-        snapshot: &Snapshot,
-    ) -> Result<bool, Error> {
-        if snapshot.dots.is_empty() {
-            return self
-                .global_currency_changed_after(table, snapshot.global_base)
-                .await;
-        }
-        for record in self
-            .global_current_records_after(table, snapshot.global_base)
-            .await?
-        {
-            let record = record.borrowed();
-            let alias = NodeAlias(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
-            let node = self.node_for_alias(alias).ok_or(Error::InvalidStoredValue(
-                "global current node alias must exist",
-            ))?;
-            let tx_id = TxId::new(
-                TxTime(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?),
-                node,
-            );
-            if !self.snapshot_covers(tx_id, snapshot).await {
-                return Ok(true);
-            }
-        }
-        Ok(false)
     }
 
     /// Return the transaction whose row image is currently globally visible,

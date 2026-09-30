@@ -49,6 +49,9 @@ mod deferred_local_persistence;
 mod dynamic_schema_views;
 #[path = "../error_code_strings.rs"]
 mod error_code_strings;
+#[cfg(feature = "runtime")]
+#[path = "../exclusive_snapshot_coverage.rs"]
+mod exclusive_snapshot_coverage;
 #[path = "../fate_regressions.rs"]
 mod fate_regressions;
 #[cfg(feature = "testing")]
