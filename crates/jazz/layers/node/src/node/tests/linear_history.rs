@@ -757,3 +757,76 @@ fn deduped_view_and_its_miss_resend_match_the_undeduped_view() {
     cold.apply_sync_message_settled(resend).unwrap();
     assert_eq!(read(&mut cold), expected);
 }
+
+/// `counters` with an unsigned counter. The public schema API admits only
+/// INTEGER and BIGINT counters, but a catalogue schema may declare a counter
+/// on any integer type `INV-HIST-9` admits, `U64` included.
+fn unsigned_counter_schema() -> JazzSchema {
+    JazzSchema::new_with_branch_columns([TableSchema::new(
+        "counters",
+        [
+            ColumnSchema::new("count", ColumnType::U64),
+            ColumnSchema::new("title", ColumnType::String),
+        ],
+    )
+    .with_column_merge_strategy("count", MergeStrategy::Counter)])
+}
+
+fn unsigned_counter_cells(count: u64, title: &str) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("count".to_owned(), Value::U64(count)),
+        ("title".to_owned(), v(title)),
+    ])
+}
+
+/// INV-HIST-10 for an unsigned counter: a decrement is a negative delta, which
+/// the column's own type cannot hold. It must still travel as an op and sum
+/// with a concurrent increment: from 10, a concurrent -3 and +2 merge to 9.
+#[test]
+fn unsigned_counter_decrement_sums_with_a_concurrent_increment_at_core() {
+    let schema = unsigned_counter_schema();
+    let (_base_dir, mut base_writer) = open_node_with_schema(node(1), schema.clone());
+    let (_alice_dir, mut alice) = open_node_with_schema(node(2), schema.clone());
+    let (_bob_dir, mut bob) = open_node_with_schema(node(3), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let target = row(0x70);
+
+    commit_mergeable_global(
+        &mut base_writer,
+        &mut core,
+        MergeableCommit::new("counters", target, 10).cells(unsigned_counter_cells(10, "base")),
+    );
+    sync_table_rows_to(&mut core, &mut alice, "counters");
+    sync_table_rows_to(&mut core, &mut bob, "counters");
+
+    let (_alice_tx, alice_unit) = alice
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("counters", target, 20)
+                .cells(unsigned_counter_cells(7, "alice")),
+        )
+        .expect("an unsigned counter can be decremented");
+    assert_eq!(
+        rows_at(&mut alice, "counters", DurabilityTier::Local)[&target].get("count"),
+        Some(&Value::U64(7))
+    );
+    let (_bob_tx, bob_unit) = bob
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("counters", target, 21)
+                .cells(unsigned_counter_cells(12, "bob")),
+        )
+        .unwrap();
+
+    core_fate(&mut core, alice_unit);
+    core_fate(&mut core, bob_unit);
+
+    let expected = BTreeMap::from([(target, unsigned_counter_cells(9, "bob"))]);
+    assert_eq!(
+        rows_at(&mut core, "counters", DurabilityTier::Global),
+        expected
+    );
+    sync_table_rows_to(&mut core, &mut alice, "counters");
+    assert_eq!(
+        rows_at(&mut alice, "counters", DurabilityTier::Global),
+        expected
+    );
+}

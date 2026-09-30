@@ -104,7 +104,11 @@ columns (`INV-HIST-9`, ch. 2). A counter write travels as its delta from the
 row image it was made over, and Core adds each accepted delta to the current
 value (`INV-HIST-10`). Concurrent increments therefore converge to the exact
 total: from a base of `10`, a concurrent `+3` and `+5` merge to `18`, not to a
-single last-writer value. A redelivered commit unit is the same transaction
+single last-writer value. The delta is carried in the column's own integer
+type modulo 2^width, and Core adds it modulo 2^width, so a decrement of an
+unsigned counter, or a signed change wider than the type, travels exactly and
+restores the written value over its base; a concurrent sum that leaves the
+column's range wraps. A redelivered commit unit is the same transaction
 and is not applied again, so a retried increment counts once (`INV-EDGE-16`).
 
 _Further invariants._ `INV-HIST-15` — for writes with distinct stamps the
