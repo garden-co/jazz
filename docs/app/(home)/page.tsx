@@ -553,7 +553,7 @@ export default function HomePage() {
                   </TableCell>
                   <TableCell>
                     <Button
-                      label="Instant API key"
+                      label="Generate API key"
                       variant="primary"
                       href="https://v2.dashboard.jazz.tools"
                     />
