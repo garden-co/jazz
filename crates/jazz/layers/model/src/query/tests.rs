@@ -491,32 +491,31 @@ mod tests {
         assert_eq!(text_query.params()["text_needle"], ColumnType::String);
     }
 
-    /// Alice cannot use an untyped claim as a `contains` needle; only query
-    /// parameters may be inferred. This model-level test pins validation
-    /// because runtime claims are not query bindings.
+    /// Alice's provider claim can be the `contains` needle; validation leaves
+    /// its type dynamic and does not turn it into a query binding. This
+    /// model-level test pins the static/dynamic boundary before policy binding.
     #[test]
-    fn contains_unknown_needle_claim_is_rejected() {
-        let error = Query::from("issues")
+    fn contains_unknown_needle_claim_remains_dynamic() {
+        let validated = Query::from("issues")
             .filter(contains(col("title"), claim("unknown_needle")))
             .validate_runtime(&schema())
-            .unwrap_err();
+            .unwrap();
 
-        assert!(matches!(error, QueryError::OperandTypeMismatch));
+        assert!(validated.params().is_empty());
     }
 
-    /// Alice cannot use an untyped claim as a `contains` haystack; only query
-    /// parameters may be inferred. This model-level test pins validation
-    /// because runtime claims are not query bindings.
+    /// Alice's provider claim can be the `contains` haystack; validation leaves
+    /// its type dynamic and does not turn it into a query binding. This
+    /// model-level test pins the static/dynamic boundary before policy binding.
     #[test]
-    fn contains_unknown_haystack_claim_is_rejected() {
-        let error = Query::from("issues")
+    fn contains_unknown_haystack_claim_remains_dynamic() {
+        let validated = Query::from("issues")
             .filter(contains(claim("unknown_haystack"), lit("needle")))
             .validate_runtime(&schema())
-            .unwrap_err();
+            .unwrap();
 
-        assert!(matches!(error, QueryError::OperandTypeMismatch));
+        assert!(validated.params().is_empty());
     }
-
 
     /// Bob's mismatched needle receives expected and actual types with
     /// nullability preserved. This model-level test checks typed error
