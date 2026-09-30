@@ -5571,7 +5571,16 @@ fn inline_current_record_for_output(
     coverage: &str,
     requirements: &SourceRequirements,
 ) -> Result<Vec<u8>, Error> {
-    let metadata = inline_source_metadata(requirements, None);
+    // Supply every field of the canonical current-source vocabulary, not only
+    // the declared requirements: some resolver paths (a selected policy base,
+    // for instance) emit the version fields without declaring them.
+    let mut complete = requirements.clone();
+    complete.metadata.extend([
+        SourceMetadataRequirement::VersionWitnesses,
+        SourceMetadataRequirement::SettlePosition,
+        SourceMetadataRequirement::Coverage,
+    ]);
+    let metadata = inline_source_metadata(&complete, None);
     let inline =
         current_row_descriptor_with_hidden_source_fields_for_branch(table, &metadata, false);
     let values = inline_current_values_with_source_metadata_and_deletion(
