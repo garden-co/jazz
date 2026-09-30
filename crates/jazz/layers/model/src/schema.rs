@@ -1046,7 +1046,12 @@ impl TableSchema {
             column("schema_version", GrooveColumnType::U64),
             column("created_by", crate::ids::RowAuthor::value_type()),
             column("created_at", GrooveColumnType::U64),
-            column("updated_by", crate::ids::RowAuthor::value_type()),
+            // Null when the image's `updated_by` is the `made_by` of the
+            // transaction named by this record's key: the node reads it from
+            // that `jazz_transactions` record instead of storing the author
+            // in every image. Set only when the merge kept an earlier
+            // writer's provenance (SPEC 2 §2.7.1).
+            column("updated_by", crate::ids::RowAuthor::value_type().nullable()),
             column("updated_at", GrooveColumnType::U64),
             // Deletion is a cell of the row image: null until deleted or restored.
             column("_deletion", deletion_column().nullable()),
@@ -2133,13 +2138,20 @@ mod tests {
 
         for table in [&history, global_current, ahead_current] {
             for name in ["created_by", "updated_by"] {
+                // History omits `updated_by` when it is the transaction's
+                // own author; current carriers always store it.
+                let expected = if std::ptr::eq(table, &history) && name == "updated_by" {
+                    crate::ids::RowAuthor::value_type().nullable()
+                } else {
+                    crate::ids::RowAuthor::value_type()
+                };
                 assert_eq!(
                     table
                         .columns
                         .iter()
                         .find(|column| column.name == name)
                         .map(|column| &column.column_type),
-                    Some(&crate::ids::RowAuthor::value_type()),
+                    Some(&expected),
                     "{name} must use the structured author record in {}",
                     table.name
                 );

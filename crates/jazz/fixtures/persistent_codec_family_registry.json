@@ -372,7 +372,7 @@
       ]
     },
     {
-      "id": "jazz.history-version-current.v3",
+      "id": "jazz.history-version-current.v4",
       "boundary": "durable-storage",
       "profile": "jazz-node-root",
       "spec": {
@@ -394,11 +394,15 @@
         },
         {
           "path": "crates/jazz/layers/protocol/src/storage_codec_profile.rs",
-          "anchor": "fn node_profile_refuses_history_v2_roots"
+          "anchor": "fn node_profile_refuses_history_v2_and_v3_roots"
         },
         {
           "path": "crates/jazz/layers/node/src/node/codec.rs",
           "anchor": "fn touched_rows_round_trip_and_reject_noncanonical_groups"
+        },
+        {
+          "path": "crates/jazz/layers/node/src/node/tests/general.rs",
+          "anchor": "fn history_images_store_updated_by_only_when_it_differs_from_the_transaction_author"
         },
         {
           "path": "crates/jazz/layers/node/src/node/tests/general.rs",

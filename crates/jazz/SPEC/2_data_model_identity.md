@@ -280,7 +280,7 @@ SYSTEM capability is not persisted as a row author. Node-local aliases live in `
 
 **Linear-history storage boundary (2026-09-29).** A node root that holds row
 history (Core, relay and client stores on every adapter) declares the codec
-family `jazz.history-version-current.v3` in its storage manifest, in addition
+family `jazz.history-version-current.v4` in its storage manifest, in addition
 to the shared Jazz epoch-one profile. That family is the linear row-state
 layout: one history record per accepted transaction holding the row state after
 Core's merge, keyed `(branch_key, row_uuid, tx_time, tx_node_id)` with no
@@ -293,12 +293,18 @@ transaction are found through that transaction's `touched_rows` audit field
 (§2.8), not through an index: fate replay, relay forwarding and
 materialization read the listed `(table, branch, row)` keys at the
 transaction's `(tx_time, tx_node_id)`. Recovery takes the transaction-clock
-high-water mark from the last `jazz_transactions` key. It has no `parents`, no
+high-water mark from the last `jazz_transactions` key. A history image's
+`updated_by` is null when it equals the `made_by` of the transaction its key
+names, and every read fills it in from that `jazz_transactions` record; it is
+stored only when the merge kept an earlier writer's provenance (SPEC 4 §4.6).
+`created_by`, `created_at` and `updated_at` stay in every image, and global
+current and the ahead overlay keep all four. It has no `parents`, no
 register tables, no shared deletion history, no `jazz_merge_heads`, no
 `jazz_global_changes` and no parked parent edges. A root written by the DAG
 layout (`jazz.history-version-current.v1`, alpha.54 to alpha.57) or by the
-unreleased v2 row layout (history and ahead-current `by_tx` indexes, no
-`touched_rows`) lacks the v3 family, so opening it fails at the manifest check, before any record is
+unreleased v2 (history and ahead-current `by_tx` indexes, no `touched_rows`)
+or v3 (`updated_by` stored in every history image) row layouts lacks the v4
+family, so opening it fails at the manifest check, before any record is
 decoded, with the typed `groove::storage::Error::UnsupportedStorageCodecs`,
 which names the codec IDs the root lacks and the ones this build does not know.
 There is no migration: whether old stores are refused, discarded and resynced,

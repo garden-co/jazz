@@ -891,6 +891,7 @@ impl NodeState {
             ahead_current_keys: FxHashMap::default(),
             ahead_shadow_dirty: Vec::new(),
             tx_touched_dirty: BTreeMap::new(),
+            history_tx_authors: BTreeMap::new(),
             minting_global_time: false,
             sync_metrics: SyncMetrics::default(),
             query_engine_read_metrics: QueryEngineReadMetrics::default(),

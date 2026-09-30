@@ -328,7 +328,7 @@ where
                 None,
                 self.authored_commit_durability,
                 contribution_merge,
-                &TouchedRows::default(),
+                &StoredTouchedRows::default(),
             )?,
         );
         let mut stored_versions = Vec::new();
@@ -477,7 +477,7 @@ where
             };
             let overlay = image_cells.map(&row_version).transpose()?;
             let stored = row_version(cells)?;
-            let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
+            let (history_table, groove_record) = self.version_storage_write_binding(&stored, tx.made_by)?;
             batch.insert_raw(
                 history_table.as_ref(),
                 self.version_storage_primary_key(&stored)?,
@@ -486,9 +486,8 @@ where
             self.write_ahead_current_insert(&mut batch, overlay.as_ref().unwrap_or(&stored))?;
             stored_versions.push(stored);
         }
-        self.flush_tx_touched_rows(&mut batch).await?;
         self.flush_ahead_shadows(&mut batch).await?;
-        let persistence = self.database.apply_batch(batch).await?;
+        let persistence = self.apply_node_batch(batch).await?;
         self.cache_tx_versions(tx_id, stored_versions.clone());
         if permission_subject != made_by {
             self.open_tx
@@ -1058,12 +1057,26 @@ where
         );
     }
 
+    /// Apply a batch this node built. Every node batch is applied here, so
+    /// the history rows a batch wrote are listed in their transaction
+    /// records by that same batch: no call site can apply history without
+    /// its `touched_rows`, and no row mark outlives its batch. (A batch
+    /// dropped on an error path leaves marks that the next applied batch
+    /// flushes; `touched_rows` is a superset, so an unwritten row listed
+    /// that way is skipped on read.)
+    pub(in crate::node) async fn apply_node_batch(
+        &mut self,
+        mut batch: DatabaseBatch,
+    ) -> Result<AppliedBatch, Error> {
+        self.flush_tx_touched_rows(&mut batch).await?;
+        Ok(self.database.apply_batch(batch).await?)
+    }
+
     /// Bring each transaction record touched by the open batch's history
     /// writes up to date: its stored `touched_rows` (as staged in this batch)
-    /// plus the rows written since. Call after the batch's last history write
-    /// and before it is applied. A transaction without a record is skipped:
-    /// a history row is only reachable through its transaction.
-    pub(in crate::node) async fn flush_tx_touched_rows(
+    /// plus the rows written since. A transaction without a record is
+    /// skipped: a history row is only reachable through its transaction.
+    async fn flush_tx_touched_rows(
         &mut self,
         batch: &mut DatabaseBatch,
     ) -> Result<(), Error> {

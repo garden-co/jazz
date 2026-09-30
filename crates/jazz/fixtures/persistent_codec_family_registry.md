@@ -36,4 +36,7 @@ epoch-one `jazz-root` base, and the non-profile
 The touched-rows transaction record (2026-09-30) retired the unreleased
 `jazz.history-version-current.v2` (history and ahead-current `by_tx` indexes)
 in favour of `jazz.history-version-current.v3`, whose `jazz_transactions`
-records list the rows each transaction touched.
+records list the rows each transaction touched. Implicit history
+`updated_by` (2026-09-30) then retired the unreleased `v3` in favour of
+`jazz.history-version-current.v4`: a history image stores `updated_by` only
+when it differs from its transaction's `made_by`.

@@ -230,7 +230,7 @@ where
             );
             batch_deletes += 1;
             if low_water_bytes.is_some() {
-                let applied = self.database.apply_batch(batch).await?;
+                let applied = self.apply_node_batch(batch).await?;
                 let persisted = applied.persist().await;
                 self.database.finish_persistence(persisted)?;
                 remaining_bytes = self
@@ -241,7 +241,7 @@ where
             }
         }
         if batch_deletes > 0 && low_water_bytes.is_none() {
-            let applied = self.database.apply_batch(batch).await?;
+            let applied = self.apply_node_batch(batch).await?;
             let persisted = applied.persist().await;
             self.database.finish_persistence(persisted)?;
         }

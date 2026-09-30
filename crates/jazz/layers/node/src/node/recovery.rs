@@ -280,7 +280,7 @@ impl<S: OrderedKvStorage> NodeState<S> {
         values[TransactionRowRecord::FIELD_DURABILITY_IDX] = Value::EnumTag(2);
         let mut batch = self.database.open_batch();
         batch.update("jazz_transactions", values);
-        let applied = self.database.apply_batch(batch).await.unwrap();
+        let applied = self.apply_node_batch(batch).await.unwrap();
         let persisted = applied.persist().await;
         self.database.finish_persistence(persisted).unwrap();
     }

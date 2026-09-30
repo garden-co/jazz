@@ -14,7 +14,7 @@ use jazz::storage_codec_profile::node_storage_codec_profile;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use sha2::{Digest, Sha256};
 
-const ROW_HISTORY: &str = "jazz.history-version-current.v3";
+const ROW_HISTORY: &str = "jazz.history-version-current.v4";
 
 fn notes_schema() -> JazzSchema {
     let source = SchemaBuilder::new()
@@ -103,7 +103,7 @@ fn assert_refused(result: Result<(), StorageError>, expected_unknown: &[&str], s
 ///
 /// ```text
 /// alice's alpha.54 root ──open(node profile)──✗ UnsupportedStorageCodecs
-///                                               missing [jazz.history-version-current.v3]
+///                                               missing [jazz.history-version-current.v4]
 /// ```
 #[test]
 fn published_alpha54_rocksdb_root_is_refused_with_a_typed_format_error() {

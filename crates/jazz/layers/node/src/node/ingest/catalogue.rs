@@ -778,6 +778,8 @@ where
             }
             let mut batch = self.database.open_batch();
             Self::write_active_schema_lineage_to_batch(&mut batch, &staged)?;
+            // A catalogue-only batch writes no history rows, so it applies directly
+            // rather than through `apply_node_batch`.
             let persistence = async {
                 let applied = self.database.apply_batch(batch).await?;
                 let persisted = applied.persist().await;

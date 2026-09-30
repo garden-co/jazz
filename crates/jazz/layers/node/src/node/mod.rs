@@ -415,6 +415,8 @@ mod tests;
 /// Default client-clock skew tolerance in milliseconds.
 pub const SKEW_TOLERANCE_MS: u64 = 30_000;
 const TX_VERSION_TABLE_CACHE_MAX_ENTRIES: usize = 4096;
+/// Bound on `history_tx_authors`; the cache is cleared when it fills.
+const HISTORY_TX_AUTHOR_CACHE_MAX_ENTRIES: usize = 4096;
 
 static NEXT_GROOVE_RUNTIME_TOKEN: AtomicU64 = AtomicU64::new(1);
 
@@ -605,6 +607,10 @@ pub struct NodeState<S = BoxedStorage> {
     /// `(tx_time, tx_node_alias)`; `flush_tx_touched_rows` lists them in the
     /// transaction's `touched_rows`.
     tx_touched_dirty: BTreeMap<(TxTime, NodeAlias), TouchedRowsDelta>,
+    /// `made_by` of transactions whose history images omitted `updated_by`
+    /// (`resolve_history_updated_by`). Bounded; transaction authors never
+    /// change, so entries never go stale.
+    history_tx_authors: BTreeMap<(TxTime, NodeAlias), Value>,
     /// Set while this node (Core) mints a seq for an incoming patch.
     minting_global_time: bool,
 

@@ -106,7 +106,7 @@ where
                 self.write_global_current_update(&mut batch, version, global_time)?;
                 // History holds the row's post-image at this seq, which is
                 // what peers receive for this transaction.
-                self.write_history_post_image(&mut batch, version)?;
+                self.write_history_post_image(&mut batch, version, stored.tx.made_by)?;
             }
             if !global_current_updates.is_empty() {
                 self.invalidate_tx_version_tables_cache(tx_id);
@@ -146,9 +146,8 @@ where
         } else {
             None
         };
-        self.flush_tx_touched_rows(&mut batch).await?;
         self.flush_ahead_shadows(&mut batch).await?;
-        let applied = self.database.apply_batch(batch).await?;
+        let applied = self.apply_node_batch(batch).await?;
         let persisted = applied.persist().await;
         self.database.finish_persistence(persisted)?;
         *terminal_fate_persisted = !matches!(stored.fate, Fate::Pending);

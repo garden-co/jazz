@@ -104,9 +104,8 @@ where
             None,
         )
         .await?;
-        self.flush_tx_touched_rows(&mut batch).await?;
         self.flush_ahead_shadows(&mut batch).await?;
-        let persistence = self.database.apply_batch(batch).await?;
+        let persistence = self.apply_node_batch(batch).await?;
         self.pending_persistence.insert(tx_id);
         Ok(PublishedTransaction { tx_id, persistence })
     }
@@ -199,9 +198,8 @@ where
         )
         .await?;
         batch.deliver_notifications(groove::db::NotificationTiming::AfterPersistence);
-        self.flush_tx_touched_rows(&mut batch).await?;
         self.flush_ahead_shadows(&mut batch).await?;
-        let applied = self.database.apply_batch(batch).await?;
+        let applied = self.apply_node_batch(batch).await?;
         let persisted = applied.persist().await;
         self.database.finish_persistence(persisted)?;
         if let Some(rejected) = rejected_payload {
@@ -407,7 +405,7 @@ where
             // immutable history and deleting it in the same batch would violate
             // ensure_exact's promise that admitted immutable bytes survive.
             if !matches!(fate, Fate::Rejected(_)) {
-                let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
+                let (history_table, groove_record) = self.version_storage_write_binding(&stored, tx.made_by)?;
                 let storage_key = self.version_storage_primary_key(&stored)?;
                 if global_time.is_some() && matches!(fate, Fate::Accepted) && !self.minting_global_time {
                     // The authority's post-image replaces this node's own copy.
@@ -447,7 +445,7 @@ where
                 global_time,
                 durability,
                 view_scoped_cardinality: view_scoped_cardinality && !preserve_authoritative_cardinality,
-                touched_rows: TouchedRows::default(),
+                touched_rows: StoredTouchedRows::default(),
             };
             self.remove_rejected_local_versions(tx.tx_id, &rejected_tx, batch).await?
         } else {
@@ -729,12 +727,11 @@ where
                 None,
                 DurabilityTier::Local,
                 contribution_merge,
-                &TouchedRows::default(),
+                &StoredTouchedRows::default(),
             )?,
         );
-        self.flush_tx_touched_rows(&mut batch).await?;
         self.flush_ahead_shadows(&mut batch).await?;
-        let applied = self.database.apply_batch(batch).await?;
+        let applied = self.apply_node_batch(batch).await?;
 let persisted = applied.persist().await;
 self.database.finish_persistence(persisted)?;
         Ok(())

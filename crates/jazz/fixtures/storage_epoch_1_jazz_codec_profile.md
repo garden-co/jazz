@@ -42,30 +42,33 @@ manifest admission. No compatibility profile is selected to bypass this check.
 
 A root that stores Jazz rows (Core, relay and client node stores on RocksDB,
 SQLite and IndexedDB) opens with `node_storage_codec_profile()`: the epoch-one
-base above plus `jazz.history-version-current.v3`, the linear row-state
+base above plus `jazz.history-version-current.v4`, the linear row-state
 history layout (SPEC 2 §2.7.1). Roots that hold no row history (the server
 account registry and catalogue-entry store) keep the base profile unchanged.
 
 - codec registry, in canonical order: the base list with
-  `jazz.history-version-current.v3` inserted after
+  `jazz.history-version-current.v4` inserted after
   `jazz.catalogue.write-pointer.v1` (13 families)
 - SHA-256 of the committed canonical `JSM1` bytes (adapter sample `memory`,
   `key-order=unsigned-lexicographic`):
-  `323199b2f7206bebea3eb2bf48859a253ff648d88a95c0232a66e6025516377d`
+  `73ece466df8d410135a648b0697126d9e3a77b977ecd6aaae0718e48bac3f319`
 - receipt: `storage_codec_profile::tests::node_profile_has_a_pinned_manifest_receipt_and_refuses_base_only_roots`
 
 A node root written by the DAG layout (alpha.54 to alpha.57) declares only the
 base profile. Manifest admission refuses it with the typed
 `groove::storage::Error::UnsupportedStorageCodecs { epoch: 1, missing:
-["jazz.history-version-current.v3"], unknown: [...] }` before any ordinary key
+["jazz.history-version-current.v4"], unknown: [...] }` before any ordinary key
 is decoded or written (`tests/storage_format_refusal.rs`). No migration exists.
 
 The touched-rows transaction record (2026-09-30) replaced
 `jazz.history-version-current.v2` with `v3`: history and ahead-current tables
 lost their `by_tx` indexes and `jazz_transactions` gained `touched_rows`
-(SPEC 2 §2.8). v2 was never in a published release. A v2 root is refused with
-`missing: ["jazz.history-version-current.v3"], unknown:
-["jazz.history-version-current.v2"]`
-(`storage_codec_profile::tests::node_profile_refuses_history_v2_roots`). The
-v2 manifest SHA-256 was
-`1153be8475ab6fd239d109e376663220d349fa9ac1f034b77cbdc8bc38f0631a`.
+(SPEC 2 §2.8). Implicit history `updated_by` (2026-09-30) then replaced `v3`
+with `v4`: a history image stores `updated_by` only when it differs from its
+transaction's `made_by`. Neither v2 nor v3 was in a published release. A v2
+or v3 root is refused with `missing: ["jazz.history-version-current.v4"],
+unknown: [<its family>]`
+(`storage_codec_profile::tests::node_profile_refuses_history_v2_and_v3_roots`).
+The v2 manifest SHA-256 was
+`1153be8475ab6fd239d109e376663220d349fa9ac1f034b77cbdc8bc38f0631a`; v3 was
+`323199b2f7206bebea3eb2bf48859a253ff648d88a95c0232a66e6025516377d`.

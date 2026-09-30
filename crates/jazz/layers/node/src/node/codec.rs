@@ -24,7 +24,7 @@ groove::define_record! {
         4 => schema_version: SchemaVersionAlias,
         5 => created_by: RowAuthor,
         6 => created_at: TxTime,
-        7 => updated_by: RowAuthor,
+        7 => updated_by: Option<RowAuthor>,
         8 => updated_at: TxTime,
         9 => _deletion: Option<DeletionEvent>,
         .. user_cells,
@@ -150,6 +150,39 @@ pub(super) struct TouchedRowsDelta {
 /// in the rows the transaction wrote: 16 bytes per row plus about 20 bytes per
 /// `(table, branch)` group, well below the history those rows occupy, and a
 /// commit unit holds at most `MAX_COMMIT_UNIT_VERSIONS` versions.
+/// A stored transaction's `touched_rows`, decoded only when a caller needs
+/// the rows (`query_versions_for_tx`). Transaction records are read far more
+/// often than their rows are listed, so decoding stays off that path.
+#[derive(Clone, Debug, Default)]
+pub(super) struct StoredTouchedRows(Option<OwnedRecord>);
+
+impl StoredTouchedRows {
+    /// Keep the transaction record; nothing is decoded yet.
+    pub(super) fn from_transaction_record(record: BorrowedRecord<'_>) -> Self {
+        Self(Some(OwnedRecord::new(
+            record.raw().to_vec(),
+            record.descriptor(),
+        )))
+    }
+
+    pub(super) fn decode(&self) -> Result<TouchedRows, Error> {
+        match &self.0 {
+            Some(record) => TouchedRows::from_transaction_record(record.borrowed()),
+            None => Ok(TouchedRows::default()),
+        }
+    }
+
+    /// The stored cell, unchanged, for rewriting the transaction record.
+    pub(super) fn to_value(&self) -> Result<Value, Error> {
+        match &self.0 {
+            Some(record) => Ok(record
+                .borrowed()
+                .get_idx(TransactionRowRecord::FIELD_TOUCHED_ROWS_IDX)?),
+            None => TouchedRows::default().to_value(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct TouchedRows(BTreeMap<(PhysicalTableId, Vec<u8>), BTreeSet<RowUuid>>);
 
@@ -1961,7 +1994,6 @@ impl VersionRecordFromNode for VersionRecord {
                 let source = match index {
                     0 => Some(HistoryRowRecord::FIELD_ROW_UUID_IDX),
                     1 => Some(HistoryRowRecord::FIELD_CREATED_BY_IDX),
-                    3 => Some(HistoryRowRecord::FIELD_UPDATED_BY_IDX),
                     5 => Some(HistoryRowRecord::FIELD__DELETION_IDX),
                     i if i >= WireRowRecord::USER_CELLS => {
                         Some(HistoryRowRecord::USER_CELLS + i - WireRowRecord::USER_CELLS)
@@ -1975,6 +2007,7 @@ impl VersionRecordFromNode for VersionRecord {
                 }
                 let value = match index {
                     2 => Value::U64(stored.created_at().physical_ms()),
+                    3 => row_author_value(stored.updated_by())?,
                     4 => Value::U64(stored.updated_at().physical_ms()),
                     5 => Value::Nullable(stored.deletion().map(|deletion| {
                         Box::new(Value::EnumTag(match deletion {
@@ -2113,7 +2146,7 @@ pub(super) struct StoredTransaction {
     /// True when `n_total_writes` is only the locally known view cardinality.
     pub(super) view_scoped_cardinality: bool,
     /// The history rows this node stored for the transaction.
-    pub(super) touched_rows: TouchedRows,
+    pub(super) touched_rows: StoredTouchedRows,
 }
 
 impl StoredTransaction {
@@ -2366,7 +2399,7 @@ impl VersionRow {
                     4 => Value::U64(schema_version_alias.0),
                     5 => row_author_value(version.created_by())?,
                     6 => Value::U64(created_at),
-                    7 => row_author_value(version.updated_by())?,
+                    7 => history_updated_by_value(version.updated_by())?,
                     8 => Value::U64(updated_at),
                     9 => nullable_deletion_value(deletion),
                     i if i < HistoryRowRecord::USER_CELLS + table.columns.len() => {
@@ -2474,16 +2507,27 @@ impl VersionRow {
         )
     }
 
+    /// The image's `updated_by`. History storage omits it when it is the
+    /// author of the image's own transaction; every read path fills it in
+    /// from that transaction record (`resolve_history_updated_by`) before a
+    /// `VersionRow` leaves storage, so an in-memory row always carries it.
     pub(super) fn updated_by(&self) -> AuthorSubject {
         let idx = HistoryRowRecord::FIELD_UPDATED_BY_IDX;
-        RowAuthor::from_record(
+        <Option<RowAuthor> as records::RecordField>::read(&self.record.borrowed(), idx)
+            .expect("valid updated_by")
+            .expect("history updated_by is resolved when the image is read")
+            .as_author_subject()
+    }
+
+    /// Whether this image still lacks `updated_by`: it was read from history
+    /// storage, which omits the transaction's own author.
+    pub(super) fn updated_by_is_implicit(&self) -> Result<bool, Error> {
+        Ok(matches!(
             self.record
                 .borrowed()
-                .get_record(idx)
-                .expect("valid updated_by"),
-        )
-        .expect("canonical updated_by")
-        .as_author_subject()
+                .get_idx(HistoryRowRecord::FIELD_UPDATED_BY_IDX)?,
+            Value::Nullable(None)
+        ))
     }
 
     pub(super) fn updated_at(&self) -> TxTime {
@@ -3416,7 +3460,7 @@ pub(super) fn transaction_values(
     global_time: Option<GlobalTime>,
     durability: DurabilityTier,
     contribution_merge: Value,
-    touched_rows: &TouchedRows,
+    touched_rows: &StoredTouchedRows,
 ) -> Result<Vec<Value>, Error> {
     transaction_values_with_cardinality_scope(
         node_alias,
@@ -3439,7 +3483,7 @@ pub(super) fn transaction_values_with_cardinality_scope(
     durability: DurabilityTier,
     view_scoped_cardinality: bool,
     contribution_merge: Value,
-    touched_rows: &TouchedRows,
+    touched_rows: &StoredTouchedRows,
 ) -> Result<Vec<Value>, Error> {
     Ok(vec![
         Value::U64(tx.tx_id.time.0),
@@ -3718,10 +3762,16 @@ fn authored_column_ids_value(columns: Option<&BTreeSet<PhysicalColumnId>>) -> Va
     }))
 }
 
-fn row_author_value(author: AuthorSubject) -> Result<Value, Error> {
+pub(super) fn row_author_value(author: AuthorSubject) -> Result<Value, Error> {
     Ok(RowAuthor::from_persisted_subject(author)
         .map_err(|_| Error::UnadmittedWriteAuthor)?
         .to_value())
+}
+
+/// `updated_by` of an in-memory history image: always present. Storage may
+/// omit it (see [`VersionRow::updated_by`]).
+pub(super) fn history_updated_by_value(author: AuthorSubject) -> Result<Value, Error> {
+    Ok(Value::Nullable(Some(Box::new(row_author_value(author)?))))
 }
 
 pub(super) fn history_values_from_parts(
@@ -3736,7 +3786,7 @@ pub(super) fn history_values_from_parts(
         Value::U64(version.schema_version_alias.0),
         row_author_value(version.created_by)?,
         Value::U64(version.created_at.0),
-        row_author_value(version.updated_by)?,
+        history_updated_by_value(version.updated_by)?,
         Value::U64(version.updated_at.0),
         nullable_deletion_value(version.deletion),
     ];
@@ -3776,7 +3826,7 @@ fn history_values_from_wire(
             .map_err(|_| Error::InvalidStoredValue("wire created_at_ms exceeds packed HLC range"))?
             .0,
     ));
-    values.push(row_author_value(version.updated_by())?);
+    values.push(history_updated_by_value(version.updated_by())?);
     values.push(Value::U64(
         TxTime::from_physical_ms(version.updated_at_ms())
             .map_err(|_| Error::InvalidStoredValue("wire updated_at_ms exceeds packed HLC range"))?
