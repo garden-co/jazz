@@ -31,8 +31,9 @@ use thiserror::Error;
 
 pub use idb::IdbStorage;
 pub use manifest::{
-    AdapterFormat, ManifestOpenReceipt, MigrationJournal, MigrationRegistry, STORAGE_EPOCH_1,
-    StorageCodecProfile, StorageEpochManifest, StorageMigration,
+    AdapterFormat, GROOVE_DURABLE_INDEX_V2_CODEC, ManifestOpenReceipt, MigrationJournal,
+    MigrationRegistry, STORAGE_EPOCH_1, StorageCodecProfile, StorageEpochManifest,
+    StorageMigration,
 };
 pub use memory::MemoryStorage;
 #[cfg(any(test, feature = "test"))]
@@ -749,23 +750,26 @@ const CLASS_CHANGES_CF: &str = "__groove_class_changes";
 const CLASS_INDICES_CF: &str = "__groove_class_indices";
 const CLASS_META_CF: &str = "__groove_class_meta";
 const CLASS_LAYOUT_MARKER_KEY: &[u8] = b"groove-storage-layout";
-const CLASS_LAYOUT_MARKER_VALUE: &[u8] = b"class-cf-v1";
+const CLASS_LAYOUT_MARKER_VALUE: &[u8] = b"class-cf-v2";
 
 /// Logical-to-physical storage layout used by [`LayoutStorage`].
 ///
 /// The identity layout preserves the historical one-logical-table-per-CF
 /// mapping. The class layout maps selected logical tables into shared physical
-/// class CFs while prefixing keys with a length-framed logical table name.
+/// class CFs while prefixing keys with a length-framed logical table name;
+/// the indices class, which holds only the `indices` family, is unframed.
+/// `V2` (marker `class-cf-v2`) differs from the retired `class-cf-v1` only
+/// by that unframed indices class.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum StorageLayout {
     #[default]
     Identity,
-    JazzClassV1,
+    JazzClassV2,
 }
 
 impl StorageLayout {
-    pub fn jazz_class_v1() -> Self {
-        Self::JazzClassV1
+    pub fn jazz_class_v2() -> Self {
+        Self::JazzClassV2
     }
 
     pub fn physical_column_families<'a>(
@@ -773,13 +777,13 @@ impl StorageLayout {
         logical_column_families: impl IntoIterator<Item = &'a str>,
     ) -> Vec<String> {
         let mut names = BTreeSet::new();
-        if matches!(self, Self::JazzClassV1) {
+        if matches!(self, Self::JazzClassV2) {
             names.insert(CLASS_META_CF.to_owned());
         }
         for logical in logical_column_families {
             let physical = match self {
                 Self::Identity => logical,
-                Self::JazzClassV1 => jazz_physical_class(logical).unwrap_or(logical),
+                Self::JazzClassV2 => jazz_physical_class(logical).unwrap_or(logical),
             };
             names.insert(physical.to_owned());
         }
@@ -796,11 +800,14 @@ impl StorageLayout {
                 physical_cf: logical_cf,
                 logical_prefix: None,
             }),
-            Self::JazzClassV1 => {
+            Self::JazzClassV2 => {
                 if let Some(physical_cf) = jazz_physical_class(logical_cf) {
+                    // The indices class holds only the `indices` family,
+                    // whose keys already start with a numeric index id, so it
+                    // is stored unframed.
                     Ok(PhysicalCf {
                         physical_cf,
-                        logical_prefix: Some(logical_cf),
+                        logical_prefix: (physical_cf != CLASS_INDICES_CF).then_some(logical_cf),
                     })
                 } else {
                     Ok(PhysicalCf {
@@ -813,7 +820,7 @@ impl StorageLayout {
     }
 
     fn validates_marker(&self) -> bool {
-        matches!(self, Self::JazzClassV1)
+        matches!(self, Self::JazzClassV2)
     }
 }
 
@@ -883,9 +890,9 @@ fn jazz_physical_class(logical_cf: &str) -> Option<&'static str> {
     } else if logical_cf == "jazz_global_changes" {
         Some(CLASS_CHANGES_CF)
     } else if logical_cf == "indices" {
-        // The class prefix wraps the existing durable-index key. That key
-        // already starts with table/index identity, so this avoids introducing
-        // a second table prefix while keeping one physical index CF.
+        // The only family in the indices class. Its keys start with a
+        // numeric index id (or 0x00 for index metadata), so the class stores
+        // them without the length-framed family name.
         Some(CLASS_INDICES_CF)
     } else if logical_cf.starts_with("jazz_") {
         Some(CLASS_META_CF)
@@ -979,10 +986,10 @@ impl LayoutStorage {
         if self.layout.validates_marker() {
             // An unenumerable adapter cannot distinguish a fresh class layout
             // from a legacy logical-CF store. Creating the marker would make
-            // that ambiguity durable, so V1 deliberately refuses it.
+            // that ambiguity durable, so the class layout deliberately refuses it.
             let names = self.inner.column_family_names().ok_or_else(|| {
                 Error::InvalidStorageLayout(
-                    "class-CF v1 requires enumerable physical column families".to_owned(),
+                    "class-CF v2 requires enumerable physical column families".to_owned(),
                 )
             })?;
             if names.iter().any(|name| jazz_physical_class(name).is_some()) {
@@ -2789,7 +2796,7 @@ mod tests {
 
     async fn metered_class_layout() -> (LayoutStorage, Rc<RefCell<Vec<String>>>) {
         let (backend, calls) = MeteredStorage::new();
-        let storage = LayoutStorage::new(backend, StorageLayout::jazz_class_v1())
+        let storage = LayoutStorage::new(backend, StorageLayout::jazz_class_v2())
             .await
             .expect("class layout opens");
         (storage, calls)
@@ -3138,7 +3145,7 @@ mod tests {
 
     #[futures_test::test]
     async fn class_layout_keeps_logical_keys_isolated_inside_shared_physical_cf() {
-        let physical_cfs = StorageLayout::jazz_class_v1().physical_column_families([
+        let physical_cfs = StorageLayout::jazz_class_v2().physical_column_families([
             "jazz_albums_history",
             "jazz_tracks_history",
             "jazz_albums_register",
@@ -3146,7 +3153,7 @@ mod tests {
         let refs = physical_cfs.iter().map(String::as_str).collect::<Vec<_>>();
         let storage = LayoutStorage::new(
             MemoryStorage::new(&refs).expect("valid memory storage families"),
-            StorageLayout::jazz_class_v1(),
+            StorageLayout::jazz_class_v2(),
         )
         .await
         .unwrap();
@@ -3248,7 +3255,7 @@ mod tests {
             .iter()
             .flat_map(|(left, right)| [*left, *right])
             .collect::<Vec<_>>();
-        let layout = StorageLayout::jazz_class_v1();
+        let layout = StorageLayout::jazz_class_v2();
         let physical_cfs = layout.physical_column_families(all_logical.iter().copied());
         let refs = physical_cfs.iter().map(String::as_str).collect::<Vec<_>>();
         let storage = LayoutStorage::new(
@@ -3294,7 +3301,7 @@ mod tests {
         let storage = MemoryStorage::new(&["__groove_class_meta", "jazz_albums_history"])
             .expect("valid memory storage families");
         assert!(matches!(
-            LayoutStorage::new(storage, StorageLayout::jazz_class_v1()).await,
+            LayoutStorage::new(storage, StorageLayout::jazz_class_v2()).await,
             Err(Error::InvalidStorageLayout(_))
         ));
     }
@@ -3303,7 +3310,7 @@ mod tests {
     async fn class_layout_accepts_truly_empty_store_and_writes_marker() {
         let storage = MemoryStorage::new(&["__groove_class_meta", "__groove_class_history"])
             .expect("valid memory storage families");
-        let storage = LayoutStorage::new(storage, StorageLayout::jazz_class_v1())
+        let storage = LayoutStorage::new(storage, StorageLayout::jazz_class_v2())
             .await
             .unwrap();
         assert_eq!(
@@ -3326,7 +3333,7 @@ mod tests {
         let raw =
             MemoryStorage::new(&["__groove_class_meta", physical_cf, "__groove_class_indices"])
                 .expect("valid physical class families");
-        let storage = LayoutStorage::new(raw.clone(), StorageLayout::jazz_class_v1())
+        let storage = LayoutStorage::new(raw.clone(), StorageLayout::jazz_class_v2())
             .await
             .expect("fresh class layout initializes its one marker");
 
@@ -3342,7 +3349,7 @@ mod tests {
             )
             .await
             .unwrap(),
-            Some(b"class-cf-v1".to_vec()),
+            Some(b"class-cf-v2".to_vec()),
             "the marker has one frozen physical key and value"
         );
         let mut expected_key = (logical_cf.len() as u32).to_be_bytes().to_vec();
@@ -3368,16 +3375,17 @@ mod tests {
                 .await
                 .unwrap(),
             vec![(b"existing-index-key".to_vec(), b"index-value".to_vec())],
-            "the public index path must retain its pre-existing logical key"
+            "the public index path must retain its logical key"
         );
-        let mut expected_index_key = ("indices".len() as u32).to_be_bytes().to_vec();
-        expected_index_key.extend_from_slice(b"indicesexisting-index-key");
         assert_eq!(
-            raw.get("__groove_class_indices".into(), expected_index_key)
-                .await
-                .unwrap(),
+            raw.get(
+                "__groove_class_indices".into(),
+                b"existing-index-key".to_vec()
+            )
+            .await
+            .unwrap(),
             Some(b"index-value".to_vec()),
-            "indices use the same one class framing, not a second table prefix"
+            "the indices class holds only `indices`, whose keys are stored unframed"
         );
 
         assert_eq!(
@@ -3410,8 +3418,9 @@ mod tests {
         for invalid_marker in [
             b"".as_slice(),
             b"class-cf-v0".as_slice(),
-            b"class-cf-v2".as_slice(),
-            b"class-cf-v1\0".as_slice(),
+            b"class-cf-v1".as_slice(),
+            b"class-cf-v3".as_slice(),
+            b"class-cf-v2\0".as_slice(),
         ] {
             let raw = MemoryStorage::new(&["__groove_class_meta", "__groove_class_history"])
                 .expect("valid class families");
@@ -3431,7 +3440,7 @@ mod tests {
             .unwrap();
 
             assert!(matches!(
-                LayoutStorage::new(raw.clone(), StorageLayout::jazz_class_v1()).await,
+                LayoutStorage::new(raw.clone(), StorageLayout::jazz_class_v2()).await,
                 Err(Error::InvalidStorageLayout(_))
             ));
             assert_eq!(
@@ -3464,7 +3473,7 @@ mod tests {
         assert!(matches!(
             LayoutStorage::new(
                 NonEnumeratingStorage(raw.clone()),
-                StorageLayout::jazz_class_v1()
+                StorageLayout::jazz_class_v2()
             )
             .await,
             Err(Error::InvalidStorageLayout(_))
@@ -3477,7 +3486,7 @@ mod tests {
             .await
             .unwrap(),
             None,
-            "an uninspectable legacy store must not acquire a V1 marker"
+            "an uninspectable legacy store must not acquire a class marker"
         );
     }
 
@@ -3485,7 +3494,7 @@ mod tests {
     async fn class_layout_rejects_invalid_logical_names_before_key_framing() {
         let raw = MemoryStorage::new(&["__groove_class_meta", "__groove_class_history"])
             .expect("valid class families");
-        let storage = LayoutStorage::new(raw.clone(), StorageLayout::jazz_class_v1())
+        let storage = LayoutStorage::new(raw.clone(), StorageLayout::jazz_class_v2())
             .await
             .unwrap();
         let overlong = format!(
@@ -3511,7 +3520,7 @@ mod tests {
 
     #[futures_test::test]
     async fn class_layout_maps_every_classifier_match_and_preserves_unmapped_missing_cf_errors() {
-        let layout = StorageLayout::jazz_class_v1();
+        let layout = StorageLayout::jazz_class_v2();
         let physical_cfs = layout.physical_column_families(["jazz_albums_history"]);
         let refs = physical_cfs.iter().map(String::as_str).collect::<Vec<_>>();
         let storage = LayoutStorage::new(
@@ -4970,7 +4979,7 @@ mod tests {
             entries: entries.clone(),
         };
         exercise(&storage, &requests, &entries).await;
-        let layout = StorageLayout::jazz_class_v1();
+        let layout = StorageLayout::jazz_class_v2();
         let families = layout.physical_column_families(["jazz_tasks_history"]);
         let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
         let storage = LayoutStorage::new(

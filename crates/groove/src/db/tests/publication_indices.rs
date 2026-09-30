@@ -189,7 +189,10 @@ async fn late_query_completion_cannot_resurrect_deleted_index_entries() {
     assert!(
         database
             .storage
-            .prefix("indices".into(), Vec::new())
+            .prefix(
+                "indices".into(),
+                index_prefix(&database, "objects", "objects_by_id"),
+            )
             .await
             .unwrap()
             .is_empty()

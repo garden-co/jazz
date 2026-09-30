@@ -38,26 +38,6 @@ fn resolved_record_value(
     record.value(field)
 }
 
-pub(crate) fn durable_index_key_prefix(table: &str, index: &str) -> Vec<u8> {
-    let mut prefix = Vec::new();
-    // NUL separators keep table/index names prefix-decodable without escaping.
-    prefix.extend(table.as_bytes());
-    prefix.push(0);
-    prefix.extend(index.as_bytes());
-    prefix.push(0);
-    prefix
-}
-
-pub(super) fn encode_ordered_bytes_without_terminal(key: &mut Vec<u8>, value: &[u8]) {
-    for byte in value {
-        if *byte == 0 {
-            key.extend([0, 0xff]);
-        } else {
-            key.push(*byte);
-        }
-    }
-}
-
 pub(super) fn primary_key_value_bytes(
     descriptor: &RecordDescriptor,
     record: &[u8],

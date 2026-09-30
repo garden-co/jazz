@@ -1449,7 +1449,7 @@ fn assert_eviction_failure_contract(
         .to_string();
     let logical_history_key = history_primary_key(persisted_version).into_bytes();
     let (history_table, history_key) =
-        jazz_class_v1_history_physical_target(&logical_history_table, &logical_history_key);
+        jazz_class_v2_history_physical_target(&logical_history_table, &logical_history_key);
     assert!(reader.cached_tx_version_tables(tx_id).is_some());
     reader.cache_tx_versions(tx_id, persisted_versions.clone());
     assert!(reader.cached_tx_versions(tx_id).is_some());

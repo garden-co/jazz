@@ -47,15 +47,35 @@ history layout (SPEC 2 §2.7.1). Roots that hold no row history (the server
 account registry and catalogue-entry store) keep the base profile unchanged.
 
 - codec registry, in canonical order: the base list with
+  `groove.durable-index.v2` inserted first and
   `jazz.history-version-current.v2` inserted after
-  `jazz.catalogue.write-pointer.v1` (13 families)
+  `jazz.catalogue.write-pointer.v1` (14 families)
 - SHA-256 of the committed canonical `JSM1` bytes (adapter sample `memory`,
   `key-order=unsigned-lexicographic`):
-  `1153be8475ab6fd239d109e376663220d349fa9ac1f034b77cbdc8bc38f0631a`
+  `98901f015655a9eef3b7ba134a1f061972f39ce3c64a14817668bde1687f9e74`
+  (13 families without `groove.durable-index.v2`, alpha.58 and alpha.59:
+  `1153be8475ab6fd239d109e376663220d349fa9ac1f034b77cbdc8bc38f0631a`)
 - receipt: `storage_codec_profile::tests::node_profile_has_a_pinned_manifest_receipt_and_refuses_base_only_roots`
 
 A node root written by the DAG layout (alpha.54 to alpha.57) declares only the
 base profile. Manifest admission refuses it with the typed
 `groove::storage::Error::UnsupportedStorageCodecs { epoch: 1, missing:
-["jazz.history-version-current.v2"], unknown: [...] }` before any ordinary key
-is decoded or written (`tests/storage_format_refusal.rs`). No migration exists.
+["groove.durable-index.v2", "jazz.history-version-current.v2"], unknown: [...] }`
+before any ordinary key is decoded or written (`tests/storage_format_refusal.rs`).
+No migration exists.
+
+## Compact durable-index layout (alpha.60)
+
+`groove.durable-index.v2` is Groove's secondary-index layout (Groove SPEC 2,
+"Durable index layout"): each entry key is a LEB128 numeric index id followed by
+the concatenated, single-escaped index key parts, and its value is empty (a
+unique index stores only the primary-key columns the index lacks). Ids live in
+the `\0groove-index-id\0` registry in the same family and are never reused.
+The earlier layout prefixed every key with `table\0index\0`, wrapped the key in
+a second escaped `Bytes` part and repeated it in the value.
+
+Only node roots declare schema indexes, so the family joins the node profile,
+not the base. A linear-history node root from alpha.58 or alpha.59 lacks it
+and is refused with `missing: ["groove.durable-index.v2"]`
+(`linear_history_root_without_the_durable_index_family_is_refused`). No
+migration exists.

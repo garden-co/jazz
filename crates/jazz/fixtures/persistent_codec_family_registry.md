@@ -32,3 +32,11 @@ admission. It added `jazz.history-version-current.v2`, the one member of the
 `jazz-node-root` profile that every row-holding root declares on top of the
 epoch-one `jazz-root` base, and the non-profile
 `jazz.subscription-watermark.v1` direct record store.
+
+The compact durable-index layout (alpha.60) added `groove.durable-index.v2`
+to the `jazz-node-root` profile: numeric index ids, single-escaped keys and
+empty index values. Node roots from alpha.58 and alpha.59 lack it and are
+refused at manifest admission. The same change moved the non-profile Jazz
+physical class layout to `groove.jazz-physical-class.v2` (marker
+`class-cf-v2`, the `indices` class stored without the logical-name frame);
+a `class-cf-v1` marker is refused as an older layout.

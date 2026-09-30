@@ -452,7 +452,7 @@ impl RuntimeSchema {
     /// Return the required RocksDB column-family names.
     pub fn column_families(&self) -> Vec<String> {
         let lowered = self.lower_to_groove();
-        StorageLayout::jazz_class_v1().physical_column_families(
+        StorageLayout::jazz_class_v2().physical_column_families(
             lowered
                 .column_families()
                 .into_iter()

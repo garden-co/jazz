@@ -302,6 +302,15 @@ epoch-one profile unchanged. The paragraphs of this section and §2.8 that still
 describe `parents`, the deletion register tables and `jazz_global_changes`
 specify the retired v1 layout.
 
+**Compact durable-index layout (alpha.60).** Node roots also declare Groove's
+`groove.durable-index.v2` (Groove SPEC 2, "Durable index layout"): every index
+entry of `by_tx`, `by_seq`, `by_global_time` and the fk/user indexes is keyed by
+a numeric index id plus the index columns written once, with only the primary-key
+columns the index lacks after a `ff` separator, and an empty value. The branch
+key is encoded once per entry (12 bytes for `01 00000000`). A node root from
+alpha.58 or alpha.59 lacks the family and is refused at the manifest check with
+the same typed error.
+
 The authoritative identity of one immutable row version is exactly
 `(PhysicalTableId, BranchKey, RowUuid, Layer, TxId)`. `Layer` is either content
 or deletion; it is part of the identity even though a deletion is physically

@@ -66,7 +66,7 @@ impl NodeState {
         let meta_database = Database::new_with_storage_layout(
             JazzSchema::empty().lower_catalogue_meta_to_groove(),
             storage,
-            StorageLayout::jazz_class_v1(),
+            StorageLayout::jazz_class_v2(),
         )
         .await?;
         let requested_key = [
@@ -238,7 +238,7 @@ impl NodeState {
         // repurpose as an uninitialized runtime.
         let meta_schema = bootstrap_schema.lower_to_groove();
         let meta_database =
-            Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v1())
+            Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v2())
                 .await?;
         let mut genesis = None;
         let mut schemas = BTreeMap::new();
@@ -483,7 +483,7 @@ impl NodeState {
     {
         let meta_schema = JazzSchema::empty().lower_catalogue_meta_to_groove();
         let meta_database =
-            Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v1())
+            Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v2())
                 .await?;
         let mut genesis = None;
         let mut active = None;
@@ -996,7 +996,7 @@ impl NodeState {
             physical_mappings,
         )?;
         lowered.tables.extend(current_tables);
-        let layout = StorageLayout::jazz_class_v1();
+        let layout = StorageLayout::jazz_class_v2();
         let mut database = Database::new_with_storage_layout(lowered, storage, layout).await?;
         // Jazz publishes plain ordered results from membership and version
         // deltas and never reads their generic root positions; only root
@@ -1973,7 +1973,7 @@ where
         let local_schema_version_id = schema.version_id();
         let meta_schema = schema.lower_catalogue_meta_to_groove();
         let mut meta_database =
-            Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v1())
+            Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v2())
                 .await?;
         let mut recovered_active_schema = None;
         let mut catalogue_schemas = BTreeMap::new();
