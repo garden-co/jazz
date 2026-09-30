@@ -86,7 +86,9 @@ impl From<crate::node::Error> for Error {
                 ErrorCode::HistoricalReadRequiresServer
             }
             crate::node::Error::Storage(_) | crate::node::Error::Groove(_) => ErrorCode::Storage,
-            crate::node::Error::Query(_) => ErrorCode::Query,
+            crate::node::Error::Query(_) | crate::node::Error::UnsupportedExclusiveRead(_) => {
+                ErrorCode::Query
+            }
             crate::node::Error::TransactionConflict => ErrorCode::TransactionConflict,
             crate::node::Error::TableNotFound(_)
             | crate::node::Error::UnsupportedColumnType(_)

@@ -52,10 +52,32 @@ where
         }
     }
 
-    async fn transaction_is_exclusive(&self, id: OpenTransactionId) -> Result<bool, Error> {
+    pub(super) async fn transaction_is_exclusive(
+        &self,
+        id: OpenTransactionId,
+    ) -> Result<bool, Error> {
         self.lock_for_transaction_operation(id)
             .await?
             .transaction_is_exclusive(id)
+            .map_err(Into::into)
+    }
+
+    /// The queries an exclusive read of `prepared` in `id` hydrates for the
+    /// sources it reads beyond its root: each source's narrowed read. Fails
+    /// when a source has none.
+    pub(super) async fn exclusive_source_hydration_queries(
+        &self,
+        id: OpenTransactionId,
+        prepared: &PreparedQuery,
+        include_deleted: bool,
+    ) -> Result<Vec<Query>, Error> {
+        self.lock_for_transaction_operation(id)
+            .await?
+            .exclusive_source_hydration_queries(
+                prepared.shape(),
+                prepared.binding(),
+                include_deleted,
+            )
             .map_err(Into::into)
     }
 
