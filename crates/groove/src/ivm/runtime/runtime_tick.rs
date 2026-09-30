@@ -2710,6 +2710,7 @@ impl IvmRuntime {
     }
 
     /// The part of [`Self::tick_detaching_cold`] after hydration admission.
+    #[allow(clippy::too_many_arguments)]
     async fn tick_admitted(
         &mut self,
         table_deltas: Vec<TableDelta>,
