@@ -505,4 +505,12 @@ describe("chat permissions", () => {
     ]);
     await expect(carolDb.all(app.reactions.where({ id: reaction.id }))).resolves.toEqual([]);
   });
+
+  it("requires parent insert authorization for stroke writes", () => {
+    expect(permissions.strokes?.insert?.with_check).toMatchObject({
+      type: "Inherits",
+      operation: "Insert",
+      via_column: "canvasId",
+    });
+  });
 });
