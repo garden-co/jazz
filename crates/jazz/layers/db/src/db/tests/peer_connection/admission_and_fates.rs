@@ -3058,7 +3058,7 @@ fn terminal_core_write_fates_prove_exact_insert_update_and_delete_actions() {
         1,
     );
     let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
-    let subscriber = server.accept_subscriber(server_transport, alice);
+    let _subscriber = server.accept_subscriber(server_transport, alice);
 
     let inserted = client
         .insert("todos", cells("owned", false, alice), Default::default())
@@ -3095,27 +3095,13 @@ fn terminal_core_write_fates_prove_exact_insert_update_and_delete_actions() {
         deleted.write_state().unwrap().fate,
         Fate::Accepted
     ));
-
-    let proofs = match &subscriber.borrow().link {
-        ConnectionLink::Subscriber(SubscriberConnectionState { peer, .. }) => {
-            peer.terminal_authority_scope_proof_count()
-        }
-        ConnectionLink::Upstream(_) => unreachable!("server link is a subscriber"),
-    };
-    assert_eq!(
-        proofs, 3,
-        "production terminal fate admission must execute one exact aggregate proof per operation"
-    );
 }
 
-fn subscriber_proofs_and_support_views(
-    subscriber: &Rc<LocalMutex<PeerConnection>>,
-) -> (u64, usize) {
+fn subscriber_support_views(subscriber: &Rc<LocalMutex<PeerConnection>>) -> usize {
     match &subscriber.borrow().link {
-        ConnectionLink::Subscriber(SubscriberConnectionState { peer, .. }) => (
-            peer.terminal_authority_scope_proof_count(),
-            peer.maintained_subscription_count(),
-        ),
+        ConnectionLink::Subscriber(SubscriberConnectionState { peer, .. }) => {
+            peer.maintained_subscription_count()
+        }
         ConnectionLink::Upstream(_) => unreachable!("server link is a subscriber"),
     }
 }
@@ -3166,9 +3152,9 @@ fn row_only_write_policy_proofs_retain_no_support_views() {
         assert!(matches!(write.write_state().unwrap().fate, Fate::Accepted));
     }
     assert_eq!(
-        subscriber_proofs_and_support_views(&subscriber),
-        (8, 0),
-        "every insert is proven, and no proof keeps the rows its policy matches"
+        subscriber_support_views(&subscriber),
+        0,
+        "no proof keeps the rows its policy matches"
     );
 
     // Skipping hydration grants nothing: a write the policy denies is still
@@ -3210,9 +3196,9 @@ fn row_only_write_policy_proofs_retain_no_support_views() {
         Fate::Accepted
     ));
     assert_eq!(
-        subscriber_proofs_and_support_views(&subscriber),
-        (11, 0),
-        "the server proves the denied insert, update and delete, keeping no support view"
+        subscriber_support_views(&subscriber),
+        0,
+        "proving the denied insert, update and delete keeps no support view"
     );
 }
 
@@ -3281,9 +3267,9 @@ fn dependency_write_policy_proofs_retain_no_support_views() {
         Fate::Rejected(_)
     ));
     assert_eq!(
-        subscriber_proofs_and_support_views(&subscriber),
-        (2, 0),
-        "both inserts are proven against the stored parent, keeping no support view"
+        subscriber_support_views(&subscriber),
+        0,
+        "proving both inserts against the stored parent keeps no support view"
     );
 }
 
@@ -3365,7 +3351,7 @@ impl RelayUpload {
     }
 
     fn support_views(&self) -> usize {
-        subscriber_proofs_and_support_views(&self.subscriber).1
+        subscriber_support_views(&self.subscriber)
     }
 }
 
