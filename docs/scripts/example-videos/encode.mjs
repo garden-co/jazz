@@ -11,7 +11,9 @@ const run = promisify(execFile);
 export const MAX_BYTES = 5_000_000;
 
 const fontFile = (weight) =>
-  new URL(`../../public/fonts/body-font-latin-${weight}-normal.woff2`, import.meta.url);
+  new URL(
+    import.meta.resolve(`@garden-co/design/fonts/jazz/body-font-latin-${weight}-normal.woff2`),
+  );
 /** The docs site's body font, for the stage around the recordings. */
 const stageFont = { family: "StageBody", files: { 400: fontFile(400), 700: fontFile(700) } };
 

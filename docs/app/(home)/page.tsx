@@ -436,7 +436,7 @@ export default function HomePage() {
             <Figure
               className="home-video-figure"
               number={2}
-              caption="The todo example on two devices, recorded from the running app."
+              caption="StagePlan on two devices, recorded from the running app."
               after={
                 <AppLink href="/examples" className="home-video-link font-medium">
                   More examples and benchmarks →
@@ -445,13 +445,13 @@ export default function HomePage() {
             >
               <video
                 className="home-video"
-                src="/examples/videos/todo-two-devices.mp4"
-                poster="/examples/videos/todo-two-devices.jpg"
+                src="/examples/videos/stage-plan-two-devices.mp4"
+                poster="/examples/videos/stage-plan-two-devices.jpg"
                 autoPlay
                 muted
                 loop
                 playsInline
-                aria-label="Two browser windows running the todo example. A todo added or checked off in one appears in the other."
+                aria-label="Two browser windows running the StagePlan example, a crew chief and a crew member on the same show board. A task added or a card moved in one appears in the other; edits made with sync turned off arrive when it is turned back on."
               />
             </Figure>
           </div>

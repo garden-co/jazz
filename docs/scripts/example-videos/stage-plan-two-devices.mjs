@@ -1,4 +1,5 @@
-// Records the Todos hero walkthrough: two independent "devices" side by side,
+// Records the homepage walkthrough: StagePlan on two independent "devices"
+// side by side, a crew chief and a crew member on the same show board,
 // syncing through the local Jazz server that the example's Vite plugin starts.
 //
 //   pnpm build:core                              # jazz-tools, WASM and NAPI
@@ -18,12 +19,12 @@ import { chromium } from "playwright";
 import { composeWindows } from "./encode.mjs";
 
 const exampleDir = fileURLToPath(
-  new URL("../../../examples/todo-client-localfirst-react/", import.meta.url),
+  new URL("../../../examples/stage-plan/apps/react-localfirst/", import.meta.url),
 );
 const outDir = fileURLToPath(new URL("../../public/examples/videos/", import.meta.url));
-const id = "todo-two-devices";
+const id = "stage-plan-two-devices";
 const port = Number(process.env.EXAMPLE_PORT ?? 5199);
-const size = { width: 600, height: 560 };
+const size = { width: 600, height: 700 };
 const url = `http://127.0.0.1:${port}/`;
 // Glide time for the drawn cursor between targets.
 const glideMs = 275;
@@ -38,11 +39,10 @@ function installCursor({ color, glideMs }) {
     cursor.style.cssText = `position:fixed;left:0;top:0;z-index:2147483647;pointer-events:none;transform:translate(300px,470px);transition:transform ${glideMs}ms cubic-bezier(.3,.7,.3,1);`;
     cursor.innerHTML = `<svg width="22" height="28" viewBox="0 0 22 28" style="display:block;filter:drop-shadow(0 1px 2px rgba(0,0,0,.35))"><path d="M2 2 L2 23 L7.5 17.5 L11.5 26 L15 24.4 L11.2 16.2 L19 16.2 Z" fill="${color}" stroke="white" stroke-width="1.6" stroke-linejoin="round"/></svg>`;
     document.documentElement.append(cursor);
-    addEventListener(
-      "mousemove",
-      (e) => (cursor.style.transform = `translate(${e.clientX - 2}px,${e.clientY - 2}px)`),
-      true,
-    );
+    const follow = (e) =>
+      (cursor.style.transform = `translate(${e.clientX - 2}px,${e.clientY - 2}px)`);
+    // A native drag sends dragover instead of mousemove.
+    for (const type of ["mousemove", "dragover"]) addEventListener(type, follow, true);
     addEventListener(
       "mousedown",
       (e) => {
@@ -74,7 +74,7 @@ function hideDevOverlay() {
 }
 
 async function startExample() {
-  // Start from an empty sync server so each recording shows only its own todos.
+  // Start from an empty sync server so each recording starts from a fresh demo show.
   await rm(`${exampleDir}node_modules/.cache/jazz-dev-server`, { recursive: true, force: true });
   const child = spawn(
     "pnpm",
@@ -110,6 +110,15 @@ async function startExample() {
   return { ready, stop, log: () => output };
 }
 
+// The board is dense, so each device shows its pages at 80%. The zoom sits on
+// <body>, which keeps the drawn cursor (on <html>) in viewport coordinates.
+function zoomOut() {
+  const style = document.createElement("style");
+  style.textContent = "body{zoom:.8}";
+  if (document.documentElement) document.documentElement.append(style);
+  else addEventListener("DOMContentLoaded", () => document.head.append(style));
+}
+
 const example = await startExample();
 const recordingDir = await mkdtemp(join(tmpdir(), "example-video-"));
 let browser;
@@ -118,8 +127,8 @@ try {
   browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || undefined });
   const devices = [];
   for (const [label, color] of [
-    ["Device A", "#2563eb"],
-    ["Device B", "#ea580c"],
+    ["Mia, crew chief", "#2563eb"],
+    ["Cole, crew", "#ea580c"],
   ]) {
     const context = await browser.newContext({
       viewport: size,
@@ -128,22 +137,43 @@ try {
     });
     await context.addInitScript(installCursor, { color, glideMs });
     await context.addInitScript(hideDevOverlay);
+    await context.addInitScript(zoomOut);
     const page = await context.newPage();
     devices.push({ label, context, page, startedAt: Date.now() });
-    await page.goto(url);
   }
   const [a, b] = devices.map((d) => d.page);
+
+  // Off camera (the recordings are trimmed to start at `origin`): Mia's first
+  // run creates the demo show, and Cole joins it through Mia's invite link.
+  const rename = async (page, name) => {
+    await page.getByRole("button", { name: /^Stagehand / }).click();
+    await page.getByRole("textbox", { name: "Name" }).fill(name);
+    await page.getByRole("button", { name: "Save" }).click();
+    await page.getByRole("button", { name }).waitFor();
+  };
+  await a.goto(url);
+  const showLink = a.getByRole("link", { name: "The Late Lanterns: album launch" });
+  await showLink.waitFor({ timeout: 60_000 });
+  await rename(a, "Mia");
+  const board = url + (await showLink.getAttribute("href"));
+  await a.goto(`${board}/crew`);
+  const inviteLink = a.getByRole("textbox", { name: "Invite link" });
+  await inviteLink.and(a.locator(":not([value=''])")).waitFor();
+  await b.goto(await inviteLink.inputValue());
+  await b.getByRole("button", { name: "Add task" }).waitFor({ timeout: 60_000 });
+  await rename(b, "Cole");
+  await a.goto(board);
+  await a.getByRole("link", { name: "Crew (2)" }).waitFor();
   for (const page of [a, b]) {
-    await page
-      .getByRole("button", { name: "Add" })
-      .and(page.locator(":enabled"))
-      .waitFor({ timeout: 60_000 });
+    await page.getByRole("link", { name: "Soundcheck with the band" }).waitFor();
     const hidden = await page.evaluate(() => {
       const overlay = document.querySelector("jazz-inspector-overlay");
       return !overlay || getComputedStyle(overlay).display === "none";
     });
     if (!hidden) throw new Error("The dev overlay is still visible");
   }
+  await a.waitForTimeout(800);
+
   const origin = Date.now();
   const captions = [];
   const caption = async (text, pause = 900) => {
@@ -162,51 +192,56 @@ try {
     await pointAt(page, locator);
     await locator.click();
   };
-  const type = async (page, locator, text, delay) => {
-    await click(page, locator);
-    await locator.pressSequentially(text, { delay });
-  };
   const add = async (page, title) => {
-    await type(page, page.getByPlaceholder("What needs to be done?"), title, 55);
+    const input = page.getByRole("textbox", { name: "New task" });
+    await click(page, input);
+    await input.pressSequentially(title, { delay: 55 });
     await page.waitForTimeout(250);
-    await click(page, page.getByRole("button", { name: "Add" }));
+    await click(page, page.getByRole("button", { name: "Add task" }));
   };
-  const todo = (page, title) => page.locator("#todo-list li", { hasText: title });
+  const column = (page, status) => page.locator(`[data-status="${status}"]`);
+  const card = (page, title, status) =>
+    (status ? column(page, status) : page).locator("[data-task-id]", { hasText: title });
+  // Drag a card into another column, the way a person would.
+  const drag = async (page, title, status) => {
+    await pointAt(page, card(page, title));
+    await page.mouse.down();
+    const box = await column(page, status).boundingBox();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height - 24, { steps: 24 });
+    await page.mouse.up();
+    await card(page, title, status).waitFor();
+  };
+  const sync = (page) => page.getByRole("switch", { name: "Sync" });
 
-  await caption("Two devices, one live todo list", 1500);
-  await caption("Device A adds a todo…", 400);
-  await add(a, "Buy oat milk");
-  await todo(b, "Buy oat milk").waitFor();
-  await caption("…and it appears on Device B right away", 1600);
+  await caption("Two crew members, one live show board", 2000);
+  await caption("Mia adds a task…", 400);
+  await add(a, "Tape down the cable runs");
+  await card(b, "Tape down the cable runs", "todo").waitFor();
+  await caption("…and it appears on Cole's board right away", 2000);
 
-  await caption("Device B adds one too", 400);
-  await add(b, "Book the rehearsal room");
-  await todo(a, "Book the rehearsal room").waitFor();
-  await a.waitForTimeout(1200);
+  await caption("Cole starts on soundcheck…", 400);
+  await drag(b, "Soundcheck with the band", "doing");
+  await card(a, "Soundcheck with the band", "doing").waitFor();
+  await caption("…and Mia's board follows", 2000);
 
-  await caption("Device A checks off its own todo", 500);
-  await click(a, todo(a, "Buy oat milk").locator("input.toggle"));
-  await todo(b, "Buy oat milk").locator("input.toggle:checked").waitFor();
-  await caption("The change syncs to Device B", 1600);
+  await caption("Mia turns Sync off and keeps working", 400);
+  await click(a, sync(a));
+  await a.getByRole("switch", { name: "Sync", checked: false }).waitFor();
+  await add(a, "Top up the hazer fluid");
+  await drag(a, "Print setlists and tape them down", "doing");
+  await caption("Her edits apply locally. Cole doesn't have them yet", 2600);
+  if (
+    (await card(b, "Top up the hazer fluid").count()) ||
+    (await card(b, "Print setlists and tape them down", "doing").count())
+  )
+    throw new Error("Offline edits reached Cole before Mia reconnected");
 
-  await caption("Device B tries to uncheck a todo it doesn't own…", 600);
-  // The server's authorization rejects the write; wait for that verdict.
-  const rejected = b.waitForEvent("console", (m) => m.text().includes("permission_denied"));
-  await click(b, todo(b, "Buy oat milk").locator("input.toggle"));
-  await rejected;
-  await todo(b, "Buy oat milk").locator("input.toggle:checked").waitFor();
-  await caption("…the server's permission policy rejects it", 2200);
-
-  await caption("Device A filters its list", 400);
-  await type(a, a.getByLabel("Filter by title"), "room", 90);
-  await a.waitForTimeout(900);
-  await caption("Device B adds a matching todo…", 400);
-  await add(b, "Tidy up the practice room");
-  await todo(a, "Tidy up the practice room").waitFor();
-  await caption("…and A's filtered view updates by itself: filters are live queries", 2400);
-  await click(a, a.getByLabel("Filter by title"));
-  await a.getByLabel("Filter by title").fill("");
-  await caption("Every change: local first, then synced", 1800);
+  await caption("Sync back on…", 400);
+  await click(a, sync(a));
+  await card(b, "Top up the hazer fluid", "todo").waitFor();
+  await card(b, "Print setlists and tape them down", "doing").waitFor();
+  await caption("…and Cole's board catches up", 2200);
+  await caption("Every change: local first, then synced", 2000);
   const end = Date.now();
   captions.at(-1).to = end - origin;
 
@@ -220,7 +255,7 @@ try {
   const encoded = await composeWindows({
     browser,
     devices: recorded,
-    address: "todo.example.com",
+    address: "stageplan.example.com",
     workDir: recordingDir,
     captions,
     origin,
