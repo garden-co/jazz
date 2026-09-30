@@ -3380,6 +3380,10 @@ impl TickEvaluator<'_> {
         self.arrangement_states.insert(key, state);
     }
 
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.op_recursive")
+    )]
     async fn update_recursive(
         &mut self,
         node: NodeId,
@@ -3613,6 +3617,10 @@ impl TickEvaluator<'_> {
         self.update_node(input).await
     }
 
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.op_other")
+    )]
     async fn update_streaming_checksum(
         &mut self,
         node: NodeId,
