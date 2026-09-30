@@ -759,6 +759,13 @@ where
         } else {
             batch.insert("jazz_transactions", tx_values);
         }
+        if tx.tx_id.node != self.node_uuid {
+            if matches!(fate, Fate::Pending) && global_time.is_none() {
+                self.open_tx.pending_foreign_transactions.insert(tx.tx_id);
+            } else {
+                self.open_tx.pending_foreign_transactions.remove(&tx.tx_id);
+            }
+        }
 
         let mut parent_edges = BTreeSet::new();
         let mut pending_parent_constraints = Vec::new();

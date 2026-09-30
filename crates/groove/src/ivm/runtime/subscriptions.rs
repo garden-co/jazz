@@ -24,14 +24,17 @@ pub enum SubscriptionLifetime {
     Retained,
 }
 
-/// How indirect (large) scalar values appear in an *initial* root snapshot:
-/// a one-shot query result or a subscription's first published result.
+/// How indirect (large) scalar values appear in a subscription's root output:
+/// a one-shot query result, or every result a retained subscription publishes.
 ///
 /// Operators still materialize exactly the fields they inspect (filters,
 /// sorts, collectors), so this choice never changes which rows a graph
 /// produces. It only decides whether the root output rebuilds whole large
-/// values for its caller. Incremental updates of a retained subscription are
-/// always materialized, whatever its initial snapshot used.
+/// values for its caller. A retained subscription keeps its choice for its
+/// whole lifetime: its initial snapshot and every later update present the
+/// same fields physically, so a retraction always names the exact record its
+/// insertion published. Subscriptions sharing a graph node may choose
+/// differently, because the choice is applied per subscription at publication.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum RootIndirectValues {
     /// Rebuild every indirect root value into its logical scalar.
@@ -70,17 +73,6 @@ impl RootIndirectValues {
                     .map(|(index, _)| index)
                     .collect(),
             ),
-        }
-    }
-}
-
-impl RootIndirectValues {
-    /// Retained subscriptions always deliver materialized updates, so a
-    /// physical first snapshot could never be retracted by them.
-    fn check_lifetime(&self, lifetime: SubscriptionLifetime) -> Result<(), IvmRuntimeError> {
-        match (self, lifetime) {
-            (Self::Materialize, _) | (_, SubscriptionLifetime::FirstResult) => Ok(()),
-            _ => Err(IvmRuntimeError::PhysicalRootValuesRequireFirstResult),
         }
     }
 }
@@ -756,6 +748,9 @@ pub(super) struct MultisinkSubscriptionState {
     pub(super) outputs: BTreeMap<String, CompiledNode>,
     pub(super) target: MultisinkSubscriptionTarget,
     pub(super) failed: bool,
+    /// How this subscription's published root records present indirect
+    /// values, for its initial snapshot and every later update alike.
+    pub(super) root_indirect_values: RootIndirectValues,
 }
 
 #[derive(Clone, Debug)]
@@ -3478,7 +3473,6 @@ impl IvmRuntime {
         K: Into<String>,
         S: OrderedKvStorage + 'static,
     {
-        root_indirect_values.check_lifetime(lifetime)?;
         let sinks = sinks
             .into_iter()
             .map(|(sink, graph)| (sink.into(), graph))
@@ -3584,6 +3578,7 @@ impl IvmRuntime {
                 outputs: outputs.clone(),
                 target: MultisinkSubscriptionTarget::Direct,
                 failed: false,
+                root_indirect_values: root_indirect_values.clone(),
             },
         );
         if lifetime == SubscriptionLifetime::Retained {
@@ -3792,6 +3787,10 @@ impl IvmRuntime {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.query_bind")
+    )]
     pub(crate) fn bind_shape_with_lifetime<S>(
         &mut self,
         shape_id: PreparedShapeId,
@@ -3805,7 +3804,6 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage + 'static,
     {
-        root_indirect_values.check_lifetime(lifetime)?;
         let subscription = self.bind_shape_with_public_fields_staged(
             shape_id,
             binding_values,
@@ -4032,6 +4030,7 @@ impl IvmRuntime {
                     MultisinkSubscriptionTarget::Direct
                 },
                 failed: false,
+                root_indirect_values: root_indirect_values.clone(),
             },
         );
         if lifetime == SubscriptionLifetime::Retained {
@@ -4942,6 +4941,10 @@ impl IvmRuntime {
     ///
     /// Returns `None`, having changed nothing, whenever that precondition is
     /// not certain; the caller then takes the ordinary hydration path.
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.live_attach")
+    )]
     pub(crate) async fn prepare_live_attach<S>(
         &mut self,
         shape_id: PreparedShapeId,

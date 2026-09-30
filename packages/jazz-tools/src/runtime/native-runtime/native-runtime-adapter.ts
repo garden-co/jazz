@@ -77,6 +77,7 @@ import { nativeCoreErrorCode } from "./native-error-code.js";
 import {
   WebSocketCarrier,
   WIRE_PROTOCOL_VERSION,
+  isReconnectLaterWireError,
   isRetryablePreHelloWireError,
   normalizeBackendWebSocketAuth,
   peerIdentityForWebSocketAuth,
@@ -385,6 +386,14 @@ type NativeDb = {
     descriptors: unknown,
     updatedAtMs?: number | null,
   ): Write;
+  updateLargeValuesInTransaction?(
+    openTransactionId: string,
+    table: string,
+    rowId: Uint8Array,
+    patch: Uint8Array,
+    descriptors: unknown,
+    updatedAtMs?: number | null,
+  ): void;
   connectUpstream(): Transport | Promise<Transport>;
   connectUpstreamWithSession?(
     protocolVersion: number,
@@ -1646,15 +1655,43 @@ export class NativeRuntimeAdapter implements Runtime {
     const branchView = branchViewFromWriteContext(writeContext);
     const tx = this.currentTx(writeContext, "Update");
 
-    // The first partial-value API is intentionally root-context only (#2087).
-    // Do not silently substitute the adapter's root author for a session or
-    // attributed write, nor read/stage through a transaction or branch view.
+    // Branch views have no partial-value coordinate space yet (#2087). Do not
+    // silently read or stage through the root instead.
     if (branchView) {
       throw new Error("Typed large-value updates are not supported in branch views.");
     }
     if (tx) {
-      throw writeError("Update", "typed partial-value updates are not supported in transactions");
+      // The transaction was opened with its identity, and the core stages the
+      // splices against the transaction's own view of the row, so a session
+      // or attributed transaction authors them like any other staged write.
+      const writeSession = sessionFromWriteContext(writeContext);
+      this.applySessionClaims(writeSession);
+      const writeIdentity = this.trustedWriteIdentity(writeSession);
+      const attribution = this.backendAttribution(writeContext);
+      this.assertTransactionAttribution(tx, attribution);
+      this.assertTransactionWriteIdentity(tx, attribution ? undefined : writeIdentity);
+      const updateInTransaction = this.db.updateLargeValuesInTransaction;
+      if (!updateInTransaction) {
+        throw writeError(
+          "Update",
+          "typed partial-value updates in transactions are not supported by this runtime",
+        );
+      }
+      const patch = encodeCellsForPatch(this.table(table), values);
+      updateInTransaction.call(
+        this.db,
+        tx.id,
+        table,
+        rowId,
+        patch,
+        descriptors,
+        updatedAtMs ?? undefined,
+      );
+      tx.hasStagedMutations = true;
+      return { kind: "staged", openTransactionId: txIdFromContext(writeContext)! };
     }
+    // Outside a transaction the binding writes as the adapter's own identity.
+    // Do not silently substitute it for a session or attributed write.
     if (largeValueWriteHasIncompatibleIdentity(writeContext, this.peerIdentity)) {
       throw new Error("Typed large-value updates do not yet support an attributed identity.");
     }
@@ -2284,7 +2321,7 @@ export class NativeRuntimeAdapter implements Runtime {
         }
       },
       onError: (error) => {
-        if (error.code === "not_ready" && error.retry === "later") return;
+        if (isReconnectLaterWireError(error)) return;
         if (attempt && this.canRetryNetworkConnection(attempt, error)) return;
         if (
           this.serverTransportError &&
@@ -2297,8 +2334,7 @@ export class NativeRuntimeAdapter implements Runtime {
       },
       onTerminal: (error) => {
         if (!attempt) return;
-        if (error.code === "not_ready" && error.retry === "later" && !attempt.carrier.hasNegotiated)
-          return;
+        if (isReconnectLaterWireError(error) && !attempt.carrier.hasNegotiated) return;
         if (this.canRetryNetworkConnection(attempt, error)) {
           const recovery = this.retryNetworkConnection(attempt, error);
           if (recovery) return;
@@ -3722,8 +3758,14 @@ export class NativeRuntimeAdapter implements Runtime {
       error.retry === "later" &&
       (error.code === "websocket_closed" ||
         error.code === "websocket_error" ||
-        error.code === "not_ready") &&
-      (attempt.carrier.hasNegotiated || this.networkRetryCount > 0)
+        isReconnectLaterWireError(error)) &&
+      // A local-first client opened while offline must also reach its server
+      // once the network returns, so a first connection that fails at the
+      // network layer is retried like a dropped established link.
+      (attempt.carrier.hasNegotiated ||
+        this.networkRetryCount > 0 ||
+        error.code === "websocket_closed" ||
+        error.code === "websocket_error")
     );
   }
 
@@ -4982,10 +5024,27 @@ function rejectionCode(message: string): string {
   return "write_rejected";
 }
 
+/**
+ * Fallback readable reasons for structured authority rejections, used only
+ * when the core diagnostic does not carry its own readable reason (older
+ * native bindings). The core appends ` (reason: …)` with the same text it puts
+ * on `onMutationError` events, so waits and events agree.
+ */
+const READABLE_REJECTION_REASONS: Readonly<Record<string, string>> = {
+  permission_denied: "Write rejected by server authorization",
+  exclusive_conflict: "Exclusive transaction conflicted with another write",
+  causality_violation: "Transaction violated causal ordering",
+  client_clock_too_far_ahead: "Client clock is too far ahead",
+  cascade_rejected: "Transaction was rejected because an ancestor transaction was rejected",
+};
+
 function rejectionReason(message: string): string {
   const reason = extractWriteRejectedReason(message);
   if (reason === null) return message;
-  if (reason.includes("AuthorizationDenied")) return "Write rejected by server authorization";
+  const readable = /^transaction .* was rejected: .* \(reason: (.*)\)$/s.exec(reason)?.[1];
+  if (readable) return readable;
+  const fallback = READABLE_REJECTION_REASONS[rejectionCode(reason)];
+  if (fallback) return fallback;
   return reason || "Write rejected";
 }
 

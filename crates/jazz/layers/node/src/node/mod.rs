@@ -324,6 +324,7 @@ mod currency;
 mod database_slot;
 mod descriptor_roles;
 mod eviction;
+mod exclusive_read_evidence;
 mod global_state;
 mod ingest;
 mod node_aliases;
@@ -1519,6 +1520,13 @@ struct OpenTxState {
     closed_batches: BTreeSet<OpenTransactionId>,
     /// Local-only permission subjects for transactions whose `made_by` keeps provenance.
     local_permission_subjects: BTreeMap<TxId, AuthorSubject>,
+    /// Groove roots staged by transactions that were abandoned before commit,
+    /// awaiting eviction by [`NodeState::evict_released_large_values`].
+    released_large_values: Vec<groove::large_values::StagedLargeValueId>,
+    /// Other nodes' transactions ingested by this runtime that are still pending and
+    /// unsequenced. Current reads include their versions; an opened transaction's snapshot
+    /// must too. Entries are confirmed against storage when a transaction opens.
+    pending_foreign_transactions: BTreeSet<TxId>,
 }
 
 /// Rejection records and derived indexes used for pending-cascade handling.

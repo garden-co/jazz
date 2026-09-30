@@ -1647,6 +1647,17 @@ impl InMemoryServerShell {
             .ok_or(ShellError::InvalidSession)
     }
 
+    /// The admitted session's connection-scoped wire credit ledger.
+    pub(crate) fn session_channel_credits(
+        &self,
+        session: ServerSession,
+    ) -> ShellResult<crate::wire::channel_credit::SharedChannelCredits> {
+        self.session_state(session)?
+            .auxiliary_pump
+            .shared_channel_credits()
+            .map_err(ShellError::Transport)
+    }
+
     fn session_state(&self, session: ServerSession) -> ShellResult<&ServerSessionState> {
         self.sessions
             .get(session.transport())

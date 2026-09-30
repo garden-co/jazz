@@ -39,9 +39,15 @@ export const TrackLane = memo(function TrackLane({
   onOpenSettings,
   onSteps,
 }: TrackLaneProps) {
-  const { data: steps = [] } = useAll(
+  // A pad toggles from what it shows, so it stays disabled until the lane's
+  // steps have loaded: a click on a still-empty lane would write "on" for a
+  // pad that is already on. On a first visit nothing is cached yet, so the
+  // first result waits for the server instead of reporting an empty lane.
+  const { data: steps = [], isLoading: isLoadingSteps } = useAll(
     app.steps.where({ track_id: track.id, pattern_id: patternId }).orderBy("position", "asc"),
+    { tier: "local-first-unless-empty" },
   );
+  const canToggle = canEdit && !isLoadingSteps;
 
   useEffect(() => {
     const enabled: boolean[] = [];
@@ -132,7 +138,7 @@ export const TrackLane = memo(function TrackLane({
             aria-label={`${track.name}, step ${position + 1}`}
             aria-pressed={enabled}
             data-beat-start={position % STEPS_PER_BEAT === 0 ? "" : undefined}
-            disabled={!canEdit}
+            disabled={!canToggle}
             onClick={() => onToggleStep(track.id, position, !enabled)}
           />
         );
