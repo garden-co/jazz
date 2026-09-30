@@ -424,7 +424,7 @@ struct Fixture {
 
 struct Client {
     name: String,
-    node: NodeState<RocksDbStorage>,
+    node: NodeState,
     _dir: tempfile::TempDir,
     peer: PeerState,
     registered_subscriptions: BTreeSet<SubscriptionKey>,
@@ -433,7 +433,7 @@ struct Client {
 }
 
 struct DbClient {
-    db: Db<RocksDbStorage>,
+    db: Db,
     _dir: tempfile::TempDir,
     server_to_client_bytes: Rc<Cell<u64>>,
     server_to_client_floor_bytes: Rc<Cell<u64>>,
@@ -700,8 +700,8 @@ fn run_db_surface(config: &Config) -> DbSurfaceSummary {
 #[allow(clippy::too_many_arguments)]
 fn grant_phase(
     ctx: &mut dyn DriverContext,
-    writer: &mut NodeState<RocksDbStorage>,
-    core: &mut NodeState<RocksDbStorage>,
+    writer: &mut NodeState,
+    core: &mut NodeState,
     client: &mut Client,
     shape: &ValidatedQuery,
     binding: &Binding,
@@ -911,8 +911,8 @@ fn revoke_phase_db(
 #[allow(clippy::too_many_arguments)]
 fn revoke_phase(
     ctx: &mut dyn DriverContext,
-    writer: &mut NodeState<RocksDbStorage>,
-    core: &mut NodeState<RocksDbStorage>,
+    writer: &mut NodeState,
+    core: &mut NodeState,
     client: &mut Client,
     shape: &ValidatedQuery,
     binding: &Binding,
@@ -979,8 +979,8 @@ fn revoke_phase(
 #[allow(clippy::too_many_arguments)]
 fn forbidden_write_phase(
     ctx: &mut dyn DriverContext,
-    writer: &mut NodeState<RocksDbStorage>,
-    core: &mut NodeState<RocksDbStorage>,
+    writer: &mut NodeState,
+    core: &mut NodeState,
     spy: &mut Client,
     shape: &ValidatedQuery,
     binding: &Binding,
@@ -1327,8 +1327,8 @@ fn seed_block_tree_fixture(
     pages: usize,
     blocks_per_page: usize,
     visible_rows: usize,
-    writer: &mut NodeState<RocksDbStorage>,
-    core: &mut NodeState<RocksDbStorage>,
+    writer: &mut NodeState,
+    core: &mut NodeState,
 ) -> BlockTreeFixture {
     let mut blocks = Vec::with_capacity(pages * blocks_per_page);
     let mut visible = BTreeSet::new();
@@ -1409,7 +1409,7 @@ fn seed_block_tree_fixture_bulk(
     visible_rows: usize,
     chunk_rows: usize,
     schema: &JazzSchema,
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
 ) -> BlockTreeFixture {
     let mut blocks = Vec::with_capacity(pages * blocks_per_page);
     let mut visible = BTreeSet::new();
@@ -1511,7 +1511,7 @@ fn seed_block_tree_fixture_bulk(
 }
 
 fn flush_headline_versions_if_full(
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     versions: &mut Vec<VersionRecord>,
     chunk_rows: usize,
     tx_seq: &mut u64,
@@ -1522,7 +1522,7 @@ fn flush_headline_versions_if_full(
 }
 
 fn flush_headline_versions(
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     versions: &mut Vec<VersionRecord>,
     tx_seq: &mut u64,
 ) {
@@ -1617,8 +1617,8 @@ fn block_subtree(fixture: &BlockTreeFixture, root: RowUuid) -> Vec<RowUuid> {
 #[allow(clippy::too_many_arguments)]
 fn rewrite_block_visibility(
     ctx: &mut dyn DriverContext,
-    writer: &mut NodeState<RocksDbStorage>,
-    core: &mut NodeState<RocksDbStorage>,
+    writer: &mut NodeState,
+    core: &mut NodeState,
     fixture: &BlockTreeFixture,
     row_uuid: RowUuid,
     claim_value: &str,
@@ -1816,7 +1816,7 @@ fn apply_db_subscription_event(visible_rows: &mut BTreeSet<RowUuid>, event: Subs
 
 fn hydrate_direct(
     ctx: &mut dyn DriverContext,
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     client: &mut Client,
     shape: &ValidatedQuery,
     binding: &Binding,
@@ -1845,7 +1845,7 @@ fn hydrate_direct(
 
 fn deliver_update(
     ctx: &mut dyn DriverContext,
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     client: &mut Client,
     shape: &ValidatedQuery,
     binding: &Binding,
@@ -1930,8 +1930,8 @@ fn ensure_client_subscription_registered(
 fn seed_fixture(
     ctx: &mut dyn DriverContext,
     config: &Config,
-    writer: &mut NodeState<RocksDbStorage>,
-    core: &mut NodeState<RocksDbStorage>,
+    writer: &mut NodeState,
+    core: &mut NodeState,
 ) -> Fixture {
     let simple_team = row(10);
     let admin_team = row(11);
@@ -2307,8 +2307,8 @@ fn resource_subscription(schema: &JazzSchema) -> (ValidatedQuery, Binding) {
 #[allow(clippy::too_many_arguments)]
 fn commit_global(
     ctx: &mut dyn DriverContext,
-    writer: &mut NodeState<RocksDbStorage>,
-    core: &mut NodeState<RocksDbStorage>,
+    writer: &mut NodeState,
+    core: &mut NodeState,
     table: &str,
     row_uuid: RowUuid,
     made_by: AuthorSubject,
@@ -2331,8 +2331,8 @@ fn commit_global(
 
 fn delete_global(
     ctx: &mut dyn DriverContext,
-    writer: &mut NodeState<RocksDbStorage>,
-    core: &mut NodeState<RocksDbStorage>,
+    writer: &mut NodeState,
+    core: &mut NodeState,
     table: &str,
     row_uuid: RowUuid,
     now_ms: u64,
@@ -2353,7 +2353,7 @@ fn delete_global(
 
 fn core_acceptance_phase(
     ctx: &mut dyn DriverContext,
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     client: &mut Client,
     resource: RowUuid,
     writer: RowUuid,
@@ -2444,7 +2444,7 @@ fn open_db_client(
 }
 
 struct CoreDb {
-    server: Node<RocksDbStorage>,
+    server: Node,
     next_now_ms: Cell<u64>,
 }
 
@@ -2481,7 +2481,7 @@ fn open_db(
     schema: JazzSchema,
     author: AuthorSubject,
     seed: u64,
-) -> (tempfile::TempDir, Db<RocksDbStorage>) {
+) -> (tempfile::TempDir, Db) {
     let dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -2501,10 +2501,7 @@ fn open_db(
     (dir, db)
 }
 
-fn open_node(
-    node_uuid: NodeUuid,
-    schema: JazzSchema,
-) -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
+fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, NodeState) {
     let dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -2561,7 +2558,7 @@ struct OracleState {
 }
 
 impl OracleState {
-    fn from_core(core: &mut NodeState<RocksDbStorage>, config: &Config, fixture: &Fixture) -> Self {
+    fn from_core(core: &mut NodeState, config: &Config, fixture: &Fixture) -> Self {
         let _ = config;
         let resources = fixture.resources.iter().copied().collect::<BTreeSet<_>>();
         let mut memberships = BTreeMap::new();
@@ -2654,7 +2651,7 @@ fn access_oracle_from_fixture(
 }
 
 fn visible_rows(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     shape: &ValidatedQuery,
     binding: &Binding,
 ) -> BTreeSet<RowUuid> {
@@ -3392,7 +3389,7 @@ fn raw_claims(author: AuthorSubject) -> BTreeMap<String, Value> {
     ])
 }
 
-fn install_claims(node: &mut NodeState<RocksDbStorage>, author: AuthorSubject) {
+fn install_claims(node: &mut NodeState, author: AuthorSubject) {
     if author != AuthorSubject::SYSTEM {
         node.admit_test_session_claims(author, raw_claims(author));
     }
@@ -3406,7 +3403,7 @@ fn install_core_db_claims(core: &CoreDb, author: AuthorSubject) {
     }
 }
 
-fn install_db_claims(db: &Db<RocksDbStorage>, author: AuthorSubject) {
+fn install_db_claims(db: &Db, author: AuthorSubject) {
     if author != AuthorSubject::SYSTEM {
         db.set_identity_claims(author, raw_claims(author));
     }

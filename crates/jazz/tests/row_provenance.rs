@@ -28,7 +28,7 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_db(identity: AuthorSubject) -> Db<TestStorage> {
+fn open_db(identity: AuthorSubject) -> Db {
     let schema = schema();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -110,7 +110,7 @@ fn row_provenance_preserves_created_fields_and_advances_updated_at() {
     );
 }
 
-fn open_persistent_db(dir: &tempfile::TempDir, identity: AuthorSubject) -> Db<RocksDbStorage> {
+fn open_persistent_db(dir: &tempfile::TempDir, identity: AuthorSubject) -> Db {
     let schema = schema();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -127,7 +127,7 @@ fn open_persistent_db(dir: &tempfile::TempDir, identity: AuthorSubject) -> Db<Ro
     .expect("open db")
 }
 
-fn read_provenance(db: &Db<RocksDbStorage>) -> Vec<(RowUuid, AuthorSubject, AuthorSubject)> {
+fn read_provenance(db: &Db) -> Vec<(RowUuid, AuthorSubject, AuthorSubject)> {
     let prepared = db.prepare_query(&db.table("todos")).expect("prepare query");
     let mut rows = db
         .read(&prepared)
@@ -160,7 +160,7 @@ fn row_authors_round_trip_across_restarts() {
     let r2 = RowUuid::from_bytes([0x62; 16]);
     let r3 = RowUuid::from_bytes([0x63; 16]);
     let title = |title: &str| BTreeMap::from([("title".to_owned(), Value::String(title.into()))]);
-    let insert = |db: &Db<RocksDbStorage>, row, text: &str| {
+    let insert = |db: &Db, row, text: &str| {
         jazz::block_on(db.insert(
             "todos",
             title(text),

@@ -1,3 +1,6 @@
+// Shared with jazz-testkit by path so Jazz needs no testkit dev-dependency.
+#[path = "../../jazz-testkit/src/duplex_transport.rs"]
+mod duplex_transport;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Debug;
@@ -6,6 +9,7 @@ use std::rc::Rc;
 
 mod common;
 
+use duplex_transport::duplex;
 use jazz::db::{
     ClientRelayScope, Db, DbConfig, DbIdentity, ExclusiveTxOps, Propagation, ReadOpts,
     SubscriptionEvent, TickScheduler, TickUrgency, Transport, block_on,
@@ -27,7 +31,6 @@ use jazz::tools::{
 };
 use jazz::tx::{DurabilityTier, Fate, Transaction, TxId, TxKind};
 use jazz_storage_rocksdb::RocksDbStorage;
-use jazz_testkit::duplex_transport::duplex;
 
 /// Mirror the production browser-worker upstream: the client side has already
 /// been admitted to forward one scope binding, and the authority side installs
@@ -299,7 +302,7 @@ fn band_chat_message_schema() -> JazzSchema {
     )
 }
 
-fn open_db(node: u8, author: AuthorSubject, schema: &JazzSchema) -> Db<TestStorage> {
+fn open_db(node: u8, author: AuthorSubject, schema: &JazzSchema) -> Db {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -321,7 +324,7 @@ fn open_db_with_storage(
     author: AuthorSubject,
     schema: &JazzSchema,
     storage: TestStorage,
-) -> Db<TestStorage> {
+) -> Db {
     block_on(Db::open(DbConfig::new(
         schema.clone(),
         storage,
@@ -333,7 +336,7 @@ fn open_db_with_storage(
     .expect("open database")
 }
 
-fn open_core(node: u8, schema: &JazzSchema) -> Db<TestStorage> {
+fn open_core(node: u8, schema: &JazzSchema) -> Db {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -369,11 +372,7 @@ fn assert_truthful_empty_local_opening(event: Option<SubscriptionEvent>) {
     assert!(removed.is_empty());
 }
 
-fn open_persistent_worker(
-    path: &std::path::Path,
-    node: u8,
-    schema: &JazzSchema,
-) -> Db<RocksDbStorage> {
+fn open_persistent_worker(path: &std::path::Path, node: u8, schema: &JazzSchema) -> Db {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -399,7 +398,7 @@ fn open_persistent_browser_worker(
     node: u8,
     author: AuthorSubject,
     schema: &JazzSchema,
-) -> Db<RocksDbStorage> {
+) -> Db {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -429,7 +428,7 @@ fn open_persistent_scope_isolated_browser_worker(
     node: u8,
     author: AuthorSubject,
     schema: &JazzSchema,
-) -> Db<RocksDbStorage> {
+) -> Db {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()

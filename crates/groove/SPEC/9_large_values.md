@@ -374,7 +374,11 @@ evaluation closure.
 Postcard decoding alone is insufficient because it accepts a valid value with
 trailing bytes. Every path that interprets node structure MUST require an exact
 byte-for-byte canonical re-encoding, including metadata-only traversal before
-the caller has an expected logical kind. Evaluation additionally verifies the
+the caller has an expected logical kind. The comparison may stream canonical
+segments rather than allocate a second complete encoding. In V1, a leaf is
+exactly the canonical enum tag `0`, its two fixed `u8` fields and its sole raw
+bytes field; that field consumes the remaining payload and has no offset or
+length table. This equivalence is pinned against the ordinary record encoder. Evaluation additionally verifies the
 expected object hash, format, kind, logical hash, and metrics.
 
 The authenticated structure is a DAG, not necessarily a tree physically: one
@@ -417,6 +421,18 @@ length effects are recomputed against the source value produced by preceding
 edits. An untrusted staged descriptor is replayed from its immutable base before
 publication so forged text coordinates, partial JSON edits, and noncanonical
 tails fail closed.
+
+Peer uploads and fresh preparations are re-read completely before their
+staging receipt is issued. A text or bytes descriptor that Groove itself
+derives from a published base (append, splice, consolidation) inherits the
+base's validity instead: finalization authenticates the base descriptor
+against its root node (the root being active, i.e. holding a staging receipt
+or a durable reference), authenticates the newly staged nodes, proves every other reachable node is an edge of the base tree with the
+same logical hash and metrics, checks the root's tail-free metrics, and
+replays the tail. It falls back to the complete pass when the base root is
+not active or reuse cannot be proven, and JSON always
+takes the complete pass. Either way a published descriptor is fully valid, so
+a local edit costs O(edit + tree depth) rather than O(value).
 
 When adding an edit would exceed a bound, Groove streams the current logical
 value through the edit, rechunks until content boundaries resynchronize, stages

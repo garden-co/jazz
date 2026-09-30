@@ -58,6 +58,9 @@ pub struct DatabaseBatch {
     pub(super) prepared: RefCell<PreparedBatchWrites>,
     pub(super) notification_timing: NotificationTiming,
     pub(super) accepted_large_values: Vec<crate::large_values::StagedLargeValueId>,
+    /// Every table an operation of this batch writes. A read of any other
+    /// table cannot observe this batch, so it needs no staged overlay.
+    pub(super) written_tables: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -262,7 +265,16 @@ impl DatabaseBatch {
     }
 
     pub(super) fn push_operation(&mut self, operation: BatchOperation) {
+        let table = operation.table();
+        if !self.written_tables.contains(table) {
+            self.written_tables.insert(table.to_owned());
+        }
         self.operations.push(operation);
+    }
+
+    /// Whether any operation of this batch writes `table`.
+    pub(super) fn writes_table(&self, table: &str) -> bool {
+        self.written_tables.contains(table)
     }
 }
 
@@ -344,6 +356,19 @@ pub enum BatchOperation {
         table: String,
         key: PrimaryKeyValue,
     },
+}
+
+impl BatchOperation {
+    pub(super) fn table(&self) -> &str {
+        match self {
+            Self::Insert { table, .. }
+            | Self::InsertRaw { table, .. }
+            | Self::InsertRawFresh { table, .. }
+            | Self::Update { table, .. }
+            | Self::UpdateRaw { table, .. }
+            | Self::Delete { table, .. } => table,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

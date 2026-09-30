@@ -63,6 +63,8 @@ struct EvaluationSession<'a> {
     requests: EvaluationRequests<'a>,
     evaluation_inputs: EvaluationInputs,
     work_queue: EvaluationWorkQueue,
+    /// How root outputs present indirect values to the caller.
+    root_indirect_values: RootIndirectValues,
     /// Nodes that stay owned by the live runtime rather than this session.
     /// A binding attached to an already-maintained prepared shape brings the
     /// shared nodes up to date through an ordinary binding tick, then hydrates
@@ -1016,6 +1018,9 @@ impl<'a> IncrementalEvaluation<'a> {
         if self.discarded {
             return;
         }
+        // Root ordering snapshots share TopBy group state. Release them before
+        // folding overlays, or the fold would copy every touched group.
+        self.root_ordering_windows.clear();
         // Installed operator state is root-scoped; recursive child scopes are
         // scratch. Drop them here, from this evaluation's own states, rather
         // than scanning every installed state afterwards.
@@ -1068,12 +1073,7 @@ impl<'a> IncrementalEvaluation<'a> {
         // the end of publication. Retain only actual hydration reuse entries.
         for (key, entry) in std::mem::take(&mut self.eval_memo).into_entries() {
             if key.tick_epoch.is_none() {
-                runtime.eval_memo_bytes =
-                    runtime.eval_memo_bytes.saturating_add(entry.payload_bytes);
-                if let Some(old) = runtime.eval_memo.insert(key, entry) {
-                    runtime.eval_memo_bytes =
-                        runtime.eval_memo_bytes.saturating_sub(old.payload_bytes);
-                }
+                runtime.insert_retained_eval_memo(key, entry);
             }
         }
         runtime.memo_use_clock = runtime.memo_use_clock.max(self.memo_use_clock);
@@ -1611,11 +1611,16 @@ impl<'a> EvaluationSession<'a> {
         }
         let mut eval_memo = EvaluationMemo::for_layout(Arc::clone(&work_queue.layout));
         eval_memo.extend(
-            runtime
-                .eval_memo
+            relevant_nodes
                 .iter()
-                .filter(|(key, _)| relevant_nodes.contains(&key.node))
-                .map(|(key, entry)| (key.clone(), entry.clone())),
+                .filter_map(|node| runtime.eval_memo_keys_by_node.get(node))
+                .flatten()
+                .filter_map(|key| {
+                    runtime
+                        .eval_memo
+                        .get(key)
+                        .map(|entry| (key.clone(), entry.clone()))
+                }),
         );
         let eval_memo_bytes = eval_memo.values().map(|entry| entry.payload_bytes).sum();
         let node_meta = relevant_nodes
@@ -1699,6 +1704,7 @@ impl<'a> EvaluationSession<'a> {
             requests,
             evaluation_inputs: EvaluationInputs::default(),
             work_queue,
+            root_indirect_values: RootIndirectValues::Materialize,
             borrowed: HashSet::default(),
         })
     }
@@ -1805,12 +1811,16 @@ impl<'a> EvaluationSession<'a> {
                 match result {
                     Ok(records) => {
                         if self.work_queue.is_root(node) {
+                            let materialized_fields = self
+                                .root_indirect_values
+                                .materialized_field_indices(&records.descriptor);
                             let mut materialized = Vec::with_capacity(records.deltas.len());
                             let mut blocked = false;
                             for delta in &records.deltas {
                                 match crate::large_values::materialize_record_borrowed_attempt(
                                     &records.descriptor,
                                     delta.raw(),
+                                    materialized_fields.as_deref(),
                                     &mut self.evaluation_inputs,
                                 ) {
                                     Ok(record) => materialized.push(RecordDelta {
@@ -1984,19 +1994,14 @@ impl<'a> EvaluationSession<'a> {
         runtime
             .arrangement_keys_by_input
             .extend(self.arrangement_keys_by_input);
-        runtime
+        runtime.remove_retained_eval_memos_for_nodes(&self.relevant_nodes);
+        for (key, entry) in self
             .eval_memo
-            .retain(|key, _| !self.relevant_nodes.contains(&key.node));
-        runtime.eval_memo.extend(
-            self.eval_memo
-                .into_entries()
-                .filter(|(key, _)| key.tick_epoch.is_none()),
-        );
-        runtime.eval_memo_bytes = runtime
-            .eval_memo
-            .values()
-            .map(|entry| entry.payload_bytes)
-            .sum();
+            .into_entries()
+            .filter(|(key, _)| key.tick_epoch.is_none())
+        {
+            runtime.insert_retained_eval_memo(key, entry);
+        }
         runtime.memo_use_clock = runtime.memo_use_clock.max(self.memo_use_clock);
         carry_live_node_lifecycle(&mut self.node_meta, runtime, &self.relevant_nodes);
         for node in &self.relevant_nodes {
@@ -2017,6 +2022,7 @@ impl IvmRuntime {
         binding_frontier_advance: Option<&str>,
         initial: Arc<Mutex<Option<MultisinkDeltas>>>,
         lifetime: SubscriptionLifetime,
+        root_indirect_values: RootIndirectValues,
         borrowed: HashSet<NodeId>,
     ) -> Result<(), IvmRuntimeError> {
         let mut seen_roots = HashSet::new();
@@ -2031,6 +2037,7 @@ impl IvmRuntime {
                 Ok::<_, IvmRuntimeError>(found || self.output_depends_on_aggregate(root)?)
             })?;
         let mut session = EvaluationSession::hydration(self, roots, storage)?;
+        session.root_indirect_values = root_indirect_values;
         if !borrowed.is_empty() {
             // The attach tick advanced every shared node. The subscription's
             // own nodes may be resident from an earlier binding of the same
@@ -2087,13 +2094,7 @@ impl IvmRuntime {
     fn fail_evaluation_nodes(&mut self, failure: &EvaluationFailure) {
         self.operator_states
             .retain(|key, _| !failure.affected_nodes.contains(&key.node));
-        self.eval_memo
-            .retain(|key, _| !failure.affected_nodes.contains(&key.node));
-        self.eval_memo_bytes = self
-            .eval_memo
-            .values()
-            .map(|entry| entry.payload_bytes)
-            .sum();
+        self.remove_retained_eval_memos_for_nodes(&failure.affected_nodes);
         for node in &failure.affected_nodes {
             if let Some(keys) = self.arrangement_keys_by_input.remove(node) {
                 for key in keys {
@@ -3034,37 +3035,40 @@ impl IvmRuntime {
             subscriptions_considered: affected_subscriptions.len(),
             ..TickMetrics::default()
         };
-        // Structured collectors own their positional edits. Only plain outputs
-        // consume the generic before/after maps. Union demand across consumers
-        // because a TopBy node can be shared by both kinds of output. Preserve
-        // root_ordering_node metadata: hydration and scheduling still need it.
+        // Only plain outputs that carry the TopBy's row identity consume the
+        // generic before/after windows (`output_consumes_root_positions`).
+        // Union demand across consumers because a TopBy node can be shared by
+        // several kinds of output. Preserve root_ordering_node metadata:
+        // hydration and scheduling still need it.
         let mut root_ordering_windows = HashMap::default();
-        for subscription in affected_subscriptions
-            .iter()
-            .filter_map(|subscription| self.multisink_subscriptions.get(subscription))
-        {
-            for output in subscription
-                .outputs
-                .values()
-                .filter(|output| affected_nodes.contains(&output.node))
+        if self.plain_output_root_positions {
+            for subscription in affected_subscriptions
+                .iter()
+                .filter_map(|subscription| self.multisink_subscriptions.get(subscription))
             {
-                if let Some(ordering_node) = output.root_ordering_node
-                    && !output_is_structured_collect_by(&self.graph, output.node)?
+                for output in subscription
+                    .outputs
+                    .values()
+                    .filter(|output| affected_nodes.contains(&output.node))
                 {
-                    root_ordering_windows
-                        .entry(ordering_node)
-                        .or_insert_with(RootOrderingWindows::default);
+                    if let Some(ordering_node) = output.root_ordering_node
+                        && output_consumes_root_positions(&self.graph, output.node, ordering_node)?
+                    {
+                        root_ordering_windows
+                            .entry(ordering_node)
+                            .or_insert_with(RootOrderingWindows::default);
+                    }
                 }
             }
-        }
-        // A routed TopBy runs before its barriers are known to be touched, so
-        // it must collect positions for any bound output it may reach.
-        for terminal in &activation.routed {
-            if let Some(table) = self.graph.routes().table(*terminal) {
-                for node in &table.root_ordering_nodes {
-                    root_ordering_windows
-                        .entry(*node)
-                        .or_insert_with(RootOrderingWindows::default);
+            // A routed TopBy runs before its barriers are known to be touched, so
+            // it must collect positions for any bound output it may reach.
+            for terminal in &activation.routed {
+                if let Some(table) = self.graph.routes().table(*terminal) {
+                    for node in &table.root_ordering_nodes {
+                        root_ordering_windows
+                            .entry(*node)
+                            .or_insert_with(RootOrderingWindows::default);
+                    }
                 }
             }
         }
@@ -3152,17 +3156,6 @@ impl IvmRuntime {
     }
 
     fn evict_eval_memo(&mut self) {
-        if self.eval_memo.tick_entries() > 0 {
-            let mut retained_bytes = 0usize;
-            self.eval_memo.retain(|key, entry| {
-                let keep = key.tick_epoch.is_none();
-                if keep {
-                    retained_bytes = retained_bytes.saturating_add(entry.payload_bytes);
-                }
-                keep
-            });
-            self.eval_memo_bytes = retained_bytes;
-        }
         if self.eval_memo.len() <= EVAL_MEMO_MAX_ENTRIES
             && self.eval_memo_bytes <= EVAL_MEMO_MAX_BYTES
         {
@@ -3180,25 +3173,12 @@ impl IvmRuntime {
             {
                 break;
             }
-            if let Some(entry) = self.eval_memo.remove(&key) {
-                self.eval_memo_bytes = self.eval_memo_bytes.saturating_sub(entry.payload_bytes);
-            }
+            self.remove_retained_eval_memo(&key);
         }
     }
 
     #[cfg(test)]
-    fn recompute_eval_memo_bytes(&mut self) {
-        self.eval_memo_bytes = self
-            .eval_memo
-            .values()
-            .map(|entry| entry.payload_bytes)
-            .sum();
-    }
-
-    #[cfg(test)]
     pub(super) fn evict_eval_memo_for_tests(&mut self, max_entries: usize, max_bytes: usize) {
-        self.eval_memo.retain(|key, _| key.tick_epoch.is_none());
-        self.recompute_eval_memo_bytes();
         let mut entries = self
             .eval_memo
             .iter()
@@ -3209,9 +3189,7 @@ impl IvmRuntime {
             if self.eval_memo.len() <= max_entries && self.eval_memo_bytes <= max_bytes {
                 break;
             }
-            if let Some(entry) = self.eval_memo.remove(&key) {
-                self.eval_memo_bytes = self.eval_memo_bytes.saturating_sub(entry.payload_bytes);
-            }
+            self.remove_retained_eval_memo(&key);
         }
     }
 
@@ -3224,23 +3202,36 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
-        self.hydration_roots([output_node], storage, mode)
-            .await?
-            .remove(&output_node)
-            .ok_or(IvmRuntimeError::GraphNodeNotFound(output_node))
+        self.hydration_snapshot_with_root_values(
+            output_node,
+            storage,
+            mode,
+            RootIndirectValues::Materialize,
+        )
+        .await
     }
 
-    async fn hydration_roots<S>(
+    pub(super) async fn hydration_snapshot_with_root_values<S>(
         &mut self,
-        roots: impl IntoIterator<Item = NodeId>,
+        output_node: NodeId,
         storage: &S,
         mode: HydrationMode,
-    ) -> Result<HashMap<NodeId, RecordDeltas>, IvmRuntimeError>
+        root_indirect_values: RootIndirectValues,
+    ) -> Result<RecordDeltas, IvmRuntimeError>
     where
         S: OrderedKvStorage,
     {
-        self.hydration_roots_owned(roots, OwnedStorage::new(Rc::new(storage)), mode, None, None)
-            .await
+        self.hydration_roots_owned(
+            [output_node],
+            OwnedStorage::new(Rc::new(storage)),
+            mode,
+            None,
+            None,
+            root_indirect_values,
+        )
+        .await?
+        .remove(&output_node)
+        .ok_or(IvmRuntimeError::GraphNodeNotFound(output_node))
     }
 
     async fn hydration_roots_owned<'a>(
@@ -3250,6 +3241,7 @@ impl IvmRuntime {
         mode: HydrationMode,
         binding_snapshots: Option<Arc<BindingSnapshots>>,
         binding_frontier_advance: Option<&str>,
+        root_indirect_values: RootIndirectValues,
     ) -> Result<HashMap<NodeId, RecordDeltas>, IvmRuntimeError> {
         let roots = roots.into_iter().collect::<VecDeque<_>>();
         let binding_snapshots = binding_snapshots.unwrap_or_else(|| self.binding_snapshot_deltas());
@@ -3262,6 +3254,7 @@ impl IvmRuntime {
                 Ok::<_, IvmRuntimeError>(found || self.output_depends_on_aggregate(root)?)
             })?;
         let mut session = EvaluationSession::hydration(self, roots, owned_storage)?;
+        session.root_indirect_values = root_indirect_values;
         if let Some(shape) = binding_frontier_advance {
             session.advance_binding_input(&self.graph, shape);
         }
@@ -3320,6 +3313,7 @@ impl IvmRuntime {
                 mode,
                 binding_snapshots,
                 binding_frontier_advance,
+                RootIndirectValues::Materialize,
             )
             .await?;
         subscription_snapshot_from_hydrated(&self.graph, outputs, &hydrated, &HashMap::default())
@@ -3634,6 +3628,8 @@ mod tests {
 
     // Internal publication receipt: observing the final rows cannot detect
     // inserting every tick memo into runtime and immediately evicting it again.
+    // The index and byte budget are private optimization state, so public rows
+    // cannot expose bookkeeping drift before a later invalidation or eviction.
     #[futures_test::test]
     async fn publication_retains_only_hydration_memos_with_exact_replacement_accounting() {
         let mut runtime = IvmRuntime::new(DatabaseSchema::new([])).unwrap();
@@ -3660,10 +3656,7 @@ mod tests {
                 0,
             )
         };
-        runtime
-            .eval_memo
-            .insert(hydration_key.clone(), make_entry(3));
-        runtime.eval_memo_bytes = 3;
+        runtime.insert_retained_eval_memo(hydration_key.clone(), make_entry(3));
         let storage = Rc::new(MemoryStorage::new(&[]).unwrap());
         let mut evaluation = runtime
             .begin_tick_with_params(Vec::new(), Vec::new(), OwnedStorage::new(storage), None)
@@ -3691,6 +3684,14 @@ mod tests {
             7
         );
         assert_eq!(runtime.eval_memo_bytes, 7);
+        assert_eq!(
+            runtime.eval_memo_keys_by_node.get(&node),
+            Some(&HashSet::from([hydration_key.clone()]))
+        );
+        runtime.remove_retained_eval_memos_for_nodes(&HashSet::from([node]));
+        assert!(runtime.eval_memo.is_empty());
+        assert!(!runtime.eval_memo_keys_by_node.contains_key(&node));
+        assert_eq!(runtime.eval_memo_bytes, 0);
     }
 
     // Internal mechanism receipt: identical public rows cannot prove that the

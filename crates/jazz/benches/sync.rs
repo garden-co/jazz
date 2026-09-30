@@ -59,10 +59,10 @@ impl Config {
 
 struct SyncBench {
     config: Config,
-    ui: NodeState<RocksDbStorage>,
-    worker: NodeState<RocksDbStorage>,
-    relay: NodeState<RocksDbStorage>,
-    core: NodeState<RocksDbStorage>,
+    ui: NodeState,
+    worker: NodeState,
+    relay: NodeState,
+    core: NodeState,
     _dirs: Vec<tempfile::TempDir>,
     core_to_relay: PeerState,
     relay_to_worker: PeerState,
@@ -437,7 +437,7 @@ impl SyncBench {
     }
 }
 
-fn relay_ingest(node: &mut NodeState<RocksDbStorage>, message: &SyncMessage) {
+fn relay_ingest(node: &mut NodeState, message: &SyncMessage) {
     let SyncMessage::CommitUnit { tx, versions } = message else {
         panic!("expected commit unit");
     };
@@ -445,11 +445,7 @@ fn relay_ingest(node: &mut NodeState<RocksDbStorage>, message: &SyncMessage) {
         .expect("relay ingest");
 }
 
-fn core_ingest(
-    core: &mut NodeState<RocksDbStorage>,
-    message: &SyncMessage,
-    now_ms: u64,
-) -> SyncMessage {
+fn core_ingest(core: &mut NodeState, message: &SyncMessage, now_ms: u64) -> SyncMessage {
     let SyncMessage::CommitUnit { tx, versions } = message else {
         panic!("expected commit unit");
     };
@@ -462,11 +458,7 @@ fn core_ingest(
     fate
 }
 
-fn refresh(
-    upstream: &mut NodeState<RocksDbStorage>,
-    downstream: &mut NodeState<RocksDbStorage>,
-    peer: &mut PeerState,
-) {
+fn refresh(upstream: &mut NodeState, downstream: &mut NodeState, peer: &mut PeerState) {
     let schema = schema();
     let (_, _, subscription) = support::table_subscription(&schema, TABLE, peer.identity());
     if peer.subscription_result_sets(subscription).is_none() {
@@ -486,9 +478,7 @@ fn content_unit_row(unit: &SyncMessage) -> Option<RowUuid> {
         .map(|version| version.row_uuid())
 }
 
-fn current_rows(
-    node: &mut NodeState<RocksDbStorage>,
-) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
+fn current_rows(node: &mut NodeState) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
     let schema = schema();
     let table = &schema.tables[0];
     node.current_rows(TABLE, DurabilityTier::Global)
@@ -541,10 +531,7 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_node(
-    node_uuid: NodeUuid,
-    schema: JazzSchema,
-) -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
+fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, NodeState) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();

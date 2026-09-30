@@ -49,7 +49,7 @@ Invariant digest:
 
 - `INV-SYNC-37`: LocalOnly propagation MUST remain on the calling node. Every remote subscription with propagate_upstream=false MUST be rejected regardless of identity, trust, role or worker transport.
 - `INV-SYNC-38`: An extra local query input absent from a completed selected-authority scope MUST be revalidated; scope absence or Unknown MUST NOT assert deletion or access loss. Bounded batches MUST preserve eventual retry/progression for supported active queries.
-- `INV-SYNC-48`: A fresh strict (Global) read of a current/default single-table scalar query MUST NOT report settled while a row the client holds live, whose local winner is accepted at Global and which matches the query locally, is absent from the settled authority answer: exactly those rows are probed through `CurrentRowsRequest` and the receipt's carriers (deleted images included) are ingested first; access loss does not redact the local copy. Agreeing views settle without a probe; an Unknown or unanswered probe, or discovery exceeding its bound, releases settlement on the authority answer alone.
+- `INV-SYNC-48`: A fresh strict (Global) read of a current/default single-table scalar query MUST NOT report settled while a row the client holds live, whose local winner is accepted at Global and which matches the query locally, is absent from the settled authority answer: exactly those rows are probed through `CurrentRowsRequest` and the receipt's carriers (deleted images included) are ingested first; access loss does not redact the local copy. Agreeing views settle without a probe. Reconciliation is reliable, not best-effort: settlement may stop waiting after a bounded interval and release on the authority answer alone, but the outstanding reconciliation is never dropped. The runtime keeps discovering and probing, deduplicated per row, independent of the stream that found the row and of whether the query runtime ever idles, retrying Unknown, dropped, timed-out, or disconnected probes with backoff (immediately on a new upstream link, never while none is admitted), until the authority answers each held row as deleted, readable, or unavailable, or the row's local version changes. A deletion answered after settlement is still applied locally and emits the ordinary local change.
 - `INV-SYNC-39`: Confirmed current unavailability MUST be scoped to the exact effective identity/claims and filter current application inputs before joins, counts and limits. It MUST NOT erase shared content, expose the cause, or affect SYSTEM and other contexts.
 - `INV-SYNC-40`: Readmission MUST follow complete authorized native content ingestion and fresh correlated evidence. Durable per-row denial and clear watermarks MUST survive reopen and prevent stale replies from reversing a newer decision; authoritative inclusion MUST be able to revalidate an excluded row.
 - `INV-SYNC-41`: A partial client relay MUST NOT authorize query or exact-version repair bytes using cached policy inputs. Core authorizes disclosure for the admitted reader; delegated client scopes remain client-scoped across local relay links. SYSTEM reconciliation MUST NOT create access-loss markers for an ordinary reader.
@@ -1004,9 +1004,11 @@ one-shot, which reads through one) first reports `settled`, the receiver
 compares the settled authority input rows with the rows its own local store
 holds live for the same query. The local inventory comes from an ordinary
 Local-tier maintained graph of the same query, opened only after the stream's
-own graph has installed and evaluated the settled closure and the query runtime
-is otherwise idle, so it never queues behind large-value chunk work that the
-same sync turn must request. Rows whose current local winner is an accepted
+own graph has installed and evaluated the settled closure. It never waits for
+the rest of the query runtime to idle (other streams' continuous fresh reads
+would starve it); while other work is pending the graph is opened without
+driving the runtime and is drained on later turns, so it never blocks behind
+large-value chunk work that the same sync turn must request. Rows whose current local winner is an accepted
 Global transaction and which the authority omitted are probed through the
 ordinary `CurrentRowsRequest` path, in `MAX_CURRENT_ROWS` batches, under the
 stream's admitted policy binding. Settlement is withheld until each receipt's
@@ -1014,10 +1016,29 @@ carriers are ingested; a deleted image deletes the row locally. A
 `CurrentUnavailable` outcome is access loss, which the settled result already
 omits: it does not redact the local copy (`INV-SYNC-14`). Pending local writes
 are never candidates. Agreeing views settle in the same refresh without any
-round trip; the cost is one local evaluation of the query. Discovery that
-cannot finish within five seconds, and an Unknown, unanswered, or timed-out
-probe, release settlement on the authority's answer alone, as before; neither
-asserts deletion or access loss. The initial scope is the current/default
+round trip; the cost is one local evaluation of the query.
+
+Reconciliation is reliable, not best-effort. The stream withholds its first
+settlement for at most five seconds; past that bound it settles on the
+authority's answer alone, but the reconciliation continues. Omitted rows are
+handed to a runtime-owned set of held-row checks, deduplicated per
+`(table, row)`, that outlives the stream (a `Remote` one-shot closes as soon
+as it settles). A discovery unfinished at the bound, or when its stream
+closes, moves to the runtime as well, keeping the settled authority rows it
+compares against; a later discovery of the same query and policy binding
+supersedes its authority rows instead of running twice. An Unknown outcome,
+a receipt the router drops (stale floor, changed coordinate, unusable Core
+evidence, a relay that cannot forward the probe), a timed-out probe, and a
+disconnect all leave the row held: it is retried with exponential backoff
+(250 ms doubling to 30 s), immediately when a new upstream link is admitted,
+and not at all while no upstream is admitted, so a down connection does not
+spin. A row leaves the set only when the authority answers it `Readable`
+(a deleted image deletes it locally) or `CurrentUnavailable` (access loss, not
+applied), or when its local coordinate changes, in which case later reads
+reconcile the new version. Deletions answered after settlement are applied
+exactly as before settlement and mark local subscriptions dirty, so live
+subscriptions observe the ordinary local change. No outcome asserts access
+loss. The initial scope is the current/default
 single-table scalar query (no joins, includes, projections, aggregates,
 windows, or policy branches), filtered or not; a stream that already opens
 settled on a coverage live before it is not rechecked.

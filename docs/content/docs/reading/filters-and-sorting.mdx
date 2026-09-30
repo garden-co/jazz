@@ -12,7 +12,7 @@ Use `where(...)` to filter rows. Pass the columns you want to match on&hairsp;â€
 
 <WhereOperatorsTable />
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-filters-ts
@@ -20,6 +20,16 @@ Use `where(...)` to filter rows. Pass the columns you want to match on&hairsp;â€
 
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-where-operators-ts
+    </include>
+
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts">
+      ../examples/docs/todo-effect/src/docs-snippets.ts#reading-filters-effect
+    </include>
+
+    <include cwd lang="ts">
+      ../examples/docs/todo-effect/src/docs-snippets.ts#reading-where-operators-effect
     </include>
 
   </Tab>
@@ -39,10 +49,15 @@ Sort results with `orderBy(...)`. Pass a column name and optionally `"asc"` or `
   queries.
 </Callout>
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-sorting-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts">
+      ../examples/docs/todo-effect/src/docs-snippets.ts#reading-sorting-effect
     </include>
   </Tab>
   <Tab value="Rust">
@@ -58,10 +73,15 @@ Sort results with `orderBy(...)`. Pass a column name and optionally `"asc"` or `
 deterministic order. If the first sort column is not unique, add `orderBy("id")` as the final
 tie-breaker so page boundaries are stable.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-pagination-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts">
+      ../examples/docs/todo-effect/src/docs-snippets.ts#reading-pagination-effect
     </include>
   </Tab>
   <Tab value="Rust">

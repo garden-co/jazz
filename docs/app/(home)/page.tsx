@@ -1,5 +1,9 @@
 import type { Metadata } from "next";
-import Link from "next/link";
+import { Card } from "@astryxdesign/core/Card";
+import { Heading } from "@astryxdesign/core/Heading";
+import { Link as AstryxLink } from "@astryxdesign/core/Link";
+import { Text } from "@astryxdesign/core/Text";
+import { AppLink } from "@/components/design/app-link";
 import { PricingCalculator } from "@/components/home/pricing-calculator";
 import { pricingMeters } from "@/lib/home-pricing";
 
@@ -12,20 +16,20 @@ const homepageSections = [
     title: "Local-first data with tunable consistency",
     body: (
       <>
-        <p className="max-w-[38rem] text-base">
+        <Text as="p" display="block" className="max-w-[38rem] text-base">
           Like an embedded database, Jazz brings durable data directly into your frontend and
           backend &mdash; but also automatically syncs it to the cloud.
-        </p>
-        <p className="max-w-[38rem] text-base">
+        </Text>
+        <Text as="p" display="block" className="max-w-[38rem] text-base">
           This is what makes Jazz feel like magically shared reactive state that abstracts away
           networking. Because data is granularly synced on-demand, your app is fast on first use and
           instant afterwards.
-        </p>
-        <p className="max-w-[38rem] text-base">
+        </Text>
+        <Text as="p" display="block" className="max-w-[38rem] text-base">
           This is possible because Jazz is eventually-consistent by default. But where
           transactionality matters, you can trade off low-latency and use traditional, globally
           consistent transactions, all in the same database.
-        </p>
+        </Text>
       </>
     ),
   },
@@ -33,15 +37,15 @@ const homepageSections = [
     title: "Row-level security and per-query auth",
     body: (
       <>
-        <p className="max-w-[38rem] text-base">
+        <Text as="p" display="block" className="max-w-[38rem] text-base">
           Row-level security allows you to express permissions in a well-defined and testable way.
           This removes significant complexity and compute effort from your backend and gives you
           zero-roundtrip security.
-        </p>
-        <p className="max-w-[38rem] text-base">
+        </Text>
+        <Text as="p" display="block" className="max-w-[38rem] text-base">
           Jazz modernizes RLS by integrating it deeply with auth (policies over both data and user
           JWT claims) and by optimizing each user query and its applicable policy queries as a unit.
-        </p>
+        </Text>
       </>
     ),
   },
@@ -49,19 +53,19 @@ const homepageSections = [
     title: "Real-time collaboration and deep edit histories",
     body: (
       <>
-        <p className="max-w-[38rem] text-base">
+        <Text as="p" display="block" className="max-w-[38rem] text-base">
           Jazz was conceived in the era of Notion and Figma when real-time collaboration became
           table stakes.
-        </p>
-        <p className="max-w-[38rem] text-base">
+        </Text>
+        <Text as="p" display="block" className="max-w-[38rem] text-base">
           Things have only gotten faster since then: users collaborate with agents to modify data at
           a much higher rate. At the same time, data versioning and edit histories have become more
           important than ever to reason about data after-the-fact.
-        </p>
-        <p className="max-w-[38rem] text-base">
+        </Text>
+        <Text as="p" display="block" className="max-w-[38rem] text-base">
           By giving each row a full git-like branching history, Jazz gives you powerful APIs to work
           with historical data and complex collaboration traces.
-        </p>
+        </Text>
       </>
     ),
   },
@@ -69,16 +73,16 @@ const homepageSections = [
     title: "Fluid schema evolution for fast teams",
     body: (
       <>
-        <p className="max-w-[38rem] text-base">
+        <Text as="p" display="block" className="max-w-[38rem] text-base">
           Instead of traditional stop-the-world migrations that quickly become a bottleneck to
           shipping app updates, Jazz's migrations act as live data compatibility layers that
           translate between different versions of your app.
-        </p>
-        <p>
+        </Text>
+        <Text as="p" display="block" className="max-w-[38rem] text-base">
           This allows you to iterate on app features at high speed in a full-stack way. It also
           automatically enables backwards-compatibility for old clients and makes complex apps with
           many feature flags much safer to manage.
-        </p>
+        </Text>
       </>
     ),
   },
@@ -86,21 +90,21 @@ const homepageSections = [
     title: "Slims your backend and simplifies your infra",
     body: (
       <>
-        <p className="max-w-[38rem] text-base">
+        <Text as="p" display="block" className="max-w-[38rem] text-base">
           Jazz does a lot of things to ease the burden of the backend by its design: By abstracting
           away networking, making permissions a database concern, integrating directly with auth and
           offering a collaboration-native data model it standardizes a large portion of
           complications that typically dilutes business logic. This clarity and high level of
           abstraction is crucial in large companies, complex apps and agentically engineered
           codebases.
-        </p>
-        <p>
+        </Text>
+        <Text as="p" display="block" className="max-w-[38rem] text-base">
           In addition, it takes on data-centric roles that usually require dedicated infrastructure
           components or even vendors: blob storage, file and image CDN, durable streams and
           real-time message queues. This means that you can build complex systems much faster using
           only Jazz - and where integration points are still necessary, Jazz is great glue between
           other systems.
-        </p>
+        </Text>
       </>
     ),
   },
@@ -111,42 +115,38 @@ export default function HomePage() {
     <div className="w-full">
       <section className="h-[80vh] w-full">
         <div className="mx-auto flex h-full w-full max-w-(--fd-layout-width) items-end px-4 relative">
-          <aside className="absolute right-4 top-4 z-30 max-w-sm text-md rounded-2xl border border-fd-border/70 dark:border-white/50 bg-white dark:bg-black p-4 leading-relaxed shadow">
-            <p>Announcing the Jazz v2 alpha!</p>
-            <p>
-              See the{" "}
-              <Link
-                href="/blog/what-is-jazz"
-                className="font-medium underline decoration-fd-muted-foreground/60 underline-offset-4 transition-colors hover:text-fd-foreground"
-              >
-                announcement post
-              </Link>
-              .{" "}
-            </p>
-            <p>
-              <span className="text-fd-muted-foreground">
+          <aside className="absolute right-4 top-4 z-30 max-w-sm">
+            <Card className="border-fd-border/70 shadow dark:border-white/50">
+              <Text as="p" display="block" className="leading-relaxed">
+                Announcing the Jazz v2 alpha!
+              </Text>
+              <Text as="p" display="block" className="leading-relaxed">
+                See the{" "}
+                <AppLink href="/blog/what-is-jazz" color="inherit" className="font-medium">
+                  announcement post
+                </AppLink>
+                .
+              </Text>
+              <Text as="p" display="block" color="secondary" className="leading-relaxed">
                 (Looking for{" "}
-                <a
-                  href="https://classic.jazz.tools"
-                  className="underline decoration-fd-muted-foreground/60 underline-offset-4 transition-colors hover:text-fd-foreground"
-                >
+                <AstryxLink href="https://classic.jazz.tools" color="inherit">
                   classic Jazz
-                </a>
+                </AstryxLink>
                 ?)
-              </span>
-            </p>
+              </Text>
+            </Card>
           </aside>
           <div className="w-full max-w-[42rem] space-y-6 pb-2 sm:space-y-10">
-            <h1 className="w-full text-[clamp(4rem,11vw,10rem)] font-black leading-[0.84] tracking-[-0.05em]">
+            <Heading level={1} type="display-1">
               <span className="block">the</span>
               <span className="block -ml-[0.04em]">database</span>
               <span className="block">that syncs</span>
-            </h1>
-            <p className="max-w-[40em] text-xl leading-relaxed">
+            </Heading>
+            <Text as="p" display="block" className="max-w-[40em] text-xl leading-relaxed">
               Jazz is a local-first relational database. It runs across your frontend, backend and
               our global storage cloud. Sync partial tables, durable streams and files, fast. Feels
               like simple reactive state.
-            </p>
+            </Text>
           </div>
         </div>
       </section>
@@ -154,9 +154,12 @@ export default function HomePage() {
         <div className="mx-auto grid w-full max-w-(--fd-layout-width) gap-x-12 gap-y-14 px-4 md:grid-cols-2 lg:gap-x-16 lg:gap-y-18">
           {homepageSections.map((section) => (
             <div key={section.title} className="max-w-[34rem] space-y-4">
-              <h2 className="text-3xl font-black leading-[0.9] tracking-[-0.04em] sm:text-[2.6rem] text-balance">
+              <Heading
+                level={2}
+                className="text-3xl font-black leading-[0.9] tracking-[-0.04em] sm:text-[2.6rem]"
+              >
                 {section.title}
-              </h2>
+              </Heading>
               {section.body}
             </div>
           ))}
@@ -166,25 +169,40 @@ export default function HomePage() {
         <div className="mx-auto w-full max-w-(--fd-layout-width) px-4">
           <div className="grid gap-14 lg:grid-cols-[minmax(0,0.86fr)_minmax(0,1.14fr)] lg:items-end">
             <div className="max-w-[34rem] space-y-4">
-              <p className="font-display text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
-                Jazz Cloud
-              </p>
-              <h2 className="text-3xl font-black leading-[0.9] tracking-[-0.04em] sm:text-[2.6rem] text-balance">
+              <Heading
+                level={2}
+                className="text-3xl font-black leading-[0.9] tracking-[-0.04em] sm:text-[2.6rem]"
+              >
                 A globally synced, auto-scaling database cloud
-              </h2>
-              <p className="max-w-[34rem] text-base leading-relaxed text-fd-muted-foreground sm:text-lg">
+              </Heading>
+              <Text
+                as="p"
+                display="block"
+                color="secondary"
+                className="max-w-[34rem] text-base leading-relaxed sm:text-lg"
+              >
                 The single-tenant Jazz database server will always be open-source and is very easy
                 to self-host, but you'll have an even better experience with Jazz Cloud.
-              </p>
-              <p className="max-w-[34rem] text-base leading-relaxed text-fd-muted-foreground sm:text-lg">
+              </Text>
+              <Text
+                as="p"
+                display="block"
+                color="secondary"
+                className="max-w-[34rem] text-base leading-relaxed sm:text-lg"
+              >
                 Jazz Cloud is a globally distributed, fault-tolerant and geo-optimized
                 infrastructure tailored for Jazz.
-              </p>
-              <p className="max-w-[34rem] text-base leading-relaxed text-fd-muted-foreground sm:text-lg">
+              </Text>
+              <Text
+                as="p"
+                display="block"
+                color="secondary"
+                className="max-w-[34rem] text-base leading-relaxed sm:text-lg"
+              >
                 It's zero-config to set up, gives you a "it just works" experience from your first
                 experiments and scales much more granularly than traditional instance-based
                 databases.
-              </p>
+              </Text>
             </div>
           </div>
         </div>
@@ -193,48 +211,78 @@ export default function HomePage() {
         <div className="mx-auto w-full max-w-(--fd-layout-width) px-4">
           <div className="grid gap-14 lg:grid-cols-[minmax(0,0.86fr)_minmax(0,1.14fr)]">
             <div className="max-w-[34rem] space-y-4">
-              <p className="font-display text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
-                Usage-based pricing
-              </p>
-              <h2 className="text-3xl font-black leading-[0.9] tracking-[-0.04em] sm:text-[2.6rem] text-balance">
+              <Heading
+                level={2}
+                className="text-3xl font-black leading-[0.9] tracking-[-0.04em] sm:text-[2.6rem]"
+              >
                 Simple billing
                 <br />
                 that scales to zero
-              </h2>
-              <p className="max-w-[34rem] text-base leading-relaxed text-fd-muted-foreground sm:text-lg">
+              </Heading>
+              <Text
+                as="p"
+                display="block"
+                color="secondary"
+                className="max-w-[34rem] text-base leading-relaxed sm:text-lg"
+              >
                 Because Jazz is incredibly flexible and supports a wide range of different apps,
                 it's important that its pricing is just as flexible.
-              </p>
-              <p className="max-w-[34rem] text-base leading-relaxed text-fd-muted-foreground sm:text-lg">
+              </Text>
+              <Text
+                as="p"
+                display="block"
+                color="secondary"
+                className="max-w-[34rem] text-base leading-relaxed sm:text-lg"
+              >
                 The idea: we bill for the things that are irreducibly-hard, making no assumptions
                 about your app or your users.
-              </p>
-              <p className="max-w-[34rem] text-base leading-relaxed text-fd-muted-foreground sm:text-lg">
+              </Text>
+              <Text
+                as="p"
+                display="block"
+                color="secondary"
+                className="max-w-[34rem] text-base leading-relaxed sm:text-lg"
+              >
                 You benefit from global infrastructure with multi-region edges, our operational
                 experience and pricing that is only possible at scale, while being billed in
                 predictable, scale-to-zero units.
-              </p>
+              </Text>
             </div>
             <div className="grid gap-x-8 gap-y-10 sm:grid-cols-3">
               {pricingMeters.map((meter) => (
                 <div key={meter.name} className="border-t pt-4">
-                  <p className="font-display text-xs font-semibold uppercase tracking-[0.18em] text-fd-muted-foreground">
+                  <Text as="p" display="block" type="label" color="secondary">
                     {meter.name}
-                  </p>
-                  <p className="font-display mt-2 text-4xl font-black tracking-[-0.06em]">
+                  </Text>
+                  <Heading level={3} type="display-3" className="mt-2">
                     {meter.price}
-                  </p>
-                  <p className="mt-1 text-sm font-medium">{meter.unit}</p>
-                  <p className="mt-3 text-sm leading-relaxed text-fd-muted-foreground">
+                  </Heading>
+                  <Text as="p" display="block" weight="medium" className="mt-1 text-sm">
+                    {meter.unit}
+                  </Text>
+                  <Text
+                    as="p"
+                    display="block"
+                    color="secondary"
+                    className="mt-3 text-sm leading-relaxed"
+                  >
                     {meter.note}
-                  </p>
-                  <p className="mt-3 text-sm leading-relaxed text-fd-muted-foreground">
+                  </Text>
+                  <Text
+                    as="p"
+                    display="block"
+                    color="secondary"
+                    className="mt-3 text-sm leading-relaxed"
+                  >
                     {meter.included}
-                  </p>
+                  </Text>
                 </div>
               ))}
             </div>
-            <div className="sm:col-start-2">
+            {/* Not ported to Astryx yet. A data-astryx-theme attribute ends the
+                  theme's @scope, so its element resets (p, h1-h6, code) leave the
+                  calculator's Tailwind typography alone. */}
+            <div className="sm:col-start-2" data-astryx-theme="none">
               <PricingCalculator />
             </div>
           </div>
@@ -243,11 +291,13 @@ export default function HomePage() {
       </section>
       <footer className="w-full pb-24 pt-4 sm:pb-28 lg:pb-32">
         <div className="mx-auto flex w-full max-w-(--fd-layout-width) flex-col items-center gap-6 px-4">
-          <p className="font-display text-[clamp(2.75rem,5vw,6rem)] font-black leading-[0.9] tracking-[-0.06em]">
+          <Heading level={2} type="display-2">
             npm create jazz
-          </p>
+          </Heading>
           <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:gap-4">
-            <p className="text-sm text-fd-muted-foreground sm:text-base">Join the </p>
+            <Text as="p" display="block" color="secondary" className="text-sm sm:text-base">
+              Join the
+            </Text>
             <a
               href="https://discord.gg/RN9UKh52be"
               className="inline-flex items-center rounded-full border border-fd-border px-4 py-2 text-sm font-medium transition-colors hover:bg-fd-accent hover:text-fd-accent-foreground"

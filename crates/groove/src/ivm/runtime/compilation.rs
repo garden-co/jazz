@@ -501,17 +501,15 @@ impl IvmRuntime {
                 let table = self
                     .schema
                     .table(table)
-                    .ok_or_else(|| IvmRuntimeError::TableNotFound(table.clone()))?
-                    .clone();
+                    .ok_or_else(|| IvmRuntimeError::TableNotFound(table.clone()))?;
                 let index = table
                     .indices
                     .iter()
                     .find(|candidate| candidate.name == *index)
-                    .ok_or_else(|| IvmRuntimeError::IndexNotFound(index.clone()))?
-                    .clone();
+                    .ok_or_else(|| IvmRuntimeError::IndexNotFound(index.clone()))?;
                 let source = self.index_source_op(
-                    &table,
-                    &index,
+                    table,
+                    index,
                     scan.clone(),
                     intersections.clone(),
                     candidate_filter.clone(),

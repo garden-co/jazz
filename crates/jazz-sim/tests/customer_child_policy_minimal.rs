@@ -172,17 +172,13 @@ fn db_config(
     }
 }
 
-fn open_db(schema: JazzSchema, node_uuid: NodeUuid, author: AuthorSubject) -> Db<MemoryStorage> {
+fn open_db(schema: JazzSchema, node_uuid: NodeUuid, author: AuthorSubject) -> Db {
     let db = jazz::db::block_on(Db::open(db_config(schema, node_uuid, author))).expect("open db");
     install_db_claims(&db, author);
     db
 }
 
-fn open_history_complete_db(
-    schema: JazzSchema,
-    node_uuid: NodeUuid,
-    author: AuthorSubject,
-) -> Db<MemoryStorage> {
+fn open_history_complete_db(schema: JazzSchema, node_uuid: NodeUuid, author: AuthorSubject) -> Db {
     jazz::db::block_on(Db::open_history_complete(db_config(
         schema, node_uuid, author,
     )))
@@ -197,18 +193,18 @@ fn session_claims() -> BTreeMap<String, Value> {
     BTreeMap::new()
 }
 
-fn install_db_claims(db: &Db<MemoryStorage>, author: AuthorSubject) {
+fn install_db_claims(db: &Db, author: AuthorSubject) {
     if author != AuthorSubject::SYSTEM {
         db.set_identity_claims(author, session_claims());
     }
 }
 
-fn insert(db: &Db<MemoryStorage>, table: &str, row: RowUuid, cells: BTreeMap<String, Value>) {
+fn insert(db: &Db, table: &str, row: RowUuid, cells: BTreeMap<String, Value>) {
     db.seed_settled_mergeable_for_bootstrap(table, row, AuthorSubject::SYSTEM, cells)
         .expect("seed settled row");
 }
 
-fn count(db: &Db<MemoryStorage>, table: &str, author: AuthorSubject) -> usize {
+fn count(db: &Db, table: &str, author: AuthorSubject) -> usize {
     let prepared = db.prepare_query(&Query::from(table)).expect("prepare");
     let rows = jazz::db::block_on(db.all_for_identity(&prepared, ReadOpts::default(), author))
         .expect("one-shot");
@@ -241,7 +237,7 @@ fn apply_event(rows: &mut BTreeSet<RowUuid>, event: SubscriptionEvent) {
     }
 }
 
-fn tick_all(core: &Db<MemoryStorage>, relay: &Db<MemoryStorage>, client: &Db<MemoryStorage>) {
+fn tick_all(core: &Db, relay: &Db, client: &Db) {
     jazz::db::block_on(core.tick()).expect("core tick");
     jazz::db::block_on(relay.tick()).expect("relay tick");
     jazz::db::block_on(client.tick()).expect("client tick");

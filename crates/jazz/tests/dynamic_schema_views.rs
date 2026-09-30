@@ -129,7 +129,7 @@ fn empty_schema() -> JazzSchema {
     compile_schema(&SchemaBuilder::new().build())
 }
 
-async fn open_owner(schema: JazzSchema) -> Db<TestStorage> {
+async fn open_owner(schema: JazzSchema) -> Db {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     Db::open(

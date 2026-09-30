@@ -2,6 +2,9 @@
 name = "groove"
 version = "0.1.0"
 edition = "2024"
+# Integration tests are listed explicitly below so the flat files build as
+# one binary; see tests/integration/main.rs.
+autotests = false
 
 [features]
 default = []
@@ -54,3 +57,15 @@ harness = false
 [[bench]]
 name = "steady_state"
 harness = false
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"
+
+[[test]]
+name = "inline_scalar_allocations"
+path = "tests/inline_scalar_allocations.rs"
+
+[[test]]
+name = "nested_record_allocations"
+path = "tests/nested_record_allocations.rs"

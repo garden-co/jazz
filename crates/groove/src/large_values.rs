@@ -1,7 +1,7 @@
 //! Canonical indirect representation for large logical scalar values.
 
 use std::borrow::Cow;
-#[cfg(test)]
+#[cfg(any(test, feature = "test"))]
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
@@ -1722,6 +1722,53 @@ impl PhysicalTraversal {
         Ok(())
     }
 
+    /// The logical hash and metrics every discovered edge into `node_ref`
+    /// agrees on (see [`Self::discover_child`]).
+    fn edge_claim(&self, node_ref: &NodeRef) -> Result<(ContentHash, NodeMetrics), Error> {
+        let state = self.nodes.get(node_ref).ok_or(Error::InvalidTree)?;
+        Ok((
+            state.expected_logical_hash,
+            state.expected_metrics.ok_or(Error::InvalidTree)?,
+        ))
+    }
+
+    /// Treat a node proven elsewhere (see [`validate_derived_upload`]) as a
+    /// terminal of this traversal: neither it nor its descendants are read.
+    fn seal_reused(&mut self, node_ref: &NodeRef) {
+        self.edges.insert(node_ref.clone(), Vec::new());
+    }
+
+    /// The longest root path to every node of the validated graph. Call only
+    /// after [`Self::finish`] succeeded: the graph is then acyclic and at most
+    /// `MAX_TREE_DEPTH` deep, which also bounds this recursion.
+    fn max_depths(&self) -> BTreeMap<NodeRef, usize> {
+        fn post_order<'a>(
+            node_ref: &'a NodeRef,
+            edges: &'a BTreeMap<NodeRef, Vec<NodeRef>>,
+            seen: &mut BTreeSet<&'a NodeRef>,
+            order: &mut Vec<&'a NodeRef>,
+        ) {
+            if !seen.insert(node_ref) {
+                return;
+            }
+            for child in edges.get(node_ref).into_iter().flatten() {
+                post_order(child, edges, seen, order);
+            }
+            order.push(node_ref);
+        }
+        let mut order = Vec::new();
+        post_order(&self.root, &self.edges, &mut BTreeSet::new(), &mut order);
+        let mut depths = BTreeMap::from([(self.root.clone(), 0_usize)]);
+        for node_ref in order.into_iter().rev() {
+            let depth = depths.get(node_ref).copied().unwrap_or_default();
+            for child in self.edges.get(node_ref).into_iter().flatten() {
+                let entry = depths.entry(child.clone()).or_default();
+                *entry = (*entry).max(depth + 1);
+            }
+        }
+        depths
+    }
+
     /// Verify the complete authenticated physical graph without enumerating
     /// its potentially exponential logical paths. Memoized height evaluation
     /// rejects both cycles and paths beyond the depth ceiling in O(V + E).
@@ -2063,6 +2110,7 @@ pub(crate) async fn validate_finalized_upload(
             .get(node_ref.locator, node_ref.object_hash)
             .await
             .map_err(crate::chunks::ChunkError::from)?;
+        record_finalize_validation_bytes(encoded.len());
         let node = decode_node_for_format(
             value.format_version,
             value.kind,
@@ -2076,6 +2124,218 @@ pub(crate) async fn validate_finalized_upload(
     }
     traversal.finish()?;
     Ok(())
+}
+
+/// Validate a descriptor that Groove itself derived from `base` by a local
+/// append, splice or consolidation, before its staging receipt is issued.
+///
+/// Precondition: `base` is a published descriptor, and therefore (by the
+/// publication invariant) a fully valid value. A derivation stages its new
+/// nodes in `staged_chunks` and reuses base nodes unchanged, so re-walking the
+/// reused part would make every local edit O(value). Instead:
+///
+/// 1. every newly staged node reachable from `value` is authenticated and
+///    checked exactly as [`validate_finalized_upload`] does;
+/// 2. descent stops at each reachable node that was not staged by this
+///    derivation, recording the edge claim (logical hash and metrics) its
+///    parent makes for it, without fetching it;
+/// 3. every recorded claim must equal an edge of the base tree, found by
+///    walking only base branches that were not themselves reused, and
+///    stopping as soon as every claim is proven.
+///
+/// Step 3 proves each reused node is a member of the base tree with its true
+/// metrics, at a base depth no shallower than its deepest derived position,
+/// so its whole subtree, including the depth bound, is covered by the base's
+/// validity. Unlike
+/// the raw-upload validator the root's metrics are checked even while an
+/// edit tail is present. The tail itself is validated separately by replaying
+/// it (see [`validate_edit_tail_attempt`]).
+///
+/// Returns `Ok(false)` when reuse cannot be proven within the traversal
+/// budget; the caller must then fall back to full validation.
+pub(crate) async fn validate_derived_upload(
+    value: &LargeValueRef,
+    base: &LargeValueRef,
+    reader: crate::chunks::LocalChunkReader,
+    staged_chunks: &std::collections::BTreeSet<NodeRef>,
+) -> Result<bool, ReachabilityError> {
+    let tree = tail_base_descriptor(value)?;
+    let base_tree = tail_base_descriptor(base)?;
+    if value.kind != base.kind || value.format_version != base.format_version {
+        return Err(Error::DescriptorMismatch.into());
+    }
+    let tree_metrics = |tree: &LargeValueRef| NodeMetrics {
+        byte_length: tree.byte_length,
+        utf16_length: tree.utf16_length,
+    };
+    // The caller's `base` descriptor is only an unauthenticated edge into a
+    // retained root: that root was validated for some descriptor, not
+    // necessarily this one. Authenticate the edge against the root node
+    // itself (one node read), so every base claim below derives from content-
+    // addressed nodes and a forged base length, hash or kind fails closed.
+    let encoded_base_root = reader
+        .get(base.root.locator, base.root.object_hash)
+        .await
+        .map_err(crate::chunks::ChunkError::from)?;
+    record_finalize_validation_bytes(encoded_base_root.len());
+    let base_root = decode_node_for_format(
+        base.format_version,
+        base.kind,
+        base.root.object_hash,
+        &encoded_base_root,
+    )?;
+    if node_logical_hash(&base_root) != base_tree.logical_hash
+        || node_metrics(base.kind, &base_root)? != tree_metrics(&base_tree)
+    {
+        return Err(Error::DescriptorMismatch.into());
+    }
+    let mut traversal = PhysicalTraversal::new(
+        value.root.clone(),
+        Some(tree_metrics(&tree)),
+        value.logical_hash,
+    );
+    let mut claims = BTreeMap::new();
+    while let Some(entry) = traversal.pop() {
+        let node_ref = &entry.node_ref;
+        if !staged_chunks.contains(node_ref) {
+            let claim = traversal.edge_claim(node_ref)?;
+            claims.insert(node_ref.clone(), claim);
+            traversal.seal_reused(node_ref);
+            continue;
+        }
+        let encoded = reader
+            .get(node_ref.locator, node_ref.object_hash)
+            .await
+            .map_err(crate::chunks::ChunkError::from)?;
+        record_finalize_validation_bytes(encoded.len());
+        let node = decode_node_for_format(
+            value.format_version,
+            value.kind,
+            node_ref.object_hash,
+            &encoded,
+        )?;
+        traversal.validate_node(value.kind, node_ref, &node)?;
+        if let ChunkNode::Branch { children, .. } = node {
+            traversal.discover_children(&entry, children)?;
+        }
+    }
+    traversal.finish()?;
+    let depths = traversal.max_depths();
+
+    // The base descriptor is the edge into the base root, at depth zero.
+    let mut pending = Vec::new();
+    match prove_reused_edge(
+        &mut claims,
+        &depths,
+        &base.root,
+        (base.logical_hash, tree_metrics(&base_tree)),
+        0,
+    )? {
+        ReuseProof::Proven => {}
+        ReuseProof::NotReused => pending.push((base.root.clone(), 0)),
+        ReuseProof::Unprovable => return Ok(false),
+    }
+    let mut visited = BTreeSet::new();
+    while !claims.is_empty() {
+        let Some((node_ref, depth)) = pending.pop() else {
+            return Ok(false);
+        };
+        if !visited.insert(node_ref.clone()) {
+            continue;
+        }
+        if visited.len() > MAX_PHYSICAL_TRAVERSAL_NODES {
+            return Ok(false);
+        }
+        let encoded = reader
+            .get(node_ref.locator, node_ref.object_hash)
+            .await
+            .map_err(crate::chunks::ChunkError::from)?;
+        record_finalize_validation_bytes(encoded.len());
+        let node = decode_node_for_format(
+            base.format_version,
+            base.kind,
+            node_ref.object_hash,
+            &encoded,
+        )?;
+        if let ChunkNode::Branch { children, .. } = node {
+            for child in children.into_iter().rev() {
+                // A proven child is reused intact, so its subtree needs no
+                // descent. Any other child was replaced or dropped by the
+                // derivation; its edges may prove deeper reused nodes. A
+                // reused node reachable only below a reused one (a reshaped
+                // tree) stays unproven and forces full validation.
+                match prove_reused_edge(
+                    &mut claims,
+                    &depths,
+                    &child.node_ref,
+                    (child.logical_hash, child.metrics),
+                    depth + 1,
+                )? {
+                    ReuseProof::Proven => {}
+                    ReuseProof::NotReused => pending.push((child.node_ref, depth + 1)),
+                    ReuseProof::Unprovable => return Ok(false),
+                }
+            }
+        }
+    }
+    Ok(true)
+}
+
+enum ReuseProof {
+    /// The base edge matches a reused node's claim.
+    Proven,
+    /// The base edge leads to a node the derived value does not reuse here.
+    NotReused,
+    /// The node is reused deeper than the base proves its subtree can be.
+    Unprovable,
+}
+
+/// Match one authenticated base edge at `base_depth` against the claims the
+/// derived graph makes for its reused nodes. Base validity bounds a reused
+/// subtree's height by `MAX_TREE_DEPTH - base_depth`, so the node must sit no
+/// deeper in the derived graph for the derived depth check to remain exact.
+fn prove_reused_edge(
+    claims: &mut BTreeMap<NodeRef, (ContentHash, NodeMetrics)>,
+    derived_depths: &BTreeMap<NodeRef, usize>,
+    node_ref: &NodeRef,
+    base_claim: (ContentHash, NodeMetrics),
+    base_depth: usize,
+) -> Result<ReuseProof, Error> {
+    let Some(expected) = claims.get(node_ref) else {
+        return Ok(ReuseProof::NotReused);
+    };
+    if *expected != base_claim {
+        return Err(Error::DescriptorMismatch);
+    }
+    if derived_depths
+        .get(node_ref)
+        .is_none_or(|depth| *depth > base_depth)
+    {
+        return Ok(ReuseProof::Unprovable);
+    }
+    claims.remove(node_ref);
+    Ok(ReuseProof::Proven)
+}
+
+// Scale-independence receipt for staging-receipt validation: the encoded node
+// and logical bytes that finalization reads back. Test-only, per thread, so
+// parallel tests cannot observe one another.
+#[cfg(any(test, feature = "test"))]
+std::thread_local! {
+    static FINALIZE_VALIDATION_BYTES: Cell<u64> = const { Cell::new(0) };
+}
+
+#[inline]
+pub(crate) fn record_finalize_validation_bytes(_bytes: usize) {
+    #[cfg(any(test, feature = "test"))]
+    FINALIZE_VALIDATION_BYTES.with(|total| total.set(total.get().saturating_add(_bytes as u64)));
+}
+
+/// Total bytes this thread has read back while validating large-value uploads
+/// before issuing staging receipts.
+#[cfg(any(test, feature = "test"))]
+pub fn finalize_validation_bytes_for_test() -> u64 {
+    FINALIZE_VALIDATION_BYTES.with(Cell::get)
 }
 
 #[derive(Clone)]
@@ -3137,13 +3397,10 @@ fn validate_descriptor_shape_v1(value: &LargeValueRef) -> Result<(), Error> {
     }
 }
 
-/// Reconstruct and replay an untrusted descriptor's tail against its immutable
-/// base tree. Shape validation alone cannot prove that text UTF-16 coordinates
-/// describe the same byte splice, or that a JSON edit is a whole-value replace.
-pub(crate) fn validate_edit_tail_attempt(
-    value: &LargeValueRef,
-    inputs: &mut EvaluationInputs,
-) -> Result<(), IvmRuntimeError> {
+/// Recover the tail-free descriptor of `value`'s immutable base tree by
+/// undoing each tail edit's length effects in reverse order. This performs no
+/// reads; callers compare the result against the authenticated root node.
+fn tail_base_descriptor(value: &LargeValueRef) -> Result<LargeValueRef, Error> {
     validate_descriptor(value)?;
     let mut replay = value.clone();
     for edit in value.edit_tail.iter().rev() {
@@ -3167,6 +3424,17 @@ pub(crate) fn validate_edit_tail_attempt(
     }
     replay.edit_tail.clear();
     validate_descriptor(&replay)?;
+    Ok(replay)
+}
+
+/// Reconstruct and replay an untrusted descriptor's tail against its immutable
+/// base tree. Shape validation alone cannot prove that text UTF-16 coordinates
+/// describe the same byte splice, or that a JSON edit is a whole-value replace.
+pub(crate) fn validate_edit_tail_attempt(
+    value: &LargeValueRef,
+    inputs: &mut EvaluationInputs,
+) -> Result<(), IvmRuntimeError> {
+    let mut replay = tail_base_descriptor(value)?;
 
     for expected in &value.edit_tail {
         let outcome = replace_tail_with_bounds_attempt(
@@ -3307,8 +3575,12 @@ fn load_authenticated_node_attempt(
         object_hash: node_ref.object_hash.0,
         locator: node_ref.locator,
     };
-    let encoded = inputs.chunk(request.clone())?;
-    let node = decode_node_for_format(format_version, kind, node_ref.object_hash, encoded)?;
+    let chunk = inputs.loaded_chunk(request)?;
+    let node = if chunk.verifies_object_hash(&node_ref.object_hash.0) {
+        decode_object_verified_node_for_format(format_version, kind, chunk.bytes())?
+    } else {
+        decode_node_for_format(format_version, kind, node_ref.object_hash, chunk.bytes())?
+    };
     if node_logical_hash(&node) != expected_logical_hash {
         return Err(Error::DescriptorMismatch.into());
     }
@@ -3452,6 +3724,19 @@ fn decode_node_for_format(
     }
     if object_hash(encoded) != expected_hash {
         return Err(Error::ObjectHashMismatch);
+    }
+    decode_object_verified_node_for_format(format_version, kind, encoded)
+}
+
+/// The bytes have already passed object-hash verification. Descriptor format,
+/// canonical encoding, and kind remain independent checks on every access.
+fn decode_object_verified_node_for_format(
+    format_version: u8,
+    kind: LargeValueKind,
+    encoded: &[u8],
+) -> Result<ChunkNode, Error> {
+    if encoded.len() > MAX_ENCODED_NODE_BYTES {
+        return Err(Error::MalformedNode);
     }
     // Select both contracts before V1 binds any variable node field. In
     // particular, a descriptor-led upload must not classify a hash-valid
@@ -3622,6 +3907,33 @@ fn decode_canonical_node_v1(encoded: &[u8]) -> Result<ChunkNode, Error> {
     if encoded.len() > MAX_ENCODED_NODE_BYTES {
         return Err(Error::MalformedNode);
     }
+    let (tag, payload) =
+        crate::records::split_variant_record(encoded).map_err(|_| Error::MalformedNode)?;
+    if tag == 0 {
+        let [format, kind, bytes @ ..] = payload else {
+            return Err(Error::MalformedNode);
+        };
+        let kind = large_value_kind_from_tag(*kind).map_err(|_| Error::MalformedNode)?;
+        if bytes.len() > LEAF_MAX_BYTES {
+            return Err(Error::MalformedNode);
+        }
+        // V1's ordinary Leaf record is exactly two fixed u8 fields followed
+        // by its sole raw-bytes field. Its canonical re-encoding is therefore
+        // this header followed by the unchanged payload, with no offset or
+        // length table. Compare those segments directly instead of allocating
+        // an owned EnumValue, decoded Values and another full encoded node.
+        let canonical_header = [0, *format, large_value_kind_tag(kind)];
+        if encoded.strip_prefix(&canonical_header) != Some(bytes) {
+            return Err(Error::MalformedNode);
+        }
+        let node = ChunkNode::Leaf {
+            format: *format,
+            kind,
+            bytes: bytes.to_vec(),
+        };
+        validate_untyped_node_structure(&node)?;
+        return Ok(node);
+    }
     let schema = chunk_node_schema();
     preflight_node_bounds(encoded, &schema)?;
     let value =
@@ -3791,6 +4103,8 @@ fn validate_untyped_node_structure(node: &ChunkNode) -> Result<(), Error> {
 }
 
 pub fn object_hash(encoded: &[u8]) -> ContentHash {
+    #[cfg(test)]
+    lease_proof_tests::record_object_hash();
     hash_domain(b"groove-large-object-v1", encoded)
 }
 
@@ -3969,7 +4283,25 @@ pub(crate) fn materialize_attempt(
     {
         return Err(Error::DescriptorMismatch.into());
     }
+    #[cfg(feature = "test")]
+    FULL_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
     Ok(bytes)
+}
+
+#[cfg(feature = "test")]
+thread_local! {
+    static FULL_MATERIALIZATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Test-only count of complete large-value rebuilds on this thread.
+///
+/// A complete rebuild reads every chunk of a value and rejoins it into one
+/// logical scalar. Range reads and descriptor-only paths never count. Tests
+/// use deltas of this counter to prove that a path does not scale with value
+/// size, which elapsed time cannot establish robustly.
+#[cfg(feature = "test")]
+pub fn full_materializations_for_test() -> u64 {
+    FULL_MATERIALIZATIONS.with(std::cell::Cell::get)
 }
 
 fn apply_edits(bytes: &mut Vec<u8>, edits: &[ReplaceEdit]) -> Result<(), Error> {
@@ -3990,23 +4322,34 @@ pub(crate) fn materialize_record_attempt(
     raw: &[u8],
     inputs: &mut EvaluationInputs,
 ) -> Result<Vec<u8>, IvmRuntimeError> {
-    materialize_record_borrowed_attempt(descriptor, raw, inputs).map(Cow::into_owned)
+    materialize_record_borrowed_attempt(descriptor, raw, None, inputs).map(Cow::into_owned)
 }
 
 /// Preserve admitted inline bytes for callers that already own their input.
 /// Indirect values retain the same chunk requests and complete-row rebuild.
+///
+/// `fields` limits materialization to those top-level field indices; `None`
+/// materializes every field. Unselected indirect arms stay physical.
 pub(crate) fn materialize_record_borrowed_attempt<'a>(
     descriptor: &RecordDescriptor,
     raw: &'a [u8],
+    fields: Option<&[usize]>,
     inputs: &mut EvaluationInputs,
 ) -> Result<Cow<'a, [u8]>, IvmRuntimeError> {
-    if !descriptor.fields_contain_indirect_values(raw, 0..descriptor.fields().len())? {
+    let contains_indirect = match fields {
+        None => descriptor.fields_contain_indirect_values(raw, 0..descriptor.fields().len())?,
+        Some(fields) => descriptor.fields_contain_indirect_values(raw, fields.iter().copied())?,
+    };
+    if !contains_indirect {
         return Ok(Cow::Borrowed(raw));
     }
     let mut values = descriptor.bind(raw).to_values()?;
     let mut blocked = false;
     let mut changed = false;
-    for value in &mut values {
+    for (index, value) in values.iter_mut().enumerate() {
+        if fields.is_some_and(|fields| !fields.contains(&index)) {
+            continue;
+        }
         changed |= materialize_value_attempt(value, inputs, &mut blocked)?;
     }
     if blocked {
@@ -8138,7 +8481,8 @@ mod tests {
             .create(&[Value::U64(7), Value::String("inline body".repeat(100))])
             .unwrap();
         let mut inputs = EvaluationInputs::default();
-        let result = materialize_record_borrowed_attempt(&descriptor, &raw, &mut inputs).unwrap();
+        let result =
+            materialize_record_borrowed_attempt(&descriptor, &raw, None, &mut inputs).unwrap();
         assert!(matches!(result, Cow::Borrowed(_)));
         assert_eq!(result.as_ptr(), raw.as_ptr());
         assert_eq!(result.as_ref(), raw.as_slice());
@@ -9067,3 +9411,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "large_values/lease_proof_tests.rs"]
+mod lease_proof_tests;

@@ -290,8 +290,8 @@ export type SubscriptionTerminalEdit =
 
 export interface SubscriptionTerminalInsert {
   index: number
-  key: Array<number>
-  value: Array<number>
+  key: Uint8Array
+  value: Uint8Array
 }
 
 export interface SubscriptionTerminalInsertEdit {
@@ -299,11 +299,11 @@ export interface SubscriptionTerminalInsertEdit {
 }
 
 export interface SubscriptionTerminalKeyPathSegment {
-  Key: Array<number>
+  Key: Uint8Array
 }
 
 export interface SubscriptionTerminalMove {
-  key: Array<number>
+  key: Uint8Array
   index: number
 }
 
@@ -312,7 +312,7 @@ export interface SubscriptionTerminalMoveEdit {
 }
 
 export interface SubscriptionTerminalOperation {
-  root_key: Array<number>
+  root_key: Uint8Array
   path: Array<SubscriptionTerminalPathSegment>
   edit: SubscriptionTerminalEdit
 }
@@ -321,7 +321,7 @@ export type SubscriptionTerminalPathSegment =
   SubscriptionTerminalCollectionPathSegment | SubscriptionTerminalKeyPathSegment
 
 export interface SubscriptionTerminalRemove {
-  key: Array<number>
+  key: Uint8Array
 }
 
 export interface SubscriptionTerminalRemoveEdit {
@@ -329,8 +329,8 @@ export interface SubscriptionTerminalRemoveEdit {
 }
 
 export interface SubscriptionTerminalUpdate {
-  key: Array<number>
-  value: Array<number>
+  key: Uint8Array
+  value: Uint8Array
 }
 
 export interface SubscriptionTerminalUpdateEdit {

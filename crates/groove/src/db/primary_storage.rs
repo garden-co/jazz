@@ -288,7 +288,12 @@ impl Database {
         table: &str,
         key: &[Value],
     ) -> Result<Option<EncodedKeyValue<'_>>, Error> {
-        self.ensure_batch_storage_txn(batch)?;
+        // Staging the batch only serves reads that can observe it: a table
+        // this batch never writes reads exactly as resident storage.
+        let batch_writes_table = batch.writes_table(table);
+        if batch_writes_table {
+            self.ensure_batch_storage_txn(batch)?;
+        }
         let table_schema = self.table(table)?;
         let primary_key = table_schema
             .primary_key
@@ -307,10 +312,11 @@ impl Database {
             ensure_primary_key_value_type(table_schema, column, value)?;
             encode_primary_key_part(&mut encoded_key, value)?;
         }
-        let staged_contains_key = batch
-            .txn_operations
-            .borrow_mut()
-            .contains_key(table, &encoded_key);
+        let staged_contains_key = batch_writes_table
+            && batch
+                .txn_operations
+                .borrow_mut()
+                .contains_key(table, &encoded_key);
         if !staged_contains_key {
             let resident = self.resident_storage();
             let storage = MeteredStorage::new(&resident, &self.storage_read_metrics);

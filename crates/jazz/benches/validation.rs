@@ -68,8 +68,8 @@ impl Config {
 
 struct ValidationBench {
     config: Config,
-    core: NodeState<RocksDbStorage>,
-    clients: Vec<NodeState<RocksDbStorage>>,
+    core: NodeState,
+    clients: Vec<NodeState>,
     _core_dir: tempfile::TempDir,
     _client_dirs: Vec<tempfile::TempDir>,
     rng: Rng,
@@ -567,10 +567,7 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_node(
-    node_uuid: NodeUuid,
-    schema: JazzSchema,
-) -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
+fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, NodeState) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -582,7 +579,7 @@ fn open_node(
     (temp_dir, node)
 }
 
-fn core_ingest(core: &mut NodeState<RocksDbStorage>, unit: &SyncMessage) -> SyncMessage {
+fn core_ingest(core: &mut NodeState, unit: &SyncMessage) -> SyncMessage {
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         panic!("expected commit unit");
     };
@@ -595,7 +592,7 @@ fn core_ingest(core: &mut NodeState<RocksDbStorage>, unit: &SyncMessage) -> Sync
     fate
 }
 
-fn apply_fate(node: &mut NodeState<RocksDbStorage>, fate: &SyncMessage) {
+fn apply_fate(node: &mut NodeState, fate: &SyncMessage) {
     support::apply_and_settle(node, fate.clone());
 }
 

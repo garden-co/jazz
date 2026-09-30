@@ -1050,8 +1050,9 @@ fn wire_message_frame_fixtures_are_current() {
     assert_eq!(
         actual, expected,
         "wire fixtures changed; review compatibility and run \
-         `JAZZ_UPDATE_WIRE_FIXTURES=1 cargo test -p jazz --test wire_fixtures \
-         wire_message_frame_fixtures_are_current -- --exact` to accept"
+         `JAZZ_UPDATE_WIRE_FIXTURES=1 cargo test -p jazz --no-default-features \
+         --features testing,transport-compression-zstd --test integration \
+         wire_fixtures::wire_message_frame_fixtures_are_current -- --exact` to accept"
     );
 }
 
@@ -1546,8 +1547,9 @@ fn binding_codec_golden_fixture_is_current() {
         serde_json::to_value(actual).expect("binding codec fixture value serializes"),
         expected,
         "binding codec goldens changed; review the NAPI/WASM compatibility contract and run \\
-         `JAZZ_UPDATE_BINDING_CODEC_GOLDENS=1 cargo test -p jazz --test wire_fixtures \\
-         binding_codec_golden_fixture_is_current -- --exact` to accept"
+         `JAZZ_UPDATE_BINDING_CODEC_GOLDENS=1 cargo test -p jazz --no-default-features \
+         --features testing,transport-compression-zstd --test integration \\
+         wire_fixtures::binding_codec_golden_fixture_is_current -- --exact` to accept"
     );
 }
 
@@ -1839,8 +1841,9 @@ fn relation_shape_id_preimage_fixture_is_current() {
         expected,
         "relation shape-id preimages changed; this breaks shape registration between peers on \
          different releases. Review the compatibility contract, then run \
-         `JAZZ_UPDATE_RELATION_SHAPE_ID_FIXTURE=1 cargo test -p jazz --test wire_fixtures \
-         relation_shape_id_preimage_fixture_is_current -- --exact` to accept"
+         `JAZZ_UPDATE_RELATION_SHAPE_ID_FIXTURE=1 cargo test -p jazz --no-default-features \
+         --features testing,transport-compression-zstd --test integration \
+         wire_fixtures::relation_shape_id_preimage_fixture_is_current -- --exact` to accept"
     );
 }
 

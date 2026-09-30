@@ -87,6 +87,9 @@ pub enum Durability {
 pub struct RocksDbStorage {
     path: PathBuf,
     durability: Durability,
+    /// The codec profile this handle was opened with. The store pins it in
+    /// its epoch manifest, so a column-family reopen must present it again.
+    codec_profile: StorageCodecProfile,
     column_families: BTreeSet<String>,
     db: DB,
     write_options: WriteOptions,
@@ -372,6 +375,7 @@ impl RocksDbStorage {
         Ok(Self {
             path,
             durability,
+            codec_profile: codec_profile.clone(),
             column_families: opened_column_families
                 .into_iter()
                 .filter(|name| name != ROCKSDB_INTERNAL_CF)
@@ -760,6 +764,7 @@ impl ReopenableStorage for RocksDbStorage {
             }
             let path = self.path.clone();
             let durability = self.durability;
+            let codec_profile = self.codec_profile.clone();
             // A column-family expansion replaces the RocksDB handle, but it
             // is not a durability boundary. Preserve both the cadence and
             // its outstanding WAL-sync debt so acknowledged batches before
@@ -772,7 +777,12 @@ impl ReopenableStorage for RocksDbStorage {
                 .iter()
                 .map(String::as_str)
                 .collect::<Vec<_>>();
-            let reopened = Self::open_with_durability(path, &column_families, durability)?;
+            let reopened = Self::open_with_durability_and_codec_profile(
+                path,
+                &column_families,
+                durability,
+                &codec_profile,
+            )?;
             *reopened.write_flush_cadence.borrow_mut() = write_flush_cadence;
             Ok(reopened)
         })

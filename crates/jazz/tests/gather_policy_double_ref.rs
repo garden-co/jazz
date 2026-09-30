@@ -208,7 +208,7 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_global_node() -> Db<TestStorage> {
+fn open_global_node() -> Db {
     let schema = schema();
     let families = schema.column_families();
     let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
@@ -223,7 +223,7 @@ fn open_global_node() -> Db<TestStorage> {
     .expect("open history-complete node")
 }
 
-fn insert(db: &Db<TestStorage>, table: &str, id: RowUuid, cells: Vec<(&str, Value)>) {
+fn insert(db: &Db, table: &str, id: RowUuid, cells: Vec<(&str, Value)>) {
     let handle = block_on(
         db.insert(
             table,

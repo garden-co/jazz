@@ -30,25 +30,25 @@ use crate::groove::storage::{BoxedStorage as CoreStorage, MemoryStorage as CoreM
 use crate::ids::{
     AuthorSubject as CoreAuthorSubject, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid,
 };
+use crate::model::public_api::types::{
+    OrderedAdded, OrderedRemoved, OrderedUpdated, QueryResultField,
+};
+use crate::model::public_schema::TableName;
+use crate::model::public_schema::{ColumnType, Session, TableSchema, Value, WriteContext};
+use crate::model::public_schema::{OrderedRowDelta, QueryResult, Row};
+use crate::model::public_schema::{Schema, validate_json_value};
+use crate::model::transaction::OpenTransactionId;
+use crate::model::transaction::TransactionId;
 use crate::protocol::ReadViewSpec as CoreReadViewSpec;
 use crate::query::{Aggregate as CoreAggregate, AggregateFunction as CoreAggregateFunction, Query};
 use crate::storage_codec_profile::node_storage_codec_profile;
-use crate::tools::OpenTransactionId;
 use crate::tools::native_transport_connector::{
     ConnectedNativeTransport, NativeTransportConnector, NativeTransportRequest,
     NativeTransportTerminal, NativeTransportTerminalFuture,
 };
-use crate::tools::public_api::types::{
-    OrderedAdded, OrderedRemoved, OrderedUpdated, QueryResultField,
-};
-use crate::tools::public_schema::TableName;
-use crate::tools::public_schema::{ColumnType, Session, TableSchema, Value, WriteContext};
-use crate::tools::public_schema::{OrderedRowDelta, QueryResult, Row};
-use crate::tools::public_schema::{Schema, validate_json_value};
 #[cfg(feature = "testing")]
 use crate::tools::sync::ClientId;
 use crate::tools::sync::{DurabilityTier, ReadTier};
-use crate::tools::transaction::TransactionId;
 use crate::tools::websocket_prelude_auth::AuthConfig as WsAuthConfig;
 use crate::tx::{
     DurabilityTier as CoreDurabilityTier, Fate as CoreFate, RejectionReason as CoreRejectionReason,
@@ -60,14 +60,15 @@ use serde::Deserialize;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
+use crate::object::OutputOccurrenceId;
 use crate::tools::{
-    AppContext, ClientStorage, JazzError, ObjectId, OutputOccurrenceId, Result, ResultKey,
-    SubscriptionHandle, SubscriptionRejectReason, SubscriptionServerFailureCode,
-    SubscriptionStream, SubscriptionStreamItem,
+    AppContext, ClientStorage, JazzError, ObjectId, Result, ResultKey, SubscriptionHandle,
+    SubscriptionRejectReason, SubscriptionServerFailureCode, SubscriptionStream,
+    SubscriptionStreamItem,
 };
 
-type CoreClientDb = CoreDb<CoreStorage>;
-type BackendConnection = Rc<LocalMutex<CorePeerConnection<CoreStorage>>>;
+type CoreClientDb = CoreDb;
+type BackendConnection = Rc<LocalMutex<CorePeerConnection>>;
 
 // Credit windows bound protocol ingress; charge tiny frames as one physical slot
 // too, so a peer cannot turn the byte limit into an unbounded allocation count.
@@ -559,7 +560,7 @@ async fn recover_tick_driver_error(
 #[derive(Clone)]
 struct ConnectConfig {
     server_url: String,
-    app_id: crate::tools::AppId,
+    app_id: crate::app_id::AppId,
     auth: WsAuthConfig,
     connector: Arc<dyn NativeTransportConnector>,
 }
@@ -663,7 +664,8 @@ impl Backend {
         table: &str,
         cells: crate::db::RowCells,
     ) -> std::result::Result<(CoreRowUuid, CoreTxId), CoreDbError> {
-        let write = crate::db::block_on(self.0.insert(table, cells, Default::default()))?;
+        let write =
+            crate::local_executor::block_on(self.0.insert(table, cells, Default::default()))?;
         Ok((write.row_uuid(), write.mergeable_tx_id()))
     }
 
@@ -673,7 +675,7 @@ impl Backend {
         table: &str,
         cells: crate::db::RowCells,
     ) -> std::result::Result<(CoreRowUuid, CoreTxId), CoreDbError> {
-        let write = crate::db::block_on(self.0.insert(
+        let write = crate::local_executor::block_on(self.0.insert(
             table,
             cells,
             crate::db::InsertOptions {
@@ -690,7 +692,7 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(crate::db::block_on(self.0.insert(
+        Ok(crate::local_executor::block_on(self.0.insert(
             table,
             cells,
             crate::db::InsertOptions {
@@ -708,7 +710,7 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(crate::db::block_on(self.0.insert(
+        Ok(crate::local_executor::block_on(self.0.insert(
             table,
             cells,
             crate::db::InsertOptions {
@@ -727,7 +729,7 @@ impl Backend {
         cells: crate::db::RowCells,
         updated_at_ms: Option<u64>,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(crate::db::block_on(self.0.upsert(
+        Ok(crate::local_executor::block_on(self.0.upsert(
             table,
             row_id,
             cells,
@@ -747,7 +749,7 @@ impl Backend {
         cells: crate::db::RowCells,
         updated_at_ms: Option<u64>,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(crate::db::block_on(self.0.upsert(
+        Ok(crate::local_executor::block_on(self.0.upsert(
             table,
             row_id,
             cells,
@@ -767,7 +769,7 @@ impl Backend {
         cells: crate::db::RowCells,
         updated_at_ms: Option<u64>,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(crate::db::block_on(self.0.update(
+        Ok(crate::local_executor::block_on(self.0.update(
             table,
             row_id,
             cells,
@@ -785,7 +787,7 @@ impl Backend {
         table: &str,
         row_id: CoreRowUuid,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(crate::db::block_on(self.0.delete(
+        Ok(crate::local_executor::block_on(self.0.delete(
             table,
             row_id,
             crate::db::DeleteOptions {
@@ -802,7 +804,7 @@ impl Backend {
         row_id: CoreRowUuid,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
         Ok(
-            crate::db::block_on(self.0.delete(table, row_id, Default::default()))?
+            crate::local_executor::block_on(self.0.delete(table, row_id, Default::default()))?
                 .mergeable_tx_id(),
         )
     }
@@ -873,7 +875,7 @@ impl Backend {
     }
 
     fn begin_exclusive(&self, id: OpenTransactionId) -> std::result::Result<(), CoreDbError> {
-        crate::db::block_on(self.0.begin_exclusive(id))
+        crate::local_executor::block_on(self.0.begin_exclusive(id))
     }
 
     fn begin_exclusive_for_identity(
@@ -881,7 +883,7 @@ impl Backend {
         id: OpenTransactionId,
         identity: CoreWriteIdentity,
     ) -> std::result::Result<(), CoreDbError> {
-        crate::db::block_on(self.0.begin_exclusive_with_identity(id, identity))
+        crate::local_executor::block_on(self.0.begin_exclusive_with_identity(id, identity))
     }
 
     fn exclusive_write(
@@ -891,7 +893,7 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<(), CoreDbError> {
-        crate::db::block_on(self.0.exclusive_tx_ref(tx_id).insert(
+        crate::local_executor::block_on(self.0.exclusive_tx_ref(tx_id).insert(
             table,
             cells,
             crate::db::InsertOptions {
@@ -909,7 +911,7 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<(), CoreDbError> {
-        crate::db::block_on(self.0.exclusive_tx_ref(tx_id).upsert(
+        crate::local_executor::block_on(self.0.exclusive_tx_ref(tx_id).upsert(
             table,
             row_id,
             cells,
@@ -924,7 +926,7 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<(), CoreDbError> {
-        crate::db::block_on(self.0.exclusive_tx_ref(tx_id).update(
+        crate::local_executor::block_on(self.0.exclusive_tx_ref(tx_id).update(
             table,
             row_id,
             cells,
@@ -938,7 +940,7 @@ impl Backend {
         table: &str,
         row_id: CoreRowUuid,
     ) -> std::result::Result<(), CoreDbError> {
-        crate::db::block_on(self.0.exclusive_tx_ref(tx_id).delete(
+        crate::local_executor::block_on(self.0.exclusive_tx_ref(tx_id).delete(
             table,
             row_id,
             Default::default(),
@@ -949,7 +951,7 @@ impl Backend {
         &self,
         tx_id: OpenTransactionId,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        crate::db::block_on(self.0.commit_exclusive_handle(tx_id))
+        crate::local_executor::block_on(self.0.commit_exclusive_handle(tx_id))
     }
 
     fn commit_exclusive_handle_for_identity(
@@ -957,7 +959,7 @@ impl Backend {
         tx_id: OpenTransactionId,
         author: CoreAuthorSubject,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        crate::db::block_on(self.0.commit_exclusive_handle_for_identity(tx_id, author))
+        crate::local_executor::block_on(self.0.commit_exclusive_handle_for_identity(tx_id, author))
     }
 }
 
@@ -1116,7 +1118,7 @@ impl ClientDb {
         storage: StorageBundle,
         identity: CoreDbIdentity,
         server_url: Option<String>,
-        app_id: crate::tools::AppId,
+        app_id: crate::app_id::AppId,
         auth: Option<WsAuthConfig>,
         connector: Option<Arc<dyn NativeTransportConnector>>,
     ) -> Result<Rc<Self>> {
@@ -1246,13 +1248,11 @@ impl ClientDb {
         transaction_id: OpenTransactionId,
         author: CoreAuthorSubject,
     ) -> Result<Vec<crate::node::CurrentRow>> {
-        let prepared = {
-            let backend = self.inner.borrow().backend_clone()?;
-            backend
-                .prepare_query(&query)
-                .await
-                .map_err(|error| JazzError::Query(error.to_string()))?
-        };
+        let prepared = self
+            .backend()?
+            .prepare_query(&query)
+            .await
+            .map_err(|error| JazzError::Query(error.to_string()))?;
         let backend = {
             let inner = self.inner.borrow();
             inner.ensure_transaction_open(transaction_id)?;
@@ -1830,7 +1830,7 @@ impl ClientDbInner {
         storage: StorageBundle,
         identity: CoreDbIdentity,
         server_url: Option<String>,
-        app_id: crate::tools::AppId,
+        app_id: crate::app_id::AppId,
         auth: Option<WsAuthConfig>,
         connector: Option<Arc<dyn NativeTransportConnector>>,
         scheduler: Rc<TickSchedulerImpl>,
@@ -2257,7 +2257,7 @@ impl ClientDbInner {
                         "remote one-shot subscription closed before settlement".to_owned(),
                     )
                 })?;
-                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                if crate::debug_env::covered_input_trace() {
                     match &event {
                         CoreSubscriptionEvent::Delta {
                             reset,
@@ -2285,14 +2285,14 @@ impl ClientDbInner {
                         let snapshot = stream
                             .settled_receiver_local_snapshot()
                             .map_err(|error| {
-                                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                                if crate::debug_env::covered_input_trace() {
                                     eprintln!(
                                         "JAZZ_COVERED_INPUT_TRACE stage=remote_one_shot_snapshot_error error={error}"
                                     );
                                 }
                                 JazzError::Query(error.to_string())
                             })?;
-                        if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                        if crate::debug_env::covered_input_trace() {
                             eprintln!(
                                 "JAZZ_COVERED_INPUT_TRACE stage=remote_one_shot_settled roots={} rows={}",
                                 snapshot.root_count,
@@ -2346,10 +2346,13 @@ impl ClientDbInner {
         // when core subscription setup is still in flight.
         let (mut shutdown_cancellation, completion) = inner.borrow_mut().admit_subscription()?;
         let db = inner.borrow().backend_clone()?;
-        let prepared = db
-            .prepare_query(&query)
-            .await
-            .map_err(|error| JazzError::Query(error.to_string()))?;
+        let prepared = tokio::select! {
+            biased;
+            _ = &mut shutdown_cancellation => return Err(ClientDbInner::shutdown_error()),
+            prepared = db.prepare_query(&query) => {
+                prepared.map_err(|error| JazzError::Query(error.to_string()))?
+            }
+        };
         let prepared = match scope {
             Some((author, claims)) => prepared.with_identity_claims(author, claims),
             None => prepared,
@@ -2790,18 +2793,18 @@ fn session_from_unverified_jwt(token: &str) -> Option<Session> {
         .ok()?;
     let claims: UnverifiedJwtClaims = serde_json::from_slice(&payload).ok()?;
     let user_id = claims.sub.as_str();
-    if !crate::tools::identity::principal_is_nonempty(user_id) {
+    if !crate::identity::principal_is_nonempty(user_id) {
         return None;
     }
 
     let auth_mode = match claims.iss.as_str() {
         CoreAuthorSubject::LOCAL_FIRST_ISSUER => {
-            crate::tools::public_api::session::AuthMode::LocalFirst
+            crate::model::public_api::session::AuthMode::LocalFirst
         }
         CoreAuthorSubject::ANONYMOUS_ISSUER => {
-            crate::tools::public_api::session::AuthMode::Anonymous
+            crate::model::public_api::session::AuthMode::Anonymous
         }
-        _ => crate::tools::public_api::session::AuthMode::External,
+        _ => crate::model::public_api::session::AuthMode::External,
     };
     Some(Session {
         account_id: None,
@@ -2927,9 +2930,9 @@ fn session_claims_to_core_claims(session: &Session) -> Result<HashMap<String, Co
     };
     let mut core_claims = HashMap::new();
     for (name, value) in claims {
-        if let Some(value) = crate::tools::policy_claims::json_value_to_policy_claim(
+        if let Some(value) = crate::model::policy_claims::json_value_to_policy_claim(
             value,
-            crate::tools::policy_claims::NumericClaimOrigin::ExactJson,
+            crate::model::policy_claims::NumericClaimOrigin::ExactJson,
         )
         .map_err(JazzError::Connection)?
         {
@@ -2948,7 +2951,7 @@ fn session_claims_to_core_claims(session: &Session) -> Result<HashMap<String, Co
         "authMode".to_owned(),
         CoreValue::String(auth_mode_claim_value(session.auth_mode).to_owned()),
     );
-    core_claims.extend(crate::tools::policy_claims::author_policy_claims(
+    core_claims.extend(crate::model::policy_claims::author_policy_claims(
         session.author_subject()?,
     ));
     Ok(core_claims)
@@ -3032,7 +3035,7 @@ fn public_to_core_value_for_column_type(
 
 fn public_to_core_value_for_column(
     value: Value,
-    column: &crate::tools::public_schema::ColumnDescriptor,
+    column: &crate::model::public_schema::ColumnDescriptor,
 ) -> Result<CoreValue> {
     validate_json_value(&value, &column.column_type, column.name_str())
         .map_err(JazzError::Write)?;
@@ -3069,18 +3072,18 @@ fn core_to_public_value_for_column_type(
     }
 }
 
-fn auth_mode_claim_value(auth_mode: crate::tools::public_api::session::AuthMode) -> &'static str {
+fn auth_mode_claim_value(auth_mode: crate::model::public_api::session::AuthMode) -> &'static str {
     match auth_mode {
-        crate::tools::public_api::session::AuthMode::External => "external",
-        crate::tools::public_api::session::AuthMode::LocalFirst => "local-first",
-        crate::tools::public_api::session::AuthMode::Anonymous => "anonymous",
+        crate::model::public_api::session::AuthMode::External => "external",
+        crate::model::public_api::session::AuthMode::LocalFirst => "local-first",
+        crate::model::public_api::session::AuthMode::Anonymous => "anonymous",
     }
 }
 
 fn core_row_provenance_to_public(
     provenance: crate::node::RowProvenance,
-) -> crate::tools::metadata::RowProvenance {
-    crate::tools::metadata::RowProvenance {
+) -> crate::model::metadata::RowProvenance {
+    crate::model::metadata::RowProvenance {
         created_by: provenance.created_by.canonical().to_owned(),
         created_at: provenance.created_at,
         updated_by: provenance.updated_by.canonical().to_owned(),
@@ -3245,7 +3248,7 @@ fn aggregate_public_values(
         .into_iter()
         .map(|(public_column, physical_column, column_type)| {
             let idx = descriptor.fields().iter().position(|field| field.name.as_deref() == Some(physical_column.as_str())).ok_or_else(|| {
-                if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                if crate::debug_env::covered_input_trace() {
                     eprintln!(
                         "JAZZ_COVERED_INPUT_TRACE stage=aggregate_field_missing wanted={physical_column} descriptor_fields={:?}",
                         descriptor
@@ -3676,7 +3679,7 @@ impl PublicQueryDecoder {
             .map_err(|error| JazzError::Query(error.to_string()))?
             .map(core_row_provenance_to_public)
             .unwrap_or_else(|| {
-                crate::tools::metadata::RowProvenance::for_insert("jazz:unknown", 0)
+                crate::model::metadata::RowProvenance::for_insert("jazz:unknown", 0)
             });
         let public = Row::new(
             ResultKey::from_occurrence(row.occurrence_id.clone()),
@@ -3692,7 +3695,7 @@ impl PublicQueryDecoder {
                     .map(|result| result.fields)
                     .unwrap_or_default(),
                 Err(error) => {
-                    if std::env::var_os("JAZZ_COVERED_INPUT_TRACE").is_some() {
+                    if crate::debug_env::covered_input_trace() {
                         eprintln!(
                             "JAZZ_COVERED_INPUT_TRACE stage=subscription_public_fields_error error={error}"
                         );
@@ -4291,14 +4294,14 @@ impl Drop for JazzClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_id::AppId;
     use crate::groove::storage::{Error as StorageError, StorageFactory, StorageFuture};
     use crate::ids::NodeUuid;
-    use crate::tools::AppId;
+    use crate::model::public_schema::Schema;
     use crate::tools::native_transport_connector::{
         ConnectedNativeTransport, NativeTransportError, NativeTransportFuture,
         NativeTransportTerminal, NativeTransportTerminalFuture,
     };
-    use crate::tools::public_schema::Schema;
     use crate::tools::{ClientStorage, ColumnType, SchemaBuilder, TableSchema};
     use crate::wire::{TransportError, WireTransport};
     use serde_json::json;
@@ -5055,33 +5058,33 @@ mod tests {
     #[test]
     fn client_session_claim_projection_matches_admission_and_preserves_nested_values() {
         assert_eq!(
-            crate::tools::policy_claims::json_value_to_policy_claim(
+            crate::model::policy_claims::json_value_to_policy_claim(
                 json!(7),
-                crate::tools::policy_claims::NumericClaimOrigin::ExactJson,
+                crate::model::policy_claims::NumericClaimOrigin::ExactJson,
             )
             .unwrap(),
             Some(CoreValue::U64(7))
         );
         assert_eq!(
-            crate::tools::policy_claims::json_value_to_policy_claim(
+            crate::model::policy_claims::json_value_to_policy_claim(
                 json!(-7),
-                crate::tools::policy_claims::NumericClaimOrigin::ExactJson,
+                crate::model::policy_claims::NumericClaimOrigin::ExactJson,
             )
             .unwrap(),
             Some(CoreValue::I64(-7))
         );
         assert_eq!(
-            crate::tools::policy_claims::json_value_to_policy_claim(
+            crate::model::policy_claims::json_value_to_policy_claim(
                 json!(9_007_199_254_740_992_u64),
-                crate::tools::policy_claims::NumericClaimOrigin::ExactJson,
+                crate::model::policy_claims::NumericClaimOrigin::ExactJson,
             )
             .unwrap(),
             Some(CoreValue::U64(9_007_199_254_740_992))
         );
         assert_eq!(
-            crate::tools::policy_claims::json_value_to_policy_claim(
+            crate::model::policy_claims::json_value_to_policy_claim(
                 json!({ "role": "admin" }),
-                crate::tools::policy_claims::NumericClaimOrigin::ExactJson,
+                crate::model::policy_claims::NumericClaimOrigin::ExactJson,
             )
             .unwrap(),
             Some(CoreValue::Tuple(vec![CoreValue::Tuple(vec![
@@ -5094,7 +5097,7 @@ mod tests {
     #[test]
     fn client_session_preserves_provider_subject_and_adds_logical_user_identity() {
         let mut session = Session::new(CoreAuthorSubject::LOCAL_FIRST_ISSUER, "trusted-user")
-            .with_auth_mode(crate::tools::public_api::session::AuthMode::LocalFirst)
+            .with_auth_mode(crate::model::public_api::session::AuthMode::LocalFirst)
             .with_claims(json!({
                 "sub": "spoofed-subject",
                 "user_id": "spoofed-user",
@@ -5498,6 +5501,52 @@ mod tests {
             (0, 0),
             "cancelling the remote one-shot must release its coverage owner"
         );
+    }
+
+    // This is an internal test because the suspended node operation it needs
+    // (the client's sync turn awaiting large-value chunks or cold storage) is
+    // timing-dependent through the public API; #3514 hit it only under load.
+    // Holding the owner makes that suspension deterministic. The assertion is
+    // public: `JazzClient::query` waits for the owner instead of panicking.
+    #[tokio::test(flavor = "current_thread")]
+    async fn query_waits_for_a_suspended_node_operation() {
+        let client = JazzClient::connect(with_synthetic_admitted_account(make_offline_context(
+            AppId::from_name("query-waits-for-suspended-owner"),
+            TempDir::new().expect("tempdir").keep(),
+            declared_todo_schema(),
+        )))
+        .await
+        .expect("connect offline client");
+        client
+            .upsert(
+                "todos",
+                Uuid::from_u128(0x3514),
+                HashMap::from([
+                    ("title".to_owned(), Value::Text("held".to_owned())),
+                    ("completed".to_owned(), Value::Boolean(false)),
+                ]),
+            )
+            .expect("write local row");
+        let backend = client
+            .db
+            .inner
+            .borrow()
+            .backend_clone()
+            .expect("client is open");
+        let waker = std::task::Waker::noop();
+        let mut context = std::task::Context::from_waker(waker);
+        let mut owner = Box::pin(backend.0.hold_node_owner_for_test());
+        assert!(owner.as_mut().poll(&mut context).is_pending());
+
+        let mut query = Box::pin(client.query(Query::from("todos"), ReadTier::LocalFirst));
+        assert!(
+            query.as_mut().poll(&mut context).is_pending(),
+            "a query must wait while another operation owns the node"
+        );
+
+        drop(owner);
+        let rows = query.await.expect("query after the owner is released");
+        assert_eq!(rows.len(), 1);
     }
 
     // This is an internal fault-injection test because a real fatal tick error

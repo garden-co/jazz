@@ -236,7 +236,7 @@ struct DbSurfaceSummary {
 
 struct Participant {
     name: String,
-    node: NodeState<RocksDbStorage>,
+    node: NodeState,
     _dir: tempfile::TempDir,
     peer: PeerState,
 }
@@ -454,7 +454,7 @@ struct ReaderActorArgs {
     is_spy: bool,
     read_tier: DurabilityTier,
     _dir: tempfile::TempDir,
-    node: NodeState<RocksDbStorage>,
+    node: NodeState,
     reader_rx: mpsc::Receiver<ReaderInbound>,
     epoch: Instant,
     shape: ValidatedQuery,
@@ -808,7 +808,7 @@ fn run_concurrent_live(
 fn run_writer_actor(
     writer_idx: usize,
     _dir: tempfile::TempDir,
-    mut node: NodeState<RocksDbStorage>,
+    mut node: NodeState,
     items: Vec<WorkItem>,
     core_tx: mpsc::Sender<CoreInbound>,
     fate_rx: mpsc::Receiver<WriterFate>,
@@ -868,7 +868,7 @@ fn run_writer_actor(
 #[allow(clippy::too_many_arguments)]
 fn run_core_actor(
     _dir: tempfile::TempDir,
-    mut core: NodeState<RocksDbStorage>,
+    mut core: NodeState,
     mut reader_peers: Vec<ReaderCorePeer>,
     core_rx: mpsc::Receiver<CoreInbound>,
     reader_txs: Vec<mpsc::Sender<ReaderInbound>>,
@@ -1038,11 +1038,7 @@ fn precompute_workload(config: &Config, coalesced: bool) -> Vec<Vec<WorkItem>> {
     per_writer
 }
 
-fn apply_core_binding(
-    core: &mut NodeState<RocksDbStorage>,
-    shape: &ValidatedQuery,
-    binding: &Binding,
-) {
+fn apply_core_binding(core: &mut NodeState, shape: &ValidatedQuery, binding: &Binding) {
     apply_sync_message_settled(
         core,
         SyncMessage::RegisterShape {
@@ -1135,7 +1131,7 @@ fn observed_at_read_tier(update: &SyncMessage, tier: DurabilityTier) -> bool {
 }
 
 fn await_write_tier(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     tx_id: jazz::tx::TxId,
     tier: DurabilityTier,
     fate_rx: &mpsc::Receiver<WriterFate>,
@@ -1529,8 +1525,8 @@ fn schema() -> JazzSchema {
 fn seed_fixture(
     ctx: &mut dyn DriverContext,
     config: &Config,
-    writer: &mut NodeState<RocksDbStorage>,
-    core: &mut NodeState<RocksDbStorage>,
+    writer: &mut NodeState,
+    core: &mut NodeState,
 ) {
     let canvas = canvas_id();
     commit_global(
@@ -1578,8 +1574,8 @@ fn seed_fixture(
 fn seed_concurrent_fixture(
     ctx: &mut dyn DriverContext,
     config: &Config,
-    writer: &mut NodeState<RocksDbStorage>,
-    core: &mut NodeState<RocksDbStorage>,
+    writer: &mut NodeState,
+    core: &mut NodeState,
 ) {
     let canvas = canvas_id();
     commit_global_at(
@@ -1627,8 +1623,8 @@ fn seed_concurrent_fixture(
 #[allow(clippy::too_many_arguments)]
 fn commit_global(
     ctx: &mut dyn DriverContext,
-    writer: &mut NodeState<RocksDbStorage>,
-    core: &mut NodeState<RocksDbStorage>,
+    writer: &mut NodeState,
+    core: &mut NodeState,
     table: &str,
     row_uuid: RowUuid,
     made_by: AuthorSubject,
@@ -1650,8 +1646,8 @@ fn commit_global(
 #[allow(clippy::too_many_arguments)]
 fn commit_global_at(
     ctx: &mut dyn DriverContext,
-    writer: &mut NodeState<RocksDbStorage>,
-    core: &mut NodeState<RocksDbStorage>,
+    writer: &mut NodeState,
+    core: &mut NodeState,
     table: &str,
     row_uuid: RowUuid,
     made_by: AuthorSubject,
@@ -1689,7 +1685,7 @@ fn shape_subscription(schema: &JazzSchema, canvas: RowUuid) -> (ValidatedQuery, 
 
 fn hydrate(
     ctx: &mut dyn DriverContext,
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     participant: &mut Participant,
     shape: &ValidatedQuery,
     binding: &Binding,
@@ -1709,7 +1705,7 @@ fn hydrate(
 }
 
 fn apply_binding(
-    node: &mut NodeState<RocksDbStorage>,
+    node: &mut NodeState,
     shape: &ValidatedQuery,
     binding: &Binding,
     identity: AuthorSubject,
@@ -1754,7 +1750,7 @@ fn apply_binding(
 
 fn register_binding(
     ctx: &mut dyn DriverContext,
-    core: &mut NodeState<RocksDbStorage>,
+    core: &mut NodeState,
     client: &str,
     shape: &ValidatedQuery,
     binding: &Binding,
@@ -1820,10 +1816,7 @@ fn open_participant(
     }
 }
 
-fn open_node(
-    node_uuid: NodeUuid,
-    schema: JazzSchema,
-) -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
+fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, NodeState) {
     let dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -1836,11 +1829,7 @@ fn open_node(
     (dir, node)
 }
 
-fn reopen_node(
-    dir: &tempfile::TempDir,
-    node_uuid: NodeUuid,
-    schema: JazzSchema,
-) -> NodeState<RocksDbStorage> {
+fn reopen_node(dir: &tempfile::TempDir, node_uuid: NodeUuid, schema: JazzSchema) -> NodeState {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage =
@@ -1855,7 +1844,7 @@ fn open_db(
     node_uuid: NodeUuid,
     author: AuthorSubject,
     schema: JazzSchema,
-) -> (tempfile::TempDir, Db<RocksDbStorage>) {
+) -> (tempfile::TempDir, Db) {
     let dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -1882,7 +1871,7 @@ fn open_db(
 fn open_history_complete_node(
     node_uuid: NodeUuid,
     schema: JazzSchema,
-) -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
+) -> (tempfile::TempDir, NodeState) {
     let dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
@@ -1892,11 +1881,7 @@ fn open_history_complete_node(
     (dir, node)
 }
 
-fn rows(
-    node: &mut NodeState<RocksDbStorage>,
-    shape: &ValidatedQuery,
-    binding: &Binding,
-) -> Vec<RowUuid> {
+fn rows(node: &mut NodeState, shape: &ValidatedQuery, binding: &Binding) -> Vec<RowUuid> {
     block_on(node.query_rows(shape, binding, DurabilityTier::Global))
         .unwrap()
         .into_iter()
@@ -1908,11 +1893,7 @@ fn db_canvas_query(canvas: RowUuid) -> Query {
     Query::from(SHAPES).filter(eq(col("canvas"), lit(Value::Uuid(canvas.0))))
 }
 
-fn db_shape_state(
-    db: &Db<RocksDbStorage>,
-    schema: &JazzSchema,
-    query: &Query,
-) -> BTreeMap<RowUuid, (u64, u64)> {
+fn db_shape_state(db: &Db, schema: &JazzSchema, query: &Query) -> BTreeMap<RowUuid, (u64, u64)> {
     let prepared = db.prepare_query(query).expect("db prepare read shapes");
     db_rows_state(schema, db.read(&prepared).expect("db read shapes"))
 }
@@ -1967,7 +1948,7 @@ fn db_rows_state(schema: &JazzSchema, rows: Vec<CurrentRow>) -> BTreeMap<RowUuid
         .collect()
 }
 
-fn shape_state(node: &mut NodeState<RocksDbStorage>) -> BTreeMap<RowUuid, (u64, u64)> {
+fn shape_state(node: &mut NodeState) -> BTreeMap<RowUuid, (u64, u64)> {
     let table = schema()
         .tables()
         .iter()
@@ -1994,7 +1975,7 @@ fn shape_state(node: &mut NodeState<RocksDbStorage>) -> BTreeMap<RowUuid, (u64, 
 /// Linear history: Core mints at most one parentless, SYSTEM-authored fold
 /// version per contended write, and never folds a fold, so `merges_of_merges`
 /// is always zero. The pair is kept so the emitted summary shape is stable.
-fn merge_counters(core: &mut NodeState<RocksDbStorage>, shapes: usize) -> (usize, usize) {
+fn merge_counters(core: &mut NodeState, shapes: usize) -> (usize, usize) {
     let mut merges = 0;
     for idx in 0..shapes {
         for entry in block_on(core.row_history(SHAPES, shape_row(idx))).unwrap() {
@@ -2363,19 +2344,19 @@ fn raw_claims(author: AuthorSubject) -> BTreeMap<String, Value> {
     ])
 }
 
-fn install_claims(node: &mut NodeState<RocksDbStorage>, author: AuthorSubject) {
+fn install_claims(node: &mut NodeState, author: AuthorSubject) {
     if author != AuthorSubject::SYSTEM {
         node.admit_test_session_claims(author, raw_claims(author));
     }
 }
 
-fn install_participant_claims(node: &mut NodeState<RocksDbStorage>, config: &Config) {
+fn install_participant_claims(node: &mut NodeState, config: &Config) {
     for idx in 0..(config.active + config.passive) {
         install_claims(node, participant_author(idx));
     }
 }
 
-fn install_db_claims(db: &Db<RocksDbStorage>, author: AuthorSubject) {
+fn install_db_claims(db: &Db, author: AuthorSubject) {
     if author != AuthorSubject::SYSTEM {
         db.set_identity_claims(author, raw_claims(author));
     }

@@ -44,6 +44,7 @@ function writeJazzSimRun(root, sha, elapsedUs, replayRate, failedElapsedUs) {
       replay_edits_per_sec: replayRate,
       local_echo_p95_us: 120,
       edits: 100,
+      git_status_available: true,
       seed: 1,
     })}\n`,
   );
@@ -91,6 +92,7 @@ test("render_deltas compares jazz-sim JSONL metrics from manifests", () => {
     /\| jazz-sim\/s2_canvas\/canvas_replay\/replay_edits_per_sec \| 40000\.0 \| 50000\.0 \| 10000\.0 \| 25\.00% \| better \|/,
   );
   assert.doesNotMatch(output, /8888|9999|\/edits|\/seed/);
+  assert.doesNotMatch(output, /git_status_available/);
 });
 
 test("history report normalizes storage-less legacy lanes to null", () => {

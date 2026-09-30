@@ -77,7 +77,7 @@ fn owner_policy() -> PolicyExpr {
     )
 }
 
-fn install_claims(node: &mut NodeState<MemoryStorage>, author: AuthorSubject) {
+fn install_claims(node: &mut NodeState, author: AuthorSubject) {
     node.admit_test_session_claims(author, BTreeMap::new());
 }
 
@@ -90,7 +90,7 @@ fn owner_write_policies(select: PolicyExpr) -> TablePolicies {
         .with_delete(owner)
 }
 
-fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> NodeState<MemoryStorage> {
+fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> NodeState {
     let refs = schema.column_families();
     let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(NodeState::new(

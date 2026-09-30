@@ -76,11 +76,21 @@ impl ServerRuntimeFrameStream {
 }
 
 // Charging at least 16 KiB per frame bounds both count (512) and bytes
-// (8 MiB), including tiny-frame floods. Credits follow queued work to Drop.
+// (8 MiB), including tiny-frame floods. Credits follow queued work: ingress
+// returns each frame's charge once that frame is consumed, the rest on Drop.
+//
+// For ingress this is a guard against a peer that ignores flow control, so it
+// must admit everything the wire credit windows let a conforming peer send.
+// Only channel frames are credited; the peer's own credit grants are not, and
+// are applied at the socket edge rather than queued here.
 const FRAME_QUEUE_BUDGET: usize = 8 * 1024 * 1024;
+const _: () = assert!(
+    crate::wire::channel_credit::MAX_OUTSTANDING_CHANNEL_CREDIT <= FRAME_QUEUE_BUDGET,
+    "ingress queue budget must cover every credit window a conforming peer can fill"
+);
 struct FrameQueueCredit {
     used: Arc<AtomicUsize>,
-    charge: usize,
+    remaining: AtomicUsize,
 }
 impl FrameQueueCredit {
     fn reserve(used: &Arc<AtomicUsize>, frames: &[AbiBytes]) -> Result<Arc<Self>, String> {
@@ -101,13 +111,30 @@ impl FrameQueueCredit {
         .map_err(|_| "wire frame queue backpressure".to_owned())?;
         Ok(Arc::new(Self {
             used: Arc::clone(used),
-            charge,
+            remaining: AtomicUsize::new(charge),
         }))
+    }
+
+    /// Return one consumed frame's charge. The peer regains the matching
+    /// channel credit when the frame is consumed, so holding the whole batch
+    /// until its last frame finishes would let a conforming peer exceed the
+    /// window this budget is sized to cover.
+    fn release_frame(&self, encoded_len: usize) {
+        let cost = crate::wire::channel_credit::channel_frame_credit_cost(encoded_len);
+        if let Ok(previous) =
+            self.remaining
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                    Some(remaining.saturating_sub(cost))
+                })
+        {
+            self.used.fetch_sub(previous.min(cost), Ordering::AcqRel);
+        }
     }
 }
 impl Drop for FrameQueueCredit {
     fn drop(&mut self) {
-        self.used.fetch_sub(self.charge, Ordering::AcqRel);
+        self.used
+            .fetch_sub(*self.remaining.get_mut(), Ordering::AcqRel);
     }
 }
 
@@ -200,6 +227,10 @@ struct ServerShellInner {
     shutdown: Mutex<ShutdownState>,
     shutdown_changed: Condvar,
     ingress_bytes: Mutex<HashMap<ServerSession, Arc<AtomicUsize>>>,
+    /// Each wire session's credit ledger, so inbound grants apply at the
+    /// socket edge instead of waiting behind the owner's semantic FIFO.
+    session_channel_credits:
+        Mutex<HashMap<ServerSession, crate::wire::channel_credit::SharedChannelCredits>>,
     wire_streams: Mutex<HashMap<ServerSession, FrameStreamSender>>,
     activity_tx: watch::Sender<u64>,
     io_wakers: Arc<Mutex<Vec<mpsc::UnboundedSender<()>>>>,
@@ -604,7 +635,7 @@ impl TickScheduler for ServerShellTickScheduler {
 struct AuxiliaryIngress {
     frames: Vec<AbiBytes>,
     reply: FrameStreamSender,
-    _credit: Arc<FrameQueueCredit>,
+    credit: Arc<FrameQueueCredit>,
 }
 
 type SessionPumps = HashMap<ServerSession, crate::db::PeerIoPump>;
@@ -711,7 +742,10 @@ fn dispatch_ingress(
                     if work.reply.persistent { active_reply = Some(work.reply.clone()); }
                     for frame in work.frames {
                         if work.reply.is_closed() || pump.is_disconnected() { break; }
-                        let result = match pump.route_incoming_wire_frame(frame).await {
+                        let frame_len = frame.len();
+                        let routed = pump.route_incoming_wire_frame(frame).await;
+                        work.credit.release_frame(frame_len);
+                        let result = match routed {
                             Ok(None) => pump.take_outbound_wire_frames(32, 4 * 1024 * 1024),
                             Ok(Some(_)) => Err("canonical frame entered auxiliary worker".to_owned()),
                             Err(error) => Err(error),
@@ -728,7 +762,7 @@ fn dispatch_ingress(
             .unbounded_send(AuxiliaryIngress {
                 frames: auxiliary,
                 reply: reply.clone(),
-                _credit: Arc::clone(&credit),
+                credit: Arc::clone(&credit),
             })
             .is_err()
         {
@@ -741,12 +775,12 @@ fn dispatch_ingress(
     }
     Some(ServerShellCommand::RunAsync(Box::new(move |shell| {
         Box::pin(async move {
-            let _credit = credit;
             for frame in canonical {
                 if reply.is_closed() {
                     return;
                 }
                 let phase = inbound_frame_phase(&frame);
+                let frame_len = frame.len();
                 let result = match shell.receive_frames_async(session, [frame]).await {
                     Err(error) => Err(format!("server receive {phase}: {error}")),
                     Ok(()) => match shell.tick_async().await {
@@ -756,6 +790,7 @@ fn dispatch_ingress(
                             .map_err(|error| format!("server drain after {phase}: {error}")),
                     },
                 };
+                credit.release_frame(frame_len);
                 let failed = result.is_err();
                 if reply.send(result).is_err() || failed {
                     return;
@@ -1331,6 +1366,7 @@ impl ServerRuntimeHandle {
                 shutdown: Mutex::new(ShutdownState::Running),
                 shutdown_changed: Condvar::new(),
                 ingress_bytes: Mutex::new(HashMap::new()),
+                session_channel_credits: Mutex::new(HashMap::new()),
                 wire_streams: Mutex::new(HashMap::new()),
                 activity_tx,
                 io_wakers,
@@ -1355,19 +1391,29 @@ impl ServerRuntimeHandle {
         session_context: Option<ConnectionSessionContext>,
         link_admission: crate::serving::ServerLinkAdmission,
     ) -> Result<ServerSession, String> {
-        self.run(move |shell| {
-            shell
-                .accept_subscriber_session_with_claims_and_trust_and_context(
-                    identity,
-                    claims,
-                    trust,
-                    negotiated_features,
-                    session_context,
-                    link_admission,
-                )
-                .map_err(|error| error.to_string())
-        })
-        .await
+        let (session, credits) = self
+            .run(move |shell| {
+                let session = shell
+                    .accept_subscriber_session_with_claims_and_trust_and_context(
+                        identity,
+                        claims,
+                        trust,
+                        negotiated_features,
+                        session_context,
+                        link_admission,
+                    )
+                    .map_err(|error| error.to_string())?;
+                Ok((session, shell.session_channel_credits(session).ok()))
+            })
+            .await?;
+        if let Some(credits) = credits {
+            self.inner
+                .session_channel_credits
+                .lock()
+                .map_err(|_| "channel credit registry lock poisoned")?
+                .insert(session, credits);
+        }
+        Ok(session)
     }
 
     /// Publish a validated schema and optional migration lens to the runtime.
@@ -1413,8 +1459,8 @@ impl ServerRuntimeHandle {
         revision: u64,
         schema: JazzSchema,
         permissions: std::collections::HashMap<
-            crate::tools::public_schema::TableName,
-            crate::tools::public_schema::TablePolicies,
+            crate::model::public_schema::TableName,
+            crate::model::public_schema::TablePolicies,
         >,
     ) -> Result<SchemaVersionId, String> {
         let activity_tx = self.inner.activity_tx.clone();
@@ -1505,6 +1551,51 @@ impl ServerRuntimeHandle {
         Ok(ServerRuntimeFrameStream { receiver })
     }
 
+    /// Apply and remove the batch's credit grants, preserving the order of
+    /// everything else. Grants settle only the server-to-peer windows, which
+    /// no queued inbound frame depends on, so applying them ahead of earlier
+    /// channel frames is the same reordering the auxiliary worker already
+    /// performed. Sessions without a registered ledger keep the queued path.
+    fn apply_edge_credit_grants(
+        &self,
+        session: ServerSession,
+        frames: Vec<AbiBytes>,
+    ) -> Result<Vec<AbiBytes>, String> {
+        let Some(credits) = self
+            .inner
+            .session_channel_credits
+            .lock()
+            .map_err(|_| "channel credit registry lock poisoned")?
+            .get(&session)
+            .cloned()
+        else {
+            return Ok(frames);
+        };
+        let mut granted = false;
+        let mut remaining = Vec::with_capacity(frames.len());
+        for frame in frames {
+            if !crate::wire::is_channel_credit_frame(&frame) {
+                remaining.push(frame);
+                continue;
+            }
+            let WireFrame::ChannelCredit(grant) = crate::wire::decode_frame(&frame)
+                .map_err(|error| format!("malformed wire credit frame: {error}"))?
+            else {
+                return Err("malformed wire credit frame".to_owned());
+            };
+            credits
+                .lock()
+                .map_err(|_| "channel credit lock poisoned")?
+                .receive_credit(grant)?;
+            granted = true;
+        }
+        if granted {
+            // Output parked on exhausted credit can move again.
+            notify_shell_activity(&self.inner.activity_tx);
+        }
+        Ok(remaining)
+    }
+
     fn wire_stream_sender(&self, session: ServerSession) -> Result<FrameStreamSender, String> {
         self.inner
             .wire_streams
@@ -1516,11 +1607,20 @@ impl ServerRuntimeHandle {
     }
 
     /// Stage bounded input while the socket continues polling its output stream.
+    ///
+    /// The peer's credit grants are applied here, before anything is queued:
+    /// they are uncredited acknowledgements of our own output, so queueing
+    /// them behind the channel frames they regulate would let a conforming
+    /// peer exhaust the ingress budget while the owner catches up.
     pub fn receive_wire_frames(
         &self,
         session: ServerSession,
         frames: Vec<AbiBytes>,
     ) -> Result<(), String> {
+        let frames = self.apply_edge_credit_grants(session, frames)?;
+        if frames.is_empty() {
+            return Ok(());
+        }
         let credit = self.reserve_session_ingress(session, &frames)?;
         self.send(ServerShellCommand::ReceiveFrames {
             session,
@@ -1544,13 +1644,17 @@ impl ServerRuntimeHandle {
                 if reply.is_closed() {
                     return;
                 }
+                let queued_before = shell.session_frames_queued();
                 let result = match shell.tick_async().await {
                     Ok(()) => shell
                         .take_frames(session)
                         .map_err(|error| error.to_string()),
                     Err(error) => Err(error.to_string()),
                 };
-                let made_progress = result.as_ref().is_ok_and(|frames| !frames.is_empty());
+                // See `tick_take`: re-arm on frames taken here or produced for
+                // any session by this tick, never on output merely queued.
+                let made_progress = result.as_ref().is_ok_and(|frames| !frames.is_empty())
+                    || shell.session_frames_queued() != queued_before;
                 let _ = reply.send(result);
                 if made_progress {
                     notify_shell_activity(&activity_tx);
@@ -1564,6 +1668,7 @@ impl ServerRuntimeHandle {
         let activity_tx = self.inner.activity_tx.clone();
         self.run_async(move |shell| {
             Box::pin(async move {
+                let queued_before = shell.session_frames_queued();
                 let result = match shell.tick_async().await {
                     Ok(()) => shell
                         .take_frames(session)
@@ -1576,9 +1681,16 @@ impl ServerRuntimeHandle {
                 // consolidation-spin feeder. One notification must never buy an
                 // unbounded loop, and delivery must never stall mid-reset; frames
                 // produced is exactly the signal that separates the two.
-                if let Ok(frames) = &result
-                    && !frames.is_empty()
-                {
+                //
+                // "Produced" covers every session, not only this one: the tick
+                // serves all connections, so it can queue another session's
+                // update while this session receives nothing. Only that
+                // session's own activity wake drains it, so announce it here.
+                // The counter advances only when a tick queues new output, so a
+                // session that never drains its backlog cannot re-arm an empty
+                // tick.
+                let produced = shell.session_frames_queued() != queued_before;
+                if produced || result.as_ref().is_ok_and(|frames| !frames.is_empty()) {
                     notify_shell_activity(&activity_tx);
                 }
                 result
@@ -1671,6 +1783,9 @@ impl ServerRuntimeHandle {
         }
         if let Ok(mut budgets) = self.inner.ingress_bytes.lock() {
             budgets.remove(&session);
+        }
+        if let Ok(mut credits) = self.inner.session_channel_credits.lock() {
+            credits.remove(&session);
         }
         let _ = self.send(ServerShellCommand::CloseSession(session));
     }
@@ -2980,6 +3095,7 @@ mod tests {
             shutdown: Mutex::new(ShutdownState::Running),
             shutdown_changed: Condvar::new(),
             ingress_bytes: Mutex::new(HashMap::new()),
+            session_channel_credits: Mutex::new(HashMap::new()),
             wire_streams: Mutex::new(HashMap::new()),
             activity_tx,
             io_wakers: Arc::new(Mutex::new(Vec::new())),
