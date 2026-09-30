@@ -2163,7 +2163,7 @@ impl TickEvaluator<'_> {
                     if self.context.eval_mode != EvalMode::Hydrate
                         || self.evaluation_inputs.is_none() =>
                 {
-                    NodeState::update_index_source(
+                    let read = NodeState::update_index_source(
                         input,
                         self.schema,
                         self.variant_projections,
@@ -2171,8 +2171,13 @@ impl TickEvaluator<'_> {
                         self.table_deltas,
                         self.storage,
                         self.context.eval_mode,
-                    )
-                    .await
+                    );
+                    #[cfg(feature = "cold-settle-attribution")]
+                    let read = tracing::Instrument::instrument(
+                        read,
+                        tracing::trace_span!("cold.phase.op_source"),
+                    );
+                    read.await
                 }
                 OpType::StreamingChecksum(checksum) => {
                     let input = self.update_unary_input(graph_node, node).await?;

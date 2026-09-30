@@ -724,6 +724,10 @@ where
             .await
     }
 
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.query_compile")
+    )]
     pub(super) async fn compile_query_program_request_with_access_paths(
         &mut self,
         request: QueryProgramRequest,
@@ -807,6 +811,10 @@ where
     /// source occurrence. This is intentionally separate from ordinary inline
     /// snapshots: the caller can atomically replace these records after the
     /// graph is subscribed.
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.query_compile")
+    )]
     pub(super) async fn compile_query_program_request_with_inline_sources_access_paths_and_covered_inputs(
         &mut self,
         request: QueryProgramRequest,
@@ -1376,6 +1384,10 @@ where
     /// choice holds for its initial snapshot and every later update. Fields
     /// kept physical must be dropped, or hydrated, before rows cross a public
     /// boundary.
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.query_subscribe")
+    )]
     pub(super) async fn subscribe_lowered_program_with_root_values(
         &mut self,
         program: QueryProgram,

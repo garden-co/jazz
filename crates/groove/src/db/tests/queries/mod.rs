@@ -702,6 +702,39 @@ async fn index_static_scan_specs_filter_index_records() {
 }
 
 #[futures_test::test]
+async fn table_prefix_limits_bound_physical_rows_in_key_order() {
+    let storage = MemoryStorage::new(&["docs", "indices"]).expect("valid memory storage families");
+    let mut database = Database::new(scan_spec_schema(), storage).await.unwrap();
+    let mut batch = database.open_batch();
+    insert_scan_doc(&mut batch, "a", 1, "/alpha", b"first");
+    insert_scan_doc(&mut batch, "a", 2, "/alpha", b"second");
+    insert_scan_doc(&mut batch, "b", 3, "/beta", b"outside prefix");
+    database.commit_batch(batch).await.unwrap();
+
+    for (reversed, expected_id) in [(false, 1), (true, 2)] {
+        let scan = if reversed {
+            StaticScanSpec::ReversePrefixLimit {
+                prefix: vec![LiteralValue::String("a".to_owned())],
+                max_items: 1,
+            }
+        } else {
+            StaticScanSpec::PrefixLimit {
+                prefix: vec![LiteralValue::String("a".to_owned())],
+                max_items: 1,
+            }
+        };
+        let rows = database
+            .query_graph(GraphBuilder::table_scan("docs", scan))
+            .await
+            .unwrap()
+            .to_values()
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0[1], Value::U64(expected_id));
+    }
+}
+
+#[futures_test::test]
 async fn reverse_bounded_index_prefix_selects_last_matching_row() {
     let storage = MemoryStorage::new(&["docs", "indices"]).expect("valid memory storage families");
     let mut database = Database::new(scan_spec_schema(), storage).await.unwrap();

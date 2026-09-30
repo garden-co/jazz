@@ -2248,6 +2248,10 @@ impl IvmRuntime {
         Ok(())
     }
 
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.ivm_tick")
+    )]
     pub(crate) async fn tick_resident_staged(
         &mut self,
         table_deltas: Vec<TableDelta>,
@@ -2595,21 +2599,37 @@ impl IvmRuntime {
                 continue;
             }
             let progress = match &mut evaluation {
-                PendingEvaluation::Incremental(incremental) => incremental.poll(self, cx),
-                PendingEvaluation::SubscriptionHydration(hydration) => hydration
-                    .session
-                    .poll(
-                        self,
-                        &hydration.binding_snapshots,
-                        hydration.hydrate_arrangements,
-                        &mut hydration.metrics,
-                        cx,
-                    )
-                    .map_err(|error| EvaluationFailure {
-                        kind: EvaluationFailureKind::Scoped,
-                        affected_nodes: hydration.session.work_queue.incomplete_nodes().collect(),
-                        error: Arc::new(error),
-                    }),
+                // Queued evaluations run under whichever caller polls the
+                // queue (a bind, a write's tick, a later owner turn). Give
+                // each poll its own phase so that work is not charged to the
+                // unrelated caller.
+                PendingEvaluation::Incremental(incremental) => {
+                    #[cfg(feature = "cold-settle-attribution")]
+                    let _phase = tracing::trace_span!("cold.phase.pending_incremental").entered();
+                    incremental.poll(self, cx)
+                }
+                PendingEvaluation::SubscriptionHydration(hydration) => {
+                    #[cfg(feature = "cold-settle-attribution")]
+                    let _phase = tracing::trace_span!("cold.phase.pending_hydration").entered();
+                    hydration
+                        .session
+                        .poll(
+                            self,
+                            &hydration.binding_snapshots,
+                            hydration.hydrate_arrangements,
+                            &mut hydration.metrics,
+                            cx,
+                        )
+                        .map_err(|error| EvaluationFailure {
+                            kind: EvaluationFailureKind::Scoped,
+                            affected_nodes: hydration
+                                .session
+                                .work_queue
+                                .incomplete_nodes()
+                                .collect(),
+                            error: Arc::new(error),
+                        })
+                }
             };
             // A hydration session owns a private snapshot of all reachable
             // state. Its completed interior nodes are not safe handoff points:

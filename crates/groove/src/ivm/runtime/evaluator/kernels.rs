@@ -15,6 +15,8 @@ impl TickEvaluator<'_> {
             .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
         let output_desc = graph_node.descriptor.output.records();
         debug_assert_eq!(inputs.len(), graph_node.descriptor.inputs.len());
+        #[cfg(feature = "cold-settle-attribution")]
+        let _phase = operator_phase_span(&graph_node.descriptor.operator).entered();
         match &graph_node.descriptor.operator {
             OpType::TableSource(input)
                 if self.context.eval_mode == EvalMode::Hydrate
@@ -362,5 +364,29 @@ impl TickEvaluator<'_> {
             OpType::Persist(_) => Err(IvmRuntimeError::UnsupportedOperator),
             _ => Err(IvmRuntimeError::UnsupportedOperator),
         }
+    }
+}
+
+/// One phase per operator family, so kernel time has a budget independent of
+/// which caller polled the evaluation.
+#[cfg(feature = "cold-settle-attribution")]
+fn operator_phase_span(operator: &OpType) -> tracing::Span {
+    match operator {
+        OpType::TableSource(_)
+        | OpType::IndexSource(_)
+        | OpType::BindingSource(_)
+        | OpType::FrontierSource(_)
+        | OpType::InlineRecords(_) => tracing::trace_span!("cold.phase.op_source"),
+        OpType::Arrange(_) => tracing::trace_span!("cold.phase.op_arrange"),
+        OpType::Join(_) | OpType::SemiJoin(_) | OpType::AntiJoin(_) => {
+            tracing::trace_span!("cold.phase.op_join")
+        }
+        OpType::MapProject(_) | OpType::Filter(_) => tracing::trace_span!("cold.phase.op_map"),
+        OpType::Aggregate(_)
+        | OpType::ArgMinBy(_)
+        | OpType::ArgMaxBy(_)
+        | OpType::TopBy(_)
+        | OpType::CollectBy(_) => tracing::trace_span!("cold.phase.op_aggregate"),
+        _ => tracing::trace_span!("cold.phase.op_other"),
     }
 }
