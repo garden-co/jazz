@@ -22,8 +22,6 @@ pub(super) struct SupportingFrontier {
     history: BTreeMap<SupportingRow, std::collections::VecDeque<String>>,
     diag_batch: u64,
     diag_tag: String,
-    /// Diagnostic (#3815): compact per-batch contributions, newest last.
-    batch_log: std::collections::VecDeque<(u64, Vec<String>)>,
 }
 
 impl SupportingFrontier {
@@ -42,29 +40,6 @@ impl SupportingFrontier {
         weights[origin] += weight;
         let after = weights.iter().any(|weight| *weight > 0);
         let removed = weights.iter().all(|weight| *weight == 0);
-        if self
-            .batch_log
-            .back()
-            .is_none_or(|(batch, _)| *batch != self.diag_batch)
-        {
-            self.batch_log.push_back((self.diag_batch, Vec::new()));
-            while self.batch_log.len() > 8 {
-                self.batch_log.pop_front();
-            }
-        }
-        if let Some((_, entries)) = self.batch_log.back_mut()
-            && entries.len() < 40
-        {
-            let row_id = row.row.0.to_string();
-            let tx = format!("{:?}", row.version.tx);
-            let time = tx.split(')').next().unwrap_or(&tx);
-            entries.push(format!(
-                "{}:{}:t{}:o{origin}{weight:+}",
-                row.version_table.as_str(),
-                &row_id[row_id.len().saturating_sub(6)..],
-                &time[time.len().saturating_sub(10)..],
-            ));
-        }
         if removed {
             self.weights.remove(&row);
             self.history.remove(&row);
@@ -108,14 +83,6 @@ impl SupportingFrontier {
     /// version, with each version's per-origin weights, journal state and
     /// recent contributions. A well-formed frontier returns nothing.
     pub(super) fn coordinate_conflicts(&self) -> Vec<String> {
-        let mut conflicts = self.coordinate_conflict_rows();
-        if !conflicts.is_empty() {
-            conflicts.push(format!("batches {:?}", self.batch_log));
-        }
-        conflicts
-    }
-
-    fn coordinate_conflict_rows(&self) -> Vec<String> {
         let mut by_coordinate =
             BTreeMap::<super::CoveredInputCoordinate, Vec<&SupportingRow>>::new();
         // Not `rows()`: that traversal is counted by publication tests.
@@ -150,7 +117,7 @@ impl SupportingFrontier {
                     .collect::<Vec<_>>()
                     .join(" vs ")
             })
-            .collect::<Vec<_>>()
+            .collect()
     }
 
     pub(super) fn rows(&self) -> impl Iterator<Item = &SupportingRow> {
