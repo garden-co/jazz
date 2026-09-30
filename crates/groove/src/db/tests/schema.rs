@@ -18,45 +18,54 @@ fn storage_name_direct_store(name: impl Into<String>) -> DirectRecordStoreSchema
     )
 }
 
-/// Scalar enum tags and enum tags nested in fixed tuples are not direct-store key types.
+/// alice writes scalar and fixed-tuple direct-store keys containing enum tags.
+/// Both keys remain readable after the database is reopened.
 #[futures_test::test]
-async fn enum_tag_direct_store_keys_fail_before_durable_open() {
+async fn enum_tag_direct_store_keys_round_trip() {
     let enum_tag = ValueType::EnumTag(ScalarEnumSchema::new("status", ["new", "done"]).unwrap());
-    for (name, key_type) in [
-        ("enum_tag_key", enum_tag.clone()),
+    let schema = DatabaseSchema::new([])
+        .with_direct_record_store(DirectRecordStoreSchema::new(
+            "enum_tag_key",
+            RecordDescriptor::new([("key", enum_tag.clone())]),
+            RecordDescriptor::new([("payload", ValueType::Bytes)]),
+        ))
+        .with_direct_record_store(DirectRecordStoreSchema::new(
+            "tuple_enum_tag_key",
+            RecordDescriptor::new([("key", ValueType::Tuple(vec![enum_tag, ValueType::U64]))]),
+            RecordDescriptor::new([("payload", ValueType::Bytes)]),
+        ));
+    let keys = [
+        ("enum_tag_key", vec![Value::EnumTag(1)]),
         (
             "tuple_enum_tag_key",
-            ValueType::Tuple(vec![enum_tag, ValueType::U64]),
+            vec![Value::Tuple(vec![Value::EnumTag(2), Value::U64(7)])],
         ),
-    ] {
-        let schema =
-            DatabaseSchema::new([]).with_direct_record_store(DirectRecordStoreSchema::new(
-                name,
-                RecordDescriptor::new([("key", key_type)]),
-                RecordDescriptor::new([("payload", ValueType::Bytes)]),
-            ));
-        let mut column_families = schema.column_families();
-        column_families.push("__groove_class_meta");
-        let (storage, control) = TestStorage::controlled(&column_families);
-        let error = match Database::new_with_storage_layout(
-            schema,
-            storage,
-            StorageLayout::jazz_class_v1(),
-        )
-        .await
-        {
-            Ok(_) => panic!("EnumTag direct-store key must be rejected"),
-            Err(error) => error,
-        };
+    ];
+    let storage = MemoryStorage::new(&schema.column_families()).expect("valid storage families");
+    let database = Database::new(schema.clone(), storage).await.unwrap();
+    for (name, key) in &keys {
+        database
+            .direct_record_store(name)
+            .unwrap()
+            .set(key, &[Value::Bytes(b"payload".to_vec())])
+            .await
+            .unwrap();
+    }
 
-        assert!(
-            matches!(&error, Error::InvalidDirectRecordStoreKey(store) if store == name),
-            "{error:?}"
-        );
-        assert!(
-            control.observed().is_empty(),
-            "{name:?} reached storage before rejection: {:?}",
-            control.observed()
+    let storage = database.into_storage();
+    let reopened = Database::new(schema, storage).await.unwrap();
+    for (name, key) in &keys {
+        assert_eq!(
+            reopened
+                .direct_record_store(name)
+                .unwrap()
+                .get(key)
+                .await
+                .unwrap()
+                .unwrap()
+                .get("payload")
+                .unwrap(),
+            Value::Bytes(b"payload".to_vec())
         );
     }
 }
