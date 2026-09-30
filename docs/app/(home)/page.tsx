@@ -30,8 +30,7 @@ import { FrameworkLogos } from "@/components/home/framework-logos";
 import { pricingMeters } from "@/lib/home-pricing";
 import { adopterQuotes } from "@/lib/home-quotes";
 import { blogSource } from "@/lib/source";
-import { StippleCanvas } from "@/components/brand/stipple-canvas";
-import { heroPattern } from "@/components/brand/stipple-presets";
+import { StippleCanvas, heroPattern } from "@garden-co/design/stipple";
 
 export const metadata: Metadata = {
   title: "Jazz - The database that syncs.",

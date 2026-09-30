@@ -3,12 +3,12 @@
 import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import { useTheme } from "next-themes";
-import { Moon, Sun } from "lucide-react";
+import { Monitor, Moon, Sun } from "lucide-react";
 import { siDiscord, siGithub, siX } from "simple-icons";
 import { Button } from "@astryxdesign/core/Button";
 import { HStack } from "@astryxdesign/core/Stack";
 import { Icon } from "@astryxdesign/core/Icon";
-import { IconButton } from "@astryxdesign/core/IconButton";
+import { SegmentedControl, SegmentedControlItem } from "@astryxdesign/core/SegmentedControl";
 import { TopNav, TopNavHeading, TopNavItem } from "@astryxdesign/core/TopNav";
 import { JazzLogo } from "@/components/brand/jazz-logo";
 import { gitConfig } from "@/lib/layout.shared";
@@ -22,21 +22,35 @@ function BrandIcon({ path }: { path: string }) {
   );
 }
 
-function ThemeToggle() {
-  const { resolvedTheme, setTheme } = useTheme();
-  // The stored theme is unknown on the server; render the light-mode control
-  // until mounted so hydration matches.
+const THEMES = [
+  { value: "light", label: "Light", icon: Sun },
+  { value: "system", label: "System", icon: Monitor },
+  { value: "dark", label: "Dark", icon: Moon },
+];
+
+function ThemeSwitch() {
+  const { theme, setTheme } = useTheme();
+  // The stored theme is unknown on the server; show "system" until mounted so
+  // hydration matches.
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
-  const isDark = mounted && resolvedTheme === "dark";
   return (
-    <IconButton
-      label={isDark ? "Switch to light mode" : "Switch to dark mode"}
-      variant="ghost"
+    <SegmentedControl
+      label="Colour theme"
       size="sm"
-      icon={<Icon icon={isDark ? Sun : Moon} size="sm" />}
-      onClick={() => setTheme(isDark ? "light" : "dark")}
-    />
+      value={mounted ? (theme ?? "system") : "system"}
+      onChange={setTheme}
+    >
+      {THEMES.map((option) => (
+        <SegmentedControlItem
+          key={option.value}
+          value={option.value}
+          label={option.label}
+          isLabelHidden
+          icon={<Icon icon={option.icon} size="sm" />}
+        />
+      ))}
+    </SegmentedControl>
   );
 }
 
@@ -99,11 +113,12 @@ export function SiteTopNav() {
           </>
         }
         endContent={
-          <HStack gap={1} vAlign="center">
+          <HStack gap={1} vAlign="center" className="site-nav-end">
             {/* The search field sits at the end, not centred: centred, it
               collided with the nav links on laptop widths. Below 1120px the
               links and the field no longer fit side by side, so search
               collapses to an icon. */}
+            <ThemeSwitch />
             <span className="site-search-field contents max-[1120px]:hidden">
               <SearchField onOpen={openSearch} />
             </span>
@@ -127,7 +142,6 @@ export function SiteTopNav() {
                 />
               ))}
             </span>
-            <ThemeToggle />
           </HStack>
         }
       />

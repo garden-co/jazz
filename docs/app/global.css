@@ -161,6 +161,20 @@ h6 {
 .site-page-shell .astryx-app-shell-header {
   background-color: var(--color-background-body);
 }
+/* Without a sidebar the bar spans the same centred width as the content and
+   footer, so the logo lines up with the text's left edge and the last icon
+   with its right edge. The heading's and icon buttons' own insets are pulled
+   back so the glyphs themselves sit on those lines. */
+.site-page-shell .astryx-top-nav {
+  max-width: var(--fd-layout-width);
+  margin-inline: auto;
+}
+.site-page-shell .astryx-top-nav-heading {
+  margin-inline-start: -8px;
+}
+.site-page-shell .site-nav-end {
+  margin-inline-end: -6px;
+}
 
 /* Callout bodies written in MDX use the Banner's own description style
    (size, leading, colour), like callouts built in components. */
@@ -185,7 +199,8 @@ h6 {
 
 /* Homepage diagrams (components/home/diagrams.tsx), in the style of the
    Jazz print material: square boxes, mono labels, thin wires with open
-   arrowheads. Blue = local, green = global. Sizes are SVG user units. */
+   arrowheads. Blue = local, mint = global, periwinkle = in flight. Sizes
+   are SVG user units. */
 .home-diagram {
   font-family: var(--font-family-code);
 }
@@ -195,8 +210,11 @@ h6 {
 .home-diagram .dg-stroke-blue {
   stroke: var(--color-jazz-blue);
 }
-.home-diagram .dg-stroke-green {
-  stroke: var(--color-jazz-green);
+.home-diagram .dg-stroke-mint {
+  stroke: var(--color-jazz-mint);
+}
+.home-diagram .dg-stroke-periwinkle {
+  stroke: var(--color-jazz-periwinkle);
 }
 .home-diagram .dg-stroke-muted {
   stroke: var(--color-text-secondary);
@@ -207,8 +225,11 @@ h6 {
 .home-diagram .dg-fill-blue {
   fill: var(--color-jazz-blue);
 }
-.home-diagram .dg-fill-green {
-  fill: var(--color-jazz-green);
+.home-diagram .dg-fill-mint {
+  fill: var(--color-jazz-mint);
+}
+.home-diagram .dg-fill-periwinkle {
+  fill: var(--color-jazz-periwinkle);
 }
 .home-diagram .dg-fill-muted {
   fill: var(--color-text-secondary);
