@@ -2004,6 +2004,8 @@ where
                 "authority covered input branch witness disagrees with stored version",
             ));
         }
+        #[cfg(feature = "cold-settle-attribution")]
+        version.record_conversion("covered_input_version", 0);
         Ok(Some(version))
     }
 
@@ -2745,6 +2747,8 @@ where
         &mut self,
         version: &VersionRow,
     ) -> Result<VersionRow, Error> {
+        #[cfg(feature = "cold-settle-attribution")]
+        version.record_conversion("canonical_history_version", 0);
         // The maintained graph can call its projected result table by a name
         // that also existed in the authored schema.  Resolve that name once
         // through the active catalogue and require the same physical table

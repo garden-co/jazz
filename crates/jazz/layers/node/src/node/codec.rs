@@ -2253,6 +2253,23 @@ pub(super) fn register_record_descriptor(table: &TableSchema) -> records::Record
 }
 
 impl VersionRow {
+    /// Count one cold-path conversion that produced or consumed this version.
+    #[cfg(feature = "cold-settle-attribution")]
+    pub(super) fn record_conversion(&self, site: &'static str, bytes: usize) {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (
+            self.table(),
+            self.row_uuid(),
+            self.branch_key(),
+            self.tx_time(),
+            self.tx_node_alias(),
+            self.layer(),
+        )
+            .hash(&mut hasher);
+        groove::cold_settle_attribution::conversions::record(site, hasher.finish(), bytes);
+    }
+
     pub(super) fn from_parts_with_schema_version(
         table: &TableSchema,
         parts: VersionRowParts,
@@ -2412,11 +2429,14 @@ impl VersionRow {
                 "borrowed wire ingest changed storage bytes"
             );
         }
-        Ok(Self {
+        let row = Self {
             table: groove::Intern::new(version.table().to_owned()),
             branch_key: version.branch_key().clone(),
             record: OwnedRecord::new(raw, descriptor),
-        })
+        };
+        #[cfg(feature = "cold-settle-attribution")]
+        row.record_conversion("wire_to_version_row", row.record.raw().len());
+        Ok(row)
     }
 
     pub(super) fn table(&self) -> &str {
