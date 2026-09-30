@@ -94,6 +94,48 @@ test("skips unlabeled, closed, fork, and untrusted pull requests", async () => {
   }
 });
 
+function releasePullRequest(overrides = {}) {
+  return pullRequest({
+    author_association: "CONTRIBUTOR",
+    labels: [],
+    user: { login: "github-actions[bot]", type: "Bot" },
+    head: { ref: "changeset-release/release", repo: { full_name: "garden-co/jazz" } },
+    base: { ref: "release", repo: { full_name: "garden-co/jazz" } },
+    ...overrides,
+  });
+}
+
+test("builds the bot-opened Version Packages PR without a label", async () => {
+  assert.equal(
+    await shouldSkipDocsDeploy({
+      env: requiredEnv,
+      fetchImpl: async () => jsonResponse(releasePullRequest()),
+    }),
+    false,
+  );
+});
+
+test("skips bot PRs that are not the Version Packages PR", async () => {
+  const cases = [
+    releasePullRequest({ state: "closed" }),
+    releasePullRequest({ user: { login: "github-actions[bot]", type: "User" } }),
+    releasePullRequest({ user: { login: "dependabot[bot]", type: "Bot" } }),
+    releasePullRequest({
+      head: { ref: "changeset-release/main", repo: { full_name: "garden-co/jazz" } },
+    }),
+    releasePullRequest({
+      head: { ref: "changeset-release/release", repo: { full_name: "some-fork/jazz" } },
+    }),
+    releasePullRequest({ base: { ref: "main", repo: { full_name: "garden-co/jazz" } } }),
+  ];
+  for (const body of cases) {
+    assert.equal(
+      await shouldSkipDocsDeploy({ env: requiredEnv, fetchImpl: async () => jsonResponse(body) }),
+      true,
+    );
+  }
+});
+
 test("fails closed on denial, malformed response, network error, and timeout", async () => {
   const fetches = [
     async () => jsonResponse({}, { ok: false, status: 403 }),
