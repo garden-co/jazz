@@ -417,6 +417,8 @@ mod tests;
 /// Default client-clock skew tolerance in milliseconds.
 pub const SKEW_TOLERANCE_MS: u64 = 30_000;
 const TX_VERSION_TABLE_CACHE_MAX_ENTRIES: usize = 4096;
+/// Bound on `history_tx_authors`; the cache is cleared when it fills.
+const HISTORY_TX_AUTHOR_CACHE_MAX_ENTRIES: usize = 4096;
 
 static NEXT_GROOVE_RUNTIME_TOKEN: AtomicU64 = AtomicU64::new(1);
 
@@ -606,6 +608,15 @@ pub struct NodeState<S = BoxedStorage> {
     /// says whether the row may already hold a shadow (it had an overlay
     /// before this batch touched it).
     ahead_shadow_dirty: Vec<(SchemaVersionId, String, BranchKey, RowUuid, bool)>,
+    /// History rows written since the last applied node batch, per
+    /// transaction `(tx_time, tx_node_alias)`; `apply_node_batch` adds them to
+    /// the transaction's `jazz_tx_touched_rows` list.
+    tx_touched_dirty: BTreeMap<(TxTime, NodeAlias), TouchedRows>,
+    /// `made_by` of transactions whose history images omitted `updated_by`
+    /// (`resolve_history_updated_by`). Bounded; transaction authors never
+    /// change, so entries never go stale.
+    /// Each entry is the encoded field, ready to splice into an image.
+    history_tx_authors: BTreeMap<(TxTime, NodeAlias), Rc<[u8]>>,
     /// Set while this node (Core) mints a seq for an incoming patch.
     minting_global_time: bool,
 
@@ -1009,13 +1020,11 @@ struct QueryServing {
     /// Policy tables currently being compiled as membership proofs. This is
     /// transient recursion state, not a cache.
     policy_proof_stack: Vec<PolicyProofStackEntry>,
-    /// Logical tables that have history rows for a stored transaction.
-    tx_version_tables_cache: BTreeMap<TxId, BTreeSet<String>>,
     /// Recently staged history rows for a stored transaction, indexed by
     /// authored schema/table/row so parent validation does not rescan wide
     /// transactions on a cache hit.
     tx_versions_cache: BTreeMap<TxId, CachedTransactionVersions>,
-    /// Approximate insertion order for bounding `tx_version_tables_cache`.
+    /// Approximate insertion order for bounding `tx_versions_cache`.
     tx_version_tables_cache_order: VecDeque<TxId>,
     /// Live membership for `tx_version_tables_cache_order`.
     tx_version_tables_cache_order_set: BTreeSet<TxId>,

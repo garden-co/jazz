@@ -316,6 +316,7 @@ fn validate_private_session_endpoint(server_url: &str) -> Result<url::Url, JazzN
     match url.scheme() {
         "https" => Ok(url),
         "http" if private_plaintext_host_is_allowed(&url) => Ok(url),
+        "http" if url.host_str().is_some() => Err(JazzNativeRelayStatus::RemotePlaintextEndpoint),
         "http" => Err(JazzNativeRelayStatus::LifecycleFailure),
         _ => Err(JazzNativeRelayStatus::LifecycleFailure),
     }
@@ -751,6 +752,7 @@ pub enum JazzNativeRelayStatus {
     InvalidAbiRange = 6,
     IncompatibleAbi = 7,
     Backpressure = 8,
+    RemotePlaintextEndpoint = 9,
 }
 
 /// Explicit host-owned lifecycle registry for JNI/Swift. No global relay map.

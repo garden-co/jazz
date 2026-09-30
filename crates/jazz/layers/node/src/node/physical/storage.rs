@@ -358,10 +358,16 @@ where
             .iter()
             .enumerate()
             .map(|(index, field)| {
+                if !current && index == HistoryRowRecord::FIELD_UPDATED_BY_IDX {
+                    return PhysicalWriteField::HistoryUpdatedBy;
+                }
                 if current {
                     match index {
                         GlobalCurrentRowRecord::FIELD_CREATED_AT_IDX => {
                             return PhysicalWriteField::CreatedAtMillis;
+                        }
+                        GlobalCurrentRowRecord::FIELD_UPDATED_BY_IDX => {
+                            return PhysicalWriteField::UpdatedBy;
                         }
                         GlobalCurrentRowRecord::FIELD_UPDATED_AT_IDX => {
                             return PhysicalWriteField::UpdatedAtMillis;
@@ -742,9 +748,14 @@ where
         Ok(())
     }
 
+    /// Encode `version` for its history table. `tx_author` is the `made_by`
+    /// of the transaction that wrote it: the image stores `updated_by` only
+    /// when it differs (SPEC 2 §2.7.1). Every caller writes or holds that
+    /// transaction record, so a read can always fill the author back in.
     pub(super) fn version_storage_write_binding(
         &mut self,
         version: &VersionRow,
+        tx_author: AuthorSubject,
         batch: &mut DatabaseBatch,
     ) -> Result<
         (
@@ -763,10 +774,14 @@ where
             version.table(),
             PhysicalWriteTarget::History,
         )?;
-        self.stage_row_author_aliases(version, batch)?;
+        // Every history write goes through this binding; list the row in its
+        // transaction record when the batch is flushed.
+        let table_id = self.physical_table_id_for_schema(schema_version, version.table())?;
+        self.mark_tx_touched_row(table_id, version);
+        self.stage_history_row_author_aliases(version, tx_author, batch)?;
         Ok((
             groove::Intern::new(plan.storage_table.clone()),
-            self.encode_physical_version_record(&plan, version, None)?,
+            self.encode_physical_version_record(&plan, version, None, Some(tx_author))?,
         ))
     }
 
@@ -778,8 +793,27 @@ where
         plan: &PreparedPhysicalWritePlan,
         version: &VersionRow,
         global_time: Option<GlobalTime>,
+        tx_author: Option<AuthorSubject>,
     ) -> Result<groove::records::ValidatedVariantRecord, Error> {
         let input = version.record.borrowed();
+        let history_updated_by = |version: &VersionRow| -> Result<Value, Error> {
+            let tx_author = tx_author.ok_or(Error::InvalidStoredValue(
+                "a history image is written with its transaction author",
+            ))?;
+            let updated_by = version.updated_by();
+            // Compared as logical author records, so the result does not
+            // depend on how the physical table stores authors.
+            Ok(if row_author_value(updated_by)? == row_author_value(tx_author)? {
+                Value::Nullable(None)
+            } else {
+                history_updated_by_value(updated_by)?
+            })
+        };
+        // Author fields of an aliased physical table store the node-local
+        // alias of the logical author record.
+        let physical_author = |index: usize, value: Value| -> Result<Value, Error> {
+            self.physical_author_value(value, &plan.physical_descriptor.fields()[index].value_type)
+        };
         let matching_layout = input.descriptor() == plan.history_descriptor;
         let encoded = groove::records::ValidatedVariantRecord::create_with_encoded_fields::<Error>(
             groove_variant_tag(version.schema_version_alias())?,
@@ -810,6 +844,12 @@ where
                     }
                     PhysicalWriteField::UpdatedAtMillis => {
                         Value::U64(version.updated_at().physical_ms())
+                    }
+                    PhysicalWriteField::UpdatedBy => {
+                        physical_author(index, row_author_value(version.updated_by())?)?
+                    }
+                    PhysicalWriteField::HistoryUpdatedBy => {
+                        physical_author(index, history_updated_by(version)?)?
                     }
                     PhysicalWriteField::GlobalTime => {
                         Value::Nullable(global_time.map(|time| Box::new(Value::U64(time.0))))
@@ -847,7 +887,9 @@ where
             let mut values = if current {
                 global_current_values(&plan.source_table, version, global_time)?
             } else {
-                version.record.to_values()?
+                let mut values = version.record.to_values()?;
+                values[HistoryRowRecord::FIELD_UPDATED_BY_IDX] = history_updated_by(version)?;
+                values
             };
             self.remap_authored_enum_cells_for_physical(
                 &mut values,
@@ -861,10 +903,14 @@ where
                 },
             )?;
             for (index, field) in plan.write_fields.iter().enumerate() {
-                if let PhysicalWriteField::AuthorAlias(_) = field
-                    && let Value::Record(author) = &values[index]
-                {
-                    values[index] = Value::U32(self.staged_author_alias(author.raw())?.0);
+                if matches!(
+                    field,
+                    PhysicalWriteField::AuthorAlias(_)
+                        | PhysicalWriteField::UpdatedBy
+                        | PhysicalWriteField::HistoryUpdatedBy
+                ) {
+                    let value = std::mem::replace(&mut values[index], Value::Nullable(None));
+                    values[index] = physical_author(index, value)?;
                 }
             }
             assert_eq!(

@@ -772,10 +772,17 @@ pub(super) fn project_descriptor(
                         .get(source_idx)
                         .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(source_idx))?
                         .value_type;
-                    if !matches!(source_type, ValueType::U32 | ValueType::U64) {
-                        return Err(IvmRuntimeError::UnsupportedOperator);
+                    match source_type {
+                        ValueType::U32 | ValueType::U64 => dictionary.value_type().clone(),
+                        // A nullable code expands to a nullable value; null
+                        // stays null.
+                        ValueType::Nullable(inner)
+                            if matches!(inner.as_ref(), ValueType::U32 | ValueType::U64) =>
+                        {
+                            dictionary.value_type().clone().nullable()
+                        }
+                        _ => return Err(IvmRuntimeError::UnsupportedOperator),
                     }
-                    dictionary.value_type().clone()
                 }
             };
             Ok(
@@ -1415,7 +1422,8 @@ pub(super) fn project_field_value(
     })
 }
 
-/// Expand one dictionary code into its installed value.
+/// Expand one dictionary code into its installed value. A nullable code
+/// expands to a nullable value, and null stays null.
 pub(super) fn expand_dictionary_code(
     code: Value,
     dictionary: &crate::ivm::ValueDictionary,
@@ -1423,6 +1431,12 @@ pub(super) fn expand_dictionary_code(
     let code = match code {
         Value::U32(code) => u64::from(code),
         Value::U64(code) => code,
+        Value::Nullable(None) => return Ok(Value::Nullable(None)),
+        Value::Nullable(Some(code)) => {
+            return Ok(Value::Nullable(Some(Box::new(expand_dictionary_code(
+                *code, dictionary,
+            )?))));
+        }
         _ => return Err(IvmRuntimeError::UnsupportedOperator),
     };
     let encoded = dictionary
@@ -2315,17 +2329,15 @@ pub(super) fn key_matches_static_scan(
 }
 
 pub(super) fn persisted_index_scan_bounds(
-    table: &str,
-    index: &str,
+    index_id: u32,
     scan: Option<&StaticScanSpec>,
 ) -> Result<StaticScanBounds, IvmRuntimeError> {
-    let base = durable_index_key_prefix(table, index);
-    let wrap_prefix = |logical_key: Vec<u8>| {
+    // The ordered part encodings are prefix-free and order-preserving on
+    // their own, so the logical key follows the numeric index id directly.
+    let base = durable_index_key_prefix(index_id);
+    let prefixed = |logical_key: Vec<u8>| {
         let mut storage_key = base.clone();
-        if !logical_key.is_empty() {
-            storage_key.push(7);
-            encode_ordered_bytes_without_terminal(&mut storage_key, &logical_key);
-        }
+        storage_key.extend(logical_key);
         storage_key
     };
     Ok(match scan {
@@ -2335,10 +2347,10 @@ pub(super) fn persisted_index_scan_bounds(
             | StaticScanSpec::Prefix(values)
             | StaticScanSpec::PrefixLimit { prefix: values, .. }
             | StaticScanSpec::ReversePrefixLimit { prefix: values, .. },
-        ) => StaticScanBounds::Prefix(wrap_prefix(static_scan_key(values)?)),
+        ) => StaticScanBounds::Prefix(prefixed(static_scan_key(values)?)),
         Some(StaticScanSpec::Range { start, end }) => StaticScanBounds::Range {
-            start: wrap_prefix(static_scan_key(start)?),
-            end: wrap_prefix(static_scan_key(end)?),
+            start: prefixed(static_scan_key(start)?),
+            end: prefixed(static_scan_key(end)?),
         },
     })
 }

@@ -4780,26 +4780,6 @@ fn current_row_has_required_subscription_cells(
     })
 }
 
-fn contiguous_tx_time_spans(times: &BTreeSet<TxTime>) -> Vec<(TxTime, Option<TxTime>)> {
-    let mut spans = Vec::new();
-    let mut iter = times.iter().copied();
-    let Some(mut start) = iter.next() else {
-        return spans;
-    };
-    let mut last = start;
-    for time in iter {
-        if last.0.checked_add(1) == Some(time.0) {
-            last = time;
-            continue;
-        }
-        spans.push((start, last.0.checked_add(1).map(TxTime)));
-        start = time;
-        last = time;
-    }
-    spans.push((start, last.0.checked_add(1).map(TxTime)));
-    spans
-}
-
 fn sort_query_default_rows(rows: &mut [CurrentRow]) {
     rows.sort_by(default_query_row_order);
 }

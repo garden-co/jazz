@@ -66,7 +66,7 @@ impl NodeState {
         let meta_database = Database::new_with_storage_layout(
             JazzSchema::empty().lower_catalogue_meta_to_groove(),
             storage,
-            StorageLayout::jazz_class_v1(),
+            StorageLayout::jazz_class_v2(),
         )
         .await?;
         let requested_key = [
@@ -238,7 +238,7 @@ impl NodeState {
         // repurpose as an uninitialized runtime.
         let meta_schema = bootstrap_schema.lower_to_groove();
         let meta_database =
-            Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v1())
+            Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v2())
                 .await?;
         let mut genesis = None;
         let mut schemas = BTreeMap::new();
@@ -483,7 +483,7 @@ impl NodeState {
     {
         let meta_schema = JazzSchema::empty().lower_catalogue_meta_to_groove();
         let meta_database =
-            Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v1())
+            Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v2())
                 .await?;
         let mut genesis = None;
         let mut active = None;
@@ -848,7 +848,6 @@ impl NodeState {
                 policy_authorization_graph_cache: BTreeMap::new(),
                 policy_authorization_graph_replacements: BTreeMap::new(),
                 policy_proof_stack: Vec::new(),
-                tx_version_tables_cache: BTreeMap::new(),
                 tx_versions_cache: BTreeMap::new(),
                 tx_version_tables_cache_order: VecDeque::new(),
                 tx_version_tables_cache_order_set: BTreeSet::new(),
@@ -892,6 +891,8 @@ impl NodeState {
             absent_node_alias: None,
             ahead_current_keys: FxHashMap::default(),
             ahead_shadow_dirty: Vec::new(),
+            tx_touched_dirty: BTreeMap::new(),
+            history_tx_authors: BTreeMap::new(),
             minting_global_time: false,
             sync_metrics: SyncMetrics::default(),
             query_engine_read_metrics: QueryEngineReadMetrics::default(),
@@ -997,7 +998,7 @@ impl NodeState {
             physical_mappings,
         )?;
         lowered.tables.extend(current_tables);
-        let layout = StorageLayout::jazz_class_v1();
+        let layout = StorageLayout::jazz_class_v2();
         let mut database = Database::new_with_storage_layout(lowered, storage, layout).await?;
         // Jazz publishes plain ordered results from membership and version
         // deltas and never reads their generic root positions; only root
@@ -1914,7 +1915,6 @@ where
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();
         self.query.policy_authorization_graph_replacements.clear();
-        self.query.tx_version_tables_cache.clear();
         self.query.tx_versions_cache.clear();
         self.query.tx_version_tables_cache_order.clear();
         self.query.tx_version_tables_cache_order_set.clear();
@@ -1974,7 +1974,7 @@ where
         let local_schema_version_id = schema.version_id();
         let meta_schema = schema.lower_catalogue_meta_to_groove();
         let mut meta_database =
-            Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v1())
+            Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v2())
                 .await?;
         let mut recovered_active_schema = None;
         let mut catalogue_schemas = BTreeMap::new();

@@ -1,4 +1,5 @@
 use super::*;
+use crate::records::ValueType;
 
 /// Validate application-selected physical names before an open or live schema
 /// admission can make a Groove storage mutation. Groove itself adds
@@ -25,12 +26,36 @@ pub(super) fn validate_application_storage_names(schema: &DatabaseSchema) -> Res
     Ok(())
 }
 
+fn is_supported_direct_store_key_type(value_type: &ValueType) -> bool {
+    match value_type {
+        ValueType::String | ValueType::Bytes => true,
+        ValueType::Tuple(members) => members.iter().all(is_supported_direct_store_tuple_member),
+        _ => is_supported_direct_store_tuple_member(value_type),
+    }
+}
+
+fn is_supported_direct_store_tuple_member(value_type: &ValueType) -> bool {
+    match value_type {
+        ValueType::U8
+        | ValueType::U16
+        | ValueType::U32
+        | ValueType::U64
+        | ValueType::I32
+        | ValueType::I64
+        | ValueType::Bool
+        | ValueType::Uuid
+        | ValueType::EnumTag(_) => true,
+        ValueType::Tuple(members) => members.iter().all(is_supported_direct_store_tuple_member),
+        _ => false,
+    }
+}
+
 pub(super) fn validate_durable_key_schema(schema: &DatabaseSchema) -> Result<(), Error> {
     for store in &schema.direct_record_stores {
         if store
             .key
             .iter()
-            .any(|(_, value_type)| value_type.contains_record())
+            .any(|(_, value_type)| !is_supported_direct_store_key_type(value_type))
         {
             return Err(Error::InvalidDirectRecordStoreKey(store.name.clone()));
         }
@@ -156,6 +181,18 @@ impl Database {
         // any storage/decode error, requires reopening instead of using a
         // partially rebuilt instance.
         self.poisoned = true;
+        // Declared indexes' id registrations become durable before any
+        // rebuilt entry that uses them.
+        let registrations = self.ivm_runtime.index_ids().borrow().pending();
+        if !registrations.is_empty() {
+            self.storage
+                .write_many(registrations.operations().to_vec())
+                .await?;
+            self.ivm_runtime
+                .index_ids()
+                .borrow_mut()
+                .mark_persisted(&registrations);
+        }
         self.ivm_runtime
             .rebuild_declared_indexes(&self.storage)
             .await?;

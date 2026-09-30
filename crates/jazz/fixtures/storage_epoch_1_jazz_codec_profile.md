@@ -42,46 +42,83 @@ manifest admission. No compatibility profile is selected to bypass this check.
 
 A root that stores Jazz rows (Core, relay and client node stores on RocksDB,
 SQLite and IndexedDB) opens with `node_storage_codec_profile()`: the epoch-one
-base above plus `jazz.history-version-current.v2`, the linear row-state
-history layout (SPEC 2 §2.7.1). Roots that hold no row history (the server
+base above plus `jazz.history-version-current.v4`, the linear row-state
+history layout (SPEC 2 §2.7.1), and `groove.durable-index.v2`, the compact
+secondary-index layout (below). Roots that hold no row history (the server
 account registry and catalogue-entry store) keep the base profile unchanged.
 
 - codec registry, in canonical order: the base list with
-  `jazz.history-version-current.v2` inserted after
-  `jazz.catalogue.write-pointer.v1` (13 families)
+  `groove.durable-index.v2` inserted first and
+  `jazz.history-version-current.v4` inserted after
+  `jazz.catalogue.write-pointer.v1` (14 families)
 - SHA-256 of the committed canonical `JSM1` bytes (adapter sample `memory`,
   `key-order=unsigned-lexicographic`):
-  `1153be8475ab6fd239d109e376663220d349fa9ac1f034b77cbdc8bc38f0631a`
+  `06e335498e562c06e78207cddd8027752c673d981640c78ef584aa95406775db`
+  (13 families without `groove.durable-index.v2`:
+  `73ece466df8d410135a648b0697126d9e3a77b977ecd6aaae0718e48bac3f319`)
 - receipt: `storage_codec_profile::tests::node_profile_has_a_pinned_manifest_receipt_and_refuses_base_only_roots`
 
 A node root written by the DAG layout (alpha.54 to alpha.57) declares only the
 base profile. Manifest admission refuses it with the typed
 `groove::storage::Error::UnsupportedStorageCodecs { epoch: 1, missing:
-["jazz.history-version-current.v2"], unknown: [...] }` before any ordinary key
-is decoded or written (`tests/storage_format_refusal.rs`). No migration exists.
+["groove.durable-index.v2", "jazz.author-alias.v1",
+"jazz.history-version-current.v4"], unknown: [...] }`
+before any ordinary key is decoded or written (`tests/storage_format_refusal.rs`).
+No migration exists.
+
+The touched-rows transaction record (2026-09-30) replaced
+`jazz.history-version-current.v2` with `v3`: history and ahead-current tables
+lost their `by_tx` indexes and `jazz_transactions` gained `touched_rows`
+(SPEC 2 §2.8). Implicit history `updated_by` (2026-09-30) then replaced `v3`
+with `v4`: a history image stores `updated_by` only when it differs from its
+transaction's `made_by`, and the touched-row list moved out of
+`jazz_transactions` into the node-local `jazz_tx_touched_rows`. Neither v2 nor v3 was in a published release. A v2
+or v3 root is refused with `missing: ["groove.durable-index.v2",
+"jazz.author-alias.v1", "jazz.history-version-current.v4"], unknown: [<its family>]`
+(`storage_codec_profile::tests::node_profile_refuses_history_v2_and_v3_roots`).
+The v2 manifest SHA-256 was
+`1153be8475ab6fd239d109e376663220d349fa9ac1f034b77cbdc8bc38f0631a`; v3 was
+`323199b2f7206bebea3eb2bf48859a253ff648d88a95c0232a66e6025516377d`.
+
+## Compact durable-index layout (alpha.60)
+
+`groove.durable-index.v2` is Groove's secondary-index layout (Groove SPEC 2,
+"Durable index layout"): each entry key is a LEB128 numeric index id followed by
+the concatenated, single-escaped index key parts, and its value is empty (a
+unique index stores only the primary-key columns the index lacks). Ids live in
+the `\0groove-index-id\0` registry in the same family and are never reused.
+The earlier layout prefixed every key with `table\0index\0`, wrapped the key in
+a second escaped `Bytes` part and repeated it in the value.
+
+Only node roots declare schema indexes, so the family joins the node profile,
+not the base. A node root with the current history and author-alias families
+but without it is refused with `missing: ["groove.durable-index.v2"]`
+(`linear_history_root_without_the_durable_index_family_is_refused`). No
+migration exists.
 
 ## Row-author aliases (2026-09-30)
 
 The node-root profile adds `jazz.author-alias.v1` (SPEC 2 §2.2): physical
 content rows store `created_by` / `updated_by`, and `jazz_transactions` stores
 `made_by`, as a 4-byte little-endian `U32` `AuthorAlias`; the `jazz_authors`
-table maps each alias to the exact `RowAuthor` record bytes. The exact row
-bytes are pinned by
+table maps each alias to the exact `RowAuthor` record bytes. A history image's
+`updated_by` is a nullable alias, null when it is its transaction's `made_by`
+(v4 above). The exact row bytes are pinned by
 `node::tests::harness::author_alias_codec_v1_pins_physical_bytes`.
 
 - codec registry, in canonical order: the node-root list above with
-  `jazz.author-alias.v1` inserted after `groove.ordered-kv.v1` (14 families)
+  `jazz.author-alias.v1` inserted after `groove.ordered-kv.v1` (15 families)
 - SHA-256 of the committed canonical `JSM1` bytes (adapter sample `memory`,
   `key-order=unsigned-lexicographic`):
-  `13a1e05bd9f954d92a0af43c1916c493d50da6863421d0562082722cf6da6faf`
-  (the 13-family node-root checksum above is superseded)
+  `372c1782886d001ef12ea5a35a7ba2f5b24caa4bfe3ec67bc66e09a67cd25e15`
+  (the 14-family node-root checksum above is superseded)
 - receipts:
   `storage_codec_profile::tests::node_profile_has_a_pinned_manifest_receipt_and_refuses_base_only_roots`,
   `storage_codec_profile::tests::node_profile_refuses_a_pre_alias_linear_history_root`
 
-A linear-history root written before aliasing declares
-`jazz.history-version-current.v2` but not `jazz.author-alias.v1`. Manifest
+A root written before aliasing declares `groove.durable-index.v2` and
+`jazz.history-version-current.v4` but not `jazz.author-alias.v1`. Manifest
 admission refuses it with `UnsupportedStorageCodecs { epoch: 1, missing:
 ["jazz.author-alias.v1"], unknown: [] }` before any record is decoded
-(`tests/storage_format_refusal.rs`). A DAG-layout root now reports both
+(`tests/storage_format_refusal.rs`). A DAG-layout root reports all three
 node-root families as missing. No migration exists.

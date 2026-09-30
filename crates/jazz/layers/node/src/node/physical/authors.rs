@@ -42,13 +42,33 @@ fn is_row_author_column(name: &str) -> bool {
     name == "created_by" || name == "updated_by"
 }
 
+/// Alias type storing a logical author type: `U32`, or `Nullable(U32)` for
+/// a nullable author (history `updated_by`, which is null when it is the
+/// author of the image's own transaction).
+fn author_alias_value_type(logical: &records::ValueType) -> records::ValueType {
+    match logical {
+        records::ValueType::Nullable(_) => records::ValueType::U32.nullable(),
+        _ => records::ValueType::U32,
+    }
+}
+
+/// Whether `value_type` is an alias author type (`U32` or `Nullable(U32)`).
+fn is_author_alias_value_type(value_type: &records::ValueType) -> bool {
+    match value_type {
+        records::ValueType::U32 => true,
+        records::ValueType::Nullable(inner) => inner.as_ref() == &records::ValueType::U32,
+        _ => false,
+    }
+}
+
 /// Physical declaration of one logical system column of `shape`.
 fn physical_system_column(
     column: GrooveColumnSchema,
     shape: ContentProjectionShape,
 ) -> GrooveColumnSchema {
     if physical_row_authors_aliased(shape) && is_row_author_column(&column.name) {
-        GrooveColumnSchema::new(column.name, records::ValueType::U32)
+        let value_type = author_alias_value_type(&column.column_type);
+        GrooveColumnSchema::new(column.name, value_type)
     } else {
         column
     }
@@ -61,7 +81,7 @@ fn physical_system_value_type(
     shape: ContentProjectionShape,
 ) -> records::ValueType {
     if physical_row_authors_aliased(shape) && is_row_author_column(name) {
-        records::ValueType::U32
+        author_alias_value_type(logical)
     } else {
         logical.clone()
     }
@@ -73,7 +93,7 @@ pub(super) fn descriptor_has_author_aliases(descriptor: &records::RecordDescript
         descriptor
             .fields()
             .get(*index)
-            .is_some_and(|field| field.value_type == records::ValueType::U32)
+            .is_some_and(|field| is_author_alias_value_type(&field.value_type))
     })
 }
 
@@ -127,29 +147,63 @@ where
     }
 
     /// Ensure both authors of `version` have aliases before it is encoded
-    /// into a physical table. A new or still-provisional alias also puts its
-    /// `jazz_authors` row into `batch`, so the mapping becomes durable
-    /// atomically with the first row that uses it.
+    /// into a current physical table. A new or still-provisional alias also
+    /// puts its `jazz_authors` row into `batch`, so the mapping becomes
+    /// durable atomically with the first row that uses it.
     pub(super) fn stage_row_author_aliases(
         &mut self,
         version: &VersionRow,
         batch: &mut DatabaseBatch,
     ) -> Result<(), Error> {
-        let record = version.record.borrowed();
-        let mut staged = None;
-        for index in ROW_AUTHOR_FIELDS {
-            if record.descriptor().fields()[index].value_type == records::ValueType::U32 {
-                continue;
-            }
-            let span = record.descriptor().field_span(record.raw(), index)?;
-            let author = &record.raw()[span];
-            if staged == Some(author) {
-                continue;
-            }
-            self.stage_author_alias(author, batch)?;
-            staged = Some(author);
+        self.stage_created_by_alias(version, batch)?;
+        let updated_by = version.updated_by();
+        if updated_by != version.created_by() {
+            self.stage_row_author_subject_alias(updated_by, batch)?;
         }
         Ok(())
+    }
+
+    /// Like [`Self::stage_row_author_aliases`] for a history image written by
+    /// a transaction authored by `tx_author`. The image stores `updated_by`
+    /// only when it differs from `tx_author`, so only then is it staged; the
+    /// transaction row stages its own author alias.
+    pub(super) fn stage_history_row_author_aliases(
+        &mut self,
+        version: &VersionRow,
+        tx_author: AuthorSubject,
+        batch: &mut DatabaseBatch,
+    ) -> Result<(), Error> {
+        self.stage_created_by_alias(version, batch)?;
+        let updated_by = version.updated_by();
+        if updated_by != tx_author && updated_by != version.created_by() {
+            self.stage_row_author_subject_alias(updated_by, batch)?;
+        }
+        Ok(())
+    }
+
+    fn stage_created_by_alias(
+        &mut self,
+        version: &VersionRow,
+        batch: &mut DatabaseBatch,
+    ) -> Result<(), Error> {
+        let record = version.record.borrowed();
+        let index = HistoryRowRecord::FIELD_CREATED_BY_IDX;
+        if is_author_alias_value_type(&record.descriptor().fields()[index].value_type) {
+            return Ok(());
+        }
+        let span = record.descriptor().field_span(record.raw(), index)?;
+        self.stage_author_alias(&record.raw()[span], batch)?;
+        Ok(())
+    }
+
+    fn stage_row_author_subject_alias(
+        &mut self,
+        author: AuthorSubject,
+        batch: &mut DatabaseBatch,
+    ) -> Result<AuthorAlias, Error> {
+        let author =
+            RowAuthor::from_persisted_subject(author).map_err(|_| Error::UnadmittedWriteAuthor)?;
+        self.stage_author_alias(author.encoded_record().raw(), batch)
     }
 
     /// Alias for storing one exact encoded author record. A new or
@@ -223,6 +277,29 @@ where
             .ok_or(Error::InvalidStoredValue("row author alias was not staged"))
     }
 
+    /// Physical value of a logical author `value` (a `RowAuthor` record, or
+    /// a nullable one) for a field of `physical` type: its alias when the
+    /// field stores aliases, otherwise `value` unchanged.
+    pub(super) fn physical_author_value(
+        &self,
+        value: Value,
+        physical: &records::ValueType,
+    ) -> Result<Value, Error> {
+        if !is_author_alias_value_type(physical) {
+            return Ok(value);
+        }
+        Ok(match value {
+            Value::Record(author) => Value::U32(self.staged_author_alias(author.raw())?.0),
+            Value::Nullable(Some(inner)) => match *inner {
+                Value::Record(author) => Value::Nullable(Some(Box::new(Value::U32(
+                    self.staged_author_alias(author.raw())?.0,
+                )))),
+                other => Value::Nullable(Some(Box::new(other))),
+            },
+            other => other,
+        })
+    }
+
     /// Replace the author aliases of a physical row read directly from
     /// storage with their exact author records, so the row reads like any
     /// logical row image. Rows without aliases are returned unchanged.
@@ -243,11 +320,46 @@ where
             input.raw().len() + 128,
             |index, output| {
                 if ROW_AUTHOR_FIELDS.contains(&index) {
-                    let alias = AuthorAlias(input.get_u32(index)?);
+                    let alias = match input.get_idx(index)? {
+                        Value::U32(alias) => AuthorAlias(alias),
+                        // History `updated_by` is null when it is the author
+                        // of the image's own transaction; a read fills it in.
+                        Value::Nullable(None) => {
+                            expanded.encode_field_into(index, &Value::Nullable(None), output)?;
+                            return Ok(());
+                        }
+                        Value::Nullable(Some(inner)) => match *inner {
+                            Value::U32(alias) => AuthorAlias(alias),
+                            _ => {
+                                return Err(Error::InvalidStoredValue(
+                                    "stored row author alias is not a U32",
+                                ));
+                            }
+                        },
+                        _ => {
+                            return Err(Error::InvalidStoredValue(
+                                "stored row author alias is not a U32",
+                            ));
+                        }
+                    };
                     let author = aliases.author_record(alias).ok_or(
                         Error::InvalidStoredValue("stored row author alias is not in jazz_authors"),
                     )?;
-                    output.extend_from_slice(&author);
+                    if matches!(
+                        expanded.fields()[index].value_type,
+                        records::ValueType::Nullable(_)
+                    ) {
+                        expanded.encode_field_into(
+                            index,
+                            &Value::Nullable(Some(Box::new(Value::Record(OwnedRecord::new(
+                                author.to_vec(),
+                                row_author_descriptor(),
+                            ))))),
+                            output,
+                        )?;
+                    } else {
+                        output.extend_from_slice(&author);
+                    }
                     return Ok(());
                 }
                 let span = physical.field_span(input.raw(), index)?;

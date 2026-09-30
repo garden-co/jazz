@@ -24,7 +24,7 @@ groove::define_record! {
         4 => schema_version: SchemaVersionAlias,
         5 => created_by: RowAuthor,
         6 => created_at: TxTime,
-        7 => updated_by: RowAuthor,
+        7 => updated_by: Option<RowAuthor>,
         8 => updated_at: TxTime,
         9 => _deletion: Option<DeletionEvent>,
         .. user_cells,
@@ -123,6 +123,156 @@ groove::define_record! {
         16 => cascade_root: Option<Value>,
         17 => reason_detail: Option<String>,
         18 => durability: DurabilityTier,
+    }
+}
+
+/// Node-local touched-row lists, one record per transaction `(tx_time,
+/// tx_node_id)` (SPEC 2 §2.8).
+pub(super) const TX_TOUCHED_ROWS_TABLE: &str = "jazz_tx_touched_rows";
+
+/// Field of the touched-row list in a `jazz_tx_touched_rows` record.
+const TX_TOUCHED_ROWS_LIST_IDX: usize = 2;
+
+/// The history rows one transaction wrote on this node, keyed exactly as
+/// history is: `(physical table lineage, branch key bytes) -> row UUIDs`.
+///
+/// Stored in the node-local `jazz_tx_touched_rows` record of the transaction
+/// (SPEC 2 §2.8), never in the transaction record itself, which is the
+/// replicated identity of the transaction. It is how the node finds a
+/// transaction's versions (fate replay, relay forwarding, settlement,
+/// rejection clean-up) without a `by_tx` index over every history version:
+/// each listed row is one exact history point read at `(branch, row, tx_time,
+/// tx_node)`.
+///
+/// The list is a superset of the transaction's live history rows. Eviction
+/// may delete a listed row, and a listed row that is absent is skipped; a
+/// rejected transaction's rows are deleted with the list. It costs 16 bytes
+/// per row plus about 20 bytes per `(table, branch)` group, and it is read
+/// only when the transaction's versions are listed, which reads every listed
+/// row anyway.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct TouchedRows(BTreeMap<(PhysicalTableId, Vec<u8>), BTreeSet<RowUuid>>);
+
+impl TouchedRows {
+    pub(super) fn insert(&mut self, table: PhysicalTableId, branch_key: Vec<u8>, row: RowUuid) {
+        self.0.entry((table, branch_key)).or_default().insert(row);
+    }
+
+    pub(super) fn extend(&mut self, other: &TouchedRows) {
+        for ((table, branch_key), rows) in &other.0 {
+            self.0
+                .entry((*table, branch_key.clone()))
+                .or_default()
+                .extend(rows.iter().copied());
+        }
+    }
+
+    /// Every touched row in `(table, branch, row)` order.
+    pub(super) fn iter(&self) -> impl Iterator<Item = (PhysicalTableId, &[u8], RowUuid)> + '_ {
+        self.0.iter().flat_map(|((table, branch_key), rows)| {
+            rows.iter()
+                .map(move |row| (*table, branch_key.as_slice(), *row))
+        })
+    }
+
+    fn group_descriptor() -> records::RecordDescriptor {
+        records::RecordDescriptor::new([
+            ("physical_table_id", records::ValueType::U64),
+            ("branch_key", records::ValueType::Bytes),
+            ("row_uuids", records::ValueType::Uuid.array_of()),
+        ])
+    }
+
+    /// The canonical list.
+    pub(super) fn to_value(&self) -> Result<Value, Error> {
+        let descriptor = Self::group_descriptor();
+        let groups = self
+            .0
+            .iter()
+            .map(|((table, branch_key), rows)| {
+                let values = [
+                    Value::U64(table.0),
+                    Value::Bytes(branch_key.clone()),
+                    Value::Array(rows.iter().map(|row| Value::Uuid(row.0)).collect()),
+                ];
+                Ok(Value::Record(OwnedRecord::new(
+                    descriptor.create(&values)?,
+                    descriptor,
+                )))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        Ok(Value::Array(groups))
+    }
+
+    /// Decode a stored `jazz_tx_touched_rows` record's list, refusing any
+    /// non-canonical spelling: unordered or repeated groups, empty groups,
+    /// unordered or repeated rows.
+    pub(super) fn from_list_record(record: BorrowedRecord<'_>) -> Result<Self, Error> {
+        Self::from_value(&record.get_idx(TX_TOUCHED_ROWS_LIST_IDX)?)
+    }
+
+    /// Values of the `jazz_tx_touched_rows` record listing these rows.
+    pub(super) fn list_record_values(
+        &self,
+        tx_time: TxTime,
+        tx_node_alias: NodeAlias,
+    ) -> Result<Vec<Value>, Error> {
+        Ok(vec![
+            Value::U64(tx_time.0),
+            Value::U64(tx_node_alias.0),
+            self.to_value()?,
+        ])
+    }
+
+    fn from_value(value: &Value) -> Result<Self, Error> {
+        let Value::Array(groups) = value else {
+            return Err(Error::InvalidStoredValue(
+                "transaction touched_rows must be an array",
+            ));
+        };
+        let mut touched = BTreeMap::new();
+        let mut previous: Option<(PhysicalTableId, Vec<u8>)> = None;
+        for group in groups {
+            let Value::Record(group) = group else {
+                return Err(Error::InvalidStoredValue(
+                    "transaction touched_rows group must be a record",
+                ));
+            };
+            let group = group.borrowed();
+            let key = (
+                PhysicalTableId(group.get_u64(0)?),
+                group.get_bytes(1)?.to_vec(),
+            );
+            let Value::Array(rows) = group.get_idx(2)? else {
+                return Err(Error::InvalidStoredValue(
+                    "transaction touched_rows group rows must be an array",
+                ));
+            };
+            let mut uuids = BTreeSet::new();
+            let mut last = None;
+            for row in rows {
+                let Value::Uuid(row) = row else {
+                    return Err(Error::InvalidStoredValue(
+                        "transaction touched row must be a UUID",
+                    ));
+                };
+                if last.is_some_and(|last| last >= row) {
+                    return Err(Error::InvalidStoredValue(
+                        "transaction touched rows are not strictly increasing",
+                    ));
+                }
+                last = Some(row);
+                uuids.insert(RowUuid(row));
+            }
+            if uuids.is_empty() || previous.as_ref().is_some_and(|previous| *previous >= key) {
+                return Err(Error::InvalidStoredValue(
+                    "transaction touched_rows groups are empty or not strictly increasing",
+                ));
+            }
+            previous = Some(key.clone());
+            touched.insert(key, uuids);
+        }
+        Ok(Self(touched))
     }
 }
 
@@ -1833,7 +1983,6 @@ impl VersionRecordFromNode for VersionRecord {
                 let source = match index {
                     0 => Some(HistoryRowRecord::FIELD_ROW_UUID_IDX),
                     1 => Some(HistoryRowRecord::FIELD_CREATED_BY_IDX),
-                    3 => Some(HistoryRowRecord::FIELD_UPDATED_BY_IDX),
                     5 => Some(HistoryRowRecord::FIELD__DELETION_IDX),
                     i if i >= WireRowRecord::USER_CELLS => {
                         Some(HistoryRowRecord::USER_CELLS + i - WireRowRecord::USER_CELLS)
@@ -1847,6 +1996,7 @@ impl VersionRecordFromNode for VersionRecord {
                 }
                 let value = match index {
                     2 => Value::U64(stored.created_at().physical_ms()),
+                    3 => row_author_value(stored.updated_by())?,
                     4 => Value::U64(stored.updated_at().physical_ms()),
                     5 => Value::Nullable(stored.deletion().map(|deletion| {
                         Box::new(Value::EnumTag(match deletion {
@@ -2242,7 +2392,7 @@ impl VersionRow {
                     4 => Value::U64(schema_version_alias.0),
                     5 => row_author_value(version.created_by())?,
                     6 => Value::U64(created_at),
-                    7 => row_author_value(version.updated_by())?,
+                    7 => history_updated_by_value(version.updated_by())?,
                     8 => Value::U64(updated_at),
                     9 => nullable_deletion_value(deletion),
                     i if i < HistoryRowRecord::USER_CELLS + table.columns.len() => {
@@ -2350,16 +2500,27 @@ impl VersionRow {
         )
     }
 
+    /// The image's `updated_by`. History storage omits it when it is the
+    /// author of the image's own transaction; every read path fills it in
+    /// from that transaction record (`resolve_history_updated_by`) before a
+    /// `VersionRow` leaves storage, so an in-memory row always carries it.
     pub(super) fn updated_by(&self) -> AuthorSubject {
         let idx = HistoryRowRecord::FIELD_UPDATED_BY_IDX;
-        RowAuthor::from_record(
+        <Option<RowAuthor> as records::RecordField>::read(&self.record.borrowed(), idx)
+            .expect("valid updated_by")
+            .expect("history updated_by is resolved when the image is read")
+            .as_author_subject()
+    }
+
+    /// Whether this image still lacks `updated_by`: it was read from history
+    /// storage, which omits the transaction's own author.
+    pub(super) fn updated_by_is_implicit(&self) -> Result<bool, Error> {
+        Ok(matches!(
             self.record
                 .borrowed()
-                .get_record(idx)
-                .expect("valid updated_by"),
-        )
-        .expect("canonical updated_by")
-        .as_author_subject()
+                .get_idx(HistoryRowRecord::FIELD_UPDATED_BY_IDX)?,
+            Value::Nullable(None)
+        ))
     }
 
     pub(super) fn updated_at(&self) -> TxTime {
@@ -3281,6 +3442,7 @@ pub(super) fn runtime_result_identity_bytes(
     Ok(encoded)
 }
 
+/// Values of a `jazz_transactions` record.
 pub(super) fn transaction_values(
     node_alias: NodeAlias,
     made_by: AuthorAlias,
@@ -3586,10 +3748,16 @@ fn authored_column_ids_value(columns: Option<&BTreeSet<PhysicalColumnId>>) -> Va
     }))
 }
 
-fn row_author_value(author: AuthorSubject) -> Result<Value, Error> {
+pub(super) fn row_author_value(author: AuthorSubject) -> Result<Value, Error> {
     Ok(RowAuthor::from_persisted_subject(author)
         .map_err(|_| Error::UnadmittedWriteAuthor)?
         .to_value())
+}
+
+/// `updated_by` of an in-memory history image: always present. Storage may
+/// omit it (see [`VersionRow::updated_by`]).
+pub(super) fn history_updated_by_value(author: AuthorSubject) -> Result<Value, Error> {
+    Ok(Value::Nullable(Some(Box::new(row_author_value(author)?))))
 }
 
 pub(super) fn history_values_from_parts(
@@ -3604,7 +3772,7 @@ pub(super) fn history_values_from_parts(
         Value::U64(version.schema_version_alias.0),
         row_author_value(version.created_by)?,
         Value::U64(version.created_at.0),
-        row_author_value(version.updated_by)?,
+        history_updated_by_value(version.updated_by)?,
         Value::U64(version.updated_at.0),
         nullable_deletion_value(version.deletion),
     ];
@@ -3644,7 +3812,7 @@ fn history_values_from_wire(
             .map_err(|_| Error::InvalidStoredValue("wire created_at_ms exceeds packed HLC range"))?
             .0,
     ));
-    values.push(row_author_value(version.updated_by())?);
+    values.push(history_updated_by_value(version.updated_by())?);
     values.push(Value::U64(
         TxTime::from_physical_ms(version.updated_at_ms())
             .map_err(|_| Error::InvalidStoredValue("wire updated_at_ms exceeds packed HLC range"))?
@@ -4446,6 +4614,78 @@ pub(super) fn decode_active_schema(bytes: &[u8]) -> Result<ActiveSchema, Error> 
         schema.schema,
     )?;
     Ok(active)
+}
+
+#[cfg(test)]
+mod touched_rows_tests {
+    use super::*;
+
+    fn group(table: u64, branch: &[u8], rows: &[u8]) -> Value {
+        let descriptor = TouchedRows::group_descriptor();
+        let values = [
+            Value::U64(table),
+            Value::Bytes(branch.to_vec()),
+            Value::Array(
+                rows.iter()
+                    .map(|row| Value::Uuid(RowUuid::from_bytes([*row; 16]).0))
+                    .collect(),
+            ),
+        ];
+        Value::Record(OwnedRecord::new(
+            descriptor.create(&values).unwrap(),
+            descriptor,
+        ))
+    }
+
+    #[test]
+    fn touched_rows_round_trip_and_reject_noncanonical_groups() {
+        let mut touched = TouchedRows::default();
+        touched.insert(
+            PhysicalTableId(2),
+            b"main".to_vec(),
+            RowUuid::from_bytes([9; 16]),
+        );
+        touched.insert(
+            PhysicalTableId(1),
+            b"main".to_vec(),
+            RowUuid::from_bytes([3; 16]),
+        );
+        touched.insert(
+            PhysicalTableId(2),
+            b"main".to_vec(),
+            RowUuid::from_bytes([1; 16]),
+        );
+        touched.insert(
+            PhysicalTableId(2),
+            b"main".to_vec(),
+            RowUuid::from_bytes([9; 16]),
+        );
+        let value = touched.to_value().unwrap();
+        assert_eq!(
+            value,
+            Value::Array(vec![group(1, b"main", &[3]), group(2, b"main", &[1, 9])]),
+            "groups ascend by (table, branch); rows ascend and are unique"
+        );
+        assert_eq!(TouchedRows::from_value(&value).unwrap(), touched);
+        assert_eq!(
+            TouchedRows::from_value(&Value::Array(Vec::new())).unwrap(),
+            TouchedRows::default()
+        );
+
+        for malformed in [
+            Value::Array(vec![group(2, b"main", &[1]), group(1, b"main", &[1])]),
+            Value::Array(vec![group(1, b"main", &[1]), group(1, b"main", &[2])]),
+            Value::Array(vec![group(1, b"main", &[])]),
+            Value::Array(vec![group(1, b"main", &[2, 1])]),
+            Value::Array(vec![group(1, b"main", &[1, 1])]),
+            Value::U64(0),
+        ] {
+            assert!(
+                TouchedRows::from_value(&malformed).is_err(),
+                "{malformed:?} must be refused"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

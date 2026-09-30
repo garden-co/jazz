@@ -160,6 +160,11 @@ shorthand: logical row images, query graphs, policy evaluation, public
 `$createdBy` / `$updatedBy`, and every wire record carry the full author, and
 another node never sees or interprets these alias numbers. No index orders or
 keys on an author column, so the alias's numeric order carries no meaning.
+A history image's `updated_by` is a nullable alias (`Nullable(U32)`): null when
+the logical author equals its transaction's `made_by` (§2.7.1), compared as
+logical author records, so an image written under its own author stores no
+alias for `updated_by` and needs no `jazz_authors` row beyond the
+transaction's own.
 
 `jazz_transactions.made_by` uses the same table, allocator and rules: it stores
 the `U32` `AuthorAlias` of the exact `RowAuthor` record of the transaction's
@@ -176,8 +181,8 @@ which is exact because the mapping is a bijection on record bytes.
 `jazz_rejected_transactions.made_by` still stores the full record.
 
 This layout is the storage codec family `jazz.author-alias.v1`, which every
-node root declares in its manifest next to `jazz.history-version-current.v2`
-(§2.7.1). A linear-history root written before aliasing stores the full
+node root declares in its manifest next to `groove.durable-index.v2` and
+`jazz.history-version-current.v4` (§2.7.1). A linear-history root written before aliasing stores the full
 `RowAuthor` record in these fields and lacks the family, so opening it fails at
 the manifest check, before any record is decoded, with the typed
 `groove::storage::Error::UnsupportedStorageCodecs { missing:
@@ -338,19 +343,31 @@ SYSTEM capability is not persisted as a row author. Node-local aliases live in `
 
 **Linear-history storage boundary (2026-09-29).** A node root that holds row
 history (Core, relay and client stores on every adapter) declares the codec
-family `jazz.history-version-current.v2` (and the row-author alias family
+family `jazz.history-version-current.v4` (and the row-author alias family
 `jazz.author-alias.v1`, §2.2) in its storage manifest, in addition to the
 shared Jazz epoch-one profile. That family is the linear row-state
 layout: one history record per accepted transaction holding the row state after
-Core's merge, keyed `(branch_key, row_uuid, tx_time, tx_node_id)` with index
-`by_tx`; a global-current record per row with `global_time` (the row's seq) and
+Core's merge, keyed `(branch_key, row_uuid, tx_time, tx_node_id)` with no
+secondary index; a global-current record per row with `global_time` (the row's seq) and
 index `by_seq (branch_key, global_time, row_uuid)`; an ahead overlay keyed
 `(branch_key, row_uuid)` with its `ahead_shadow` copy; `_deletion` as an
 ordinary nullable cell; and, after `authored_columns`, one hidden `U48` stamp
-per LWW column then `_ts__deletion` (SPEC 4 §4.6). It has no `parents`, no
+per LWW column then `_ts__deletion` (SPEC 4 §4.6). The history images of one
+transaction are found through that transaction's `jazz_tx_touched_rows` list
+(§2.8), not through an index: fate replay, relay forwarding and
+materialization read the listed `(table, branch, row)` keys at the
+transaction's `(tx_time, tx_node_id)`. Recovery takes the transaction-clock
+high-water mark from the last `jazz_transactions` key. A history image's
+`updated_by` is null when it equals the `made_by` of the transaction its key
+names, and every read fills it in from that `jazz_transactions` record; it is
+stored only when the merge kept an earlier writer's provenance (SPEC 4 §4.6).
+`created_by`, `created_at` and `updated_at` stay in every image, and global
+current and the ahead overlay keep all four. It has no `parents`, no
 register tables, no shared deletion history, no `jazz_merge_heads`, no
 `jazz_global_changes` and no parked parent edges. A root written by the DAG
-layout (`jazz.history-version-current.v1`, alpha.54 to alpha.57) lacks the v2
+layout (`jazz.history-version-current.v1`, alpha.54 to alpha.57) or by the
+unreleased v2 (history and ahead-current `by_tx` indexes, no touched-row list)
+or v3 (`updated_by` stored in every history image) row layouts lacks the v4
 family, so opening it fails at the manifest check, before any record is
 decoded, with the typed `groove::storage::Error::UnsupportedStorageCodecs`,
 which names the codec IDs the root lacks and the ones this build does not know.
@@ -360,6 +377,15 @@ history (the server's account registry and catalogue-entry store) keep the
 epoch-one profile unchanged. The paragraphs of this section and §2.8 that still
 describe `parents`, the deletion register tables and `jazz_global_changes`
 specify the retired v1 layout.
+
+**Compact durable-index layout (alpha.60).** Node roots also declare Groove's
+`groove.durable-index.v2` (Groove SPEC 2, "Durable index layout"): every index
+entry of `by_seq`, `by_global_time` and the fk/user indexes is keyed by
+a numeric index id plus the index columns written once, with only the primary-key
+columns the index lacks after a `ff` separator, and an empty value. The branch
+key is encoded once per entry (12 bytes for `01 00000000`). A node root from
+alpha.58 or alpha.59 lacks the family and is refused at the manifest check with
+the same typed error.
 
 The authoritative identity of one immutable row version is exactly
 `(PhysicalTableId, BranchKey, RowUuid, Layer, TxId)`. `Layer` is either content
@@ -459,6 +485,26 @@ and a receiver never infers one from durability alone. A malformed or stale
 receipt that happens to carry a global-time field with a rejection still cannot
 make that transaction a content or deletion winner (ch. 3).
 
+**Touched-row list.** The history rows this node stored for a transaction
+are listed in the node-local table `jazz_tx_touched_rows`, one record per
+transaction keyed `(tx_time: U64, tx_node_id: U64)` with the field
+`touched_rows: Array<{physical_table_id: U64, branch_key: Bytes, row_uuids:
+Array<Uuid>}>`, grouped by physical table and branch in ascending order with
+strictly ascending, unique row UUIDs per group; empty groups and any other
+order are rejected at decode. It is never part of the transaction record,
+which is the transaction's replicated identity and is compared with incoming
+copies, and never part of a receipt: the list differs between nodes and grows
+as history arrives. It is written only when a node batch is applied, which
+first adds every history row marked since the previous apply to its
+transaction's list, extending what is stored; it does not depend on the
+transaction record existing yet. It is a superset: a listed row whose
+history image was never written or was later evicted is skipped on read, and
+rejection deletes the list together with the rejected images. It costs about
+16 bytes per row plus about 20 bytes per group and is read only to list the
+transaction's versions, which reads every listed row anyway, so pending
+history stays findable by transaction until its fate arrives without a
+per-version index.
+
 Positions 5 through 8 are retained nullable layout slots, but the durable audit
 row writes them null in epoch 1. Exclusive snapshot/read/CAS evidence belongs to
 the immutable `Transaction` commit-unit payload and authority validation seam;
@@ -506,7 +552,8 @@ created_by, created_at, updated_by, updated_at)`, followed by declared
 `user_{column}` cells in application declaration order. `created_by` and
 `updated_by` are `RowAuthor` records in the logical row image and `U32`
 `AuthorAlias` values in the physical `jazz_physical_{id}_history` table
-(§2.2); deletion-layer records keep full authors. The deletion relation
+(§2.2), where `updated_by` is nullable and null when it is the transaction's
+own author (§2.7.1); deletion-layer records keep full authors. The deletion relation
 adds `physical_table_id` at position 1 and ends with `_deletion` at position 11;
 it has no user cells. The replicated `WireRowRecord` positions are
 `(row_uuid, created_by, created_at_ms, updated_by, updated_at_ms,

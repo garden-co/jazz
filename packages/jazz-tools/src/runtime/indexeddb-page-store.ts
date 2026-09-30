@@ -61,6 +61,10 @@ export const INDEXEDDB_PAGE_FORMAT_MAGIC = "IDBTREE\0";
  * opened with the exact epoch-one inventory.
  */
 export const JAZZ_EPOCH_1_STORAGE_CODEC_IDS = [
+  // Compact durable-index layout (numeric index ids, empty values). A browser
+  // root written by alpha.59 or earlier lacks this family and fails manifest
+  // admission.
+  "groove.durable-index.v2",
   "groove.large-value.v1",
   "groove.ordered-chunk-storage.v1",
   "groove.ordered-kv.v1",
@@ -76,8 +80,9 @@ export const JAZZ_EPOCH_1_STORAGE_CODEC_IDS = [
   "jazz.catalogue.schema.v1",
   "jazz.catalogue.write-pointer.v1",
   // Linear row-state history. A browser root written by the DAG layout
-  // (alpha.54 to alpha.57) lacks this family and fails manifest admission.
-  "jazz.history-version-current.v2",
+  // (alpha.54 to alpha.57) or by the unreleased v2/v3 row layouts lacks this
+  // family and fails manifest admission.
+  "jazz.history-version-current.v4",
   "jazz.subscription-program-fact-key.v1",
 ] as const;
 

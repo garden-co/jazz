@@ -107,7 +107,7 @@ where
                 self.write_global_current_update(&mut batch, version, global_time)?;
                 // History holds the row's post-image at this seq, which is
                 // what peers receive for this transaction.
-                self.write_history_post_image(&mut batch, version)?;
+                self.write_history_post_image(&mut batch, version, stored.tx.made_by)?;
             }
             if !global_current_updates.is_empty() {
                 self.invalidate_tx_version_tables_cache(tx_id);
@@ -148,7 +148,7 @@ where
             None
         };
         self.flush_ahead_shadows(&mut batch).await?;
-        let applied = self.database.apply_batch(batch).await?;
+        let applied = self.apply_node_batch(batch).await?;
         let persisted = applied.persist().await;
         self.database.finish_persistence(persisted)?;
         *terminal_fate_persisted = !matches!(stored.fate, Fate::Pending);
@@ -973,6 +973,14 @@ where
                 self.version_storage_primary_key(version)?,
             );
         }
+        // The rejected images are gone, so is the list naming them.
+        batch.delete(
+            TX_TOUCHED_ROWS_TABLE,
+            PrimaryKeyValue::Composite(vec![
+                PrimaryKeyValue::U64(tx_id.time.0),
+                PrimaryKeyValue::U64(tx.node_alias.0),
+            ]),
+        );
         self.invalidate_tx_version_tables_cache(tx_id);
         let _ = affected;
         Ok(rejected_payload)

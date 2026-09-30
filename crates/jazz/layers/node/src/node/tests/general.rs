@@ -1636,7 +1636,7 @@ fn malformed_persisted_authored_column_ids_never_reenter_derived_current_state()
             .unwrap();
             let mut corruption = node.database.open_batch();
             let (history_table, raw) = node
-                .version_storage_write_binding(&corrupted, &mut corruption)
+                .version_storage_write_binding(&corrupted, version.updated_by(), &mut corruption)
                 .unwrap();
             corruption.update_raw(
                 history_table.to_string(),
@@ -1668,6 +1668,168 @@ fn malformed_persisted_authored_column_ids_never_reenter_derived_current_state()
             .unwrap()
             .is_empty());
     }
+}
+
+#[test]
+fn every_history_write_is_listed_in_its_transaction_by_the_same_batch() {
+    // Internal receipt for SPEC 2 §2.8: history has no by-transaction index,
+    // so a row missing from `touched_rows` would be invisible to fate replay
+    // and forwarding. Both the pending write and the authority's post-image
+    // at acceptance must leave no row mark behind their batch.
+    let (_temp_dir, mut node) = open_node();
+    let table_id = node
+        .physical_table_id_for_schema(node.catalogue.local_schema_version_id, "todos")
+        .unwrap();
+    let listed = |node: &mut NodeState, tx_id| {
+        let alias = node.query_transaction(tx_id).unwrap().unwrap().node_alias;
+        crate::local_executor::block_on(node.load_tx_touched_rows(None, tx_id.time, alias))
+            .unwrap()
+            .iter()
+            .map(|(table, branch, row)| (table, branch.to_vec(), row))
+            .collect::<Vec<_>>()
+    };
+    let tx_id = node
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(3), 10).cells(title_cells("listed")),
+        )
+        .unwrap();
+    assert!(node.tx_touched_dirty.is_empty());
+    let expected = vec![(table_id, BranchKey::default().canonical_bytes(), row(3))];
+    assert_eq!(listed(&mut node, tx_id), expected);
+
+    node.finalize_local_mergeable_commit_settled(tx_id).unwrap();
+    assert!(node.tx_touched_dirty.is_empty());
+    assert_eq!(listed(&mut node, tx_id), expected);
+    assert_eq!(node.query_versions_for_tx(tx_id).unwrap().len(), 1);
+}
+
+#[test]
+fn a_touched_row_list_is_node_local_and_survives_batches_applied_before_its_transaction() {
+    // Internal receipt for SPEC 2 §2.8. Ingest can apply another node batch
+    // (a schema or node alias) while the batch holding a transaction's
+    // history rows is still being built, before that transaction's record
+    // exists. That batch lists the marked rows; they must not be dropped
+    // for want of a transaction record, and the replicated transaction
+    // record must not carry the list at all.
+    let (_temp_dir, mut node) = open_node();
+    let tx_id = node
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(5), 10).cells(title_cells("listed")),
+        )
+        .unwrap();
+    let version = node.query_versions_for_tx(tx_id).unwrap().remove(0);
+    let alias = version.tx_node_alias();
+    let table_id = node
+        .physical_table_id_for_schema(node.catalogue.local_schema_version_id, "todos")
+        .unwrap();
+    let transaction = node
+        .database
+        .primary_key_get_raw("jazz_transactions", &[Value::U64(tx_id.time.0), Value::U64(alias.0)])
+        .unwrap()
+        .unwrap()
+        .owned_record();
+    assert_eq!(
+        transaction.borrowed().descriptor().fields().len(),
+        TransactionRowRecord::FIELD_DURABILITY_IDX + 1,
+        "the transaction record ends at durability; it carries no node-local list"
+    );
+
+    // Forget the list and the transaction record, as if neither was written yet.
+    let mut forget = node.database.open_batch();
+    forget.delete(
+        TX_TOUCHED_ROWS_TABLE,
+        PrimaryKeyValue::Composite(vec![
+            PrimaryKeyValue::U64(tx_id.time.0),
+            PrimaryKeyValue::U64(alias.0),
+        ]),
+    );
+    forget.delete(
+        "jazz_transactions",
+        PrimaryKeyValue::Composite(vec![
+            PrimaryKeyValue::U64(tx_id.time.0),
+            PrimaryKeyValue::U64(alias.0),
+        ]),
+    );
+    let applied = crate::local_executor::block_on(node.database.apply_batch(forget)).unwrap();
+    let persisted = crate::local_executor::block_on(applied.persist());
+    node.database.finish_persistence(persisted).unwrap();
+
+    // The history write is marked, then an unrelated node batch applies first.
+    node.mark_tx_touched_row(table_id, &version);
+    let unrelated = node.database.open_batch();
+    let applied = crate::local_executor::block_on(node.apply_node_batch(unrelated)).unwrap();
+    let persisted = crate::local_executor::block_on(applied.persist());
+    node.database.finish_persistence(persisted).unwrap();
+
+    assert!(node.tx_touched_dirty.is_empty());
+    assert_eq!(
+        crate::local_executor::block_on(node.load_tx_touched_rows(None, tx_id.time, alias))
+            .unwrap()
+            .iter()
+            .map(|(table, branch, row)| (table, branch.to_vec(), row))
+            .collect::<Vec<_>>(),
+        vec![(table_id, version.branch_key().canonical_bytes(), row(5))]
+    );
+}
+
+#[test]
+fn history_images_store_updated_by_only_when_it_differs_from_the_transaction_author() {
+    // Internal storage receipt (SPEC 2 §2.7.1): the public API always sees
+    // `updated_by`, so read the raw history bytes to pin that an image
+    // written by its own transaction's author omits it.
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
+    {
+        let mut node = open_node_at(&temp_dir, schema.clone());
+        let tx_id = node
+            .commit_mergeable_settled(
+                MergeableCommit::new("todos", row(1), 10)
+                    .made_by(alice)
+                    .cells(title_cells("own author")),
+            )
+            .unwrap();
+        let version = node.query_versions_for_tx(tx_id).unwrap().remove(0);
+        assert_eq!(version.updated_by(), alice);
+        let table_id = node
+            .physical_table_id_for_schema(node.catalogue.local_schema_version_id, "todos")
+            .unwrap();
+        let stored = node
+            .database
+            .primary_key_scan_raw(&physical_history_table_name(table_id), &[])
+            .unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(
+            stored[0]
+                .record()
+                .get_idx(HistoryRowRecord::FIELD_UPDATED_BY_IDX)
+                .unwrap(),
+            Value::Nullable(None),
+            "the transaction's own author is not stored in the image"
+        );
+        // An image whose merge kept another writer's provenance (here: the
+        // same image written under bob's transaction) stores it, as the
+        // node-local alias of that author.
+        let mut staging = node.database.open_batch();
+        let (_, explicit) = node
+            .version_storage_write_binding(&version, bob, &mut staging)
+            .unwrap();
+        let alice_alias = node.resident_transaction_author_alias(alice).unwrap();
+        assert_eq!(
+            explicit
+                .record()
+                .get_idx(HistoryRowRecord::FIELD_UPDATED_BY_IDX)
+                .unwrap(),
+            Value::Nullable(Some(Box::new(Value::U32(alice_alias.0))))
+        );
+    }
+    // A cold reopen fills the author in from the transaction record.
+    let mut reopened = reopen_node_at(&temp_dir, node(1), schema);
+    let versions = reopened.query_table_versions("todos").unwrap();
+    assert_eq!(versions.len(), 1);
+    assert_eq!(versions[0].updated_by(), alice);
+    assert!(!versions[0].updated_by_is_implicit().unwrap());
 }
 
 #[test]

@@ -113,7 +113,7 @@ where
                 Value::Bytes(codec::encode_catalogue_schema(schema)?),
             ],
         );
-        let applied = self.database.apply_batch(batch).await?;
+        let applied = self.apply_node_batch(batch).await?;
 let persisted = applied.persist().await;
 self.database.finish_persistence(persisted)?;
         Ok(())
@@ -328,7 +328,7 @@ self.database.finish_persistence(persisted)?;
                 ))?;
         let mut batch = self.database.open_batch();
         Self::write_schema_version_mapping_to_batch(&mut batch, alias, schema_version, &mapping)?;
-        let applied = self.database.apply_batch(batch).await?;
+        let applied = self.apply_node_batch(batch).await?;
 let persisted = applied.persist().await;
 self.database.finish_persistence(persisted)?;
         self.catalogue
@@ -876,7 +876,7 @@ self.database.finish_persistence(persisted)?;
                 Value::Bytes(codec::encode_catalogue_staged_lineage(staged)?),
             ],
         );
-        let applied = self.database.apply_batch(batch).await?;
+        let applied = self.apply_node_batch(batch).await?;
 let persisted = applied.persist().await;
 self.database.finish_persistence(persisted)?;
         Ok(())
@@ -896,7 +896,7 @@ self.database.finish_persistence(persisted)?;
                 Value::Bytes(codec::encode_catalogue_pending_lineage(pending)?),
             ],
         );
-        let applied = self.database.apply_batch(batch).await?;
+        let applied = self.apply_node_batch(batch).await?;
 let persisted = applied.persist().await;
 self.database.finish_persistence(persisted)?;
         Ok(())
@@ -915,7 +915,7 @@ self.database.finish_persistence(persisted)?;
                 PrimaryKeyValue::Uuid(publication_id.0),
             ]),
         );
-        let applied = self.database.apply_batch(batch).await?;
+        let applied = self.apply_node_batch(batch).await?;
 let persisted = applied.persist().await;
 self.database.finish_persistence(persisted)?;
         self.catalogue.pending_lineages.remove(&catalogue_seq);
@@ -1014,7 +1014,7 @@ self.database.finish_persistence(persisted)?;
                 ))?;
             Self::write_schema_version_mapping_to_batch(&mut batch, alias, lens.target, mapping)?;
         }
-        let applied = self.database.apply_batch(batch).await?;
+        let applied = self.apply_node_batch(batch).await?;
 let persisted = applied.persist().await;
 self.database.finish_persistence(persisted)?;
         Ok(())
@@ -1108,7 +1108,7 @@ self.database.finish_persistence(persisted)?;
                 Value::Bytes(codec::encode_catalogue_schema(&structural)?),
             ],
         );
-        let applied = self.database.apply_batch(batch).await?;
+        let applied = self.apply_node_batch(batch).await?;
         let persisted = applied.persist().await;
         self.database.finish_persistence(persisted)?;
         Ok(())
@@ -1270,7 +1270,7 @@ self.database.finish_persistence(persisted)?;
             "jazz_nodes",
             vec![Value::U64(alias.0), Value::Uuid(node_uuid.0)],
         );
-        let applied = self.database.apply_batch(batch).await?;
+        let applied = self.apply_node_batch(batch).await?;
 let persisted = applied.persist().await;
 self.database.finish_persistence(persisted)?;
         // This mapping is a durable prerequisite for every later row that

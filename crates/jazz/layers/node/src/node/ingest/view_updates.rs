@@ -281,7 +281,8 @@ where
                 continue;
             };
             return self
-                .decode_history_owned_record(table, &storage_table, record)
+                .decode_stored_history_record(Some(batch), table, &storage_table, record)
+                .await
                 .map(Some);
         }
         Ok(None)
@@ -405,8 +406,9 @@ where
         &mut self,
         batch: &mut DatabaseBatch,
         version: &VersionRow,
+        tx_author: AuthorSubject,
     ) -> Result<(), Error> {
-        let (history_table, record) = self.version_storage_write_binding(version, batch)?;
+        let (history_table, record) = self.version_storage_write_binding(version, tx_author, batch)?;
         batch.update_raw(
             history_table.as_ref(),
             self.version_storage_primary_key(version)?,
@@ -433,7 +435,7 @@ where
         // the current carrier; encoding itself retains trusted bytes.
         let _ = self.authored_columns_for_version(version)?;
         self.stage_row_author_aliases(version, batch)?;
-        let physical = self.encode_physical_version_record(&plan, version, Some(global_time))?;
+        let physical = self.encode_physical_version_record(&plan, version, Some(global_time), None)?;
         batch.update_raw(
             plan.storage_table.clone(),
             global_current_primary_key(version.branch_key(), version.row_uuid()),
@@ -568,7 +570,7 @@ where
         )?;
         let _ = self.authored_columns_for_version(version)?;
         self.stage_row_author_aliases(version, batch)?;
-        let physical = self.encode_physical_version_record(&plan, version, None)?;
+        let physical = self.encode_physical_version_record(&plan, version, None, None)?;
         batch.update_raw(
             plan.storage_table.clone(),
             global_current_primary_key(version.branch_key(), version.row_uuid()),

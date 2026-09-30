@@ -96,6 +96,9 @@ mod shared_coverage_differential;
 mod shared_query_hydration;
 #[path = "../storage_format_refusal.rs"]
 mod storage_format_refusal;
+#[cfg(feature = "testing")]
+#[path = "../storage_per_row_bytes.rs"]
+mod storage_per_row_bytes;
 #[path = "../structured_result_tree.rs"]
 mod structured_result_tree;
 #[cfg(feature = "testing")]

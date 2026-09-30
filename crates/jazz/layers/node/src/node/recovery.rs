@@ -115,6 +115,10 @@ where
             .map(|(node, alias)| (*alias, *node))
             .collect::<BTreeMap<_, _>>();
 
+        // The transaction-clock high-water mark is the newest stored
+        // transaction: `jazz_transactions` is keyed `(time, node_id)`, and every
+        // history row is written in the same batch as its transaction record,
+        // so no history version can carry a later `tx_time`.
         if let Some(raw) = self
             .database
             .primary_key_last_raw("jazz_transactions", &[])
@@ -123,23 +127,6 @@ where
             self.merge_tx_time(TxTime(
                 raw.record().get_u64(TransactionRowRecord::FIELD_TIME_IDX)?,
             ));
-        }
-        let physical_table_ids = self
-            .catalogue
-            .physical_mappings
-            .values()
-            .flat_map(|mapping| mapping.tables.values().map(|table| table.table_id))
-            .collect::<BTreeSet<_>>();
-        for table_id in physical_table_ids {
-            if let Some(raw) = self
-                .database
-                .index_last_raw(&physical_history_table_name(table_id), "by_tx", &[])
-                .await?
-            {
-                self.merge_tx_time(TxTime(
-                    raw.record().get_u64(HistoryRowRecord::FIELD_TX_TIME_IDX)?,
-                ));
-            }
         }
         #[cfg(feature = "testing")]
         if let (Some(receipt), Some(started)) = (&mut receipt, started) {
@@ -295,7 +282,7 @@ impl<S: OrderedKvStorage> NodeState<S> {
         values[TransactionRowRecord::FIELD_DURABILITY_IDX] = Value::EnumTag(2);
         let mut batch = self.database.open_batch();
         batch.update("jazz_transactions", values);
-        let applied = self.database.apply_batch(batch).await.unwrap();
+        let applied = self.apply_node_batch(batch).await.unwrap();
         let persisted = applied.persist().await;
         self.database.finish_persistence(persisted).unwrap();
     }

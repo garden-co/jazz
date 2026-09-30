@@ -1763,7 +1763,7 @@ where
         if !receiver_batch.is_empty() {
             self.sync_metrics.receiver_bulk_ingest_commits += 1;
             self.sync_metrics.receiver_bulk_bundle_ingests += receiver_batch_bundle_count;
-            let applied = self.database.apply_batch(receiver_batch).await?;
+            let applied = self.apply_node_batch(receiver_batch).await?;
             let persisted = applied.persist().await;
             self.database.finish_persistence(persisted)?;
             for rejected in receiver_batch_rejections {

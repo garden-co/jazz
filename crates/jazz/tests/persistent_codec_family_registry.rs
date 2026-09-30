@@ -204,10 +204,13 @@ fn validate_registry_with_profiles(
     for required in [
         "groove.typed-record.v1",
         "groove.storage-epoch-manifest.v1",
-        "groove.jazz-physical-class.v1",
+        "groove.jazz-physical-class.v2",
+        "groove.durable-index.v2",
         // Linear row-state history retired `jazz.history-version-current.v1`,
-        // `jazz.contribution-provenance.v1` and `jazz.merge-heads.v1`.
-        "jazz.history-version-current.v2",
+        // `jazz.contribution-provenance.v1` and `jazz.merge-heads.v1`; the
+        // touched-rows transaction record retired `...v2` (history `by_tx`),
+        // and implicit history `updated_by` retired `...v3`.
+        "jazz.history-version-current.v4",
         "jazz.subscription-watermark.v1",
         "jazz.idb-page.v1",
         "jazz.wire-frame.v1",

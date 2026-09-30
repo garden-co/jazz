@@ -50,6 +50,9 @@ pub enum VariantProjectionTarget {
 pub struct IndexSourceOp {
     pub table: String,
     pub index: String,
+    /// Durable numeric ids of the indexes this source reads (boxed to keep
+    /// `OpType` variants balanced).
+    pub durable_ids: Box<IndexSourceDurableIds>,
     pub intersections: Vec<(String, StaticScanSpec)>,
     pub candidate_filter: Option<IndexCandidateFilter>,
     /// Fixed descriptor consumed by `IndexBy` after optional variant
@@ -66,6 +69,18 @@ pub struct IndexSourceOp {
     pub append_value_to_key: bool,
     pub store_value: bool,
     pub scan: Option<StaticScanSpec>,
+}
+
+/// Durable numeric ids (storage-key prefixes) of the indexes one
+/// [`IndexSourceOp`] reads.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct IndexSourceDurableIds {
+    /// Id of the source's own index.
+    pub index: u32,
+    /// Ids of `intersections`, in the same order.
+    pub intersections: Vec<u32>,
+    /// Id of the candidate filter's index.
+    pub candidate: Option<u32>,
 }
 
 /// Static ordered-key scan supplied at graph construction.

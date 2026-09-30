@@ -167,7 +167,14 @@ impl AuthorAliases {
                         .map(|(index, field)| {
                             let mut field = field.clone();
                             if author_fields.contains(&index) {
-                                field.value_type = author.clone();
+                                // A nullable alias (history `updated_by`)
+                                // widens to a nullable author record.
+                                field.value_type = match field.value_type {
+                                    groove::records::ValueType::Nullable(_) => {
+                                        author.clone().nullable()
+                                    }
+                                    _ => author.clone(),
+                                };
                             }
                             field
                         })

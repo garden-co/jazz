@@ -30,6 +30,17 @@ pub const GROOVE_EPOCH_1_CODECS: &[&str] = &[
     "groove.ordered-kv.v1",
 ];
 
+/// Groove's durable secondary-index layout (`indices` family): entries keyed
+/// by a LEB128 numeric index id plus the concatenated, single-escaped index key
+/// parts, with an empty value (unique indexes store the primary-key columns
+/// the index lacks), and the `\0groove-index-id\0` registry that assigns ids.
+///
+/// It is not part of [`GROOVE_EPOCH_1_CODECS`] because only roots that declare
+/// schema indexes carry it; such a root composes it into its profile, so a
+/// root written by the earlier name-prefixed layout is refused at manifest
+/// admission instead of being misread.
+pub const GROOVE_DURABLE_INDEX_V2_CODEC: &str = "groove.durable-index.v2";
+
 /// A closed, deterministic set of persistent payload codecs required by one
 /// storage root.
 ///

@@ -452,7 +452,7 @@ impl RuntimeSchema {
     /// Return the required RocksDB column-family names.
     pub fn column_families(&self) -> Vec<String> {
         let lowered = self.lower_to_groove();
-        StorageLayout::jazz_class_v1().physical_column_families(
+        StorageLayout::jazz_class_v2().physical_column_families(
             lowered
                 .column_families()
                 .into_iter()
@@ -480,6 +480,7 @@ impl RuntimeSchema {
             catalogue_table(),
             catalogue_pointer_table(),
             transactions_table(),
+            tx_touched_rows_table(),
             rejected_transactions_table(),
         ]
     }
@@ -1047,7 +1048,12 @@ impl TableSchema {
             column("schema_version", GrooveColumnType::U64),
             column("created_by", crate::ids::RowAuthor::value_type()),
             column("created_at", GrooveColumnType::U64),
-            column("updated_by", crate::ids::RowAuthor::value_type()),
+            // Null when the image's `updated_by` is the `made_by` of the
+            // transaction named by this record's key: the node reads it from
+            // that `jazz_transactions` record instead of storing the author
+            // in every image. Set only when the merge kept an earlier
+            // writer's provenance (SPEC 2 §2.7.1).
+            column("updated_by", crate::ids::RowAuthor::value_type().nullable()),
             column("updated_at", GrooveColumnType::U64),
             // Deletion is a cell of the row image: null until deleted or restored.
             column("_deletion", deletion_column().nullable()),
@@ -1067,17 +1073,15 @@ impl TableSchema {
         ));
         columns.extend(self.column_stamp_columns());
 
-        GrooveTableSchema::new(name, columns)
-            .with_primary_key(PrimaryKey::composite([
-                PrimaryKeyColumn::bytes("branch_key"),
-                PrimaryKeyColumn::uuid("row_uuid"),
-                PrimaryKeyColumn::integer("tx_time", IntegerKeyType::U64),
-                PrimaryKeyColumn::integer("tx_node_id", IntegerKeyType::U64),
-            ]))
-            .with_index(GrooveIndexSchema::new(
-                "by_tx",
-                ["tx_time", "tx_node_id", "branch_key", "row_uuid"],
-            ))
+        GrooveTableSchema::new(name, columns).with_primary_key(PrimaryKey::composite([
+            PrimaryKeyColumn::bytes("branch_key"),
+            PrimaryKeyColumn::uuid("row_uuid"),
+            PrimaryKeyColumn::integer("tx_time", IntegerKeyType::U64),
+            PrimaryKeyColumn::integer("tx_node_id", IntegerKeyType::U64),
+        ]))
+        // No secondary index: the rows one transaction wrote are listed in its
+        // `jazz_tx_touched_rows` record, so "versions of transaction T" is a
+        // point read per listed row rather than an index over every version.
     }
 
     /// Return the global-current table: one settled row image per row.
@@ -1174,10 +1178,8 @@ impl TableSchema {
                 PrimaryKeyColumn::bytes("branch_key"),
                 PrimaryKeyColumn::uuid("row_uuid"),
             ]))
-            .with_index(GrooveIndexSchema::new(
-                "by_tx",
-                ["tx_time", "tx_node_id", "branch_key", "row_uuid"],
-            ))
+        // No transaction index: an overlay row is found through the history
+        // rows its pending transaction lists in `jazz_tx_touched_rows`.
     }
 
     /// Columns available for constrained global-current reads.
@@ -1484,6 +1486,45 @@ fn transactions_table() -> GrooveTableSchema {
         PrimaryKeyColumn::integer("node_id", IntegerKeyType::U64),
     ]))
     .with_index(GrooveIndexSchema::new("by_global_time", ["global_time"]))
+}
+
+/// `jazz_tx_touched_rows`: node-local bookkeeping, one record per transaction
+/// `(tx_time, tx_node_id)`, listing the history rows this node stored for it.
+/// It replaces a `by_tx` index over every history version (SPEC 2 §2.8).
+///
+/// It is deliberately not part of `jazz_transactions`: a transaction record is
+/// the transaction's replicated identity and is compared with incoming copies,
+/// and it is read on hot paths (fates, view updates, covered-input checks).
+/// This list differs between nodes, grows as history arrives, and is written
+/// only when a batch that wrote history rows is applied.
+fn tx_touched_rows_table() -> GrooveTableSchema {
+    GrooveTableSchema::new(
+        "jazz_tx_touched_rows",
+        [
+            column("tx_time", GrooveColumnType::U64),
+            column("tx_node_id", GrooveColumnType::U64),
+            column("touched_rows", touched_rows_column()),
+        ],
+    )
+    .with_primary_key(PrimaryKey::composite([
+        PrimaryKeyColumn::integer("tx_time", IntegerKeyType::U64),
+        PrimaryKeyColumn::integer("tx_node_id", IntegerKeyType::U64),
+    ]))
+}
+
+/// `jazz_tx_touched_rows.touched_rows`: the rows this node stored in history for
+/// one transaction, as canonical groups `(physical_table_id, branch_key,
+/// row_uuids)`. Groups are strictly increasing by `(physical_table_id,
+/// branch_key bytes)`, every group is non-empty, and each group's row UUIDs are
+/// strictly increasing. A fixed-width `Array<Uuid>` has no count or offsets, so
+/// each touched row costs its 16 UUID bytes plus a small per-group header.
+fn touched_rows_column() -> GrooveColumnType {
+    GrooveColumnType::Record(Box::new(RecordDescriptor::new([
+        ("physical_table_id", ValueType::U64),
+        ("branch_key", ValueType::Bytes),
+        ("row_uuids", ValueType::Uuid.array_of()),
+    ])))
+    .array_of()
 }
 
 fn contribution_component_column() -> GrooveColumnType {
@@ -2136,13 +2177,20 @@ mod tests {
 
         for table in [&history, global_current, ahead_current] {
             for name in ["created_by", "updated_by"] {
+                // History omits `updated_by` when it is the transaction's
+                // own author; current carriers always store it.
+                let expected = if std::ptr::eq(table, &history) && name == "updated_by" {
+                    crate::ids::RowAuthor::value_type().nullable()
+                } else {
+                    crate::ids::RowAuthor::value_type()
+                };
                 assert_eq!(
                     table
                         .columns
                         .iter()
                         .find(|column| column.name == name)
                         .map(|column| &column.column_type),
-                    Some(&crate::ids::RowAuthor::value_type()),
+                    Some(&expected),
                     "{name} must use the structured author record in {}",
                     table.name
                 );

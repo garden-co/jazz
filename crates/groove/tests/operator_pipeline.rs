@@ -574,3 +574,60 @@ fn absent_dictionary_code_is_not_hidden_by_a_virtual_filter_or_projection() {
     let error = block_on(db.query_graph(graph)).unwrap_err();
     assert!(error.to_string().contains("no value for code 9"), "{error}");
 }
+
+#[test]
+fn nullable_dictionary_codes_expand_to_nullable_values_and_keep_nulls() {
+    let mut db = block_on(Database::new(
+        DatabaseSchema::new([]),
+        MemoryStorage::new(&[]).unwrap(),
+    ))
+    .unwrap();
+    let author = RecordDescriptor::new([("name", ValueType::String)]);
+    let dictionary = ValueDictionary::new("authors", ValueType::Record(Box::new(author)));
+    let encoded = author.create(&[Value::String("author-1".into())]).unwrap();
+    dictionary.install(1, &encoded).unwrap();
+    // Even ids carry code 1, odd ids carry null.
+    let rows = GraphBuilder::values(
+        RecordDescriptor::new([
+            ("id", ValueType::U64),
+            ("author", ValueType::U32.nullable()),
+        ]),
+        (0..10).map(|id| {
+            vec![
+                Value::U64(id),
+                Value::Nullable((id % 2 == 0).then(|| Box::new(Value::U32(1)))),
+            ]
+        }),
+    )
+    .unwrap();
+    let graph = rows.project_fields([
+        ProjectField::named("id"),
+        ProjectField::dictionary("author", "author", dictionary.clone()),
+    ]);
+    let subscription = db.subscribe([("result", graph.clone())]).unwrap();
+    let subscribed = block_on(db.next_multisink_subscription(&subscription)).unwrap();
+    let one_shot = block_on(db.query_graph(graph)).unwrap();
+    for result in [subscribed.get("result").unwrap(), &one_shot] {
+        let mut actual = result.to_values().unwrap();
+        actual.sort_by_key(|(row, _)| match row[0] {
+            Value::U64(id) => id,
+            _ => panic!("id"),
+        });
+        assert_eq!(actual.len(), 10);
+        for ((row, weight), id) in actual.iter().zip(0..) {
+            assert_eq!(*weight, 1);
+            assert_eq!(row[0], Value::U64(id));
+            match &row[1] {
+                Value::Nullable(None) => assert_eq!(id % 2, 1),
+                Value::Nullable(Some(inner)) => {
+                    assert_eq!(id % 2, 0);
+                    let Value::Record(record) = inner.as_ref() else {
+                        panic!("expanded author is a record: {inner:?}");
+                    };
+                    assert_eq!(record.get_idx(0).unwrap(), Value::String("author-1".into()));
+                }
+                other => panic!("nullable author: {other:?}"),
+            }
+        }
+    }
+}

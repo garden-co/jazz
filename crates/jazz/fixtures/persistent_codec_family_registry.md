@@ -33,9 +33,29 @@ admission. It added `jazz.history-version-current.v2`, the one member of the
 epoch-one `jazz-root` base, and the non-profile
 `jazz.subscription-watermark.v1` direct record store.
 
+The touched-rows transaction record (2026-09-30) retired the unreleased
+`jazz.history-version-current.v2` (history and ahead-current `by_tx` indexes)
+in favour of `jazz.history-version-current.v3`, whose `jazz_transactions`
+records list the rows each transaction touched. Implicit history
+`updated_by` (2026-09-30) then retired the unreleased `v3` in favour of
+`jazz.history-version-current.v4`: a history image stores `updated_by` only
+when it differs from its transaction's `made_by`, and the touched-row list
+lives in the node-local `jazz_tx_touched_rows`, outside the replicated
+transaction record.
+
+The compact durable-index layout (alpha.60) added `groove.durable-index.v2`
+to the `jazz-node-root` profile: numeric index ids, single-escaped keys and
+empty index values. Node roots written before it lack it and are
+refused at manifest admission. The same change moved the non-profile Jazz
+physical class layout to `groove.jazz-physical-class.v2` (marker
+`class-cf-v2`, the `indices` class stored without the logical-name frame);
+a `class-cf-v1` marker is refused as an older layout.
+
 Row-author aliasing (2026-09-30) added `jazz.author-alias.v1` to the
 `jazz-node-root` profile: physical row-author columns and
 `jazz_transactions.made_by` store a 4-byte `U32` alias resolved through the
-`jazz_authors` table. A linear-history root written before aliasing declares
-only `jazz.history-version-current.v2` and is refused at manifest admission
-with `missing: ["jazz.author-alias.v1"]`.
+`jazz_authors` table (a history image's `updated_by` is a nullable alias, null
+when it is the transaction's own author). A root written before aliasing
+declares `groove.durable-index.v2` and `jazz.history-version-current.v4` but
+not the alias family and is refused at manifest admission with
+`missing: ["jazz.author-alias.v1"]`.

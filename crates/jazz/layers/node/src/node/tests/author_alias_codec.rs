@@ -7,7 +7,9 @@
 /// ```text
 /// jazz_authors  { id: U32 = 1, author: RowAuthor record }  one row, pinned below
 /// jazz_transactions.made_by                  = 01 00 00 00   (alias 1, U32 LE)
-/// history created_by / updated_by           = 01 00 00 00   (alias 1, U32 LE)
+/// history created_by                        = 01 00 00 00   (alias 1, U32 LE)
+/// history updated_by                        = null          (Nullable(U32): it is
+///                                                            the tx's own author)
 /// ```
 ///
 /// The alias is physical shorthand only: the stored transaction and the
@@ -74,7 +76,8 @@ fn author_alias_codec_v1_pins_physical_bytes() {
         .unwrap();
     assert_eq!(&record.raw()[span], ALIAS_1);
 
-    // Physical history row: both author columns hold the same alias.
+    // Physical history row: `created_by` holds the alias; `updated_by` is a
+    // nullable alias, null because it is the transaction's own author.
     let table_id = core
         .physical_table_id_for_schema(core.catalogue.local_schema_version_id, "todos")
         .unwrap();
@@ -84,17 +87,22 @@ fn author_alias_codec_v1_pins_physical_bytes() {
         .unwrap();
     assert_eq!(history.len(), 1);
     let record = history[0].record();
-    for index in [
-        HistoryRowRecord::FIELD_CREATED_BY_IDX,
-        HistoryRowRecord::FIELD_UPDATED_BY_IDX,
-    ] {
-        assert_eq!(
-            record.descriptor().fields()[index].value_type,
-            records::ValueType::U32
-        );
-        let span = record.descriptor().field_span(record.raw(), index).unwrap();
-        assert_eq!(&record.raw()[span], ALIAS_1);
-    }
+    let created_by = HistoryRowRecord::FIELD_CREATED_BY_IDX;
+    assert_eq!(
+        record.descriptor().fields()[created_by].value_type,
+        records::ValueType::U32
+    );
+    let span = record
+        .descriptor()
+        .field_span(record.raw(), created_by)
+        .unwrap();
+    assert_eq!(&record.raw()[span], ALIAS_1);
+    let updated_by = HistoryRowRecord::FIELD_UPDATED_BY_IDX;
+    assert_eq!(
+        record.descriptor().fields()[updated_by].value_type,
+        records::ValueType::U32.nullable()
+    );
+    assert_eq!(record.get_idx(updated_by).unwrap(), Value::Nullable(None));
 
     // Decoding resolves the alias back to the full author.
     assert_eq!(

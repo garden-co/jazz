@@ -606,7 +606,8 @@ where
             let mut previously_stored = Vec::new();
             for version in versions {
                 let stored = self.prepare_exact_history_version(existing.node_alias, tx.tx_id.time, &version).await?;
-                let (table, record) = self.version_storage_write_binding(&stored, &mut batch)?;
+                let (table, record) =
+                    self.version_storage_write_binding(&stored, existing.tx.made_by, &mut batch)?;
                 let key = self.version_storage_primary_key(&stored)?;
                 if global_time.is_some() && matches!(fate, Fate::Accepted) && !self.minting_global_time {
                     // The authority's post-image replaces this node's copy.
@@ -891,7 +892,8 @@ where
                     (author_schema != self.catalogue.local_schema_version_id)
                         .then_some(author_schema),
                 )?;
-                let (history_table, groove_record) = self.version_storage_write_binding(&stored, &mut batch)?;
+                let (history_table, groove_record) =
+                    self.version_storage_write_binding(&stored, tx.made_by, &mut batch)?;
                 batch.insert_raw(
                     history_table.as_ref(),
                     self.version_storage_primary_key(&stored)?,
@@ -967,7 +969,7 @@ where
             .map(|(stored, global_time)| (stored.clone(), *global_time))
             .collect::<Vec<_>>();
         self.flush_ahead_shadows(&mut batch).await?;
-        let applied = self.database.apply_batch(batch).await?;
+        let applied = self.apply_node_batch(batch).await?;
         let persisted = applied.persist().await;
         self.database.finish_persistence(persisted)?;
         #[cfg(test)]

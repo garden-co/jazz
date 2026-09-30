@@ -5646,6 +5646,9 @@ async fn commit_metrics_split_storage_writes_by_jazz_destination() {
             .await
             .unwrap();
         let row_uuid = uuid(1);
+        // The first publication also makes the schema indexes' id
+        // registrations durable; measure a steady-state batch.
+        database.commit_batch(database.open_batch()).await.unwrap();
 
         let mut batch = database.open_batch();
         batch.insert(
@@ -5701,7 +5704,7 @@ async fn commit_metrics_split_storage_writes_by_jazz_destination() {
     assert_eq!(writes.transactions_indexes.count, 1);
     assert_eq!(writes.other.count, 0);
 
-    let class_writes = run(StorageLayout::jazz_class_v1()).await;
+    let class_writes = run(StorageLayout::jazz_class_v2()).await;
     assert_eq!(class_writes, writes);
 }
 

@@ -411,6 +411,8 @@ where
         if plan.catalogue.active_schema.revision > 0 {
             Self::write_active_schema_to_batch(&mut batch, &plan.catalogue.active_schema)?;
         }
+        // A catalogue-only batch writes no history rows, so it applies directly
+        // rather than through `apply_node_batch`.
         let persistence = async {
             let applied = self.database.apply_batch(batch).await?;
             let persisted = applied.persist().await;
