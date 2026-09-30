@@ -1578,6 +1578,8 @@ impl ServerRuntimeHandle {
                 remaining.push(frame);
                 continue;
             }
+            // A credit frame carries no payload for the session codec; its
+            // context is validated against the session by `receive_credit`.
             let WireFrame::ChannelCredit(grant) = crate::wire::decode_frame(&frame)
                 .map_err(|error| format!("malformed wire credit frame: {error}"))?
             else {
@@ -2979,6 +2981,183 @@ mod tests {
         assert_eq!(used.load(Ordering::Acquire), 0);
         assert!(FrameQueueCredit::reserve(&used, &[vec![0; FRAME_QUEUE_BUDGET + 1]]).is_err());
         assert!(FrameQueueCredit::reserve(&used, &[vec![0]]).is_ok());
+    }
+
+    #[test]
+    fn session_frame_queue_releases_each_consumed_frame() {
+        let used = Arc::new(AtomicUsize::new(0));
+        let frames = vec![vec![0]; 512];
+        let credit = FrameQueueCredit::reserve(&used, &frames).unwrap();
+        assert!(FrameQueueCredit::reserve(&used, &[vec![0]]).is_err());
+        // Each consumed frame returns its own charge while the batch is live.
+        credit.release_frame(1);
+        let next = FrameQueueCredit::reserve(&used, &[vec![0]]).unwrap();
+        assert!(FrameQueueCredit::reserve(&used, &[vec![0]]).is_err());
+        for _ in 1..512 {
+            credit.release_frame(1);
+        }
+        // Releasing past the reservation cannot free another batch's charge.
+        credit.release_frame(1);
+        assert_eq!(used.load(Ordering::Acquire), CHANNEL_FRAME_CREDIT_FLOOR);
+        drop(credit);
+        assert_eq!(used.load(Ordering::Acquire), CHANNEL_FRAME_CREDIT_FLOOR);
+        drop(next);
+        assert_eq!(used.load(Ordering::Acquire), 0);
+    }
+
+    const CHANNEL_FRAME_CREDIT_FLOOR: usize =
+        crate::wire::channel_credit::CHANNEL_FRAME_CREDIT_FLOOR;
+
+    /// Opens one wire session and suspends the semantic owner, so nothing
+    /// queued for it can drain until the returned sender releases it.
+    async fn session_with_suspended_owner() -> (
+        ServerRuntimeHandle,
+        ServerSession,
+        ServerRuntimeFrameStream,
+        crate::wire::channel_credit::SharedChannelCredits,
+        oneshot::Sender<()>,
+        tokio::task::JoinHandle<Result<(), String>>,
+    ) {
+        let schema = JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(TableSchemaBuilder::new("todos").column("title", ColumnType::Text))
+                .build(),
+        )
+        .unwrap();
+        let runtime =
+            ServerRuntimeHandle::start_with_storage(schema, StorageConfig::InMemory, None).unwrap();
+        let session = runtime
+            .open_with_session_context(
+                AuthorSubject::for_test_bytes([93; 16]),
+                BTreeMap::new(),
+                CommitUnitTrust::TrustedAdmin,
+                crate::wire::current_wire_features(),
+                None,
+                crate::serving::ServerLinkAdmission::OrdinarySession,
+            )
+            .await
+            .unwrap();
+        let credits = runtime
+            .inner
+            .session_channel_credits
+            .lock()
+            .unwrap()
+            .get(&session)
+            .cloned()
+            .expect("a wire session registers its credit ledger");
+        let stream = runtime.open_wire_stream(session).unwrap();
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let held_runtime = runtime.clone();
+        let held = tokio::spawn(async move {
+            held_runtime
+                .run_async(move |_| {
+                    Box::pin(async move {
+                        let _ = started_tx.send(());
+                        release_rx.await.map_err(|_| "hold cancelled".to_owned())
+                    })
+                })
+                .await
+        });
+        started_rx.await.unwrap();
+        (runtime, session, stream, credits, release_tx, held)
+    }
+
+    fn writes_credit_grant(sequence: u64, consumed_bytes: usize) -> AbiBytes {
+        encode_frame(&WireFrame::ChannelCredit(crate::wire::WireChannelCredit {
+            protocol_version: crate::wire::WIRE_PROTOCOL_VERSION,
+            features: crate::wire::current_wire_features(),
+            session: None,
+            class: crate::wire::channels::ChannelClass::Writes,
+            sequence,
+            consumed_bytes: consumed_bytes as u64,
+            kind: crate::wire::WireCreditKind::Frames,
+        }))
+        .unwrap()
+    }
+
+    // A peer grants credit for every frame of ours it consumes, and those
+    // grants used to queue behind the owner's work, each charged a 16 KiB
+    // ingress slot. A conforming peer then exhausted the budget while the
+    // owner was busy and was disconnected for backpressure it never caused.
+    #[tokio::test]
+    async fn conforming_peer_credit_grants_bypass_ingress_budget_while_owner_is_busy() {
+        let (runtime, session, _stream, credits, release, held) =
+            session_with_suspended_owner().await;
+        let class = crate::wire::channels::ChannelClass::Writes;
+        let grants = FRAME_QUEUE_BUDGET / CHANNEL_FRAME_CREDIT_FLOOR + 64;
+        for sequence in 0..grants {
+            // Our output consumes the window; the peer's grant must reopen it
+            // at once, or the next charge exceeds the window.
+            credits
+                .lock()
+                .unwrap()
+                .charge(class, 1)
+                .expect("the peer's previous grant reopened the window");
+            runtime
+                .receive_wire_frames(
+                    session,
+                    vec![writes_credit_grant(
+                        sequence as u64,
+                        CHANNEL_FRAME_CREDIT_FLOOR,
+                    )],
+                )
+                .expect("a conforming peer's grant is never refused for backpressure");
+        }
+        let queued = runtime
+            .inner
+            .ingress_bytes
+            .lock()
+            .unwrap()
+            .get(&session)
+            .map_or(0, |used| used.load(Ordering::Acquire));
+        assert_eq!(queued, 0, "grants are applied at the edge, never queued");
+
+        // A grant behind channel frames in the same batch is applied at once,
+        // while those frames stay queued for the suspended owner.
+        let window_filled = (0..)
+            .take_while(|_| credits.lock().unwrap().charge(class, 1).is_ok())
+            .count();
+        assert!(window_filled > 0);
+        assert!(credits.lock().unwrap().charge(class, 1).is_err());
+        runtime
+            .receive_wire_frames(
+                session,
+                vec![
+                    vec![0; 32],
+                    vec![0; 32],
+                    writes_credit_grant(grants as u64, CHANNEL_FRAME_CREDIT_FLOOR),
+                ],
+            )
+            .unwrap();
+        credits
+            .lock()
+            .unwrap()
+            .charge(class, 1)
+            .expect("the grant behind queued frames reopened the window");
+        assert!(!held.is_finished(), "the owner is still suspended");
+
+        release.send(()).unwrap();
+        held.await.unwrap().unwrap();
+        runtime.shutdown().await.unwrap();
+    }
+
+    // The budget still guards against a peer that ignores flow control.
+    #[tokio::test]
+    async fn non_conforming_peer_still_hits_ingress_backpressure() {
+        let (runtime, session, _stream, _credits, release, held) =
+            session_with_suspended_owner().await;
+        let budget_frames = FRAME_QUEUE_BUDGET / CHANNEL_FRAME_CREDIT_FLOOR;
+        runtime
+            .receive_wire_frames(session, vec![vec![0; 32]; budget_frames])
+            .unwrap();
+        assert_eq!(
+            runtime.receive_wire_frames(session, vec![vec![0; 32]]),
+            Err("wire frame queue backpressure".to_owned())
+        );
+        release.send(()).unwrap();
+        held.await.unwrap().unwrap();
+        runtime.shutdown().await.unwrap();
     }
 
     #[tokio::test]
