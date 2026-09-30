@@ -86,8 +86,12 @@ failures, TLS `UnexpectedEof` when a peer closes without `close_notify`, and
 handshake timeouts leave local relay work available while the worker retries.
 HTTP 408, 425, 429, 500, 502, 503, and 504 responses before authenticated wire
 admission are likewise retryable; other statuses, including authorization
-denials and unsupported server capabilities, remain terminal. An I/O wrapper
-alone is insufficient: rustls certificate and other TLS protocol failures
+denials and unsupported server capabilities, remain terminal.
+
+A disallowed remote plaintext endpoint returns
+`JAZZ_NATIVE_RELAY_REMOTE_PLAINTEXT_ENDPOINT`. React Native maps that status to
+a fixed diagnostic that contains no endpoint URL, bearer, or claims.
+An I/O wrapper alone is insufficient: rustls certificate and other TLS protocol failures
 arrive as `InvalidData` I/O errors and remain terminal, as do unknown I/O kinds.
 A structured pre-Hello `NotReady`/`Later` response is likewise retryable,
 matching browser admission. Authentication denial, malformed wire/WebSocket
