@@ -247,10 +247,11 @@ describe("createDb in-memory driver", () => {
         },
       );
       const [seen] = await tx.all(tail(6));
-      const [outside] = await db!.all(tail(6));
-      return { seen: seen?.body, outside: outside?.body };
+      // Outside the transaction the committed body is still just the prefix.
+      const outside = await db!.one(largeValues.documents.where({ id: inserted.id }));
+      return { seen: seen?.body, outsideLength: outside?.body.length };
     });
-    expect(mergeable.value).toEqual({ seen: "onetwo", outside: "" });
+    expect(mergeable.value).toEqual({ seen: "onetwo", outsideLength: prefix.length });
     await mergeable.wait({ tier: "local" });
     await expect(db.all(tail(6))).resolves.toEqual([{ id: inserted.id, body: "onetwo" }]);
     await expect(db.one(largeValues.documents.where({ id: inserted.id }))).resolves.toMatchObject({
