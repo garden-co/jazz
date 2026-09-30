@@ -1789,16 +1789,14 @@ export class JazzClient {
     openTransactionId?: OpenTransactionId,
     branch?: BranchView,
   ): MutationResult {
-    if (openTransactionId || branch) {
-      throw new Error(
-        "Partial-value updates are not yet supported inside transactions or branch views.",
-      );
+    if (branch) {
+      throw new Error("Partial-value updates are not yet supported in branch views.");
     }
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const writeContext = this.encodeWriteContext(
       effectiveSession,
       attribution,
-      undefined,
+      openTransactionId,
       updatedAt,
     );
     if (!this.runtime.updateLargeValues) {

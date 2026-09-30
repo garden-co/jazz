@@ -1,5 +1,7 @@
 //! Self-contained RecordPlayer metadata and playlist-window workloads.
 
+pub mod audio;
+
 use jazz::db::{
     Db, DbConfig, DbIdentity, PreparedQuery, ReadOpts, SubscriptionEvent, SubscriptionStream,
     block_on,

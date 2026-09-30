@@ -165,6 +165,14 @@ authority accepts the transaction and rejects if the authority rejects it.
 The Rust example uses the embedded `jazz::db::Db` API. An owning `ExclusiveTx` abandons the open
 transaction if it is dropped before `commit()` succeeds.
 
+<Callout type="warn">
+  The authority checks only the reads the writing client reports. That keeps honest writers from
+  acting on stale data, but it is not a security boundary: a client that under-reports its reads can
+  commit anyway. Enforce rules that must hold for every writer, such as "a membership needs a live
+  invite", in [permission policies](/docs/auth/permissions), or perform the write on your backend,
+  as the [invite links](/docs/recipes/access-control/invite-links) recipe does.
+</Callout>
+
 ## Manage a transaction yourself only when needed
 
 Use `beginTransaction()` when the work cannot fit in one callback. You then own the transaction and
