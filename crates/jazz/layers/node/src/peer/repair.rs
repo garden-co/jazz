@@ -16,8 +16,8 @@ impl PeerState {
                     .collect::<Vec<_>>()
                     .join(",")
             };
-            eprintln!(
-                "DIAG3816S out sub={:?} at={} snapshot={} opening_pending={} adds=[{}] removes=[{}]",
+            tracing::debug!(
+                "DIAG3816 relay-out sub={:?} at={} snapshot={} opening_pending={} adds=[{}] removes=[{}]",
                 view.subscription,
                 std::panic::Location::caller(),
                 view.supporting_rows.is_snapshot(),
