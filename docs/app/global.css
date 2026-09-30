@@ -316,15 +316,27 @@ h6 {
    pinned to the hero's top-right corner. Tune these in devtools on
    `.home-hero`: --pattern-width (the canvas width; its height follows the
    pattern's 1.1 aspect ratio), --pattern-top / --pattern-right (offsets from
-   that corner), --pattern-opacity. */
+   that corner), --pattern-opacity. Dots and ribs keep a fixed on-screen size
+   whatever the canvas size, so wider screens show more of them:
+   --pattern-dot-radius, --pattern-dot-spacing, and --pattern-rib-unit (each
+   rib is its pattern width, 0.2 across or 0.12 down, times this). */
 .home-hero {
   --pattern-width: 100%;
+  --pattern-dot-radius: 1.1px;
+  --pattern-dot-spacing: 2.5px;
+  --pattern-rib-unit: 450px;
   --pattern-top: 0px;
   --pattern-right: 0px;
   --pattern-opacity: 1;
   position: relative;
   overflow: clip;
   isolation: isolate;
+}
+@media (max-width: 639px) {
+  .home-hero {
+    --pattern-width: 190%;
+    --pattern-rib-unit: 320px;
+  }
 }
 .home-hero-pattern {
   position: absolute;

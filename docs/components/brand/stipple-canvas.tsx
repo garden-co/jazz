@@ -59,9 +59,16 @@ function boundsOf(width: number, height: number): Bounds {
 /**
  * Draws a stipple pattern into a canvas that fills its box. The pattern's
  * centre sits at the box centre and one pattern unit is half the box height,
- * so the dots scale with the box and stay put as it resizes. Dots are worked
- * out in a worker and kept while only the box's size changes; the canvas
- * gets `data-drawn` once it shows the pattern.
+ * so the composition scales with the box. Dots are worked out in a worker and
+ * kept while only the box's size changes; the canvas gets `data-drawn` once it
+ * shows the pattern.
+ *
+ * Three optional CSS custom properties (read from the canvas, so they can be
+ * set on any ancestor) pin details to screen pixels instead, so a bigger box
+ * shows more of them rather than bigger ones: `--pattern-dot-radius` and
+ * `--pattern-dot-spacing` (px) replace the pattern's `radius` and `spacing`,
+ * and `--pattern-rib-unit` (px) is the size of one pattern unit for fluting
+ * widths, so each rib is `period × rib unit` pixels wide.
  */
 export function StippleCanvas({
   pattern,
@@ -86,16 +93,22 @@ export function StippleCanvas({
       const height = Math.round(canvas.clientHeight * dpr);
       if (!width || !height) return;
       const bounds = boundsOf(width, height);
-      // Dots depend on the aspect ratio, not the pixel size.
-      const key = (width / height).toFixed(3);
+      const sized = sizePattern(pattern, canvas);
+      // Dots depend on the aspect ratio and pixel-pinned details, not the size.
+      const key = JSON.stringify([
+        (width / height).toFixed(3),
+        sized.spacing,
+        sized.radius,
+        sized.layers,
+      ]);
       if (cached?.key !== key) {
-        const dots = await computeDots(pattern, bounds);
+        const dots = await computeDots(sized, bounds);
         if (cancelled || !dots) return;
         cached = { key, dots };
       }
       canvas.width = width;
       canvas.height = height;
-      paint(canvas, pattern, cached.dots);
+      paint(canvas, sized, cached.dots);
       canvas.dataset.drawn = "";
     };
     const observer = new ResizeObserver(() => {
@@ -111,6 +124,36 @@ export function StippleCanvas({
   }, [pattern]);
 
   return <canvas ref={ref} aria-hidden className={className} style={style} />;
+}
+
+/** Applies the pixel-pinned details a canvas's CSS asks for, if any. */
+function sizePattern(pattern: StipplePattern, canvas: HTMLCanvasElement): StipplePattern {
+  const style = getComputedStyle(canvas);
+  const px = (name: string) => {
+    const value = Number.parseFloat(style.getPropertyValue(name));
+    return Number.isFinite(value) && value > 0 ? value : undefined;
+  };
+  // Pixels per pattern unit, rounded so sub-pixel resizes keep the dots.
+  const unit = Math.round(canvas.clientHeight / 2);
+  const round = (v: number) => Number(v.toPrecision(4));
+  const radius = px("--pattern-dot-radius");
+  const spacing = px("--pattern-dot-spacing");
+  const ribUnit = px("--pattern-rib-unit");
+  return {
+    ...pattern,
+    radius: radius ? round(radius / unit) : pattern.radius,
+    spacing: spacing ? round(spacing / unit) : pattern.spacing,
+    layers: ribUnit
+      ? pattern.layers.map((layer) => ({
+          ...layer,
+          warps: layer.warps?.map((warp) =>
+            warp.type === "flute"
+              ? { ...warp, period: round((warp.period * ribUnit) / unit) }
+              : warp,
+          ),
+        }))
+      : pattern.layers,
+  };
 }
 
 function paint(canvas: HTMLCanvasElement, pattern: StipplePattern, dots: Dots) {
