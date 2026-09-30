@@ -1,5 +1,13 @@
 # create-jazz
 
+## 2.0.0-alpha.58
+
+### Patch Changes
+
+- c5884c3: Add Effect starters: pick "TypeScript + Effect" to scaffold `ts-effect-localfirst` (a local-first browser app on `jazz-tools/effect`) or `ts-effect-betterauth` (the same client with Better Auth sign-in and an `effect/http` server route that acts as the signed-in user through `jazz-tools/effect/backend`).
+- fbd68bd: Document the explicit `s.rel` / `s.reverse` relation API in the `jazz-tools` README, list every starter and the `--hosting` values in the `create-jazz` README, and make `PolicyTestApp.seed` throw a descriptive error when its callback returns something other than a write result.
+- 479fbea: The `ts-effect-betterauth` starter's `pnpm dev` no longer restarts in a loop: its `tsx watch` now ignores the Jazz dev plugin's temporary schema bundle.
+
 ## 2.0.0-alpha.57
 
 ## 2.0.0-alpha.56
