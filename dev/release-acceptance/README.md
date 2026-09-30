@@ -240,7 +240,9 @@ global-tier insert/update/delete, remote point reads, subscriptions in both
 directions, 800KB chunked values, disconnect/offline write/reconnect, a server
 restart or in-place server upgrade on the same store with a write made while it
 was down, and fresh clients. The `large-values-*` cells probe fresh subscribers
-against tables holding large rows.
+against tables holding large rows. The `exclusive-*` cells run exclusive
+transactions that read a row by id, update or upsert an existing row, and
+expect a conflict once another client changed the row first.
 
 Unknown config keys and unknown cell names in `only` are rejected, a run where
 no cell ran fails, and every skipped cell gets a `skip` entry with its reason.

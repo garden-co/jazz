@@ -612,6 +612,124 @@ async function largeValueCell(name, sv, writer, reader) {
 }
 
 /**
+ * Exclusive transactions from a `cv` client against an `sv` server: reads of a
+ * row by id, and updates and upserts of an existing row, commit while their
+ * rows are unchanged and conflict once another client changed them.
+ */
+async function exclusiveCell(name, sv, cv) {
+  const cell = newCell(name);
+  const server = new Server(name, cell.dir, cell.ctx);
+  const clients = [];
+  try {
+    await check(
+      name,
+      "server-start",
+      async () => ({ url: await server.start(sv), server: sv.version }),
+      { fatal: true },
+    );
+    await check(name, "deploy", () => deploy(name, cell.dir, server, sv), { fatal: true });
+    const open = async (v, cname) => {
+      const c = new Client(name, cell.dir, v, cname);
+      clients.push(c);
+      await c.call("open", {
+        name: cname,
+        appId: cell.ctx.appId,
+        serverUrl: server.url,
+        ms: 30000,
+      });
+      return c;
+    };
+    const A = await open(cv, "a");
+    const B = await open(sv, "b");
+    const rows = [];
+    await check(
+      name,
+      "seed",
+      async () => {
+        for (const label of ["x0", "x1", "x2", "x3", "x4"])
+          rows.push(
+            (
+              await A.call("insert", {
+                values: { label, body: "seed", author: cv.key },
+                wait: "global",
+              })
+            ).id,
+          );
+      },
+      { fatal: true },
+    );
+    // Runs one exclusive transaction on A; `between` runs after its reads and
+    // writes, before it commits.
+    const exclusive = async (label, steps, expected, between) => {
+      await check(name, label, async () => {
+        await A.call("txBegin", { tx: label });
+        for (const [op, args] of steps) await A.call(op, { tx: label, ...args });
+        if (between) await between();
+        const result = await A.call("txCommit", { tx: label, ms: 30000 });
+        assert.deepEqual(result, expected);
+        return result;
+      });
+    };
+    const accepted = { outcome: "accepted" };
+    const conflict = { outcome: "rejected", code: "exclusive_conflict" };
+    const edit = (id) => () =>
+      B.call("update", { id, values: { body: "changed-by-b" }, wait: "global" });
+    await exclusive(
+      "read-by-id+update",
+      [
+        ["txReadById", { id: rows[0] }],
+        ["txUpdate", { id: rows[0], values: { body: "read-then-updated" } }],
+      ],
+      accepted,
+    );
+    await check(name, "read-by-id+update:visible", async () => {
+      const row = await B.call("one", { id: rows[0], tier: "global" });
+      assert.equal(row?.body, "read-then-updated");
+    });
+    await exclusive(
+      "read-by-id+insert",
+      [
+        ["txReadById", { id: rows[1] }],
+        ["txInsert", { values: { label: "by-id", body: "saw", author: cv.key } }],
+      ],
+      accepted,
+    );
+    await exclusive(
+      "blind-update",
+      [["txUpdate", { id: rows[1], values: { body: "blind" } }]],
+      accepted,
+    );
+    await exclusive(
+      "blind-upsert-existing",
+      [["txUpsert", { id: rows[2], values: { body: "upserted" } }]],
+      accepted,
+    );
+    await exclusive(
+      "stale-read-by-id-conflicts",
+      [
+        ["txReadById", { id: rows[3] }],
+        ["txInsert", { values: { label: "stale", body: "saw", author: cv.key } }],
+      ],
+      conflict,
+      edit(rows[3]),
+    );
+    await exclusive(
+      "stale-update-conflicts",
+      [["txUpdate", { id: rows[4], values: { body: "stale" } }]],
+      conflict,
+      edit(rows[4]),
+    );
+  } catch (error) {
+    record(name, "cell-aborted", "fail", {
+      error: String(error?.message ?? error).slice(0, 4000),
+    });
+  } finally {
+    for (const c of clients) await c.close();
+    await server.stop();
+  }
+}
+
+/**
  * Oversized first sync (#3477/#3520): a fresh whole-table subscriber whose
  * initial snapshot exceeds the 256 MiB routed payload limit. `writer` fills
  * the table with settled rows of just-under-inline-limit bodies; then fresh
@@ -784,6 +902,12 @@ const CELLS = {
     largeValueCell("large-values-new-server-old-writer-old-reader", V.new, V.old, V.old),
   "large-values-old-server-old-clients": () =>
     largeValueCell("large-values-old-server-old-clients", V.old, V.old, V.old),
+  "exclusive-new-server-old-client": () =>
+    exclusiveCell("exclusive-new-server-old-client", V.new, V.old),
+  "exclusive-new-server-new-client": () =>
+    exclusiveCell("exclusive-new-server-new-client", V.new, V.new),
+  "exclusive-old-server-new-client": () =>
+    exclusiveCell("exclusive-old-server-new-client", V.old, V.new),
   edge: edgeCells,
   "oversized-first-sync-new-server-old-writer": () =>
     oversizedCell("oversized-first-sync-new-server-old-writer", V.new, V.old, [V.old, V.new]),

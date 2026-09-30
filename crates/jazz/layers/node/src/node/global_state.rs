@@ -50,7 +50,6 @@ where
         Some(TxId::new(tx_time, self.node_for_alias(tx_node_alias)?))
     }
 
-    #[cfg(test)]
     pub(super) async fn global_currency_changed_after(
         &mut self,
         table: &str,
@@ -74,6 +73,56 @@ where
         };
         let record = raw.record();
         Ok(record.get_u64(GlobalChangeRowRecord::FIELD_GLOBAL_TIME_IDX)? > global_base.0)
+    }
+
+    /// Whether any main-branch change to `table` is visible globally now but
+    /// not covered by `snapshot`.
+    pub(super) async fn global_currency_changed_outside_snapshot(
+        &mut self,
+        table: &str,
+        snapshot: &Snapshot,
+    ) -> Result<bool, Error> {
+        if snapshot.dots.is_empty() {
+            return self
+                .global_currency_changed_after(table, snapshot.global_base)
+                .await;
+        }
+        let table_id =
+            self.physical_table_id_for_schema(self.catalogue.local_schema_version_id, table)?;
+        let records = self
+            .database
+            .index_scan_raw(
+                "jazz_global_changes",
+                "by_table_global_time",
+                &[
+                    Value::U64(table_id.0),
+                    Value::Bytes(BranchKey::default().canonical_bytes()),
+                ],
+            )
+            .await?
+            .into_iter()
+            .map(|raw| raw.owned_record())
+            .collect::<Vec<_>>();
+        for record in records {
+            let record = record.borrowed();
+            if record.get_u64(GlobalChangeRowRecord::FIELD_GLOBAL_TIME_IDX)?
+                <= snapshot.global_base.0
+            {
+                continue;
+            }
+            let alias = NodeAlias(record.get_u64(GlobalChangeRowRecord::FIELD_TX_NODE_ID_IDX)?);
+            let node = self.node_for_alias(alias).ok_or(Error::InvalidStoredValue(
+                "global change node alias must exist",
+            ))?;
+            let tx_id = TxId::new(
+                TxTime(record.get_u64(GlobalChangeRowRecord::FIELD_TX_TIME_IDX)?),
+                node,
+            );
+            if !self.snapshot_covers(tx_id, snapshot).await {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Return the transaction whose row state is currently observed by an

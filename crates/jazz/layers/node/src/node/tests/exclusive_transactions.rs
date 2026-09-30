@@ -2789,6 +2789,192 @@ fn exclusive_reads_and_their_validation_share_one_identity() {
 }
 
 
+/// Notes and an audit log, both readable by anyone: a read policy that
+/// depends on nothing but the row.
+fn open_notes_schema() -> JazzSchema {
+    build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("notes")
+                    .column("title", PublicColumnType::Text)
+                    .policies(public_all_policies()),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("audit")
+                    .column("title", PublicColumnType::Text)
+                    .policies(public_all_policies()),
+            ),
+    )
+}
+
+#[derive(Clone, Copy, Debug)]
+enum NotesTx {
+    /// Read note 1 by id, then log to the audit table.
+    ReadByIdThenLog,
+    /// Update note 1 without reading it first.
+    UpdateNote,
+    /// Read every note, then update note 1.
+    ReadAllThenUpdateNote,
+}
+
+/// Which client sent the transaction.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Sender {
+    Current,
+    /// A client before alpha.58: no row proofs for predicate reads, and each
+    /// update's read-policy check of its target recorded as a whole-table
+    /// read of the written table.
+    PreAlpha58,
+}
+
+/// The authority's fate for an exclusive transaction over two notes, after
+/// `change` commits elsewhere between the transaction's open and its commit.
+fn notes_tx_fate(
+    sender: Sender,
+    read: NotesTx,
+    change: impl FnOnce(&mut NodeState, &mut NodeState),
+) -> Fate {
+    let schema = open_notes_schema();
+    let (_client_dir, mut client) = open_node_with_schema(node(1), schema.clone());
+    let (_other_dir, mut other) = open_node_with_schema(node(2), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
+    let reader = user(0x51);
+    for (note, title) in [(row(1), "one"), (row(2), "two")] {
+        commit_mergeable_global(
+            &mut client,
+            &mut core,
+            MergeableCommit::new("notes", note, 10).cells(title_cells(title)),
+        );
+    }
+    let open = OpenTransactionId::new();
+    client.open_exclusive_for_identity(open, reader).unwrap();
+    let query = |query: Query| {
+        let shape = query.validate(&schema).unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        (shape, binding)
+    };
+    let mut updates = 0;
+    match read {
+        NotesTx::ReadByIdThenLog => {
+            let (shape, binding) =
+                query(Query::from("notes").filter(eq(col("id"), lit(Value::Uuid(row(1).0)))));
+            let rows = client
+                .tx_query_for_identity(open, &shape, &binding, reader)
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            client
+                .tx_write(open, "audit", row(0x71), title_cells("read one"), None)
+                .unwrap();
+        }
+        NotesTx::UpdateNote | NotesTx::ReadAllThenUpdateNote => {
+            if matches!(read, NotesTx::ReadAllThenUpdateNote) {
+                let (shape, binding) = query(Query::from("notes"));
+                let rows = client
+                    .tx_query_for_identity(open, &shape, &binding, reader)
+                    .unwrap();
+                assert_eq!(rows.len(), 2);
+            }
+            // An update reads its target first, as every client does.
+            client.tx_read(open, "notes", row(1)).unwrap();
+            client
+                .tx_write(open, "notes", row(1), title_cells("edited"), None)
+                .unwrap();
+            updates += 1;
+        }
+    }
+    change(&mut other, &mut core);
+    let (_tx_id, unit) = client.commit_exclusive_settled(open, reader, 20).unwrap();
+    let SyncMessage::CommitUnit { mut tx, versions } = unit else {
+        panic!("expected commit unit");
+    };
+    if sender == Sender::PreAlpha58 {
+        // Only the update's own target read is a point read.
+        let targets = if updates > 0 { vec![row(1)] } else { vec![] };
+        tx.row_read_set
+            .as_mut()
+            .unwrap()
+            .retain(|read| targets.contains(&read.row_uuid));
+        let (shape, binding) = query(Query::from("notes"));
+        for _ in 0..updates {
+            tx.predicate_read_set.get_or_insert_default().push(PredicateRead {
+                table: "notes".to_owned(),
+                shape_id: shape.shape_id(),
+                shape: shape.query().clone(),
+                binding_id: binding.binding_id(),
+                binding_values: binding.values().clone(),
+            });
+        }
+    }
+    let [fate] = core
+        .ingest_commit_unit_settled(tx, versions, 20)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let SyncMessage::FateUpdate { fate, .. } = fate else {
+        panic!("expected fate update");
+    };
+    fate
+}
+
+fn edit_note(note: RowUuid, title: &str) -> impl FnOnce(&mut NodeState, &mut NodeState) {
+    let title = title.to_owned();
+    move |other, core| {
+        commit_mergeable_global(
+            other,
+            core,
+            MergeableCommit::new("notes", note, 15).cells(title_cells(&title)),
+        );
+    }
+}
+
+/// A read of one row by id is a point read, so a client that proves no
+/// predicate reads commits it while that row is unchanged, and only then.
+#[test]
+fn a_read_by_id_without_a_row_proof_is_validated_as_a_point_read() {
+    for sender in [Sender::Current, Sender::PreAlpha58] {
+        let unchanged = notes_tx_fate(sender, NotesTx::ReadByIdThenLog, |_, _| {});
+        assert_eq!(unchanged, Fate::Accepted, "{sender:?}");
+        let other_row = notes_tx_fate(sender, NotesTx::ReadByIdThenLog, edit_note(row(2), "x"));
+        assert_eq!(other_row, Fate::Accepted, "{sender:?}");
+        let read_row = notes_tx_fate(sender, NotesTx::ReadByIdThenLog, edit_note(row(1), "x"));
+        assert_eq!(
+            read_row,
+            Fate::Rejected(RejectionReason::ExclusiveConflict),
+            "{sender:?}"
+        );
+    }
+}
+
+/// A pre-alpha.58 update records its target's read-policy check as a
+/// whole-table read. The authority validates it as those clients' own
+/// authority did: the update commits while nothing in the table changed.
+#[test]
+fn a_pre_alpha58_update_commits_while_its_table_is_unchanged() {
+    let fate = notes_tx_fate(Sender::PreAlpha58, NotesTx::UpdateNote, |_, _| {});
+    assert_eq!(fate, Fate::Accepted);
+    for change in [edit_note(row(1), "x"), edit_note(row(2), "x"), edit_note(row(3), "x")] {
+        let fate = notes_tx_fate(Sender::PreAlpha58, NotesTx::UpdateNote, change);
+        assert_eq!(fate, Fate::Rejected(RejectionReason::ExclusiveConflict));
+    }
+}
+
+/// The target check accounts for one whole-table read per updated row. A
+/// genuine whole-table read without row proofs still conflicts, and a proved
+/// one still sees a row that appeared since.
+#[test]
+fn a_whole_table_read_beside_an_update_is_still_validated() {
+    let fate = notes_tx_fate(Sender::PreAlpha58, NotesTx::ReadAllThenUpdateNote, |_, _| {});
+    assert_eq!(fate, Fate::Rejected(RejectionReason::ExclusiveConflict));
+    let fate = notes_tx_fate(Sender::Current, NotesTx::ReadAllThenUpdateNote, |_, _| {});
+    assert_eq!(fate, Fate::Accepted);
+    let fate = notes_tx_fate(
+        Sender::Current,
+        NotesTx::ReadAllThenUpdateNote,
+        edit_note(row(3), "new"),
+    );
+    assert_eq!(fate, Fate::Rejected(RejectionReason::ExclusiveConflict));
+}
+
 /// Orgs own projects, projects own todos, todos own comments and comments own
 /// reactions, all readable by anyone.
 fn narrowing_hierarchy_schema() -> JazzSchema {
