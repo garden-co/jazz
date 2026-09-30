@@ -1,16 +1,27 @@
 # CodSpeed native benchmark build handoff
 
 Every CodSpeed walltime workload compiles on Blacksmith ARM64 Ubuntu 22.04,
-then runs on the existing `codspeed-macro` machines. The eighteen workloads are the
-thirteen native examples (todo, permissioned resources, policy-scoped documents,
-BandChat, WorldTour, Chat, auth Chat, PosterShop, RecordPlayer, Wequencer,
-EpicDrop, Jamazon warehouse, MusicAgent), BigLabel (ingest and loads), W1 (memory, RocksDB and
-ahead-current), route subscription, the Groove IVM experiment and maintained
-selective hydration. `workloadSpecs` in `codspeed-artifact.mjs` is the one
+then runs on the existing `codspeed-macro` machines. The thirteen workloads are the
+hero examples (StagePlan, BandChat, BandBook, WorldTour, Wequencer, PosterShop,
+RecordPlayer, EpicDrop, Jamazon warehouse, MusicAgent, and BigLabel with its
+ingest and loads benches), the anonymized permissioned-resources adopter
+workload, and the Groove IVM engine experiment. `workloadSpecs` in `codspeed-artifact.mjs` is the one
 table of each workload's package, benches, build-time features, measurement
-thread stack and timeout. The workflow's plan job reads its `matrix` and
-`measure` output, and the build and measurement jobs read `build-args` and
-`run-args`, rather than repeating them. Build latency, cache behavior and acceptance receipts are tracked in
+thread stack and timeout, and `workloadGroups` groups the workloads into six
+CodSpeed jobs (stage-plan, docs-and-access, live-apps, files-and-ops,
+public-apps, engine) whose packages enable the same `jazz` features, so each
+build job compiles the Jazz stack once. Each workload can also list `nightly`
+extras (other bench targets, or run environment that selects other cases of
+the same targets). The nightly suite (`JAZZ_CODSPEED_SUITE=nightly`: the
+scheduled run, or a manual dispatch) builds and measures only those extras,
+and only the workloads and groups that have them, so no case is measured twice
+at one commit. The
+workflow's plan job reads its `groups` and `group-measure` output; each group's
+build job builds its workloads one after another with their own `build-args`
+in one shared target directory and seals one bundle per workload into one
+artifact, and each group's measurement job verifies those bundles and runs the
+group's `run-command`: the workloads' `cargo codspeed run` commands in
+sequence under a single CodSpeed session. Build latency, cache behavior and acceptance receipts are tracked in
 [#3174](https://github.com/garden-co/jazz/issues/3174).
 
 ## Invariants
@@ -19,8 +30,9 @@ thread stack and timeout. The workflow's plan job reads its `matrix` and
   debug info, per-workload features (the mimalloc allocator for the native
   examples, `testing` for the two `jazz` benches) and benchmark commands remain
   unchanged. The measurement job keeps each workload's former environment:
-  only the native examples set `RUST_MIN_STACK`, and each keeps the timeout its
-  former build-and-run job had.
+  only the native examples' run commands set `RUST_MIN_STACK`, and a group's
+  timeout is the sum of the timeouts its workloads' former build-and-run jobs
+  had.
   `--locked` forbids dependency resolution drift. No `target-cpu=native`,
   optimization downgrade, debug stripping or fixture change. Rust's
   `--remap-path-prefix=$PWD=/actions-runner/_work/jazz/jazz` maps source paths
@@ -32,7 +44,9 @@ thread stack and timeout. The workflow's plan job reads its `matrix` and
   the artifact contract pins it, and installation rejects checkout-path drift.
   This is the one intentional debug-path flag difference; it does not change
   optimization settings. Hosted user-source attribution passed at `9c7995a1d41189ae0719e2cdb442423c9b75f233`: CodSpeed run `6aaf3c6cc8296f49201b8f39` classified all 54,073 cold-sync project frames and 5,539 sequential-update project frames as user code, with zero non-repository paths. Result IDs are `6aaf3ee7ad9a6239bfb27f3b` and `6aaf3ee7ad9a6239bfb27f37`, respectively.
-- Each workload builds separately to avoid feature unification. A 16-vCPU
+- Each workload builds with its own Cargo invocation to avoid feature
+  unification, even when a group's workloads share a target directory:
+  cargo-codspeed replaces only the built package's executables. A 16-vCPU
   build host replaces four compile jobs on a measurement host. This does not
   change benchmark execution parallelism or the measurement machine.
 - `timed-cargo/cargo` forwards every argument and adds only `--timings` to
@@ -44,7 +58,7 @@ thread stack and timeout. The workflow's plan job reads its `matrix` and
   sealing outputs. Rust-cache retains registry, Git and installed-tool caches
   with target caching disabled. Explicit cache restore/save steps retain
   `target/release`, including workspace outputs. Their compatibility prefix
-  pins workload (and so its features), OS/architecture, Ubuntu image, Rust/CodSpeed versions,
+  pins the group (and so its workloads' features), OS/architecture, Ubuntu image, Rust/CodSpeed versions,
   absolute debug-path contract, Cargo lockfile, toolchain file and Cargo config.
   Only the primary save key appends the source SHA; the restore prefix does not,
   so a new revision can restore and then save refreshed outputs. The pinned
@@ -67,11 +81,11 @@ thread stack and timeout. The workflow's plan job reads its `matrix` and
 
 ## Examples and failure behavior
 
-A todo build seals `target/codspeed/walltime/jazz-example-todo-benchmark/walltime`
+A StagePlan build seals `target/codspeed/walltime/jazz-example-stage-plan-benchmark/walltime`
 and the Cargo CodSpeed CLI. The consumer checks out the same workflow SHA,
 downloads only the named artifact from this workflow, verifies it and runs the
 original `cargo codspeed run` command. It never compiles a fallback executable.
-A W1 build seals both `reads_memory_walltime` and `reads_rocksdb_walltime`; a
+A BigLabel build seals both `ingest_walltime` and `loads`; a
 bundle missing either, or sealed for another workload, is rejected.
 
 Rerunning a producer replaces its bundle for the same source/run; a failed

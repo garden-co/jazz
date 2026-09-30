@@ -813,67 +813,26 @@ impl MaintainedSubscriptionView {
                     .into_iter()
                     .map(|operation| rebind_terminal_operation_to_layout(operation, layout))
                     .collect::<Result<Vec<_>, _>>()?;
-                // A root removal can share its batch with descendants which
-                // are being retracted beneath it. Fold every root first, then
-                // skip only those now-unreachable descendants. This mirrors
-                // the facade reducer and keeps malformed descendants for an
-                // otherwise retained root fail-closed.
-                let (root_operations, nested_operations): (Vec<_>, Vec<_>) = operations
-                    .into_iter()
-                    .partition(|operation| operation.path.is_empty());
-                let inserted_roots = root_operations
-                    .iter()
-                    .filter_map(|operation| match operation.edit {
-                        TerminalEdit::Insert { .. } => Some((operation.root_key.clone(), true)),
-                        TerminalEdit::Remove { .. } => Some((operation.root_key.clone(), false)),
-                        _ => None,
-                    })
-                    .collect::<BTreeMap<_, _>>()
-                    .into_iter()
-                    .filter_map(|(key, present)| present.then_some(key))
-                    .collect::<BTreeSet<_>>();
-                let removed_roots = root_operations
-                    .iter()
-                    .filter_map(|operation| {
-                        matches!(operation.edit, TerminalEdit::Remove { .. })
-                            .then_some(operation.root_key.clone())
-                    })
-                    .collect::<BTreeSet<_>>();
-                // A scalar replacement can arrive as -old/+new in one drain.
-                // Its independently maintained descendants were not removed.
-                let mut replaced_records = removed_roots
-                    .intersection(&inserted_roots)
-                    .filter_map(|key| {
-                        self.structured_terminal_records
-                            .remove(key)
-                            .map(|record| (key.clone(), record))
-                    })
-                    .collect::<BTreeMap<_, _>>();
-                for operation in root_operations.into_iter().chain(nested_operations) {
-                    if !operation.path.is_empty()
-                        && removed_roots.contains(operation.root_key.as_slice())
-                        && !inserted_roots.contains(operation.root_key.as_slice())
-                    {
+                // Keep operation order: a later full insertion starts a new
+                // tree and must not inherit descendants from the removed root.
+                let mut removed_roots = BTreeSet::new();
+                for operation in operations {
+                    if !operation.path.is_empty() && removed_roots.contains(&operation.root_key) {
+                        // Retractions emitted beneath an already removed root
+                        // have no remaining target in this tree's lifetime.
                         continue;
                     }
                     self.apply_structured_terminal_operation(&operation)?;
-                    if operation.path.is_empty()
-                        && let TerminalEdit::Insert { value, .. } = &operation.edit
-                        && let Some(mut record) = replaced_records.remove(&operation.root_key)
-                    {
-                        record
-                            .update_record(OwnedRecord::new(
-                                value.clone(),
-                                operation.root_descriptor,
-                            ))
-                            .map_err(|_| {
-                                super::Error::InvalidStoredValue(
-                                    "invalid replacement collector terminal record",
-                                )
-                            })?;
-                        self.structured_app_rows.remove(&operation.root_key);
-                        self.structured_terminal_records
-                            .insert(operation.root_key.clone(), record);
+                    if operation.path.is_empty() {
+                        match &operation.edit {
+                            TerminalEdit::Remove { .. } => {
+                                removed_roots.insert(operation.root_key.clone());
+                            }
+                            TerminalEdit::Insert { .. } => {
+                                removed_roots.remove(&operation.root_key);
+                            }
+                            _ => {}
+                        }
                     }
                     transitions.terminal_operations.push(operation);
                 }
@@ -1498,6 +1457,56 @@ impl MaintainedSubscriptionView {
         }
     }
 
+    /// Initialize from the retained pre-update row, before a scalar payload
+    /// with empty collection placeholders can replace it.
+    fn retained_terminal_record(
+        &mut self,
+        root_key: &[u8],
+    ) -> Result<&mut crate::node::terminal_record::TerminalRecordState, super::Error> {
+        if !self.structured_terminal_records.contains_key(root_key) {
+            let descriptor =
+                self.structured_app_row_descriptor
+                    .ok_or(super::Error::InvalidStoredValue(
+                        "terminal update arrived before its root collector record",
+                    ))?;
+            let records = self.structured_app_rows.get_mut(root_key).ok_or(
+                super::Error::InvalidStoredValue(
+                    "terminal descendant operation addressed an absent retained root",
+                ),
+            )?;
+            let mut candidates = records
+                .iter()
+                .filter(|(_, weight)| **weight > 0)
+                .map(|(raw, weight)| (raw.clone(), *weight));
+            let (raw, weight) = candidates.next().ok_or(super::Error::InvalidStoredValue(
+                "terminal descendant operation addressed a non-positive retained root",
+            ))?;
+            if candidates.next().is_some() {
+                return Err(super::Error::InvalidStoredValue(
+                    "terminal descendant operation addressed an ambiguous retained root",
+                ));
+            }
+            if weight != 1 {
+                return Err(super::Error::InvalidStoredValue(
+                    "collector terminal root has non-unit multiplicity",
+                ));
+            }
+            let state = crate::node::terminal_record::TerminalRecordState::new(OwnedRecord::new(
+                raw, descriptor,
+            ))
+            .map_err(|_| {
+                super::Error::InvalidStoredValue("invalid retained collector terminal record")
+            })?;
+            self.structured_app_rows.remove(root_key);
+            self.structured_terminal_records
+                .insert(root_key.to_vec(), state);
+        }
+        Ok(self
+            .structured_terminal_records
+            .get_mut(root_key)
+            .expect("initialized above"))
+    }
+
     /// Fold root terminal edits into the same retained collector tree used by
     /// an initial/reset snapshot. This is deliberately receiver-local: it
     /// never re-runs the query or reads authority output.
@@ -1528,46 +1537,7 @@ impl MaintainedSubscriptionView {
                     "terminal descendant descriptor disagrees with retained collector layout",
                 ));
             }
-            if !self
-                .structured_terminal_records
-                .contains_key(&operation.root_key)
-            {
-                let records = self
-                    .structured_app_rows
-                    .get_mut(&operation.root_key)
-                    .ok_or(super::Error::InvalidStoredValue(
-                        "terminal descendant operation addressed an absent retained root",
-                    ))?;
-                let mut candidates = records
-                    .iter()
-                    .filter(|(_, weight)| **weight > 0)
-                    .map(|(raw, weight)| (raw.clone(), *weight));
-                let (raw, weight) = candidates.next().ok_or(super::Error::InvalidStoredValue(
-                    "terminal descendant operation addressed a non-positive retained root",
-                ))?;
-                if candidates.next().is_some() {
-                    return Err(super::Error::InvalidStoredValue(
-                        "terminal descendant operation addressed an ambiguous retained root",
-                    ));
-                }
-                if weight != 1 {
-                    return Err(super::Error::InvalidStoredValue(
-                        "collector terminal root has non-unit multiplicity",
-                    ));
-                }
-                let state = crate::node::terminal_record::TerminalRecordState::new(
-                    OwnedRecord::new(raw, descriptor),
-                )
-                .map_err(|_| {
-                    super::Error::InvalidStoredValue("invalid retained collector terminal record")
-                })?;
-                self.structured_app_rows.remove(&operation.root_key);
-                self.structured_terminal_records
-                    .insert(operation.root_key.clone(), state);
-            }
-            self.structured_terminal_records
-                .get_mut(&operation.root_key)
-                .expect("initialized above")
+            self.retained_terminal_record(&operation.root_key)?
                 .apply(operation)
                 .map_err(|_| {
                     super::Error::InvalidStoredValue(
@@ -1624,17 +1594,11 @@ impl MaintainedSubscriptionView {
             }
             TerminalEdit::Update { value, .. } => {
                 let record = OwnedRecord::new(value.clone(), operation.root_descriptor);
-                if let Some(state) = self
-                    .structured_terminal_records
-                    .get_mut(&operation.root_key)
-                {
-                    state.update_record(record).map_err(|_| {
+                self.retained_terminal_record(&operation.root_key)?
+                    .update_record(record)
+                    .map_err(|_| {
                         super::Error::InvalidStoredValue("invalid collector terminal scalar update")
                     })?;
-                    return Ok(());
-                }
-                self.structured_app_rows.remove(&operation.root_key);
-                self.apply_structured_app_row_delta(operation.root_key.clone(), record, 1);
             }
             TerminalEdit::Remove { .. } => {
                 self.structured_terminal_records.remove(&operation.root_key);
@@ -3360,6 +3324,8 @@ fn decode_typed_version_witness(
         record: OwnedRecord::new(raw, plan.descriptor),
     };
     version.validate_canonical()?;
+    #[cfg(feature = "cold-settle-attribution")]
+    version.record_conversion("witness_to_version_row", version.record.raw().len());
     Ok(version)
 }
 
