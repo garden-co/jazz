@@ -352,16 +352,12 @@ recorded reads against current global state:
   the reader's policies, so a change there conflicts exactly when it changes
   what the reader sees.
   A client that records no proofs for its predicate
-  reads conflicts whenever such a read returned rows, with two exceptions.
-  A predicate read whose only condition is `id = <uuid>` on a table whose
-  read policy depends only on the row and the session is a point read: it
-  holds while that row's visible state at the base snapshot is still
-  current. And clients before alpha.58 recorded each exclusive update's
-  read-policy check of its target as a whole-table read of the written
-  table; one such read per content write to a point-read row, under a
-  row-local read policy and a non-system subject, holds while nothing in
-  that table changed outside the base snapshot. For a client that proves
-  its reads neither exception accepts anything the proof check rejects.
+  reads conflicts whenever such a read returned rows, with one exception.
+  Clients before alpha.58 recorded each exclusive update's read-policy check
+  of its target as a whole-table read of the written table; one such read
+  per content write to a point-read row, under a row-local read policy and a
+  non-system subject, holds while nothing in that table changed outside the
+  base snapshot.
 - each **write** is first-committer-wins in its **written history layer**: a
   content version compares its parent to the row's current global content
   `TxId`, while a deletion or restore version compares its parent to the

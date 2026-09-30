@@ -3471,14 +3471,10 @@ fn exclusive_reads_reject_a_union_of_relations() {
     );
 }
 
-/// garden-co/jazz#3694 stays closed for clients before alpha.58: a row they
-/// read by id that was revoked since conflicts, and so does a row that
-/// appeared in one of their queries, even beside an update whose target
-/// check the authority accounts for.
+/// A row that appeared in a query of a client before alpha.58 conflicts, even
+/// beside an update whose target check the authority accounts for.
 #[test]
-fn pre_alpha58_reads_still_conflict_on_revocations_and_phantoms() {
-    let revoked = notes_tx_fate(Sender::PreAlpha58, NotesTx::ReadByIdThenLog, delete_note(row(1)));
-    assert_eq!(revoked, Fate::Rejected(RejectionReason::ExclusiveConflict));
+fn pre_alpha58_reads_still_conflict_on_phantoms() {
     let unchanged = notes_tx_fate(Sender::PreAlpha58, NotesTx::ReadTitledThenUpdateNote, |_, _| {});
     assert_eq!(unchanged, Fate::Accepted);
     let phantom = notes_tx_fate(
