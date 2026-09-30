@@ -758,16 +758,15 @@ impl Database {
         let table_schema = self.table(table)?;
         let storage_descriptor = self.table_storage_descriptor(table)?;
         let store = RecordStore::new(storage, table, &storage_descriptor);
-        let index_descriptor = index_record_descriptor();
+        let index = self.index(table, index_name)?;
         let mut records = Vec::new();
-        for (storage_key, persisted_record) in raw_entries {
-            let index_record = index_descriptor.bind(&persisted_record);
+        for (storage_key, stored_value) in raw_entries {
             let primary_key = persisted_index_primary_key(
                 table_schema,
                 index_name,
-                self.index(table, index_name)?,
+                index,
                 &storage_key,
-                &index_record.get("value")?,
+                &stored_value,
             )?;
             if let Some(record) = store.get_raw(&primary_key).await? {
                 records.push(self.decode_stored_key_value(table_schema, primary_key, record)?);
@@ -823,20 +822,11 @@ impl Database {
                 })?;
             encode_index_prefix_part(&mut logical_key, value, &column.column_type)?;
         }
-        let mut storage_prefix = durable_index_key_prefix(table, index_name);
-        if !logical_key.is_empty() {
-            // Persist stores IndexBy's logical bytes as a Value::Bytes key field.
-            // For prefix scans we emit the Bytes tag and escaped payload bytes
-            // without the terminal 00 00, so longer non-unique keys remain in range.
-            storage_prefix.push(7);
-            for byte in logical_key {
-                if byte == 0 {
-                    storage_prefix.extend([0, 0xff]);
-                } else {
-                    storage_prefix.push(byte);
-                }
-            }
-        }
+        // Durable entries are the index id followed directly by the ordered,
+        // prefix-free part encodings, so a logical prefix stays a byte prefix.
+        let mut storage_prefix =
+            durable_index_key_prefix(self.ivm_runtime.index_storage_id(table, index));
+        storage_prefix.extend(logical_key);
         Ok(storage_prefix)
     }
 }

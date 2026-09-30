@@ -143,14 +143,41 @@ fn split_logical(cf: &str, key: &[u8]) -> (String, Vec<u8>) {
     (cf.to_owned(), key.to_vec())
 }
 
-fn index_name(key: &[u8]) -> Option<String> {
-    let first = key.iter().position(|byte| *byte == 0)?;
-    let second = first + 1 + key[first + 1..].iter().position(|byte| *byte == 0)?;
-    Some(format!(
-        "index {}.{}",
-        String::from_utf8_lossy(&key[..first]),
-        String::from_utf8_lossy(&key[first + 1..second])
-    ))
+/// Groove's durable index registry: `\0groove-index-id\0` | u16be table
+/// length | table | index -> u32be id | definition.
+const INDEX_REGISTRY: &[u8] = b"\0groove-index-id\0";
+
+fn index_registry_entry(key: &[u8], value: &[u8]) -> Option<(u32, String)> {
+    let rest = key.strip_prefix(INDEX_REGISTRY)?;
+    let table_len = usize::from(u16::from_be_bytes([rest[0], rest[1]]));
+    let table = String::from_utf8_lossy(&rest[2..2 + table_len]);
+    let index = String::from_utf8_lossy(&rest[2 + table_len..]);
+    let id = u32::from_be_bytes(value[..4].try_into().ok()?);
+    Some((id, format!("index {table}.{index}")))
+}
+
+/// Group an `indices` entry by its LEB128 index id (metadata keys start 00).
+fn index_name(key: &[u8], names: &BTreeMap<u32, String>) -> Option<String> {
+    if key.first() == Some(&0) {
+        return Some("indices metadata".to_owned());
+    }
+    let (mut id, mut shift) = (0_u32, 0);
+    for byte in key {
+        id |= u32::from(byte & 0x7f) << shift;
+        shift += 7;
+        if byte & 0x80 == 0 {
+            break;
+        }
+    }
+    names.get(&id).cloned()
+}
+
+fn logical_entry(family: &str, key: &[u8]) -> (String, Vec<u8>) {
+    // The class layout stores the `indices` class without a logical frame.
+    if family == "__groove_class_indices" {
+        return ("indices".to_owned(), key.to_vec());
+    }
+    split_logical(family, key)
 }
 
 fn measure(path: &std::path::Path) -> BTreeMap<String, Group> {
@@ -158,14 +185,27 @@ fn measure(path: &std::path::Path) -> BTreeMap<String, Group> {
     let families = rocksdb::DB::list_cf(&options, path).expect("list column families");
     let db = rocksdb::DB::open_cf_for_read_only(&options, path, &families, false)
         .expect("open RocksDB read-only");
+    let mut names = BTreeMap::new();
+    for family in &families {
+        let handle = db.cf_handle(family).expect("column family handle");
+        for entry in db.iterator_cf(&handle, rocksdb::IteratorMode::Start) {
+            let (key, value) = entry.expect("raw entry");
+            let (logical, rest) = logical_entry(family, &key);
+            if logical == "indices"
+                && let Some((id, name)) = index_registry_entry(&rest, &value)
+            {
+                names.insert(id, name);
+            }
+        }
+    }
     let mut groups = BTreeMap::<String, Group>::new();
     for family in &families {
         let handle = db.cf_handle(family).expect("column family handle");
         for entry in db.iterator_cf(&handle, rocksdb::IteratorMode::Start) {
             let (key, value) = entry.expect("raw entry");
-            let (logical, rest) = split_logical(family, &key);
+            let (logical, rest) = logical_entry(family, &key);
             let group = if logical == "indices" {
-                index_name(&rest).unwrap_or(logical)
+                index_name(&rest, &names).unwrap_or(logical)
             } else {
                 logical
             };

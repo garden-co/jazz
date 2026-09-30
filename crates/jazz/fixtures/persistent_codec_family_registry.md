@@ -42,3 +42,11 @@ records list the rows each transaction touched. Implicit history
 when it differs from its transaction's `made_by`, and a transaction's
 `touched_rows` list longer than 32 rows moves to `jazz_tx_touched_rows` so
 transaction records stay small.
+
+The compact durable-index layout (alpha.60) added `groove.durable-index.v2`
+to the `jazz-node-root` profile: numeric index ids, single-escaped keys and
+empty index values. Node roots written before it lack it and are
+refused at manifest admission. The same change moved the non-profile Jazz
+physical class layout to `groove.jazz-physical-class.v2` (marker
+`class-cf-v2`, the `indices` class stored without the logical-name frame);
+a `class-cf-v1` marker is refused as an older layout.

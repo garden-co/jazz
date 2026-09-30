@@ -182,14 +182,26 @@ fn identity_only_codec_change_changes_aggregate_identity_and_flat_join_preimage(
 
 #[test]
 fn physical_index_spelling_changes_the_durable_key_namespace() {
-    use crate::ivm::runtime::durable_index_key_prefix;
-    // Exact formats from both revisions of Jazz physical/catalogue.rs.
+    use crate::ivm::runtime::{IndexIdRegistry, durable_index_key_prefix};
+    use crate::schema::IndexSchema;
+    // Exact index names from both revisions of Jazz physical/catalogue.rs.
+    // Durable entries are keyed by a numeric id registered per
+    // (table, index name, definition), so a respelled index never shares the
+    // old spelling's key namespace.
     let table = "jazz_1_global_current";
-    let contained = durable_index_key_prefix(table, "by_physical_app_v1_7");
-    let typed = durable_index_key_prefix(table, "by_physical_user_v1_7");
+    let mut registry = IndexIdRegistry::default();
+    let contained = registry.resolve(
+        table,
+        &IndexSchema::new("by_physical_app_v1_7", ["_app_owner"]),
+    );
+    let typed = registry.resolve(
+        table,
+        &IndexSchema::new("by_physical_user_v1_7", ["_app_owner"]),
+    );
     assert_ne!(contained, typed);
-    assert_eq!(contained, b"jazz_1_global_current\0by_physical_app_v1_7\0");
-    assert_eq!(typed, b"jazz_1_global_current\0by_physical_user_v1_7\0");
+    let contained = durable_index_key_prefix(contained);
+    let typed = durable_index_key_prefix(typed);
+    assert!(!contained.starts_with(&typed) && !typed.starts_with(&contained));
 }
 
 #[test]

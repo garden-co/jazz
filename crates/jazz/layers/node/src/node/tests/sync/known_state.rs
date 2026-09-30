@@ -526,7 +526,8 @@ fn physical_manifest_cache_never_outlives_its_facts_across_cancelled_receive_wri
         }
         drop(reader);
         control.resume();
-        let storage = crate::local_executor::block_on(reopen_handle.reopen(families.clone())).unwrap();
+        let storage =
+            crate::local_executor::block_on(reopen_handle.reopen(families.clone())).unwrap();
         let reopened =
             NodeState::new_with_shared_test_catalogue(node(0xe7), schema.clone(), storage).unwrap();
         assert!(
@@ -1370,9 +1371,7 @@ fn two_table_client_cache_budget_counts_shared_physical_history_once_without_evi
         .expect("memory storage meters its physical history class");
     assert!(physical_history_bytes > 0);
     let report = reader
-        .enforce_client_cache_budget(
-            ClientCacheBudget::new(physical_history_bytes),
-        )
+        .enforce_client_cache_budget(ClientCacheBudget::new(physical_history_bytes))
         .resolve()
         .unwrap();
 
@@ -1449,7 +1448,7 @@ fn assert_eviction_failure_contract(
         .to_string();
     let logical_history_key = history_primary_key(persisted_version).into_bytes();
     let (history_table, history_key) =
-        jazz_class_v1_history_physical_target(&logical_history_table, &logical_history_key);
+        jazz_class_v2_history_physical_target(&logical_history_table, &logical_history_key);
     reader.cache_tx_versions(tx_id, persisted_versions.clone());
     assert!(reader.cached_tx_versions(tx_id).is_some());
     // Internal durable-boundary receipt: a reopened node intentionally lacks
@@ -1651,7 +1650,10 @@ fn failed_body_eviction_still_invalidates_volatile_scope_and_cursors() {
         .resolve()
         .expect_err("body deletion failure must preserve native history");
 
-    assert!(!reader.query.authority_results.is_empty(), "live receipt sequencing survives eviction");
+    assert!(
+        !reader.query.authority_results.is_empty(),
+        "live receipt sequencing survives eviction"
+    );
     for state in reader.query.authority_results.values() {
         assert_authority_proof_cleared(state);
         assert!(state.applied_view_update_generation > 0);
@@ -2036,7 +2038,8 @@ fn known_state_declaration_never_skips_pending_local_members() {
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         panic!("expected commit unit");
     };
-    relay.ingest_known_transaction(tx, versions, Fate::Pending, None, DurabilityTier::Local)
+    relay
+        .ingest_known_transaction(tx, versions, Fate::Pending, None, DurabilityTier::Local)
         .unwrap();
     let mut peer = relay_with_system_binding(subscription);
     peer.declare_known_state(
@@ -2048,7 +2051,13 @@ fn known_state_declaration_never_skips_pending_local_members() {
     );
 
     let update = peer
-        .rehydrate_query_for_subscription_with_opts(&mut relay, subscription, &shape, &binding, opts)
+        .rehydrate_query_for_subscription_with_opts(
+            &mut relay,
+            subscription,
+            &shape,
+            &binding,
+            opts,
+        )
         .unwrap()
         .expect("expected view update");
     let version_bundles = version_bundles_for_update(&update);
@@ -2127,10 +2136,7 @@ fn fresh_delivery_generation_advances_after_live_body_eviction() {
                 .resolve()
                 .unwrap();
         } else {
-            reader
-                .evict_cold()
-                .resolve()
-                .unwrap();
+            reader.evict_cold().resolve().unwrap();
         }
         assert!(
             reader.row_history("todos", row_uuid).unwrap().is_empty(),

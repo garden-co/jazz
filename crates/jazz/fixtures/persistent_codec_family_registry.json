@@ -116,7 +116,7 @@
       ]
     },
     {
-      "id": "groove.jazz-physical-class.v1",
+      "id": "groove.jazz-physical-class.v2",
       "boundary": "durable-storage",
       "spec": {
         "path": "crates/groove/SPEC/2_storage_model.md",
@@ -128,12 +128,16 @@
       },
       "rejection_receipt": {
         "path": "crates/groove/src/storage/mod.rs",
-        "anchor": "class_layout_rejects_missing_marker_with_legacy_mapped_families"
+        "anchor": "class_layout_rejects_unknown_old_future_and_malformed_markers_before_logical_access"
       },
       "evidence": [
         {
           "path": "crates/groove/src/storage/mod.rs",
-          "anchor": "class_layout_isolates_every_jazz_physical_class"
+          "anchor": "class_layout_marker_and_mapped_key_receipt_is_exact"
+        },
+        {
+          "path": "crates/groove/src/storage/mod.rs",
+          "anchor": "class_layout_rejects_missing_marker_with_legacy_mapped_families"
         }
       ]
     },
@@ -415,6 +419,41 @@
         {
           "path": "crates/jazz/layers/node/src/node/tests/recovery.rs",
           "anchor": "row_history_reports_versions_flags_and_audit_records_across_restart"
+        }
+      ]
+    },
+    {
+      "id": "groove.durable-index.v2",
+      "boundary": "durable-storage",
+      "profile": "jazz-node-root",
+      "spec": {
+        "path": "crates/groove/SPEC/2_storage_model.md",
+        "anchor": "### Durable index layout"
+      },
+      "semantic_fixture": {
+        "path": "crates/groove/src/db/tests/indices.rs",
+        "anchor": "fn composite_primary_key_dedup_and_unique_entries_have_exact_compact_bytes"
+      },
+      "rejection_receipt": {
+        "path": "crates/jazz/tests/storage_format_refusal.rs",
+        "anchor": "fn linear_history_root_without_the_durable_index_family_is_refused"
+      },
+      "evidence": [
+        {
+          "path": "crates/groove/src/db/tests/indices.rs",
+          "anchor": "fn first_index_entries_carry_the_exact_id_registration_and_layout_marker"
+        },
+        {
+          "path": "crates/groove/src/db/tests/indices.rs",
+          "anchor": "fn durable_index_ids_survive_reopen_added_indices_and_reordering"
+        },
+        {
+          "path": "crates/groove/src/db/tests/indices.rs",
+          "anchor": "fn durable_index_layout_refuses_earlier_or_unknown_index_layouts"
+        },
+        {
+          "path": "crates/groove/src/db/tests/indices.rs",
+          "anchor": "fn mixed_type_index_keys_are_prefix_free_order_preserving_and_decodable"
         }
       ]
     },

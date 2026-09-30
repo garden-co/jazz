@@ -1148,7 +1148,7 @@ mod tests {
             let mut database = groove::db::Database::new_with_storage_layout(
                 target_runtime.lower_catalogue_meta_to_groove(),
                 storage,
-                groove::storage::StorageLayout::jazz_class_v1(),
+                groove::storage::StorageLayout::jazz_class_v2(),
             )
             .await
             .unwrap();

@@ -63,12 +63,16 @@ impl NodeState {
                     return Err(IvmRuntimeError::UnsupportedIndexCandidateFilter);
                 }
                 let StaticScanBounds::Prefix(prefix) =
-                    persisted_index_scan_bounds(&input.table, &input.index, input.scan.as_ref())?
+                    persisted_index_scan_bounds(input.durable_ids.index, input.scan.as_ref())?
                 else {
                     return Err(IvmRuntimeError::UnsupportedIndexCandidateFilter);
                 };
+                let candidate_index_id = input
+                    .durable_ids
+                    .candidate
+                    .ok_or(IvmRuntimeError::UnsupportedIndexCandidateFilter)?;
                 let StaticScanBounds::Prefix(candidate_prefix) =
-                    persisted_index_scan_bounds(&filter.table, &filter.index, Some(&filter.scan))?
+                    persisted_index_scan_bounds(candidate_index_id, Some(&filter.scan))?
                 else {
                     return Err(IvmRuntimeError::UnsupportedIndexCandidateFilter);
                 };
@@ -87,16 +91,17 @@ impl NodeState {
             }
             if !input.intersections.is_empty() {
                 let StaticScanBounds::Prefix(prefix) =
-                    persisted_index_scan_bounds(&input.table, &input.index, input.scan.as_ref())?
+                    persisted_index_scan_bounds(input.durable_ids.index, input.scan.as_ref())?
                 else {
                     return Err(IvmRuntimeError::UnsupportedIndexIntersectionScan);
                 };
                 let intersections = input
                     .intersections
                     .iter()
-                    .map(|(index, scan)| {
+                    .zip(&input.durable_ids.intersections)
+                    .map(|((index, scan), index_id)| {
                         let StaticScanBounds::Prefix(prefix) =
-                            persisted_index_scan_bounds(&input.table, index, Some(scan))?
+                            persisted_index_scan_bounds(*index_id, Some(scan))?
                         else {
                             return Err(IvmRuntimeError::UnsupportedIndexIntersectionScan);
                         };
@@ -114,8 +119,7 @@ impl NodeState {
             }
             let max_items = scan_max_items(input.scan.as_ref());
             return Ok(Some(
-                match persisted_index_scan_bounds(&input.table, &input.index, input.scan.as_ref())?
-                {
+                match persisted_index_scan_bounds(input.durable_ids.index, input.scan.as_ref())? {
                     StaticScanBounds::Prefix(prefix) => {
                         if let Some(max_items) = max_items {
                             super::evaluation_session::StorageRequestKey::IndexedRowsPrefixLimit {
@@ -145,7 +149,7 @@ impl NodeState {
             ));
         }
         Ok(
-            match persisted_index_scan_bounds(&input.table, &input.index, input.scan.as_ref())? {
+            match persisted_index_scan_bounds(input.durable_ids.index, input.scan.as_ref())? {
                 StaticScanBounds::Prefix(prefix) => {
                     let max_items = scan_max_items(input.scan.as_ref());
                     Some(match max_items {
@@ -270,13 +274,16 @@ impl NodeState {
                 &table_deltas,
             );
         }
+        let prefix_len = durable_index_key_prefix(input.durable_ids.index).len();
         let deltas = rows
             .iter()
-            .map(|(_, record)| RecordDelta {
-                record: Bytes::copy_from_slice(record),
-                weight: 1,
+            .map(|(key, value)| {
+                Ok(RecordDelta {
+                    record: index_record_from_storage(prefix_len, key, value.to_vec())?,
+                    weight: 1,
+                })
             })
-            .collect();
+            .collect::<Result<_, IvmRuntimeError>>()?;
         Ok(RecordDeltas {
             descriptor: *output_desc,
             deltas,
@@ -433,8 +440,7 @@ impl NodeState {
                 ScanDirection::Forward
             };
             let scan =
-                match persisted_index_scan_bounds(&input.table, &input.index, input.scan.as_ref())?
-                {
+                match persisted_index_scan_bounds(input.durable_ids.index, input.scan.as_ref())? {
                     StaticScanBounds::Prefix(prefix) => {
                         storage
                             .scan(ScanRequest {
@@ -461,11 +467,14 @@ impl NodeState {
                 };
             let mut scan = scan;
             let mut deltas = Vec::new();
+            let prefix_len = durable_index_key_prefix(input.durable_ids.index).len();
             while let Some(batch) = scan.next_batch().await? {
-                deltas.extend(batch.into_iter().map(|(_, record)| RecordDelta {
-                    record: Bytes::from(record),
-                    weight: 1,
-                }));
+                for (key, value) in batch {
+                    deltas.push(RecordDelta {
+                        record: index_record_from_storage(prefix_len, &key, value)?,
+                        weight: 1,
+                    });
+                }
             }
             return Ok(RecordDeltas {
                 descriptor: *output_desc,

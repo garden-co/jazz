@@ -33,7 +33,7 @@ async fn reserved_application_storage_names_fail_before_durable_open() {
         let error = match Database::new_with_storage_layout(
             schema,
             storage,
-            StorageLayout::jazz_class_v1(),
+            StorageLayout::jazz_class_v2(),
         )
         .await
         {
@@ -55,7 +55,7 @@ async fn reserved_application_storage_names_fail_before_durable_open() {
         .with_direct_record_store(storage_name_direct_store("__groove_large_values"));
     let (storage, control) = TestStorage::controlled(&["__groove_class_meta"]);
     let error =
-        match Database::new_with_storage_layout(schema, storage, StorageLayout::jazz_class_v1())
+        match Database::new_with_storage_layout(schema, storage, StorageLayout::jazz_class_v2())
             .await
         {
             Ok(_) => panic!("reserved direct-record-store name must fail"),
@@ -103,7 +103,7 @@ async fn application_storage_name_length_is_portable_before_open() {
     let schema = DatabaseSchema::new([storage_name_table(too_long.clone())]);
     let (storage, control) = TestStorage::controlled(&["__groove_class_meta"]);
     let error =
-        match Database::new_with_storage_layout(schema, storage, StorageLayout::jazz_class_v1())
+        match Database::new_with_storage_layout(schema, storage, StorageLayout::jazz_class_v2())
             .await
         {
             Ok(_) => panic!("oversized name must be rejected before storage access"),

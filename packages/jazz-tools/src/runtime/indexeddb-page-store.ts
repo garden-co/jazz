@@ -61,6 +61,10 @@ export const INDEXEDDB_PAGE_FORMAT_MAGIC = "IDBTREE\0";
  * opened with the exact epoch-one inventory.
  */
 export const JAZZ_EPOCH_1_STORAGE_CODEC_IDS = [
+  // Compact durable-index layout (numeric index ids, empty values). A browser
+  // root written by alpha.59 or earlier lacks this family and fails manifest
+  // admission.
+  "groove.durable-index.v2",
   "groove.large-value.v1",
   "groove.ordered-chunk-storage.v1",
   "groove.ordered-kv.v1",

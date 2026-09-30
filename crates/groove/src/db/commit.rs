@@ -258,6 +258,11 @@ impl Database {
             .chain(accepted_roots.keys())
             .cloned()
             .collect::<BTreeSet<_>>();
+        // Index ids allocated since the last durable write (a newly
+        // registered table or index) become durable atomically with this
+        // publication, before or with the first entry that uses them.
+        let index_id_registrations = self.ivm_runtime.index_ids().borrow().pending();
+        staged_operations.extend(index_id_registrations.operations().iter().cloned());
         let resident_overlay = Rc::new(StagedWriteOverlay::new_owned(
             Rc::clone(&self.storage),
             Rc::clone(&self.resident_writes),
@@ -402,6 +407,12 @@ impl Database {
             .extend_shared(staged_state.borrow().snapshot());
         self.resident_publications
             .insert(publication, Rc::clone(&staged_state));
+        // A failed persistence of this publication poisons the database, so
+        // the registrations it carries count as written from here on.
+        self.ivm_runtime
+            .index_ids()
+            .borrow_mut()
+            .mark_persisted(&index_id_registrations);
         if !roots.is_empty() {
             if let Some(guard) = lifecycle_guard {
                 self.large_value_publication_lifecycle_guard = Some(guard);
@@ -421,6 +432,7 @@ impl Database {
             notifications_deferred: defer_notifications_until_durable,
             lifecycle: Rc::new(Cell::new(AppliedBatchLifecycle::Applied)),
             abandoned_application: Rc::clone(&self.abandoned_application),
+            index_ids: Rc::clone(self.ivm_runtime.index_ids()),
         })
     }
 

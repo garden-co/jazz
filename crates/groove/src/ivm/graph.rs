@@ -2753,6 +2753,9 @@ pub enum NodeDurability {
 pub struct DurableStorage {
     pub column_family: String,
     pub key_prefix: Vec<u8>,
+    /// Human-readable name of the durable object, used in errors
+    /// (`table.index` for a schema index, whose key prefix is a numeric id).
+    pub name: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -2950,6 +2953,7 @@ mod tests {
                 storage: DurableStorage {
                     column_family: "albums".to_owned(),
                     key_prefix: Vec::new(),
+                    name: "albums".to_owned(),
                 },
             },
         );
@@ -3127,6 +3131,7 @@ mod tests {
                 storage: DurableStorage {
                     column_family: "indices".to_owned(),
                     key_prefix: Vec::new(),
+                    name: "albums.albums_by_title".to_owned(),
                 },
                 key_fields: vec![1],
                 unique: false,
