@@ -117,6 +117,23 @@ impl WireTransport for ByteDuplexTransport {
     }
 }
 
+/// Restores the protocol routed-payload limit when a test that lowered it ends,
+/// including by panic, so later tests on a reused thread see the real limit.
+pub(super) struct RoutedPayloadLimitGuard;
+
+impl RoutedPayloadLimitGuard {
+    pub(super) fn lower_to(limit: usize) -> Self {
+        crate::db::routed_messages::set_routed_payload_limit_for_test(Some(limit));
+        Self
+    }
+}
+
+impl Drop for RoutedPayloadLimitGuard {
+    fn drop(&mut self) {
+        crate::db::routed_messages::set_routed_payload_limit_for_test(None);
+    }
+}
+
 pub(super) fn byte_duplex_raw() -> (ByteDuplexTransport, ByteDuplexTransport) {
     use std::collections::VecDeque;
     let left = Rc::new(RefCell::new(VecDeque::new()));

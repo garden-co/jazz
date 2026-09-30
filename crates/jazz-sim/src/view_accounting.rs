@@ -14,6 +14,11 @@ pub fn view_update_bytes(update: &SyncMessage) -> u64 {
             version_carriers,
             peer_payload_inventory,
             ..
+        })
+        | SyncMessage::ViewUpdatePart(ViewUpdatePayload {
+            version_carriers,
+            peer_payload_inventory,
+            ..
         }) => {
             version_carriers_bytes(version_carriers)
                 + (peer_payload_inventory.complete_tx_payloads.len() as u64 * tx_id_wire_bytes())

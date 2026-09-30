@@ -1986,6 +1986,7 @@ fn sync_message_name(message: &SyncMessage) -> &'static str {
         SyncMessage::PublishLens { .. } => "PublishLens",
         SyncMessage::CatalogueAck(_) => "CatalogueAck",
         SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. }) => "ViewUpdate",
+        SyncMessage::ViewUpdatePart(_) => "ViewUpdatePart",
         SyncMessage::Reserved15(retired) | SyncMessage::Reserved16(retired) => match *retired {},
         SyncMessage::CatalogueSnapshot(_) => "CatalogueSnapshot",
         SyncMessage::CurrentRowsRequest(_) => "CurrentRowsRequest",

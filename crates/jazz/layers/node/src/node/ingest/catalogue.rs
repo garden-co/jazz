@@ -358,6 +358,11 @@ where
                 SyncMessage::ChunkRequestBatch(_) | SyncMessage::ChunkResponseBatch(_) => Err(
                     Error::UnsupportedSyncMessage("chunk traffic requires peer link context"),
                 ),
+                // The wire transport reassembles parts into one `ViewUpdate`;
+                // a bare part never reaches node ingest.
+                SyncMessage::ViewUpdatePart(_) => Err(Error::UnsupportedSyncMessage(
+                    "view-update parts are reassembled by the wire transport",
+                )),
                 SyncMessage::CurrentRowsRequest(_)
                 | SyncMessage::CurrentRowsReceipt(_)
                 | SyncMessage::CurrentRowsCancel { .. }
