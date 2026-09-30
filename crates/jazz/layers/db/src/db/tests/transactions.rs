@@ -523,6 +523,409 @@ fn exclusive_transactions_lower_oversized_scalars_before_publication() {
     assert!(error.message.contains("unverified large-value descriptor"));
 }
 
+fn append_text(column: &str, at_utf8: u64, text: &str) -> Vec<LargeValueUpdate> {
+    vec![LargeValueUpdate::Splice {
+        column: column.to_owned(),
+        within: LargeValueUpdatePage::TextUtf8 {
+            from: at_utf8,
+            to: at_utf8,
+        },
+        splices: vec![LargeValueUpdateSplice {
+            at: 0,
+            delete: 0,
+            insert: text.as_bytes().to_vec(),
+        }],
+    }]
+}
+
+fn physical_title(db: &Db, row: RowUuid) -> Value {
+    block_on(async {
+        db.node
+            .node
+            .lock()
+            .await
+            .current_physical_cell_in_schema(db.schema_version_id, "todos", row, "title")
+            .await
+            .unwrap()
+            .unwrap()
+    })
+}
+
+fn staged_large_value_count(db: &Db) -> usize {
+    block_on(async {
+        db.node
+            .node
+            .lock()
+            .await
+            .staged_large_value_ids()
+            .await
+            .unwrap()
+            .len()
+    })
+}
+
+fn committed_title(db: &Db) -> Option<Value> {
+    db.read(&db.prepare_query(&db.table("todos")).unwrap())
+        .unwrap()[0]
+        .cell(&doctest_support::schema().tables[0], "title")
+}
+
+/// #2087: diffs inside a transaction address the transaction's own view, so
+/// consecutive appends compose; nothing is visible outside until commit, and
+/// the commit publishes the spliced value without leaking any staged root.
+#[test]
+fn transaction_splices_compose_against_the_transaction_view() {
+    for exclusive in [false, true] {
+        let db = block_on(doctest_support::open_todos_db()).unwrap();
+        let base = "a".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 32);
+        let row = db
+            .insert(
+                "todos",
+                doctest_support::todo_cells(&base, false),
+                Default::default(),
+            )
+            .unwrap()
+            .row_uuid();
+        let before = physical_title(&db, row);
+        assert!(matches!(before, Value::Large(_)));
+
+        let (tx_id, commit): (
+            OpenTransactionId,
+            Box<dyn FnOnce() -> Result<TxId, Error> + '_>,
+        ) = if exclusive {
+            let tx = db.exclusive_tx().unwrap();
+            (tx.tx_id(), Box::new(move || block_on(tx.commit())))
+        } else {
+            let tx = db.mergeable_tx().unwrap();
+            (tx.tx_id(), Box::new(move || block_on(tx.commit())))
+        };
+        let len = base.len() as u64;
+        block_on(db.stage_transaction_large_value_update(
+            tx_id,
+            "todos",
+            row,
+            BTreeMap::new(),
+            append_text("title", len, "one"),
+            None,
+        ))
+        .unwrap();
+        block_on(db.stage_transaction_large_value_update(
+            tx_id,
+            "todos",
+            row,
+            BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+            append_text("title", len + 3, "two"),
+            None,
+        ))
+        .unwrap();
+        assert_eq!(
+            block_on(db.transaction_read(tx_id, "todos", row))
+                .unwrap()
+                .unwrap()
+                .get("title"),
+            Some(&Value::String(format!("{base}onetwo"))),
+            "the second splice addresses the result of the first"
+        );
+        assert_eq!(
+            committed_title(&db),
+            Some(Value::String(base.clone())),
+            "staged splices stay inside the transaction"
+        );
+        assert_eq!(physical_title(&db, row), before);
+
+        commit().unwrap();
+        assert_eq!(
+            committed_title(&db),
+            Some(Value::String(format!("{base}onetwo")))
+        );
+        assert!(matches!(physical_title(&db, row), Value::Large(_)));
+        assert_eq!(
+            staged_large_value_count(&db),
+            0,
+            "the superseded first splice and the published root are both released"
+        );
+    }
+}
+
+/// An ordinary write of the spliced column in the same transaction replaces
+/// the splice, and the orphaned root is evicted at commit.
+#[test]
+fn transaction_replacement_supersedes_an_earlier_splice() {
+    for exclusive in [false, true] {
+        let db = block_on(doctest_support::open_todos_db()).unwrap();
+        let base = "b".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 32);
+        let row = db
+            .insert(
+                "todos",
+                doctest_support::todo_cells(&base, false),
+                Default::default(),
+            )
+            .unwrap()
+            .row_uuid();
+        let replacement = BTreeMap::from([("title".to_owned(), Value::String("short".to_owned()))]);
+        let committed = if exclusive {
+            let tx = db.exclusive_tx().unwrap();
+            block_on(db.stage_transaction_large_value_update(
+                tx.tx_id(),
+                "todos",
+                row,
+                BTreeMap::new(),
+                append_text("title", base.len() as u64, "tail"),
+                None,
+            ))
+            .unwrap();
+            tx.update("todos", row, replacement, Default::default())
+                .unwrap();
+            block_on(tx.commit())
+        } else {
+            let tx = db.mergeable_tx().unwrap();
+            block_on(db.stage_transaction_large_value_update(
+                tx.tx_id(),
+                "todos",
+                row,
+                BTreeMap::new(),
+                append_text("title", base.len() as u64, "tail"),
+                None,
+            ))
+            .unwrap();
+            tx.update("todos", row, replacement, Default::default())
+                .unwrap();
+            block_on(tx.commit())
+        };
+        committed.unwrap();
+        assert_eq!(
+            committed_title(&db),
+            Some(Value::String("short".to_owned()))
+        );
+        assert_eq!(staged_large_value_count(&db), 0);
+    }
+}
+
+/// An inline value that outgrows the inline limit inside a transaction is
+/// lowered at the splice, so later splices only touch the chunks they edit.
+#[test]
+fn transaction_splice_lowers_a_value_that_outgrows_inline_storage() {
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+    let row = db
+        .insert(
+            "todos",
+            doctest_support::todo_cells("", false),
+            Default::default(),
+        )
+        .unwrap()
+        .row_uuid();
+    let tx = db.mergeable_tx().unwrap();
+    let chunk = "c".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES / 2 + 1);
+    let mut expected = String::new();
+    for _ in 0..3 {
+        block_on(db.stage_transaction_large_value_update(
+            tx.tx_id(),
+            "todos",
+            row,
+            BTreeMap::new(),
+            append_text("title", expected.len() as u64, &chunk),
+            None,
+        ))
+        .unwrap();
+        expected.push_str(&chunk);
+    }
+    block_on(tx.commit()).unwrap();
+    assert_eq!(committed_title(&db), Some(Value::String(expected)));
+    assert!(matches!(physical_title(&db, row), Value::Large(_)));
+    assert_eq!(staged_large_value_count(&db), 0);
+}
+
+/// Diffs are not a way around a branch view or a deleted row, and a failed
+/// diff leaves the transaction exactly as it was.
+#[test]
+fn transaction_splice_rejects_invalid_targets_without_staging() {
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+    let row = db
+        .insert(
+            "todos",
+            doctest_support::todo_cells("hello", false),
+            Default::default(),
+        )
+        .unwrap()
+        .row_uuid();
+    let tx = db.mergeable_tx().unwrap();
+    let error = block_on(db.stage_transaction_large_value_update(
+        tx.tx_id(),
+        "todos",
+        row,
+        BTreeMap::new(),
+        append_text("title", 99, "!"),
+        None,
+    ))
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::Query);
+    let error = block_on(db.stage_transaction_large_value_update(
+        tx.tx_id(),
+        "todos",
+        row,
+        BTreeMap::from([("title".to_owned(), Value::String("x".to_owned()))]),
+        append_text("title", 5, "!"),
+        None,
+    ))
+    .unwrap_err();
+    assert_eq!(
+        error.message,
+        "a large-value field cannot be both patched and partially updated"
+    );
+    assert_eq!(
+        block_on(db.transaction_read(tx.tx_id(), "todos", row))
+            .unwrap()
+            .unwrap()
+            .get("title"),
+        Some(&Value::String("hello".to_owned()))
+    );
+    tx.delete("todos", row, Default::default()).unwrap();
+    assert!(
+        block_on(db.stage_transaction_large_value_update(
+            tx.tx_id(),
+            "todos",
+            row,
+            BTreeMap::new(),
+            append_text("title", 5, "!"),
+            None,
+        ))
+        .is_err(),
+        "a row deleted by this transaction has no value to splice"
+    );
+    assert_eq!(staged_large_value_count(&db), 0);
+}
+
+/// Abandoning a transaction releases the roots its splices staged instead of
+/// leaving them to the staging TTL.
+#[test]
+fn abandoned_transaction_releases_its_staged_splices() {
+    for exclusive in [false, true] {
+        let db = block_on(doctest_support::open_todos_db()).unwrap();
+        let base = "d".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 32);
+        let row = db
+            .insert(
+                "todos",
+                doctest_support::todo_cells(&base, false),
+                Default::default(),
+            )
+            .unwrap()
+            .row_uuid();
+        let stage = |tx_id| {
+            for (offset, text) in [(0, "one"), (3, "two")] {
+                block_on(db.stage_transaction_large_value_update(
+                    tx_id,
+                    "todos",
+                    row,
+                    BTreeMap::new(),
+                    append_text("title", base.len() as u64 + offset, text),
+                    None,
+                ))
+                .unwrap();
+            }
+        };
+        if exclusive {
+            let tx = db.exclusive_tx().unwrap();
+            stage(tx.tx_id());
+            assert_ne!(staged_large_value_count(&db), 0);
+            drop(tx);
+        } else {
+            let tx = db.mergeable_tx().unwrap();
+            stage(tx.tx_id());
+            assert_ne!(staged_large_value_count(&db), 0);
+            drop(tx);
+        }
+        block_on(db.tick()).unwrap();
+        assert_eq!(committed_title(&db), Some(Value::String(base)));
+        assert_eq!(staged_large_value_count(&db), 0);
+    }
+}
+
+/// Bindings roll back through the queued cleanup (wasm, React Native) or the
+/// synchronous handle abandon (napi); both release the staged roots.
+#[test]
+fn binding_rollback_paths_release_staged_splices() {
+    for queued in [false, true] {
+        let db = block_on(doctest_support::open_todos_db()).unwrap();
+        let base = "f".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 32);
+        let row = db
+            .insert(
+                "todos",
+                doctest_support::todo_cells(&base, false),
+                Default::default(),
+            )
+            .unwrap()
+            .row_uuid();
+        let open = OpenTransactionId::new();
+        block_on(db.begin_exclusive(open)).unwrap();
+        block_on(db.stage_transaction_large_value_update(
+            open,
+            "todos",
+            row,
+            BTreeMap::new(),
+            append_text("title", base.len() as u64, "tail"),
+            None,
+        ))
+        .unwrap();
+        assert_ne!(staged_large_value_count(&db), 0);
+        if queued {
+            db.enqueue_abandon_transaction_handle(open);
+            while db.queued_mutation_count() > 0 {
+                db.drive_queued_mutation_once();
+            }
+        } else {
+            db.abandon_transaction_handle(open).unwrap();
+            block_on(db.tick()).unwrap();
+        }
+        assert_eq!(staged_large_value_count(&db), 0, "queued: {queued}");
+    }
+}
+
+/// Deleting a row after splicing it in the same transaction leaves no staged
+/// root behind once the transaction commits.
+#[test]
+fn transaction_delete_after_splice_leaves_no_staged_root() {
+    for exclusive in [false, true] {
+        let db = block_on(doctest_support::open_todos_db()).unwrap();
+        let base = "e".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 32);
+        let row = db
+            .insert(
+                "todos",
+                doctest_support::todo_cells(&base, false),
+                Default::default(),
+            )
+            .unwrap()
+            .row_uuid();
+        let splice = |tx_id| {
+            block_on(db.stage_transaction_large_value_update(
+                tx_id,
+                "todos",
+                row,
+                BTreeMap::new(),
+                append_text("title", base.len() as u64, "tail"),
+                None,
+            ))
+            .unwrap();
+        };
+        if exclusive {
+            let tx = db.exclusive_tx().unwrap();
+            splice(tx.tx_id());
+            tx.delete("todos", row, Default::default()).unwrap();
+            block_on(tx.commit()).unwrap();
+        } else {
+            let tx = db.mergeable_tx().unwrap();
+            splice(tx.tx_id());
+            tx.delete("todos", row, Default::default()).unwrap();
+            block_on(tx.commit()).unwrap();
+        }
+        assert!(
+            db.read(&db.prepare_query(&db.table("todos")).unwrap())
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(staged_large_value_count(&db), 0);
+    }
+}
+
 /// A branch-view update starts a physical overlay with every visible base
 /// cell. Its untouched large descriptor is engine-derived, while a descriptor
 /// from another source remains untrusted even if both have the same shape.
