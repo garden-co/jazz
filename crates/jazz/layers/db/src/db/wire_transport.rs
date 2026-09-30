@@ -609,6 +609,18 @@ impl<T: WireTransport> WireTransportAdapter<T> {
 }
 
 impl<T: WireTransport> WireTransportAdapter<T> {
+    /// The structured error the remote peer sent before ending this link.
+    ///
+    /// Local failures (a closed socket, a frame this side rejected) return
+    /// `None`: only the peer's own retry guidance belongs here.
+    pub fn remote_wire_error(&self) -> Option<&WireError> {
+        if self.received_wire_error {
+            self.last_wire_error.as_ref()
+        } else {
+            None
+        }
+    }
+
     /// Offer one logical message, handing it back if it was not admitted.
     ///
     /// `Ok(WireSendOutcome::Rejected(message))` is the only backpressure
@@ -746,6 +758,9 @@ impl<T: WireTransport> Transport for WireTransportAdapter<T> {
 
     fn has_terminal_failure(&self) -> bool {
         self.terminal_error.is_some()
+    }
+    fn remote_wire_error(&self) -> Option<WireError> {
+        WireTransportAdapter::remote_wire_error(self).cloned()
     }
     fn incomplete_receive_timeout_ms(&self) -> Option<u64> {
         let auxiliary = self

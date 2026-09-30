@@ -5504,6 +5504,13 @@ pub trait Transport {
         false
     }
 
+    /// The structured error the remote peer sent before ending this link, if
+    /// it sent one. Owners use its retry guidance to decide whether to
+    /// reconnect.
+    fn remote_wire_error(&self) -> Option<crate::wire::WireError> {
+        None
+    }
+
     /// Remaining time until an incomplete receive must be serviced, even if
     /// the remote peer sends no further bytes. Hosts use a real delayed wake.
     fn incomplete_receive_timeout_ms(&self) -> Option<u64> {
