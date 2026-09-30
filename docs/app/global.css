@@ -328,6 +328,7 @@ h6 {
   --pattern-top: 0px;
   --pattern-right: 0px;
   --pattern-opacity: 1;
+  --pattern-fade: 0.5;
   position: relative;
   overflow: clip;
   isolation: isolate;
@@ -350,6 +351,20 @@ h6 {
   transition: opacity 600ms ease-out;
   pointer-events: none;
   user-select: none;
+}
+/* A wash of the page background over the pattern, strongest behind the
+   intro paragraph at the bottom left, so the text stays readable. Tune
+   --pattern-fade (its strongest opacity) on `.home-hero`. */
+.home-hero-fade {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background: linear-gradient(
+    to top right,
+    color-mix(in srgb, var(--color-background-body) calc(var(--pattern-fade) * 100%), transparent),
+    transparent 60%
+  );
 }
 /* Fades in once the canvas has drawn. */
 .home-hero-pattern:not([data-drawn]) {
@@ -450,9 +465,6 @@ h6 {
 }
 .home-statement {
   max-width: 56rem;
-}
-.home-statement-muted {
-  color: var(--color-text-secondary);
 }
 .home-code-grid {
   display: grid;

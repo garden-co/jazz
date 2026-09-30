@@ -359,6 +359,7 @@ export default function HomePage() {
     <div className="w-full">
       <section className="home-hero h-[80vh] w-full">
         <StippleCanvas pattern={heroPattern} className="home-hero-pattern" />
+        <div aria-hidden className="home-hero-fade" />
         <div className="mx-auto flex h-full w-full max-w-(--fd-layout-width) items-end px-4 relative">
           <div className="w-full max-w-[42rem] space-y-6 pb-2 sm:space-y-10">
             <Heading level={1} type="display-1">
@@ -367,9 +368,10 @@ export default function HomePage() {
               <span className="block">that syncs</span>
             </Heading>
             <Text as="p" display="block" className="max-w-[40em] text-xl leading-relaxed">
-              Jazz is a relational database built on real-time sync. It runs distributed across the
-              cloud, your backend, frontend, native apps, CLIs and agent sandboxes. Mix and match
-              ACID and local-first.
+              Jazz is a relational database built on real-time sync.
+              <br />
+              It runs across the cloud, your backend, frontend, native apps, CLIs and agent VMs. Mix
+              and match ACID and eventually consistent / local-first.
             </Text>
           </div>
         </div>
@@ -454,10 +456,7 @@ export default function HomePage() {
       <section className="home-section">
         <div className="home-container">
           <Heading level={2} type="display-3" id="features" className="home-anchor home-statement">
-            A database responsible for more.{" "}
-            <span className="home-statement-muted">
-              The hard parts of shared, live data, handled once instead of in every app.
-            </span>
+            A database responsible for more.
           </Heading>
           <div className="mt-6">
             {features.map((feature, index) => (
