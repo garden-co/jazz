@@ -3581,6 +3581,14 @@ pub(super) fn transaction_values_with_cardinality_scope(
     view_scoped_cardinality: bool,
     contribution_merge: Value,
 ) -> Result<Vec<Value>, Error> {
+    // Slots 5-8: `jazz.exclusive-read-evidence.v1` while an exclusive fate is
+    // pending, null otherwise (SPEC 2 §2.8).
+    let [
+        base_snapshot,
+        row_read_set,
+        absent_read_set,
+        predicate_read_set,
+    ] = super::exclusive_read_evidence::evidence_slot_values(tx, matches!(fate, Fate::Pending))?;
     Ok(vec![
         Value::U64(tx.tx_id.time.0),
         Value::U64(node_alias.0),
@@ -3592,10 +3600,10 @@ pub(super) fn transaction_values_with_cardinality_scope(
         RowAuthor::from_persisted_subject(tx.made_by)
             .map_err(|_| Error::UnadmittedWriteAuthor)?
             .to_value(),
-        Value::Nullable(None),
-        Value::Nullable(None),
-        Value::Nullable(None),
-        Value::Nullable(None),
+        base_snapshot,
+        row_read_set,
+        absent_read_set,
+        predicate_read_set,
         Value::Nullable(
             tx.user_metadata_json
                 .clone()

@@ -293,6 +293,11 @@ pub(super) struct CurrentIndexCandidateFilter {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum CurrentAccessPath {
     PrimaryKey(Vec<Value>),
+    /// First-result Global listing in physical row-UUID order. The caller
+    /// re-proves the page after policy and deletion filtering before returning.
+    PrimaryKeyPage {
+        cap: usize,
+    },
     Index {
         column: String,
         /// Second key of an explicitly declared two-column composite index.
@@ -317,6 +322,15 @@ pub(super) enum CurrentAccessPath {
         /// never selected by policy compilation or subscriptions.
         source_limit: Option<usize>,
     },
+}
+
+fn primary_key_page_scan(cap: usize) -> StaticScanSpec {
+    // The physical source helper prepends the shared branch coordinate. The
+    // remaining primary-key column is row_uuid, matching default result order.
+    StaticScanSpec::PrefixLimit {
+        prefix: Vec::new(),
+        max_items: cap,
+    }
 }
 
 impl<S> JazzSourceGraphPreparer<'_, S>
@@ -489,7 +503,7 @@ where
                 .expect("checked alongside compiler-owned covered input source");
             return Ok(ResolvedSource {
                 stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
-                table_schema: table,
+                table_schema: table.into(),
                 graph: input_source.clone(),
                 row_shape: SourceRowShape {
                     source: request.source.clone(),
@@ -625,7 +639,7 @@ where
             .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
             return Ok(ResolvedSource {
                 stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
-                table_schema: table,
+                table_schema: table.into(),
                 graph,
                 row_shape: SourceRowShape {
                     source: request.source.clone(),
@@ -761,7 +775,7 @@ where
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
                 return Ok(ResolvedSource {
                     stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
-                    table_schema: table.clone(),
+                    table_schema: table.clone().into(),
                     graph,
                     row_shape: SourceRowShape {
                         source: request.source.clone(),
@@ -915,7 +929,7 @@ where
                 .map_err(|error| source_resolution_error_from_policy_proof(request, error))?;
                 return Ok(ResolvedSource {
                     stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
-                    table_schema: table.clone(),
+                    table_schema: table.clone().into(),
                     graph,
                     row_shape: SourceRowShape {
                         source: request.source.clone(),
@@ -1133,7 +1147,7 @@ where
                 };
                 return Ok(ResolvedSource {
                     stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
-                    table_schema: table.clone(),
+                    table_schema: table.clone().into(),
                     graph,
                     row_shape: SourceRowShape {
                         source: request.source.clone(),
@@ -1951,7 +1965,7 @@ where
         };
         Ok(ResolvedSource {
             stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
-            table_schema: table,
+            table_schema: table.into(),
             graph,
             row_shape: SourceRowShape {
                 source: request.source.clone(),
@@ -2051,7 +2065,7 @@ where
             .await?;
         Ok(ResolvedSource {
             stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
-            table_schema: table,
+            table_schema: table.into(),
             graph,
             row_shape: SourceRowShape {
                 source: request.source.clone(),
@@ -2214,7 +2228,7 @@ where
             .await?;
         Ok(ResolvedSource {
             stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
-            table_schema: table,
+            table_schema: table.into(),
             graph,
             row_shape: SourceRowShape {
                 source: request.source.clone(),
@@ -2294,7 +2308,7 @@ where
         .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
         Ok(ResolvedSource {
             stored_column_ids: self.stored_column_ids_for_read_table(request, &table)?,
-            table_schema: table,
+            table_schema: table.into(),
             graph,
             row_shape: SourceRowShape {
                 source: request.source.clone(),
@@ -2334,9 +2348,10 @@ where
                 .prepare_source_graph_without_local_exclusions(request)
                 .await?;
             // Only a write-policy check of a multi-row unit carries an
-            // overlay. Box it so ordinary reads keep their poll frames.
+            // overlay; ordinary reads never await it.
             if self.transaction_overlay.is_active() {
-                Box::pin(self.overlay_transaction_writes(request, &mut resolved)).await?;
+                self.boxed_overlay_transaction_writes(request, &mut resolved)
+                    .await?;
             }
             if let Some(scope) = exclusion_scope
                 && !self.excludes_below_pending(request)
@@ -2361,6 +2376,22 @@ where
 }
 
 impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
+    /// [`Self::overlay_transaction_writes`], boxed and built in this frame
+    /// rather than the caller's.
+    ///
+    /// Boxing at the call site alone still materializes the whole overlay
+    /// future in `prepare_source_graph`'s poll frame in unoptimized builds,
+    /// so every source of every read would pay for it on a recursion that
+    /// already nears the 1 MiB WASM stack of the dev build ("memory access
+    /// out of bounds" while lowering a read's sources).
+    fn boxed_overlay_transaction_writes<'a>(
+        &'a mut self,
+        request: &'a SourceRequest,
+        resolved: &'a mut ResolvedSource,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SourceResolutionError>> + 'a>> {
+        Box::pin(self.overlay_transaction_writes(request, resolved))
+    }
+
     /// Layer the candidate transaction's own writes over one committed
     /// write-policy evidence source (`INV-RLS-9`).
     ///
@@ -2796,6 +2827,23 @@ where
                     table, tier, prefix,
                 )))
             }
+            CurrentAccessPath::PrimaryKeyPage { cap } => {
+                if tier != DurabilityTier::Global {
+                    return Ok(None);
+                }
+                let projection_target = self.current_projection_target(request, table)?;
+                let rows = self
+                    .node
+                    .physical_current_source_scan_graph_with_projection_target(
+                        self.read_view.read_schema,
+                        &request.source.table,
+                        PhysicalCurrentClass::Global,
+                        projection_target,
+                        primary_key_page_scan(cap),
+                    )
+                    .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+                Ok(Some(rows))
+            }
             CurrentAccessPath::Index {
                 column,
                 order_column,
@@ -3155,6 +3203,18 @@ where
                                 source_resolution_error(request, SourceGap::SchemaProjection)
                             })?
                     }
+                    Some(CurrentAccessPath::PrimaryKeyPage { cap }) => self
+                        .node
+                        .physical_current_source_scan_graph_with_projection_target(
+                            self.read_view.read_schema,
+                            &request.source.table,
+                            PhysicalCurrentClass::Global,
+                            projection_target,
+                            primary_key_page_scan(cap),
+                        )
+                        .map_err(|_| {
+                            source_resolution_error(request, SourceGap::SchemaProjection)
+                        })?,
                     Some(CurrentAccessPath::Index {
                         column,
                         order_column,
@@ -3262,6 +3322,16 @@ where
                             source_resolution_error(request, SourceGap::SchemaProjection)
                         })?
                 }
+                Some(CurrentAccessPath::PrimaryKeyPage { cap }) => self
+                    .node
+                    .physical_current_source_scan_graph_with_projection_target(
+                        self.read_view.read_schema,
+                        &request.source.table,
+                        PhysicalCurrentClass::Global,
+                        projection_target.clone(),
+                        primary_key_page_scan(*cap),
+                    )
+                    .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?,
                 Some(CurrentAccessPath::Index {
                     column,
                     order_column,

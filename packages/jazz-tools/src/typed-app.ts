@@ -419,12 +419,14 @@ export type TableStreamingUpdate<TSchema extends SchemaLike, TTable extends Tabl
 }[StreamingColumnName<TSchema, TTable>];
 
 type MaybeNullableWhere<T, TOptional extends boolean> = TOptional extends true ? T | null : T;
+type NullableWhere<TOptional extends boolean> = TOptional extends true ? { isNull?: boolean } : {};
 type WhereEqNe<T, TOptional extends boolean, TExtra extends object = {}> =
   | MaybeNullableWhere<T, TOptional>
   | ({
       eq?: MaybeNullableWhere<T, TOptional>;
       ne?: MaybeNullableWhere<T, TOptional>;
-    } & TExtra);
+    } & TExtra &
+      NullableWhere<TOptional>);
 type Membership<T> = { in?: T[]; notIn?: T[] };
 type NumberWhere<T extends number | bigint, TOptional extends boolean> = WhereEqNe<
   T,
@@ -441,11 +443,7 @@ type TimestampWhere<TOptional extends boolean> = WhereEqNe<
     lte?: Date | number;
   } & Membership<Date | number>
 >;
-type UuidWhere<TOptional extends boolean> = WhereEqNe<
-  string,
-  TOptional,
-  TOptional extends true ? Membership<string> & { isNull?: boolean } : Membership<string>
->;
+type UuidWhere<TOptional extends boolean> = WhereEqNe<string, TOptional, Membership<string>>;
 type PayloadEnumMatch<T> = T extends { type: infer Case extends string }
   ? { type: Case; where?: Partial<Omit<T, "type">> }
   : never;

@@ -339,7 +339,17 @@ fn lower_resolved_query_program_with_source_parameters(
             validate_app_row_publication_schema(rows)?;
         }
     }
-    verify_routed_terminal_outputs(&terminals, &parameters, &request, &explain)?;
+    // Terminals share most of their graph, and the declared fields of a node
+    // do not depend on the parameter domain, so both verification passes
+    // share one per-node memo.
+    let mut declared_fields = DeclaredOutputFields::default();
+    verify_routed_terminal_outputs(
+        &terminals,
+        &parameters,
+        &request,
+        &explain,
+        &mut declared_fields,
+    )?;
     let output = ProgramOutputSchemas::RowSet(
         terminals
             .iter()
@@ -364,17 +374,23 @@ fn lower_resolved_query_program_with_source_parameters(
             || claim_path_from_param_field(field)
                 .is_some_and(|_| parameters.claim_params.contains_key(field))
     });
-    verify_routed_terminal_outputs(&terminals, &parameters, &request, &explain)?;
+    verify_routed_terminal_outputs(
+        &terminals,
+        &parameters,
+        &request,
+        &explain,
+        &mut declared_fields,
+    )?;
 
-    let maintained_terminal_tables = resolved_sources
-        .values()
-        .map(|source| {
-            (
-                source.table_schema.name.clone(),
-                source.table_schema.clone(),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
+    // Many source occurrences share a table. Copy each table schema once
+    // (keeping the last occurrence, as collecting into the map would), not
+    // once per occurrence: a schema carries its table's compiled policies.
+    let mut maintained_terminal_tables = BTreeMap::new();
+    for source in resolved_sources.values().rev() {
+        maintained_terminal_tables
+            .entry(source.table_schema.name.clone())
+            .or_insert_with(|| TableSchema::clone(&source.table_schema));
+    }
     let targeted_refresh_tables = maintained_terminal_tables.keys().cloned().collect();
 
     Ok(QueryProgram {
@@ -441,18 +457,19 @@ pub async fn lower_query_program(
         .await
 }
 
-fn verify_routed_terminal_outputs(
-    terminals: &[LoweredTerminal],
+fn verify_routed_terminal_outputs<'g>(
+    terminals: &'g [LoweredTerminal],
     parameters: &ParameterDomain,
     request: &QueryProgramRequest,
     explain: &ExplainPlan,
+    declared_fields: &mut DeclaredOutputFields<'g>,
 ) -> CapabilityResult<()> {
     for terminal in terminals {
         let expected = terminal_schema_routing_fields(&terminal.output, &parameters.routing_params);
         if expected.is_empty() {
             continue;
         }
-        let Some(actual) = graph_declared_output_fields(&terminal.graph) else {
+        let Some(actual) = declared_fields.of(&terminal.graph) else {
             return Err(Box::new(CapabilityReport {
                 gaps: vec![UnsupportedReason::Runtime(format!(
                     "routed terminal '{}' output fields could not be verified",
@@ -492,120 +509,152 @@ fn terminal_schema_routing_fields(
 
 #[doc(hidden)]
 pub fn graph_declared_output_fields(graph: &GraphBuilder) -> Option<BTreeSet<String>> {
-    // Policy lowering can build deeply nested finite graphs on the server
-    // shell's ordinary thread stack. Keep this structural analysis iterative:
-    // it is used while installing those policies, before Groove compiles its
-    // own graph representation.
-    let mut outputs =
-        std::collections::HashMap::<*const GraphBuilder, Option<BTreeSet<String>>>::new();
-    for node in graph_builder_postorder(graph) {
-        let child_output = |child: &GraphBuilder| {
-            outputs
-                .get(&std::ptr::from_ref(child))
-                .expect("postorder visits graph children before their parent")
-                .clone()
-        };
-        let fields = match node {
-            GraphBuilder::TemplateInput { output, .. } => descriptor_named_fields(output),
-            GraphBuilder::TypedTemplate { program, .. } => {
-                descriptor_named_fields(&program.output_descriptor())
+    DeclaredOutputFields::default().of(graph).cloned()
+}
+
+/// Declared output fields per builder node, memoized by node address so graphs
+/// that share subgraphs (the terminals of one program) derive each node once.
+/// The borrow keeps every memoized node alive, so an address is never reused.
+#[derive(Default)]
+struct DeclaredOutputFields<'g> {
+    outputs: std::collections::HashMap<*const GraphBuilder, Option<BTreeSet<String>>>,
+    graphs: std::marker::PhantomData<&'g GraphBuilder>,
+}
+
+impl<'g> DeclaredOutputFields<'g> {
+    fn of(&mut self, graph: &'g GraphBuilder) -> Option<&BTreeSet<String>> {
+        // Policy lowering can build deeply nested finite graphs on the server
+        // shell's ordinary thread stack. Keep this structural analysis
+        // iterative: it is used while installing those policies, before
+        // Groove compiles its own graph representation.
+        if !self.outputs.contains_key(&std::ptr::from_ref(graph)) {
+            self.derive(graph);
+        }
+        self.outputs
+            .get(&std::ptr::from_ref(graph))
+            .expect("the graph root was derived")
+            .as_ref()
+    }
+
+    fn derive(&mut self, graph: &'g GraphBuilder) {
+        let outputs = &mut self.outputs;
+        for node in graph_builder_postorder(graph) {
+            if outputs.contains_key(&std::ptr::from_ref(node)) {
+                continue;
             }
-            GraphBuilder::InlineRecords { output, .. }
-            | GraphBuilder::FrontierSource { output, .. }
-            | GraphBuilder::BindingSource { output, .. } => descriptor_named_fields(output),
-            GraphBuilder::InputSource { .. } => None,
-            GraphBuilder::Project { fields, .. } => Some(
-                fields
-                    .iter()
-                    .map(|field| field.output_name.clone())
-                    .collect(),
-            ),
-            GraphBuilder::StreamingChecksum {
-                input,
-                field,
-                output_field,
-                ..
-            } => child_output(input).and_then(|mut fields| match field {
-                FieldRef::Name(field) | FieldRef::StoredName(field) => {
-                    fields.remove(field);
-                    fields.insert(output_field.clone());
-                    Some(fields)
-                }
-                FieldRef::Resolved(_) => None,
-            }),
-            GraphBuilder::Aggregate {
-                group_cols,
-                aggregates,
-                ..
-            } => Some(
-                group_cols
-                    .iter()
-                    .map(|field| field.display_name())
-                    .chain(aggregates.iter().enumerate().map(|(index, aggregate)| {
-                        aggregate
-                            .output_name
-                            .clone()
-                            .unwrap_or_else(|| format!("aggregate_{index}"))
-                    }))
-                    .collect(),
-            ),
-            GraphBuilder::CollectBy { collect, .. } => Some(
-                collect
-                    .parent_fields
-                    .iter()
-                    .map(|field| field.output_name.clone())
-                    .chain(std::iter::once(collect.collection_field.clone()))
-                    .collect(),
-            ),
-            GraphBuilder::Filter { input, .. }
-            | GraphBuilder::UnwrapNullable { input, .. }
-            | GraphBuilder::VariantProject { input, .. }
-            | GraphBuilder::ArgMaxBy { input, .. }
-            | GraphBuilder::ArgMinBy { input, .. }
-            | GraphBuilder::TopBy { input, .. }
-            | GraphBuilder::SemiJoin { left: input, .. }
-            | GraphBuilder::AntiJoin { left: input, .. } => child_output(input),
-            GraphBuilder::Unnest {
-                input,
-                element_field,
-                ..
-            } => child_output(input).map(|mut fields| {
-                fields.insert(element_field.clone());
-                fields
-            }),
-            GraphBuilder::Recursive { seed, .. } => child_output(seed),
-            GraphBuilder::RecursiveStepWitness { recursive } => match recursive.as_ref() {
-                GraphBuilder::Recursive {
-                    step_witness: Some(witness),
-                    ..
-                } => child_output(witness),
-                _ => None,
-            },
-            GraphBuilder::Union { inputs } => inputs.split_first().and_then(|(first, rest)| {
-                let mut fields = child_output(first)?;
-                for input in rest {
-                    fields = fields
-                        .intersection(&child_output(input)?)
-                        .cloned()
-                        .collect();
-                }
+            let fields = declared_node_fields(node, |child| {
+                outputs
+                    .get(&std::ptr::from_ref(child))
+                    .expect("postorder visits graph children before their parent")
+                    .clone()
+            });
+            outputs.insert(std::ptr::from_ref(node), fields);
+        }
+    }
+}
+
+fn declared_node_fields(
+    node: &GraphBuilder,
+    child_output: impl Fn(&GraphBuilder) -> Option<BTreeSet<String>>,
+) -> Option<BTreeSet<String>> {
+    match node {
+        GraphBuilder::TemplateInput { output, .. } => descriptor_named_fields(output),
+        GraphBuilder::TypedTemplate { program, .. } => {
+            descriptor_named_fields(&program.output_descriptor())
+        }
+        GraphBuilder::InlineRecords { output, .. }
+        | GraphBuilder::FrontierSource { output, .. }
+        | GraphBuilder::BindingSource { output, .. } => descriptor_named_fields(output),
+        GraphBuilder::InputSource { .. } => None,
+        GraphBuilder::Project { fields, .. } => Some(
+            fields
+                .iter()
+                .map(|field| field.output_name.clone())
+                .collect(),
+        ),
+        GraphBuilder::StreamingChecksum {
+            input,
+            field,
+            output_field,
+            ..
+        } => child_output(input).and_then(|mut fields| match field {
+            FieldRef::Name(field) | FieldRef::StoredName(field) => {
+                fields.remove(field);
+                fields.insert(output_field.clone());
                 Some(fields)
-            }),
-            GraphBuilder::Join { left, right, .. } => child_output(left)
+            }
+            FieldRef::Resolved(_) => None,
+        }),
+        GraphBuilder::Aggregate {
+            group_cols,
+            aggregates,
+            ..
+        } => Some(
+            group_cols
+                .iter()
+                .map(|field| field.display_name())
+                .chain(aggregates.iter().enumerate().map(|(index, aggregate)| {
+                    aggregate
+                        .output_name
+                        .clone()
+                        .unwrap_or_else(|| format!("aggregate_{index}"))
+                }))
+                .collect(),
+        ),
+        GraphBuilder::CollectBy { collect, .. } => Some(
+            collect
+                .parent_fields
+                .iter()
+                .map(|field| field.output_name.clone())
+                .chain(std::iter::once(collect.collection_field.clone()))
+                .collect(),
+        ),
+        GraphBuilder::Filter { input, .. }
+        | GraphBuilder::UnwrapNullable { input, .. }
+        | GraphBuilder::VariantProject { input, .. }
+        | GraphBuilder::ArgMaxBy { input, .. }
+        | GraphBuilder::ArgMinBy { input, .. }
+        | GraphBuilder::TopBy { input, .. }
+        | GraphBuilder::SemiJoin { left: input, .. }
+        | GraphBuilder::AntiJoin { left: input, .. } => child_output(input),
+        GraphBuilder::Unnest {
+            input,
+            element_field,
+            ..
+        } => child_output(input).map(|mut fields| {
+            fields.insert(element_field.clone());
+            fields
+        }),
+        GraphBuilder::Recursive { seed, .. } => child_output(seed),
+        GraphBuilder::RecursiveStepWitness { recursive } => match recursive.as_ref() {
+            GraphBuilder::Recursive {
+                step_witness: Some(witness),
+                ..
+            } => child_output(witness),
+            _ => None,
+        },
+        GraphBuilder::Union { inputs } => inputs.split_first().and_then(|(first, rest)| {
+            let mut fields = child_output(first)?;
+            for input in rest {
+                fields = fields
+                    .intersection(&child_output(input)?)
+                    .cloned()
+                    .collect();
+            }
+            Some(fields)
+        }),
+        GraphBuilder::Join { left, right, .. } => {
+            child_output(left)
                 .zip(child_output(right))
                 .map(|(left_fields, right_fields)| {
                     let mut fields = BTreeSet::new();
                     fields.extend(left_fields.into_iter().map(|field| left_field(&field)));
                     fields.extend(right_fields.into_iter().map(|field| right_field(&field)));
                     fields
-                }),
-            GraphBuilder::Table { .. } | GraphBuilder::Index { .. } => None,
-        };
-        outputs.insert(std::ptr::from_ref(node), fields);
+                })
+        }
+        GraphBuilder::Table { .. } | GraphBuilder::Index { .. } => None,
     }
-    outputs
-        .remove(&std::ptr::from_ref(graph))
-        .expect("postorder includes the graph root")
 }
 
 fn descriptor_named_fields(descriptor: &RecordDescriptor) -> Option<BTreeSet<String>> {

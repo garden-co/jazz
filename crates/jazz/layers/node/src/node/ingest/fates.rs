@@ -51,6 +51,9 @@ where
         terminal_fate_persisted: &mut bool,
         cascade_descendants: bool,
     ) -> Result<(), Error> {
+        if !matches!(fate, Fate::Pending) || global_time.is_some() {
+            self.open_tx.pending_foreign_transactions.remove(&tx_id);
+        }
         let mut stored = self
             .query_transaction(tx_id).await?
             .ok_or(Error::MissingTransaction(tx_id))?;
@@ -849,9 +852,10 @@ where
 
     /// Evaluate every write policy of one candidate commit unit under the
     /// active exact session scope, each write seeing the unit's other writes
-    /// (`INV-RLS-9`). Terminal relay admission uses this after its support
-    /// proof before it may issue a non-wire authorization receipt, so a relay
-    /// and the fate authority decide the unit alike.
+    /// (`INV-RLS-9`). Terminal relay admission uses this, under the
+    /// connection's admitted claims, before it may issue a non-wire
+    /// authorization receipt, so a relay and the fate authority decide the
+    /// unit alike.
     pub async fn commit_unit_satisfies_write_policy(
         &mut self,
         versions: &[VersionRecord],

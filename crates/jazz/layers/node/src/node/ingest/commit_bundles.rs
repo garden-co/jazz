@@ -210,11 +210,11 @@ where
     /// authority, returning the accepted or rejected fate.
     ///
     /// Validation runs against the in-memory commit unit (`tx` + `versions`),
-    /// NOT a re-query of the stored transaction: the stored transaction record
-    /// does not persist `base_snapshot` or the read sets (they travel only on
-    /// the commit unit), so re-querying would drop the §3.7 read evidence and
-    /// spuriously reject. This mirrors the foreign authority path, which
-    /// validates the arriving commit unit before it is ingested.
+    /// the evidence the author captured. The stored row keeps the same
+    /// evidence only while the fate is pending, for retransmission after a
+    /// restart (`jazz.exclusive-read-evidence.v1`). This mirrors the foreign
+    /// authority path, which validates the arriving commit unit before it is
+    /// ingested.
     pub async fn finalize_local_exclusive_commit(
         &mut self,
         tx: Transaction,

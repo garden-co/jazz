@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
+import "@astryxdesign/core/reset.css";
 import "@astryxdesign/core/astryx.css";
 import "@garden-co/design/jazz/theme.css";
 import "@garden-co/design/jazz/components.css";
