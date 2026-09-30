@@ -3907,7 +3907,7 @@ impl IvmRuntime {
             debug_assert_eq!(live.binding_key, binding_key);
         }
         let subscription_id = self.next_subscription_id();
-        let (outputs, binding_snapshots, route_barriers) = {
+        let (outputs, binding_snapshots, route_barriers, binding_added) = {
             let mut install = super::graph_lifecycle::EphemeralGraphInstall::new(self);
             let runtime = install.runtime();
             runtime.logical_nodes_requested += shape
@@ -3964,11 +3964,19 @@ impl IvmRuntime {
                     runtime.add_retainer(output.node, lifetime.retainer(subscription_id));
                 }
                 install.commit();
-                (outputs, binding_snapshots, route_barriers)
+                (outputs, binding_snapshots, route_barriers, false)
             } else {
                 let cancelled_retraction = lifetime == SubscriptionLifetime::Retained
                     && runtime.cancel_pending_binding_retraction(&binding_shape, &binding_key);
                 let binding_delta = runtime.provisional_binding_delta(shape_id, &binding_key)?;
+                // A queued retraction still changes the source's binding set
+                // before this hydration's results are current, so it keeps the
+                // conservative path even for a binding the source holds.
+                let binding_added = !binding_delta.deltas.is_empty()
+                    || runtime
+                        .pending_binding_retractions
+                        .iter()
+                        .any(|pending| pending.key == binding_delta.key);
                 let mut binding_snapshots = runtime.binding_snapshot_deltas();
                 let snapshot = Arc::make_mut(
                     Arc::make_mut(&mut binding_snapshots)
@@ -4001,7 +4009,7 @@ impl IvmRuntime {
                     runtime.add_retainer(output.node, lifetime.retainer(subscription_id));
                 }
                 install.commit();
-                (outputs, binding_snapshots, route_barriers)
+                (outputs, binding_snapshots, route_barriers, binding_added)
             }
         };
         let (sender, receiver) = mpsc::channel();
@@ -4034,9 +4042,15 @@ impl IvmRuntime {
             self.index_subscription_outputs(subscription_id, &outputs);
         }
         let initial = Arc::new(Mutex::new(None));
+        // Only a change to the source's binding set changes what its readers
+        // produce. Another reference to a live binding leaves every retained
+        // result over the shape valid, so it must not invalidate them (#3797).
         let (binding_frontier_advance, borrowed) = match live {
             Some(live) => (None, live.borrowed),
-            None => (Some(shape.shape.as_str()), HashSet::default()),
+            None => (
+                binding_added.then_some(shape.shape.as_str()),
+                HashSet::default(),
+            ),
         };
         self.enqueue_subscription_hydration(
             subscription_id,
