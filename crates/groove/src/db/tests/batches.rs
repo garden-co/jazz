@@ -3242,6 +3242,19 @@ async fn first_cold_publication_persists_before_resolver_without_deadlock() {
     );
 }
 
+/// Poll `future` a bounded number of times. Every storage wait in
+/// [`TestStorage`] completes on its next poll, so a future still pending after
+/// this waits on something nothing will release.
+async fn within<T>(label: &str, future: impl std::future::Future<Output = T>) -> T {
+    let mut future = std::pin::pin!(future);
+    for _ in 0..1024 {
+        if let Poll::Ready(value) = futures::poll!(future.as_mut()) {
+            return value;
+        }
+    }
+    panic!("{label} did not complete");
+}
+
 /// #3815: A's cold root parks its evaluation, and A is persisted, so no
 /// resident publication holds the lifecycle mutex any more. When the root
 /// arrives, A's resumed install takes the mutex and waits for storage. Only an
@@ -3322,9 +3335,11 @@ async fn publication_drives_a_suspended_chunk_install_holding_the_lifecycle_mute
         vec![Value::U64(1), Value::Large(Box::new(cold_staged.value_ref))],
     );
     first.accept_large_value(cold_staged.id);
-    let first = database.apply_batch(first).await.unwrap();
+    let first = within("A's write", database.apply_batch(first))
+        .await
+        .unwrap();
     assert!(subscription.try_recv().is_err(), "A's cold root parks it");
-    let persisted = first.persist().await;
+    let persisted = within("A's persistence", first.persist()).await;
     database.finish_persistence(persisted).unwrap();
     assert!(
         database.large_value_publication_lifecycle_guard.is_none(),
@@ -3354,21 +3369,15 @@ async fn publication_drives_a_suspended_chunk_install_holding_the_lifecycle_mute
         vec![Value::U64(2), Value::Large(Box::new(warm_staged.value_ref))],
     );
     second.accept_large_value(warm_staged.id);
-    let mut application = Box::pin(database.apply_batch(second));
-    let mut applied = None;
-    // Every storage wait here completes on its next poll, so a bounded
-    // number of polls is enough unless B waits on a mutex nobody releases.
-    for _ in 0..256 {
-        if let Poll::Ready(result) = futures::poll!(application.as_mut()) {
-            applied = Some(result.unwrap());
-            break;
-        }
-    }
-    drop(application);
-    let second = applied.expect("B waits on a mutex that only A's suspended install can release");
-    let persisted = second.persist().await;
+    let second = within(
+        "B's write, which needs the mutex that only A's suspended install can release",
+        database.apply_batch(second),
+    )
+    .await
+    .unwrap();
+    let persisted = within("B's persistence", second.persist()).await;
     database.finish_persistence(persisted).unwrap();
-    database.flush().await.unwrap();
+    within("the final flush", database.flush()).await.unwrap();
 
     let mut inserted = 0;
     while let Ok(update) = subscription.try_recv_with_publication() {
