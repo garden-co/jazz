@@ -3255,6 +3255,164 @@ async fn within<T>(label: &str, future: impl std::future::Future<Output = T>) ->
     panic!("{label} did not complete");
 }
 
+/// #3901: an offline tab's local write must not wait on remote bytes.
+///
+/// A live `ids` subscription never reads the large `payload`. A second
+/// subscription opens over the whole table after row 1's payload has gone
+/// cold, so its hydration parks on a chunk fetch that nothing releases, as
+/// when the upstream link drops before the bytes arrive. A write of row 2 to
+/// the same table overlaps that parked hydration. It must still commit and
+/// reach `ids` while the chunk is missing; only the payload stays pending.
+#[futures_test::test]
+async fn local_write_does_not_wait_on_a_hydration_parked_on_a_remote_chunk() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let mut database = Database::new(schema, storage).await.unwrap();
+    database.set_chunk_storage(chunks.clone());
+
+    let ids = within(
+        "the ids subscription",
+        database.subscribe_one_sink(GraphBuilder::table("objects").project(["id"])),
+    )
+    .await
+    .unwrap();
+    within("the ids hydration", database.drive_progress())
+        .await
+        .unwrap();
+    assert!(ids.try_recv().unwrap().is_empty());
+
+    let prepared = crate::large_values::prepare(
+        crate::large_values::LargeValueKind::Bytes,
+        &vec![9; crate::large_values::INLINE_VALUE_MAX_BYTES * 4],
+    )
+    .unwrap();
+    let staged = database
+        .stage_large_value_preparation(prepared.clone())
+        .await
+        .unwrap();
+    let mut first = database.open_batch();
+    first.insert(
+        "objects",
+        vec![Value::U64(1), Value::Large(Box::new(staged.value_ref))],
+    );
+    first.accept_large_value(staged.id);
+    let first = within("row 1's write", database.apply_batch(first))
+        .await
+        .unwrap();
+    let persisted = within("row 1's persistence", first.persist()).await;
+    database.finish_persistence(persisted).unwrap();
+    assert_eq!(
+        ids.try_recv().unwrap().to_values().unwrap(),
+        vec![(vec![Value::U64(1)], 1)]
+    );
+
+    // Row 1's payload is now known only upstream, and upstream is gone.
+    let root = prepared
+        .staged_chunks
+        .iter()
+        .find(|chunk| chunk.node_ref == prepared.value_ref.root)
+        .unwrap()
+        .clone();
+    crate::chunks::ChunkStorage::delete(&*chunks, root.node_ref.locator, root.node_ref.object_hash)
+        .await
+        .unwrap();
+    database
+        .storage
+        .delete(
+            LARGE_VALUE_METADATA_CF.to_owned(),
+            large_value_node_key(&root.node_ref).unwrap(),
+        )
+        .await
+        .unwrap();
+    let resolver_ready = Rc::new(Cell::new(false));
+    database.set_missing_chunk_resolver(Rc::new(DeferredFixtureChunkResolver {
+        chunks: Rc::new(std::collections::BTreeMap::from([(
+            crate::chunks::ChunkRequest {
+                object_hash: root.node_ref.object_hash.0,
+                locator: root.node_ref.locator,
+            },
+            Bytes::from(root.encoded),
+        )])),
+        ready: Rc::clone(&resolver_ready),
+    }));
+
+    let payloads = within(
+        "the payload subscription",
+        database.subscribe_one_sink(GraphBuilder::table("objects")),
+    )
+    .await
+    .unwrap();
+    let mut cx = std::task::Context::from_waker(Waker::noop());
+    for _ in 0..64 {
+        assert!(
+            database.poll_progress(&mut cx).is_pending(),
+            "the payload hydration waits on the missing chunk"
+        );
+    }
+    assert!(payloads.try_recv().is_err());
+    assert!(database.subscription_has_pending_evaluation(payloads.id()));
+
+    let mut second = database.open_batch();
+    second.insert("objects", vec![Value::U64(2), Value::Bytes(vec![2; 8])]);
+    let second = within(
+        "a local write overlapping a hydration parked on a remote chunk",
+        database.apply_batch(second),
+    )
+    .await
+    .unwrap();
+    let persisted = within("row 2's persistence", second.persist()).await;
+    database.finish_persistence(persisted).unwrap();
+
+    let mut published = Vec::new();
+    for _ in 0..64 {
+        while let Ok(update) = ids.try_recv() {
+            published.extend(update.to_values().unwrap());
+        }
+        if !published.is_empty() {
+            break;
+        }
+        let _ = database.poll_progress(&mut cx);
+    }
+    assert_eq!(
+        published,
+        vec![(vec![Value::U64(2)], 1)],
+        "the committed row is visible while the chunk is still missing"
+    );
+    assert!(
+        payloads.try_recv().is_err(),
+        "only the subscription reading the missing payload stays pending"
+    );
+
+    // The link returns. The retained chunk demand completes the payload
+    // hydration, whose first result already includes the later write.
+    resolver_ready.set(true);
+    within("the payload hydration", database.drive_progress())
+        .await
+        .unwrap();
+    let mut rows = payloads
+        .try_recv()
+        .unwrap()
+        .to_values()
+        .unwrap()
+        .into_iter()
+        .map(|(row, weight)| (row[0].clone(), weight))
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|(id, _)| match id {
+        Value::U64(id) => *id,
+        _ => u64::MAX,
+    });
+    assert_eq!(rows, vec![(Value::U64(1), 1), (Value::U64(2), 1)]);
+}
+
 /// #3815: A's cold root parks its evaluation, and A is persisted, so no
 /// resident publication holds the lifecycle mutex any more. When the root
 /// arrives, A's resumed install takes the mutex and waits for storage. Only an
