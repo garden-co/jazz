@@ -362,6 +362,51 @@ async fn prepared_routed_multisink_combines_binding_sets_with_user_output_routin
     );
 }
 
+/// Binding a value the shape's binding source already holds adds no binding,
+/// so every retained result over the shape stays valid. Reacquiring it must
+/// reuse those results instead of hydrating the shared nodes again (#3797).
+#[futures_test::test]
+async fn reacquired_binding_reuses_retained_hydration_results() {
+    let mut db = project_database().await;
+    let mut batch = db.open_batch();
+    insert_doc(&mut batch, 1, 10, 20, "Spec");
+    insert_doc(&mut batch, 2, 10, 21, "Roadmap");
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
+
+    let shape = db
+        .prepare(
+            routed_doc_output_terminals(),
+            "project_route",
+            route_descriptor(),
+        )
+        .await
+        .unwrap();
+    let first = db
+        .bind_shape(shape.id(), &[Value::U64(10), Value::U64(20)])
+        .await
+        .unwrap();
+    let expected = first.recv().unwrap();
+    let hydrated = db.runtime_stats();
+
+    let second = db
+        .bind_shape(shape.id(), &[Value::U64(10), Value::U64(20)])
+        .await
+        .unwrap();
+    let initial = second.recv().unwrap();
+    assert_eq!(
+        initial.get("rows").unwrap().to_values().unwrap(),
+        expected.get("rows").unwrap().to_values().unwrap()
+    );
+    let reused = db.runtime_stats();
+    assert_eq!(
+        reused.hydration_memo_computes, hydrated.hydration_memo_computes,
+        "a reacquired binding must not invalidate results over its shape"
+    );
+    assert!(reused.hydration_memo_hits > hydrated.hydration_memo_hits);
+}
+
 #[futures_test::test]
 async fn multisink_subscription_delivers_initial_and_tick_deltas_for_all_sinks() {
     let mut db = database().await;
