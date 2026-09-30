@@ -225,13 +225,13 @@ fn listing_subscription_never_rebuilds_excluded_large_columns() {
     let mut names = opening
         .added
         .iter()
-        .map(|published| name(&table, published))
+        .map(|published| match name(&table, published) {
+            Some(Value::String(listed)) => listed,
+            other => panic!("expected a listed name, got {other:?}"),
+        })
         .collect::<Vec<_>>();
     names.sort();
-    assert_eq!(
-        names,
-        ["a.bin", "b.bin"].map(|name| Some(Value::String(name.to_owned())))
-    );
+    assert_eq!(names, ["a.bin", "b.bin"]);
     for published in &opening.added {
         assert_eq!(published.cell(&table, "contents"), None);
         assert_eq!(published.cell(&table, "notes"), None);
