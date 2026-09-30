@@ -121,6 +121,68 @@ pub fn subscribe_trace_entries(callback: js_sys::Function) -> js_sys::Function {
     wasm_tracing::subscribe_trace_entries(callback)
 }
 
+/// Install the JSON Schema validator for JSON columns.
+///
+/// The browser build leaves the Rust validator out to keep the binary small.
+/// `compile` takes a declared schema as JSON text and returns a check that
+/// takes a value as JSON text and returns why it does not match, or
+/// `undefined`. `compile` throws when the schema itself is invalid.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+#[wasm_bindgen(js_name = setJsonSchemaValidator)]
+pub fn set_json_schema_validator(compile: js_sys::Function) {
+    jazz::model::json_schema::install_host_validator(Box::new(JsJsonSchemaValidator { compile }));
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+struct JsJsonSchemaValidator {
+    compile: js_sys::Function,
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+struct JsCompiledJsonSchema {
+    check: js_sys::Function,
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+impl jazz::model::json_schema::HostJsonSchemaValidator for JsJsonSchemaValidator {
+    fn compile(
+        &self,
+        schema_json: &str,
+    ) -> Result<Box<dyn jazz::model::json_schema::HostCompiledJsonSchema>, String> {
+        let check = self
+            .compile
+            .call1(&JsValue::NULL, &JsValue::from_str(schema_json))
+            .map_err(|error| js_error_message(&error))?;
+        let check = check
+            .dyn_into::<js_sys::Function>()
+            .map_err(|_| "the JSON Schema validator did not return a function".to_owned())?;
+        Ok(Box::new(JsCompiledJsonSchema { check }))
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+impl jazz::model::json_schema::HostCompiledJsonSchema for JsCompiledJsonSchema {
+    fn validate(&self, instance_json: &str) -> Result<(), String> {
+        let outcome = self
+            .check
+            .call1(&JsValue::NULL, &JsValue::from_str(instance_json))
+            .map_err(|error| js_error_message(&error))?;
+        match outcome.as_string() {
+            Some(reason) => Err(reason),
+            None => Ok(()),
+        }
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn js_error_message(error: &JsValue) -> String {
+    error
+        .dyn_ref::<js_sys::Error>()
+        .map(|error| String::from(error.message()))
+        .or_else(|| error.as_string())
+        .unwrap_or_else(|| format!("{error:?}"))
+}
+
 /// Exact build/ABI fingerprint for this generated WASM artifact.
 #[wasm_bindgen(js_name = nativeArtifactFingerprint)]
 pub fn native_artifact_fingerprint() -> String {

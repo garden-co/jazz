@@ -1,0 +1,269 @@
+[
+  {
+    "description": "a schema generated from a zod object (draft-07)",
+    "schema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "avatar": {
+          "type": "string",
+          "format": "base64",
+          "contentEncoding": "base64",
+          "pattern": "^$|^(?:[0-9a-zA-Z+/]{4})*(?:(?:[0-9a-zA-Z+/]{2}==)|(?:[0-9a-zA-Z+/]{3}=))?$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "pattern": "^(?!\\.)(?!.*\\.\\.)([A-Za-z0-9_'+\\-\\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$"
+        },
+        "homepage": { "type": "string", "format": "uri" },
+        "id": { "type": "string", "format": "uuid" },
+        "role": { "type": "string", "enum": ["admin", "member"] },
+        "age": { "type": "integer", "minimum": 0, "maximum": 150 },
+        "tags": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        }
+      },
+      "required": ["email", "role"],
+      "additionalProperties": false
+    },
+    "valid": [
+      { "email": "ada@example.com", "role": "admin" },
+      {
+        "avatar": "QQ==",
+        "email": "ada@example.com",
+        "homepage": "https://example.com/ada",
+        "id": "not validated as a uuid in draft-07",
+        "role": "member",
+        "age": 36,
+        "tags": ["math", "engines"]
+      }
+    ],
+    "invalid": [
+      { "role": "admin" },
+      { "email": "ada@example.com", "role": "owner" },
+      { "email": "not an email", "role": "admin" },
+      { "email": "ada@example.com", "role": "admin", "homepage": "not a uri" },
+      { "email": "ada@example.com", "role": "admin", "age": 36.5 },
+      { "email": "ada@example.com", "role": "admin", "age": -1 },
+      { "email": "ada@example.com", "role": "admin", "tags": ["a", "a"] },
+      { "email": "ada@example.com", "role": "admin", "tags": [""] },
+      { "email": "ada@example.com", "role": "admin", "nickname": "ada" },
+      { "email": "ada@example.com", "role": "admin", "avatar": "QR==" }
+    ]
+  },
+  {
+    "description": "without $schema, formats only annotate (2020-12)",
+    "schema": { "type": "string", "format": "email" },
+    "valid": ["not an email"],
+    "invalid": [1]
+  },
+  {
+    "description": "draft-07 asserts the formats it defines",
+    "schema": { "$schema": "http://json-schema.org/draft-07/schema#", "format": "date-time" },
+    "valid": ["2026-09-30T21:44:30Z", 12],
+    "invalid": ["2026-09-30", "2026-02-30T00:00:00Z"]
+  },
+  {
+    "description": "draft-07 ignores formats it does not define",
+    "schema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "string",
+      "format": "uuid"
+    },
+    "valid": ["not a uuid"],
+    "invalid": [1]
+  },
+  {
+    "description": "draft-07 checks base64 content encoding",
+    "schema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "contentEncoding": "base64"
+    },
+    "valid": ["", "QQ==", "QUI=", "QUJD", 7],
+    "invalid": ["QR==", "QUJ=", "QQ", "QUJD===", "!!!!"]
+  },
+  {
+    "description": "draft-07 checks base64url content encoding (padded)",
+    "schema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "contentEncoding": "base64url"
+    },
+    "valid": ["", "-_8=", "QQ=="],
+    "invalid": ["+/8=", "QQ"]
+  },
+  {
+    "description": "draft-07 checks base32 and base16 content encodings",
+    "schema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "b32": { "contentEncoding": "base32" },
+        "b32hex": { "contentEncoding": "base32hex" },
+        "b16": { "contentEncoding": "base16" }
+      }
+    },
+    "valid": [{ "b32": "MFRGG===", "b32hex": "C5H66===", "b16": "0aFF" }, { "b32": "" }],
+    "invalid": [
+      { "b32": "MFRGH===" },
+      { "b32hex": "C5H67===" },
+      { "b16": "0aF" },
+      { "b32": "mfrgg===" }
+    ]
+  },
+  {
+    "description": "2020-12 does not check content encoding",
+    "schema": { "contentEncoding": "base64" },
+    "valid": ["!!!!"],
+    "invalid": []
+  },
+  {
+    "description": "draft-06 ignores if/then, which draft-07 introduced",
+    "schema": {
+      "$schema": "http://json-schema.org/draft-06/schema#",
+      "if": { "const": 1 },
+      "then": false
+    },
+    "valid": [1],
+    "invalid": []
+  },
+  {
+    "description": "draft-07 applies if/then",
+    "schema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "if": { "const": 1 },
+      "then": false
+    },
+    "valid": [2],
+    "invalid": [1]
+  },
+  {
+    "description": "draft-07 ignores prefixItems, which 2020-12 introduced",
+    "schema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "prefixItems": [{ "type": "string" }]
+    },
+    "valid": [[1]],
+    "invalid": []
+  },
+  {
+    "description": "2020-12 applies prefixItems",
+    "schema": { "prefixItems": [{ "type": "string" }] },
+    "valid": [["a", 1]],
+    "invalid": [[1]]
+  },
+  {
+    "description": "draft-07 ignores the siblings of $ref",
+    "schema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "definitions": { "name": { "type": "string" } },
+      "properties": { "name": { "$ref": "#/definitions/name", "maxLength": 1 } }
+    },
+    "valid": [{ "name": "Ada" }],
+    "invalid": [{ "name": 1 }]
+  },
+  {
+    "description": "2020-12 applies the siblings of $ref",
+    "schema": {
+      "$defs": { "name": { "type": "string" } },
+      "properties": { "name": { "$ref": "#/$defs/name", "maxLength": 1 } }
+    },
+    "valid": [{ "name": "A" }],
+    "invalid": [{ "name": "Ada" }, { "name": 1 }]
+  },
+  {
+    "description": "2020-12 unevaluatedProperties sees through allOf",
+    "schema": {
+      "allOf": [{ "properties": { "a": true } }],
+      "unevaluatedProperties": false
+    },
+    "valid": [{ "a": 1 }],
+    "invalid": [{ "a": 1, "b": 2 }]
+  },
+  {
+    "description": "property names that are JavaScript prototype members are ordinary keys",
+    "schema": {
+      "required": ["__proto__", "toString"],
+      "properties": { "__proto__": { "type": "number" } }
+    },
+    "valid": [{ "__proto__": 1, "toString": "x" }],
+    "invalid": [{}, { "toString": "x" }, { "__proto__": "x", "toString": "x" }]
+  },
+  {
+    "description": "string length counts code points",
+    "schema": { "maxLength": 2 },
+    "valid": ["💩💩"],
+    "invalid": ["abc"]
+  },
+  {
+    "description": "decimal multipleOf",
+    "schema": { "multipleOf": 0.01 },
+    "valid": [0.07, 19.99, 3],
+    "invalid": [0.001]
+  },
+  {
+    "description": "integers written with a fraction are integers",
+    "schema": { "type": "integer" },
+    "valid": [1, 1.0, -7],
+    "invalid": [1.5, "1"]
+  },
+  {
+    "description": "boolean schemas",
+    "schema": false,
+    "valid": [],
+    "invalid": [null, 1, {}]
+  },
+  {
+    "description": "a keyword with the wrong type",
+    "schema": { "type": 12 },
+    "invalidSchema": true
+  },
+  { "description": "a negative length", "schema": { "minLength": -1 }, "invalidSchema": true },
+  {
+    "description": "an invalid regular expression",
+    "schema": { "pattern": "(" },
+    "invalidSchema": true
+  },
+  {
+    "description": "a reference to a missing definition",
+    "schema": { "$ref": "#/$defs/missing" },
+    "invalidSchema": true
+  },
+  {
+    "description": "a reference to a remote schema",
+    "schema": { "$ref": "https://example.com/schemas/remote.json" },
+    "invalidSchema": true
+  },
+  {
+    "description": "an unknown dialect",
+    "schema": { "$schema": "https://example.com/custom-dialect" },
+    "invalidSchema": true
+  },
+  {
+    "description": "draft-07 subschema with the wrong type",
+    "schema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": { "a": { "type": "strin" } }
+    },
+    "invalidSchema": true
+  },
+  {
+    "description": "$dynamicRef is not supported by the browser runtime yet",
+    "schema": { "$dynamicAnchor": "node", "properties": { "next": { "$dynamicRef": "#node" } } },
+    "browserUnsupported": true
+  },
+  {
+    "description": "internationalized formats are not supported by the browser runtime yet",
+    "schema": { "$schema": "http://json-schema.org/draft-07/schema#", "format": "idn-hostname" },
+    "browserUnsupported": true
+  },
+  {
+    "description": "contentMediaType is not supported by the browser runtime yet",
+    "schema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "contentMediaType": "application/json"
+    },
+    "browserUnsupported": true
+  }
+]

@@ -17,6 +17,8 @@ pub use crate::model::public_api::types::{
 };
 pub use crate::model::transaction::{OpenTransactionId, TransactionId};
 
+use crate::model::json_schema::{self, JsonSchemaError};
+
 /// Validate JSON-bearing public values without changing their source text.
 ///
 /// This is shared by schema-default admission and every facade write path so a
@@ -35,13 +37,16 @@ pub fn validate_json_value(
             let Some(schema) = schema else {
                 return Ok(());
             };
-            let validator = jsonschema::validator_for(schema).map_err(|error| {
-                format!(
+            json_schema::validate(schema, &instance, source).map_err(|error| match error {
+                JsonSchemaError::Mismatch(error) => {
+                    format!("JSON schema validation failed for column `{path}`: {error}")
+                }
+                JsonSchemaError::InvalidSchema(error) => format!(
                     "JSON schema validation failed for column `{path}`: invalid declared schema: {error}"
-                )
-            })?;
-            validator.validate(&instance).map_err(|error| {
-                format!("JSON schema validation failed for column `{path}`: {error}")
+                ),
+                JsonSchemaError::Unavailable(error) => {
+                    format!("JSON schema validation unavailable for column `{path}`: {error}")
+                }
             })
         }
         (Value::Array(values), ColumnType::Array { element }) => {
@@ -80,9 +85,14 @@ pub fn validate_json_schemas(column_type: &ColumnType, path: &str) -> Result<(),
     match column_type {
         ColumnType::Json {
             schema: Some(schema),
-        } => jsonschema::validator_for(schema)
-            .map(|_| ())
-            .map_err(|error| format!("invalid JSON schema for column `{path}`: {error}")),
+        } => json_schema::check_schema(schema).map_err(|error| match error {
+            JsonSchemaError::InvalidSchema(error) | JsonSchemaError::Mismatch(error) => {
+                format!("invalid JSON schema for column `{path}`: {error}")
+            }
+            JsonSchemaError::Unavailable(error) => {
+                format!("JSON schema validation unavailable for column `{path}`: {error}")
+            }
+        }),
         ColumnType::Array { element } => validate_json_schemas(element, &format!("{path}[]")),
         ColumnType::Row { columns } => columns.columns.iter().try_for_each(|field| {
             validate_json_schemas(&field.column_type, &format!("{path}.{}", field.name_str()))
