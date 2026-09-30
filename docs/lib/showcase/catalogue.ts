@@ -46,11 +46,11 @@ export type HeroExample = {
   plannedMetrics?: string;
 };
 
-// Interpretations get the /5 estimate, so every time and rate they print
-// carries the page's "*" marker. Ratios need none: the divisor cancels out.
-const t = (seconds: number) => `${formatTime(seconds)}*`;
+// Interpretations are given the /5 estimate like every displayed time.
+// Ratios need none: the divisor cancels out.
+const t = (seconds: number) => formatTime(seconds);
 const rate = (count: number, seconds: number) =>
-  `${Math.round(count / seconds).toLocaleString("en-US")}*`;
+  Math.round(count / seconds).toLocaleString("en-US");
 const each = (count: number, seconds: number) => t(seconds / count);
 // A 60 Hz frame. Only used to phrase a result that is already below it.
 const frame = 1 / 60;

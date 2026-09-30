@@ -3,13 +3,14 @@ import type { ReactNode } from "react";
 // Static explainer diagrams for the homepage, drawn in the style of the Jazz
 // print material: square boxes with mono labels, thin wires with rounded
 // elbows and open arrowheads. Colour carries meaning throughout:
-//   blue  = local (on a device, instantly visible, mergeable)
-//   green = global (the cloud, authoritative, exclusive)
-//   blue/green dashed = shared by both
+//   blue       = local (on a device, instantly visible, mergeable)
+//   mint       = global (the cloud, authoritative, exclusive)
+//   periwinkle = in between (sync messages in flight, a second version)
+//   blue/mint dashed = shared by both
 // Everything draws with theme tokens (see `.home-diagram` in app/global.css),
 // so the diagrams follow light and dark mode.
 
-type Tone = "ink" | "blue" | "green" | "shared" | "muted";
+type Tone = "ink" | "blue" | "mint" | "periwinkle" | "shared" | "muted";
 type Point = [number, number];
 
 function Diagram({
@@ -30,7 +31,7 @@ function Diagram({
       xmlns="http://www.w3.org/2000/svg"
     >
       <defs>
-        {(["ink", "blue", "green", "muted"] as const).map((tone) => (
+        {(["ink", "blue", "mint", "periwinkle", "muted"] as const).map((tone) => (
           <marker
             key={tone}
             id={`dg-arrow-${tone}`}
@@ -96,10 +97,10 @@ function Wire({
 
 function Frame({ x, y, w, h, tone }: { x: number; y: number; w: number; h: number; tone: Tone }) {
   if (tone === "shared") {
-    // Green underneath, blue dashes on top: reads as alternating blue/green.
+    // Mint underneath, blue dashes on top: reads as alternating blue/mint.
     return (
       <g>
-        <rect x={x} y={y} width={w} height={h} rx={2} className="dg-box dg-stroke-green" />
+        <rect x={x} y={y} width={w} height={h} rx={2} className="dg-box dg-stroke-mint" />
         <rect x={x} y={y} width={w} height={h} rx={2} className="dg-box-dash dg-stroke-blue" />
       </g>
     );
@@ -342,7 +343,7 @@ export function ConsistencyDiagram() {
       <Label x={device} y={20} tone="blue" anchor="middle">
         device
       </Label>
-      <Label x={cloud} y={20} tone="green" anchor="middle">
+      <Label x={cloud} y={20} tone="mint" anchor="middle">
         cloud
       </Label>
       <line x1={device} x2={device} y1={30} y2={330} className="dg-region" />
@@ -361,9 +362,9 @@ export function ConsistencyDiagram() {
           [216, 96],
           [424, 150],
         ]}
-        tone="blue"
+        tone="periwinkle"
       />
-      <Label x={236} y={86} tone="blue">
+      <Label x={236} y={86} tone="periwinkle">
         sync + permission check
       </Label>
       <Box
@@ -371,7 +372,7 @@ export function ConsistencyDiagram() {
         y={136}
         w={200}
         h={74}
-        tone="green"
+        tone="mint"
         title="remote state"
         lines={["authorized", "stored durably"]}
       />
@@ -380,9 +381,9 @@ export function ConsistencyDiagram() {
           [424, 196],
           [216, 250],
         ]}
-        tone="green"
+        tone="periwinkle"
       />
-      <Label x={300} y={252} tone="green">
+      <Label x={300} y={252} tone="periwinkle">
         fate confirmation
       </Label>
       <Box
@@ -413,7 +414,7 @@ export function PermissionsDiagram() {
       viewBox="0 0 640 224"
       label="A tasks table with title, done and createdBy columns. The read policy, createdBy equals you, and your query, done equals false, run as one combined query. Only the two matching tasks reach you."
     >
-      <Label x={16} y={28} tone="green">
+      <Label x={16} y={28} tone="mint">
         tasks · all rows
       </Label>
       <Grid
@@ -422,10 +423,10 @@ export function PermissionsDiagram() {
         cols={[
           { label: "title", w: 110 },
           { label: "done", w: 52, tone: "blue" },
-          { label: "$createdBy", w: 88, tone: "green" },
+          { label: "$createdBy", w: 88, tone: "mint" },
         ]}
         rows={tasks}
-        tone="green"
+        tone="mint"
         cellTone={(r) => (matches(tasks[r]) ? "ink" : "muted")}
       />
       <Wire
@@ -442,7 +443,7 @@ export function PermissionsDiagram() {
         title="combined query"
         lines={[
           { text: "read policy", tone: "muted" },
-          { text: "$createdBy = you", tone: "green" },
+          { text: "$createdBy = you", tone: "mint" },
           { text: "your query", tone: "muted" },
           { text: "done = false", tone: "blue" },
         ]}
@@ -496,13 +497,13 @@ export function HistoryDiagram() {
       viewBox="0 0 640 250"
       label="One row's history: edits on the main branch, a draft branch edited by an agent, and a merge back into main."
     >
-      <Label x={16} y={mainY + 5} tone="green">
+      <Label x={16} y={mainY + 5} tone="mint">
         main
       </Label>
       <Label x={16} y={draftY + 5} tone="blue">
         draft
       </Label>
-      <line x1={80} x2={624} y1={mainY} y2={mainY} className="dg-lane dg-stroke-green" />
+      <line x1={80} x2={624} y1={mainY} y2={mainY} className="dg-lane dg-stroke-mint" />
       <path
         d={rounded(
           [
@@ -517,19 +518,12 @@ export function HistoryDiagram() {
         )}
         className="dg-lane dg-stroke-blue"
       />
-      {commit(110, mainY, "green", "ana")}
-      {commit(210, mainY, "green", "ana")}
+      {commit(110, mainY, "mint", "ana")}
+      {commit(210, mainY, "mint", "ana")}
       {commit(310, draftY, "blue", "agent", true)}
       {commit(390, draftY, "blue", "agent", true)}
-      {commit(410, mainY, "green", "sam")}
-      <rect
-        x={513}
-        y={mainY - 7}
-        width={14}
-        height={14}
-        rx={2}
-        className="dg-box dg-stroke-green"
-      />
+      {commit(410, mainY, "mint", "sam")}
+      <rect x={513} y={mainY - 7} width={14} height={14} rx={2} className="dg-box dg-stroke-mint" />
       <rect
         x={513}
         y={mainY - 7}
@@ -556,14 +550,22 @@ export function SchemaDiagram() {
     ["ship v2", "", "doing", "v2"],
     ["fix bug", "", "done", "v2"],
   ];
-  const tone = (version: string): Tone => (version === "v1" ? "blue" : "green");
+  const tone = (version: string): Tone => (version === "v1" ? "blue" : "periwinkle");
   return (
     <Diagram
       viewBox="0 0 640 336"
       label="A raw table holds the superset of columns from every schema version: title, done from version 1 and status from version 2. Rows written by each version fill only their own columns. App v1 reads and writes it through a lens that maps status to done; app v2 through a lens that maps done to status."
     >
       <Box x={16} y={16} w={200} h={56} tone="blue" title="app v1" lines={["title · done"]} />
-      <Box x={424} y={16} w={200} h={56} tone="green" title="app v2" lines={["title · status"]} />
+      <Box
+        x={424}
+        y={16}
+        w={200}
+        h={56}
+        tone="periwinkle"
+        title="app v2"
+        lines={["title · status"]}
+      />
       <Wire
         points={[
           [116, 72],
@@ -577,11 +579,19 @@ export function SchemaDiagram() {
           [524, 72],
           [524, 108],
         ]}
-        tone="green"
+        tone="periwinkle"
         start
       />
       <Box x={16} y={108} w={200} h={56} tone="blue" title="lens v1" lines={["status → done"]} />
-      <Box x={424} y={108} w={200} h={56} tone="green" title="lens v2" lines={["done → status"]} />
+      <Box
+        x={424}
+        y={108}
+        w={200}
+        h={56}
+        tone="periwinkle"
+        title="lens v2"
+        lines={["done → status"]}
+      />
       <Wire
         points={[
           [116, 164],
@@ -597,7 +607,7 @@ export function SchemaDiagram() {
           [524, 272],
           [480, 272],
         ]}
-        tone="green"
+        tone="periwinkle"
         start
       />
       <Label x={160} y={204} tone="muted">
@@ -609,7 +619,7 @@ export function SchemaDiagram() {
         cols={[
           { label: "title", w: 104 },
           { label: "done", w: 68, tone: "blue" },
-          { label: "status", w: 76, tone: "green" },
+          { label: "status", w: 76, tone: "periwinkle" },
           { label: "written", w: 72 },
         ]}
         rows={rows.map((row) => row.map((cell) => cell || "·"))}
