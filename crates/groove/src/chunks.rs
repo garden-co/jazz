@@ -1196,6 +1196,7 @@ impl Future for CoalescedChunkGet {
                             "coalesced chunk request remains registered while a consumer exists",
                         );
                         entry.result = Some(result.clone());
+                        tracing::debug!("DIAG3816 chunk load finished ok={}", result.is_ok());
                         wake = std::mem::take(
                             &mut *entry.wake.waiters.lock().expect("chunk waiters poisoned"),
                         )
@@ -1237,6 +1238,7 @@ impl ActiveChunkRequest {
         std::future::poll_fn(|context| {
             let mut state = activity.borrow_mut();
             if state.reclaiming {
+                tracing::debug!("DIAG3816 chunk request waits for reclamation");
                 if !state
                     .waiters
                     .iter()

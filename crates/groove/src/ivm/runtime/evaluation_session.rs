@@ -626,6 +626,7 @@ impl<'a> EvaluationRequests<'a> {
             }
             EvaluationRequestKey::Chunk(request) => {
                 let request = request.clone();
+                tracing::debug!("DIAG3816 evaluation registers a chunk request");
                 match chunks {
                     Some(chunks) => {
                         let future = chunks.get_tracked(request.clone());
@@ -673,6 +674,11 @@ impl<'a> EvaluationRequests<'a> {
             }
         }
         let count = completed.len();
+        tracing::debug!(
+            "DIAG3816 evaluation requests polled pending={} completed={}",
+            self.pending.len(),
+            count
+        );
         for (key, result) in completed {
             self.pending.remove(&key);
             self.ready.insert(key, result);

@@ -9,10 +9,10 @@ autotests = false
 [features]
 default = []
 test = []
-cold-settle-attribution = ["dep:tracing"]
+cold-settle-attribution = []
 
 [dependencies]
-tracing = { version = "0.1", optional = true }
+tracing = { version = "0.1" }
 internment = { version = "0.8.6", features = ["serde"] }
 bytes = "1"
 blake3 = "1"

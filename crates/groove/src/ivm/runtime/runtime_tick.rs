@@ -1836,6 +1836,10 @@ impl<'a> EvaluationSession<'a> {
                             }
                             if blocked {
                                 let requests = self.evaluation_inputs.take_missing();
+                                tracing::debug!(
+                                    "DIAG3816 hydration root blocked on {} requests",
+                                    requests.len()
+                                );
                                 if requests.is_empty() {
                                     return Poll::Ready(Err(IvmRuntimeError::EvaluationBlocked));
                                 }
@@ -2283,6 +2287,13 @@ impl IvmRuntime {
         );
         drop(changed_tables);
         drop(changed_bindings);
+        tracing::debug!(
+            "DIAG3816 tick_detaching_cold enter chunk_only={} tables={} bindings={} affected={}",
+            detach_on == DetachOn::ChunkRequest,
+            table_deltas.len(),
+            binding_deltas.len(),
+            affected_nodes.len()
+        );
         // Hydration evaluates an isolated snapshot and installs that snapshot
         // atomically. Do not begin a resident tick which overlaps its graph
         // slice: beginning mutates durable evaluator state and input
@@ -2315,6 +2326,11 @@ impl IvmRuntime {
                         .get(id)
                         .is_some_and(PendingEvaluation::has_resident_continuation)
                 }) {
+                    tracing::debug!(
+                        "DIAG3816 admission waits on hydrations {:?} (order {:?})",
+                        remaining,
+                        pending.order
+                    );
                     return Poll::Pending;
                 }
                 // The direct write owns CPU-only continuations needed to
@@ -2382,6 +2398,10 @@ impl IvmRuntime {
         .await;
         let metrics = evaluation.metrics.clone();
         let durable_writes = Rc::clone(&evaluation.durable_writes);
+        tracing::debug!(
+            "DIAG3816 tick_detaching_cold exit detached={}",
+            matches!(progress, Poll::Pending)
+        );
         match progress {
             Poll::Ready(Ok(())) => {}
             Poll::Ready(Err(failure)) => return Err(failure.into_error()),
@@ -2507,6 +2527,12 @@ impl IvmRuntime {
         if state.order.is_empty() {
             return self.finish_pending_incremental_poll(&slot, state, Poll::Ready(Ok(())));
         }
+        tracing::debug!(
+            "DIAG3816 poll_incremental enter resident_only={} selected={:?} order={:?}",
+            resident_only,
+            selected_evaluations,
+            state.order
+        );
         let mut retained_order = VecDeque::new();
         while let Some(evaluation_id) = state.order.pop_front() {
             let mut evaluation = state
@@ -2540,6 +2566,17 @@ impl IvmRuntime {
                         error: Arc::new(error),
                     }),
             };
+            tracing::debug!(
+                "DIAG3816 poll_incremental polled id={} hydration={} resident={} result={}",
+                evaluation_id,
+                matches!(evaluation, PendingEvaluation::SubscriptionHydration(_)),
+                evaluation.has_resident_continuation(),
+                match &progress {
+                    Poll::Ready(Ok(())) => "ready",
+                    Poll::Ready(Err(_)) => "error",
+                    Poll::Pending => "pending",
+                }
+            );
             // A hydration session owns a private snapshot of all reachable
             // state. Its completed interior nodes are not safe handoff points:
             // a later incremental evaluation would run against the old live
@@ -2866,7 +2903,14 @@ impl IvmRuntime {
         if self.persistence_indeterminate.get() {
             return Err(IvmRuntimeError::PersistenceOutcomeIndeterminate);
         }
+        tracing::debug!(
+            "DIAG3816 tick_with_params enter tables={} bindings={} pending={}",
+            table_deltas.len(),
+            binding_deltas.len(),
+            self.pending_incremental.is_pending()
+        );
         self.drive_pending_incremental().await?;
+        tracing::debug!("DIAG3816 tick_with_params drained pending");
         let mut evaluation = self
             .begin_tick_with_params(
                 table_deltas,

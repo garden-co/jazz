@@ -66,6 +66,7 @@ describe("browser subscriptions while the backend rewrites a row", () => {
           appId: info.appId,
           serverUrl: info.serverUrl,
           secret: generateAuthSecret(),
+          logLevel: "trace",
           driver: {
             type: "persistent",
             dbName: uniqueDbName("large-value-rewrite"),

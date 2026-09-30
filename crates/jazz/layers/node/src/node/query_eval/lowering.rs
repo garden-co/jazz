@@ -1542,6 +1542,7 @@ where
                 app_row_public_fields,
             )
             .await?;
+        tracing::debug!("DIAG3816 one-shot hydration begins");
         let mut owner = HydrationSubscription {
             database: &mut self.database,
             subscription: Some(subscription),
@@ -1564,6 +1565,7 @@ where
             subscription.poll_next_event(cx).map(Ok)
         })
         .await;
+        tracing::debug!("DIAG3816 one-shot hydration ends ok={}", result.is_ok());
         let release = owner.release();
         let snapshot = match result? {
             GrooveSubscriptionEvent::Update(update) => update.deltas,

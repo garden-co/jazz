@@ -338,6 +338,10 @@ impl Database {
         &mut self,
         progress_waker: Option<&std::task::Waker>,
     ) -> Result<(), Error> {
+        tracing::debug!(
+            "DIAG3816 drive_ready_progress with_waker={}",
+            progress_waker.is_some()
+        );
         let progress = match progress_waker {
             Some(progress_waker) => {
                 std::future::poll_fn(|_| {

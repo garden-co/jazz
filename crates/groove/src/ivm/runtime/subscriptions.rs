@@ -3495,6 +3495,10 @@ impl IvmRuntime {
         &mut self,
         progress_waker: Option<&Waker>,
     ) -> Result<(), IvmRuntimeError> {
+        tracing::debug!(
+            "DIAG3816 subscribe polls pending work with_waker={}",
+            progress_waker.is_some()
+        );
         let mut cx = Context::from_waker(progress_waker.unwrap_or(Waker::noop()));
         match self.poll_pending_incremental(&mut cx) {
             Poll::Ready(result) => result,

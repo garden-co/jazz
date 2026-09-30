@@ -1419,6 +1419,7 @@ where
         &mut self,
         mut updates: Vec<ViewUpdateParts>,
     ) -> Result<(), Error> {
+        tracing::debug!("DIAG3816 receiver applies {} view updates", updates.len());
         let mut prior_snapshots = BTreeMap::new();
         let mut snapshots = Vec::with_capacity(updates.len());
         for update in &mut updates {

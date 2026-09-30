@@ -3280,6 +3280,13 @@ where
 
     /// Service every accepted subscriber connection once.
     pub async fn tick(&self) -> Result<DbTickStats, Error> {
+        tracing::debug!("DIAG3816 db tick begins");
+        let result = self.tick_inner_diag3816().await;
+        tracing::debug!("DIAG3816 db tick ends ok={}", result.is_ok());
+        result
+    }
+
+    async fn tick_inner_diag3816(&self) -> Result<DbTickStats, Error> {
         // Storage futures wake on arbitrary threads, but subscriber links remain
         // thread-affine. Consume the cross-thread marker only at this owner
         // boundary, before any connection tick can observe stale readiness.

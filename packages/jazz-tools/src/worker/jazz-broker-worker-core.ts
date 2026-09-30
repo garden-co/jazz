@@ -1083,6 +1083,27 @@ async function initialize(context: RuntimeContext): Promise<void> {
       handleStorageInvalidation(context),
     );
     workerGlobal.__JAZZ_WASM_LOG_LEVEL = options.logLevel ?? DEFAULT_WASM_LOG_LEVEL;
+    // DIAG3816 (diagnostic branch only): forward the worker's diagnostic
+    // console lines to its tabs, which print relay traces at logLevel "trace".
+    if (options.logLevel === "trace") {
+      diag3816Context = context;
+      const diagGlobal = globalThis as { __diag3816Installed?: boolean };
+      if (!diagGlobal.__diag3816Installed) {
+        diagGlobal.__diag3816Installed = true;
+        for (const method of ["log", "debug", "info", "warn", "error"] as const) {
+          const original = console[method].bind(console);
+          console[method] = (...args: unknown[]) => {
+            original(...args);
+            const text = args.map((arg) => String(arg)).join(" ");
+            if (!text.includes("DIAG3816") || !diag3816Context) return;
+            broadcast(diag3816Context, {
+              type: "relay-trace",
+              entries: [{ event: "diag", message: text, hop: "worker" } as never],
+            });
+          };
+        }
+      }
+    }
     const wasmModule = await loadWorkerWasmModule(options.runtimeSources);
     context.disposeTelemetry = installWasmTelemetry({
       wasmModule,
@@ -1931,6 +1952,8 @@ function detachPeerRuntime(peer: TabPeer): void {
   peer.subscriber = null;
   peer.pendingFrames.length = 0;
 }
+
+let diag3816Context: RuntimeContext | undefined;
 
 function broadcast(context: RuntimeContext, event: BrowserFollowerPortEvent): void {
   for (const peer of context.peers.values()) post(peer.port, event);
