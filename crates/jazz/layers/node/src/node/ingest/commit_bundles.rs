@@ -739,376 +739,381 @@ where
         .await
     }
 
-    #[tracing::instrument(target = "jazz::profile", level = "debug", skip_all, name = "cold.phase.ingest")]
     pub(super) async fn ingest_reset_view_bundle_refs_in_bulk(
         &mut self,
         bundles: &[VersionBundleRef<'_>],
         preflight_persisted_tx_ids: Option<&BTreeSet<TxId>>,
     ) -> Result<BTreeSet<TxId>, Error> {
-        let mut bundles_by_tx = BTreeMap::<TxId, Vec<VersionBundleRef<'_>>>::new();
-        for bundle in bundles {
-            // This helper is also called directly by reset fast paths; do not
-            // rely on their outer ViewUpdate preflight for durable admission.
-            self.admit_contribution_merge_for_storage(bundle.tx)?;
-            validate_received_view_bundle_global_time_durability(
-                bundle.global_time,
-                bundle.durability,
-            )?;
-            bundles_by_tx
-                .entry(bundle.tx.tx_id)
-                .or_default()
-                .push(*bundle);
-        }
-        let mut eligible = Vec::new();
-        let mut loaded_tx_ids = BTreeSet::new();
-        for (tx_id, tx_bundles) in bundles_by_tx {
-            let first = tx_bundles[0];
-            let view_scoped = first.scope == crate::protocol::VersionBundleScope::ViewScoped;
-            // Each view-scoped bundle declares only its own redacted fragment
-            // cardinality. Compare the immutable transaction identity here and
-            // synthesize the receiver-local authorized cardinality only after
-            // exact version deduplication below.
-            let mut first_tx_identity = transaction_without_permission_subject(first.tx);
-            first_tx_identity.n_total_writes = 0;
-            if tx_bundles.iter().any(|bundle| {
-                let mut tx_identity = transaction_without_permission_subject(bundle.tx);
-                tx_identity.n_total_writes = 0;
-                tx_identity != first_tx_identity
-                    || (bundle.scope == crate::protocol::VersionBundleScope::ViewScoped)
-                        != view_scoped
-                    || bundle.fate != first.fate
-                    || bundle.global_time != first.global_time
-                    || bundle.durability != first.durability
-            }) {
-                continue;
+        tracing::Instrument::instrument(
+            async move {
+            let mut bundles_by_tx = BTreeMap::<TxId, Vec<VersionBundleRef<'_>>>::new();
+            for bundle in bundles {
+                // This helper is also called directly by reset fast paths; do not
+                // rely on their outer ViewUpdate preflight for durable admission.
+                self.admit_contribution_merge_for_storage(bundle.tx)?;
+                validate_received_view_bundle_global_time_durability(
+                    bundle.global_time,
+                    bundle.durability,
+                )?;
+                bundles_by_tx
+                    .entry(bundle.tx.tx_id)
+                    .or_default()
+                    .push(*bundle);
             }
-            if *first.fate != Fate::Accepted {
-                continue;
-            }
-            if first.global_time.is_none() {
-                continue;
-            }
-            if first.tx.kind != TxKind::Mergeable && first.tx.kind != TxKind::Exclusive {
-                continue;
-            }
-            let mut unique_versions = BTreeMap::<
-                (String, BranchKey, RowUuid, crate::ids::SchemaVersionId, bool),
-                &VersionRecord,
-            >::new();
-            for bundle in &tx_bundles {
-                for version in bundle.versions {
-                    let key = (
-                        version.table().to_owned(),
-                        version.branch_key().clone(),
-                        version.row_uuid(),
-                        version.schema_version(),
-                        version.deletion().is_some(),
-                    );
-                    match unique_versions.get(&key) {
-                        Some(existing) if *existing != version => {
-                            return Err(Error::ConflictingCommitUnit(tx_id));
-                        }
-                        Some(_) => {}
-                        None => {
-                            unique_versions.insert(key, version);
-                        }
-                    }
+            let mut eligible = Vec::new();
+            let mut loaded_tx_ids = BTreeSet::new();
+            for (tx_id, tx_bundles) in bundles_by_tx {
+                let first = tx_bundles[0];
+                let view_scoped = first.scope == crate::protocol::VersionBundleScope::ViewScoped;
+                // Each view-scoped bundle declares only its own redacted fragment
+                // cardinality. Compare the immutable transaction identity here and
+                // synthesize the receiver-local authorized cardinality only after
+                // exact version deduplication below.
+                let mut first_tx_identity = transaction_without_permission_subject(first.tx);
+                first_tx_identity.n_total_writes = 0;
+                if tx_bundles.iter().any(|bundle| {
+                    let mut tx_identity = transaction_without_permission_subject(bundle.tx);
+                    tx_identity.n_total_writes = 0;
+                    tx_identity != first_tx_identity
+                        || (bundle.scope == crate::protocol::VersionBundleScope::ViewScoped)
+                            != view_scoped
+                        || bundle.fate != first.fate
+                        || bundle.global_time != first.global_time
+                        || bundle.durability != first.durability
+                }) {
+                    continue;
                 }
-            }
-            let version_count = unique_versions.len();
-            if first.tx.kind == TxKind::Exclusive
-                && !view_scoped
-                && usize::try_from(first.tx.n_total_writes).ok() != Some(version_count)
-            {
-                continue;
-            }
-            if preflight_persisted_tx_ids.is_some_and(|known| known.contains(&tx_id))
-                || preflight_persisted_tx_ids.is_none()
-                    && self.query_transaction(tx_id).await?.is_some()
-            {
-                continue;
-            }
-            let mut missing_refs = false;
-            for bundle in &tx_bundles {
-                if !self.missing_parent_refs(bundle.versions).await?.is_empty() {
-                    missing_refs = true;
-                    break;
+                if *first.fate != Fate::Accepted {
+                    continue;
                 }
-            }
-            if missing_refs {
-                continue;
-            }
-            if loaded_tx_ids.insert(tx_id) {
-                let mut local_tx = transaction_without_permission_subject(first.tx);
-                if view_scoped {
-                    local_tx.n_total_writes = version_count
-                        .try_into()
-                        .map_err(|_| Error::InvalidStoredValue("view payload is too large"))?;
+                if first.global_time.is_none() {
+                    continue;
                 }
-                eligible.push((tx_bundles, local_tx, view_scoped));
-            }
-        }
-        if eligible.is_empty() {
-            return Ok(loaded_tx_ids);
-        }
-        let eligible_versions = eligible
-            .iter()
-            .flat_map(|(tx_bundles, _, _)| {
-                tx_bundles.iter().flat_map(|bundle| bundle.versions)
-            })
-            .collect::<Vec<_>>();
-        self.prepare_authored_schema_variants_for_commit(&eligible_versions).await?;
-
-        let mut complete_parents = Vec::new();
-        for (tx_bundles, tx, _) in &eligible {
-            let versions = tx_bundles
-                .iter()
-                .flat_map(|bundle| bundle.versions.iter())
-                .collect::<Vec<_>>();
-            if let Some(versions) = self.complete_parent_versions(tx, &versions).await? {
-                complete_parents.push((tx.tx_id, versions));
-            }
-        }
-        let complete_parent_tx_ids = complete_parents
-            .iter()
-            .map(|(tx_id, _)| *tx_id)
-            .collect::<BTreeSet<_>>();
-
-        let mut batch = self.database.open_batch();
-        self.preflight_complete_parent_batch(&mut batch, &complete_parents)
-            .await?;
-        self.sync_metrics.receiver_bulk_ingest_commits += 1;
-        self.sync_metrics.receiver_bulk_bundle_ingests += eligible.len() as u64;
-        let version_count = eligible
-            .iter()
-            .flat_map(|(tx_bundles, _, _)| tx_bundles)
-            .map(|bundle| bundle.versions.len())
-            .sum::<usize>();
-        batch.reserve(eligible.len() + version_count.saturating_mul(2));
-        let mut current_updates = BTreeMap::<
-            (String, BranchKey, RowUuid, VersionLayer),
-            (VersionRow, GlobalTime),
-        >::new();
-        let mut content_versions = Vec::new();
-        let mut content_rows =
-            BTreeSet::<(PhysicalTableId, String, BranchKey, RowUuid)>::new();
-        let mut applied_global_times = Vec::with_capacity(eligible.len());
-
-        for (tx_bundles, local_tx, view_scoped) in eligible {
-            let first = tx_bundles[0];
-            let tx = &local_tx;
-            // A reset is a clock observation just like incremental ingestion.
-            // Otherwise the next local write can sort before the snapshot it
-            // just read, including a synchronously reserved binding commit.
-            self.merge_tx_time(tx.tx_id.time);
-            let tx_node_alias = self.ensure_node_alias(tx.tx_id.node).await?;
-            let global_time = first.global_time.expect("checked above");
-            applied_global_times.push(global_time);
-            let contribution_merge = self.contribution_merge_storage_value(
-                tx.contribution_merge.as_ref(),
-            )?;
-            batch.insert(
-                "jazz_transactions",
-                // A reset may bulk-load only the view-authorized rows of an
-                // exclusive transaction. Preserve that scope marker even when
-                // the redacted write count equals this fragment's length, so a
-                // later sibling view can extend the same local projection.
-                transaction_values_with_cardinality_scope(
-                    tx_node_alias,
-                    tx,
-                    (*first.fate).clone(),
-                    first.global_time,
-                    first.durability,
-                    view_scoped,
-                    contribution_merge,
-                )?,
-            );
-
-            let mut unique_versions = BTreeMap::<
-                (String, BranchKey, RowUuid, crate::ids::SchemaVersionId, bool),
-                &VersionRecord,
-            >::new();
-            for bundle in &tx_bundles {
-                for version in bundle.versions {
-                    unique_versions
-                        .entry((
+                if first.tx.kind != TxKind::Mergeable && first.tx.kind != TxKind::Exclusive {
+                    continue;
+                }
+                let mut unique_versions = BTreeMap::<
+                    (String, BranchKey, RowUuid, crate::ids::SchemaVersionId, bool),
+                    &VersionRecord,
+                >::new();
+                for bundle in &tx_bundles {
+                    for version in bundle.versions {
+                        let key = (
                             version.table().to_owned(),
                             version.branch_key().clone(),
                             version.row_uuid(),
                             version.schema_version(),
                             version.deletion().is_some(),
-                        ))
-                        .or_insert(version);
+                        );
+                        match unique_versions.get(&key) {
+                            Some(existing) if *existing != version => {
+                                return Err(Error::ConflictingCommitUnit(tx_id));
+                            }
+                            Some(_) => {}
+                            None => {
+                                unique_versions.insert(key, version);
+                            }
+                        }
+                    }
+                }
+                let version_count = unique_versions.len();
+                if first.tx.kind == TxKind::Exclusive
+                    && !view_scoped
+                    && usize::try_from(first.tx.n_total_writes).ok() != Some(version_count)
+                {
+                    continue;
+                }
+                if preflight_persisted_tx_ids.is_some_and(|known| known.contains(&tx_id))
+                    || preflight_persisted_tx_ids.is_none()
+                        && self.query_transaction(tx_id).await?.is_some()
+                {
+                    continue;
+                }
+                let mut missing_refs = false;
+                for bundle in &tx_bundles {
+                    if !self.missing_parent_refs(bundle.versions).await?.is_empty() {
+                        missing_refs = true;
+                        break;
+                    }
+                }
+                if missing_refs {
+                    continue;
+                }
+                if loaded_tx_ids.insert(tx_id) {
+                    let mut local_tx = transaction_without_permission_subject(first.tx);
+                    if view_scoped {
+                        local_tx.n_total_writes = version_count
+                            .try_into()
+                            .map_err(|_| Error::InvalidStoredValue("view payload is too large"))?;
+                    }
+                    eligible.push((tx_bundles, local_tx, view_scoped));
                 }
             }
-            let mut versions = unique_versions.into_values().collect::<Vec<_>>();
-            versions.sort();
-            for version in versions {
-                let author_schema = version.schema_version();
-                self.table_in_schema_ref(version.table(), author_schema)?;
-                let schema_version_alias = self.ensure_schema_version_alias(author_schema).await?;
-                let source_table_schema = self.table_in_schema_ref(version.table(), author_schema)?;
-                let authored_column_ids = self.authored_column_ids_for_names(
-                    author_schema,
-                    version.table(),
-                    version.authored_columns(),
+            if eligible.is_empty() {
+                return Ok(loaded_tx_ids);
+            }
+            let eligible_versions = eligible
+                .iter()
+                .flat_map(|(tx_bundles, _, _)| {
+                    tx_bundles.iter().flat_map(|bundle| bundle.versions)
+                })
+                .collect::<Vec<_>>();
+            self.prepare_authored_schema_variants_for_commit(&eligible_versions).await?;
+
+            let mut complete_parents = Vec::new();
+            for (tx_bundles, tx, _) in &eligible {
+                let versions = tx_bundles
+                    .iter()
+                    .flat_map(|bundle| bundle.versions.iter())
+                    .collect::<Vec<_>>();
+                if let Some(versions) = self.complete_parent_versions(tx, &versions).await? {
+                    complete_parents.push((tx.tx_id, versions));
+                }
+            }
+            let complete_parent_tx_ids = complete_parents
+                .iter()
+                .map(|(tx_id, _)| *tx_id)
+                .collect::<BTreeSet<_>>();
+
+            let mut batch = self.database.open_batch();
+            self.preflight_complete_parent_batch(&mut batch, &complete_parents)
+                .await?;
+            self.sync_metrics.receiver_bulk_ingest_commits += 1;
+            self.sync_metrics.receiver_bulk_bundle_ingests += eligible.len() as u64;
+            let version_count = eligible
+                .iter()
+                .flat_map(|(tx_bundles, _, _)| tx_bundles)
+                .map(|bundle| bundle.versions.len())
+                .sum::<usize>();
+            batch.reserve(eligible.len() + version_count.saturating_mul(2));
+            let mut current_updates = BTreeMap::<
+                (String, BranchKey, RowUuid, VersionLayer),
+                (VersionRow, GlobalTime),
+            >::new();
+            let mut content_versions = Vec::new();
+            let mut content_rows =
+                BTreeSet::<(PhysicalTableId, String, BranchKey, RowUuid)>::new();
+            let mut applied_global_times = Vec::with_capacity(eligible.len());
+
+            for (tx_bundles, local_tx, view_scoped) in eligible {
+                let first = tx_bundles[0];
+                let tx = &local_tx;
+                // A reset is a clock observation just like incremental ingestion.
+                // Otherwise the next local write can sort before the snapshot it
+                // just read, including a synchronously reserved binding commit.
+                self.merge_tx_time(tx.tx_id.time);
+                let tx_node_alias = self.ensure_node_alias(tx.tx_id.node).await?;
+                let global_time = first.global_time.expect("checked above");
+                applied_global_times.push(global_time);
+                let contribution_merge = self.contribution_merge_storage_value(
+                    tx.contribution_merge.as_ref(),
                 )?;
-                let stored = VersionRow::from_wire_with_schema_version(
-                    source_table_schema,
-                    version,
-                    authored_column_ids,
-                    tx_node_alias,
-                    schema_version_alias,
-                    tx.tx_id.time,
-                    (author_schema != self.catalogue.local_schema_version_id)
-                        .then_some(author_schema),
-                )?;
-                let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
-                batch.insert_raw(
-                    history_table.as_ref(),
-                    self.version_storage_primary_key(&stored)?,
-                    groove_record,
+                batch.insert(
+                    "jazz_transactions",
+                    // A reset may bulk-load only the view-authorized rows of an
+                    // exclusive transaction. Preserve that scope marker even when
+                    // the redacted write count equals this fragment's length, so a
+                    // later sibling view can extend the same local projection.
+                    transaction_values_with_cardinality_scope(
+                        tx_node_alias,
+                        tx,
+                        (*first.fate).clone(),
+                        first.global_time,
+                        first.durability,
+                        view_scoped,
+                        contribution_merge,
+                    )?,
                 );
-                if stored.layer() == VersionLayer::Content {
-                    content_versions.push(stored.clone());
-                    content_rows.insert((
-                        self.physical_table_id_for_version(&stored)?,
+
+                let mut unique_versions = BTreeMap::<
+                    (String, BranchKey, RowUuid, crate::ids::SchemaVersionId, bool),
+                    &VersionRecord,
+                >::new();
+                for bundle in &tx_bundles {
+                    for version in bundle.versions {
+                        unique_versions
+                            .entry((
+                                version.table().to_owned(),
+                                version.branch_key().clone(),
+                                version.row_uuid(),
+                                version.schema_version(),
+                                version.deletion().is_some(),
+                            ))
+                            .or_insert(version);
+                    }
+                }
+                let mut versions = unique_versions.into_values().collect::<Vec<_>>();
+                versions.sort();
+                for version in versions {
+                    let author_schema = version.schema_version();
+                    self.table_in_schema_ref(version.table(), author_schema)?;
+                    let schema_version_alias = self.ensure_schema_version_alias(author_schema).await?;
+                    let source_table_schema = self.table_in_schema_ref(version.table(), author_schema)?;
+                    let authored_column_ids = self.authored_column_ids_for_names(
+                        author_schema,
+                        version.table(),
+                        version.authored_columns(),
+                    )?;
+                    let stored = VersionRow::from_wire_with_schema_version(
+                        source_table_schema,
+                        version,
+                        authored_column_ids,
+                        tx_node_alias,
+                        schema_version_alias,
+                        tx.tx_id.time,
+                        (author_schema != self.catalogue.local_schema_version_id)
+                            .then_some(author_schema),
+                    )?;
+                    let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
+                    batch.insert_raw(
+                        history_table.as_ref(),
+                        self.version_storage_primary_key(&stored)?,
+                        groove_record,
+                    );
+                    if stored.layer() == VersionLayer::Content {
+                        content_versions.push(stored.clone());
+                        content_rows.insert((
+                            self.physical_table_id_for_version(&stored)?,
+                            stored.table().to_owned(),
+                            stored.branch_key().clone(),
+                            stored.row_uuid(),
+                        ));
+                    }
+
+                    let key = (
                         stored.table().to_owned(),
                         stored.branch_key().clone(),
                         stored.row_uuid(),
-                    ));
-                }
-
-                let key = (
-                    stored.table().to_owned(),
-                    stored.branch_key().clone(),
-                    stored.row_uuid(),
-                    stored.layer(),
-                );
-                let existing_winner = current_updates.get(&key).map(|(previous, _)| {
-                    (
-                        previous,
-                        self.version_tx_id(previous).expect("valid version tx id"),
-                        previous.tx_time(),
-                    )
-                });
-                if version_wins_over_open_winner(&stored, tx.tx_id, tx.tx_id.time, existing_winner)
-                {
-                    current_updates.insert(key, (stored, global_time));
-                }
-            }
-        }
-
-        // A first snapshot belongs to one subscription, not to an empty
-        // database. Another subscription may already have supplied a newer
-        // accepted version. Keep history ingestion complete without rewinding
-        // the node-wide current winner. Empty-table probes preserve the cold
-        // load path: it does not need one resident lookup per incoming row.
-        let mut resident_tables = BTreeMap::new();
-        let mut winning_updates = BTreeMap::new();
-        for (key, (stored, global_time)) in current_updates {
-            let schema = self.schema_version_for_alias(stored.schema_version_alias())
-                .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
-            let table = self.physical_current_table_for_schema(
-                schema, stored.table(), stored.layer(), PhysicalCurrentClass::Global,
-            )?;
-            let has_resident_rows = if let Some(present) = resident_tables.get(&table) {
-                *present
-            } else {
-                let present = self.database.table_has_stored_rows(&table).await?;
-                resident_tables.insert(table, present);
-                present
-            };
-            if has_resident_rows {
-                let previous = self.query_global_layer_winner_in_schema_and_branch(
-                    schema, stored.table(), stored.branch_key(), stored.row_uuid(), stored.layer(),
-                ).await?;
-                if let Some(previous) = previous.as_ref() {
-                    let previous_tx = self.version_tx_id(previous)?;
-                    let previous_made_at = self.version_made_at(previous).await?;
-                    if !version_wins_over_open_winner(
-                        &stored, self.version_tx_id(&stored)?, stored.tx_time(),
-                        Some((previous, previous_tx, previous_made_at)),
-                    ) {
-                        continue;
+                        stored.layer(),
+                    );
+                    let existing_winner = current_updates.get(&key).map(|(previous, _)| {
+                        (
+                            previous,
+                            self.version_tx_id(previous).expect("valid version tx id"),
+                            previous.tx_time(),
+                        )
+                    });
+                    if version_wins_over_open_winner(&stored, tx.tx_id, tx.tx_id.time, existing_winner)
+                    {
+                        current_updates.insert(key, (stored, global_time));
                     }
                 }
             }
-            winning_updates.insert(key, (stored, global_time));
-        }
-        let current_updates = winning_updates;
-        for (stored, global_time) in current_updates.values() {
-            self.write_global_current_update(&mut batch, stored, *global_time)?;
-        }
-        // An empty physical content-history table makes the incoming Accepted
-        // versions its complete post-commit history. Probe applied resident
-        // storage, not the uncommitted batch and not a derived head/current
-        // index. No helper below writes history before this batch is applied.
-        let mut probed_history_tables = BTreeSet::new();
-        let mut empty_history_tables = BTreeSet::new();
-        for (table_id, _, _, _) in &content_rows {
-            if probed_history_tables.insert(*table_id) {
-                self.sync_metrics.receiver_history_table_probes += 1;
-                if !self.database.table_has_stored_rows(&physical_history_table_name(*table_id)).await? {
-                    empty_history_tables.insert(*table_id);
+
+            // A first snapshot belongs to one subscription, not to an empty
+            // database. Another subscription may already have supplied a newer
+            // accepted version. Keep history ingestion complete without rewinding
+            // the node-wide current winner. Empty-table probes preserve the cold
+            // load path: it does not need one resident lookup per incoming row.
+            let mut resident_tables = BTreeMap::new();
+            let mut winning_updates = BTreeMap::new();
+            for (key, (stored, global_time)) in current_updates {
+                let schema = self.schema_version_for_alias(stored.schema_version_alias())
+                    .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
+                let table = self.physical_current_table_for_schema(
+                    schema, stored.table(), stored.layer(), PhysicalCurrentClass::Global,
+                )?;
+                let has_resident_rows = if let Some(present) = resident_tables.get(&table) {
+                    *present
+                } else {
+                    let present = self.database.table_has_stored_rows(&table).await?;
+                    resident_tables.insert(table, present);
+                    present
+                };
+                if has_resident_rows {
+                    let previous = self.query_global_layer_winner_in_schema_and_branch(
+                        schema, stored.table(), stored.branch_key(), stored.row_uuid(), stored.layer(),
+                    ).await?;
+                    if let Some(previous) = previous.as_ref() {
+                        let previous_tx = self.version_tx_id(previous)?;
+                        let previous_made_at = self.version_made_at(previous).await?;
+                        if !version_wins_over_open_winner(
+                            &stored, self.version_tx_id(&stored)?, stored.tx_time(),
+                            Some((previous, previous_tx, previous_made_at)),
+                        ) {
+                            continue;
+                        }
+                    }
+                }
+                winning_updates.insert(key, (stored, global_time));
+            }
+            let current_updates = winning_updates;
+            for (stored, global_time) in current_updates.values() {
+                self.write_global_current_update(&mut batch, stored, *global_time)?;
+            }
+            // An empty physical content-history table makes the incoming Accepted
+            // versions its complete post-commit history. Probe applied resident
+            // storage, not the uncommitted batch and not a derived head/current
+            // index. No helper below writes history before this batch is applied.
+            let mut probed_history_tables = BTreeSet::new();
+            let mut empty_history_tables = BTreeSet::new();
+            for (table_id, _, _, _) in &content_rows {
+                if probed_history_tables.insert(*table_id) {
+                    self.sync_metrics.receiver_history_table_probes += 1;
+                    if !self.database.table_has_stored_rows(&physical_history_table_name(*table_id)).await? {
+                        empty_history_tables.insert(*table_id);
+                    }
                 }
             }
-        }
-        self.write_merge_heads_for_bulk_content_versions_with_empty_history(
-            &mut batch,
-            &content_versions,
-            &empty_history_tables,
-        ).await?;
+            self.write_merge_heads_for_bulk_content_versions_with_empty_history(
+                &mut batch,
+                &content_versions,
+                &empty_history_tables,
+            ).await?;
 
-        #[cfg(test)]
-        let current_update_versions = current_updates
-            .values()
-            .map(|(stored, global_time)| (stored.clone(), *global_time))
-            .collect::<Vec<_>>();
-        let applied = self.database.apply_batch(batch).await?;
-        let persisted = applied.persist().await;
-        self.database.finish_persistence(persisted)?;
-        let rebuild_rows = content_rows.iter()
-            .filter(|(table_id, _, _, _)| !empty_history_tables.contains(table_id))
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        self.sync_metrics.receiver_history_rebuild_rows_avoided +=
-            (content_rows.len() - rebuild_rows.len()) as u64;
-        // Counterfactual benchmark only: price the post-write history reread.
-        // This is not a supported ingestion mode or a proof of redundancy.
-        #[cfg(feature = "testing")]
-        let skip_head_rebuild = std::env::var_os("JAZZ_HISTORY_SKIP_HEAD_REBUILD").is_some();
-        #[cfg(not(feature = "testing"))]
-        let skip_head_rebuild = false;
-        if !skip_head_rebuild {
-            self.rebuild_merge_heads_after_history_commit(&rebuild_rows)
-                .await?;
-        }
-        #[cfg(test)]
-        {
-            if std::env::var_os("JAZZ_SKIP_BULK_INGEST_ASSERTS").is_none() {
-                for (_, table, branch_key, row_uuid) in &content_rows {
-                    self.assert_merge_heads_match_history_in_branch_for_test(
-                        table,
-                        branch_key,
-                        *row_uuid,
+            #[cfg(test)]
+            let current_update_versions = current_updates
+                .values()
+                .map(|(stored, global_time)| (stored.clone(), *global_time))
+                .collect::<Vec<_>>();
+            let applied = self.database.apply_batch(batch).await?;
+            let persisted = applied.persist().await;
+            self.database.finish_persistence(persisted)?;
+            let rebuild_rows = content_rows.iter()
+                .filter(|(table_id, _, _, _)| !empty_history_tables.contains(table_id))
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            self.sync_metrics.receiver_history_rebuild_rows_avoided +=
+                (content_rows.len() - rebuild_rows.len()) as u64;
+            // Counterfactual benchmark only: price the post-write history reread.
+            // This is not a supported ingestion mode or a proof of redundancy.
+            #[cfg(feature = "testing")]
+            let skip_head_rebuild = std::env::var_os("JAZZ_HISTORY_SKIP_HEAD_REBUILD").is_some();
+            #[cfg(not(feature = "testing"))]
+            let skip_head_rebuild = false;
+            if !skip_head_rebuild {
+                self.rebuild_merge_heads_after_history_commit(&rebuild_rows)
+                    .await?;
+            }
+            #[cfg(test)]
+            {
+                if std::env::var_os("JAZZ_SKIP_BULK_INGEST_ASSERTS").is_none() {
+                    for (_, table, branch_key, row_uuid) in &content_rows {
+                        self.assert_merge_heads_match_history_in_branch_for_test(
+                            table,
+                            branch_key,
+                            *row_uuid,
+                        )
+                        .await?;
+                    }
+                    self.assert_global_current_updates_match_history_for_test(
+                        &current_update_versions,
                     )
                     .await?;
                 }
-                self.assert_global_current_updates_match_history_for_test(
-                    &current_update_versions,
-                )
-                .await?;
             }
-        }
-        for tx_id in &loaded_tx_ids {
-            self.invalidate_tx_version_tables_cache(*tx_id);
-        }
-        for global_time in applied_global_times {
-            self.record_applied_global_time(global_time);
-        }
-        self.settle_completed_parent_batch(&complete_parent_tx_ids)
-            .await?;
-        Ok(loaded_tx_ids)
+            for tx_id in &loaded_tx_ids {
+                self.invalidate_tx_version_tables_cache(*tx_id);
+            }
+            for global_time in applied_global_times {
+                self.record_applied_global_time(global_time);
+            }
+            self.settle_completed_parent_batch(&complete_parent_tx_ids)
+                .await?;
+            Ok(loaded_tx_ids)
+            },
+            tracing::debug_span!(target: "jazz::profile", "cold.phase.ingest"),
+        )
+        .await
     }
 }

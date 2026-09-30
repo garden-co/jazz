@@ -1114,52 +1114,52 @@ impl GraphRuntimeView<'_> {
             .retain(|key, _| key.scope != self.scope);
     }
 
-    #[tracing::instrument(
-        target = "jazz::profile",
-        level = "debug",
-        skip_all,
-        name = "cold.phase.ivm_hydrate"
-    )]
     pub(super) async fn eval_root(
         &mut self,
         node: NodeId,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
-        let mut evaluator = TickEvaluator {
-            schema: self.schema,
-            graph: self.graph,
-            variant_projections: self.variant_projections,
-            table_deltas: self.table_deltas,
-            binding_deltas: self.binding_deltas,
-            binding_snapshots: self.binding_snapshots,
-            current_tick: self.current_tick,
-            operator_states: self.operator_states,
-            arrangement_states: self.arrangement_states,
-            arrangement_keys_by_input: self.arrangement_keys_by_input,
-            eval_memo: self.eval_memo,
-            eval_memo_bytes: self.eval_memo_bytes,
-            table_frontiers: self.table_frontiers,
-            binding_frontiers: self.binding_frontiers,
-            memo_use_clock: self.memo_use_clock,
-            node_meta: self.node_meta,
-            storage: Some(self.storage),
-            evaluation_inputs: None,
-            context: EvalContext {
-                scope: self.scope,
-                sub_tick: 0,
-                bindings: HashMap::default(),
-                binding_digests: HashMap::default(),
-                arrangement_update_mode: ArrangementUpdateMode::Accumulate,
-                eval_mode: EvalMode::Tick,
-                hydrate_arrangements: false,
+        tracing::Instrument::instrument(
+            async move {
+                let mut evaluator = TickEvaluator {
+                    schema: self.schema,
+                    graph: self.graph,
+                    variant_projections: self.variant_projections,
+                    table_deltas: self.table_deltas,
+                    binding_deltas: self.binding_deltas,
+                    binding_snapshots: self.binding_snapshots,
+                    current_tick: self.current_tick,
+                    operator_states: self.operator_states,
+                    arrangement_states: self.arrangement_states,
+                    arrangement_keys_by_input: self.arrangement_keys_by_input,
+                    eval_memo: self.eval_memo,
+                    eval_memo_bytes: self.eval_memo_bytes,
+                    table_frontiers: self.table_frontiers,
+                    binding_frontiers: self.binding_frontiers,
+                    memo_use_clock: self.memo_use_clock,
+                    node_meta: self.node_meta,
+                    storage: Some(self.storage),
+                    evaluation_inputs: None,
+                    context: EvalContext {
+                        scope: self.scope,
+                        sub_tick: 0,
+                        bindings: HashMap::default(),
+                        binding_digests: HashMap::default(),
+                        arrangement_update_mode: ArrangementUpdateMode::Accumulate,
+                        eval_mode: EvalMode::Tick,
+                        hydrate_arrangements: false,
+                    },
+                    metrics: self.metrics,
+                    terminal_deltas: HashMap::default(),
+                    root_ordering_windows: HashMap::default(),
+                };
+                evaluator
+                    .update_subgraph(node)
+                    .await
+                    .map(|records| records.as_ref().clone())
             },
-            metrics: self.metrics,
-            terminal_deltas: HashMap::default(),
-            root_ordering_windows: HashMap::default(),
-        };
-        evaluator
-            .update_subgraph(node)
-            .await
-            .map(|records| records.as_ref().clone())
+            tracing::debug_span!(target: "jazz::profile", "cold.phase.ivm_hydrate"),
+        )
+        .await
     }
 }
 
@@ -1361,57 +1361,57 @@ impl TickEvaluator<'_> {
     /// Keeping graph traversal here iterative makes stack use independent of
     /// graph depth, including recursive seed/step scopes which do not use the
     /// outer tick work queue.
-    #[tracing::instrument(
-        target = "jazz::profile",
-        level = "debug",
-        skip_all,
-        name = "cold.phase.ivm_update"
-    )]
     pub(super) async fn update_subgraph(
         &mut self,
         root: NodeId,
     ) -> Result<Arc<RecordDeltas>, IvmRuntimeError> {
-        #[cfg(test)]
-        SUBGRAPH_WALKS.with(|count| count.set(count.get() + 1));
-        let mut pending = vec![(root, false)];
-        let mut discovered = HashSet::new();
-        let mut order = Vec::new();
-        while let Some((node, expanded)) = pending.pop() {
-            if expanded {
-                order.push(node);
-                continue;
-            }
-            if !discovered.insert(node) {
-                continue;
-            }
-            let graph_node = self
-                .graph
-                .node(node)
-                .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
-            pending.push((node, true));
-            // Recursive seed and step graphs run under a frontier-scoped
-            // evaluator in `update_recursive`; evaluating them here would
-            // incorrectly populate root-scoped memo and operator state.
-            if !matches!(graph_node.descriptor.operator, OpType::Recursive(_)) {
-                pending.extend(
-                    graph_node
-                        .descriptor
-                        .inputs
-                        .iter()
-                        .rev()
-                        .map(|input| (*input, false)),
-                );
-            }
-        }
+        tracing::Instrument::instrument(
+            async move {
+                #[cfg(test)]
+                SUBGRAPH_WALKS.with(|count| count.set(count.get() + 1));
+                let mut pending = vec![(root, false)];
+                let mut discovered = HashSet::new();
+                let mut order = Vec::new();
+                while let Some((node, expanded)) = pending.pop() {
+                    if expanded {
+                        order.push(node);
+                        continue;
+                    }
+                    if !discovered.insert(node) {
+                        continue;
+                    }
+                    let graph_node = self
+                        .graph
+                        .node(node)
+                        .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
+                    pending.push((node, true));
+                    // Recursive seed and step graphs run under a frontier-scoped
+                    // evaluator in `update_recursive`; evaluating them here would
+                    // incorrectly populate root-scoped memo and operator state.
+                    if !matches!(graph_node.descriptor.operator, OpType::Recursive(_)) {
+                        pending.extend(
+                            graph_node
+                                .descriptor
+                                .inputs
+                                .iter()
+                                .rev()
+                                .map(|input| (*input, false)),
+                        );
+                    }
+                }
 
-        let mut result = None;
-        for node in order {
-            let records = self.update_ready_node(node).await?;
-            if node == root {
-                result = Some(records);
-            }
-        }
-        result.ok_or(IvmRuntimeError::GraphNodeNotFound(root))
+                let mut result = None;
+                for node in order {
+                    let records = self.update_ready_node(node).await?;
+                    if node == root {
+                        result = Some(records);
+                    }
+                }
+                result.ok_or(IvmRuntimeError::GraphNodeNotFound(root))
+            },
+            tracing::debug_span!(target: "jazz::profile", "cold.phase.ivm_update"),
+        )
+        .await
     }
 
     pub(super) fn apply_root_ordering(

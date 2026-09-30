@@ -63,7 +63,13 @@ longer depends on them.
    atomics bumped on every call. Anything beyond a sum belongs in the layer
    too: a distinct count is an `identity` field that the layer inserts into a
    set, and grouping by node role reads the enclosing role span.
-5. No `cfg(feature = …)` around instrumentation. A Cargo feature is for a
+5. Never put `#[tracing::instrument]` on an `async fn`. Its expansion awaits
+   the body on two paths (instrumented and not), so the function's future
+   holds the body future more than once. On the cold-load call chain that was
+   enough to overflow the stack of a debug test. Wrap the body once instead:
+   `Instrument::instrument(async move { … }, debug_span!(target:
+"jazz::profile", "…")).await`. `#[instrument]` on a plain `fn` is fine.
+6. No `cfg(feature = …)` around instrumentation. A Cargo feature is for a
    listener that pulls in a heavy dependency (pprof, an allocator hook), never
    for the call sites.
 

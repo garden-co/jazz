@@ -3607,12 +3607,6 @@ impl IvmRuntime {
         })
     }
 
-    #[tracing::instrument(
-        target = "jazz::profile",
-        level = "debug",
-        skip_all,
-        name = "cold.phase.query_prepare"
-    )]
     pub async fn prepare<I, S>(
         &mut self,
         terminals: I,
@@ -3624,112 +3618,118 @@ impl IvmRuntime {
         I: IntoIterator<Item = RoutedMultisinkTerminal>,
         S: OrderedKvStorage,
     {
-        self.flush_pending_binding_retractions(storage).await?;
-        let terminals = terminals.into_iter().collect::<Vec<_>>();
-        if terminals.is_empty() {
-            return Err(IvmRuntimeError::EmptyMultisinkSubscription);
-        }
-        let mut sink_names = HashSet::new();
-        for terminal in &terminals {
-            if !sink_names.insert(terminal.sink.clone()) {
-                return Err(IvmRuntimeError::DuplicateMultisinkSink(
-                    terminal.sink.clone(),
-                ));
-            }
-            if terminal.route_fields.len() > binding_descriptor.fields().len() {
-                return Err(IvmRuntimeError::RoutedMultisinkRouteArityMismatch {
-                    sink: terminal.sink.clone(),
-                    expected: binding_descriptor.fields().len(),
-                    actual: terminal.route_fields.len(),
-                });
-            }
-            if terminal.route_value_indices.len() != terminal.route_fields.len() {
-                return Err(IvmRuntimeError::RoutedMultisinkRouteArityMismatch {
-                    sink: terminal.sink.clone(),
-                    expected: terminal.route_fields.len(),
-                    actual: terminal.route_value_indices.len(),
-                });
-            }
-            if let Some(index) = terminal
-                .route_value_indices
-                .iter()
-                .find(|index| **index >= binding_descriptor.fields().len())
-            {
-                return Err(IvmRuntimeError::GraphFieldIndexOutOfBounds(*index));
-            }
-            let output = self.infer_builder_output(&terminal.graph)?;
-            for field in &terminal.route_fields {
-                if output.field_index(field).is_none() {
-                    return Err(IvmRuntimeError::GraphFieldNotFound(field.clone()));
+        tracing::Instrument::instrument(
+            async move {
+                self.flush_pending_binding_retractions(storage).await?;
+                let terminals = terminals.into_iter().collect::<Vec<_>>();
+                if terminals.is_empty() {
+                    return Err(IvmRuntimeError::EmptyMultisinkSubscription);
                 }
-            }
-            for field in &terminal.public_fields {
-                resolve_field_ref(&output, &FieldRef::stored_name(field.clone()))?;
-            }
-        }
-        self.logical_nodes_requested += terminals
-            .iter()
-            .map(|terminal| count_builder_nodes(&terminal.graph))
-            .sum::<usize>() as u64;
-        let shape = binding_source_shape.into();
-        let shape_id = self.next_shape_id();
-        let source_key = BindingSourceKey::prepared(shape.clone());
-        let inserted_source = match self.binding_sources.entry(source_key) {
-            std::collections::hash_map::Entry::Occupied(existing)
-                if existing.get().descriptor != binding_descriptor =>
-            {
-                return Err(IvmRuntimeError::BindingSourceDescriptorMismatch(shape));
-            }
-            std::collections::hash_map::Entry::Occupied(_) => false,
-            std::collections::hash_map::Entry::Vacant(vacant) => {
-                vacant.insert(BindingSourceState {
-                    descriptor: binding_descriptor,
-                    refcounts: HashMap::default(),
-                    initialized: true,
-                });
-                true
-            }
-        };
-        let mut install = super::graph_lifecycle::EphemeralGraphInstall::new(self);
-        let runtime = install.runtime();
-        let mut terminal_states = BTreeMap::new();
-        for terminal in terminals {
-            let output = match runtime.add_dedup_graph(&terminal.graph) {
-                Ok(output) => output,
-                Err(error) => {
-                    if inserted_source {
-                        runtime
-                            .binding_sources
-                            .remove(&BindingSourceKey::prepared(shape));
+                let mut sink_names = HashSet::new();
+                for terminal in &terminals {
+                    if !sink_names.insert(terminal.sink.clone()) {
+                        return Err(IvmRuntimeError::DuplicateMultisinkSink(
+                            terminal.sink.clone(),
+                        ));
                     }
-                    return Err(error);
+                    if terminal.route_fields.len() > binding_descriptor.fields().len() {
+                        return Err(IvmRuntimeError::RoutedMultisinkRouteArityMismatch {
+                            sink: terminal.sink.clone(),
+                            expected: binding_descriptor.fields().len(),
+                            actual: terminal.route_fields.len(),
+                        });
+                    }
+                    if terminal.route_value_indices.len() != terminal.route_fields.len() {
+                        return Err(IvmRuntimeError::RoutedMultisinkRouteArityMismatch {
+                            sink: terminal.sink.clone(),
+                            expected: terminal.route_fields.len(),
+                            actual: terminal.route_value_indices.len(),
+                        });
+                    }
+                    if let Some(index) = terminal
+                        .route_value_indices
+                        .iter()
+                        .find(|index| **index >= binding_descriptor.fields().len())
+                    {
+                        return Err(IvmRuntimeError::GraphFieldIndexOutOfBounds(*index));
+                    }
+                    let output = self.infer_builder_output(&terminal.graph)?;
+                    for field in &terminal.route_fields {
+                        if output.field_index(field).is_none() {
+                            return Err(IvmRuntimeError::GraphFieldNotFound(field.clone()));
+                        }
+                    }
+                    for field in &terminal.public_fields {
+                        resolve_field_ref(&output, &FieldRef::stored_name(field.clone()))?;
+                    }
                 }
-            };
-            terminal_states.insert(
-                terminal.sink.clone(),
-                RoutedMultisinkTerminalState { terminal, output },
-            );
-        }
-        // Publish retainers only after every terminal compiles, so the guard
-        // can collect failed additions without disturbing existing shapes.
-        for terminal in terminal_states.values() {
-            runtime.add_retainer(
-                terminal.output.node,
-                Retainer::PreparedShape(shape_id.retainer_key()),
-            );
-        }
-        runtime.prepared_shapes.insert(
-            shape_id,
-            RoutedMultisinkShapeState {
-                shape,
-                binding_descriptor,
-                terminals: terminal_states,
-                auto_family_key: None,
-                shared_key: None,
+                self.logical_nodes_requested += terminals
+                    .iter()
+                    .map(|terminal| count_builder_nodes(&terminal.graph))
+                    .sum::<usize>() as u64;
+                let shape = binding_source_shape.into();
+                let shape_id = self.next_shape_id();
+                let source_key = BindingSourceKey::prepared(shape.clone());
+                let inserted_source = match self.binding_sources.entry(source_key) {
+                    std::collections::hash_map::Entry::Occupied(existing)
+                        if existing.get().descriptor != binding_descriptor =>
+                    {
+                        return Err(IvmRuntimeError::BindingSourceDescriptorMismatch(shape));
+                    }
+                    std::collections::hash_map::Entry::Occupied(_) => false,
+                    std::collections::hash_map::Entry::Vacant(vacant) => {
+                        vacant.insert(BindingSourceState {
+                            descriptor: binding_descriptor,
+                            refcounts: HashMap::default(),
+                            initialized: true,
+                        });
+                        true
+                    }
+                };
+                let mut install = super::graph_lifecycle::EphemeralGraphInstall::new(self);
+                let runtime = install.runtime();
+                let mut terminal_states = BTreeMap::new();
+                for terminal in terminals {
+                    let output = match runtime.add_dedup_graph(&terminal.graph) {
+                        Ok(output) => output,
+                        Err(error) => {
+                            if inserted_source {
+                                runtime
+                                    .binding_sources
+                                    .remove(&BindingSourceKey::prepared(shape));
+                            }
+                            return Err(error);
+                        }
+                    };
+                    terminal_states.insert(
+                        terminal.sink.clone(),
+                        RoutedMultisinkTerminalState { terminal, output },
+                    );
+                }
+                // Publish retainers only after every terminal compiles, so the guard
+                // can collect failed additions without disturbing existing shapes.
+                for terminal in terminal_states.values() {
+                    runtime.add_retainer(
+                        terminal.output.node,
+                        Retainer::PreparedShape(shape_id.retainer_key()),
+                    );
+                }
+                runtime.prepared_shapes.insert(
+                    shape_id,
+                    RoutedMultisinkShapeState {
+                        shape,
+                        binding_descriptor,
+                        terminals: terminal_states,
+                        auto_family_key: None,
+                        shared_key: None,
+                    },
+                );
+                install.commit();
+                Ok(PreparedShape { id: shape_id })
             },
-        );
-        install.commit();
-        Ok(PreparedShape { id: shape_id })
+            tracing::debug_span!(target: "jazz::profile", "cold.phase.query_prepare"),
+        )
+        .await
     }
 
     /// Like [`Self::prepare`], but a caller preparing terminals identical to
@@ -4949,12 +4949,6 @@ impl IvmRuntime {
     ///
     /// Returns `None`, having changed nothing, whenever that precondition is
     /// not certain; the caller then takes the ordinary hydration path.
-    #[tracing::instrument(
-        target = "jazz::profile",
-        level = "debug",
-        skip_all,
-        name = "cold.phase.live_attach"
-    )]
     pub(crate) async fn prepare_live_attach<S>(
         &mut self,
         shape_id: PreparedShapeId,
@@ -4964,56 +4958,63 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage + 'static,
     {
-        // Retire receivers dropped since the last tick, then bring every
-        // queued retraction into arranged state before any bind hydrates,
-        // exactly as `prepare` does. Otherwise a full hydration that no
-        // longer counts a retracted binding has that retraction applied on
-        // top, and a later live attach would build on the result. Queued
-        // retractions that the coming full hydration makes moot are dropped
-        // rather than ticked (see `absorb_unobserved_binding_retractions`).
-        self.prune_dropped_subscriptions_with_storage(storage.as_ref())
-            .await?;
-        self.absorb_unobserved_binding_retractions(shape_id)?;
-        self.flush_pending_binding_retractions(storage.as_ref())
-            .await?;
-        let Some(borrowed) = self.live_attach_borrowed_nodes(shape_id, binding_values)? else {
-            return Ok(None);
-        };
-        let shape = self
-            .prepared_shapes
-            .get(&shape_id)
-            .ok_or(IvmRuntimeError::PreparedShapeNotFound(shape_id))?;
-        let binding_key = BindingKey(shape.binding_descriptor.create(binding_values)?);
-        let delta = self.add_binding_ref(shape_id, binding_key.clone())?;
-        debug_assert_eq!(delta.deltas.len(), 1, "a live attach admits a new binding");
-        if let Err(error) = self
-            .tick_with_params(
-                Vec::new(),
-                vec![delta],
-                OwnedStorage::new(Rc::clone(storage)),
-                None,
-            )
-            .await
-        {
-            if let Some(delta) = self.remove_binding_ref(shape_id, &binding_key)
-                && !delta.deltas.is_empty()
-            {
-                self.pending_binding_retractions.push(delta);
-            }
-            return Err(error);
-        }
-        // A receiver dropped concurrently with the attach tick is discovered
-        // there and its retraction queued. Apply it before the new binding
-        // hydrates, so the borrowed nodes match the source's refcounts.
-        while !self.pending_binding_retractions.is_empty() {
-            self.flush_pending_binding_retractions(storage.as_ref())
-                .await?;
-        }
-        self.live_attaches += 1;
-        Ok(Some(LiveAttach {
-            binding_key,
-            borrowed,
-        }))
+        tracing::Instrument::instrument(
+            async move {
+                // Retire receivers dropped since the last tick, then bring every
+                // queued retraction into arranged state before any bind hydrates,
+                // exactly as `prepare` does. Otherwise a full hydration that no
+                // longer counts a retracted binding has that retraction applied on
+                // top, and a later live attach would build on the result. Queued
+                // retractions that the coming full hydration makes moot are dropped
+                // rather than ticked (see `absorb_unobserved_binding_retractions`).
+                self.prune_dropped_subscriptions_with_storage(storage.as_ref())
+                    .await?;
+                self.absorb_unobserved_binding_retractions(shape_id)?;
+                self.flush_pending_binding_retractions(storage.as_ref())
+                    .await?;
+                let Some(borrowed) = self.live_attach_borrowed_nodes(shape_id, binding_values)?
+                else {
+                    return Ok(None);
+                };
+                let shape = self
+                    .prepared_shapes
+                    .get(&shape_id)
+                    .ok_or(IvmRuntimeError::PreparedShapeNotFound(shape_id))?;
+                let binding_key = BindingKey(shape.binding_descriptor.create(binding_values)?);
+                let delta = self.add_binding_ref(shape_id, binding_key.clone())?;
+                debug_assert_eq!(delta.deltas.len(), 1, "a live attach admits a new binding");
+                if let Err(error) = self
+                    .tick_with_params(
+                        Vec::new(),
+                        vec![delta],
+                        OwnedStorage::new(Rc::clone(storage)),
+                        None,
+                    )
+                    .await
+                {
+                    if let Some(delta) = self.remove_binding_ref(shape_id, &binding_key)
+                        && !delta.deltas.is_empty()
+                    {
+                        self.pending_binding_retractions.push(delta);
+                    }
+                    return Err(error);
+                }
+                // A receiver dropped concurrently with the attach tick is discovered
+                // there and its retraction queued. Apply it before the new binding
+                // hydrates, so the borrowed nodes match the source's refcounts.
+                while !self.pending_binding_retractions.is_empty() {
+                    self.flush_pending_binding_retractions(storage.as_ref())
+                        .await?;
+                }
+                self.live_attaches += 1;
+                Ok(Some(LiveAttach {
+                    binding_key,
+                    borrowed,
+                }))
+            },
+            tracing::debug_span!(target: "jazz::profile", "cold.phase.live_attach"),
+        )
+        .await
     }
 
     #[cfg(test)]

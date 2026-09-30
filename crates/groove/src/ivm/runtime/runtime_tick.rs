@@ -2177,12 +2177,6 @@ impl IvmRuntime {
         Ok(())
     }
 
-    #[tracing::instrument(
-        target = "jazz::profile",
-        level = "debug",
-        skip_all,
-        name = "cold.phase.ivm_tick"
-    )]
     pub(crate) async fn tick_resident_staged(
         &mut self,
         table_deltas: Vec<TableDelta>,
@@ -2193,31 +2187,37 @@ impl IvmRuntime {
             crate::chunks::PublicationInstallFailures,
         )>,
     ) -> Result<ResidentTick, IvmRuntimeError> {
-        let publication = PendingResidentPublication {
-            publication: Rc::new(Cell::new(None)),
-            notifications: Rc::new(RefCell::new(Vec::new())),
-            completed: Rc::new(Cell::new(false)),
-            defer_notifications_until_durable,
-            chunk_provider: publication_install.map(|(observer, failures)| {
-                self.chunk_provider
-                    .with_install_observer(observer, failures)
-            }),
-        };
-        let (metrics, durable_writes) = self
-            .tick_detaching_cold(
-                table_deltas,
-                Vec::new(),
-                storage,
-                defer_notifications_until_durable,
-                Some(publication.clone()),
-                DetachOn::AnyRequest,
-            )
-            .await?;
-        Ok(ResidentTick {
-            metrics,
-            durable_writes,
-            publication,
-        })
+        tracing::Instrument::instrument(
+            async move {
+                let publication = PendingResidentPublication {
+                    publication: Rc::new(Cell::new(None)),
+                    notifications: Rc::new(RefCell::new(Vec::new())),
+                    completed: Rc::new(Cell::new(false)),
+                    defer_notifications_until_durable,
+                    chunk_provider: publication_install.map(|(observer, failures)| {
+                        self.chunk_provider
+                            .with_install_observer(observer, failures)
+                    }),
+                };
+                let (metrics, durable_writes) = self
+                    .tick_detaching_cold(
+                        table_deltas,
+                        Vec::new(),
+                        storage,
+                        defer_notifications_until_durable,
+                        Some(publication.clone()),
+                        DetachOn::AnyRequest,
+                    )
+                    .await?;
+                Ok(ResidentTick {
+                    metrics,
+                    durable_writes,
+                    publication,
+                })
+            },
+            tracing::debug_span!(target: "jazz::profile", "cold.phase.ivm_tick"),
+        )
+        .await
     }
 
     /// Drive one tick of runtime-owned input changes without waiting for

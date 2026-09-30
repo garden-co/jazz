@@ -909,12 +909,6 @@ impl PendingTableWrite {
     }
 }
 
-#[tracing::instrument(
-    target = "jazz::profile",
-    level = "debug",
-    skip_all,
-    name = "cold.phase.table_deltas"
-)]
 pub(super) async fn compute_table_deltas<S>(
     pending_writes: &[PendingTableWrite],
     stores: &[RecordStore<'_, S>],
@@ -923,117 +917,125 @@ pub(super) async fn compute_table_deltas<S>(
 where
     S: OrderedKvStorage,
 {
-    // Reads see earlier writes in the same batch through this overlay. Without
-    // it, same-key insert/update/delete sequences emit deltas against stale
-    // pre-batch storage and corrupt maintained views.
-    // The keys already live for the duration of this computation. Borrow them
-    // instead of allocating a second table name and primary-key buffer for
-    // every write merely to track same-batch visibility.
-    let mut overlay =
-        HashMap::<(&str, &[u8]), Option<(u32, &[u8])>>::with_capacity(pending_writes.len());
-    // Accumulate directly into the homogeneous groups consumed by IVM. The
-    // previous path allocated a singleton TableDelta (and Vec) per old/new
-    // record, then hashed every group and record again in a second pass.
-    let mut by_table = HashMap::<(&str, u32, RecordDescriptor), HashMap<bytes::Bytes, i64>>::new();
-    // The schema is fixed for this batch. Old rows may use several variants,
-    // but each variant's descriptor needs preparation only once.
-    let mut old_descriptors = HashMap::<(&str, u32), RecordDescriptor>::new();
+    tracing::Instrument::instrument(
+        async move {
+            // Reads see earlier writes in the same batch through this overlay. Without
+            // it, same-key insert/update/delete sequences emit deltas against stale
+            // pre-batch storage and corrupt maintained views.
+            // The keys already live for the duration of this computation. Borrow them
+            // instead of allocating a second table name and primary-key buffer for
+            // every write merely to track same-batch visibility.
+            let mut overlay =
+                HashMap::<(&str, &[u8]), Option<(u32, &[u8])>>::with_capacity(pending_writes.len());
+            // Accumulate directly into the homogeneous groups consumed by IVM. The
+            // previous path allocated a singleton TableDelta (and Vec) per old/new
+            // record, then hashed every group and record again in a second pass.
+            let mut by_table =
+                HashMap::<(&str, u32, RecordDescriptor), HashMap<bytes::Bytes, i64>>::new();
+            // The schema is fixed for this batch. Old rows may use several variants,
+            // but each variant's descriptor needs preparation only once.
+            let mut old_descriptors = HashMap::<(&str, u32), RecordDescriptor>::new();
 
-    for (write, store) in pending_writes.iter().zip(stores) {
-        let overlay_key = (write.table(), write.key());
-        let stored_current;
-        let current = if let Some(record) = overlay.get(&overlay_key) {
-            *record
-        } else if matches!(
-            write,
-            PendingTableWrite::Set {
-                mode: WriteMode::InsertFresh,
-                ..
+            for (write, store) in pending_writes.iter().zip(stores) {
+                let overlay_key = (write.table(), write.key());
+                let stored_current;
+                let current = if let Some(record) = overlay.get(&overlay_key) {
+                    *record
+                } else if matches!(
+                    write,
+                    PendingTableWrite::Set {
+                        mode: WriteMode::InsertFresh,
+                        ..
+                    }
+                ) {
+                    None
+                } else {
+                    stored_current = store.get_raw(write.key()).await?;
+                    stored_current
+                        .as_deref()
+                        .map(split_variant_record)
+                        .transpose()?
+                };
+                if matches!(
+                    write,
+                    PendingTableWrite::Set {
+                        mode: WriteMode::Insert,
+                        ..
+                    }
+                ) && current.is_some()
+                {
+                    return Err(Error::DuplicatePrimaryKey {
+                        table: write.table().to_owned(),
+                        key: write.key().to_vec(),
+                    });
+                }
+                let table_schema = schema
+                    .table(write.table())
+                    .ok_or_else(|| Error::TableNotFound(write.table().to_owned()))?;
+                if let Some((variant_tag, payload)) = current {
+                    let descriptor_key = (write.table(), variant_tag);
+                    let descriptor = if let Some(descriptor) = old_descriptors.get(&descriptor_key)
+                    {
+                        *descriptor
+                    } else {
+                        let descriptor = table_schema
+                            .record_schema_for_variant(variant_tag)
+                            .ok_or_else(|| Error::UnknownTableVariant {
+                                table: table_schema.name.clone(),
+                                version: u64::from(variant_tag),
+                            })?;
+                        old_descriptors.insert(descriptor_key, descriptor);
+                        descriptor
+                    };
+                    *by_table
+                        .entry((write.table(), variant_tag, descriptor))
+                        .or_default()
+                        .entry(bytes::Bytes::copy_from_slice(payload))
+                        .or_default() -= 1;
+                }
+                if let PendingTableWrite::Set {
+                    variant_tag,
+                    descriptor,
+                    record,
+                    ..
+                } = write
+                {
+                    *by_table
+                        .entry((write.table(), *variant_tag, *descriptor))
+                        .or_default()
+                        .entry(bytes::Bytes::copy_from_slice(record))
+                        .or_default() += 1;
+                }
+                let next = match write {
+                    PendingTableWrite::Set {
+                        variant_tag,
+                        record,
+                        ..
+                    } => Some((*variant_tag, record.as_slice())),
+                    PendingTableWrite::Delete { .. } => None,
+                };
+                overlay.insert(overlay_key, next);
             }
-        ) {
-            None
-        } else {
-            stored_current = store.get_raw(write.key()).await?;
-            stored_current
-                .as_deref()
-                .map(split_variant_record)
-                .transpose()?
-        };
-        if matches!(
-            write,
-            PendingTableWrite::Set {
-                mode: WriteMode::Insert,
-                ..
-            }
-        ) && current.is_some()
-        {
-            return Err(Error::DuplicatePrimaryKey {
-                table: write.table().to_owned(),
-                key: write.key().to_vec(),
-            });
-        }
-        let table_schema = schema
-            .table(write.table())
-            .ok_or_else(|| Error::TableNotFound(write.table().to_owned()))?;
-        if let Some((variant_tag, payload)) = current {
-            let descriptor_key = (write.table(), variant_tag);
-            let descriptor = if let Some(descriptor) = old_descriptors.get(&descriptor_key) {
-                *descriptor
-            } else {
-                let descriptor = table_schema
-                    .record_schema_for_variant(variant_tag)
-                    .ok_or_else(|| Error::UnknownTableVariant {
-                        table: table_schema.name.clone(),
-                        version: u64::from(variant_tag),
-                    })?;
-                old_descriptors.insert(descriptor_key, descriptor);
-                descriptor
-            };
-            *by_table
-                .entry((write.table(), variant_tag, descriptor))
-                .or_default()
-                .entry(bytes::Bytes::copy_from_slice(payload))
-                .or_default() -= 1;
-        }
-        if let PendingTableWrite::Set {
-            variant_tag,
-            descriptor,
-            record,
-            ..
-        } = write
-        {
-            *by_table
-                .entry((write.table(), *variant_tag, *descriptor))
-                .or_default()
-                .entry(bytes::Bytes::copy_from_slice(record))
-                .or_default() += 1;
-        }
-        let next = match write {
-            PendingTableWrite::Set {
-                variant_tag,
-                record,
-                ..
-            } => Some((*variant_tag, record.as_slice())),
-            PendingTableWrite::Delete { .. } => None,
-        };
-        overlay.insert(overlay_key, next);
-    }
 
-    Ok(by_table
-        .into_iter()
-        .filter_map(|((table, variant_tag, descriptor), records)| {
-            let deltas = records
+            Ok(by_table
                 .into_iter()
-                .filter_map(|(record, weight)| {
-                    (weight != 0).then_some(RecordDelta { record, weight })
+                .filter_map(|((table, variant_tag, descriptor), records)| {
+                    let deltas = records
+                        .into_iter()
+                        .filter_map(|(record, weight)| {
+                            (weight != 0).then_some(RecordDelta { record, weight })
+                        })
+                        .collect::<Vec<_>>();
+                    (!deltas.is_empty()).then_some(TableDelta {
+                        table: table.to_owned(),
+                        variant_tag,
+                        descriptor,
+                        deltas,
+                    })
                 })
-                .collect::<Vec<_>>();
-            (!deltas.is_empty()).then_some(TableDelta {
-                table: table.to_owned(),
-                variant_tag,
-                descriptor,
-                deltas,
-            })
-        })
-        .collect())
+                .collect())
+        },
+        tracing::debug_span!(target: "jazz::profile", "cold.phase.table_deltas"),
+    )
+    .await
 }

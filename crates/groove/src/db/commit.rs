@@ -110,320 +110,330 @@ impl Database {
     /// persistence. The returned handle owns the pending persistence work and
     /// no longer borrows this database, so resident queries may continue while
     /// storage suspends.
-    #[tracing::instrument(
-        target = "jazz::profile",
-        level = "debug",
-        skip_all,
-        name = "cold.phase.storage_apply"
-    )]
     pub async fn apply_batch(&mut self, mut batch: DatabaseBatch) -> Result<AppliedBatch, Error> {
-        batch.check_exact_base(self)?;
-        self.ensure_not_poisoned()?;
-        let accepted_large_values = batch.accepted_large_values.clone();
-        let defer_notifications_until_durable =
-            batch.notification_timing == NotificationTiming::AfterPersistence;
-        // Later ordinary writes must not invalidate an ensure_exact result.
-        let exact_keys = std::mem::take(&mut batch.exact_keys);
-        let borrowed_exact_keys = exact_keys
-            .iter()
-            .map(|((table, key), value)| ((table.as_str(), key.as_slice()), value))
-            .collect::<HashMap<_, _>>();
-        let pending_writes = self.pending_writes_from_batch(batch)?;
-        for write in &pending_writes {
-            if let Some(expected) = borrowed_exact_keys.get(&(write.table(), write.key()))
-                && write.stored_record().as_ref() != Some(*expected)
-            {
-                return Err(Error::ImmutableBatchConflict);
-            }
-        }
-        let mut accepted_staging = Vec::new();
-        for staged_id in &accepted_large_values {
-            let key = staged_large_value_key(*staged_id);
-            // Read through resident writes: an earlier batch whose persistence
-            // is still pending may already have consumed this id.
-            let encoded = self
-                .resident_storage()
-                .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
-                .await?
-                .ok_or_else(|| {
-                    Error::InvalidLargeValueMetadata(
-                        "accepted staging id is missing or already consumed".to_owned(),
-                    )
-                })?;
-            let staged = decode_staged_large_value_at_key(&key, &encoded)?;
-            accepted_staging.push(staged);
-        }
-        for staged in &accepted_staging {
-            let mut found = false;
-            for write in &pending_writes {
-                let PendingTableWrite::Set {
-                    descriptor, record, ..
-                } = write
-                else {
-                    continue;
-                };
-                found = descriptor
-                    .visit_large_value_refs(record, |reference| reference == &staged.value_ref)?;
-                if found {
-                    break;
-                }
-            }
-            if !found {
-                return Err(Error::InvalidLargeValueMetadata(
-                    "accepted staging root is not referenced by this physical-record batch"
-                        .to_owned(),
-                ));
-            }
-        }
-        let descriptors = pending_writes
-            .iter()
-            .map(PendingTableWrite::descriptor)
-            .collect::<Vec<_>>();
-        let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
-        let stores = pending_writes
-            .iter()
-            .zip(&descriptors)
-            .map(|(write, descriptor)| RecordStore::new(&overlay, write.table(), descriptor))
-            .collect::<Vec<_>>();
-        let table_deltas =
-            compute_table_deltas(&pending_writes, &stores, self.ivm_runtime.schema()).await?;
-        let mut changed_tables = table_deltas
-            .iter()
-            .map(|delta| delta.table.clone())
-            .collect::<Vec<_>>();
-        changed_tables.sort_unstable();
-        changed_tables.dedup();
-        let mut durable_root_deltas = BTreeMap::<crate::large_values::NodeRef, i64>::new();
-        for table_delta in &table_deltas {
-            for delta in &table_delta.deltas {
-                table_delta
-                    .descriptor
-                    .visit_large_value_refs(&delta.record, |reference| {
-                        *durable_root_deltas
-                            .entry(reference.root.clone())
-                            .or_default() += delta.weight;
-                        false
-                    })?;
-            }
-        }
-        let mut staged_operations = pending_writes
-            .into_iter()
-            .map(|write| match write {
-                PendingTableWrite::Set {
-                    table,
-                    key,
-                    variant_tag,
-                    record,
-                    ..
-                } => OwnedWriteOperation::Set {
-                    cf: table,
-                    key,
-                    value: encode_variant_record(variant_tag, &record),
-                },
-                PendingTableWrite::Delete { table, key, .. } => {
-                    OwnedWriteOperation::Delete { cf: table, key }
-                }
-            })
-            .collect::<Vec<_>>();
-        for staged_id in accepted_large_values {
-            let key = staged_large_value_key(staged_id);
-            if self
-                .resident_storage()
-                .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
-                .await?
-                .is_none()
-            {
-                return Err(Error::InvalidLargeValueMetadata(
-                    "accepted staging id is missing or already consumed".to_owned(),
-                ));
-            }
-            staged_operations.push(OwnedWriteOperation::Delete {
-                cf: LARGE_VALUE_METADATA_CF.to_owned(),
-                key,
-            });
-            staged_operations.extend(
-                super::facade::completed_large_value_cleanup_operations(
-                    &self.resident_storage(),
-                    staged_id,
-                )
-                .await?,
-            );
-        }
-        let mut accepted_roots = BTreeMap::<crate::large_values::NodeRef, u64>::new();
-        for staged in &accepted_staging {
-            *accepted_roots
-                .entry(staged.value_ref.root.clone())
-                .or_default() += 1;
-        }
-        let roots = durable_root_deltas
-            .keys()
-            .chain(accepted_roots.keys())
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        let resident_overlay = Rc::new(StagedWriteOverlay::new_owned(
-            Rc::clone(&self.storage),
-            Rc::clone(&self.resident_writes),
-        ));
-        let staged_state = Rc::new(RefCell::new(StagedWriteState::from(staged_operations)));
-        let storage = Rc::new(StagedWriteOverlay::new_owned(
-            resident_overlay,
-            Rc::clone(&staged_state),
-        ));
-        let resident_install_durable = Rc::new(Cell::new(false));
-        let resident_install_failures = crate::chunks::PublicationInstallFailures::default();
-        let resident_install_observer = Rc::new(MetadataChunkInstallObserver {
-            storage: Rc::downgrade(&self.storage),
-            lifecycle: std::sync::Arc::downgrade(&self.large_value_lifecycle),
-            resident_install: Some(ResidentLifecycleInstall {
-                storage: OwnedStorage::new(Rc::clone(&storage)),
-                staged: Rc::clone(&staged_state),
-                lifecycle_held: Rc::clone(&self.large_value_lifecycle_held),
-                durable: Rc::clone(&resident_install_durable),
-                install_failures: resident_install_failures.clone(),
-            }),
-        }) as Rc<dyn crate::chunks::ChunkInstallObserver>;
-        let tick_start = Instant::now();
-        let resident_tick = match self
-            .ivm_runtime
-            .tick_resident_staged(
-                table_deltas,
-                OwnedStorage::new(Rc::clone(&storage)),
-                defer_notifications_until_durable,
-                Some((resident_install_observer, resident_install_failures)),
-            )
-            .await
-        {
-            Ok(tick) => tick,
-            Err(error) => {
-                self.poisoned = true;
-                return Err(Error::IvmRuntime(error));
-            }
-        };
-        // Durable nodes are already evaluated, even when a query terminal is
-        // waiting for cold content. Include their writes in this publication's
-        // atomic batch now; a later query turn must not append them to a
-        // publication whose persistence snapshot has already been taken.
-        staged_state
-            .borrow_mut()
-            .extend(resident_tick.take_durable_writes());
-        // The public direct write APIs are themselves the runtime owner for
-        // CPU-only continuations which this tick scheduled.  In particular,
-        // a bounded recursive evaluation may yield after making resident
-        // progress and self-wake for another slice.  Finish those slices
-        // before returning the publication so its subscription output is
-        // observable in the same direct write turn. A genuinely cold input
-        // remains pending for an external owner even if its storage future
-        // eagerly wakes, rather than making a write wait on storage.
-        self.drain_self_scheduled_resident_progress()?;
-        let ivm_tick_time = tick_start.elapsed();
-        // The IVM's resident observer uses the staged overlay. It takes the
-        // lifecycle lock itself only when another resident publication does
-        // not already hold it. After the tick settles, compute from the
-        // complete overlay. No publication id exists yet, so cancellation
-        // while waiting for this lock cannot leave an ordered-persistence hole.
-        let lifecycle_guard =
-            if roots.is_empty() || self.large_value_publication_lifecycle_guard.is_some() {
-                None
-            } else {
-                Some(self.large_value_lifecycle.clone().lock_owned().await)
-            };
-        if !roots.is_empty() {
-            let mut node_transitions = Vec::<(crate::large_values::NodeRef, i8)>::new();
-            let mut lifecycle_operations = Vec::new();
-            for root in &roots {
-                let key = large_value_root_key(root)?;
-                let mut references = match storage
-                    .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
-                    .await?
-                {
-                    Some(encoded) => decode_large_value_root_references(&encoded)?,
-                    None => LargeValueRootReferences::default(),
-                };
-                let previous_total = references.durable.saturating_add(references.staged);
-                let durable_delta = durable_root_deltas.get(root).copied().unwrap_or_default();
-                references.durable = if durable_delta >= 0 {
-                    references.durable.checked_add(durable_delta as u64)
-                } else {
-                    references.durable.checked_sub(durable_delta.unsigned_abs())
-                }
-                .ok_or_else(|| {
-                    Error::InvalidLargeValueMetadata(
-                        "durable root count overflow/underflow".to_owned(),
-                    )
-                })?;
-                references.staged = references
-                    .staged
-                    .checked_sub(accepted_roots.get(root).copied().unwrap_or_default())
-                    .ok_or_else(|| {
-                        Error::InvalidLargeValueMetadata("staged root count underflow".to_owned())
-                    })?;
-                let next_total = references.durable.saturating_add(references.staged);
-                if previous_total == 0 && next_total > 0 && !references.node_active {
-                    if storage
-                        .get(
-                            LARGE_VALUE_METADATA_CF.to_owned(),
-                            large_value_node_key(root)?,
-                        )
-                        .await?
-                        .is_some()
+        tracing::Instrument::instrument(
+            async move {
+                batch.check_exact_base(self)?;
+                self.ensure_not_poisoned()?;
+                let accepted_large_values = batch.accepted_large_values.clone();
+                let defer_notifications_until_durable =
+                    batch.notification_timing == NotificationTiming::AfterPersistence;
+                // Later ordinary writes must not invalidate an ensure_exact result.
+                let exact_keys = std::mem::take(&mut batch.exact_keys);
+                let borrowed_exact_keys = exact_keys
+                    .iter()
+                    .map(|((table, key), value)| ((table.as_str(), key.as_slice()), value))
+                    .collect::<HashMap<_, _>>();
+                let pending_writes = self.pending_writes_from_batch(batch)?;
+                for write in &pending_writes {
+                    if let Some(expected) = borrowed_exact_keys.get(&(write.table(), write.key()))
+                        && write.stored_record().as_ref() != Some(*expected)
                     {
-                        references.node_active = true;
-                        node_transitions.push((root.clone(), 1));
+                        return Err(Error::ImmutableBatchConflict);
                     }
-                } else if previous_total > 0 && next_total == 0 && references.node_active {
-                    references.node_active = false;
-                    node_transitions.push((root.clone(), -1));
                 }
-                lifecycle_operations.push(OwnedWriteOperation::Set {
-                    cf: LARGE_VALUE_METADATA_CF.to_owned(),
-                    key,
-                    value: encode_large_value_root_references(&references)?,
-                });
-            }
-            lifecycle_operations.extend(
-                large_value_node_transition_operations(
-                    storage.as_ref(),
-                    BTreeMap::new(),
-                    node_transitions,
-                    false,
-                )
-                .await?,
-            );
-            staged_state.borrow_mut().extend(lifecycle_operations);
-        }
-        // Every fallible/cancellable operation is complete. Allocate the id,
-        // bind buffered notifications, and register the publication without an
-        // intervening await.
-        let publication = PublicationId(self.next_publication_id);
-        self.next_publication_id = self.next_publication_id.saturating_add(1);
-        let tick = self
-            .ivm_runtime
-            .assign_resident_publication(resident_tick, publication);
-        self.resident_writes
-            .borrow_mut()
-            .extend_shared(staged_state.borrow().snapshot());
-        self.resident_publications
-            .insert(publication, Rc::clone(&staged_state));
-        if !roots.is_empty() {
-            if let Some(guard) = lifecycle_guard {
-                self.large_value_publication_lifecycle_guard = Some(guard);
-                self.large_value_lifecycle_held.set(true);
-            }
-            self.large_value_lifecycle_publications.insert(publication);
-        }
-        Ok(AppliedBatch {
-            publication,
-            storage: Rc::new(RefCell::new(Some(Rc::clone(&self.storage)))),
-            operations: staged_state,
-            resident_install_durable: Some(resident_install_durable),
-            order: Rc::clone(&self.publication_persistence),
-            ivm_tick_time,
-            tick,
-            changed_tables,
-            notifications_deferred: defer_notifications_until_durable,
-            lifecycle: Rc::new(Cell::new(AppliedBatchLifecycle::Applied)),
-            abandoned_application: Rc::clone(&self.abandoned_application),
-        })
+                let mut accepted_staging = Vec::new();
+                for staged_id in &accepted_large_values {
+                    let key = staged_large_value_key(*staged_id);
+                    // Read through resident writes: an earlier batch whose persistence
+                    // is still pending may already have consumed this id.
+                    let encoded = self
+                        .resident_storage()
+                        .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
+                        .await?
+                        .ok_or_else(|| {
+                            Error::InvalidLargeValueMetadata(
+                                "accepted staging id is missing or already consumed".to_owned(),
+                            )
+                        })?;
+                    let staged = decode_staged_large_value_at_key(&key, &encoded)?;
+                    accepted_staging.push(staged);
+                }
+                for staged in &accepted_staging {
+                    let mut found = false;
+                    for write in &pending_writes {
+                        let PendingTableWrite::Set {
+                            descriptor, record, ..
+                        } = write
+                        else {
+                            continue;
+                        };
+                        found = descriptor.visit_large_value_refs(record, |reference| {
+                            reference == &staged.value_ref
+                        })?;
+                        if found {
+                            break;
+                        }
+                    }
+                    if !found {
+                        return Err(Error::InvalidLargeValueMetadata(
+                            "accepted staging root is not referenced by this physical-record batch"
+                                .to_owned(),
+                        ));
+                    }
+                }
+                let descriptors = pending_writes
+                    .iter()
+                    .map(PendingTableWrite::descriptor)
+                    .collect::<Vec<_>>();
+                let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
+                let stores = pending_writes
+                    .iter()
+                    .zip(&descriptors)
+                    .map(|(write, descriptor)| {
+                        RecordStore::new(&overlay, write.table(), descriptor)
+                    })
+                    .collect::<Vec<_>>();
+                let table_deltas =
+                    compute_table_deltas(&pending_writes, &stores, self.ivm_runtime.schema())
+                        .await?;
+                let mut changed_tables = table_deltas
+                    .iter()
+                    .map(|delta| delta.table.clone())
+                    .collect::<Vec<_>>();
+                changed_tables.sort_unstable();
+                changed_tables.dedup();
+                let mut durable_root_deltas = BTreeMap::<crate::large_values::NodeRef, i64>::new();
+                for table_delta in &table_deltas {
+                    for delta in &table_delta.deltas {
+                        table_delta.descriptor.visit_large_value_refs(
+                            &delta.record,
+                            |reference| {
+                                *durable_root_deltas
+                                    .entry(reference.root.clone())
+                                    .or_default() += delta.weight;
+                                false
+                            },
+                        )?;
+                    }
+                }
+                let mut staged_operations = pending_writes
+                    .into_iter()
+                    .map(|write| match write {
+                        PendingTableWrite::Set {
+                            table,
+                            key,
+                            variant_tag,
+                            record,
+                            ..
+                        } => OwnedWriteOperation::Set {
+                            cf: table,
+                            key,
+                            value: encode_variant_record(variant_tag, &record),
+                        },
+                        PendingTableWrite::Delete { table, key, .. } => {
+                            OwnedWriteOperation::Delete { cf: table, key }
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                for staged_id in accepted_large_values {
+                    let key = staged_large_value_key(staged_id);
+                    if self
+                        .resident_storage()
+                        .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
+                        .await?
+                        .is_none()
+                    {
+                        return Err(Error::InvalidLargeValueMetadata(
+                            "accepted staging id is missing or already consumed".to_owned(),
+                        ));
+                    }
+                    staged_operations.push(OwnedWriteOperation::Delete {
+                        cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                        key,
+                    });
+                    staged_operations.extend(
+                        super::facade::completed_large_value_cleanup_operations(
+                            &self.resident_storage(),
+                            staged_id,
+                        )
+                        .await?,
+                    );
+                }
+                let mut accepted_roots = BTreeMap::<crate::large_values::NodeRef, u64>::new();
+                for staged in &accepted_staging {
+                    *accepted_roots
+                        .entry(staged.value_ref.root.clone())
+                        .or_default() += 1;
+                }
+                let roots = durable_root_deltas
+                    .keys()
+                    .chain(accepted_roots.keys())
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                let resident_overlay = Rc::new(StagedWriteOverlay::new_owned(
+                    Rc::clone(&self.storage),
+                    Rc::clone(&self.resident_writes),
+                ));
+                let staged_state = Rc::new(RefCell::new(StagedWriteState::from(staged_operations)));
+                let storage = Rc::new(StagedWriteOverlay::new_owned(
+                    resident_overlay,
+                    Rc::clone(&staged_state),
+                ));
+                let resident_install_durable = Rc::new(Cell::new(false));
+                let resident_install_failures =
+                    crate::chunks::PublicationInstallFailures::default();
+                let resident_install_observer = Rc::new(MetadataChunkInstallObserver {
+                    storage: Rc::downgrade(&self.storage),
+                    lifecycle: std::sync::Arc::downgrade(&self.large_value_lifecycle),
+                    resident_install: Some(ResidentLifecycleInstall {
+                        storage: OwnedStorage::new(Rc::clone(&storage)),
+                        staged: Rc::clone(&staged_state),
+                        lifecycle_held: Rc::clone(&self.large_value_lifecycle_held),
+                        durable: Rc::clone(&resident_install_durable),
+                        install_failures: resident_install_failures.clone(),
+                    }),
+                })
+                    as Rc<dyn crate::chunks::ChunkInstallObserver>;
+                let tick_start = Instant::now();
+                let resident_tick = match self
+                    .ivm_runtime
+                    .tick_resident_staged(
+                        table_deltas,
+                        OwnedStorage::new(Rc::clone(&storage)),
+                        defer_notifications_until_durable,
+                        Some((resident_install_observer, resident_install_failures)),
+                    )
+                    .await
+                {
+                    Ok(tick) => tick,
+                    Err(error) => {
+                        self.poisoned = true;
+                        return Err(Error::IvmRuntime(error));
+                    }
+                };
+                // Durable nodes are already evaluated, even when a query terminal is
+                // waiting for cold content. Include their writes in this publication's
+                // atomic batch now; a later query turn must not append them to a
+                // publication whose persistence snapshot has already been taken.
+                staged_state
+                    .borrow_mut()
+                    .extend(resident_tick.take_durable_writes());
+                // The public direct write APIs are themselves the runtime owner for
+                // CPU-only continuations which this tick scheduled.  In particular,
+                // a bounded recursive evaluation may yield after making resident
+                // progress and self-wake for another slice.  Finish those slices
+                // before returning the publication so its subscription output is
+                // observable in the same direct write turn. A genuinely cold input
+                // remains pending for an external owner even if its storage future
+                // eagerly wakes, rather than making a write wait on storage.
+                self.drain_self_scheduled_resident_progress()?;
+                let ivm_tick_time = tick_start.elapsed();
+                // The IVM's resident observer uses the staged overlay. It takes the
+                // lifecycle lock itself only when another resident publication does
+                // not already hold it. After the tick settles, compute from the
+                // complete overlay. No publication id exists yet, so cancellation
+                // while waiting for this lock cannot leave an ordered-persistence hole.
+                let lifecycle_guard =
+                    if roots.is_empty() || self.large_value_publication_lifecycle_guard.is_some() {
+                        None
+                    } else {
+                        Some(self.large_value_lifecycle.clone().lock_owned().await)
+                    };
+                if !roots.is_empty() {
+                    let mut node_transitions = Vec::<(crate::large_values::NodeRef, i8)>::new();
+                    let mut lifecycle_operations = Vec::new();
+                    for root in &roots {
+                        let key = large_value_root_key(root)?;
+                        let mut references = match storage
+                            .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
+                            .await?
+                        {
+                            Some(encoded) => decode_large_value_root_references(&encoded)?,
+                            None => LargeValueRootReferences::default(),
+                        };
+                        let previous_total = references.durable.saturating_add(references.staged);
+                        let durable_delta =
+                            durable_root_deltas.get(root).copied().unwrap_or_default();
+                        references.durable = if durable_delta >= 0 {
+                            references.durable.checked_add(durable_delta as u64)
+                        } else {
+                            references.durable.checked_sub(durable_delta.unsigned_abs())
+                        }
+                        .ok_or_else(|| {
+                            Error::InvalidLargeValueMetadata(
+                                "durable root count overflow/underflow".to_owned(),
+                            )
+                        })?;
+                        references.staged = references
+                            .staged
+                            .checked_sub(accepted_roots.get(root).copied().unwrap_or_default())
+                            .ok_or_else(|| {
+                                Error::InvalidLargeValueMetadata(
+                                    "staged root count underflow".to_owned(),
+                                )
+                            })?;
+                        let next_total = references.durable.saturating_add(references.staged);
+                        if previous_total == 0 && next_total > 0 && !references.node_active {
+                            if storage
+                                .get(
+                                    LARGE_VALUE_METADATA_CF.to_owned(),
+                                    large_value_node_key(root)?,
+                                )
+                                .await?
+                                .is_some()
+                            {
+                                references.node_active = true;
+                                node_transitions.push((root.clone(), 1));
+                            }
+                        } else if previous_total > 0 && next_total == 0 && references.node_active {
+                            references.node_active = false;
+                            node_transitions.push((root.clone(), -1));
+                        }
+                        lifecycle_operations.push(OwnedWriteOperation::Set {
+                            cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                            key,
+                            value: encode_large_value_root_references(&references)?,
+                        });
+                    }
+                    lifecycle_operations.extend(
+                        large_value_node_transition_operations(
+                            storage.as_ref(),
+                            BTreeMap::new(),
+                            node_transitions,
+                            false,
+                        )
+                        .await?,
+                    );
+                    staged_state.borrow_mut().extend(lifecycle_operations);
+                }
+                // Every fallible/cancellable operation is complete. Allocate the id,
+                // bind buffered notifications, and register the publication without an
+                // intervening await.
+                let publication = PublicationId(self.next_publication_id);
+                self.next_publication_id = self.next_publication_id.saturating_add(1);
+                let tick = self
+                    .ivm_runtime
+                    .assign_resident_publication(resident_tick, publication);
+                self.resident_writes
+                    .borrow_mut()
+                    .extend_shared(staged_state.borrow().snapshot());
+                self.resident_publications
+                    .insert(publication, Rc::clone(&staged_state));
+                if !roots.is_empty() {
+                    if let Some(guard) = lifecycle_guard {
+                        self.large_value_publication_lifecycle_guard = Some(guard);
+                        self.large_value_lifecycle_held.set(true);
+                    }
+                    self.large_value_lifecycle_publications.insert(publication);
+                }
+                Ok(AppliedBatch {
+                    publication,
+                    storage: Rc::new(RefCell::new(Some(Rc::clone(&self.storage)))),
+                    operations: staged_state,
+                    resident_install_durable: Some(resident_install_durable),
+                    order: Rc::clone(&self.publication_persistence),
+                    ivm_tick_time,
+                    tick,
+                    changed_tables,
+                    notifications_deferred: defer_notifications_until_durable,
+                    lifecycle: Rc::new(Cell::new(AppliedBatchLifecycle::Applied)),
+                    abandoned_application: Rc::clone(&self.abandoned_application),
+                })
+            },
+            tracing::debug_span!(target: "jazz::profile", "cold.phase.storage_apply"),
+        )
+        .await
     }
 
     /// Install one persistence result and advance only the contiguous durable

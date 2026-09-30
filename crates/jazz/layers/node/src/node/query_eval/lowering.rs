@@ -724,72 +724,72 @@ where
             .await
     }
 
-    #[tracing::instrument(
-        target = "jazz::profile",
-        level = "debug",
-        skip_all,
-        name = "cold.phase.query_compile"
-    )]
     pub(super) async fn compile_query_program_request_with_access_paths(
         &mut self,
         request: QueryProgramRequest,
         access_paths: BTreeMap<SourceId, CurrentAccessPath>,
     ) -> Result<QueryProgram, Error> {
-        let key = admission_program_key(&request, &access_paths);
-        if let Some(key) = key
-            && let Some(program) = self
-                .query
-                .supported_query_program_requests
-                .iter_mut()
-                .find(|entry| entry.fingerprint == key)
-                .and_then(|entry| entry.program.take())
-        {
-            return Ok(program);
-        }
-        let cache_key = query_program_cache_safe(&request)
-            .then(|| query_program_cache_key(&request, &access_paths));
-        if let Some(program) = cache_key
-            .as_ref()
-            .and_then(|key| self.query.compiled_query_program_cache.get(key))
-        {
-            let program = (**program).clone();
-            if let Some(key) = key {
-                self.remember_supported_query_program(key, None);
-            }
-            return Ok(program);
-        }
-        let program = self
-            .compile_query_program_request_with_inline_sources_and_access_paths(
-                request,
-                BTreeMap::new(),
-                access_paths,
-            )
-            .await?;
-        if let Some(cache_key) = cache_key {
-            if self.query.compiled_query_program_cache.len()
-                >= COMPILED_QUERY_PROGRAM_CACHE_MAX_ENTRIES
-                && let Some(eviction_key) = self
-                    .query
-                    .compiled_query_program_cache
-                    .keys()
-                    .next()
-                    .cloned()
-            {
-                self.query
-                    .compiled_query_program_cache
-                    .remove(&eviction_key);
-            }
-            self.query
-                .compiled_query_program_cache
-                .insert(cache_key, Arc::new(program.clone()));
-        }
-        // The order can be reversed: a foreground installs locally before it
-        // receives RegisterShape. Its successful compilation is already the
-        // exact capability proof; later admission need not compile it again.
-        if let Some(key) = key {
-            self.remember_supported_query_program(key, None);
-        }
-        Ok(program)
+        tracing::Instrument::instrument(
+            async move {
+                let key = admission_program_key(&request, &access_paths);
+                if let Some(key) = key
+                    && let Some(program) = self
+                        .query
+                        .supported_query_program_requests
+                        .iter_mut()
+                        .find(|entry| entry.fingerprint == key)
+                        .and_then(|entry| entry.program.take())
+                {
+                    return Ok(program);
+                }
+                let cache_key = query_program_cache_safe(&request)
+                    .then(|| query_program_cache_key(&request, &access_paths));
+                if let Some(program) = cache_key
+                    .as_ref()
+                    .and_then(|key| self.query.compiled_query_program_cache.get(key))
+                {
+                    let program = (**program).clone();
+                    if let Some(key) = key {
+                        self.remember_supported_query_program(key, None);
+                    }
+                    return Ok(program);
+                }
+                let program = self
+                    .compile_query_program_request_with_inline_sources_and_access_paths(
+                        request,
+                        BTreeMap::new(),
+                        access_paths,
+                    )
+                    .await?;
+                if let Some(cache_key) = cache_key {
+                    if self.query.compiled_query_program_cache.len()
+                        >= COMPILED_QUERY_PROGRAM_CACHE_MAX_ENTRIES
+                        && let Some(eviction_key) = self
+                            .query
+                            .compiled_query_program_cache
+                            .keys()
+                            .next()
+                            .cloned()
+                    {
+                        self.query
+                            .compiled_query_program_cache
+                            .remove(&eviction_key);
+                    }
+                    self.query
+                        .compiled_query_program_cache
+                        .insert(cache_key, Arc::new(program.clone()));
+                }
+                // The order can be reversed: a foreground installs locally before it
+                // receives RegisterShape. Its successful compilation is already the
+                // exact capability proof; later admission need not compile it again.
+                if let Some(key) = key {
+                    self.remember_supported_query_program(key, None);
+                }
+                Ok(program)
+            },
+            tracing::debug_span!(target: "jazz::profile", "cold.phase.query_compile"),
+        )
+        .await
     }
 
     pub(super) async fn compile_query_program_request_with_inline_sources_and_access_paths(
@@ -813,12 +813,6 @@ where
     /// source occurrence. This is intentionally separate from ordinary inline
     /// snapshots: the caller can atomically replace these records after the
     /// graph is subscribed.
-    #[tracing::instrument(
-        target = "jazz::profile",
-        level = "debug",
-        skip_all,
-        name = "cold.phase.query_compile"
-    )]
     pub(super) async fn compile_query_program_request_with_inline_sources_access_paths_and_covered_inputs(
         &mut self,
         request: QueryProgramRequest,
@@ -827,14 +821,20 @@ where
         covered_input_sources: BTreeMap<SourceId, GraphBuilder>,
         covered_input_descriptors: BTreeMap<SourceId, RecordDescriptor>,
     ) -> Result<QueryProgram, Error> {
-        self.compile_query_program_request_with_inline_sources_and_access_paths_inner(
-            request,
-            inline_sources,
-            access_paths,
-            covered_input_sources,
-            covered_input_descriptors,
-            true,
-            None,
+        tracing::Instrument::instrument(
+            async move {
+                self.compile_query_program_request_with_inline_sources_and_access_paths_inner(
+                    request,
+                    inline_sources,
+                    access_paths,
+                    covered_input_sources,
+                    covered_input_descriptors,
+                    true,
+                    None,
+                )
+                .await
+            },
+            tracing::debug_span!(target: "jazz::profile", "cold.phase.query_compile"),
         )
         .await
     }
@@ -877,12 +877,6 @@ where
         .await
     }
 
-    #[tracing::instrument(
-        target = "jazz::profile",
-        level = "debug",
-        skip_all,
-        name = "cold.phase.query_lowering"
-    )]
     async fn compile_query_program_request_with_inline_sources_and_access_paths_inner(
         &mut self,
         request: QueryProgramRequest,
@@ -893,99 +887,105 @@ where
         count_access_path_metrics: bool,
         bounded_deletion_register: Option<(SourceId, GraphBuilder)>,
     ) -> Result<QueryProgram, Error> {
-        #[cfg(any(test, feature = "testing"))]
-        {
-            self.query_program_compilations += 1;
-        }
-        #[cfg(any(test, feature = "testing"))]
-        if std::env::var_os("JAZZ_COMPILE_SHAPES").is_some() {
-            // Opt-in work classification only. Never emit queries, claims,
-            // literals or row contents; these process-local hashes are not
-            // cache identities and are not a serialization contract.
-            let fingerprint = |value: String| blake3::hash(value.as_bytes()).to_hex().to_string();
-            eprintln!(
-                "JAZZ_COMPILE_SHAPES node={} mode={:?} request={} structure={} sources={} binding={} paths={} inline={} covered={}",
-                fingerprint(format!("{:?}", self.node_uuid)),
-                request.authorization_mode,
-                fingerprint(format!("{request:?}")),
-                fingerprint(format!("{:?}", (&request.input.shape, &request.output))),
-                fingerprint(format!("{:?}", (&request.reads, &request.policy))),
-                fingerprint(format!("{:?}", request.input.binding)),
-                fingerprint(format!("{access_paths:?}")),
-                inline_sources.len(),
-                covered_input_sources.len()
-            );
-        }
-        self.restore_expired_policy_compilation_state();
-        if crate::debug_env::covered_input_trace() && !covered_input_sources.is_empty() {
-            eprintln!(
-                "JAZZ_COVERED_INPUT_TRACE stage=compile_receiver_program requested_sources={:?} runtime_sources={:?}",
-                request.reads.primary.sources.keys().collect::<Vec<_>>(),
-                covered_input_sources.keys().collect::<Vec<_>>(),
-            );
-        }
-        let policy_replacement_lease = std::rc::Rc::new(());
-        let compilation = QueryProgramCompilation::analyze(request)
-            .map_err(|report| Error::QueryCapability(format!("{report:?}")))?;
-        let request = compilation.request();
-        let policy_dependency_footprint = Box::pin(self.prepare_query_program_policy_dependencies(
-            request,
-            compilation.sources(),
-            &access_paths,
-            bounded_deletion_register.as_ref(),
-            &policy_replacement_lease,
-        ))
-        .await?;
-        let trace_request = capability_trace_enabled().then(|| request.clone());
-        let read_view = request.reads.primary.clone();
-        let mut resolver = JazzSourceGraphPreparer {
-            local_unavailable_scope: unavailable_inputs::local_unavailable_policy_binding(&request),
-            node: self,
-            read_view: &read_view,
-            inline_sources,
-            covered_input_sources,
-            covered_input_descriptors,
-            access_paths,
-            bounded_deletion_register,
-            count_access_path_metrics,
-            current_projection_targets: BTreeMap::new(),
-            policy_subplan: matches!(request.policy, PolicyContext::AuthorizationSubplan { .. }),
-        };
-        let node_uuid = resolver.node.node_uuid;
-        let node_alias = resolver.node.self_node_alias;
-        let mut result = match Box::pin(crate::node::query_engine::prepare_query_program_sources(
-            &compilation,
-            &mut resolver,
-        ))
+        tracing::Instrument::instrument(
+            async move {
+            #[cfg(any(test, feature = "testing"))]
+            {
+                self.query_program_compilations += 1;
+            }
+            #[cfg(any(test, feature = "testing"))]
+            if std::env::var_os("JAZZ_COMPILE_SHAPES").is_some() {
+                // Opt-in work classification only. Never emit queries, claims,
+                // literals or row contents; these process-local hashes are not
+                // cache identities and are not a serialization contract.
+                let fingerprint = |value: String| blake3::hash(value.as_bytes()).to_hex().to_string();
+                eprintln!(
+                    "JAZZ_COMPILE_SHAPES node={} mode={:?} request={} structure={} sources={} binding={} paths={} inline={} covered={}",
+                    fingerprint(format!("{:?}", self.node_uuid)),
+                    request.authorization_mode,
+                    fingerprint(format!("{request:?}")),
+                    fingerprint(format!("{:?}", (&request.input.shape, &request.output))),
+                    fingerprint(format!("{:?}", (&request.reads, &request.policy))),
+                    fingerprint(format!("{:?}", request.input.binding)),
+                    fingerprint(format!("{access_paths:?}")),
+                    inline_sources.len(),
+                    covered_input_sources.len()
+                );
+            }
+            self.restore_expired_policy_compilation_state();
+            if crate::debug_env::covered_input_trace() && !covered_input_sources.is_empty() {
+                eprintln!(
+                    "JAZZ_COVERED_INPUT_TRACE stage=compile_receiver_program requested_sources={:?} runtime_sources={:?}",
+                    request.reads.primary.sources.keys().collect::<Vec<_>>(),
+                    covered_input_sources.keys().collect::<Vec<_>>(),
+                );
+            }
+            let policy_replacement_lease = std::rc::Rc::new(());
+            let compilation = QueryProgramCompilation::analyze(request)
+                .map_err(|report| Error::QueryCapability(format!("{report:?}")))?;
+            let request = compilation.request();
+            let policy_dependency_footprint = Box::pin(self.prepare_query_program_policy_dependencies(
+                request,
+                compilation.sources(),
+                &access_paths,
+                bounded_deletion_register.as_ref(),
+                &policy_replacement_lease,
+            ))
+            .await?;
+            let trace_request = capability_trace_enabled().then(|| request.clone());
+            let read_view = request.reads.primary.clone();
+            let mut resolver = JazzSourceGraphPreparer {
+                local_unavailable_scope: unavailable_inputs::local_unavailable_policy_binding(&request),
+                node: self,
+                read_view: &read_view,
+                inline_sources,
+                covered_input_sources,
+                covered_input_descriptors,
+                access_paths,
+                bounded_deletion_register,
+                count_access_path_metrics,
+                current_projection_targets: BTreeMap::new(),
+                policy_subplan: matches!(request.policy, PolicyContext::AuthorizationSubplan { .. }),
+            };
+            let node_uuid = resolver.node.node_uuid;
+            let node_alias = resolver.node.self_node_alias;
+            let mut result = match Box::pin(crate::node::query_engine::prepare_query_program_sources(
+                &compilation,
+                &mut resolver,
+            ))
+            .await
+            {
+                Ok((sources, explain)) => resolver.node.query.query_program_templates.lower(
+                    compilation,
+                    sources,
+                    explain,
+                    |graph| resolver.node.database.describe_template_input(graph),
+                ),
+                Err(error) => Err(error),
+            };
+            if let Ok(program) = result.as_mut() {
+                program
+                    .lowered
+                    .targeted_refresh_tables
+                    .extend(policy_dependency_footprint.tables);
+                program.lowered.targeted_refresh_uncertain |= policy_dependency_footprint.uncertain;
+            }
+            resolver
+                .node
+                .restore_scoped_policy_authorization_graphs(&policy_replacement_lease);
+            if let Some(request) = trace_request {
+                trace_capability_compile(
+                    node_uuid,
+                    node_alias,
+                    &request,
+                    result.as_ref().map_err(|report| report.as_ref()),
+                );
+            }
+            result.map_err(|report| Error::QueryCapability(format!("{report:?}")))
+            },
+            tracing::debug_span!(target: "jazz::profile", "cold.phase.query_lowering"),
+        )
         .await
-        {
-            Ok((sources, explain)) => resolver.node.query.query_program_templates.lower(
-                compilation,
-                sources,
-                explain,
-                |graph| resolver.node.database.describe_template_input(graph),
-            ),
-            Err(error) => Err(error),
-        };
-        if let Ok(program) = result.as_mut() {
-            program
-                .lowered
-                .targeted_refresh_tables
-                .extend(policy_dependency_footprint.tables);
-            program.lowered.targeted_refresh_uncertain |= policy_dependency_footprint.uncertain;
-        }
-        resolver
-            .node
-            .restore_scoped_policy_authorization_graphs(&policy_replacement_lease);
-        if let Some(request) = trace_request {
-            trace_capability_compile(
-                node_uuid,
-                node_alias,
-                &request,
-                result.as_ref().map_err(|report| report.as_ref()),
-            );
-        }
-        result.map_err(|report| Error::QueryCapability(format!("{report:?}")))
     }
 
     async fn prepare_query_program_policy_dependencies(
@@ -1362,12 +1362,6 @@ where
         }
     }
 
-    #[tracing::instrument(
-        target = "jazz::profile",
-        level = "debug",
-        skip_all,
-        name = "cold.phase.query_subscribe"
-    )]
     pub(super) async fn subscribe_lowered_program(
         &mut self,
         program: QueryProgram,
@@ -1376,18 +1370,24 @@ where
         prepared_claim_binding_mode: PreparedClaimBindingMode,
         progress_waker: Option<&std::task::Waker>,
     ) -> Result<MultisinkSubscription, Error> {
-        self.install_lowered_program_subscription(
-            program,
-            binding,
-            binding_source_shape,
-            prepared_claim_binding_mode,
-            progress_waker,
-            SubscriptionLifetime::Retained,
-            RootIndirectValues::Materialize,
-            None,
+        tracing::Instrument::instrument(
+            async move {
+                self.install_lowered_program_subscription(
+                    program,
+                    binding,
+                    binding_source_shape,
+                    prepared_claim_binding_mode,
+                    progress_waker,
+                    SubscriptionLifetime::Retained,
+                    RootIndirectValues::Materialize,
+                    None,
+                )
+                .await
+                .map(|(subscription, _)| subscription)
+            },
+            tracing::debug_span!(target: "jazz::profile", "cold.phase.query_subscribe"),
         )
         .await
-        .map(|(subscription, _)| subscription)
     }
 
     /// The same installation and binding path serves one-result and retained

@@ -609,17 +609,22 @@ where
         Ok(None)
     }
 
-    #[tracing::instrument(target = "jazz::profile", level = "debug", skip_all, name = "cold.phase.merge_heads_stage")]
     #[doc(hidden)]
     pub async fn write_merge_heads_for_bulk_content_versions(
         &mut self,
         batch: &mut DatabaseBatch,
         versions: &[VersionRow],
     ) -> Result<(), Error> {
-        self.write_merge_heads_for_bulk_content_versions_with_empty_history(
-            batch,
-            versions,
-            &BTreeSet::new(),
+        tracing::Instrument::instrument(
+            async move {
+            self.write_merge_heads_for_bulk_content_versions_with_empty_history(
+                batch,
+                versions,
+                &BTreeSet::new(),
+            )
+            .await
+            },
+            tracing::debug_span!(target: "jazz::profile", "cold.phase.merge_heads_stage"),
         )
         .await
     }
@@ -740,30 +745,35 @@ where
         Ok(())
     }
 
-    #[tracing::instrument(target = "jazz::profile", level = "debug", skip_all, name = "cold.phase.merge_heads_rebuild")]
     #[doc(hidden)]
     pub async fn rebuild_merge_heads_after_history_commit(
         &mut self,
         rows: &BTreeSet<(PhysicalTableId, String, BranchKey, RowUuid)>,
     ) -> Result<(), Error> {
-        if rows.is_empty() {
-            return Ok(());
-        }
-        let mut batch = self.database.open_batch();
-        for (table_id, table, branch_key, row_uuid) in rows {
-            let heads = self.recompute_merge_heads_from_persisted_history(
-                *table_id,
-                table,
-                branch_key,
-                *row_uuid,
-            )
-            .await?;
-            Self::write_merge_heads(&mut batch, *table_id, branch_key, *row_uuid, &heads)?;
-        }
-        let applied = self.database.apply_batch(batch).await?;
-        let persisted = applied.persist().await;
-        self.database.finish_persistence(persisted)?;
-        Ok(())
+        tracing::Instrument::instrument(
+            async move {
+            if rows.is_empty() {
+                return Ok(());
+            }
+            let mut batch = self.database.open_batch();
+            for (table_id, table, branch_key, row_uuid) in rows {
+                let heads = self.recompute_merge_heads_from_persisted_history(
+                    *table_id,
+                    table,
+                    branch_key,
+                    *row_uuid,
+                )
+                .await?;
+                Self::write_merge_heads(&mut batch, *table_id, branch_key, *row_uuid, &heads)?;
+            }
+            let applied = self.database.apply_batch(batch).await?;
+            let persisted = applied.persist().await;
+            self.database.finish_persistence(persisted)?;
+            Ok(())
+            },
+            tracing::debug_span!(target: "jazz::profile", "cold.phase.merge_heads_rebuild"),
+        )
+        .await
     }
 
     pub(super) async fn content_version_reaches_tx(

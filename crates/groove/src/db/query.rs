@@ -892,59 +892,59 @@ impl Database {
     /// columns. Binding appends ordinary filter/project graph nodes for each
     /// sink, so callers with one-sink needs should treat [`Database::prepare_one_sink`]
     /// and [`Database::prepare_one_sink_with_routing`] as thin convenience wrappers.
-    #[tracing::instrument(
-        target = "jazz::profile",
-        level = "debug",
-        skip_all,
-        name = "cold.phase.query_prepare"
-    )]
     pub async fn prepare(
         &mut self,
         terminals: impl IntoIterator<Item = RoutedMultisinkTerminal>,
         binding_source_shape: impl Into<String>,
         binding_descriptor: RecordDescriptor,
     ) -> Result<crate::ivm::PreparedShape, Error> {
-        self.ensure_not_poisoned()?;
-        let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
-        let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
-        self.ivm_runtime
-            .prepare(
-                terminals,
-                binding_source_shape,
-                binding_descriptor,
-                &storage,
-            )
-            .await
-            .map_err(Error::IvmRuntime)
+        tracing::Instrument::instrument(
+            async move {
+                self.ensure_not_poisoned()?;
+                let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
+                let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
+                self.ivm_runtime
+                    .prepare(
+                        terminals,
+                        binding_source_shape,
+                        binding_descriptor,
+                        &storage,
+                    )
+                    .await
+                    .map_err(Error::IvmRuntime)
+            },
+            tracing::debug_span!(target: "jazz::profile", "cold.phase.query_prepare"),
+        )
+        .await
     }
 
     /// Prepare a routed shape that callers with identical terminals share.
     /// The shape retires itself when its last retained binding unsubscribes;
     /// see [`crate::ivm::IvmRuntime::prepare_shared`].
-    #[tracing::instrument(
-        target = "jazz::profile",
-        level = "debug",
-        skip_all,
-        name = "cold.phase.query_prepare"
-    )]
     pub async fn prepare_shared(
         &mut self,
         terminals: impl IntoIterator<Item = RoutedMultisinkTerminal>,
         binding_source_shape: impl Into<String>,
         binding_descriptor: RecordDescriptor,
     ) -> Result<crate::ivm::PreparedShape, Error> {
-        self.ensure_not_poisoned()?;
-        let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
-        let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
-        self.ivm_runtime
-            .prepare_shared(
-                terminals,
-                binding_source_shape,
-                binding_descriptor,
-                &storage,
-            )
-            .await
-            .map_err(Error::IvmRuntime)
+        tracing::Instrument::instrument(
+            async move {
+                self.ensure_not_poisoned()?;
+                let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
+                let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
+                self.ivm_runtime
+                    .prepare_shared(
+                        terminals,
+                        binding_source_shape,
+                        binding_descriptor,
+                        &storage,
+                    )
+                    .await
+                    .map_err(Error::IvmRuntime)
+            },
+            tracing::debug_span!(target: "jazz::profile", "cold.phase.query_prepare"),
+        )
+        .await
     }
 
     /// Retire a shared prepared shape that no retained binding holds, for a
