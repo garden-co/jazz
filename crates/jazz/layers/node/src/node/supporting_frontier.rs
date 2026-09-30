@@ -69,13 +69,7 @@ impl SupportingFrontier {
     pub(super) fn coordinate_conflicts(&self) -> Vec<String> {
         let mut by_coordinate =
             BTreeMap::<super::CoveredInputCoordinate, Vec<&SupportingRow>>::new();
-        // Not `rows()`: that traversal is counted by publication tests.
-        for row in self
-            .weights
-            .iter()
-            .filter(|(_, weights)| weights.iter().any(|weight| *weight > 0))
-            .map(|(row, _)| row)
-        {
+        for row in self.rows() {
             by_coordinate
                 .entry(super::CoveredInputCoordinate::from(row))
                 .or_default()
