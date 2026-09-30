@@ -6,7 +6,7 @@ const canvas = (shapes: number) =>
   `One canvas with ${shapes.toLocaleString("en-US")} shapes across 4 layers, 8 editor cursors, 4 asset-metadata rows and 3 checkpoints.`;
 
 export const posterShopBenchmarks: BenchmarkMetadata[] = [
-  ...[512, 4096].map((shapes) => ({
+  ...[4096].map((shapes) => ({
     name: `poster_shop_open_canvas[${shapes}]`,
     title: `PosterShop · open a ${shapes.toLocaleString("en-US")}-shape poster`,
     description:

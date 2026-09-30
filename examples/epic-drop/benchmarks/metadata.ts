@@ -27,7 +27,6 @@ const upload = (name: string, mib: number): BenchmarkMetadata => ({
 });
 
 export const epicDropBenchmarks: BenchmarkMetadata[] = [
-  upload("epic_drop_upload_4mb", 4),
   upload("epic_drop_upload_64mb", 64),
   {
     name: "epic_drop_folder_listing_100_files",
@@ -54,18 +53,6 @@ export const epicDropBenchmarks: BenchmarkMetadata[] = [
       unit: "bytes downloaded/s",
       explanation: "4 MiB per download.",
     },
-    source,
-  },
-  {
-    name: "epic_drop_seek_64mb",
-    title: "EpicDrop seek · 64 KiB from a 64 MiB file",
-    description:
-      "Read a 64 KiB window from the middle of a 64 MiB file, as an audio or video player does when the user scrubs. Today the cost grows with the whole file's size rather than the window's (#3471), so this number should fall once that is fixed.",
-    fixture: fileFixture("64 MiB"),
-    storage,
-    includes: ["Resolving the file's large-value reference", "Reading the requested 64 KiB window"],
-    excludes: ["Uploading the file", "Decoding the media"],
-    work: { count: 1, unit: "seeks/s", explanation: "One 64 KiB range read per seek." },
     source,
   },
 ];

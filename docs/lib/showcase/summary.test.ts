@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Benchmark, Point, Stage } from "../perf-timeline/model.ts";
-import { change, summarize } from "./summary.ts";
+import { change, stitchFormerHistory, summarize } from "./summary.ts";
 
 let serial = 0;
 function point(stage: Stage, date: string, median: number, extra: Partial<Point> = {}): Point {
@@ -70,4 +70,61 @@ test("falls back to main history when no release is attributable, never to open 
 
 test("change is negative when faster", () => {
   assert.equal(change(2, 1), -0.5);
+});
+
+test("a declared-equivalent rename keeps its former release history", () => {
+  const stitched = new Map([["new_name", "old_name"]]);
+  const old: Benchmark = {
+    id: "old",
+    name: "old_name",
+    points: [
+      point("released", "2026-08-01", 4, { release: "v2.0.0-alpha.54" }),
+      point("released", "2026-09-01", 3, { release: "v2.0.0-alpha.58" }),
+    ],
+  };
+  const current: Benchmark = {
+    id: "new",
+    name: "new_name",
+    points: [point("main", "2026-09-29", 2)],
+  };
+  const unrelated: Benchmark = {
+    id: "other",
+    name: "other",
+    points: [point("main", "2026-09-29", 1)],
+  };
+  const result = stitchFormerHistory([old, current, unrelated], stitched);
+  const merged = result.find((bench) => bench.name === "new_name")!;
+  assert.equal(merged.id, "new");
+  assert.deepEqual(
+    merged.points.map((p) => p.median),
+    [4, 3, 2],
+  );
+  const summary = summarize(merged)!;
+  assert.deepEqual(
+    summary.history.map((entry) => entry.label),
+    ["v2.0.0-alpha.54", "v2.0.0-alpha.58"],
+  );
+  assert.equal(summary.unreleased?.median, 2);
+  assert.equal(
+    result.find((bench) => bench.name === "other"),
+    unrelated,
+  );
+  // Before the new name has results, the former's history stands in for it.
+  const early = stitchFormerHistory([old], stitched).find((bench) => bench.name === "new_name")!;
+  assert.deepEqual(
+    early.points.map((p) => p.median),
+    [4, 3],
+  );
+  // Names that are not declared equivalent are left alone.
+  assert.deepEqual(stitchFormerHistory([old, current], new Map()), [old, current]);
+});
+
+test("the StagePlan task-list cards continue the todo suite's history", () => {
+  const stitched = stitchFormerHistory([
+    { id: "a", name: "sequential_insert_1350_rocksdb", points: [point("main", "2026-09-01", 3)] },
+    { id: "b", name: "query_board_profile_s_rocksdb", points: [point("main", "2026-09-01", 0.04)] },
+  ]);
+  assert.ok(stitched.some((bench) => bench.name === "stage_plan_add_task_1350"));
+  // W1 moves restart their history.
+  assert.ok(!stitched.some((bench) => bench.name === "stage_plan_open_board"));
 });

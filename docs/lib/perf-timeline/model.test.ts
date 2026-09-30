@@ -178,6 +178,45 @@ test("retains independent reruns, deduplicates result IDs and sorts chronologica
   );
 });
 
+test("a scheduled run never adds a second point for a benchmark already measured at that SHA", () => {
+  const merge = run("merge");
+  const nightly = run("nightly");
+  nightly.event = "Schedule";
+  nightly.date = "2026-09-14T03:17:00Z";
+  nightly.commit.hash = merge.commit.hash;
+  nightly.results.push({
+    id: "result-nightly-extra",
+    benchmark: { id: "bench-2", name: "nightly_only" },
+    walltime: { min: 1.9, median: 2, max: 2.1 },
+  });
+  const again = structuredClone(nightly);
+  again.id = "nightly-again";
+  again.results = again.results.map((r) => ({ ...r, id: `${r.id}-again` }));
+  // Whatever order the runs arrive in, the merge run keeps the only point of
+  // the shared benchmark, and the nightly-only case gets exactly one point.
+  for (const runs of [
+    [merge, nightly, again],
+    [again, nightly, merge],
+  ]) {
+    const data = buildTimeline(runs, []);
+    const byId = new Map(data.benchmarks.map((b) => [b.id, b.points]));
+    assert.deepEqual(
+      byId.get("bench-1")?.map((p) => p.runId),
+      ["merge"],
+    );
+    assert.equal(byId.get("bench-2")?.length, 1);
+    assert.equal(data.excludedResults, 3);
+  }
+  // A scheduled run at a new commit is still an ordinary main point.
+  const later = run("later");
+  later.event = "Schedule";
+  const data = buildTimeline([merge, later], []);
+  assert.deepEqual(
+    data.benchmarks[0].points.map((p) => p.runId),
+    ["later", "merge"],
+  );
+});
+
 test("timing ticks are rounded in displayed units, mirrored without altering raw data", () => {
   const r = run("ticks");
   r.results[0].walltime = { min: 0.2, median: 0.9, max: 1 };
