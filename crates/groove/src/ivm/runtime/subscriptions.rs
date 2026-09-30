@@ -3975,7 +3975,14 @@ impl IvmRuntime {
                 let cancelled_retraction = lifetime == SubscriptionLifetime::Retained
                     && runtime.cancel_pending_binding_retraction(&binding_shape, &binding_key);
                 let binding_delta = runtime.provisional_binding_delta(shape_id, &binding_key)?;
-                let binding_added = !binding_delta.deltas.is_empty();
+                // A queued retraction still changes the source's binding set
+                // before this hydration's results are current, so it keeps the
+                // conservative path even for a binding the source holds.
+                let binding_added = !binding_delta.deltas.is_empty()
+                    || runtime
+                        .pending_binding_retractions
+                        .iter()
+                        .any(|pending| pending.key == binding_delta.key);
                 let mut binding_snapshots = runtime.binding_snapshot_deltas();
                 let snapshot = Arc::make_mut(
                     Arc::make_mut(&mut binding_snapshots)
@@ -4040,7 +4047,7 @@ impl IvmRuntime {
             self.index_subscription_outputs(subscription_id, &outputs);
         }
         let initial = Arc::new(Mutex::new(None));
-        // Only a binding the source did not hold changes what its readers
+        // Only a change to the source's binding set changes what its readers
         // produce. Another reference to a live binding leaves every retained
         // result over the shape valid, so it must not invalidate them (#3797).
         let (binding_frontier_advance, borrowed) = match live {
