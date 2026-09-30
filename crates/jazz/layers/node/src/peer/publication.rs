@@ -1488,6 +1488,26 @@ impl PeerState {
         }
         node.drive_ready_query_runtime_with_waker(progress_waker)
             .await?;
+        // A relay child's receiver graph can still be evaluating (for example
+        // while a joined row's large value waits on chunks). Its terminal is
+        // then a partial transition: a replaced source row can already show
+        // its successor while the old version is still held by the pending
+        // join. Folding that into the supporting frontier would publish two
+        // versions of one physical coordinate, which the downstream receiver
+        // rightly rejects. Leave the terminal undrained; the query-runtime
+        // wake re-serves this subscriber once evaluation completes. This is
+        // the relay counterpart of the local receiver guard (#3349).
+        if self
+            .publication_states
+            .get(&subscription)
+            .and_then(|state| state.maintained_subscription_view.as_ref())
+            .is_some_and(|maintained| {
+                maintained.covered_input_receiver.is_some()
+                    && node.subscription_has_pending_query_evaluation(maintained.subscription.id())
+            })
+        {
+            return Ok(ResultTransitions::default());
+        }
         let previous_member_result_set = self
             .publication_states
             .get(&subscription)
