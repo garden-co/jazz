@@ -47,12 +47,6 @@ pub const LOCAL_ROW_AVAILABILITY_STORE: &str = "jazz_local_row_availability_v1";
 /// version from its upstream authority. This is distinct from live result
 /// membership, whose later removals only govern future disclosure.
 pub const SCOPE_RELAY_REPAIR_LEDGER_STORE: &str = "jazz_scope_relay_repair_ledger";
-/// Direct groove record store used to distinguish clean shutdown from crash
-/// recovery windows for bounded startup repair.
-pub const CLEAN_CLOSE_MARKERS_STORE: &str = "jazz_clean_close_markers";
-/// Direct groove record store used to bound crash recovery work when a process
-/// dies after a durable consistency boundary but before clean close runs.
-pub const STORAGE_CONSISTENCY_MARKERS_STORE: &str = "jazz_storage_consistency_markers";
 /// Node-local derived content-head table used to avoid row-history scans on
 /// ordinary accepted writes. It is storage metadata, never wire or app data.
 pub const MERGE_HEADS_TABLE: &str = "jazz_merge_heads";
@@ -718,20 +712,6 @@ impl RuntimeSchema {
                     ),
                 ]),
             ))
-            .with_direct_record_store(DirectRecordStoreSchema::new(
-                CLEAN_CLOSE_MARKERS_STORE,
-                RecordDescriptor::new([("marker", ValueType::String)]),
-                RecordDescriptor::new([("version", ValueType::U64), ("node", ValueType::Uuid)]),
-            ))
-            .with_direct_record_store(DirectRecordStoreSchema::new(
-                STORAGE_CONSISTENCY_MARKERS_STORE,
-                RecordDescriptor::new([("marker", ValueType::String)]),
-                RecordDescriptor::new([
-                    ("version", ValueType::U64),
-                    ("node", ValueType::Uuid),
-                    ("tx_time", ValueType::U64),
-                ]),
-            ))
     }
 }
 
@@ -887,6 +867,24 @@ impl ColumnSchema {
     pub fn with_default(mut self, value: Value) -> Self {
         self.default = Some(value);
         self
+    }
+
+    /// Whether this is a nullable JSON column. Its published storage type is
+    /// the bare `StoredScalar(Json)`: one nullable slot records presence, and
+    /// there is no separate slot for the column's own nullability.
+    pub fn is_nullable_json(&self) -> bool {
+        self.large_value_kind == LargeValueSemanticKind::Json
+            && matches!(self.column_type, GrooveColumnType::Nullable(_))
+    }
+
+    /// Lower a newly authored logical cell to its storage value without
+    /// changing the published JSON descriptor. A present nullable JSON value
+    /// is stored bare; SQL NULL is left to the caller's validation (#2733).
+    pub fn storage_value(&self, value: Value) -> Value {
+        match value {
+            Value::Nullable(Some(value)) if self.is_nullable_json() => *value,
+            value => value,
+        }
     }
 }
 

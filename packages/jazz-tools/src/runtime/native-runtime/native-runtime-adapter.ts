@@ -1970,7 +1970,7 @@ export class NativeRuntimeAdapter implements Runtime {
     for (;;) {
       this.throwServerTransportErrorForTier(tier);
       const observedServerWorkEpoch = this.serverTransportWorkEpoch;
-      void this.pumpServerTransport();
+      this.startServerPump();
       this.throwServerTransportErrorForTier(tier);
       const transportError = this.waitForServerTransportError(tier);
       const transportWork = this.waitForServerTransportWork(tier, observedServerWorkEpoch);
@@ -2605,7 +2605,7 @@ export class NativeRuntimeAdapter implements Runtime {
       throw new Error("Native runtime lacks graceful sync shutdown; rebuild its bindings");
     await this.flushLocalSettlements();
     this.throwServerTransportErrorForTier(tier);
-    void this.pumpServerTransport();
+    this.startServerPump();
     const failure = this.waitForServerTransportError(tier);
     try {
       const wait = this.awaitNativeRead(
@@ -2826,7 +2826,7 @@ export class NativeRuntimeAdapter implements Runtime {
         if (bytes !== null) return bytes;
         // Keep polling while a core pass waits for large-value chunks: the
         // read itself may be what lets that pass resume.
-        this.pumpServerTransport();
+        this.startServerPump();
         if (tier) this.throwServerTransportErrorForTier(tier);
         await sleep(0);
       }
@@ -3473,8 +3473,17 @@ export class NativeRuntimeAdapter implements Runtime {
     setTimeout(() => {
       this.serverPumpScheduled = false;
       if (this.closed) return;
-      void this.pumpServerTransport().catch((error) => this.handleServerTransportError(error));
+      this.startServerPump();
     }, SERVER_PUMP_DEBOUNCE_MS);
+  }
+
+  /** Run a pump without awaiting it. A failure becomes the connection's
+   * terminal error rather than an unhandled rejection that crashes Node. */
+  private startServerPump(): void {
+    const generation = this.serverConnectionGeneration;
+    void this.pumpServerTransport().catch((error) =>
+      this.handleServerTransportError(error, generation),
+    );
   }
 
   private notifyPeerTransportWork(requiresDistinctPass = false): void {
@@ -4854,8 +4863,38 @@ function rejectedWaitError(
   /** An Error-compatible diagnostic for direct native callers. */
   message: string;
 } | null {
+  if (isCoreTransactionConflict(error)) return transactionConflictRejection(transactionId, error);
   if (!isCoreWriteRejection(error)) return null;
   return queuedWriteRejection(transactionId, error);
+}
+
+/**
+ * A queued exclusive commit that fails its local serializability check settles
+ * its reserved transaction with core `TransactionConflict`. Surface it as the
+ * same structured rejection an authority rejection produces, keeping the
+ * `transaction_conflict` code so callers can tell a local conflict from an
+ * authority `exclusive_conflict`.
+ */
+function transactionConflictRejection(
+  transactionId: TxId,
+  error: unknown,
+): {
+  kind: "rejected";
+  transactionId: TxId;
+  code: string;
+  reason: string;
+  message: string;
+} {
+  const message = errorMessage(error);
+  const rejection = {
+    kind: "rejected" as const,
+    transactionId,
+    code: "transaction_conflict",
+    reason: /^\(transaction_conflict\):\s*(.*)$/s.exec(message)?.[1] || message,
+    message,
+  };
+  Object.defineProperty(rejection, "message", { enumerable: false });
+  return rejection;
 }
 
 function queuedWriteRejection(
@@ -4954,6 +4993,11 @@ function rejectionReason(message: string): string {
   if (reason === null) return message;
   if (reason.includes("AuthorizationDenied")) return "Write rejected by server authorization";
   return reason || "Write rejected";
+}
+
+/** Whether a native error is a core `TransactionConflict` error, decided by its stable core code. */
+function isCoreTransactionConflict(error: unknown): boolean {
+  return nativeCoreErrorCode(error) === "transaction_conflict";
 }
 
 /** Whether a native error is a core `WriteRejected` error, decided by its stable core code. */

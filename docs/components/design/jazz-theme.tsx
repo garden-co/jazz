@@ -7,6 +7,7 @@ import { jazzTheme } from "@garden-co/design/jazz";
 import "@astryxdesign/core/astryx.css";
 import "@garden-co/design/jazz/theme.css";
 import "@garden-co/design/jazz/components.css";
+import "@garden-co/design/jazz/palette.css";
 
 /**
  * Provides the shared Jazz design-system theme (garden-co/design) to Astryx
