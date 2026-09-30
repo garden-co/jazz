@@ -628,11 +628,6 @@ pub struct NodeState<S = BoxedStorage> {
     /// Test-only count of query programs actually lowered, excluding cache hits.
     #[cfg(any(test, feature = "testing"))]
     query_program_compilations: usize,
-    /// The tier whose current rows policy subplans read as evidence. Local
-    /// (read-your-writes) by default; a commit unit's write-policy decision
-    /// reads authority-accepted state (Global), so neither the candidate nor
-    /// any other still-pending local transaction is evidence (`INV-RLS-9`).
-    policy_evidence_tier: DurabilityTier,
     /// Process-local claims attached to authenticated subscriber sessions.
     session_claims: BTreeMap<AuthorSubject, BTreeMap<String, Value>>,
     /// Monotone revision for each identity's process-local session claims.

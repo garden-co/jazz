@@ -70,11 +70,32 @@ pub(super) struct JazzSourceGraphPreparer<'a, S> {
 /// descriptor, so a check never rebuilds or re-encodes the overlay. A check
 /// can also record which overlay-eligible tables its policy reads, so the
 /// caller re-checks a write only when a table it reads changed.
-#[derive(Clone, Default)]
+///
+/// The overlay also names the tier its committed view is read at. Ordinary
+/// policy checks read Local (read-your-writes); a commit unit's decision
+/// reads authority-accepted state (Global), so neither the candidate, which a
+/// self-finalizing node has already stored Pending, nor any other pending
+/// local transaction is evidence. The tier travels with each check rather
+/// than living on the node, so a dropped or interleaved decision can never
+/// change what another check reads.
+#[derive(Clone)]
 pub(in crate::node) struct TransactionWriteOverlay {
     tables: Arc<BTreeMap<(SchemaVersionId, String), Arc<TransactionOverlayTable>>>,
     excluded: Option<(SchemaVersionId, String, RowUuid)>,
     reads: Option<Arc<Mutex<BTreeSet<(SchemaVersionId, String)>>>>,
+    evidence_tier: DurabilityTier,
+}
+
+impl Default for TransactionWriteOverlay {
+    /// No overlaid rows, over the Local view: an ordinary policy check.
+    fn default() -> Self {
+        Self {
+            tables: Arc::default(),
+            excluded: None,
+            reads: None,
+            evidence_tier: DurabilityTier::Local,
+        }
+    }
 }
 
 /// One table's overlaid rows for one evaluation round: `Some` shows the row
@@ -125,8 +146,8 @@ impl TransactionOverlayTable {
 }
 
 impl TransactionWriteOverlay {
-    /// An overlay of the given per-table row sets, excluding no row and
-    /// recording nothing.
+    /// A commit unit decision's overlay of the given per-table row sets over
+    /// authority-accepted state, excluding no row and recording nothing.
     pub(in crate::node) fn from_tables(
         tables: Arc<BTreeMap<(SchemaVersionId, String), Arc<TransactionOverlayTable>>>,
     ) -> Self {
@@ -134,7 +155,29 @@ impl TransactionWriteOverlay {
             tables,
             excluded: None,
             reads: None,
+            evidence_tier: DurabilityTier::Global,
         }
+    }
+
+    /// Authority-accepted state with nothing overlaid: the evidence of a
+    /// commit unit decision's checks that do not see the unit's own writes.
+    pub(in crate::node) fn accepted_state() -> Self {
+        Self::from_tables(Arc::default())
+    }
+
+    /// This overlay's committed view with nothing overlaid, excluded or
+    /// recorded: USING clauses judge the rows a transaction acts on as
+    /// committed, at the same tier as its WITH CHECK evidence.
+    pub(in crate::node) fn committed_view(&self) -> Self {
+        Self {
+            evidence_tier: self.evidence_tier,
+            ..Self::default()
+        }
+    }
+
+    /// The tier whose current rows the policy check reads under the overlay.
+    pub(in crate::node) fn evidence_tier(&self) -> DurabilityTier {
+        self.evidence_tier
     }
 
     /// The same overlay with one row left out: the row under check is the
@@ -149,6 +192,7 @@ impl TransactionWriteOverlay {
             tables: Arc::clone(&self.tables),
             excluded: Some((schema, table.to_owned(), row_uuid)),
             reads: self.reads.clone(),
+            evidence_tier: self.evidence_tier,
         }
     }
 
@@ -162,6 +206,7 @@ impl TransactionWriteOverlay {
             tables: Arc::clone(&self.tables),
             excluded: self.excluded.clone(),
             reads: Some(reads),
+            evidence_tier: self.evidence_tier,
         }
     }
 

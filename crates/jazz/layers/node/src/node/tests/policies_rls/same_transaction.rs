@@ -1022,3 +1022,52 @@ fn self_finalized_exclusive_units_read_accepted_state_as_policy_evidence() {
         "rows that justify only each other are rejected"
     );
 }
+
+/// A unit's decision reads authority-accepted state, but only that decision
+/// does: the tier travels with its checks, never on the node, so ordinary
+/// policy checks on the same node keep reading the Local view (read your own
+/// writes) before and after it.
+///
+/// ```text
+/// core(self) ──mergeable{ show } (pending)
+/// dry run: task(show) ─────────────────────► allowed (Local sees show)
+/// core(self) ──exclusive{ task(show) }─────► Rejected (Global does not)
+/// dry run: task(show) ─────────────────────► still allowed
+/// ```
+#[test]
+fn unit_decisions_leave_ordinary_policy_checks_reading_local_state() {
+    let alice = user(0xa1);
+    let (_core_dir, mut core) = open_node_with_schema(node(7), show_task_schema());
+    install_test_uuid_sub_claim(&mut core, alice);
+
+    let pending_show = row(0xe0);
+    core.commit_mergeable_settled(show_insert(pending_show, alice, 10))
+        .unwrap();
+    let local_check_allows = |core: &mut NodeState, task: RowUuid| {
+        crate::local_executor::block_on(
+            core.dry_run_insert_allows(task_insert(task, pending_show, alice, 11)),
+        )
+        .unwrap()
+    };
+    assert!(
+        local_check_allows(&mut core, row(0xe1)),
+        "an ordinary check sees the pending local show"
+    );
+
+    let fate = self_finalize_exclusive(
+        &mut core,
+        alice,
+        vec![("tasks", row(0xe2), task_cells(pending_show), None)],
+        12,
+    );
+    assert_eq!(
+        fate,
+        Fate::Rejected(RejectionReason::AuthorizationDenied),
+        "the unit decision reads accepted state"
+    );
+
+    assert!(
+        local_check_allows(&mut core, row(0xe3)),
+        "after a unit decision an ordinary check still reads the Local view"
+    );
+}

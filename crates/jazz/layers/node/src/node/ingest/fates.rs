@@ -692,27 +692,6 @@ where
         versions: &[VersionRecord],
         ingest_context: Option<CommitUnitIngestContext>,
     ) -> Result<Option<RejectionReason>, Error> {
-        // Policy evidence for a fate decision is authority-accepted state on
-        // every path (foreign ingest, self-finalize, relay admission): the
-        // candidate is already stored Pending on a self-finalizing node, and
-        // no pending local transaction may justify another (`INV-RLS-9`).
-        let previous = std::mem::replace(&mut self.policy_evidence_tier, DurabilityTier::Global);
-        let rejection = Box::pin(self.commit_unit_write_policy_rejection_on_accepted_state(
-            tx,
-            versions,
-            ingest_context,
-        ))
-        .await;
-        self.policy_evidence_tier = previous;
-        rejection
-    }
-
-    async fn commit_unit_write_policy_rejection_on_accepted_state(
-        &mut self,
-        tx: &Transaction,
-        versions: &[VersionRecord],
-        ingest_context: Option<CommitUnitIngestContext>,
-    ) -> Result<Option<RejectionReason>, Error> {
         if ingest_context.is_some_and(|context| context.trust == CommitUnitTrust::TrustedAdmin) {
             return Ok(None);
         }
@@ -881,12 +860,11 @@ where
     ) -> Result<bool, Error> {
         // Boxed so fate and relay admission frames stay as small as they
         // were with one policy evaluation per version.
-        let previous = std::mem::replace(&mut self.policy_evidence_tier, DurabilityTier::Global);
-        let decision =
+        Ok(
             Box::pin(self.commit_unit_write_policies_allow(versions, author, candidate_tx_id))
-                .await;
-        self.policy_evidence_tier = previous;
-        Ok(decision? == crate::node::policy::UnitWritePolicyDecision::Allowed)
+                .await?
+                == crate::node::policy::UnitWritePolicyDecision::Allowed,
+        )
     }
 
     pub(super) async fn cascade_root_for_versions(

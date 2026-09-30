@@ -266,7 +266,10 @@ unit: foreign ingest, a node finalizing its own mergeable or exclusive commit
 (where the unit is already stored Pending and Local, `INV-TX-2`) and relay
 admission. So the candidate never justifies itself through its own pending
 rows, a committed row the unit deletes is not hidden by that pending deletion,
-and no other still-pending local transaction is evidence.
+and no other still-pending local transaction is evidence. The tier is part of
+each decision's own checks, not node state: ordinary policy checks on the same
+node read the Local view before, during and after a unit decision, and a
+decision that is dropped part-way leaves nothing behind.
 
 A WITH CHECK clause judges the row a write leaves behind, so the rows its policy
 joins read are committed main-branch state overlaid, row by row, with the unit's

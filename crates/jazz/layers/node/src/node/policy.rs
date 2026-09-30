@@ -419,7 +419,7 @@ where
                     None,
                     Some(candidate_tx_id),
                     versions,
-                    &TransactionWriteOverlay::default(),
+                    &TransactionWriteOverlay::accepted_state(),
                 ))
                 .await?
                 {
@@ -970,7 +970,7 @@ where
                 .collect();
             let provenance = current.provenance()?.unwrap_or_else(unresolved_provenance);
             return self
-                .write_policy_query_allows_candidate_with_provenance_for_schema(
+                .write_policy_query_allows_candidate_over_transaction(
                     policy_schema_version,
                     &table,
                     &policy,
@@ -979,6 +979,7 @@ where
                     author,
                     false,
                     provenance,
+                    &transaction_overlay.committed_view(),
                 )
                 .await;
         }
@@ -1015,7 +1016,7 @@ where
             let previous_provenance = previous.provenance()?.unwrap_or_else(unresolved_provenance);
             if let Some(policy) = table.write_policies.update_using.clone() {
                 if !self
-                    .write_policy_query_allows_candidate_with_provenance_for_schema(
+                    .write_policy_query_allows_candidate_over_transaction(
                         policy_schema_version,
                         &table,
                         &policy,
@@ -1024,6 +1025,7 @@ where
                         author,
                         false,
                         previous_provenance,
+                        &transaction_overlay.committed_view(),
                     )
                     .await?
                 {

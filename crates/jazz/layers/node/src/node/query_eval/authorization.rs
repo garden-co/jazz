@@ -663,6 +663,9 @@ where
         .await
     }
 
+    /// Authorize read-for-write visibility of a row a commit unit acts on.
+    /// Only a commit unit's decision asks this, so its evidence is
+    /// authority-accepted state (`INV-RLS-9`).
     pub(in crate::node) async fn read_policy_query_allows_candidate_with_provenance_for_schema(
         &mut self,
         policy_schema_version: SchemaVersionId,
@@ -683,7 +686,7 @@ where
             false,
             provenance,
             PolicyDecisionRole::Read,
-            &TransactionWriteOverlay::default(),
+            &TransactionWriteOverlay::accepted_state(),
         )
         .await
     }
@@ -777,7 +780,7 @@ where
                 &input.shape,
                 policy_shape.schema_version(),
                 policy_shape.schema_version(),
-                self.policy_evidence_tier,
+                transaction_overlay.evidence_tier(),
                 None,
                 None,
                 false,
