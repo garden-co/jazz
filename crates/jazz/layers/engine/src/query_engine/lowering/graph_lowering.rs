@@ -1737,7 +1737,11 @@ fn lower_linear_plan_steps_cached(
                             }
                         }
                     }
-                    graph = graph.project_fields(projection);
+                    // The chain's flattened records carried every joined field so this
+                    // projection could name any of them; drop the ones it did not.
+                    graph = graph
+                        .project_fields(projection)
+                        .narrow_projected_join_chain();
                     fields = source_fields(root_source).collect();
                     fields.extend(available_route_fields.iter().cloned());
                     fields.extend(introduced_route_fields.iter().cloned());
@@ -1949,7 +1953,9 @@ fn lower_linear_plan_steps_cached(
                         }
                     }
                 }
-                graph = graph.project_fields(project_fields);
+                graph = graph
+                    .project_fields(project_fields)
+                    .narrow_projected_join_chain();
                 fields = columns
                     .iter()
                     .map(|column| column.output.name.clone())
