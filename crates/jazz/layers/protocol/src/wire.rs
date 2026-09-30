@@ -670,6 +670,14 @@ pub fn encode_frame(frame: &WireFrame) -> Result<Vec<u8>, postcard::Error> {
     to_allocvec(frame)
 }
 
+/// Whether encoded frame bytes carry a [`WireFrame::ChannelCredit`] grant,
+/// judged by its pinned postcard-v1 enum tag (5) alone. Callers still decode
+/// and validate the grant; this only lets a receiver route credit frames
+/// without decoding every channel payload.
+pub fn is_channel_credit_frame(bytes: &[u8]) -> bool {
+    bytes.first() == Some(&5)
+}
+
 /// Decode a wire frame serialized by [`encode_frame`].
 pub fn decode_frame(bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
     if validate_wire_frame_len(bytes.len()).is_err() {
