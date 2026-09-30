@@ -2,6 +2,15 @@ import { expect, test, type Browser, type Page } from "@playwright/test";
 
 const TIMEOUT = 30_000;
 
+/**
+ * The trigger of an astryx `Selector`. A plain selector's trigger is the
+ * `combobox`; with `hasSearch` the trigger is a labelled `button` and the
+ * combobox role moves to the search input inside the popup.
+ */
+function selector(page: Page, label: string, { hasSearch }: { hasSearch: boolean }) {
+  return page.getByRole(hasSearch ? "button" : "combobox", { name: label, exact: true });
+}
+
 async function operator(browser: Browser, name: string): Promise<Page> {
   const page = await (await browser.newContext()).newPage();
   await page.goto("/");
@@ -15,7 +24,8 @@ async function operator(browser: Browser, name: string): Promise<Page> {
   });
   // On a fresh database the seeded warehouses arrive after the join screen
   // mounts; the first one must still be preselected so joining is one click.
-  await expect(page.getByRole("combobox", { name: "Warehouse" })).toHaveText(/East instruments/, {
+  // The warehouse list is ordered by name, so "East instruments" comes first.
+  await expect(selector(page, "Warehouse", { hasSearch: false })).toHaveText(/East instruments/, {
     timeout: TIMEOUT,
   });
   const join = page.getByRole("button", { name: "Join warehouse" });
@@ -25,17 +35,20 @@ async function operator(browser: Browser, name: string): Promise<Page> {
   return page;
 }
 
-async function choose(page: Page, label: string, option: string | RegExp) {
-  // Searchable selectors render their trigger as a labelled button; the
-  // combobox role moves to the search input inside the popup.
-  await page.getByRole("button", { name: label, exact: true }).click();
+async function choose(
+  page: Page,
+  label: string,
+  option: string | RegExp,
+  { hasSearch }: { hasSearch: boolean },
+) {
+  await selector(page, label, { hasSearch }).click();
   await page.getByRole("option", { name: option }).click();
 }
 
 async function fillOrder(page: Page, customer: string, item: string, quantity: number) {
   await page.getByRole("link", { name: "New order" }).click();
-  await choose(page, "Customer", new RegExp(`^${customer}`));
-  await choose(page, "Item, line 1", new RegExp(`^${item}`));
+  await choose(page, "Customer", new RegExp(`^${customer}`), { hasSearch: true });
+  await choose(page, "Item, line 1", new RegExp(`^${item}`), { hasSearch: true });
   await page.getByLabel("Quantity").fill(String(quantity));
 }
 
