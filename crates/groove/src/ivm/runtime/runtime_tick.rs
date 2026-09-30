@@ -5,13 +5,31 @@ use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Mutex;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Wake, Waker};
 
 use super::evaluation_session::{
     EvaluationInputs, EvaluationRequestFailure, EvaluationRequestKey, EvaluationRequests,
 };
 use super::*;
 use crate::storage::{OwnedStorage, StagedWriteOverlay, StagedWriteState, WriteManyOutcome};
+
+/// Wakes both a direct poller and the runtime owner; see
+/// `IvmRuntime::owner_fanout_waker_for`.
+struct OwnerFanoutWake {
+    caller: Waker,
+    owner: Waker,
+}
+
+impl Wake for OwnerFanoutWake {
+    fn wake(self: std::sync::Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &std::sync::Arc<Self>) {
+        self.caller.wake_by_ref();
+        self.owner.wake_by_ref();
+    }
+}
 
 /// Hydration can discover a large resident graph in one poll. Keep every
 /// owner turn bounded so a browser worker returns to transport ingress between
@@ -65,12 +83,49 @@ struct EvaluationSession<'a> {
     work_queue: EvaluationWorkQueue,
     /// How root outputs present indirect values to the caller.
     root_indirect_values: RootIndirectValues,
+    /// Roots hydrated only to order another output's terminal. Their records
+    /// are read for row identity alone and never published, so their
+    /// indirect values stay physical whatever `root_indirect_values` says.
+    ordering_only_roots: HashSet<NodeId>,
     /// Nodes that stay owned by the live runtime rather than this session.
     /// A binding attached to an already-maintained prepared shape brings the
     /// shared nodes up to date through an ordinary binding tick, then hydrates
     /// against only its own binding. Those nodes' session state then covers
     /// one binding, so it must never replace the live state for all of them.
     borrowed: HashSet<NodeId>,
+}
+
+/// One root node's relational output retained while its publication waits
+/// for immutable chunks, with the materialized forms loaded so far.
+struct PendingSubscriptionOutput {
+    physical: Arc<RecordDeltas>,
+    materialized: Vec<(RootIndirectValues, Arc<RecordDeltas>)>,
+}
+
+impl PendingSubscriptionOutput {
+    fn new(physical: Arc<RecordDeltas>) -> Self {
+        Self {
+            physical,
+            materialized: Vec::new(),
+        }
+    }
+
+    fn materialized_as(&self, representation: &RootIndirectValues) -> Option<Arc<RecordDeltas>> {
+        self.materialized
+            .iter()
+            .find(|(candidate, _)| candidate == representation)
+            .map(|(_, records)| Arc::clone(records))
+    }
+
+    fn record_materialized(
+        &mut self,
+        representation: &RootIndirectValues,
+        records: Arc<RecordDeltas>,
+    ) {
+        if self.materialized_as(representation).is_none() {
+            self.materialized.push((representation.clone(), records));
+        }
+    }
 }
 
 pub(super) struct IncrementalEvaluation<'a> {
@@ -95,8 +150,9 @@ pub(super) struct IncrementalEvaluation<'a> {
     /// for immutable chunks. Re-evaluating after operator state advances can
     /// correctly yield an empty delta, so publication owns this exact value.
     /// Each entry is the physical output and, once loaded, its materialized
-    /// form. TopBy root keys are taken from the physical form (#3309).
-    pending_subscription_outputs: HashMap<NodeId, (Arc<RecordDeltas>, Option<Arc<RecordDeltas>>)>,
+    /// form for each root representation a subscriber of that node asked for.
+    /// TopBy root keys are taken from the physical form (#3309).
+    pending_subscription_outputs: HashMap<NodeId, PendingSubscriptionOutput>,
     terminal_deltas: HashMap<NodeId, TerminalDeltas>,
     root_ordering_windows: HashMap<NodeId, RootOrderingWindows>,
     notification_publication: Option<PublicationId>,
@@ -1460,10 +1516,13 @@ impl<'a> IncrementalEvaluation<'a> {
                 if !self.affected_nodes.contains(&output.node) {
                     continue;
                 }
-                let (physical_records, materialized) = if let Some((physical, materialized)) =
+                let (physical_records, materialized) = if let Some(pending) =
                     self.pending_subscription_outputs.get(&output.node)
                 {
-                    (Arc::clone(physical), materialized.clone())
+                    (
+                        Arc::clone(&pending.physical),
+                        pending.materialized_as(&subscription.root_indirect_values),
+                    )
                 } else {
                     let records = {
                         let mut future = evaluator.update_node(output.node);
@@ -1474,20 +1533,37 @@ impl<'a> IncrementalEvaluation<'a> {
                             }
                         }
                     };
-                    self.pending_subscription_outputs
-                        .insert(output.node, (Arc::clone(&records), None));
+                    self.pending_subscription_outputs.insert(
+                        output.node,
+                        PendingSubscriptionOutput::new(Arc::clone(&records)),
+                    );
                     (records, None)
                 };
+                // Each subscription publishes in the representation its
+                // initial snapshot used, so fields it keeps physical are never
+                // rebuilt, nor fetched, only to be dropped by its consumer.
                 let materialized = match materialized {
                     Some(records) => Ok(records),
-                    None => evaluator.materialize_indirect_input(&physical_records),
+                    None => match subscription
+                        .root_indirect_values
+                        .materialized_field_indices(&physical_records.descriptor)
+                    {
+                        None => evaluator.materialize_indirect_input(&physical_records),
+                        Some(fields) => {
+                            evaluator.materialize_indirect_field_indices(&physical_records, &fields)
+                        }
+                    },
                 };
                 let records = match materialized {
                     Ok(records) => {
-                        self.pending_subscription_outputs.insert(
-                            output.node,
-                            (Arc::clone(&physical_records), Some(Arc::clone(&records))),
-                        );
+                        if let Some(pending) =
+                            self.pending_subscription_outputs.get_mut(&output.node)
+                        {
+                            pending.record_materialized(
+                                &subscription.root_indirect_values,
+                                Arc::clone(&records),
+                            );
+                        }
                         records
                     }
                     Err(IvmRuntimeError::EvaluationBlocked) => {
@@ -1894,6 +1970,7 @@ impl<'a> EvaluationSession<'a> {
             evaluation_inputs: EvaluationInputs::default(),
             work_queue,
             root_indirect_values: RootIndirectValues::Materialize,
+            ordering_only_roots: HashSet::default(),
             borrowed: HashSet::default(),
         })
     }
@@ -2000,9 +2077,12 @@ impl<'a> EvaluationSession<'a> {
                 match result {
                     Ok(records) => {
                         if self.work_queue.is_root(node) {
-                            let materialized_fields = self
-                                .root_indirect_values
-                                .materialized_field_indices(&records.descriptor);
+                            let materialized_fields = if self.ordering_only_roots.contains(&node) {
+                                Some(Vec::new())
+                            } else {
+                                self.root_indirect_values
+                                    .materialized_field_indices(&records.descriptor)
+                            };
                             let mut materialized = Vec::with_capacity(records.deltas.len());
                             let mut blocked = false;
                             for delta in &records.deltas {
@@ -2225,8 +2305,17 @@ impl IvmRuntime {
             && roots.iter().copied().try_fold(false, |found, root| {
                 Ok::<_, IvmRuntimeError>(found || self.output_depends_on_aggregate(root)?)
             })?;
+        // A collector's ordering root carries every source field, but only
+        // its row identity orders the terminal snapshot. Rebuilding its large
+        // values would fetch every chunk of columns the output drops (#3830).
+        let ordering_only_roots = outputs
+            .values()
+            .filter_map(|output| output.root_ordering_node)
+            .filter(|ordering| outputs.values().all(|output| output.node != *ordering))
+            .collect::<HashSet<_>>();
         let mut session = EvaluationSession::hydration(self, roots, storage)?;
         session.root_indirect_values = root_indirect_values;
+        session.ordering_only_roots = ordering_only_roots;
         if !borrowed.is_empty() {
             // The attach tick advanced every shared node. The subscription's
             // own nodes may be resident from an earlier binding of the same
@@ -2744,6 +2833,15 @@ impl IvmRuntime {
             "pending evaluation polling is not reentrant"
         );
         self.pending_incremental_polling = true;
+        // Suspended storage and chunk futures retain only the waker of their
+        // latest poll. Direct operations (subscription openings, one-shot
+        // reads, write admission) poll this queue with their own transient
+        // or no-op wakers; without the owner's bridge, whichever of them
+        // polled last would silently take the continuation of an older cold
+        // hydration with it, and that hydration would never be resumed.
+        let fanout = self.owner_fanout_waker_for(cx.waker());
+        let mut owner_cx = Context::from_waker(fanout.as_ref().unwrap_or(cx.waker()));
+        let cx = &mut owner_cx;
         let slot = Rc::clone(&self.pending_incremental.0);
         let mut state = std::mem::take(&mut *slot.borrow_mut());
         if state.order.is_empty() {
@@ -2972,6 +3070,41 @@ impl IvmRuntime {
                 Poll::Pending
             },
         )
+    }
+
+    /// Remember the durable wake bridge of the runtime owner. Cold work that
+    /// any later caller polls keeps waking this owner as well as that caller.
+    pub(crate) fn retain_owner_progress_waker(&mut self, owner: &Waker) {
+        if self
+            .owner_progress_waker
+            .as_ref()
+            .is_some_and(|retained| retained.will_wake(owner))
+        {
+            return;
+        }
+        self.owner_progress_waker = Some(owner.clone());
+        self.owner_fanout_waker = None;
+    }
+
+    /// The waker a poll by `caller` must install on suspended work: the
+    /// caller's own waker plus the retained owner bridge. `None` when no
+    /// owner is known or the caller is the owner.
+    fn owner_fanout_waker_for(&mut self, caller: &Waker) -> Option<Waker> {
+        let owner = self.owner_progress_waker.as_ref()?;
+        if owner.will_wake(caller) {
+            return None;
+        }
+        if let Some((cached_caller, fanout)) = &self.owner_fanout_waker
+            && cached_caller.will_wake(caller)
+        {
+            return Some(fanout.clone());
+        }
+        let fanout = Waker::from(std::sync::Arc::new(OwnerFanoutWake {
+            caller: caller.clone(),
+            owner: owner.clone(),
+        }));
+        self.owner_fanout_waker = Some((caller.clone(), fanout.clone()));
+        Some(fanout)
     }
 
     fn finish_pending_incremental_poll(
@@ -3812,8 +3945,14 @@ fn touched_route_barriers(
                 _ => None,
             }
         };
-        let records =
-            records.and_then(|records| evaluator.materialize_indirect_input(&records).ok());
+        // Only the route fields key a barrier. Rebuilding the rest of the
+        // record would read, and on a miss request, large values that no
+        // barrier inspects.
+        let records = records.and_then(|records| {
+            evaluator
+                .materialize_indirect_field_indices(&records, &table.field_indices)
+                .ok()
+        });
         let Some(records) = records else {
             touched.extend(table.barriers());
             continue;

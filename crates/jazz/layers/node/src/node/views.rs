@@ -394,7 +394,10 @@ where
             stored_identity = transaction_without_permission_subject(&stored_identity);
             let mut incoming_identity = bundle.tx.clone();
             incoming_identity.n_total_writes = 0;
-            if stored_identity != incoming_identity {
+            // The author or relay of a pending exclusive transaction stores
+            // its read evidence; view carriers never ship it. Compare the
+            // payload, not the local-only evidence.
+            if !known_transaction_payload_matches(&stored_identity, &incoming_identity) {
                 return Err(Error::ConflictingCommitUnit(*tx_id));
             }
             let stored_versions = self.query_versions_for_tx(*tx_id).await?;
@@ -1575,7 +1578,7 @@ where
             self.sync_metrics.receiver_bulk_ingest_commits += 1;
             self.sync_metrics.receiver_bulk_bundle_ingests += receiver_batch_bundle_count;
             let applied = self.database.apply_batch(receiver_batch).await?;
-            let persisted = applied.persist().await;
+            let persisted = self.database.persist_with_progress(&applied).await;
             self.database.finish_persistence(persisted)?;
             for rejected in receiver_batch_rejections {
                 self.rejections
@@ -2031,6 +2034,8 @@ where
                 "authority covered input branch witness disagrees with stored version",
             ));
         }
+        #[cfg(feature = "cold-settle-attribution")]
+        version.record_conversion("covered_input_version", 0);
         Ok(Some(version))
     }
 
@@ -2360,7 +2365,10 @@ where
             stored_identity = transaction_without_permission_subject(&stored_identity);
             let mut incoming_identity = bundle.tx.clone();
             incoming_identity.n_total_writes = 0;
-            if stored_identity != incoming_identity {
+            // The author or relay of a pending exclusive transaction stores
+            // its read evidence; view carriers never ship it. Compare the
+            // payload, not the local-only evidence.
+            if !known_transaction_payload_matches(&stored_identity, &incoming_identity) {
                 return Err(Error::ConflictingCommitUnit(bundle.tx.tx_id));
             }
         }
@@ -2679,7 +2687,7 @@ where
             n_total_writes,
             made_by,
             permission_subject: _,
-            base_snapshot,
+            base_snapshot: _,
             user_metadata_json,
             contribution_merge,
             ..
@@ -2740,7 +2748,9 @@ where
             // Policy capabilities are local authority state and never part of
             // a view or repair carrier. Durable made_by remains explicit.
             permission_subject: None,
-            base_snapshot,
+            // Exclusive read evidence is kept only for retransmitting the
+            // author's own pending unit; view carriers never expose it.
+            base_snapshot: None,
             row_read_set: None,
             absent_read_set: None,
             predicate_read_set: None,
@@ -2772,6 +2782,8 @@ where
         &mut self,
         version: &VersionRow,
     ) -> Result<VersionRow, Error> {
+        #[cfg(feature = "cold-settle-attribution")]
+        version.record_conversion("canonical_history_version", 0);
         // The maintained graph can call its projected result table by a name
         // that also existed in the authored schema.  Resolve that name once
         // through the active catalogue and require the same physical table

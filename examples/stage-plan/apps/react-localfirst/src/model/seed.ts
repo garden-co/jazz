@@ -1,6 +1,13 @@
 import type { Db, WriteResult } from "jazz-tools";
 import { app, type Crew, type TaskStatus } from "../../schema.js";
-import { addComment, createShow, ensureChiefSetup, type Me } from "./actions.js";
+import {
+  addComment,
+  ensureChiefSetup,
+  stageComment,
+  stageShow,
+  type Me,
+  type Tx,
+} from "./actions.js";
 
 /**
  * The demo show every new account starts with. The content is fixed, so every
@@ -68,16 +75,18 @@ export async function setUpAccount(db: Db, account: string, { withDemo }: { with
 }
 
 /**
- * Writes the demo show: the show, its crew chief and invite, the board with
- * its activity, and a first comment. Each write only depends on earlier
- * writes, never on rows in its own transaction
- * (https://github.com/garden-co/jazz/issues/3755).
+ * Writes the demo show in one transaction: the show, its crew chief and
+ * invite, the board with its activity, and a first comment. Each row's policy
+ * sees the rows staged before it in the same transaction.
  */
 export async function seedDemoShow(db: Db, me: Me): Promise<DemoShow> {
-  const created = await createShow(db, me, DEMO_SHOW);
-  const board = await writeBoard(db, me, created.show.id);
-  const comment = await addComment(db, me, board.lineCheck, DEMO_COMMENT);
-  return { showId: created.show.id, writes: [...created.writes, ...board.writes, comment] };
+  const seeded = await db.transaction(async (tx) => {
+    const show = await stageShow(tx, me, DEMO_SHOW);
+    const lineCheck = stageBoard(tx, me, show.id);
+    stageComment(tx, me, lineCheck, DEMO_COMMENT);
+    return show;
+  });
+  return { showId: seeded.value.id, writes: [seeded] as Writes };
 }
 
 /**
@@ -105,20 +114,23 @@ export async function resumeDemoShow(db: Db, me: Me, showId: string): Promise<De
 
 /** The demo board: eight tasks, each with its "created" activity. */
 async function writeBoard(db: Db, me: Me, showId: string) {
-  const board = await db.transaction((tx) =>
-    DEMO_TASKS.map((demo, index) => {
-      const task = tx.insert(app.tasks, {
-        showId,
-        title: demo.title,
-        status: demo.status,
-        assigneeId: demo.mine ? me.profile.id : null,
-        notes: demo.notes ?? null,
-        rank: index + 1,
-      });
-      tx.insert(app.activity, { showId, taskId: task.id, actorId: me.profile.id, kind: "created" });
-      return task;
-    }),
-  );
-  const lineCheck = board.value.find((task) => task.title === "Line check")!;
-  return { lineCheck, writes: [board] as Writes };
+  const board = await db.transaction((tx) => stageBoard(tx, me, showId));
+  return { lineCheck: board.value, writes: [board] as Writes };
+}
+
+/** Stages the demo board into `tx` and returns its "Line check" task. */
+function stageBoard(tx: Tx, me: Me, showId: string) {
+  const tasks = DEMO_TASKS.map((demo, index) => {
+    const task = tx.insert(app.tasks, {
+      showId,
+      title: demo.title,
+      status: demo.status,
+      assigneeId: demo.mine ? me.profile.id : null,
+      notes: demo.notes ?? null,
+      rank: index + 1,
+    });
+    tx.insert(app.activity, { showId, taskId: task.id, actorId: me.profile.id, kind: "created" });
+    return task;
+  });
+  return tasks.find((task) => task.title === "Line check")!;
 }

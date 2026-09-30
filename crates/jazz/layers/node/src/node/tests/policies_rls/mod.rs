@@ -2,6 +2,7 @@
 
 include!("support.rs");
 include!("write_authorization.rs");
+include!("same_transaction.rs");
 include!("read_delivery.rs");
 include!("includes.rs");
 include!("maintained_views.rs");
