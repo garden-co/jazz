@@ -84,7 +84,15 @@ export function buildTimeline(
   // A result ID is the measurement receipt. Do not average reruns, manufacture
   // zeros for missing jobs, or mix instruction-simulation results into seconds.
   const seen = new Set<string>();
-  for (const run of runs) {
+  // The scheduled nightly CodSpeed run measures extra cases on main. It must
+  // not add a second point at a commit whose merge (or earlier nightly) run
+  // already measured that benchmark: summaries compare a point with the one
+  // before it, and two points of one commit would show noise as change.
+  // Scheduled runs are placed last, so the merge run's point wins either way.
+  const measured = new Set<string>();
+  const scheduled = (run: RawRun) => run.event === "Schedule";
+  const ordered = [...runs.filter((r) => !scheduled(r)), ...runs.filter(scheduled)];
+  for (const run of ordered) {
     if (!Number.isFinite(Date.parse(run.date))) continue;
     const branch = run.commit.branch;
     const pr = branch?.pullRequest;
@@ -139,6 +147,12 @@ export function buildTimeline(
       }
       if (seen.has(result.id)) continue;
       seen.add(result.id);
+      const atCommit = `${result.benchmark.id}@${run.commit.hash}`;
+      if (scheduled(run) && measured.has(atCommit)) {
+        excludedResults++;
+        continue;
+      }
+      measured.add(atCommit);
       const bench = benchmarks.get(result.benchmark.id) ?? { ...result.benchmark, points: [] };
       bench.points.push({
         ...time,

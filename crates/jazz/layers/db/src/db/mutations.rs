@@ -3474,15 +3474,15 @@ where
         Ok((content_parents, deletion_parents))
     }
 
-    /// Why a client-local UPDATE found no preimage. A row this replica never
-    /// received cannot be staged against, and saying so discloses nothing the
-    /// replica does not already hold. A resident row that the client query
-    /// still hides stays a read denial.
-    async fn client_update_target_missing(
-        &self,
-        table: &str,
-        row: RowUuid,
-    ) -> Result<Error, Error> {
+    /// Why an UPDATE found no preimage. A row this replica never received
+    /// cannot be staged against, and saying so discloses nothing the replica
+    /// does not already hold: its answer is the same whether or not the row
+    /// exists elsewhere. Local residency is already observable to the same
+    /// caller through explicit-id insert and upsert, so this adds no oracle.
+    /// A resident row that the caller's read query still hides stays a read
+    /// denial. This holds for client-local writes and for trusted-serving
+    /// session writes alike (#3661).
+    async fn update_target_missing(&self, table: &str, row: RowUuid) -> Result<Error, Error> {
         Ok(if self.local_current_row(table, row).await?.is_none() {
             update_target_not_loaded("UPDATE", table, row)
         } else {
@@ -3588,7 +3588,7 @@ where
             .local_row_for_client_identity(table, row, identity)
             .await?
         else {
-            return Err(self.client_update_target_missing(table, row).await?);
+            return Err(self.update_target_missing(table, row).await?);
         };
         let tx_id = self
             .node
@@ -3616,10 +3616,12 @@ where
         identity: AuthorSubject,
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row).await?;
-        let existing = self
+        let Some(existing) = self
             .local_row_for_trusted_identity(table, row, identity)
             .await?
-            .ok_or_else(|| read_for_write_denied("UPDATE", table))?;
+        else {
+            return Err(self.update_target_missing(table, row).await?);
+        };
         let tx_id = self
             .node
             .node
@@ -3685,7 +3687,7 @@ where
             .local_row_for_client_identity(table, row, identity)
             .await?
         else {
-            return Err(self.client_update_target_missing(table, row).await?);
+            return Err(self.update_target_missing(table, row).await?);
         };
         let (mut cells, parent) = {
             let mut node = self.node.node.lock().await;
@@ -3710,7 +3712,7 @@ where
     ) -> Result<(RowCells, Option<TxId>, BTreeSet<String>), Error> {
         self.ensure_row_not_deleted(table, row).await?;
         if self.authorize_read_for_identity(table, row, identity)? != PermissionAdvice::Allowed {
-            return Err(read_for_write_denied("UPDATE", table));
+            return Err(self.update_target_missing(table, row).await?);
         }
         let authored_columns = patch.keys().cloned().collect();
         // A complete replacement still requires read permission, proved by
@@ -3742,7 +3744,7 @@ where
             let (cells, parent) = node
                 .current_physical_cells_and_winner_in_schema(self.schema_version_id, table, row)
                 .await?
-                .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
+                .ok_or_else(|| update_target_not_loaded("partial UPDATE", table, row))?;
             (cells, Some(parent))
         };
         cells.extend(patch);

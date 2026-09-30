@@ -3,6 +3,8 @@
 //! This deliberately duplicates the small schema surface needed by the
 //! benchmark. It does not import an application runtime or fixture helper.
 
+pub mod live_view;
+
 use std::collections::BTreeMap;
 
 use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, MergeableTxOps, PreparedQuery, block_on};

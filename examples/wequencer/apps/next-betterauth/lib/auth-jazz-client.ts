@@ -1,12 +1,17 @@
 import { app } from "@/schema";
 import permissions from "@/permissions";
+import { serverSecret } from "@/lib/server-secret";
+import { JAZZ_ENV } from "@/lib/jazz-env";
 import type { JazzClient } from "jazz-tools/backend";
 import { createRequire as createRequireFromModule } from "node:module";
 
 const createRequire =
   process.getBuiltinModule?.("module")?.createRequire ?? createRequireFromModule;
 const nodeRequire = createRequire(import.meta.url);
-const { createJazzSession } = nodeRequire(
+// Load the backend through Node at runtime, never through the bundler: Turbopack
+// bundles a static "jazz-tools/backend" import (and jazz-napi with it) despite
+// serverExternalPackages, and then fails to resolve the native binding.
+export const { createJazzSession, resolveRequestSession } = nodeRequire(
   "jazz-tools/backend",
 ) as typeof import("jazz-tools/backend");
 
@@ -25,9 +30,9 @@ export async function authJazzClient(): Promise<JazzClient> {
     driver: { type: "memory" },
     serverUrl: process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!,
     initial: {
-      backendSecret: process.env.BACKEND_SECRET ?? "wequencer-development-backend-secret",
+      backendSecret: serverSecret("BACKEND_SECRET", "wequencer-development-backend-secret"),
     },
-    env: process.env.NODE_ENV === "production" ? "prod" : "dev",
+    env: JAZZ_ENV,
     tier: "global",
   }));
   try {

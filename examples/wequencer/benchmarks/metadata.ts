@@ -36,4 +36,45 @@ export const wequencerBenchmarks: BenchmarkMetadata[] = [
     work: { count: 1, unit: "pad toggles/s", explanation: "One toggled pad per iteration." },
     source,
   },
+  {
+    name: "wequencer_open_pattern_views[100]",
+    title: "Wequencer · 100 bandmates open their pattern views",
+    description:
+      "Prepare and attach 100 distinct bindings of one pattern-view query shape (a pattern's 100 most recent pad edits), consuming each initial result.",
+    fixture:
+      "1,001 patterns and 2,000 pad edits; the busy pattern holds 1,000 edits, every other pattern one. Views show the newest 100.",
+    storage: "In-memory Jazz database",
+    includes: [
+      "Per-view query preparation, binding, subscription and initial hydration",
+      "Initial-result validation and runtime/retained-state receipt collection",
+    ],
+    excludes: ["Fixture seeding"],
+    work: {
+      count: 100,
+      unit: "views opened/s",
+      explanation: "100 pattern views attached per timed iteration.",
+    },
+    source,
+  },
+  ...[1000, 10000].map(
+    (depth): BenchmarkMetadata => ({
+      name: `wequencer_pad_edit_history[${depth}]`,
+      title: "Wequencer · read a pad after a long offline edit chain",
+      description:
+        "Read the current value of one pad that was toggled over and over while offline: a chain of locally settled edits, each built on the last, all still retained.",
+      fixture: `One pad edited ${depth.toLocaleString("en-US")} times; every candidate is retained.`,
+      storage: "RocksDB; WAL without fsync",
+      includes: ["One current-row read that scans the retained edit history"],
+      excludes: [
+        "Writing and settling the edit history",
+        "The untimed receipt that checks the winner and read counts",
+      ],
+      work: {
+        count: 1,
+        unit: "reads/s",
+        explanation: "One current-row read per iteration; the edit depth is load context.",
+      },
+      source,
+    }),
+  ),
 ];

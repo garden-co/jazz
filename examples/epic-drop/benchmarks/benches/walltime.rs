@@ -1,6 +1,7 @@
 //! EpicDrop wall-clock receipts for what a user of the file browser notices:
 //! how long an upload takes, how fast a folder lists, and how quickly a
-//! download or a seek into a large file returns. Names are app-prefixed
+//! download returns. Seeking into a large value is measured by RecordPlayer
+//! (`record_player_scrub_track_64mb`). Names are app-prefixed
 //! because the examples page matches CodSpeed results by exact name.
 
 use jazz_example_epic_drop_benchmark::{Fixture, UploadFixture};
@@ -15,15 +16,8 @@ fn main() {
     divan::main();
 }
 
-/// Stream one 4 MiB file from a bounded reader and wait for local durability.
-#[divan::bench(sample_count = 20)]
-fn epic_drop_upload_4mb(bencher: divan::Bencher<'_, '_>) {
-    bencher
-        .with_inputs(UploadFixture::new)
-        .bench_local_refs(|fixture| fixture.upload(0, 4 * MIB));
-}
-
-/// The same upload at 64 MiB: a long recording or a video.
+/// Stream one 64 MiB file (a long recording or a video) from a bounded reader
+/// and wait for local durability.
 #[divan::bench(sample_count = 5)]
 fn epic_drop_upload_64mb(bencher: divan::Bencher<'_, '_>) {
     bencher
@@ -44,13 +38,4 @@ fn epic_drop_folder_listing_100_files(bencher: divan::Bencher<'_, '_>) {
 fn epic_drop_download_4mb(bencher: divan::Bencher<'_, '_>) {
     let fixture = Fixture::new(4 * MIB);
     bencher.bench_local(|| divan::black_box(fixture.download_file()));
-}
-
-/// Seek into the middle of a 64 MiB file and read a 64 KiB window, as an
-/// audio or video player does when the user scrubs. Cost still grows with
-/// file size today (#3471).
-#[divan::bench(sample_count = 20)]
-fn epic_drop_seek_64mb(bencher: divan::Bencher<'_, '_>) {
-    let fixture = Fixture::new(64 * MIB);
-    bencher.bench_local(|| divan::black_box(fixture.download_middle_range()));
 }
