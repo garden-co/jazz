@@ -18,7 +18,6 @@ use groove::records::Value;
 use groove::storage::OrderedKvStorage;
 use web_time::Instant;
 
-use crate::authorization_scope::AuthorityScopeAggregate;
 use crate::ids::AuthorSubject;
 use crate::node::maintained_subscription_view::{
     MaintainedSubscriptionViewFootprint as MaintainedSubscriptionViewIndexFootprint,

@@ -3174,7 +3174,7 @@ fn row_only_write_policy_proofs_retain_no_support_views() {
     // Skipping hydration grants nothing: a write the policy denies is still
     // rejected, and update/delete prove against the stored preimage alike.
     let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
-    let mut settle = || {
+    let settle = || {
         client.tick().unwrap();
         server.tick().unwrap();
         client.tick().unwrap();
@@ -3216,14 +3216,18 @@ fn row_only_write_policy_proofs_retain_no_support_views() {
     );
 }
 
-/// Bob's child insert inherits the parent's select policy, so its proof has a
-/// real dependency input (the parent row) and still hydrates support.
+/// Bob's child insert inherits the parent's select policy, so its proof reads
+/// a row besides the candidate. The Core evaluates that dependency from its
+/// own storage and keeps no support view: a view over the policy query would
+/// hold every child the policy matches for the life of Bob's connection.
 ///
 /// ```text
-/// bob ──insert child──► core ──proof: hydrate parent support──► Accepted
+/// bob ──child of existing parent──► core ──reads parent──► Accepted
+/// bob ──child of missing parent───► core ──reads parent──► Rejected
+///                                     └── retains no support view
 /// ```
 #[test]
-fn dependency_write_policy_proofs_still_hydrate_support() {
+fn dependency_write_policy_proofs_retain_no_support_views() {
     let schema = inherited_insert_policy_schema();
     let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
     let server = open_core(0x65, AuthorSubject::SYSTEM, &schema);
@@ -3257,12 +3261,29 @@ fn dependency_write_policy_proofs_still_hydrate_support() {
     server.tick().unwrap();
     client.tick().unwrap();
 
+    let orphan = client
+        .insert(
+            "children",
+            BTreeMap::from([
+                ("parent_id".to_owned(), Value::Uuid(row(0xf2).0)),
+                ("label".to_owned(), Value::String("orphan".to_owned())),
+            ]),
+            Default::default(),
+        )
+        .unwrap();
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+
     assert!(matches!(child.write_state().unwrap().fate, Fate::Accepted));
-    let (proofs, support_views) = subscriber_proofs_and_support_views(&subscriber);
-    assert_eq!(proofs, 1);
-    assert!(
-        support_views > 0,
-        "an inherited policy must still hydrate its parent support"
+    assert!(matches!(
+        orphan.write_state().unwrap().fate,
+        Fate::Rejected(_)
+    ));
+    assert_eq!(
+        subscriber_proofs_and_support_views(&subscriber),
+        (2, 0),
+        "both inserts are proven against the stored parent, keeping no support view"
     );
 }
 
@@ -3569,35 +3590,23 @@ fn scope_isolated_relay_terminal_write_rejects_empty_handshake_claims() {
     );
 }
 
-/// A terminal support receiver belongs to one admitted link, even if another
-/// live link authenticates the same author with different claims before that
-/// receiver is first proved.
+/// A terminal proof uses its own admitted link's claims, even if another live
+/// link authenticates the same author with different claims first.
 ///
 /// ```text
-/// alice/A link ──admitted──► Core ──terminal proof──► A-bound support
+/// alice/A link ──admitted──► Core ──terminal proof──► A's claims
 ///                                  ▲
 /// alice/B link ──binds B───────────┘
 /// ```
 ///
-/// This targets the opaque terminal-support allocation rather than a public
-/// subscription: its canonical query key is intentionally shared, while its
-/// policy snapshot must not be selected from the node's author-keyed legacy
-/// cache. Replacing the explicit A snapshot below with `session_claims_for`
-/// makes the final assertion observe B and fail.
+/// The policy snapshot must not be selected from the node's author-keyed
+/// legacy cache. Replacing the explicit A snapshot below with
+/// `session_claims_for` makes the first proof observe B and fail.
 #[test]
-fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
-    // The clause must read a row besides the candidate: claim-only clauses
-    // prove without hydrating any support receiver.
-    let schema = editor_claim_workspace_write_schema();
+fn terminal_commit_proof_keeps_same_author_sibling_claim_snapshot() {
+    let schema = editor_claim_write_schema();
     let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
     let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
-    server
-        .insert_with_id(
-            "workspaces",
-            row(0x3e),
-            BTreeMap::from([("open".to_owned(), Value::Bool(true))]),
-        )
-        .unwrap();
     let a_claims = BTreeMap::from([(
         crate::query::provider_claim_key("role"),
         Value::String("editor".to_owned()),
@@ -3649,29 +3658,6 @@ fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
     else {
         panic!("prepared mergeable write must produce one commit unit");
     };
-    let scope = server
-        .node()
-        .borrow()
-        .authorization_support_scope_for_session(
-            alice,
-            Some(&a_claims),
-            &PermissionAdviceAction::Insert {
-                table: "todos".to_owned(),
-                cells: candidate_cells.clone(),
-            },
-        )
-        .expect("editor policy has a support clause");
-    let (shape, binding) = scope
-        .subscriptions
-        .into_iter()
-        .next()
-        .expect("editor policy produces one support subscription");
-    let a_subscription = SubscriptionKey {
-        shape_id: shape.shape_id(),
-        binding_id: binding.binding_id(),
-        read_view: scope.options.read_view_key(),
-    };
-
     {
         let mut a_connection = a_subscriber.borrow_mut();
         let ConnectionLink::Subscriber(a_state) = &mut a_connection.link else {
@@ -3687,40 +3673,12 @@ fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
             ))
             .expect("A terminal proof remains valid after B updates the legacy cache");
         assert!(allowed, "A's editor snapshot authorizes the write");
-        assert_eq!(
-            a_state.peer.subscription_policy_binding(a_subscription),
-            Some((alice, a_claims.clone())),
-            "the maintained terminal support receiver retains A rather than B's sibling snapshot"
-        );
     }
 
-    // 0→1→2 authenticated refreshes reuse the same canonical support key,
-    // but each must replace its maintained receiver before terminal proof.
+    // 0→1→2 authenticated refreshes each prove under their own snapshot.
     a_subscriber
         .borrow_mut()
         .update_authenticated_session_claims(b_claims.clone());
-    let b_scope = server
-        .node()
-        .borrow()
-        .authorization_support_scope_for_session(
-            alice,
-            Some(&b_claims),
-            &PermissionAdviceAction::Insert {
-                table: "todos".to_owned(),
-                cells: candidate_cells.clone(),
-            },
-        )
-        .expect("viewer policy has the same support clause under its own snapshot");
-    let (b_shape, b_binding) = b_scope
-        .subscriptions
-        .into_iter()
-        .next()
-        .expect("viewer policy produces one support subscription");
-    let b_subscription = SubscriptionKey {
-        shape_id: b_shape.shape_id(),
-        binding_id: b_binding.binding_id(),
-        read_view: b_scope.options.read_view_key(),
-    };
     {
         let mut a_connection = a_subscriber.borrow_mut();
         let ConnectionLink::Subscriber(a_state) = &mut a_connection.link else {
@@ -3734,13 +3692,8 @@ fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
                 &versions,
                 tx.tx_id,
             ))
-            .expect("a refreshed terminal proof replaces the stale support receiver");
+            .expect("a refreshed terminal proof uses the refreshed snapshot");
         assert!(!allowed, "the viewer snapshot denies the same write");
-        assert_eq!(
-            a_state.peer.subscription_policy_binding(b_subscription),
-            Some((alice, b_claims)),
-            "terminal support reuse is keyed by exact immutable claims, not just its query key"
-        );
     }
     a_subscriber
         .borrow_mut()
@@ -3758,13 +3711,8 @@ fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
                 &versions,
                 tx.tx_id,
             ))
-            .expect("the next refreshed terminal proof replaces the stale support receiver");
+            .expect("the next refreshed terminal proof uses the restored snapshot");
         assert!(allowed, "the restored editor snapshot authorizes it again");
-        assert_eq!(
-            a_state.peer.subscription_policy_binding(a_subscription),
-            Some((alice, a_claims)),
-            "each claim revision receives a fresh terminal support receiver"
-        );
     }
 }
 

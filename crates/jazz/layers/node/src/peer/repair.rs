@@ -108,95 +108,20 @@ impl PeerState {
             // out of that mutable map, and same-author sessions may differ.
             let scope =
                 node.authorization_support_scope_for_session(writer, Some(&claims), &action)?;
-            let dependencies = scope.dependency_subscriptions().cloned().collect::<Vec<_>>();
-            if dependencies.is_empty() {
-                // Clauses that read only the candidate row and claims have no
-                // inputs to hydrate: the proof is complete at any authority
-                // cut. Hydrating them would materialize every row they match.
-                if !scope.subscriptions.is_empty() {
-                    self.authority_scope_proofs = self.authority_scope_proofs.saturating_add(1);
-                }
-                continue;
+            // This node is the sole authority for every table it serves, so
+            // each policy input is already at the authority cut in its own
+            // storage and the final evaluation below reads it directly.
+            // Hydrating the clauses as maintained support views would only
+            // re-prove that, and each view materializes every row the policy
+            // query matches for the connection's lifetime. Cross-authority
+            // support (INV-SHARD-13) has to be bound to the candidate's
+            // dependency closure; see #3794.
+            if !scope.subscriptions.is_empty() {
+                self.authority_scope_proofs = self.authority_scope_proofs.saturating_add(1);
             }
-            let mut aggregate = AuthorityScopeAggregate::new(
-                dependencies
-                    .iter()
-                    .map(|(shape, binding)| (shape.shape_id(), binding.binding_id()))
-                    .collect(),
-            );
-            for (shape, binding) in dependencies {
-                let subscription = SubscriptionKey {
-                    shape_id: shape.shape_id(),
-                    binding_id: binding.binding_id(),
-                    read_view: scope.options.read_view_key(),
-                };
-                if !aggregate.register(subscription, (shape.shape_id(), binding.binding_id())) {
-                    continue;
-                }
-                let policy_binding = (writer, claims.clone());
-                let maintained = self
-                    .publication_states
-                    .get(&subscription)
-                    .is_some_and(|state| state.maintained_subscription_view.is_some());
-                if maintained
-                    && self.subscription_policy_binding(subscription)
-                        != Some(policy_binding.clone())
-                {
-                    // A canonical support key does not encode the session
-                    // snapshot. Reusing a receiver installed by an earlier
-                    // claim revision (or a sibling link) would prove this
-                    // commit under the wrong immutable policy binding.
-                    self.forget_subscription_with_node(&mut node, subscription);
-                }
-                let (cut, progress) = if self
-                    .publication_states
-                    .get(&subscription)
-                    .is_some_and(|state| state.maintained_subscription_view.is_some())
-                    && self.subscription_policy_binding(subscription) == Some(policy_binding)
-                {
-                    (
-                        node.committed_global_time(),
-                        self.authorization_progress_for_subscription(subscription),
-                    )
-                } else {
-                    let update = self
-                        .rehydrate_authorization_support_query_for_identity(
-                            &mut node,
-                            writer,
-                            claims.clone(),
-                            subscription,
-                            &shape,
-                            &binding,
-                            scope.options.clone(),
-                        )
-                        .await;
-                    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-                        settled_through,
-                        ..
-                    }) = update?
-                    else {
-                        return Err(Error::UnsupportedSyncMessage(
-                            "terminal authority support hydration did not return a view",
-                        ));
-                    };
-                    (
-                        settled_through,
-                        self.authorization_progress_for_subscription(subscription),
-                    )
-                };
-                let _ = aggregate.apply(subscription, cut, progress);
-            }
-            if aggregate.bounds().is_none() {
-                return Err(Error::UnsupportedSyncMessage(
-                    "terminal authority support proof is incomplete",
-                ));
-            }
-            self.authority_scope_proofs = self.authority_scope_proofs.saturating_add(1);
         }
-        // Support subscriptions prove that every policy-dependent input has
-        // reached a stable authority cut. The terminal result still has to be
-        // evaluated under this exact snapshot; a claim-only policy has no
-        // support subscription at all and must not become an implicit grant.
+        // The terminal result is evaluated under this exact snapshot; a
+        // claim-only policy must not become an implicit grant.
         if !evaluate_write_policies {
             return Ok(true);
         }
