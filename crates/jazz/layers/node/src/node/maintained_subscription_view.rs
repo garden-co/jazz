@@ -1079,19 +1079,18 @@ impl MaintainedSubscriptionView {
                 }
                 NetEvent::Version(source, identity, row) => {
                     let covered_input =
-                        self.supporting_row_for_version(source.clone(), &row, node_aliases)?;
+                        self.supporting_row_for_version(source, &row, node_aliases)?;
                     let payload = VersionPayload::prepare(row, &identity, node_aliases)?;
                     if weight < 0 {
                         self.witness_gated_journal = None;
                     }
                     self.versions.apply_delta(payload, weight);
-                    self.supporting.apply(0, covered_input.clone(), weight);
-                    self.supporting.note_source(&covered_input, &source);
+                    self.supporting.apply(0, covered_input, weight);
                     transitions.supporting_changed = true;
                 }
                 NetEvent::Replacement(source, key, identity, row) => {
                     let covered_input =
-                        self.supporting_row_for_version(source.clone(), &row, node_aliases)?;
+                        self.supporting_row_for_version(source, &row, node_aliases)?;
                     let payload = VersionPayload::prepare(row, &identity, node_aliases)?;
                     // A new replacement for an already replaced row can change
                     // its winner, retracting the previous winner's witness.
@@ -1100,13 +1099,12 @@ impl MaintainedSubscriptionView {
                     }
                     self.replacements
                         .apply_delta(key, identity, payload, weight);
-                    self.supporting.apply(1, covered_input.clone(), weight);
-                    self.supporting.note_source(&covered_input, &source);
+                    self.supporting.apply(1, covered_input, weight);
                     transitions.supporting_changed = true;
                 }
                 NetEvent::SharedVersion(source, identity, row) => {
                     let covered_input =
-                        self.supporting_row_for_version(source.clone(), &row, node_aliases)?;
+                        self.supporting_row_for_version(source, &row, node_aliases)?;
                     let key = ReplacementKey::for_row(&row, identity.layer);
                     let payload = VersionPayload::prepare(row, &identity, node_aliases)?;
                     if weight < 0 || self.replacements.contains_key(&key) {
@@ -1116,8 +1114,7 @@ impl MaintainedSubscriptionView {
                     self.replacements
                         .apply_delta(key, identity, payload, weight);
                     self.supporting.apply(0, covered_input.clone(), weight);
-                    self.supporting.apply(1, covered_input.clone(), weight);
-                    self.supporting.note_source(&covered_input, &source);
+                    self.supporting.apply(1, covered_input, weight);
                     transitions.supporting_changed = true;
                 }
                 NetEvent::ProgramFact(fact) => {
@@ -1184,12 +1181,6 @@ impl MaintainedSubscriptionView {
     #[doc(hidden)]
     pub fn supporting_rows(&self) -> impl Iterator<Item = &SupportingRow> {
         self.supporting.rows()
-    }
-
-    /// Diagnostic (#3815): coordinates retained at more than one version.
-    #[doc(hidden)]
-    pub fn supporting_coordinate_conflicts(&self) -> Vec<String> {
-        self.supporting.coordinate_conflicts()
     }
 
     #[doc(hidden)]
