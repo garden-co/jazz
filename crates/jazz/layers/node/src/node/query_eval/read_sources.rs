@@ -2182,7 +2182,11 @@ where
             let mut resolved = self
                 .prepare_source_graph_without_local_exclusions(request)
                 .await?;
-            resolved = self.overlay_transaction_writes(request, resolved).await?;
+            // Only a write-policy check of a multi-row unit carries an
+            // overlay. Box it so ordinary reads keep their poll frames.
+            if !self.transaction_overlay.is_empty() {
+                Box::pin(self.overlay_transaction_writes(request, &mut resolved)).await?;
+            }
             if let Some(scope) = exclusion_scope
                 && !self.excludes_below_pending(request)
             {
@@ -2216,8 +2220,8 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
     async fn overlay_transaction_writes(
         &mut self,
         request: &SourceRequest,
-        mut resolved: ResolvedSource,
-    ) -> Result<ResolvedSource, SourceResolutionError> {
+        resolved: &mut ResolvedSource,
+    ) -> Result<(), SourceResolutionError> {
         if !self.policy_subplan
             || request.visibility != RowVisibility::Visible
             || self.inline_sources.contains_key(&request.source)
@@ -2230,14 +2234,14 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
                 })
             )
         {
-            return Ok(resolved);
+            return Ok(());
         }
         let Some(rows) = self
             .transaction_overlay
             .table(self.read_view.read_schema, &request.source.table)
             .cloned()
         else {
-            return Ok(resolved);
+            return Ok(());
         };
         let overlay_error = || source_resolution_error(request, SourceGap::TransactionReadOverlay);
         // Policy subplan sources are read as raw evidence (INV-RLS-21), so
@@ -2250,26 +2254,26 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
             .ensure_schema_version_alias(self.read_view.read_schema)
             .await
             .map_err(|_| overlay_error())?;
-        let (live, live_descriptor, _) = inline_current_graph_with_source_metadata(
-            &resolved.table_schema,
-            rows.values().flatten().cloned().collect(),
-            schema_version_alias,
-            "transaction-overlay",
-            &request.requirements,
-        )
-        .map_err(|_| overlay_error())?;
-        let live = if live_descriptor == resolved.row_shape.descriptor {
-            live
-        } else {
-            let fields = descriptor_field_names(&resolved.row_shape.descriptor)
-                .map_err(|_| overlay_error())?;
-            let live_fields =
-                descriptor_field_names(&live_descriptor).map_err(|_| overlay_error())?;
-            if fields.iter().any(|field| !live_fields.contains(field)) {
-                return Err(overlay_error());
-            }
-            live.project(fields)
-        };
+        // Encode the live rows against the committed arm's exact runtime
+        // descriptor, as receiver-covered inputs do, so both union arms carry
+        // one record shape (field identities and storage cell types included).
+        let descriptor = resolved.row_shape.descriptor;
+        let live_records = rows
+            .values()
+            .flatten()
+            .map(|row| {
+                inline_current_record_with_source_metadata(
+                    &resolved.table_schema,
+                    &descriptor,
+                    row,
+                    schema_version_alias,
+                    "transaction-overlay",
+                    None,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| overlay_error())?;
+        let live = GraphBuilder::inline_records(descriptor, live_records);
         let row_field = resolved.row_shape.row_uuid_field.clone();
         let written_descriptor = RecordDescriptor::new([(row_field.clone(), ValueType::Uuid)]);
         let written = rows
@@ -2278,13 +2282,13 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| overlay_error())?;
         let committed = GraphBuilder::anti_join(
-            resolved.graph,
+            resolved.graph.clone(),
             GraphBuilder::inline_records(written_descriptor, written),
             [row_field.clone()],
             [row_field],
         );
         resolved.graph = GraphBuilder::union([committed, live]);
-        Ok(resolved)
+        Ok(())
     }
 
     fn prepare_source_graph_without_local_exclusions<'a>(

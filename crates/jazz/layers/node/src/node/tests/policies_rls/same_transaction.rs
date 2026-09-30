@@ -263,7 +263,7 @@ fn folder_schema() -> JazzSchema {
         PublicSchemaBuilder::new().table(
             PublicTableSchemaBuilder::new("folders")
                 .column("owner", PublicColumnType::Uuid)
-                .column("parent", PublicColumnType::Uuid)
+                .fk_column("parent", "folders")
                 .policies(
                     public_write_policies(under_my_folder).with_select(PublicPolicyExpr::True),
                 ),

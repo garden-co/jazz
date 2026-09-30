@@ -827,8 +827,9 @@ where
         author: AuthorSubject,
         candidate_tx_id: TxId,
     ) -> Result<bool, Error> {
-        self.commit_unit_write_policies_allow(versions, author, candidate_tx_id)
-            .await
+        // Boxed so fate and relay admission frames stay as small as they
+        // were with one policy evaluation per version.
+        Box::pin(self.commit_unit_write_policies_allow(versions, author, candidate_tx_id)).await
     }
 
     pub(super) async fn cascade_root_for_versions(

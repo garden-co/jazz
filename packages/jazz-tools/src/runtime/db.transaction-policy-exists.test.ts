@@ -10,7 +10,7 @@ import { deploy, startLocalJazzServer } from "../testing/index.js";
 // transaction, so the server accepts the transaction the client already applied
 // optimistically, and rejects it only when the client's own view would too.
 const app = s.defineApp({
-  shows: s.table({ chiefAccount: s.string() }, {}),
+  shows: s.table({ chiefAccount: s.uuid() }, {}),
   tasks: s.table({ showId: s.uuid(), title: s.string() }, { show: s.rel("shows", "showId") }),
 });
 const permissions = definePermissions(app, ({ policy, session }) => {

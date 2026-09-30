@@ -240,9 +240,8 @@ where
         author: AuthorSubject,
         candidate_tx_id: TxId,
     ) -> Result<bool, Error> {
-        let evidence = self
-            .candidate_unit_evidence(versions, author, candidate_tx_id)
-            .await?;
+        let evidence =
+            Box::pin(self.candidate_unit_evidence(versions, author, candidate_tx_id)).await?;
         let mut passed = vec![false; versions.len()];
         let mut pending = (0..versions.len()).collect::<Vec<_>>();
         let mut grounded = BTreeSet::new();
@@ -253,16 +252,15 @@ where
                 let overlay = evidence.overlay_for(version, &grounded);
                 #[cfg(any(test, feature = "testing"))]
                 WRITE_POLICY_VERSION_EVALUATIONS.with(|count| count.set(count.get() + 1));
-                if self
-                    .write_policy_allows_version_record_for_view(
-                        version,
-                        author,
-                        None,
-                        Some(candidate_tx_id),
-                        versions,
-                        &overlay,
-                    )
-                    .await?
+                if Box::pin(self.write_policy_allows_version_record_for_view(
+                    version,
+                    author,
+                    None,
+                    Some(candidate_tx_id),
+                    versions,
+                    &overlay,
+                ))
+                .await?
                 {
                     passed[index] = true;
                 } else {
