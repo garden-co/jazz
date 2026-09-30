@@ -41,7 +41,7 @@ describe("layerAt", () => {
     const fluted: Layer = {
       ...ramp,
       source: { type: "linear", angle: 0, from: -1, to: 1 },
-      warps: [{ type: "flute", angle: 0, period: 0.2, scale: 8 }],
+      warps: [{ type: "flute", angle: 0, period: 0.2, projection: "perspective", scale: 8 }],
     };
     // Inside a rib the ramp runs from dark to bright ...
     expect(layerAt(fluted, 0.01, 0)).toBeLessThan(layerAt(fluted, 0.19, 0));
@@ -52,7 +52,13 @@ describe("layerAt", () => {
   });
 
   it("a negative flute scale mirrors each rib, keeping its edges in place", () => {
-    const flute = { type: "flute", angle: 0, period: 0.2, scale: 8 } as const;
+    const flute = {
+      type: "flute",
+      angle: 0,
+      period: 0.2,
+      projection: "perspective",
+      scale: 8,
+    } as const;
     const source = { type: "linear", angle: 0, from: -1, to: 1 } as const;
     const up = layerAt({ ink: "a", source, warps: [flute] }, 0.05, 0);
     const down = layerAt({ ink: "a", source, warps: [{ ...flute, scale: -8 }] }, 0.15, 0);
@@ -75,9 +81,40 @@ describe("expandCopies", () => {
   });
 });
 
-describe("mirrored flutes", () => {
+describe("orthographic flutes", () => {
+  const flute = { type: "flute", angle: 0, period: 0.2, falloff: 1 } as const;
+  const source = { type: "radial", x: 0.3, radius: 3 } as const;
+  const a: Layer = { ink: "a", source, warps: [flute] };
+  const b: Layer = { ink: "b", source, warps: [{ ...flute, mirror: true }] };
+
+  it("keep the sharp edge on the same side of every rib, on both sides of the centre", () => {
+    for (const rib of [-3, -1, 0, 1, 3]) {
+      const start = rib * 0.2;
+      // a is lit hard where a rib starts and fades towards its end ...
+      expect(layerAt(a, start + 0.001, 0)).toBeGreaterThan(layerAt(a, start + 0.199, 0) + 0.3);
+      expect(layerAt(a, start - 0.001, 0)).toBeLessThan(0.05);
+      // ... and b, mirrored, the other way round.
+      expect(layerAt(b, start - 0.001, 0)).toBeGreaterThan(layerAt(b, start - 0.199, 0) + 0.3);
+      expect(layerAt(b, start + 0.001, 0)).toBeLessThan(0.05);
+    }
+  });
+
+  it("leave the plane in place, only dimming it", () => {
+    expect(layerAt(a, 0.3, 0)).toBeCloseTo(0.5);
+    expect(layerAt(b, 0.3, 0)).toBeCloseTo(0.5);
+  });
+});
+
+describe("mirrored perspective flutes", () => {
   it("meet at rib lines: one ink ends a rib where the other starts the next", () => {
-    const flute = { type: "flute", angle: 0, period: 0.2, scale: 4, shift: 2 } as const;
+    const flute = {
+      type: "flute",
+      angle: 0,
+      period: 0.2,
+      projection: "perspective",
+      scale: 4,
+      shift: 2,
+    } as const;
     const source = { type: "radial", x: 0.9, radius: 3 } as const;
     const a: Layer = { ink: "a", source, warps: [flute] };
     const b: Layer = { ink: "b", source, warps: [{ ...flute, scale: -4 }] };

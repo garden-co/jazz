@@ -31,15 +31,18 @@ const flutesOf = (pattern: StipplePattern) =>
  */
 function setFlutes(pattern: StipplePattern, key: keyof Flute, value: number): StipplePattern {
   const signed = key === "scale" || key === "shift";
+  return mapFlutes(pattern, (flute) => {
+    const sign = signed && ((flute[key] as number | undefined) ?? 1) < 0 ? -1 : 1;
+    return { ...flute, [key]: sign * value };
+  });
+}
+
+function mapFlutes(pattern: StipplePattern, update: (flute: Flute) => Flute): StipplePattern {
   return {
     ...pattern,
     layers: pattern.layers.map((layer) => ({
       ...layer,
-      warps: layer.warps?.map((warp) => {
-        if (warp.type !== "flute") return warp;
-        const sign = signed && ((warp[key] as number | undefined) ?? 1) < 0 ? -1 : 1;
-        return { ...warp, [key]: sign * value };
-      }),
+      warps: layer.warps?.map((warp) => (warp.type === "flute" ? update(warp) : warp)),
     })),
   };
 }
@@ -59,13 +62,25 @@ function setRadials(
   };
 }
 
+type Projection = NonNullable<Flute["projection"]>;
+
 const fluteSliders = [
   { key: "period", label: "Fluting width", min: 0.02, max: 0.5, step: 0.005 },
-  { key: "scale", label: "Fluting strength", min: 0, max: 30, step: 0.25 },
-  { key: "shift", label: "Fluting offset", min: 0, max: 15, step: 0.25 },
   { key: "angle", label: "Fluting angle", min: 0, max: 180, step: 1 },
-  { key: "bend", label: "Fluting bend", min: -1, max: 2, step: 0.05 },
-] as const;
+  { key: "falloff", label: "Fluting falloff", min: 0.1, max: 6, step: 0.1, only: "orthographic" },
+  { key: "scale", label: "Fluting strength", min: 0, max: 30, step: 0.25, only: "perspective" },
+  { key: "shift", label: "Fluting offset", min: 0, max: 15, step: 0.25, only: "perspective" },
+  { key: "bend", label: "Fluting bend", min: -1, max: 2, step: 0.05, only: "perspective" },
+] as const satisfies {
+  key: keyof Flute;
+  label: string;
+  min: number;
+  max: number;
+  step: number;
+  only?: Projection;
+}[];
+
+const defaultFluteValue = { falloff: 1, scale: 1 } as Partial<Record<keyof Flute, number>>;
 
 const radialSliders = [
   { key: "radius", label: "Gradient radius", min: 0.2, max: 4, step: 0.05 },
@@ -149,6 +164,7 @@ export function StipplePlayground() {
       ),
     });
   const flute = flutesOf(pattern)[0];
+  const projection: Projection = flute?.projection ?? "orthographic";
   const radial = pattern.layers.find((layer) => layer.source.type === "radial")?.source;
 
   const exportPng = () => {
@@ -223,23 +239,52 @@ export function StipplePlayground() {
             </select>
           </label>
         ))}
+        {flute && (
+          <label className="block space-y-1">
+            <Text weight="medium">Fluting projection</Text>
+            <select
+              className="w-full rounded border border-(--color-border) bg-transparent p-2"
+              value={projection}
+              onChange={(event) =>
+                commit(
+                  mapFlutes(pattern, (f) => ({
+                    ...f,
+                    projection: event.target.value as Projection,
+                  })),
+                )
+              }
+            >
+              <option>orthographic</option>
+              <option>perspective</option>
+            </select>
+          </label>
+        )}
+        {flute && projection === "orthographic" && (
+          <Button
+            label="Swap sharp edges"
+            variant="secondary"
+            onClick={() => commit(mapFlutes(pattern, (f) => ({ ...f, mirror: !f.mirror })))}
+          />
+        )}
         {flute &&
-          fluteSliders.map(({ key, label, min, max, step }) => (
-            <label key={key} className="block space-y-1">
-              <Text weight="medium">
-                {label} {Math.abs(flute[key] ?? 0)}
-              </Text>
-              <input
-                type="range"
-                className="w-full"
-                min={min}
-                max={max}
-                step={step}
-                value={Math.abs(flute[key] ?? 0)}
-                onChange={(event) => commit(setFlutes(pattern, key, Number(event.target.value)))}
-              />
-            </label>
-          ))}
+          fluteSliders.map(({ key, label, min, max, step, ...rest }) =>
+            "only" in rest && rest.only !== projection ? null : (
+              <label key={key} className="block space-y-1">
+                <Text weight="medium">
+                  {label} {Math.abs(flute[key] ?? defaultFluteValue[key] ?? 0)}
+                </Text>
+                <input
+                  type="range"
+                  className="w-full"
+                  min={min}
+                  max={max}
+                  step={step}
+                  value={Math.abs(flute[key] ?? defaultFluteValue[key] ?? 0)}
+                  onChange={(event) => commit(setFlutes(pattern, key, Number(event.target.value)))}
+                />
+              </label>
+            ),
+          )}
         {radial?.type === "radial" &&
           radialSliders.map(({ key, label, min, max, step }) => (
             <label key={key} className="block space-y-1">

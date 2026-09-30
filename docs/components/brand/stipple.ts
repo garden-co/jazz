@@ -23,15 +23,25 @@ export type Source =
   | { type: "linear"; angle: number; from: number; to: number; gamma?: number };
 
 /**
- * Fluted glass with ribs perpendicular to `angle`, `period` apart. Each rib
- * shows the plane behind it scaled by `scale` around the rib's centre
- * (negative flips it), shifted by `shift` periods; `bend` curves the scale
- * towards the rib edges like a real lens.
+ * Fluted glass with ribs perpendicular to `angle`, `period` apart.
+ *
+ * "orthographic" (the default) looks straight through each rib: the plane is
+ * unchanged, but every rib is lit hard at its leading edge and fades towards
+ * its trailing edge (`falloff` shapes the fade, `mirror` swaps the edges), the
+ * same way everywhere on the page.
+ *
+ * "perspective" shows the plane behind each rib scaled by `scale` around the
+ * rib's centre (negative flips it), shifted by `shift` periods; `bend` curves
+ * the scale towards the rib edges like a real lens. Which edge ends up sharp
+ * then depends on which way the gradient runs behind the rib.
  */
 export type Flute = {
   type: "flute";
   angle: number;
   period: number;
+  projection?: "orthographic" | "perspective";
+  falloff?: number;
+  mirror?: boolean;
   scale?: number;
   shift?: number;
   bend?: number;
@@ -82,7 +92,8 @@ export type Densities = { a: number; b: number };
 const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
 const rad = (deg: number) => (deg * Math.PI) / 180;
 
-function warp(w: Warp, x: number, y: number): [number, number] {
+/** Maps a page point towards the source; the third value dims the reading. */
+function warp(w: Warp, x: number, y: number): [number, number, number] {
   switch (w.type) {
     case "flute": {
       const cos = Math.cos(rad(w.angle));
@@ -93,23 +104,27 @@ function warp(w: Warp, x: number, y: number): [number, number] {
       const u = t / w.period + (w.phase ?? 0);
       const rib = Math.floor(u);
       const local = u - rib - 0.5;
+      if ((w.projection ?? "orthographic") === "orthographic") {
+        const along = w.mirror ? 0.5 - local : local + 0.5;
+        return [x, y, Math.pow(1 - along, w.falloff ?? 1)];
+      }
       const bend = 1 + (w.bend ?? 0) * 4 * local * local;
       const t2 =
         (rib + 0.5 + local * (w.scale ?? 1) * bend + (w.shift ?? 0) - (w.phase ?? 0)) * w.period;
-      return [t2 * cos - s * sin, t2 * sin + s * cos];
+      return [t2 * cos - s * sin, t2 * sin + s * cos, 1];
     }
     case "mirror": {
       const c = Math.cos(rad(2 * w.angle));
       const s = Math.sin(rad(2 * w.angle));
-      return [x * c + y * s, x * s - y * c];
+      return [x * c + y * s, x * s - y * c, 1];
     }
     case "rotate": {
       const c = Math.cos(rad(-w.angle));
       const s = Math.sin(rad(-w.angle));
-      return [x * c - y * s, x * s + y * c];
+      return [x * c - y * s, x * s + y * c, 1];
     }
     case "translate":
-      return [x - w.x, y - w.y];
+      return [x - w.x, y - w.y, 1];
   }
 }
 
@@ -129,8 +144,14 @@ function source(src: Source, x: number, y: number) {
 export function layerAt(layer: Layer, x: number, y: number) {
   let px = x;
   let py = y;
-  for (const w of layer.warps ?? []) [px, py] = warp(w, px, py);
-  return clamp01(source(layer.source, px, py) * (layer.gain ?? 1));
+  let weight = 1;
+  for (const w of layer.warps ?? []) {
+    const [nx, ny, dim] = warp(w, px, py);
+    px = nx;
+    py = ny;
+    weight *= dim;
+  }
+  return clamp01(source(layer.source, px, py) * weight * (layer.gain ?? 1));
 }
 
 export type Blend = "screen" | "max" | "multiply";
