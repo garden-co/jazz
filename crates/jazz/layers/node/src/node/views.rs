@@ -381,7 +381,10 @@ where
             stored_identity = transaction_without_permission_subject(&stored_identity);
             let mut incoming_identity = bundle.tx.clone();
             incoming_identity.n_total_writes = 0;
-            if stored_identity != incoming_identity {
+            // The author or relay of a pending exclusive transaction stores
+            // its read evidence; view carriers never ship it. Compare the
+            // payload, not the local-only evidence.
+            if !known_transaction_payload_matches(&stored_identity, &incoming_identity) {
                 return Err(Error::ConflictingCommitUnit(*tx_id));
             }
             let stored_versions = self.query_versions_for_tx(*tx_id).await?;
@@ -2333,7 +2336,10 @@ where
             stored_identity = transaction_without_permission_subject(&stored_identity);
             let mut incoming_identity = bundle.tx.clone();
             incoming_identity.n_total_writes = 0;
-            if stored_identity != incoming_identity {
+            // The author or relay of a pending exclusive transaction stores
+            // its read evidence; view carriers never ship it. Compare the
+            // payload, not the local-only evidence.
+            if !known_transaction_payload_matches(&stored_identity, &incoming_identity) {
                 return Err(Error::ConflictingCommitUnit(bundle.tx.tx_id));
             }
         }

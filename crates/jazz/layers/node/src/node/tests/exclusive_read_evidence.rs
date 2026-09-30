@@ -174,3 +174,76 @@ fn mergeable_transaction_row_with_exclusive_evidence_is_rejected() {
         ))
     ));
 }
+
+/// The author of a pending exclusive transaction keeps its read evidence, but
+/// view carriers never ship it. When Core's view of the accepted transaction
+/// reaches the author (as a browser worker relays it back to the tab), the
+/// stored evidence must not make the bundle look like a conflicting payload.
+///
+/// ```
+/// alice ──commit exclusive (pending, evidence stored)──► core ──accept
+///   ▲                                                      │
+///   └──────────── view update (bundle, no evidence) ◄──────┘
+/// ```
+#[test]
+fn view_bundle_for_a_pending_exclusive_transaction_matches_its_stored_evidence() {
+    let (_alice_dir, mut alice) = open_node_with_uuid(node(1));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let shape = Query::from("todos").validate(&schema()).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+
+    let open_id = OpenTransactionId::new();
+    alice.open_exclusive(open_id).unwrap();
+    assert!(alice.tx_read(open_id, "todos", row(1)).unwrap().is_none());
+    alice
+        .tx_write(open_id, "todos", row(1), title_cells("one"), None)
+        .unwrap();
+    let (tx_id, unit) = alice
+        .commit_exclusive_settled(open_id, AuthorSubject::SYSTEM, 10)
+        .unwrap();
+    assert!(
+        stored_exclusive_evidence_slots(&alice, tx_id)
+            .iter()
+            .any(|slot| matches!(slot, Value::Nullable(Some(_))))
+    );
+    let [fate] = core
+        .apply_sync_message_settled(unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert!(matches!(
+        fate,
+        SyncMessage::FateUpdate {
+            fate: Fate::Accepted,
+            ..
+        }
+    ));
+
+    let mut peer = relay_with_system_binding(crate::protocol::SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: Default::default(),
+    });
+    let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    assert!(
+        version_bundles_for_update(&update)
+            .iter()
+            .all(|bundle| bundle.tx.base_snapshot.is_none())
+    );
+    register_shape_binding_for_receiver(&mut alice, &shape, &binding);
+    alice.apply_sync_message_settled(update).unwrap();
+    alice.apply_sync_message_settled(fate).unwrap();
+    assert_eq!(
+        alice.transaction_state_settled(tx_id).unwrap().0,
+        Fate::Accepted
+    );
+    assert_eq!(
+        alice
+            .current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<Vec<_>>(),
+        vec![(row(1), title_cells("one"))]
+    );
+}

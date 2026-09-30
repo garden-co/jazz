@@ -279,6 +279,13 @@ tolerates evidence being present or absent on duplicates.
   It checks that the stored row carries all four slots while pending, that
   `commit_unit_for` after reopen equals the published unit, and that the slots
   are null after the authority's fate is applied.
+- View carriers (`jazz-node`):
+  `node::tests::harness::view_bundle_for_a_pending_exclusive_transaction_matches_its_stored_evidence`.
+  Core's view bundle for an exclusive transaction never carries evidence,
+  while its author still holds the pending row with evidence. The view
+  receiver's stored-versus-incoming identity checks (`node/views.rs`) compare
+  the payload through `known_transaction_payload_matches`, which already
+  ignores evidence on either side, instead of exact equality.
 - Binding decoder (`jazz-model`):
   `query::tests::canonical_binding_bytes_decode_round_trips_and_rejects_the_rest`.
 - End to end (`jazz-db`, `db::tests::node_runtime`), each through a real
