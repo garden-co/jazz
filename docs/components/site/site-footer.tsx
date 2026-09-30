@@ -12,6 +12,7 @@ const columns = [
       { label: "Quickstart", href: "/docs/quickstart" },
       { label: "Examples & benches", href: "/examples" },
       { label: "Pricing", href: "/#pricing" },
+      { label: "Roadmap", href: "https://github.com/garden-co/jazz/milestones" },
       { label: "Dashboard", href: "https://v2.dashboard.jazz.tools" },
     ],
   },
