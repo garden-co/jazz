@@ -64,8 +64,9 @@ const bandChatPermissions = definePermissions(
     // the check sees the committed request (INV-RLS-9).
     //
     // Adding people the creator already shares another room with, without a
-    // request, would need `allowedTo.read("memberProfile")` here, which is
-    // denied even when the creator can read the profile (reported upstream).
+    // request, would need `allowedTo.read("memberProfile")` here. On INSERT
+    // that currently requires UPDATE authority on the profile, not READ
+    // (garden-co/jazz#1900), so it is denied even when the creator can read it.
     policy.roomMembers.allowInsert.where((member) =>
       allOf([
         isCreatorOf(member.roomId),

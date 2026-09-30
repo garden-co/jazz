@@ -116,3 +116,14 @@ backend, app-local worker/WASM copies, or a compatibility path for pre-canonical
 author identifiers. The room link is deliberately an "ask to join" link, not a
 bearer capability; secure, revocable invite capabilities belong to
 [#1954](https://github.com/garden-co/jazz/issues/1954).
+
+## Known limits
+
+- A creator cannot add someone they already share another room with unless
+  that person asks to join. The policy for that would use
+  `allowedTo.read("memberProfile")`, which on INSERT currently requires UPDATE
+  authority on the profile rather than READ
+  ([#1900](https://github.com/garden-co/jazz/issues/1900)).
+- A room and its creator's membership, and a sketch's canvas and message, are
+  separate writes until a transaction's own rows are visible to its policy
+  `exists` checks ([#3755](https://github.com/garden-co/jazz/issues/3755)).

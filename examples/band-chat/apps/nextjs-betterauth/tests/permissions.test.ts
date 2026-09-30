@@ -193,8 +193,8 @@ describe("BandChat room admission and authorship", () => {
     await guest.expectDenied((db) =>
       db.insert(app.roomMembers, { roomId: room.id, memberAuthor: guestAuthor }),
     );
-    // Without a request or a shared room, the creator cannot read a profile,
-    // so cannot add it, even with the matching account id.
+    // Without a join request, the creator cannot add them, even with the
+    // matching account id and profile.
     await owner.expectDenied((db) =>
       db.insert(app.roomMembers, {
         roomId: room.id,
