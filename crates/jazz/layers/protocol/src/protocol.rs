@@ -234,6 +234,15 @@ pub enum SyncMessage {
         /// Nonce allocated on this connection.
         request_id: PermissionAdviceRequestId,
     },
+    /// A non-final part of one `ViewUpdate` whose encoding exceeds the routed
+    /// per-message payload limit. The sender splits the update into bounded
+    /// parts on one delivery stream: every part but the last is a
+    /// `ViewUpdatePart`, and the last is an ordinary `ViewUpdate`. The
+    /// receiving transport buffers the parts and yields only the reassembled
+    /// update, so no receiver ever observes a partial update. Every part names
+    /// the same subscription, `settled_through`, supporting-set transition kind
+    /// and revisions; only the final part's `peer_payload_inventory` counts.
+    ViewUpdatePart(ViewUpdatePayload),
 }
 
 /// Maximum known rows in one current-availability request.
@@ -808,7 +817,9 @@ impl SyncMessage {
 
     fn carried_view_update(&self) -> Option<&ViewUpdatePayload> {
         match self {
-            Self::ViewUpdate(view) | Self::AuthorizationScopeView { view, .. } => Some(view),
+            Self::ViewUpdate(view)
+            | Self::ViewUpdatePart(view)
+            | Self::AuthorizationScopeView { view, .. } => Some(view),
             _ => None,
         }
     }

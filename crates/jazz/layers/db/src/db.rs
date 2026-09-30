@@ -82,6 +82,7 @@ pub mod channel_endpoint;
 mod routed_messages;
 pub use channel_endpoint::{AuxiliaryChannelEndpoint, SharedAuxiliaryEndpoint};
 pub use routed_messages::ReceivedSyncMessage;
+mod view_update_parts;
 mod wire_transport;
 #[cfg(test)]
 use wire_transport::{LogicalMessageReassembler, RECENT_COMPLETED_LOGICAL_MESSAGES};

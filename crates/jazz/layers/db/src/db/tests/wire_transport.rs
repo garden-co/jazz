@@ -2230,3 +2230,273 @@ fn pending_query_carrier_routes_real_foreign_fate() {
         }
     ));
 }
+
+/// A snapshot update whose `rows` bundles each carry a `title_bytes` title, so
+/// the whole update can be made larger than a lowered routed payload limit.
+fn bulky_view_update(rows: u16, title_bytes: usize) -> crate::protocol::ViewUpdatePayload {
+    use crate::protocol::{
+        PeerPayloadInventory, ResultRowLayer, RowVersionRefEntry, SupportingRow,
+        SupportingRowsUpdate, VersionBundle, VersionRecord, ViewUpdatePayload,
+    };
+    use crate::schema::ColumnSchema;
+    use crate::time::{GlobalTime, TxTime};
+    use crate::tx::{DurabilityTier, Fate, Transaction, TxId, TxKind};
+    use groove::schema::ColumnType;
+    let table = TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)]);
+    let schema_version = SchemaVersionId::from_bytes([0x44; 16]);
+    let node = NodeUuid::from_bytes([0x11; 16]);
+    let author = AuthorSubject::for_test_bytes([0x55; 16]);
+    let row_id = |index: u16| {
+        let mut bytes = [0x66; 16];
+        bytes[..2].copy_from_slice(&index.to_be_bytes());
+        RowUuid::from_bytes(bytes)
+    };
+    let mut supporting = Vec::new();
+    let mut bundles = Vec::new();
+    for index in 0..rows {
+        let tx_id = TxId::new(TxTime(1_000 + u64::from(index)), node);
+        let row = row_id(index);
+        supporting.push(SupportingRow {
+            physical_table: crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_bytes([0x71; 16])),
+            version_table: "todos".to_owned().into(),
+            row,
+            version: RowVersionRefEntry {
+                tx: tx_id,
+                schema_version: Some(schema_version),
+                layer: ResultRowLayer::Content,
+                batch: Some(tx_id),
+                branch_or_prefix: Some(Vec::new()),
+                row_digest: None,
+            },
+        });
+        bundles.push(VersionBundle {
+            tx: Transaction {
+                tx_id,
+                kind: TxKind::Mergeable,
+                n_total_writes: 1,
+                made_by: author,
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                contribution_merge: None,
+            },
+            versions: vec![
+                VersionRecord::from_cells(
+                    &table,
+                    schema_version,
+                    row,
+                    author,
+                    1_000 + u64::from(index),
+                    author,
+                    1_000 + u64::from(index),
+                    &BTreeMap::from([(
+                        "title".to_owned(),
+                        format!("{index:05}-{}", "x".repeat(title_bytes)),
+                    )]),
+                    None,
+                )
+                .unwrap(),
+            ],
+            scope: crate::protocol::VersionBundleScope::CompleteTransaction,
+            fate: Fate::Accepted,
+            global_time: Some(GlobalTime(10_000 + u64::from(index))),
+            durability: DurabilityTier::Global,
+        });
+    }
+    ViewUpdatePayload {
+        subscription: crate::protocol::SubscriptionKey {
+            shape_id: crate::query::ShapeId(uuid::Uuid::from_bytes([0x22; 16])),
+            binding_id: crate::query::BindingId(uuid::Uuid::from_bytes([0x33; 16])),
+            read_view: Default::default(),
+        },
+        settled_through: GlobalTime(20_000),
+        version_carriers: crate::protocol::build_version_carriers_from_singletons(bundles).unwrap(),
+        peer_payload_inventory: PeerPayloadInventory {
+            complete_tx_payloads: Vec::new(),
+            authorization_progress: Some(7),
+            opening_pending: false,
+        },
+        supporting_rows: SupportingRowsUpdate::snapshot(supporting),
+    }
+}
+
+/// Compare two updates by meaning: carrier packing (one run or several) is a
+/// transport encoding, so compare the expanded bundle sequence instead.
+fn assert_same_view_update(
+    actual: &crate::protocol::ViewUpdatePayload,
+    expected: &crate::protocol::ViewUpdatePayload,
+) {
+    let bundles = |view: &crate::protocol::ViewUpdatePayload| {
+        crate::protocol::expand_version_carriers(&view.version_carriers).unwrap()
+    };
+    assert_eq!(bundles(actual), bundles(expected));
+    let without_carriers = |view: &crate::protocol::ViewUpdatePayload| {
+        let mut view = view.clone();
+        view.version_carriers.clear();
+        view
+    };
+    assert_eq!(without_carriers(actual), without_carriers(expected));
+}
+
+fn view_update_len(message: &SyncMessage) -> usize {
+    crate::wire::encoded_sync_message_len(message).unwrap()
+}
+
+/// Chunk boundaries: at every limit from just under the whole update down to
+/// a few rows per part, each part fits, decodes on its own under the
+/// untrusted decoder, only the last is an ordinary `ViewUpdate` with the real
+/// inventory, and the parts reassemble to the original update. Both lists of
+/// a delta split across part boundaries in order.
+#[test]
+fn oversized_view_update_splits_into_bounded_parts_that_reassemble() {
+    use crate::db::view_update_parts::{merge_view_update_parts, split_view_update};
+    use crate::protocol::SupportingRowsUpdate;
+    let snapshot = bulky_view_update(24, 2_000);
+    let mut delta = snapshot.clone();
+    let rows = delta.supporting_rows.added_rows().to_vec();
+    delta.supporting_rows = SupportingRowsUpdate::Delta {
+        predecessor: [0x51; 16],
+        revision: [0x52; 16],
+        adds: rows[..10].to_vec(),
+        removes: rows[10..].to_vec(),
+    };
+    for view in [snapshot, delta] {
+        let whole = view_update_len(&SyncMessage::ViewUpdate(view.clone()));
+        for limit in [whole - 1, whole / 2, whole / 3, whole / 7, 8 * 1024] {
+            let parts = split_view_update(view.clone(), limit).unwrap();
+            assert!(parts.len() >= 2, "limit {limit} of {whole} must split");
+            let mut buffered = Vec::new();
+            let mut last = None;
+            for (index, part) in parts.into_iter().enumerate() {
+                assert!(
+                    view_update_len(&part) <= limit,
+                    "part {index} exceeds {limit}"
+                );
+                let bytes = crate::wire::encode_sync_message(&part).unwrap();
+                assert_eq!(crate::wire::decode_sync_message(&bytes).unwrap(), part);
+                match part {
+                    SyncMessage::ViewUpdatePart(payload) => {
+                        assert!(last.is_none(), "a part follows the final update");
+                        assert_eq!(
+                            payload.peer_payload_inventory,
+                            crate::protocol::PeerPayloadInventory::default()
+                        );
+                        buffered.push(payload);
+                    }
+                    SyncMessage::ViewUpdate(payload) => {
+                        assert!(last.replace(payload).is_none(), "one final update");
+                    }
+                    other => panic!("unexpected part {other:?}"),
+                }
+            }
+            let merged = merge_view_update_parts(buffered, last.unwrap()).unwrap();
+            assert_same_view_update(&merged, &view);
+        }
+    }
+}
+
+/// Splitting never divides a transaction bundle or the header: one that alone
+/// exceeds a part is an explicit typed refusal, and the adapter reports it as
+/// a send failure rather than sending anything.
+#[test]
+fn indivisible_oversized_view_update_units_are_unsupported() {
+    use crate::db::view_update_parts::{OversizedViewUpdate, split_view_update};
+    let view = bulky_view_update(4, 8_000);
+    assert!(matches!(
+        split_view_update(view.clone(), 4 * 1024),
+        Err(OversizedViewUpdate::VersionBundleExceedsLimit { .. })
+    ));
+    assert!(matches!(
+        split_view_update(view.clone(), 64),
+        Err(OversizedViewUpdate::HeaderExceedsLimit { .. })
+    ));
+
+    let _limit = RoutedPayloadLimitGuard::lower_to(4 * 1024);
+    let (left, right) = byte_duplex_raw();
+    let frames = Rc::clone(&right.inbound);
+    let mut sender = WireTransportAdapter::current(left);
+    let Err(TransportError::Failed(reason)) = sender.send(SyncMessage::ViewUpdate(view)) else {
+        panic!("an indivisible oversized row must be refused");
+    };
+    assert!(reason.contains("unsupported view update"), "{reason}");
+    sender.poll_flush().unwrap();
+    assert!(frames.borrow().is_empty(), "nothing of the update is sent");
+}
+
+/// The adapter sends an oversized update as parts on one delivery stream and
+/// the receiving adapter yields it once, whole, only after the final part.
+/// A message offered after it keeps its order behind the whole update.
+#[test]
+fn oversized_view_update_crosses_the_wire_whole() {
+    let view = bulky_view_update(24, 2_000);
+    let whole = view_update_len(&SyncMessage::ViewUpdate(view.clone()));
+    let _limit = RoutedPayloadLimitGuard::lower_to(whole / 4);
+    let (left, right) = byte_duplex_raw();
+    let mut sender = WireTransportAdapter::current(left);
+    let mut receiver = WireTransportAdapter::current(right);
+    sender.send(SyncMessage::ViewUpdate(view.clone())).unwrap();
+    let mut follow_up = view.clone();
+    follow_up.version_carriers.clear();
+    follow_up.supporting_rows = crate::protocol::SupportingRowsUpdate::snapshot(Vec::new());
+    sender
+        .send(SyncMessage::ViewUpdate(follow_up.clone()))
+        .unwrap();
+    let SyncMessage::ViewUpdate(received) = receive_after_pumping(&mut sender, &mut receiver)
+    else {
+        panic!("the receiver yields the reassembled update");
+    };
+    assert_same_view_update(&received, &view);
+    assert_eq!(receiver.view_update_parts_in_flight_for_test(), (0, 0));
+    assert_eq!(
+        receive_after_pumping(&mut sender, &mut receiver),
+        SyncMessage::ViewUpdate(follow_up)
+    );
+}
+
+/// Reconnect mid-sequence: the receiving adapter holds the parts it has, but
+/// the link drops before the final part. It never yields a partial update, the
+/// buffered parts go with the dropped adapter, and the update sent again on a
+/// fresh link arrives whole.
+#[test]
+fn view_update_parts_are_discarded_when_the_link_drops_mid_sequence() {
+    let view = bulky_view_update(24, 2_000);
+    let whole = view_update_len(&SyncMessage::ViewUpdate(view.clone()));
+    let _limit = RoutedPayloadLimitGuard::lower_to(whole / 4);
+    let (left, right) = byte_duplex_raw();
+    let inbound = Rc::clone(&right.inbound);
+    let mut sender = WireTransportAdapter::current(left);
+    let mut receiver = WireTransportAdapter::current(right);
+    sender.send(SyncMessage::ViewUpdate(view.clone())).unwrap();
+    for _ in 0..64 {
+        sender.poll_flush().unwrap();
+    }
+    assert_eq!(sender.view_update_parts_in_flight_for_test(), (0, 0));
+    let frames = inbound.borrow_mut().drain(..).collect::<Vec<_>>();
+    let (last, delivered) = frames.split_last().unwrap();
+    for frame in delivered {
+        inbound.borrow_mut().push_back(frame.clone());
+        assert!(
+            receiver.try_recv_result().unwrap().is_none(),
+            "no partial update is ever yielded"
+        );
+    }
+    let (buffered, _) = receiver.view_update_parts_in_flight_for_test();
+    assert!(
+        buffered >= 3,
+        "the non-final parts are buffered: {buffered}"
+    );
+    drop((sender, receiver, last));
+
+    let (left, right) = byte_duplex_raw();
+    let mut sender = WireTransportAdapter::current(left);
+    let mut receiver = WireTransportAdapter::current(right);
+    sender.send(SyncMessage::ViewUpdate(view.clone())).unwrap();
+    let SyncMessage::ViewUpdate(received) = receive_after_pumping(&mut sender, &mut receiver)
+    else {
+        panic!("the resent update arrives whole");
+    };
+    assert_same_view_update(&received, &view);
+}

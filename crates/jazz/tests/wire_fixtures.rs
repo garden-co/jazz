@@ -644,6 +644,12 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
         .iter()
         .find(|(name, _, _)| *name == "view_update_reset_with_covered_input")
         .unwrap();
+    // A non-final part of an oversized update (tag 34): the update's payload
+    // shape, with the inventory reserved for the final `ViewUpdate`.
+    let SyncMessage::ViewUpdate(mut part) = snapshot.clone() else {
+        unreachable!()
+    };
+    part.peer_payload_inventory = PeerPayloadInventory::default();
     let SyncMessage::ViewUpdate(mut delta) = snapshot.clone() else {
         unreachable!()
     };
@@ -660,6 +666,11 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
         "view_update_physical_delta",
         "ViewUpdate",
         SyncMessage::ViewUpdate(delta),
+    ));
+    messages.push((
+        "view_update_part_non_final",
+        "ViewUpdatePart",
+        SyncMessage::ViewUpdatePart(part),
     ));
     messages
 }
