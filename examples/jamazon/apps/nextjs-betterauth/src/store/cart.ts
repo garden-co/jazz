@@ -113,10 +113,17 @@ export async function readGuestCart(db: Db, account: string): Promise<GuestCartL
  */
 export async function claimGuestCart(db: Db, account: string, guest: GuestCartLine[]) {
   const cartId = ids.cart(account);
-  // Read what the account already holds at the server, not just this device.
-  const existing = await db.all(app.cartLines.where({ cartId }), { tier: "remote" });
+  // What the account holds at the server, plus this device's unsynced lines.
+  const [atServer, onDevice] = await Promise.all([
+    db.all(app.cartLines.where({ cartId }), { tier: "remote" }),
+    db.all(app.cartLines.where({ cartId }), { tier: "local-first" }),
+  ]);
+  const existing = [...atServer, ...onDevice];
   for (const line of guest) {
-    const current = existing.find((e) => e.productId === line.productId)?.quantity ?? 0;
+    const current = Math.max(
+      0,
+      ...existing.filter((e) => e.productId === line.productId).map((e) => e.quantity),
+    );
     if (line.quantity > current) setLineQuantity(db, account, line.productId, line.quantity);
   }
 }
