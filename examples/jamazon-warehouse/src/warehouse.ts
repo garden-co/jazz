@@ -1,6 +1,6 @@
 import type { Db } from "jazz-tools";
-import { app, REORDER_LEVEL_CAP } from "../schema.js";
-import { isDefinitiveRejection, retryOnConflict } from "./write-errors.js";
+import { app, REORDER_LEVEL_CAP } from "../schema";
+import { isDefinitiveRejection, retryOnConflict } from "./write-errors";
 
 export interface WarehouseScope {
   warehouseId: string;

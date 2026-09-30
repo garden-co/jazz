@@ -9,16 +9,6 @@ export default withJazz(
   {
     reactStrictMode: true,
     serverExternalPackages: ["jazz-napi", "jazz-tools/backend"],
-    // The shared modules import each other with Node ESM ".js" specifiers.
-    // Turbopack resolves those to the ".ts" source; `next dev --webpack` needs
-    // the alias spelled out.
-    webpack: (config: { resolve: { extensionAlias?: Record<string, string[]> } }) => {
-      config.resolve.extensionAlias = {
-        ...config.resolve.extensionAlias,
-        ".js": [".ts", ".tsx", ".js"],
-      };
-      return config;
-    },
   } satisfies NextConfig,
   {
     server: {
