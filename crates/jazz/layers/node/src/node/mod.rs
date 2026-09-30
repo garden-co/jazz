@@ -324,6 +324,7 @@ mod currency;
 mod database_slot;
 mod descriptor_roles;
 mod eviction;
+mod exclusive_read_evidence;
 mod global_state;
 mod ingest;
 mod node_aliases;

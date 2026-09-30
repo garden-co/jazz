@@ -72,34 +72,34 @@ recognised rather than misread.
 
 Slot 5, `base_snapshot`, is `jazz_exclusive_base_snapshot_v1`:
 
-| # | field | type |
-|---|---|---|
-| 0 | `format_v1` | `U8` = 1 |
-| 1 | `owner` | `Uuid` (`NodeUuid`) |
-| 2 | `global_base` | `U64` (`GlobalTime`) |
-| 3 | `local_base` | `U64` (`TxTime`) |
-| 4 | `dots` | `Array(Record { time: U64, node: Uuid })`, in the snapshot's order |
+| #   | field         | type                                                               |
+| --- | ------------- | ------------------------------------------------------------------ |
+| 0   | `format_v1`   | `U8` = 1                                                           |
+| 1   | `owner`       | `Uuid` (`NodeUuid`)                                                |
+| 2   | `global_base` | `U64` (`GlobalTime`)                                               |
+| 3   | `local_base`  | `U64` (`TxTime`)                                                   |
+| 4   | `dots`        | `Array(Record { time: U64, node: Uuid })`, in the snapshot's order |
 
 Slot 6, `row_read_set`, is `jazz_exclusive_row_reads_v1`:
 
-| # | field | type |
-|---|---|---|
-| 0 | `format_v1` | `U8` = 1 |
-| 1 | `reads` | `Array(Record { table: String, row_uuid: Uuid, version_time: U64, version_node: Uuid })` |
+| #   | field       | type                                                                                     |
+| --- | ----------- | ---------------------------------------------------------------------------------------- |
+| 0   | `format_v1` | `U8` = 1                                                                                 |
+| 1   | `reads`     | `Array(Record { table: String, row_uuid: Uuid, version_time: U64, version_node: Uuid })` |
 
 Slot 7, `absent_read_set`, is `jazz_exclusive_absent_reads_v1`:
 
-| # | field | type |
-|---|---|---|
-| 0 | `format_v1` | `U8` = 1 |
-| 1 | `reads` | `Array(Record { table: String, row_uuid: Uuid })` |
+| #   | field       | type                                              |
+| --- | ----------- | ------------------------------------------------- |
+| 0   | `format_v1` | `U8` = 1                                          |
+| 1   | `reads`     | `Array(Record { table: String, row_uuid: Uuid })` |
 
 Slot 8, `predicate_read_set`, is `jazz_exclusive_predicate_reads_v1`:
 
-| # | field | type |
-|---|---|---|
-| 0 | `format_v1` | `U8` = 1 |
-| 1 | `reads` | `Array(Record { table: String, shape_id: Uuid, query: Bytes, binding_id: Uuid, bindings: Bytes })` |
+| #   | field       | type                                                                                               |
+| --- | ----------- | -------------------------------------------------------------------------------------------------- |
+| 0   | `format_v1` | `U8` = 1                                                                                           |
+| 1   | `reads`     | `Array(Record { table: String, shape_id: Uuid, query: Bytes, binding_id: Uuid, bindings: Bytes })` |
 
 The two nested byte strings are not new formats. Each reuses an encoding that
 is already pinned:
@@ -113,7 +113,9 @@ is already pinned:
 - `bindings` holds the canonical binding bytes `jazz-binding-v0`
   (`crates/jazz/layers/model/src/query/canonical_request.rs`
   `canonical_binding_bytes`). These are the bytes the `BindingId` is already
-  derived from (`uuid_v5(QUERY_NAMESPACE, bytes)`). The decoder must re-derive
+  derived from (`uuid_v5(QUERY_NAMESPACE, bytes)`). The decoder
+  (`binding_values_from_canonical_bytes`, `model/src/query/validation.rs`)
+  must re-derive
   exactly the stored `binding_id` and re-encode to identical bytes. v1 decodes
   scalar, tuple, array and nullable binding values (tags 1–15). Record-valued
   bindings (tag 16) are not decodable in v1. A transaction whose predicate
@@ -136,7 +138,34 @@ Decoding follows the native-record rules of `local-row-availability.v1`:
 
 A malformed, non-canonical or unknown-version slot fails the transaction read
 with `InvalidStoredValue`, the same fail-closed stance as the other epoch-1
-records (`INV-DATA-23`). A null slot is valid and means "no evidence".
+records (`INV-DATA-23`). So do read sets stored without a base snapshot and
+any non-null slot on a `Mergeable` row. A null slot is valid and means "no
+evidence".
+
+Groove typed records delimit their last variable-width field by the length of
+the stored value. The row and absent read records end with a table name, so a
+value cut inside that name decodes as a shorter, still canonical name. That is
+a property of every Groove record, not of this family: the ordered-KV store
+owns value integrity. Cuts into fixed-width fields, and into the nested query
+and binding bytes, are structural and are rejected.
+
+The implementation is `crates/jazz/layers/node/src/node/exclusive_read_evidence.rs`.
+It is written by `transaction_values_with_cardinality_scope` (`node/codec.rs`)
+and read by `stored_transaction_from_record` (`node/currency.rs`). Maintained
+view bundles (`node/views.rs`) set `base_snapshot` to `None` explicitly.
+
+Pinned fixture: a pending exclusive transaction with owner `01…01`,
+`global_base = 3`, `local_base = TxTime::from(12)`, dots `(10, 01…01)` and
+`(11, 02…02)`; one row read `todos/22…22` at `(10, 01…01)`; one absent read
+`todos/33…33`; and one predicate read of `Query::from("todos")`, shape
+`44…44`, bindings `{done: true}`. It encodes to:
+
+| slot | hex                                                                                                                                                                                                                            |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 5    | `010101010101010101010101010101010103000000000000000000300000000000020000002000000000002800000000000101010101010101010101010101010100002c000000000002020202020202020202020202020202`                                           |
+| 6    | `01010000002222222222222222222222222222222200002800000000000101010101010101010101010101010102746f646f73`                                                                                                                       |
+| 7    | `01010000003333333333333333333333333333333302746f646f73`                                                                                                                                                                       |
+| 8    | `010100000044444444444444444444444444444444d327cd149e8f531dbb3fd829eba589f22e0000004300000002746f646f730205746f646f730000000000000000000000000000026a617a7a2d62696e64696e672d763000000000000000010000000000000004646f6e650601` |
 
 ### Storage epoch, profile and registry
 
@@ -167,14 +196,14 @@ before its crash. No wire message, field, tag or frame changes, so
 matches the original payload, and `known_transaction_payload_matches` already
 tolerates evidence being present or absent on duplicates.
 
-| Combination | Behaviour |
-|---|---|
-| New client, new server | An in-flight exclusive transaction replays after restart with its evidence and is validated normally. It is accepted, or rejected only for a real conflict. |
-| New client, old server | The old server already validates evidence carried on the unit, so the replay validates normally. The fix is client-side and helps old servers too. |
-| Old client, new server | The old client still replays without evidence. The new server rejects it with `ExclusiveConflict`, as today. Nothing gets worse. |
-| New binary opens an old data dir | Rows written by the old binary have null slots, so a transaction that was in flight at the upgrade is rejected on replay, as today. Rows written after the upgrade replay correctly. No migration and no rewrite of old rows. |
+| Combination                                      | Behaviour                                                                                                                                                                                                                                                                                      |
+| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| New client, new server                           | An in-flight exclusive transaction replays after restart with its evidence and is validated normally. It is accepted, or rejected only for a real conflict.                                                                                                                                    |
+| New client, old server                           | The old server already validates evidence carried on the unit, so the replay validates normally. The fix is client-side and helps old servers too.                                                                                                                                             |
+| Old client, new server                           | The old client still replays without evidence. The new server rejects it with `ExclusiveConflict`, as today. Nothing gets worse.                                                                                                                                                               |
+| New binary opens an old data dir                 | Rows written by the old binary have null slots, so a transaction that was in flight at the upgrade is rejected on replay, as today. Rows written after the upgrade replay correctly. No migration and no rewrite of old rows.                                                                  |
 | New data dir opened by an old binary (downgrade) | The old decoder never reads slots 5–8, so the rows decode as before and the evidence is ignored. An in-flight exclusive transaction is rejected on replay, as today. No corruption and no new failure. Downgrade is not a supported path across alpha.60 anyway, because #3281 breaks storage. |
-| Relay (Local tier) restart | The relay stores forwarded unfated exclusive units with evidence and re-forwards them intact. Old relays behave as today. |
+| Relay (Local tier) restart                       | The relay stores forwarded unfated exclusive units with evidence and re-forwards them intact. Old relays behave as today.                                                                                                                                                                      |
 
 ## Security and correctness
 
@@ -238,10 +267,27 @@ tolerates evidence being present or absent on duplicates.
 
 ## Evidence
 
-- Exact bytes: `node::tests::exclusive_read_evidence::exclusive_read_evidence_v1_bytes_are_pinned`.
-- Rejection: `node::tests::exclusive_read_evidence::exclusive_read_evidence_v1_rejects_malformed_noncanonical_and_unknown_versions`.
-- Lifecycle: `node::tests::exclusive_read_evidence::exclusive_evidence_is_stored_while_pending_and_cleared_at_settlement`.
-- End to end (db layer):
-  `exclusive_transaction_in_flight_at_restart_replays_without_false_conflict`,
-  `exclusive_transaction_replayed_after_restart_still_rejects_a_real_conflict`, and
-  `exclusive_transaction_without_persisted_evidence_is_still_rejected_on_replay`.
+- Exact bytes (`jazz-node`):
+  `node::exclusive_read_evidence::tests::exclusive_read_evidence_v1_bytes_are_pinned`.
+- Rejection (`jazz-node`):
+  `node::exclusive_read_evidence::tests::exclusive_read_evidence_rejects_malformed_noncanonical_and_unknown_versions`
+  and `node::tests::harness::mergeable_transaction_row_with_exclusive_evidence_is_rejected`.
+- Write policy (`jazz-node`):
+  `node::exclusive_read_evidence::tests::exclusive_read_evidence_is_written_only_when_replayable`.
+- Lifecycle (`jazz-node`):
+  `node::tests::harness::exclusive_evidence_is_stored_while_pending_and_cleared_at_settlement`.
+  It checks that the stored row carries all four slots while pending, that
+  `commit_unit_for` after reopen equals the published unit, and that the slots
+  are null after the authority's fate is applied.
+- Binding decoder (`jazz-model`):
+  `query::tests::canonical_binding_bytes_decode_round_trips_and_rejects_the_rest`.
+- End to end (`jazz-db`, `db::tests::node_runtime`), each through a real
+  RocksDB close and reopen:
+  - `exclusive_transaction_in_flight_at_restart_replays_without_false_conflict`.
+    This is the #3663 regression. It fails with `ExclusiveConflict` when
+    evidence is not persisted and passes with it.
+  - `exclusive_transaction_replayed_after_restart_still_rejects_a_real_conflict`.
+  - `exclusive_transaction_without_persisted_evidence_is_still_rejected_on_replay`.
+- Registry: `jazz.exclusive-read-evidence.v1` in
+  `crates/jazz/fixtures/persistent_codec_family_registry.json`, verified by
+  `crates/jazz/tests/persistent_codec_family_registry.rs`.

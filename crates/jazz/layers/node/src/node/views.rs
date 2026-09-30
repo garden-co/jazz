@@ -2652,7 +2652,7 @@ where
             n_total_writes,
             made_by,
             permission_subject: _,
-            base_snapshot,
+            base_snapshot: _,
             user_metadata_json,
             contribution_merge,
             ..
@@ -2713,7 +2713,9 @@ where
             // Policy capabilities are local authority state and never part of
             // a view or repair carrier. Durable made_by remains explicit.
             permission_subject: None,
-            base_snapshot,
+            // Exclusive read evidence is kept only for retransmitting the
+            // author's own pending unit; view carriers never expose it.
+            base_snapshot: None,
             row_read_set: None,
             absent_read_set: None,
             predicate_read_set: None,
