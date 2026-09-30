@@ -1634,7 +1634,6 @@ export class Db {
   private connection: ConnectionManager;
   private _localFirstSecret: string | null = null;
   private localFirstRefreshTimer: ReturnType<typeof setTimeout> | null = null;
-  private isShuttingDown = false;
   private shutdownPromise: Promise<void> | null = null;
   private readonly shutdownAbort = new AbortController();
   private runtimeOperationContextOverride: DbRuntimeOperationContext | null = null;
@@ -1707,7 +1706,7 @@ export class Db {
         return thisDb.runtimeSource;
       },
       get isShuttingDown() {
-        return thisDb.isShuttingDown;
+        return thisDb.shutdownPromise !== null;
       },
       markUnauthenticated: (reason) => this.markUnauthenticated(reason),
       clearAuthError: () => this.authStateStore.clearError(),
@@ -1794,7 +1793,7 @@ export class Db {
   }
 
   private refreshLocalFirstToken(): void {
-    if (!this._localFirstSecret || this.isShuttingDown) return;
+    if (!this._localFirstSecret || this.shutdownPromise) return;
 
     try {
       const ttlSeconds = 3600;
@@ -2094,7 +2093,7 @@ export class Db {
    * {@link reconnect} to resume sync using the same Db instance.
    */
   async disconnect(): Promise<void> {
-    if (this.isShuttingDown || this.shutdownPromise) {
+    if (this.shutdownPromise) {
       throw new Error("Cannot disconnect a Db that is shutting down.");
     }
 
@@ -2108,7 +2107,7 @@ export class Db {
   async reconnect(): Promise<void> {
     // Sync recovery is safe before teardown starts; it must remain available
     // while a graceful transition waits for previously committed writes.
-    if ((this.isShuttingDown || this.shutdownPromise) && !this.cancelSyncShutdown) {
+    if (this.shutdownPromise && !this.cancelSyncShutdown) {
       throw new Error("Cannot reconnect a Db that is shutting down.");
     }
 
@@ -2971,7 +2970,7 @@ export class Db {
     };
     const ready = initialReadiness
       ?.then(() => {
-        if (unsubscribed || terminalized || activeSubscription === null || this.isShuttingDown) {
+        if (unsubscribed || terminalized || activeSubscription === null || this.shutdownPromise) {
           return;
         }
         deliveryReady = true;
@@ -2981,7 +2980,7 @@ export class Db {
         }
       })
       .catch((error: unknown) => {
-        if (unsubscribed || terminalized || activeSubscription === null || this.isShuttingDown) {
+        if (unsubscribed || terminalized || activeSubscription === null || this.shutdownPromise) {
           return;
         }
         // Admission failed after native registration. Terminalize the same
@@ -3013,7 +3012,7 @@ export class Db {
       )
         .then(() => startNativeSubscription(initialSubscription))
         .catch((error: unknown) => {
-          if (unsubscribed || readyAbort.signal.aborted || this.isShuttingDown) return;
+          if (unsubscribed || readyAbort.signal.aborted || this.shutdownPromise) return;
           terminalizeSubscription(initialSubscription, error);
         });
     } else {
@@ -3030,15 +3029,16 @@ export class Db {
    *
    * Idempotent: concurrent or repeated calls share the same in-flight promise.
    */
-  async shutdown(options: ShutdownOptions = {}): Promise<void> {
+  shutdown(options: ShutdownOptions = {}): Promise<void> {
     if (this.shutdownPromise) return this.shutdownPromise;
-    this.shutdownPromise = this.runShutdown(options);
-    try {
-      await this.shutdownPromise;
-    } catch (error) {
-      if (!this.isShuttingDown) this.shutdownPromise = null;
-      throw error;
-    }
+    // Publish the promise before teardown can synchronously call back into Db.
+    let resolveShutdown!: (result: Promise<void>) => void;
+    const shutdown = new Promise<void>((resolve) => {
+      resolveShutdown = resolve;
+    });
+    this.shutdownPromise = shutdown;
+    resolveShutdown(this.runShutdown(options));
+    return shutdown;
   }
 
   private cancelSyncShutdown: (() => void) | undefined;
@@ -3049,7 +3049,7 @@ export class Db {
   }
 
   protected assertOpen(): void {
-    if (this.isShuttingDown || this.shutdownPromise) {
+    if (this.shutdownPromise) {
       throw new Error("Cannot operate on a Db that is shutting down or closed.");
     }
   }
@@ -3058,13 +3058,12 @@ export class Db {
 
   /** @internal Dispose account refresh and invalidation observers with the context. */
   onShutdown(listener: () => void): () => void {
-    if (this.isShuttingDown) listener();
+    if (this.shutdownPromise) listener();
     else this.shutdownListeners.add(listener);
     return () => this.shutdownListeners.delete(listener);
   }
 
   private async runShutdown(options: ShutdownOptions): Promise<void> {
-    this.isShuttingDown = true;
     if (options.waitForSync) {
       const syncAbort = new AbortController();
       const cancelled = new Promise<never>((_resolve, reject) => {
@@ -3081,7 +3080,7 @@ export class Db {
         ]);
       } catch (error) {
         syncAbort.abort();
-        this.isShuttingDown = false;
+        this.shutdownPromise = null;
         throw new GracefulShutdownSyncError(error);
       } finally {
         this.cancelSyncShutdown = undefined;
