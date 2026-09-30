@@ -1344,6 +1344,55 @@ fn production_policy_union_labels_survive_reorder_and_unrelated_insertion() {
     assert_ne!(labels(&node, &["open"]), labels(&node, &["changed"]));
 }
 
+#[test]
+fn and_of_or_policy_branches_lower_as_one_union_per_factor() {
+    fn branch(state: &str, title: &str) -> crate::query::PolicyBranch {
+        crate::query::PolicyBranch {
+            filters: vec![eq(col("state"), lit(state)), eq(col("title"), lit(title))],
+            joins: Vec::new(),
+            reachable: Vec::new(),
+            inherits: Vec::new(),
+        }
+    }
+    let mut query = Query::from("issues");
+    query.filters = vec![crate::query::Predicate::Any(Vec::new())];
+    query.policy_branches = ["open", "done"]
+        .into_iter()
+        .flat_map(|state| {
+            ["a", "b"]
+                .into_iter()
+                .map(move |title| branch(state, title))
+        })
+        .collect();
+    let shape = query.validate_runtime(&schema()).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let (_dir, node) = open_node();
+    let normalized = node.normalized_row_set_shape(&shape, &binding).unwrap();
+
+    let union_sizes = normalized
+        .nodes
+        .iter()
+        .filter_map(|(id, node)| match node {
+            RowSetExpr::Union { inputs } => Some((id.0.clone(), inputs.len())),
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        union_sizes,
+        BTreeMap::from([
+            ("policy_factor:0:authorized_rows".to_owned(), 2),
+            ("policy_factor:1:authorized_rows".to_owned(), 2),
+        ])
+    );
+    assert!(
+        normalized
+            .nodes
+            .keys()
+            .all(|id| !id.0.starts_with("policy_branch:")),
+        "a factored policy must not also lower its expanded branches"
+    );
+}
+
 /// Internal evaluation is necessary to prove lazy authorization: these valid
 /// references deliberately have no stored chunks, so ownership can pass only
 /// if the policy never materializes its unrelated payload. The public native

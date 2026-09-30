@@ -98,20 +98,14 @@ pub(super) fn factor_policy_branches(branches: &[PolicyBranch]) -> Option<Vec<Ve
         return None;
     }
     // Pairwise independence does not imply the whole set is a product; only
-    // factor when it is exactly one.
+    // factor when it is exactly one. Every row is some combination of the
+    // factors' alternatives (they are its projections), rows are distinct and
+    // the groups partition the atoms, so equal counts mean every combination
+    // is a row.
     let product_size = factors.iter().try_fold(1usize, |size, alternatives| {
         size.checked_mul(alternatives.len())
     })?;
-    if product_size != rows.len()
-        || !rows.iter().all(|row| {
-            groups
-                .iter()
-                .zip(&factors)
-                .all(|((_, members), alternatives)| {
-                    alternatives.contains(&row.intersection(members).copied().collect())
-                })
-        })
-    {
+    if product_size != rows.len() {
         return None;
     }
 
