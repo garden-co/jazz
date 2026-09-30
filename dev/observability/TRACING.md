@@ -103,10 +103,21 @@ Two ways forward, to be measured before either lands:
 
 ## Measured cost when nobody listens
 
-See the draft PR description for the latest numbers. The method: callgrind
-instruction counts of `steady_state::Engine::step` (groove `steady_state`
-bench, the IVM cases CodSpeed measures), same base, with and without the
-phase spans compiled in and no subscriber installed.
+Callgrind instruction counts, tracing 0.1.44, release build:
+
+| Setup                                          | Instructions per disabled `trace_span!(…).entered()` |
+| ---------------------------------------------- | ---------------------------------------------------- |
+| No subscriber installed                        | 25                                                   |
+| Subscriber at `info` (the jazz-cli default)    | 25                                                   |
+| Subscriber at `trace` with `jazz::profile=off` | 32                                                   |
+
+On the groove `steady_state` IVM bench (the cases CodSpeed measures, 1,800
+`Engine::step` calls), the synchronous spans are entered about 9 times per
+step against about 74M instructions per step: roughly 225 instructions, or
+0.0003%. That is far below the bench's own run-to-run spread under callgrind
+(about 0.5%, from hash seeds), and the base and prototype totals fall inside
+that spread. On the permissioned cold load, 641k span entries would cost about
+16M instructions against an 18.7 s run.
 
 ## Migrating what exists today
 
