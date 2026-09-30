@@ -2932,8 +2932,8 @@ fn edit_note(note: RowUuid, title: &str) -> impl FnOnce(&mut NodeState, &mut Nod
 }
 
 /// A read of one row by id proves the row it returned, so it commits while
-/// that row is unchanged. A client before alpha.58 proves nothing, and the
-/// authority cannot tell what its replica returned, so its read conflicts.
+/// that row is unchanged. A client before alpha.58 proves nothing, so its
+/// read conflicts while the row still exists.
 #[test]
 fn a_read_by_id_commits_only_with_a_row_proof() {
     let unchanged = notes_tx_fate(Sender::Current, NotesTx::ReadByIdThenLog, |_, _| {});
@@ -2944,6 +2944,25 @@ fn a_read_by_id_commits_only_with_a_row_proof() {
     assert_eq!(read_row, Fate::Rejected(RejectionReason::ExclusiveConflict));
     let legacy = notes_tx_fate(Sender::PreAlpha58, NotesTx::ReadByIdThenLog, |_, _| {});
     assert_eq!(legacy, Fate::Rejected(RejectionReason::ExclusiveConflict));
+}
+
+/// An unproved read is checked only against rows that exist at validation,
+/// so a read by a client before alpha.58 of a row deleted since commits.
+/// Documented limitation: exclusive conflicts rely on writers reporting their
+/// reads and are not a security boundary.
+#[test]
+fn a_pre_alpha58_read_of_a_row_deleted_since_commits() {
+    let delete_note = |other: &mut NodeState, core: &mut NodeState| {
+        commit_mergeable_global(
+            other,
+            core,
+            MergeableCommit::new("notes", row(1), 15).deletion(DeletionEvent::Deleted),
+        );
+    };
+    let legacy = notes_tx_fate(Sender::PreAlpha58, NotesTx::ReadByIdThenLog, delete_note);
+    assert_eq!(legacy, Fate::Accepted);
+    let current = notes_tx_fate(Sender::Current, NotesTx::ReadByIdThenLog, delete_note);
+    assert_eq!(current, Fate::Rejected(RejectionReason::ExclusiveConflict));
 }
 
 /// A client before alpha.58 records an update's read-policy check of its
