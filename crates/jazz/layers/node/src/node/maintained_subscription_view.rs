@@ -1498,6 +1498,56 @@ impl MaintainedSubscriptionView {
         }
     }
 
+    /// Initialize from the retained pre-update row, before a scalar payload
+    /// with empty collection placeholders can replace it.
+    fn retained_terminal_record(
+        &mut self,
+        root_key: &[u8],
+    ) -> Result<&mut crate::node::terminal_record::TerminalRecordState, super::Error> {
+        if !self.structured_terminal_records.contains_key(root_key) {
+            let descriptor =
+                self.structured_app_row_descriptor
+                    .ok_or(super::Error::InvalidStoredValue(
+                        "terminal update arrived before its root collector record",
+                    ))?;
+            let records = self.structured_app_rows.get_mut(root_key).ok_or(
+                super::Error::InvalidStoredValue(
+                    "terminal descendant operation addressed an absent retained root",
+                ),
+            )?;
+            let mut candidates = records
+                .iter()
+                .filter(|(_, weight)| **weight > 0)
+                .map(|(raw, weight)| (raw.clone(), *weight));
+            let (raw, weight) = candidates.next().ok_or(super::Error::InvalidStoredValue(
+                "terminal descendant operation addressed a non-positive retained root",
+            ))?;
+            if candidates.next().is_some() {
+                return Err(super::Error::InvalidStoredValue(
+                    "terminal descendant operation addressed an ambiguous retained root",
+                ));
+            }
+            if weight != 1 {
+                return Err(super::Error::InvalidStoredValue(
+                    "collector terminal root has non-unit multiplicity",
+                ));
+            }
+            let state = crate::node::terminal_record::TerminalRecordState::new(OwnedRecord::new(
+                raw, descriptor,
+            ))
+            .map_err(|_| {
+                super::Error::InvalidStoredValue("invalid retained collector terminal record")
+            })?;
+            self.structured_app_rows.remove(root_key);
+            self.structured_terminal_records
+                .insert(root_key.to_vec(), state);
+        }
+        Ok(self
+            .structured_terminal_records
+            .get_mut(root_key)
+            .expect("initialized above"))
+    }
+
     /// Fold root terminal edits into the same retained collector tree used by
     /// an initial/reset snapshot. This is deliberately receiver-local: it
     /// never re-runs the query or reads authority output.
@@ -1528,46 +1578,7 @@ impl MaintainedSubscriptionView {
                     "terminal descendant descriptor disagrees with retained collector layout",
                 ));
             }
-            if !self
-                .structured_terminal_records
-                .contains_key(&operation.root_key)
-            {
-                let records = self
-                    .structured_app_rows
-                    .get_mut(&operation.root_key)
-                    .ok_or(super::Error::InvalidStoredValue(
-                        "terminal descendant operation addressed an absent retained root",
-                    ))?;
-                let mut candidates = records
-                    .iter()
-                    .filter(|(_, weight)| **weight > 0)
-                    .map(|(raw, weight)| (raw.clone(), *weight));
-                let (raw, weight) = candidates.next().ok_or(super::Error::InvalidStoredValue(
-                    "terminal descendant operation addressed a non-positive retained root",
-                ))?;
-                if candidates.next().is_some() {
-                    return Err(super::Error::InvalidStoredValue(
-                        "terminal descendant operation addressed an ambiguous retained root",
-                    ));
-                }
-                if weight != 1 {
-                    return Err(super::Error::InvalidStoredValue(
-                        "collector terminal root has non-unit multiplicity",
-                    ));
-                }
-                let state = crate::node::terminal_record::TerminalRecordState::new(
-                    OwnedRecord::new(raw, descriptor),
-                )
-                .map_err(|_| {
-                    super::Error::InvalidStoredValue("invalid retained collector terminal record")
-                })?;
-                self.structured_app_rows.remove(&operation.root_key);
-                self.structured_terminal_records
-                    .insert(operation.root_key.clone(), state);
-            }
-            self.structured_terminal_records
-                .get_mut(&operation.root_key)
-                .expect("initialized above")
+            self.retained_terminal_record(&operation.root_key)?
                 .apply(operation)
                 .map_err(|_| {
                     super::Error::InvalidStoredValue(
@@ -1624,17 +1635,11 @@ impl MaintainedSubscriptionView {
             }
             TerminalEdit::Update { value, .. } => {
                 let record = OwnedRecord::new(value.clone(), operation.root_descriptor);
-                if let Some(state) = self
-                    .structured_terminal_records
-                    .get_mut(&operation.root_key)
-                {
-                    state.update_record(record).map_err(|_| {
+                self.retained_terminal_record(&operation.root_key)?
+                    .update_record(record)
+                    .map_err(|_| {
                         super::Error::InvalidStoredValue("invalid collector terminal scalar update")
                     })?;
-                    return Ok(());
-                }
-                self.structured_app_rows.remove(&operation.root_key);
-                self.apply_structured_app_row_delta(operation.root_key.clone(), record, 1);
             }
             TerminalEdit::Remove { .. } => {
                 self.structured_terminal_records.remove(&operation.root_key);

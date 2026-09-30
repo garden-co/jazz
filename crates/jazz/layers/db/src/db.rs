@@ -6394,9 +6394,30 @@ fn apply_terminal_operations_to_subscription_snapshot(
             continue;
         }
         if let groove::ivm::TerminalEdit::Update { value, .. } = &operation.edit {
-            if let Some(state) = snapshot_index.terminal_records.get_mut(occurrence) {
-                state.update_record(OwnedRecord::new(value.clone(), operation.root_descriptor))?;
+            // A root which has not received child edits still holds its
+            // collections in the snapshot row. Retain that pre-update state
+            // before replacing the scalar payload below.
+            if !snapshot_index.terminal_records.contains_key(occurrence) {
+                let position = snapshot_index.roots.position(occurrence).ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::Protocol,
+                        "terminal root update addressed a missing result",
+                    )
+                })?;
+                let (descriptor, raw) = snapshot.rows[position].encoded_record();
+                let state = terminal_record::TerminalRecordState::new(OwnedRecord::new(
+                    raw.to_vec(),
+                    *descriptor,
+                ))?;
+                snapshot_index
+                    .terminal_records
+                    .insert(occurrence.clone(), state);
             }
+            snapshot_index
+                .terminal_records
+                .get_mut(occurrence)
+                .expect("initialized above")
+                .update_record(OwnedRecord::new(value.clone(), operation.root_descriptor))?;
         } else if !matches!(operation.edit, groove::ivm::TerminalEdit::Move { .. }) {
             snapshot_index.terminal_records.remove(occurrence);
         }
