@@ -3287,6 +3287,229 @@ fn dependency_write_policy_proofs_retain_no_support_views() {
     );
 }
 
+/// A scope-isolated relay link: the Core consumes its terminal write proof as
+/// the admission receipt instead of re-checking the write policies at ingest.
+struct RelayUpload {
+    transport: Box<dyn Transport>,
+    subscriber: Rc<LocalMutex<PeerConnection>>,
+}
+
+impl RelayUpload {
+    fn open(server: &CoreDb, identity: AuthorSubject, scope: u64) -> Self {
+        let (transport, server_transport) = duplex();
+        let subscriber = server.server.accept_scope_isolated_relay_subscriber(
+            server_transport,
+            identity,
+            test_provider_claims(identity),
+            scope,
+        );
+        Self {
+            transport,
+            subscriber,
+        }
+    }
+
+    /// Forward the client's staged insert unchanged and return its fate.
+    fn upload_insert(&mut self, client: &Db, table: &str, cells: RowCells) -> Fate {
+        self.upload(client, table, cells, Default::default())
+    }
+
+    fn upload_insert_with_id(
+        &mut self,
+        client: &Db,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Fate {
+        let options = InsertOptions {
+            row_id: Some(row),
+            ..Default::default()
+        };
+        self.upload(client, table, cells, options)
+    }
+
+    fn upload(
+        &mut self,
+        client: &Db,
+        table: &str,
+        cells: RowCells,
+        options: InsertOptions,
+    ) -> Fate {
+        let write = client
+            .insert(table, cells, options)
+            .expect("client stages the candidate before terminal proof");
+        let tx_id = write.mergeable_tx_id();
+        let unit = client
+            .node
+            .node
+            .borrow_mut()
+            .commit_unit_for(tx_id)
+            .expect("staged candidate retains its commit unit");
+        self.transport
+            .send(unit)
+            .expect("relay forwards the commit unit");
+        self.subscriber
+            .borrow_mut()
+            .tick()
+            .expect("terminal authority processes the relay upload");
+        std::iter::from_fn(|| self.transport.try_recv())
+            .find_map(|message| match message {
+                SyncMessage::FateUpdate {
+                    tx_id: candidate,
+                    fate,
+                    ..
+                } if candidate == tx_id => Some(fate),
+                _ => None,
+            })
+            .expect("the relay receives the upload's fate")
+    }
+
+    fn support_views(&self) -> usize {
+        subscriber_proofs_and_support_views(&self.subscriber).1
+    }
+}
+
+/// Alice may post to a chat only while she is a member. The relay receipt is
+/// the only authorization at ingest, so the proof must read her membership
+/// from the Core's current storage, including one added after earlier proofs.
+///
+/// ```text
+/// relay ──message to chat A (member)──► core ──join chat_members──► Accepted
+/// relay ──message to chat B──────────► core ──no membership──────► Rejected
+/// core  ──adds alice to chat B
+/// relay ──message to chat B──────────► core ──membership─────────► Accepted
+/// ```
+#[test]
+fn relay_join_write_policy_proofs_read_current_dependencies() {
+    let schema = chat_member_write_schema();
+    let alice = AuthorSubject::for_test_bytes([0xa3; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xa3, alice, &schema);
+    let (chat_a, chat_b) = (row(0xc1), row(0xc2));
+    for chat in [chat_a, chat_b] {
+        server
+            .insert_with_id(
+                "chats",
+                chat,
+                BTreeMap::from([("name".to_owned(), Value::String("chat".to_owned()))]),
+            )
+            .unwrap();
+    }
+    let membership = |chat: RowUuid| {
+        BTreeMap::from([
+            ("chat_id".to_owned(), Value::Uuid(chat.0)),
+            ("user_id".to_owned(), Value::Uuid(alice.test_uuid())),
+        ])
+    };
+    server.insert("chat_members", membership(chat_a)).unwrap();
+    let message = |chat: RowUuid| {
+        BTreeMap::from([
+            ("chat_id".to_owned(), Value::Uuid(chat.0)),
+            ("text".to_owned(), Value::String("hi".to_owned())),
+        ])
+    };
+    let mut relay = RelayUpload::open(&server, alice, 11);
+
+    assert!(matches!(
+        relay.upload_insert(&client, "messages", message(chat_a)),
+        Fate::Accepted
+    ));
+    assert!(matches!(
+        relay.upload_insert(&client, "messages", message(chat_b)),
+        Fate::Rejected(_)
+    ));
+    server.insert("chat_members", membership(chat_b)).unwrap();
+    assert!(matches!(
+        relay.upload_insert(&client, "messages", message(chat_b)),
+        Fate::Accepted
+    ));
+    assert_eq!(relay.support_views(), 0);
+}
+
+/// Seeds the reachable-doc schema: Alice holds access to `engineering`, which
+/// is a member of `company`, so she reaches both; `sales` is unrelated.
+/// Returns `(company, sales)`.
+fn seed_reachable_teams(server: &CoreDb, alice: AuthorSubject) -> (RowUuid, RowUuid) {
+    let (engineering, company, sales) = (row(0x71), row(0x72), row(0x73));
+    for team in [engineering, company, sales] {
+        server
+            .insert_with_id(
+                "group",
+                team,
+                BTreeMap::from([("name".to_owned(), Value::String("team".to_owned()))]),
+            )
+            .unwrap();
+    }
+    server
+        .insert(
+            "group_access_edges",
+            BTreeMap::from([
+                ("group_id".to_owned(), Value::Uuid(engineering.0)),
+                ("user_id".to_owned(), Value::Uuid(alice.test_uuid())),
+                ("role".to_owned(), Value::String("member".to_owned())),
+            ]),
+        )
+        .unwrap();
+    server
+        .insert(
+            "group_entry",
+            BTreeMap::from([
+                ("member_id".to_owned(), Value::Uuid(engineering.0)),
+                ("target_id".to_owned(), Value::Uuid(company.0)),
+                ("administrator".to_owned(), Value::Bool(false)),
+                ("date_added".to_owned(), Value::U64(1)),
+            ]),
+        )
+        .unwrap();
+    (company, sales)
+}
+
+fn grant_doc_access(server: &CoreDb, doc: RowUuid, team: RowUuid) {
+    server
+        .insert(
+            "doc_access",
+            BTreeMap::from([
+                ("resource".to_owned(), Value::Uuid(doc.0)),
+                ("team".to_owned(), Value::Uuid(team.0)),
+                ("grant_role".to_owned(), Value::String("editor".to_owned())),
+                ("administrator".to_owned(), Value::Bool(false)),
+            ]),
+        )
+        .unwrap();
+}
+
+/// A doc may be created only when one of its access teams is reachable from
+/// Alice's memberships, so the relay's proof walks several stored hops:
+/// the doc's access rows, her membership, and the group edge to `company`.
+///
+/// ```text
+/// relay ──doc shared with company──► core ──alice → engineering → company──► Accepted
+/// relay ──doc shared with sales────► core ──not reachable──────────────────► Rejected
+/// ```
+#[test]
+fn relay_reachable_write_policy_proofs_walk_stored_edges() {
+    let schema = reachable_doc_write_schema();
+    let alice = AuthorSubject::for_test_bytes([0xa5; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xa5, alice, &schema);
+    let (company, sales) = seed_reachable_teams(&server, alice);
+    let (company_doc, sales_doc) = (row(0x81), row(0x82));
+    grant_doc_access(&server, company_doc, company);
+    grant_doc_access(&server, sales_doc, sales);
+    let doc = || BTreeMap::from([("label".to_owned(), Value::String("doc".to_owned()))]);
+    let mut relay = RelayUpload::open(&server, alice, 12);
+
+    assert!(matches!(
+        relay.upload_insert_with_id(&client, "docs", company_doc, doc()),
+        Fate::Accepted
+    ));
+    assert!(matches!(
+        relay.upload_insert_with_id(&client, "docs", sales_doc, doc()),
+        Fate::Rejected(_)
+    ));
+    assert_eq!(relay.support_views(), 0);
+}
+
 /// A scope-isolated relay carries one binding selected by server admission. A
 /// raw `SessionClaims` frame must neither replace that binding nor make the
 /// later terminal write proof use the forged editor role.
@@ -3604,9 +3827,17 @@ fn scope_isolated_relay_terminal_write_rejects_empty_handshake_claims() {
 /// `session_claims_for` makes the first proof observe B and fail.
 #[test]
 fn terminal_commit_proof_keeps_same_author_sibling_claim_snapshot() {
-    let schema = editor_claim_write_schema();
+    // The clause reads an open workspace as well as the claim.
+    let schema = editor_claim_workspace_write_schema();
     let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
     let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    server
+        .insert_with_id(
+            "workspaces",
+            row(0x3e),
+            BTreeMap::from([("open".to_owned(), Value::Bool(true))]),
+        )
+        .unwrap();
     let a_claims = BTreeMap::from([(
         crate::query::provider_claim_key("role"),
         Value::String("editor".to_owned()),

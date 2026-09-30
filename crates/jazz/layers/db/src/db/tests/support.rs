@@ -1188,6 +1188,115 @@ pub(super) fn editor_claim_write_schema() -> JazzSchema {
     )
 }
 
+/// Like [`editor_claim_write_schema`], but the editor clause also reads an
+/// open workspace, so a write proof depends on another row as well as claims.
+pub(super) fn editor_claim_workspace_write_schema() -> JazzSchema {
+    let editor = PublicPolicyExpr::SessionCmp {
+        path: vec!["claims".to_owned(), "role".to_owned()],
+        op: PublicCmpOp::Eq,
+        value: PublicValue::Text("editor".to_owned()),
+    };
+    let open_workspace = public_exists(
+        "workspaces",
+        [public_literal_eq("open", PublicValue::Boolean(true))],
+    );
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("workspaces")
+                    .column("open", PublicColumnType::Boolean)
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .column("done", PublicColumnType::Boolean)
+                    .column("owner", PublicColumnType::Uuid)
+                    .policies(public_legacy_write_policy(PublicPolicyExpr::and(vec![
+                        editor,
+                        open_workspace,
+                    ]))),
+            ),
+    )
+}
+
+/// A message may be posted only by a member of its chat: the insert policy
+/// joins `chat_members` on the candidate's `chat_id`.
+pub(super) fn chat_member_write_schema() -> JazzSchema {
+    let is_member = |chat_column: &str| {
+        public_exists(
+            "chat_members",
+            [
+                public_outer_eq("chat_id", chat_column),
+                public_session_eq("user_id", &["claims", "sub"]),
+            ],
+        )
+    };
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("chats")
+                    .column("name", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_select(is_member("id"))),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("chat_members")
+                    .allow_all()
+                    .fk_column("chat_id", "chats")
+                    .column("user_id", PublicColumnType::Uuid),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("messages")
+                    .fk_column("chat_id", "chats")
+                    .column("text", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_insert(is_member("chat_id"))),
+            ),
+    )
+}
+
+/// Docs are readable and creatable by a session that reaches one of the doc's
+/// access teams through member-to-parent `group_entry` edges.
+pub(super) fn reachable_doc_write_schema() -> JazzSchema {
+    let doc_access = public_recursive_access_policy(
+        "doc_access",
+        "resource",
+        "team",
+        &[("administrator", PublicValue::Boolean(false))],
+        &[],
+        "group",
+        "group_entry",
+        "member_id",
+        "target_id",
+        &[("administrator", PublicValue::Boolean(false))],
+        "group_access_edges",
+        "user_id",
+        &["claims", "sub"],
+        "group_id",
+    );
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("group").column("name", PublicColumnType::Text))
+            .table(
+                PublicTableSchemaBuilder::new("group_access_edges")
+                    .allow_all()
+                    .fk_column("group_id", "group")
+                    .column("user_id", PublicColumnType::Uuid)
+                    .column("role", PublicColumnType::Text),
+            )
+            .table(public_group_entry_table_builder())
+            .table(
+                PublicTableSchemaBuilder::new("docs")
+                    .column("label", PublicColumnType::Text)
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(doc_access.clone())
+                            .with_insert(doc_access),
+                    ),
+            )
+            .table(public_resource_access_table_builder("doc_access", "docs")),
+    )
+}
+
 pub(super) fn owner_id_read_schema() -> JazzSchema {
     build_public_db_test_schema(
         PublicSchemaBuilder::new().table(
