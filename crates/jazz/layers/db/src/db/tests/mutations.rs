@@ -5002,3 +5002,144 @@ fn client_partial_update_of_unloaded_row_is_not_observed_rather_than_read_denied
         );
     }
 }
+
+/// A trusted backend serving `alice`'s request (`WriteIdentity::Session`) that
+/// has never loaded her row cannot stage a partial UPDATE for it: the
+/// mergeable commit needs the row's current cells and parent version, and a
+/// freshly started backend replica holds neither. That is a missing local
+/// observation, not a read-policy decision, so it must say so instead of
+/// reporting a read denial, both for `always()`-readable tables and for rows
+/// alice may read. Once the backend has loaded the row, the same patch stages
+/// and the authority accepts it. A row the backend holds but alice may not
+/// read (bob's) stays a read denial.
+///
+/// ```text
+/// server (alice row) ──not synced──► backend ──alice UPDATE──► NotObserved
+/// backend loads row ──row arrives──► alice UPDATE ──► Accepted
+/// backend holds bob row ──alice UPDATE──► read policy denied
+/// ```
+#[test]
+fn session_partial_update_of_unloaded_row_is_not_observed_rather_than_read_denied() {
+    let backend_author = AuthorSubject::for_test_bytes([0xb0; 16]);
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
+    for (label, schema, owner_scoped) in [
+        ("always-readable table", schema(), false),
+        ("owner-readable table", owner_write_schema(), true),
+    ] {
+        let alice_row = row(0xa7);
+        let bob_row = row(0xb7);
+        let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+        server
+            .insert_with_id("todos", alice_row, cells("original", false, alice))
+            .unwrap();
+        let backend = open_db(0xb0, backend_author, &schema);
+        let (backend_transport, server_transport) = duplex();
+        let _upstream = crate::local_executor::block_on(backend.connect_upstream(Box::new(
+            TrustedBackendTransport {
+                inner: backend_transport,
+            },
+        )));
+        let _subscriber = server.accept_subscriber_with_trust(
+            server_transport,
+            backend_author,
+            CommitUnitTrust::TrustedBackend,
+        );
+        backend.set_test_provider_claims(alice, test_provider_claims(alice));
+        backend.set_test_provider_claims(bob, test_provider_claims(bob));
+        backend.tick().unwrap();
+        server.tick().unwrap();
+        backend.tick().unwrap();
+
+        let as_alice = || crate::db::UpdateOptions {
+            identity: crate::db::WriteIdentity::Session(alice),
+            ..Default::default()
+        };
+        let patch = BTreeMap::from([("done".to_owned(), Value::Bool(true))]);
+        let error = match block_on(backend.update("todos", alice_row, patch.clone(), as_alice())) {
+            Ok(_) => panic!("{label}: an unloaded row has no preimage to stage against"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.code,
+            ErrorCode::NotObserved,
+            "{label}: {}",
+            error.message
+        );
+        assert!(
+            !error.message.contains("read policy denied"),
+            "{label}: an unloaded row is not a read denial: {}",
+            error.message
+        );
+        assert!(
+            error.message.contains("not loaded locally"),
+            "{label}: the error explains what is missing: {}",
+            error.message
+        );
+
+        if owner_scoped {
+            // Bob's row is resident on the backend, but alice may not read it.
+            let insert = backend
+                .insert(
+                    "todos",
+                    cells("bob secret", false, bob),
+                    crate::db::InsertOptions {
+                        row_id: Some(bob_row),
+                        identity: crate::db::WriteIdentity::Session(bob),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            backend.tick().unwrap();
+            server.tick().unwrap();
+            backend.tick().unwrap();
+            block_on(insert.wait(DurabilityTier::Global)).unwrap();
+            let error = match block_on(backend.update("todos", bob_row, patch, as_alice())) {
+                Ok(_) => panic!("{label}: alice cannot update bob's row"),
+                Err(error) => error,
+            };
+            assert_eq!(
+                error.code,
+                ErrorCode::WriteRejected,
+                "{label}: {}",
+                error.message
+            );
+            assert_eq!(
+                error.message,
+                "read policy denied UPDATE on table todos: the operation requires read permission on the target row"
+            );
+            continue;
+        }
+
+        let query = Query::from("todos");
+        let _subscription = prepared_subscribe(&backend, &query, global_subscribe_opts()).unwrap();
+        for _ in 0..16 {
+            backend.tick().unwrap();
+            server.tick().unwrap();
+            backend.tick().unwrap();
+            if !prepared_all(&backend, &query, global_subscribe_opts()).is_empty() {
+                break;
+            }
+        }
+        let write = block_on(backend.update("todos", alice_row, patch, as_alice()))
+            .unwrap_or_else(|error| panic!("{label}: a loaded row updates: {error:?}"));
+        backend.tick().unwrap();
+        server.tick().unwrap();
+        backend.tick().unwrap();
+        block_on(write.wait(DurabilityTier::Global))
+            .unwrap_or_else(|error| panic!("{label}: authority accepts: {error:?}"));
+        let server_rows = server.read(&query).unwrap();
+        assert_eq!(server_rows.len(), 1, "{label}");
+        let table = &schema.tables[0];
+        assert_eq!(
+            server_rows[0].cell(table, "done"),
+            Some(Value::Bool(true)),
+            "{label}"
+        );
+        assert_eq!(
+            server_rows[0].cell(table, "title"),
+            Some(Value::String("original".to_owned())),
+            "{label}: the partial update preserves unauthored cells"
+        );
+    }
+}
