@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
+import { Button } from "@astryxdesign/core/Button";
 import { Card } from "@astryxdesign/core/Card";
 import { Heading } from "@astryxdesign/core/Heading";
 import { Link as AstryxLink } from "@astryxdesign/core/Link";
@@ -17,6 +18,7 @@ import {
   BackendDiagram,
   ConsistencyDiagram,
   HistoryDiagram,
+  LargeValuesDiagram,
   PermissionsDiagram,
   SchemaDiagram,
   StackDiagram,
@@ -25,6 +27,7 @@ import { AdopterQuotes } from "@/components/home/adopter-quotes";
 import { CodeWindow } from "@/components/home/code-window";
 import { PricingCalculator } from "@/components/home/pricing-calculator";
 import { CreateJazzCommand } from "@/components/home/create-jazz-command";
+import { FrameworkLogos } from "@/components/home/framework-logos";
 import { pricingMeters } from "@/lib/home-pricing";
 import { adopterQuotes } from "@/lib/home-quotes";
 import { blogSource } from "@/lib/source";
@@ -106,10 +109,55 @@ const features: {
   id: string;
   title: string;
   body: ReactNode;
-  link: { label: string; href: string };
+  links: { label: string; href: string }[];
   diagram: ReactNode;
   caption: string;
 }[] = [
+  {
+    id: "permissions",
+    title: "Row-level security and per-query auth",
+    body: (
+      <>
+        <p>
+          Permissions are policies over your data and the user&apos;s JWT claims, defined in code
+          and testable like the rest of your app.
+        </p>
+        <p>
+          Jazz optimizes each query together with the policies that apply to it, which removes work
+          from your backend and gives you zero-roundtrip security.
+        </p>
+      </>
+    ),
+    links: [{ label: "Permissions", href: "/docs/auth/permissions" }],
+    diagram: <PermissionsDiagram />,
+    caption: "A query and its read policy, planned together",
+  },
+  {
+    id: "data",
+    title: "Blobs, streams, JSON, richtext? To Jazz it's all just columns.",
+    body: (
+      <>
+        <p>
+          Jazz is designed to efficiently handle all kinds, sizes, shapes and intensities of data,
+          while still representing everything in a simple relational model.
+        </p>
+        <ul>
+          <li>Durable streams? Just keep appending to a column, or stream out of one.</li>
+          <li>Binary blobs? Just put 2GB in a column, and read ranges.</li>
+          <li>Giant JSON document? Just put it in a column and stream parts with JSON pointers.</li>
+          <li>Long markdown document? It&apos;s just a very big string column.</li>
+        </ul>
+        <p>
+          This allows you to truly keep all data in one place, with no external links and no
+          separate systems. And permission policies apply exactly like on normal data.
+        </p>
+      </>
+    ),
+    links: [{ label: "Column types", href: "/docs/schemas/column-types" }],
+    diagram: <LargeValuesDiagram />,
+    caption:
+      "Under the hood, Jazz uses prolly trees when values get large, ensuring appends, point edits, partial and streaming reads stay fast. Jazz syncs only the parts you need and any queries you run over large data operate in a streaming fashion.",
+  },
   {
     id: "consistency",
     title: "Local-first data with tunable consistency",
@@ -126,28 +174,12 @@ const features: {
         </p>
       </>
     ),
-    link: { label: "How sync works", href: "/docs/concepts/how-sync-works" },
+    links: [
+      { label: "How sync works", href: "/docs/concepts/how-sync-works" },
+      { label: "Durability tiers", href: "/docs/reference/durability-tiers" },
+    ],
     diagram: <ConsistencyDiagram />,
-    caption: "When a write becomes visible, locally and globally",
-  },
-  {
-    id: "permissions",
-    title: "Row-level security and per-query auth",
-    body: (
-      <>
-        <p>
-          Permissions are policies over your data and the user&apos;s JWT claims, defined in code
-          and testable like the rest of your app.
-        </p>
-        <p>
-          Jazz optimizes each query together with the policies that apply to it, which removes work
-          from your backend and gives you zero-roundtrip security.
-        </p>
-      </>
-    ),
-    link: { label: "Permissions", href: "/docs/auth/permissions" },
-    diagram: <PermissionsDiagram />,
-    caption: "A query and its read policy, planned together",
+    caption: "A write's local state, its sync message, and its confirmed fate",
   },
   {
     id: "history",
@@ -159,12 +191,15 @@ const features: {
           about it afterwards.
         </p>
         <p>
-          Every row has a full, git-like branching history, with APIs for historical data, drafts
-          and complex collaboration traces.
+          Jazz gives you flexible, branch-like views over your data. Build anything from drafts to
+          complex git-like workflows on them, including permissions over branches.
         </p>
       </>
     ),
-    link: { label: "Branches", href: "/docs/concepts/branches" },
+    links: [
+      { label: "Branches", href: "/docs/concepts/branches" },
+      { label: "Edit metadata", href: "/docs/reading/queries#magic-columns" },
+    ],
     diagram: <HistoryDiagram />,
     caption: "The history of one row, with a draft branch",
   },
@@ -178,14 +213,14 @@ const features: {
           translate between the versions of your app.
         </p>
         <p>
-          Old clients keep working, new features ship without a maintenance window, and apps with
+          Old clients keep working, new features ship without complicated rollouts, and apps with
           many feature flags stay safe to change.
         </p>
       </>
     ),
-    link: { label: "Migrations", href: "/docs/schemas/migrations" },
+    links: [{ label: "Migrations", href: "/docs/schemas/migrations" }],
     diagram: <SchemaDiagram />,
-    caption: "Two app versions reading and writing one table",
+    caption: "One raw table, read as two app versions through migration lenses",
   },
   {
     id: "backend",
@@ -202,38 +237,66 @@ const features: {
         </p>
       </>
     ),
-    link: { label: "Server setup", href: "/docs/getting-started/server-setup" },
+    links: [
+      { label: "Server setup", href: "/docs/getting-started/server-setup" },
+      { label: "Auth providers", href: "/docs/recipes/auth/auth-provider-integration" },
+      { label: "Permissions", href: "/docs/auth/permissions" },
+      { label: "How sync works", href: "/docs/concepts/how-sync-works" },
+    ],
     diagram: <BackendDiagram />,
-    caption: "What moves out of your backend into Jazz",
+    caption: "What moves out of your code into Jazz",
   },
 ];
 
-const hostingRows = [
+const hostingRows: {
+  topic: string;
+  selfHosted: ReactNode;
+  cloud: ReactNode;
+  enterprise: ReactNode;
+}[] = [
   {
     topic: "Setup",
     selfHosted: "One open-source, single-tenant server binary",
     cloud: "Zero config; create an app from the CLI or dashboard",
+    enterprise: "Dedicated deployment, set up with you",
   },
   {
     topic: "Topology",
     selfHosted: "Runs where you deploy it",
     cloud: "Globally distributed and geo-optimized",
+    enterprise: "Regions and data residency to your requirements",
   },
   {
     topic: "Reliability",
     selfHosted: "You operate backups and failover",
     cloud: "Fault-tolerant, with backups included",
+    enterprise: "Uptime SLA and direct support",
   },
   {
     topic: "Scaling",
     selfHosted: "Size the instance yourself",
     cloud: "Scales more granularly than instance-based databases",
+    enterprise: "Capacity planned with you",
   },
-  {
-    topic: "Billing",
-    selfHosted: "Open source; you pay only for your own hosting",
-    cloud: "Usage-based, scales to zero",
-  },
+  ...pricingMeters.map((meter) => ({
+    topic: meter.name,
+    selfHosted: {
+      Compute: "Your own servers; one instance runs a whole app",
+      Storage: "Your own disks; keep room for row history",
+      Egress: "Your hosting provider's rates",
+    }[meter.name],
+    cloud: (
+      <>
+        <Text as="p" display="block" weight="medium">
+          {meter.price} {meter.unit}
+        </Text>
+        <Text as="p" display="block" type="supporting" color="secondary" className="mt-1">
+          {meter.note} {meter.included}.
+        </Text>
+      </>
+    ),
+    enterprise: "Volume pricing",
+  })),
 ];
 
 function SectionHeader({
@@ -323,9 +386,9 @@ export default function HomePage() {
               <span className="block">that syncs</span>
             </Heading>
             <Text as="p" display="block" className="max-w-[40em] text-xl leading-relaxed">
-              Jazz is a local-first relational database. It runs across your frontend, backend and
-              our global storage cloud. Sync partial tables, durable streams and files, fast. Feels
-              like simple reactive state.
+              Jazz is a relational database built on real-time sync. It runs distributed across the
+              cloud, your backend, frontend, native apps, CLIs and agent sandboxes. Mix and match
+              ACID and local-first.
             </Text>
           </div>
         </div>
@@ -333,7 +396,7 @@ export default function HomePage() {
 
       <section className="home-section">
         <div className="home-container">
-          <SectionHeader id="how-it-works" title="One database, from the client to the cloud" />
+          <SectionHeader id="how-it-works" title="One database from the client to the cloud" />
           <Figure
             className="home-figure-wide mt-6"
             number={1}
@@ -356,7 +419,7 @@ export default function HomePage() {
 
       <section className="home-section">
         <div className="home-container">
-          <SectionHeader id="code" title="Feels like simple reactive state">
+          <SectionHeader id="code" title="In the client: feels like simple reactive state">
             <Text as="p" display="block" type="large" color="secondary" weight="normal">
               Define tables and permissions in TypeScript, then query from any component. Writes
               apply locally at once and sync in the background.
@@ -423,9 +486,13 @@ export default function HomePage() {
                     {feature.title}
                   </Heading>
                   <div className="home-prose mt-4">{feature.body}</div>
-                  <AppLink href={feature.link.href} className="mt-5 inline-block font-medium">
-                    {feature.link.label} →
-                  </AppLink>
+                  <div className="mt-5 flex flex-wrap gap-x-6 gap-y-2">
+                    {feature.links.map((link) => (
+                      <AppLink key={link.href} href={link.href} className="font-medium">
+                        {link.label} →
+                      </AppLink>
+                    ))}
+                  </div>
                 </div>
                 <Figure
                   className="home-feature-figure"
@@ -441,29 +508,25 @@ export default function HomePage() {
       </section>
 
       <section className="home-section">
-        <div className="home-container grid gap-12 lg:grid-cols-12">
-          <div className="lg:col-span-5">
-            <Heading level={2} type="display-3" id="cloud" className="home-anchor">
-              A globally synced, auto&#8209;scaling database cloud
-            </Heading>
-            <div className="home-prose mt-6">
-              <p>
-                The single-tenant Jazz server will always be open source and is easy to self-host.
-                Jazz Cloud is the same database on infrastructure built for it.
-              </p>
-              <p>
-                It&apos;s zero-config to set up, works from your first experiment and scales much
-                more granularly than traditional instance-based databases.
-              </p>
-            </div>
-          </div>
-          <div className="home-table lg:col-span-7 lg:col-start-6">
+        <div className="home-container">
+          <SectionHeader id="cloud" title="Self-host or use Jazz Cloud">
+            <Text as="p" display="block" type="large" color="secondary" weight="normal">
+              The single-tenant Jazz server will always be open source and is easy to self-host.
+              Jazz Cloud is the same database, running on global infrastructure tailored for it.
+            </Text>
+            <Text as="p" display="block" type="large" color="secondary" weight="normal">
+              As developers, we hate pricing that makes limiting assumptions about your app and your
+              users, so we bill across simple metrics for the things that are irreducibly hard.
+            </Text>
+          </SectionHeader>
+          <div id="pricing" className="home-table home-anchor mt-6">
             <Table density="balanced" verticalAlign="top">
               <TableHeader>
                 <TableRow>
                   <TableHeaderCell> </TableHeaderCell>
                   <TableHeaderCell>Self-hosted</TableHeaderCell>
                   <TableHeaderCell>Jazz Cloud</TableHeaderCell>
+                  <TableHeaderCell>Enterprise</TableHeaderCell>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -476,45 +539,41 @@ export default function HomePage() {
                       <Text color="secondary">{row.selfHosted}</Text>
                     </TableCell>
                     <TableCell>{row.cloud}</TableCell>
+                    <TableCell>{row.enterprise}</TableCell>
                   </TableRow>
                 ))}
+                <TableRow>
+                  <TableCell> </TableCell>
+                  <TableCell>
+                    <Button
+                      label="How to self-host"
+                      variant="secondary"
+                      href="/docs/getting-started/server-setup#self-hosted-database-server"
+                    />
+                  </TableCell>
+                  <TableCell>
+                    <Button
+                      label="Instant API key"
+                      variant="primary"
+                      href="https://v2.dashboard.jazz.tools"
+                    />
+                  </TableCell>
+                  <TableCell>
+                    <Button
+                      label="Book a call"
+                      variant="primary"
+                      href="https://cal.com/anselm-io/cloud-pro-intro"
+                    />
+                  </TableCell>
+                </TableRow>
               </TableBody>
             </Table>
           </div>
-        </div>
-      </section>
-
-      <section className="home-section">
-        <div className="home-container">
-          <SectionHeader id="pricing" title="Simple billing that scales to zero">
-            <Text as="p" display="block" type="large" color="secondary" weight="normal">
-              We bill for the things that are irreducibly hard, and make no assumptions about your
-              app or your users. Global infrastructure, billed in predictable units.
-            </Text>
-          </SectionHeader>
-          <div className="home-meters mt-6">
-            {pricingMeters.map((meter) => (
-              <div key={meter.name} className="home-meter">
-                <Text as="p" display="block" type="label" color="secondary">
-                  {meter.name}
-                </Text>
-                <Heading level={3} type="display-3" className="mt-3">
-                  {meter.price}
-                </Heading>
-                <Text as="p" display="block" weight="medium" className="mt-1">
-                  {meter.unit}
-                </Text>
-                <Text as="p" display="block" type="supporting" color="secondary" className="mt-4">
-                  {meter.note} {meter.included}.
-                </Text>
-              </div>
-            ))}
-          </div>
           <div className="mt-12 grid gap-8 lg:grid-cols-12">
             <div className="lg:col-span-4">
-              <Heading level={3}>Estimate your bill</Heading>
+              <Heading level={3}>Estimate your Jazz Cloud bill</Heading>
               <Text as="p" display="block" color="secondary" className="mt-3">
-                Move the sliders to match your app. The estimate uses the public meters above.
+                Move the sliders to match your app. The estimate uses the Jazz Cloud prices above.
               </Text>
             </div>
             {/* Not ported to Astryx yet. A data-astryx-theme attribute ends the
@@ -579,6 +638,9 @@ export default function HomePage() {
               <AstryxLink href="https://discord.gg/RN9UKh52be">Jazz Discord</AstryxLink>.
             </Text>
           </div>
+        </div>
+        <div className="home-container mt-10">
+          <FrameworkLogos />
         </div>
       </section>
     </div>

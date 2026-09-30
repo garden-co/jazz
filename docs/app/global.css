@@ -265,6 +265,16 @@ h6 {
 .home-diagram .dg-struck {
   text-decoration: line-through;
 }
+.home-diagram .dg-grid {
+  stroke: var(--color-border);
+  stroke-width: 1;
+}
+.home-diagram .dg-rule {
+  stroke-width: 1.5;
+}
+.home-diagram .dg-hot {
+  fill: var(--color-jazz-blue-tint);
+}
 
 /* Site footer (components/site/site-footer.tsx). */
 .site-footer {
@@ -311,9 +321,17 @@ h6 {
   color: var(--color-text-secondary);
   max-width: 38rem;
 }
-.home-prose p {
+.home-prose p,
+.home-prose li {
   font-size: var(--text-body-size);
   line-height: var(--text-body-leading);
+}
+.home-prose ul {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-1);
+  padding-left: 1.25em;
+  list-style: disc;
 }
 .home-figure {
   margin: 0;
@@ -322,19 +340,16 @@ h6 {
   border-radius: var(--radius-container);
   background-color: var(--color-background-card);
 }
-.home-facts,
-.home-meters {
+.home-facts {
   display: grid;
   gap: var(--spacing-8);
 }
 @media (min-width: 768px) {
-  .home-facts,
-  .home-meters {
+  .home-facts {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
-.home-fact,
-.home-meter {
+.home-fact {
   border-top: 1px solid var(--color-border-emphasized);
   padding-top: var(--spacing-4);
 }
@@ -484,7 +499,7 @@ h6 {
     min-width: 44rem;
   }
   .home-table table {
-    min-width: 34rem;
+    min-width: 44rem;
   }
 }
 .home-figure-wide .home-figure > svg {
@@ -496,6 +511,30 @@ h6 {
   border-radius: var(--radius-container);
   overflow-x: auto;
   background-color: var(--color-background-card);
+}
+.home-logos {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-3) var(--spacing-6);
+  list-style: none;
+  padding: 0;
+}
+.home-logo {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  color: var(--color-text-secondary);
+  font-size: var(--text-supporting-size);
+  text-decoration: none;
+  transition: color var(--duration-fast);
+}
+.home-logo:hover {
+  color: var(--color-text-primary);
+}
+.home-logo-mark {
+  width: 1.25rem;
+  height: 1.25rem;
+  fill: currentColor;
 }
 .home-command {
   display: inline-flex;

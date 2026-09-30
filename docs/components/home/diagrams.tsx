@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 // print material: square boxes with mono labels, thin wires with rounded
 // elbows and open arrowheads. Colour carries meaning throughout:
 //   blue  = local (on a device, instantly visible, mergeable)
-//   green = global (Core, authoritative, exclusive)
+//   green = global (the cloud, authoritative, exclusive)
 //   blue/green dashed = shared by both
 // Everything draws with theme tokens (see `.home-diagram` in app/global.css),
 // so the diagrams follow light and dark mode.
@@ -185,17 +185,83 @@ function Label({
   );
 }
 
+/** A plain table: header row, then rows; `tones` colours individual cells. */
+function Grid({
+  x,
+  y,
+  cols,
+  rows,
+  tone = "ink",
+  cellTone,
+  rowH = 24,
+}: {
+  x: number;
+  y: number;
+  cols: { label: string; w: number; tone?: Tone }[];
+  rows: string[][];
+  tone?: Tone;
+  cellTone?: (row: number, col: number) => Tone | undefined;
+  rowH?: number;
+}) {
+  const w = cols.reduce((sum, col) => sum + col.w, 0);
+  const h = rowH * (rows.length + 1);
+  const colX = cols.map((_, index) => x + cols.slice(0, index).reduce((sum, c) => sum + c.w, 0));
+  return (
+    <g>
+      <Frame x={x} y={y} w={w} h={h} tone={tone} />
+      {rows.map((_, index) => (
+        <line
+          key={`r${index}`}
+          x1={x}
+          x2={x + w}
+          y1={y + rowH * (index + 1)}
+          y2={y + rowH * (index + 1)}
+          className={
+            index === 0 ? `dg-rule dg-stroke-${tone === "shared" ? "blue" : tone}` : "dg-grid"
+          }
+        />
+      ))}
+      {colX.slice(1).map((cx) => (
+        <line key={`c${cx}`} x1={cx} x2={cx} y1={y} y2={y + h} className="dg-grid" />
+      ))}
+      {cols.map((col, index) => (
+        <text
+          key={col.label}
+          x={colX[index] + 8}
+          y={y + rowH / 2 + 4}
+          className={`dg-label dg-fill-${col.tone ?? "muted"}`}
+        >
+          {col.label}
+        </text>
+      ))}
+      {rows.map((row, r) =>
+        row.map((cell, c) => (
+          <text
+            key={`${r}-${c}`}
+            x={colX[c] + 8}
+            y={y + rowH * (r + 1) + rowH / 2 + 4}
+            className={`dg-label dg-fill-${cellTone?.(r, c) ?? "ink"}`}
+          >
+            {cell}
+          </text>
+        )),
+      )}
+    </g>
+  );
+}
+
 /** Clients and server modules each hold a partial copy; Jazz Cloud holds all data. */
 export function StackDiagram() {
   const copy = (where: string) => [
     { text: "partial local copy", tone: "blue" as const },
     { text: `(${where})`, tone: "blue" as const },
   ];
+  const w = 188;
   const peers = [
-    { x: 16, title: "web app", lines: ["browser", ...copy("on disk")] },
-    { x: 214, title: "mobile app", lines: ["react native", ...copy("on disk")] },
-    { x: 412, title: "backend", lines: ["typescript · rust", ...copy("in memory")] },
-    { x: 610, title: "agents & jobs", lines: ["any server", ...copy("in memory")] },
+    { x: 8, title: "web app", lines: [...copy("on disk"), "react · svelte · vue · …"] },
+    { x: 206, title: "mobile app", lines: [...copy("on disk"), "react native"] },
+    { x: 404, title: "backend", lines: [...copy("in memory"), "typescript · rust"] },
+    { x: 602, title: "agents & jobs", lines: [...copy("in memory"), "any server"] },
   ];
   const coreX = 250;
   const coreW = 300;
@@ -204,7 +270,7 @@ export function StackDiagram() {
   return (
     <Diagram
       viewBox="0 0 800 300"
-      label="Web apps, mobile apps, backends and agents each keep a partial local copy of the data they use, on disk or in memory, and sync it with Jazz Cloud, which authorizes every write and holds all data."
+      label="Web apps, mobile apps, backends and agents each keep a partial local copy of the data they use, on disk or in memory, and sync it with Jazz Cloud, which holds all data and authorizes every write."
     >
       <Box
         x={coreX}
@@ -213,10 +279,10 @@ export function StackDiagram() {
         h={82}
         title="jazz cloud"
         note="(or self-hosted via CLI)"
-        lines={["authorizes every write", { text: "all data", tone: "blue" }]}
+        lines={[{ text: "all data", tone: "blue" }, "authorizes every write"]}
       />
       {peers.map((peer) => {
-        const cx = peer.x + 87;
+        const cx = peer.x + w / 2;
         return (
           <Wire
             key={peer.title}
@@ -226,7 +292,7 @@ export function StackDiagram() {
               [cx, busY],
               [cx, peerY],
             ]}
-            start={peer.x === 16}
+            start={peer.x === 8}
           />
         );
       })}
@@ -238,154 +304,157 @@ export function StackDiagram() {
           key={peer.title}
           x={peer.x}
           y={peerY}
-          w={174}
+          w={w}
           h={98}
           title={peer.title}
           lines={peer.lines}
         />
       ))}
-      <Label x={16} y={288} tone="muted">
+      <Label x={8} y={288} tone="muted">
         the clients and server modules making up your app
       </Label>
     </Diagram>
   );
 }
 
-/** A write is visible locally at once and globally once Core accepts it. */
+/** Node-message-state: a write's local state, its sync message, and its confirmed fate. */
 export function ConsistencyDiagram() {
+  const device = 116;
+  const cloud = 524;
   return (
     <Diagram
-      viewBox="0 0 640 290"
-      label="A write applies on the device immediately. wait with tier local resolves once it is saved locally; wait with tier global resolves once Core has authorized and stored it."
+      viewBox="0 0 640 340"
+      label="On the device, a write is applied to local state and visible at once; the local tier resolves. It syncs to the cloud with a permission check, which authorizes and stores it as new remote state. The cloud sends back the write's fate, and the device reaches confirmed state; the global tier resolves."
     >
-      <Label x={16} y={24} tone="muted">
+      <Label x={device} y={20} tone="blue" anchor="middle">
         device
       </Label>
-      <line x1={16} x2={624} y1={34} y2={34} className="dg-region" />
-      <Box x={16} y={52} w={150} h={40} tone="ink" title="db.insert(…)" center />
-      <Wire
-        points={[
-          [166, 72],
-          [206, 72],
-        ]}
-      />
+      <Label x={cloud} y={20} tone="green" anchor="middle">
+        cloud
+      </Label>
+      <line x1={device} x2={device} y1={30} y2={330} className="dg-region" />
+      <line x1={cloud} x2={cloud} y1={30} y2={330} className="dg-region" />
       <Box
-        x={206}
-        y={52}
+        x={16}
+        y={44}
         w={200}
         h={74}
         tone="blue"
-        title='tier: "local"'
-        lines={["visible to local queries", "works offline"]}
+        title="local state"
+        lines={["write visible at once", 'tier "local" resolves']}
       />
+      <Wire
+        points={[
+          [216, 96],
+          [424, 150],
+        ]}
+        tone="blue"
+      />
+      <Label x={236} y={86} tone="blue">
+        sync + permission check
+      </Label>
       <Box
-        x={446}
-        y={52}
-        w={178}
+        x={424}
+        y={136}
+        w={200}
         h={74}
         tone="green"
-        title='tier: "global"'
-        lines={["accepted everywhere"]}
+        title="remote state"
+        lines={["authorized", "stored durably"]}
       />
-      <Label x={16} y={170} tone="muted">
-        core
-      </Label>
-      <line x1={16} x2={624} y1={180} y2={180} className="dg-region" />
       <Wire
         points={[
-          [306, 126],
-          [306, 232],
-          [380, 232],
-        ]}
-        end={false}
-      />
-      <Box x={380} y={206} w={170} h={52} tone="green" title="authorize, store" center />
-      <Wire
-        points={[
-          [550, 232],
-          [590, 232],
-          [590, 126],
+          [424, 196],
+          [216, 250],
         ]}
         tone="green"
       />
-      <Label x={316} y={222}>
-        sync
+      <Label x={300} y={252} tone="green">
+        fate confirmation
       </Label>
-      <Label x={16} y={280} tone="muted">
-        offline: local resolves, global waits for core
-      </Label>
+      <Box
+        x={16}
+        y={236}
+        w={200}
+        h={74}
+        tone="shared"
+        title="confirmed state"
+        lines={['tier "global" resolves', "or rolled back"]}
+      />
     </Diagram>
   );
 }
 
-/** The read policy and the query run as one plan; only allowed rows sync. */
+/** The read policy and the query run as one plan; only matching rows reach you. */
 export function PermissionsDiagram() {
-  const rows = [
-    { title: "plan launch", kept: true },
-    { title: "draft pricing", kept: false },
-    { title: "review pr", kept: true },
-    { title: "book venue", kept: false },
+  const tasks = [
+    ["plan launch", "false", "you"],
+    ["draft pricing", "false", "sam"],
+    ["review pr", "true", "you"],
+    ["book venue", "false", "you"],
+    ["fix login", "false", "ana"],
   ];
+  const matches = (row: string[]) => row[1] === "false" && row[2] === "you";
   return (
     <Diagram
-      viewBox="0 0 640 300"
-      label="A query and the table's read policy are optimized together as one plan, so only rows the user may read are synced."
+      viewBox="0 0 640 224"
+      label="A tasks table with title, done and createdBy columns. The read policy, createdBy equals you, and your query, done equals false, run as one combined query. Only the two matching tasks reach you."
     >
-      <Box x={16} y={40} w={96} h={40} title="todos" center />
+      <Label x={16} y={28} tone="green">
+        tasks · all rows
+      </Label>
+      <Grid
+        x={16}
+        y={40}
+        cols={[
+          { label: "title", w: 110 },
+          { label: "done", w: 52, tone: "blue" },
+          { label: "$createdBy", w: 88, tone: "green" },
+        ]}
+        rows={tasks}
+        tone="green"
+        cellTone={(r) => (matches(tasks[r]) ? "ink" : "muted")}
+      />
       <Wire
         points={[
-          [112, 60],
-          [150, 60],
+          [266, 112],
+          [292, 112],
         ]}
       />
-      <Box x={150} y={40} w={196} h={40} tone="green" title="owner_id = you" center />
-      <Label x={158} y={28} tone="green">
-        read policy
-      </Label>
+      <Box
+        x={292}
+        y={58}
+        w={176}
+        h={108}
+        title="combined query"
+        lines={[
+          { text: "read policy", tone: "muted" },
+          { text: "$createdBy = you", tone: "green" },
+          { text: "your query", tone: "muted" },
+          { text: "done = false", tone: "blue" },
+        ]}
+      />
       <Wire
         points={[
-          [346, 60],
-          [384, 60],
+          [468, 112],
+          [496, 112],
         ]}
+        tone="blue"
       />
-      <Box x={384} y={40} w={150} h={40} tone="blue" title="done = false" center />
-      <Label x={392} y={28} tone="blue">
-        your query
+      <Label x={496} y={64} tone="blue">
+        synced to you
       </Label>
-      <Wire
-        points={[
-          [534, 60],
-          [566, 60],
-        ]}
+      <Grid
+        x={496}
+        y={76}
+        cols={[{ label: "title", w: 128 }]}
+        rows={tasks.filter(matches).map((row) => [row[0]])}
+        tone="blue"
+        cellTone={() => "blue"}
       />
-      <Box x={566} y={40} w={58} h={40} tone="blue" title="ui" center />
-      <path d="M150 96 V104 H534 V96" className="dg-bracket" />
-      <Label x={342} y={122} anchor="middle">
-        one plan, optimized together
+      <Label x={16} y={214} tone="muted">
+        one plan · rows you may not read never leave the cloud
       </Label>
-      {rows.map((row, index) => {
-        const y = 146 + index * 34;
-        return (
-          <g key={row.title}>
-            <Frame x={150} y={y} w={384} h={28} tone={row.kept ? "blue" : "muted"} />
-            <text
-              x={162}
-              y={y + 19}
-              className={`dg-label dg-fill-${row.kept ? "blue" : "muted"}${row.kept ? "" : " dg-struck"}`}
-            >
-              {row.title}
-            </text>
-            <text
-              x={522}
-              y={y + 19}
-              textAnchor="end"
-              className={`dg-label dg-fill-${row.kept ? "blue" : "muted"}`}
-            >
-              {row.kept ? "synced" : "never leaves core"}
-            </text>
-          </g>
-        );
-      })}
     </Diagram>
   );
 }
@@ -466,73 +535,158 @@ export function HistoryDiagram() {
   );
 }
 
-/** Two app versions share one table through a migration lens. */
+/** One raw table holds rows from every schema version; each app reads it through its lens. */
 export function SchemaDiagram() {
+  const rows = [
+    ["buy milk", "true", "", "v1"],
+    ["call ana", "false", "", "v1"],
+    ["ship v2", "", "doing", "v2"],
+    ["fix bug", "", "done", "v2"],
+  ];
+  const tone = (version: string): Tone => (version === "v1" ? "blue" : "green");
   return (
     <Diagram
-      viewBox="0 0 640 270"
-      label="Clients on schema version 1 and version 2 read and write the same data. A migration lens translates the done column to a status column in both directions."
+      viewBox="0 0 640 336"
+      label="A raw table holds the superset of columns from every schema version: title, done from version 1 and status from version 2. Rows written by each version fill only their own columns. App v1 reads and writes it through a lens that maps status to done; app v2 through a lens that maps done to status."
     >
-      <Box
-        x={16}
-        y={24}
-        w={176}
-        h={96}
+      <Box x={16} y={16} w={200} h={56} tone="blue" title="app v1" lines={["title · done"]} />
+      <Box x={424} y={16} w={200} h={56} tone="green" title="app v2" lines={["title · status"]} />
+      <Wire
+        points={[
+          [116, 72],
+          [116, 108],
+        ]}
         tone="blue"
-        title="app v1"
-        lines={["still running", "title: string", "done: boolean"]}
+        start
       />
-      <Box
-        x={448}
-        y={24}
-        w={176}
-        h={96}
+      <Wire
+        points={[
+          [524, 72],
+          [524, 108],
+        ]}
+        tone="green"
+        start
+      />
+      <Box x={16} y={108} w={200} h={56} tone="blue" title="lens v1" lines={["status → done"]} />
+      <Box x={424} y={108} w={200} h={56} tone="green" title="lens v2" lines={["done → status"]} />
+      <Wire
+        points={[
+          [116, 164],
+          [116, 272],
+          [160, 272],
+        ]}
         tone="blue"
-        title="app v2"
-        lines={["just shipped", "title: string", "status: enum"]}
-      />
-      <Box
-        x={232}
-        y={44}
-        w={176}
-        h={56}
-        tone="shared"
-        title="migration lens"
-        lines={["done ⇄ status"]}
-      />
-      <Wire
-        points={[
-          [192, 72],
-          [232, 72],
-        ]}
         start
       />
       <Wire
         points={[
-          [448, 72],
-          [408, 72],
+          [524, 164],
+          [524, 272],
+          [480, 272],
         ]}
-        start
-      />
-      <Wire
-        points={[
-          [320, 100],
-          [320, 170],
-        ]}
-        start
         tone="green"
+        start
       />
-      <Box
-        x={200}
-        y={170}
-        w={240}
-        h={60}
-        tone="green"
-        title="todos"
-        lines={["one table, both versions live"]}
+      <Label x={160} y={204} tone="muted">
+        raw table · superset of all versions
+      </Label>
+      <Grid
+        x={160}
+        y={216}
+        cols={[
+          { label: "title", w: 104 },
+          { label: "done", w: 68, tone: "blue" },
+          { label: "status", w: 76, tone: "green" },
+          { label: "written", w: 72 },
+        ]}
+        rows={rows.map((row) => row.map((cell) => cell || "·"))}
+        rowH={20}
+        cellTone={(r, c) => (c === 0 ? "ink" : rows[r][c] ? tone(rows[r][3]) : "muted")}
       />
-      <Label x={16} y={258} tone="muted">
-        no stop-the-world migration · old clients keep working
+    </Diagram>
+  );
+}
+
+/** Large values are chunked, so appends, range reads and edits touch only a few chunks. */
+export function LargeValuesDiagram() {
+  const columns: {
+    name: string;
+    kind: string;
+    chunks: number;
+    hot: number[];
+    append?: boolean;
+    op: string;
+  }[] = [
+    { name: "events", kind: "stream", chunks: 8, hot: [], append: true, op: "append · stream out" },
+    { name: "video", kind: "binary · 2GB", chunks: 10, hot: [4, 5, 6], op: "read a byte range" },
+    { name: "settings", kind: "json", chunks: 6, hot: [2], op: "read /theme by pointer" },
+    { name: "body", kind: "markdown", chunks: 9, hot: [5], op: "edit mid-document" },
+  ];
+  const chunkX = (index: number) => 176 + index * 26;
+  return (
+    <Diagram
+      viewBox="0 0 640 290"
+      label="Four columns of one table: an events stream, a 2GB binary video, a JSON settings document and a markdown body. Each is stored as chunks. Appending to the stream, reading a byte range of the video, reading one JSON pointer and editing the middle of the document each touch only a few chunks."
+    >
+      <Label x={16} y={24} tone="muted">
+        column
+      </Label>
+      <Label x={176} y={24} tone="muted">
+        stored as chunks
+      </Label>
+      <Label x={456} y={24} tone="muted">
+        stays fast
+      </Label>
+      {columns.map((column, row) => {
+        const y = 44 + row * 54;
+        return (
+          <g key={column.name}>
+            <text x={16} y={y + 16} className="dg-title dg-fill-ink">
+              {column.name}
+            </text>
+            <text x={16} y={y + 34} className="dg-detail">
+              {column.kind}
+            </text>
+            {Array.from({ length: column.chunks }, (_, index) => (
+              <rect
+                key={index}
+                x={chunkX(index)}
+                y={y + 6}
+                width={20}
+                height={28}
+                rx={2}
+                className={`dg-box dg-stroke-${column.hot.includes(index) ? "blue" : "muted"}${column.hot.includes(index) ? " dg-hot" : ""}`}
+              />
+            ))}
+            {column.append ? (
+              <>
+                <rect
+                  x={chunkX(column.chunks)}
+                  y={y + 6}
+                  width={20}
+                  height={28}
+                  rx={2}
+                  className="dg-box-dash dg-stroke-blue"
+                />
+                <Wire
+                  points={[
+                    [chunkX(column.chunks) + 26, y + 20],
+                    [chunkX(column.chunks) + 50, y + 20],
+                  ]}
+                  tone="blue"
+                  start
+                  end={false}
+                />
+              </>
+            ) : null}
+            <text x={456} y={y + 25} className="dg-label dg-fill-blue">
+              {column.op}
+            </text>
+          </g>
+        );
+      })}
+      <Label x={16} y={278} tone="muted">
+        only touched chunks sync · permissions apply as on any column
       </Label>
     </Diagram>
   );
@@ -541,7 +695,9 @@ export function SchemaDiagram() {
 /** A typical backend stack compared with what Jazz covers. */
 export function BackendDiagram() {
   const typical = [
-    "api endpoints",
+    "CRUD api endpoints",
+    "requests and reconnects",
+    "client data state handling",
     "websocket fan-out",
     "cache + invalidation",
     "permission checks",
@@ -557,10 +713,14 @@ export function BackendDiagram() {
     "database",
   ];
   const row = 32;
+  const listY = 82;
+  const listBottom = listY + (typical.length - 1) * (row + 6) + row;
+  const frameH = listBottom - listY;
+  const jazzStep = (frameH - 34 - row - 16) / (jazz.length - 1);
   return (
     <Diagram
-      viewBox="0 0 640 358"
-      label="A typical stack needs API endpoints, WebSocket fan-out, caching, permission checks, a queue, blob storage and a database. With Jazz, your business logic sits on one layer that covers sync, permissions, streams, files and the database."
+      viewBox={`0 0 640 ${listBottom + 16}`}
+      label="A typical stack needs CRUD API endpoints, request and reconnect handling, client data state handling, WebSocket fan-out, caching, permission checks, a queue, blob storage and a database. With Jazz, your business logic sits on one layer that covers sync, permissions, streams, files and the database."
     >
       <Label x={16} y={24} tone="muted">
         typical stack
@@ -573,7 +733,7 @@ export function BackendDiagram() {
         <Box
           key={item}
           x={16}
-          y={82 + index * (row + 6)}
+          y={listY + index * (row + 6)}
           w={280}
           h={row}
           tone="muted"
@@ -581,18 +741,18 @@ export function BackendDiagram() {
         />
       ))}
       <Box x={344} y={36} w={280} h={row + 4} title="business logic" />
-      <Frame x={344} y={82} w={280} h={260} tone="shared" />
-      <Label x={356} y={104} tone="blue">
+      <Frame x={344} y={listY} w={280} h={frameH} tone="blue" />
+      <Label x={356} y={listY + 22} tone="blue">
         jazz
       </Label>
       {jazz.map((item, index) => (
         <Box
           key={item}
           x={356}
-          y={116 + index * (row + 13)}
+          y={listY + 34 + index * jazzStep}
           w={256}
           h={row}
-          tone={index === jazz.length - 1 ? "green" : "blue"}
+          tone="blue"
           title={item}
         />
       ))}
