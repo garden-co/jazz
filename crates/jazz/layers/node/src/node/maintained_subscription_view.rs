@@ -778,9 +778,11 @@ impl MaintainedSubscriptionView {
         Ok(transitions)
     }
 
-    #[cfg_attr(
-        feature = "cold-settle-attribution",
-        tracing::instrument(skip_all, name = "cold.phase.decode_query_outputs")
+    #[tracing::instrument(
+        target = "jazz::profile",
+        level = "debug",
+        skip_all,
+        name = "cold.phase.decode_query_outputs"
     )]
     #[doc(hidden)]
     pub fn apply_multisink_deltas(
@@ -984,8 +986,8 @@ impl MaintainedSubscriptionView {
     ) -> Result<ResultTransitions, super::Error> {
         // Decode into the net-change accumulator directly. No retained state
         // changes until the complete input has decoded successfully.
-        #[cfg(feature = "cold-settle-attribution")]
-        let net_span = tracing::trace_span!("cold.phase.terminal_net").entered();
+        let net_span =
+            tracing::trace_span!(target: "jazz::profile", "cold.phase.terminal_net").entered();
         let mut net = BTreeMap::<EventIdentity, (NetEvent, i64)>::new();
         for row in rows {
             let (event, weight) = row?;
@@ -1039,10 +1041,9 @@ impl MaintainedSubscriptionView {
                 .or_insert((net_event, weight));
         }
 
-        #[cfg(feature = "cold-settle-attribution")]
         drop(net_span);
-        #[cfg(feature = "cold-settle-attribution")]
-        let _apply_span = tracing::trace_span!("cold.phase.terminal_apply").entered();
+        let _apply_span =
+            tracing::trace_span!(target: "jazz::profile", "cold.phase.terminal_apply").entered();
         let mut transitions = ResultTransitions::default();
         for (identity, (event, weight)) in net {
             drop(identity);
@@ -2020,9 +2021,11 @@ fn covered_input_for_version(
 /// present nullable cell. Nested edits address named collections and stable
 /// keys. An unrelated root field may tighten without changing those edits,
 /// but the addressed collection's complete subtree layout must agree exactly.
-#[cfg_attr(
-    feature = "cold-settle-attribution",
-    tracing::instrument(skip_all, name = "cold.phase.rebind_terminal_output")
+#[tracing::instrument(
+    target = "jazz::profile",
+    level = "debug",
+    skip_all,
+    name = "cold.phase.rebind_terminal_output"
 )]
 fn rebind_terminal_operation_to_layout(
     mut operation: TerminalOperation,
@@ -3201,9 +3204,11 @@ fn validate_witness_event_kind(
     }
 }
 
-#[cfg_attr(
-    feature = "cold-settle-attribution",
-    tracing::instrument(skip_all, name = "cold.phase.decode_version_witness")
+#[tracing::instrument(
+    target = "jazz::profile",
+    level = "debug",
+    skip_all,
+    name = "cold.phase.decode_version_witness"
 )]
 fn decode_typed_version_witness(
     record: BorrowedRecord<'_>,

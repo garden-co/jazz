@@ -2075,9 +2075,11 @@ pub(super) fn schema_index_input_descriptor(
     project_descriptor(&catalogue, &fields)
 }
 
-#[cfg_attr(
-    feature = "cold-settle-attribution",
-    tracing::instrument(skip_all, name = "cold.phase.index_projection")
+#[tracing::instrument(
+    target = "jazz::profile",
+    level = "debug",
+    skip_all,
+    name = "cold.phase.index_projection"
 )]
 pub(super) fn apply_index_by(
     index_by: &IndexByOp,

@@ -1442,9 +1442,11 @@ impl AppliedBatch {
         &self.changed_tables
     }
 
-    #[cfg_attr(
-        feature = "cold-settle-attribution",
-        tracing::instrument(skip_all, name = "cold.phase.storage_persist")
+    #[tracing::instrument(
+        target = "jazz::profile",
+        level = "debug",
+        skip_all,
+        name = "cold.phase.storage_persist"
     )]
     pub async fn persist(&self) -> PersistedBatch {
         assert_eq!(

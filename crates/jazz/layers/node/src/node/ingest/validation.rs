@@ -121,7 +121,7 @@ where
                 == coordinate.physical_table_id)
     }
 
-    #[cfg_attr(feature = "cold-settle-attribution", tracing::instrument(skip_all, name = "cold.phase.parent_completion"))]
+    #[tracing::instrument(target = "jazz::profile", level = "debug", skip_all, name = "cold.phase.parent_completion")]
     async fn complete_parent_versions<V: std::borrow::Borrow<VersionRecord>>(
         &mut self,
         tx: &Transaction,

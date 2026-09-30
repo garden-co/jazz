@@ -724,9 +724,11 @@ where
             .await
     }
 
-    #[cfg_attr(
-        feature = "cold-settle-attribution",
-        tracing::instrument(skip_all, name = "cold.phase.query_compile")
+    #[tracing::instrument(
+        target = "jazz::profile",
+        level = "debug",
+        skip_all,
+        name = "cold.phase.query_compile"
     )]
     pub(super) async fn compile_query_program_request_with_access_paths(
         &mut self,
@@ -811,9 +813,11 @@ where
     /// source occurrence. This is intentionally separate from ordinary inline
     /// snapshots: the caller can atomically replace these records after the
     /// graph is subscribed.
-    #[cfg_attr(
-        feature = "cold-settle-attribution",
-        tracing::instrument(skip_all, name = "cold.phase.query_compile")
+    #[tracing::instrument(
+        target = "jazz::profile",
+        level = "debug",
+        skip_all,
+        name = "cold.phase.query_compile"
     )]
     pub(super) async fn compile_query_program_request_with_inline_sources_access_paths_and_covered_inputs(
         &mut self,
@@ -873,9 +877,11 @@ where
         .await
     }
 
-    #[cfg_attr(
-        feature = "cold-settle-attribution",
-        tracing::instrument(skip_all, name = "cold.phase.query_lowering")
+    #[tracing::instrument(
+        target = "jazz::profile",
+        level = "debug",
+        skip_all,
+        name = "cold.phase.query_lowering"
     )]
     async fn compile_query_program_request_with_inline_sources_and_access_paths_inner(
         &mut self,
@@ -1356,9 +1362,11 @@ where
         }
     }
 
-    #[cfg_attr(
-        feature = "cold-settle-attribution",
-        tracing::instrument(skip_all, name = "cold.phase.query_subscribe")
+    #[tracing::instrument(
+        target = "jazz::profile",
+        level = "debug",
+        skip_all,
+        name = "cold.phase.query_subscribe"
     )]
     pub(super) async fn subscribe_lowered_program(
         &mut self,

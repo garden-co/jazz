@@ -609,7 +609,7 @@ where
         Ok(None)
     }
 
-    #[cfg_attr(feature = "cold-settle-attribution", tracing::instrument(skip_all, name = "cold.phase.merge_heads_stage"))]
+    #[tracing::instrument(target = "jazz::profile", level = "debug", skip_all, name = "cold.phase.merge_heads_stage")]
     #[doc(hidden)]
     pub async fn write_merge_heads_for_bulk_content_versions(
         &mut self,
@@ -740,7 +740,7 @@ where
         Ok(())
     }
 
-    #[cfg_attr(feature = "cold-settle-attribution", tracing::instrument(skip_all, name = "cold.phase.merge_heads_rebuild"))]
+    #[tracing::instrument(target = "jazz::profile", level = "debug", skip_all, name = "cold.phase.merge_heads_rebuild")]
     #[doc(hidden)]
     pub async fn rebuild_merge_heads_after_history_commit(
         &mut self,

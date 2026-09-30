@@ -1114,9 +1114,11 @@ impl GraphRuntimeView<'_> {
             .retain(|key, _| key.scope != self.scope);
     }
 
-    #[cfg_attr(
-        feature = "cold-settle-attribution",
-        tracing::instrument(skip_all, name = "cold.phase.ivm_hydrate")
+    #[tracing::instrument(
+        target = "jazz::profile",
+        level = "debug",
+        skip_all,
+        name = "cold.phase.ivm_hydrate"
     )]
     pub(super) async fn eval_root(
         &mut self,
@@ -1359,9 +1361,11 @@ impl TickEvaluator<'_> {
     /// Keeping graph traversal here iterative makes stack use independent of
     /// graph depth, including recursive seed/step scopes which do not use the
     /// outer tick work queue.
-    #[cfg_attr(
-        feature = "cold-settle-attribution",
-        tracing::instrument(skip_all, name = "cold.phase.ivm_update")
+    #[tracing::instrument(
+        target = "jazz::profile",
+        level = "debug",
+        skip_all,
+        name = "cold.phase.ivm_update"
     )]
     pub(super) async fn update_subgraph(
         &mut self,
@@ -2172,10 +2176,9 @@ impl TickEvaluator<'_> {
                         self.storage,
                         self.context.eval_mode,
                     );
-                    #[cfg(feature = "cold-settle-attribution")]
                     let read = tracing::Instrument::instrument(
                         read,
-                        tracing::trace_span!("cold.phase.op_source"),
+                        tracing::trace_span!(target: "jazz::profile", "cold.phase.op_source"),
                     );
                     read.await
                 }
@@ -2868,9 +2871,11 @@ impl TickEvaluator<'_> {
     /// a root-scope arrangement keyed by the collector input; a collector is
     /// structurally terminal, so it can never become state in a recursive step
     /// or inherit a recursive sub-tick work bound.
-    #[cfg_attr(
-        feature = "cold-settle-attribution",
-        tracing::instrument(skip_all, name = "cold.phase.collect_results")
+    #[tracing::instrument(
+        target = "jazz::profile",
+        level = "debug",
+        skip_all,
+        name = "cold.phase.collect_results"
     )]
     fn update_collect_by(
         &mut self,

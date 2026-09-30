@@ -73,6 +73,9 @@ fn initialize_wasm_tracing() {
     let max_level = configured_wasm_log_level();
     let config = wasm_tracing::WasmLayerConfig::new()
         .with_max_level(max_level)
+        // Profiling spans are tuned separately from the log level; see
+        // dev/observability/TRACING.md.
+        .with_excluded_target("jazz::profile")
         .with_console_group_spans();
     let _ = wasm_tracing::set_as_global_default_with_config(config);
 }

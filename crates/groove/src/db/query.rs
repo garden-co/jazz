@@ -892,9 +892,11 @@ impl Database {
     /// columns. Binding appends ordinary filter/project graph nodes for each
     /// sink, so callers with one-sink needs should treat [`Database::prepare_one_sink`]
     /// and [`Database::prepare_one_sink_with_routing`] as thin convenience wrappers.
-    #[cfg_attr(
-        feature = "cold-settle-attribution",
-        tracing::instrument(skip_all, name = "cold.phase.query_prepare")
+    #[tracing::instrument(
+        target = "jazz::profile",
+        level = "debug",
+        skip_all,
+        name = "cold.phase.query_prepare"
     )]
     pub async fn prepare(
         &mut self,
@@ -919,9 +921,11 @@ impl Database {
     /// Prepare a routed shape that callers with identical terminals share.
     /// The shape retires itself when its last retained binding unsubscribes;
     /// see [`crate::ivm::IvmRuntime::prepare_shared`].
-    #[cfg_attr(
-        feature = "cold-settle-attribution",
-        tracing::instrument(skip_all, name = "cold.phase.query_prepare")
+    #[tracing::instrument(
+        target = "jazz::profile",
+        level = "debug",
+        skip_all,
+        name = "cold.phase.query_prepare"
     )]
     pub async fn prepare_shared(
         &mut self,
