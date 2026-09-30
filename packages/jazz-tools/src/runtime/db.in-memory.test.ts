@@ -247,7 +247,7 @@ describe("createDb in-memory driver", () => {
         },
       );
       const [seen] = await tx.all(tail(6));
-      const [outside] = await db.all(tail(6));
+      const [outside] = await db!.all(tail(6));
       return { seen: seen?.body, outside: outside?.body };
     });
     expect(mergeable.value).toEqual({ seen: "onetwo", outside: "" });
