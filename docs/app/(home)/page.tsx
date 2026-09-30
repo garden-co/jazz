@@ -419,7 +419,7 @@ export default function HomePage() {
 
       <section className="home-section">
         <div className="home-container">
-          <SectionHeader id="code" title="In the client: feels like simple reactive state">
+          <SectionHeader id="code" title="Use straight from the client as simple reactive state">
             <Text as="p" display="block" type="large" color="secondary" weight="normal">
               Define tables and permissions in TypeScript, then query from any component. Writes
               apply locally at once and sync in the background.
