@@ -65,6 +65,8 @@ pub const FEATURE_AUXILIARY_CHUNKS: WireFeatures = 1 << 8;
 pub const FEATURE_SCOPE_ISOLATED_CLIENT_RELAY: WireFeatures = 1 << 9;
 /// Reserved legacy edge-publication bit. Never advertised by current peers.
 pub const FEATURE_AUTHORITY_PUBLICATIONS: WireFeatures = 1 << 10;
+/// Peers understand the bounded maintained-query result protocol failure code.
+pub const FEATURE_QUERY_RESULT_PROTOCOL: WireFeatures = 1 << 11;
 
 const FEATURE_PAYLOAD_COMPRESSION_MASK: WireFeatures = FEATURE_PAYLOAD_LZ4 | FEATURE_PAYLOAD_ZSTD;
 
@@ -940,6 +942,7 @@ pub fn current_wire_features() -> WireFeatures {
         | FEATURE_AUTHORIZATION_SCOPE_VIEWS
         | FEATURE_AUXILIARY_CHUNKS
         | FEATURE_SCOPE_ISOLATED_CLIENT_RELAY
+        | FEATURE_QUERY_RESULT_PROTOCOL
         | runtime_transport_compression_features()
 }
 

@@ -325,8 +325,8 @@ mod database_slot;
 mod descriptor_roles;
 #[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
-pub fn omit_next_current_result_union_arm_for_test() {
-    descriptor_roles::omit_next_current_result_union_arm_for_test();
+pub fn corrupt_next_current_result_schema_for_test() {
+    descriptor_roles::corrupt_next_current_result_schema_for_test();
 }
 mod eviction;
 mod global_state;
@@ -3330,6 +3330,9 @@ pub enum Error {
     /// Stored value failed validation.
     #[error("invalid stored value: {0}")]
     InvalidStoredValue(&'static str),
+    /// A maintained query result did not match its compiled publication schema.
+    #[error("maintained query result protocol mismatch")]
+    QueryResultProtocol,
     /// A live authority source-closure delta could not transition from the
     /// receiver's installed predecessor.  The usage handle is safe to expose
     /// to the subscription owner; row bodies and claims are deliberately not.

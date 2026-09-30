@@ -325,30 +325,18 @@ pub(super) struct CurrentPayloadEncodePlan {
 
 #[cfg(any(test, feature = "testing"))]
 thread_local! {
-    static OMIT_NEXT_CURRENT_RESULT_UNION_ARM: std::cell::Cell<bool> =
+    static CORRUPT_NEXT_CURRENT_RESULT_SCHEMA: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
 }
 
 #[cfg(any(test, feature = "testing"))]
-pub fn omit_next_current_result_union_arm_for_test() {
-    OMIT_NEXT_CURRENT_RESULT_UNION_ARM.with(|next| next.set(true));
+pub fn corrupt_next_current_result_schema_for_test() {
+    CORRUPT_NEXT_CURRENT_RESULT_SCHEMA.with(|next| next.set(true));
 }
 
 #[cfg(any(test, feature = "testing"))]
-fn take_omitted_current_result_union_arm_for_test(
-    schema: &super::query_engine::ResultMembershipSchema,
-) -> Option<String> {
-    OMIT_NEXT_CURRENT_RESULT_UNION_ARM.with(|next| {
-        if next.get() {
-            let omitted = schema.occurrence_union_arm_fields.values().next().cloned();
-            if omitted.is_some() {
-                next.set(false);
-            }
-            omitted
-        } else {
-            None
-        }
-    })
+fn take_current_result_schema_corruption_for_test() -> bool {
+    CORRUPT_NEXT_CURRENT_RESULT_SCHEMA.with(|next| next.replace(false))
 }
 
 impl CurrentPayloadEncodePlan {
@@ -356,34 +344,39 @@ impl CurrentPayloadEncodePlan {
         descriptor: RecordDescriptor,
         schema: &super::query_engine::ResultMembershipSchema,
     ) -> Result<Self, Error> {
-        #[cfg(any(test, feature = "testing"))]
-        let omitted_field = take_omitted_current_result_union_arm_for_test(schema);
-        #[cfg(not(any(test, feature = "testing")))]
-        let omitted_field: Option<String> = None;
+        Self::new_inner(descriptor, schema).map_err(|_| Error::QueryResultProtocol)
+    }
 
-        let mut projected_schema = schema.clone();
-        if let Some(omitted_field) = omitted_field {
-            projected_schema
-                .occurrence_union_arm_fields
-                .retain(|_, name| name != &omitted_field);
-        }
-        let selected = std::iter::once(projected_schema.row_field.as_str())
+    fn new_inner(
+        descriptor: RecordDescriptor,
+        schema: &super::query_engine::ResultMembershipSchema,
+    ) -> Result<Self, Error> {
+        #[cfg(any(test, feature = "testing"))]
+        let malformed_schema = take_current_result_schema_corruption_for_test().then(|| {
+            let mut malformed = schema.clone();
+            malformed.row_field = "__missing_current_result_row_uuid".to_owned();
+            malformed
+        });
+        #[cfg(any(test, feature = "testing"))]
+        let schema = malformed_schema.as_ref().unwrap_or(schema);
+
+        let selected = std::iter::once(schema.row_field.as_str())
             .chain(
-                projected_schema
+                schema
                     .payload_fields
                     .iter()
-                    .filter(|field| field.name != projected_schema.row_field)
+                    .filter(|field| field.name != schema.row_field)
                     .map(|field| field.name.as_str()),
             )
             .chain(
-                projected_schema
+                schema
                     .occurrence_id_fields
                     .iter()
                     .skip(1)
                     .map(String::as_str),
             )
             .chain(
-                projected_schema
+                schema
                     .occurrence_union_arm_fields
                     .values()
                     .map(String::as_str),
@@ -410,7 +403,7 @@ impl CurrentPayloadEncodePlan {
             runtime_fields.push(descriptor.fields()[index].clone());
         }
         let runtime = RecordDescriptor::new_with_fields(runtime_fields);
-        let canonical = current_role_schema(&projected_schema)?;
+        let canonical = current_role_schema(schema)?;
         // A complete named/type tree comparison precedes any byte-layout reuse.
         for (source, target) in runtime.fields().iter().zip(canonical.fields()) {
             let source_type = RecordDescriptor::new([("value", source.value_type.clone())]);
@@ -434,10 +427,11 @@ impl CurrentPayloadEncodePlan {
     pub(super) fn encode(&self, record: BorrowedRecord<'_>) -> Result<(Vec<u8>, Vec<u8>), Error> {
         // Both descriptors are trusted compiled schemas. Copy the selected
         // encoded fields; do not decode and re-encode our own encoder's output.
-        Ok((
-            self.descriptor.clone(),
-            self.projector.project(record)?.into_raw(),
-        ))
+        let projected = self
+            .projector
+            .project(record)
+            .map_err(|_| Error::QueryResultProtocol)?;
+        Ok((self.descriptor.clone(), projected.into_raw()))
     }
 }
 
@@ -717,7 +711,10 @@ mod tests {
             ("row_uuid", ValueType::Uuid),
             ("payload", ValueType::String),
         ]);
-        assert!(plan.encode(wrong_source.bind(&[])).is_err());
+        assert!(matches!(
+            plan.encode(wrong_source.bind(&[])),
+            Err(crate::node::Error::QueryResultProtocol)
+        ));
     }
 
     // Malformed member/schema pairings cannot be authored through the public

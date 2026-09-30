@@ -274,7 +274,7 @@ export type SubscriptionRejectionReason =
 
 export interface SubscriptionServerFailureReason {
   type: 'ServerFailure'
-  code: 'TableNotFound' | 'SchemaResolution' | 'QueryValidation' | 'QueryLowering' | 'PolicyEvaluation' | 'Internal'
+  code: 'TableNotFound' | 'SchemaResolution' | 'QueryValidation' | 'QueryLowering' | 'PolicyEvaluation' | 'Internal' | 'QueryResultProtocol'
 }
 
 export interface SubscriptionShapeRegistrationPendingReason {

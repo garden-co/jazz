@@ -1741,6 +1741,16 @@ impl ClientDb {
     }
 }
 
+fn subscription_rejection_is_retryable(reason: &crate::protocol::SubscribeRejectReason) -> bool {
+    matches!(
+        reason,
+        crate::protocol::SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission
+            | crate::protocol::SubscribeRejectReason::ServerFailure {
+                code: crate::protocol::SubscribeServerFailureCode::Internal,
+            }
+    )
+}
+
 impl ClientDbInner {
     fn shutdown_error() -> JazzError {
         JazzError::Connection("client is shut down".to_string())
@@ -2552,6 +2562,7 @@ impl ClientDbInner {
                         let _ = tx.send(SubscriptionStreamItem::Delta(delta));
                     }
                     CoreSubscriptionEvent::Rejected { reason } => {
+                        let retryable = subscription_rejection_is_retryable(&reason);
                         let reason = match reason {
                             crate::protocol::SubscribeRejectReason::UnsupportedShapeCapability {
                                 detail,
@@ -2580,6 +2591,9 @@ impl ClientDbInner {
                                         crate::protocol::SubscribeServerFailureCode::Internal => {
                                             SubscriptionServerFailureCode::Internal
                                         }
+                                        crate::protocol::SubscribeServerFailureCode::QueryResultProtocol => {
+                                            SubscriptionServerFailureCode::QueryResultProtocol
+                                        }
                                     },
                                 }
                             }
@@ -2590,6 +2604,9 @@ impl ClientDbInner {
                             },
                         };
                         let _ = tx.send(SubscriptionStreamItem::Rejected { reason });
+                        if !retryable {
+                            break;
+                        }
                     }
                     CoreSubscriptionEvent::Closed => break,
                 }
@@ -4303,6 +4320,33 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
     use tempfile::TempDir;
+
+    /// The public client retries only transient rejection classes; Alice's stream
+    /// keeps `Internal` live but treats query failures as terminal. This unit test
+    /// isolates the classifier's complete decision table.
+    #[test]
+    fn retryable_subscription_rejections_preserve_only_transient_failures() {
+        use crate::protocol::{SubscribeRejectReason, SubscribeServerFailureCode};
+
+        assert!(subscription_rejection_is_retryable(
+            &SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission
+        ));
+        assert!(subscription_rejection_is_retryable(
+            &SubscribeRejectReason::ServerFailure {
+                code: SubscribeServerFailureCode::Internal,
+            }
+        ));
+        assert!(!subscription_rejection_is_retryable(
+            &SubscribeRejectReason::ServerFailure {
+                code: SubscribeServerFailureCode::QueryResultProtocol,
+            }
+        ));
+        assert!(!subscription_rejection_is_retryable(
+            &SubscribeRejectReason::ServerFailure {
+                code: SubscribeServerFailureCode::QueryValidation,
+            }
+        ));
+    }
 
     struct ControlledNativeWireTransport;
 

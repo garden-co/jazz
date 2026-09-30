@@ -3774,19 +3774,21 @@ fn invalidated_owner_delivery_cannot_cover_a_waiting_local_read() {
     foreground.detach_query(waiting);
     foreground.detach_query(refreshed);
 }
-/// Contract: a prepared owner-or-editor union projection failure rejects only
-/// its browser query, retires that exact route, and does not alter the fate of
-/// the Core transaction that supplied the result.
+/// Contract: a malformed prepared-result projection rejects only its
+/// browser route, retires that exact Core route, and does not alter the
+/// transaction that supplied the result. An older downstream peer receives
+/// `Internal` and can recover by reattaching; a healthy sibling coverage is
+/// recomputed after the rejection without another source write.
 ///
 /// Actors: `reader` subscribes in the browser; Edge relays the subscription;
-/// Core owns the row and serves its owner/editor policy branches.
+/// Core owns the row and serves it under owner/editor policy branches.
 ///
 /// ```text
 /// browser ──query──► Edge ──query──► Core
 /// browser ◄─reject── Edge ◄─reject── Core
 /// ```
 #[test]
-fn prepared_union_result_projection_failure_is_terminal_and_query_scoped() {
+fn prepared_result_projection_failure_retires_one_route_and_rearms_sibling() {
     let reader = AuthorSubject::for_test_bytes([0x91; 16]);
     let claims = test_provider_claims(reader);
     let schema = build_public_db_test_schema(
@@ -3811,17 +3813,43 @@ fn prepared_union_result_projection_failure_is_terminal_and_query_scoped() {
     browser.set_non_durable_client();
     browser.set_test_provider_claims(reader, claims.clone());
 
-    let (edge_core, core_transport, core_sent) = duplex_with_server_outbound_tap();
+    let (edge_core, core_transport, core_sent) =
+        duplex_with_admitted_session_context_and_server_outbound_recorder(
+            reader,
+            NodeUuid::from_bytes([0x92; 16]),
+            1,
+            NodeUuid::from_bytes([0x91; 16]),
+            1,
+            crate::wire::current_wire_features(),
+        );
     block_on(edge.connect_upstream(edge_core));
     let core_connection =
         core.accept_scope_isolated_relay_subscriber(core_transport, reader, claims.clone(), 1);
-    let (browser_edge, edge_transport) = duplex();
+    let (browser_edge, edge_transport, edge_sent) =
+        duplex_with_admitted_session_context_and_server_outbound_recorder(
+            reader,
+            NodeUuid::from_bytes([0x93; 16]),
+            1,
+            NodeUuid::from_bytes([0x92; 16]),
+            1,
+            crate::wire::current_wire_features() & !crate::wire::FEATURE_QUERY_RESULT_PROTOCOL,
+        );
     block_on(browser.connect_upstream(browser_edge));
-    edge.accept_subscriber_with_claims(edge_transport, reader, claims);
+    let edge_connection = edge.accept_subscriber_with_claims(edge_transport, reader, claims);
 
-    let failed_query = Query::from("todos").filter(eq(col("title"), lit("union-target")));
-    let sibling_query = Query::from("todos").filter(eq(col("title"), lit("sibling")));
-    let failed_shape = prepared(&browser, &failed_query).shape.shape_id();
+    let title_query = Query::from("todos")
+        .filter(eq(col("title"), lit("projection-target")))
+        .select(["title"]);
+    let owner_query = Query::from("todos")
+        .filter(eq(col("title"), lit("projection-target")))
+        .select(["owner"]);
+    let title_shape = prepared(&browser, &title_query).shape.shape_id();
+    let owner_shape = prepared(&browser, &owner_query).shape.shape_id();
+    let (failed_query, sibling_query, failed_shape, sibling_shape) = if title_shape < owner_shape {
+        (title_query, owner_query, title_shape, owner_shape)
+    } else {
+        (owner_query, title_query, owner_shape, title_shape)
+    };
     let mut failed = prepared_subscribe(&browser, &failed_query, global_subscribe_opts()).unwrap();
     let mut sibling =
         prepared_subscribe(&browser, &sibling_query, global_subscribe_opts()).unwrap();
@@ -3835,25 +3863,54 @@ fn prepared_union_result_projection_failure_is_terminal_and_query_scoped() {
     drive();
     while failed.try_next_event().is_some() {}
     while sibling.try_next_event().is_some() {}
-    let failed_subscription = {
+    let (failed_subscription, sibling_subscription) = {
         let connection = core_connection.borrow();
         let ConnectionLink::Subscriber(state) = &connection.link else {
             unreachable!("Core retains the Edge subscriber connection");
         };
-        *state
-            .served
-            .keys()
-            .find(|subscription| subscription.shape_id == failed_shape)
-            .expect("the failed browser query has one Core-served route")
+        let subscription_for = |shape_id| {
+            *state
+                .served
+                .keys()
+                .find(|subscription| subscription.shape_id == shape_id)
+                .expect("each browser query has one Core-served route")
+        };
+        (
+            subscription_for(failed_shape),
+            subscription_for(sibling_shape),
+        )
     };
-    let active_browser_queries = browser.active_groove_subscriptions_for_test();
+    let (failed_edge_subscription, sibling_edge_subscription) = {
+        let connection = edge_connection.borrow();
+        let ConnectionLink::Subscriber(state) = &connection.link else {
+            unreachable!("Edge retains the browser subscriber connection");
+        };
+        let subscription_for = |shape_id| {
+            *state
+                .served
+                .keys()
+                .find(|subscription| subscription.shape_id == shape_id)
+                .expect("each browser query has one Edge-served route")
+        };
+        (
+            subscription_for(failed_shape),
+            subscription_for(sibling_shape),
+        )
+    };
+    assert!(
+        failed_shape < sibling_shape,
+        "the injected failure must hit the first dirty coverage key"
+    );
 
-    let sibling_row = row(0x94);
+    let baseline_row = row(0x94);
     core.insert_with_id(
         "todos",
-        sibling_row,
+        baseline_row,
         BTreeMap::from([
-            ("title".to_owned(), Value::String("sibling".to_owned())),
+            (
+                "title".to_owned(),
+                Value::String("projection-target".to_owned()),
+            ),
             ("owner".to_owned(), Value::Uuid(reader.test_uuid())),
             ("editor".to_owned(), Value::Uuid(reader.test_uuid())),
         ]),
@@ -3861,19 +3918,37 @@ fn prepared_union_result_projection_failure_is_terminal_and_query_scoped() {
     .unwrap();
     drive();
     assert!(
-        sibling.try_next_event().is_some(),
-        "the sibling query must establish its own healthy result before fault injection"
+        matches!(
+            failed.try_next_event(),
+            Some(SubscriptionEvent::Delta { added, .. })
+                if added.iter().any(|added| added.row.row_uuid() == baseline_row)
+        ),
+        "the failed route must have a healthy result before fault injection"
     );
+    assert!(
+        matches!(
+            sibling.try_next_event(),
+            Some(SubscriptionEvent::Delta { added, .. })
+                if added.iter().any(|added| added.row.row_uuid() == baseline_row)
+        ),
+        "the sibling route must have a healthy result before fault injection"
+    );
+    while failed.try_next_event().is_some() {}
     while sibling.try_next_event().is_some() {}
 
-    crate::node::omit_next_current_result_union_arm_for_test();
+    let edge_outbound_offset = edge_sent.borrow().len();
+    let core_outbound_offset = core_sent.borrow().len();
+    crate::node::corrupt_next_current_result_schema_for_test();
     let failed_row = row(0x95);
     let target_write = core
         .insert_with_id(
             "todos",
             failed_row,
             BTreeMap::from([
-                ("title".to_owned(), Value::String("union-target".to_owned())),
+                (
+                    "title".to_owned(),
+                    Value::String("projection-target".to_owned()),
+                ),
                 ("owner".to_owned(), Value::Uuid(reader.test_uuid())),
                 ("editor".to_owned(), Value::Uuid(reader.test_uuid())),
             ]),
@@ -3883,22 +3958,63 @@ fn prepared_union_result_projection_failure_is_terminal_and_query_scoped() {
     assert_eq!(fate_before.fate, Fate::Accepted);
     assert_eq!(fate_before.durability, DurabilityTier::Global);
     drive();
+    let sibling_event = sibling.try_next_event();
+    assert!(
+        matches!(
+            sibling_event,
+            Some(SubscriptionEvent::Delta { added, .. })
+                if added.iter().any(|added| added.row.row_uuid() == failed_row)
+        ),
+        "the sibling coverage must recompute the already-pending row without another write"
+    );
 
     let rejection = failed
         .try_next_event()
         .expect("the malformed prepared result must reach the browser as a rejection");
-    let SubscriptionEvent::Rejected { reason } = rejection else {
-        panic!("the failed owner/editor query must reject, not publish a partial result");
-    };
-    let SubscribeRejectReason::ServerFailure { code } = reason else {
+    let SubscribeRejectReason::ServerFailure { code } = (match rejection {
+        SubscriptionEvent::Rejected { reason } => reason,
+        event => {
+            panic!("the failed query must reject, not publish a partial result; got {event:?}")
+        }
+    }) else {
         panic!("the failed prepared projection must produce a bounded server rejection");
     };
     assert_eq!(
-        format!("{code:?}"),
-        "QueryResultProtocol",
-        "the maintained result protocol failure must use its dedicated bounded code"
+        code,
+        SubscribeServerFailureCode::Internal,
+        "an older downstream must receive the legacy-compatible failure code"
     );
-
+    {
+        let sent = edge_sent.borrow();
+        let after_fault = &sent[edge_outbound_offset..];
+        let rejection_index = after_fault
+            .iter()
+            .position(|message| {
+                matches!(
+                    message,
+                    SyncMessage::SubscribeRejected {
+                        subscription,
+                        reason: SubscribeRejectReason::ServerFailure {
+                            code: SubscribeServerFailureCode::Internal,
+                        },
+                    } if *subscription == failed_edge_subscription
+                )
+            })
+            .expect("Edge must send the downgraded rejection");
+        let sibling_update_index = after_fault
+            .iter()
+            .position(|message| {
+                matches!(
+                    message,
+                    SyncMessage::ViewUpdate(view) if view.subscription == sibling_edge_subscription
+                )
+            })
+            .expect("Edge must send the healthy sibling result");
+        assert!(
+            rejection_index < sibling_update_index,
+            "the rejection control must precede the healthy rearmed view"
+        );
+    }
     assert_eq!(
         core_sent
             .borrow()
@@ -3910,22 +4026,61 @@ fn prepared_union_result_projection_failure_is_terminal_and_query_scoped() {
             ))
             .count(),
         1,
-        "one failed query key receives one bounded rejection"
+        "Core sends one typed rejection for the failed route"
+    );
+    {
+        let sent = core_sent.borrow();
+        let after_fault = &sent[core_outbound_offset..];
+        let rejection_index = after_fault
+            .iter()
+            .position(|message| {
+                matches!(
+                    message,
+                    SyncMessage::SubscribeRejected {
+                        subscription,
+                        reason: SubscribeRejectReason::ServerFailure {
+                            code: SubscribeServerFailureCode::QueryResultProtocol,
+                        },
+                    } if *subscription == failed_subscription
+                )
+            })
+            .expect("Core must send the typed rejection");
+        assert!(
+            !after_fault[..rejection_index]
+                .iter()
+                .any(|message| matches!(message, SyncMessage::ViewUpdate(_))),
+            "the first dirty coverage failed before any view update was sent"
+        );
+    }
+    assert!(
+        core_sent.borrow().iter().any(|message| matches!(
+            message,
+            SyncMessage::SubscribeRejected {
+                subscription,
+                reason: SubscribeRejectReason::ServerFailure {
+                    code: SubscribeServerFailureCode::QueryResultProtocol,
+                },
+            } if *subscription == failed_subscription
+        )),
+        "Core's negotiated link must retain the typed result-protocol reason"
     );
     let mut context = Context::from_waker(Waker::noop());
     assert!(
         matches!(
             futures::Stream::poll_next(std::pin::Pin::new(&mut failed), &mut context),
-            Poll::Ready(None)
+            Poll::Pending
         ),
-        "the browser stream must become terminal after delivering its rejection"
+        "the legacy Internal rejection is nonterminal; the application must reattach"
     );
+    drop(failed);
+    browser.tick().unwrap();
     {
         let connection = core_connection.borrow();
         let ConnectionLink::Subscriber(state) = &connection.link else {
             unreachable!("Core retains the Edge subscriber connection");
         };
         assert!(!state.served.contains_key(&failed_subscription));
+        assert!(state.served.contains_key(&sibling_subscription));
         assert!(
             state
                 .coverage_groups
@@ -3940,47 +4095,27 @@ fn prepared_union_result_projection_failure_is_terminal_and_query_scoped() {
             .relay_upstream_subscription_owners
             .borrow()
             .keys()
-            .all(|(subscription, _, _)| *subscription != failed_subscription),
+            .all(|(subscription, _, _)| *subscription != failed_edge_subscription),
         "Edge must release the failed upstream query pin"
     );
-    assert_eq!(
-        browser.active_groove_subscriptions_for_test() + 1,
-        active_browser_queries,
-        "the browser must retire only the failed local maintained query"
-    );
 
-    let healthy_row = row(0x96);
-    let sibling_write = core
-        .insert_with_id(
-            "todos",
-            healthy_row,
-            BTreeMap::from([
-                ("title".to_owned(), Value::String("sibling".to_owned())),
-                ("owner".to_owned(), Value::Uuid(reader.test_uuid())),
-                ("editor".to_owned(), Value::Uuid(reader.test_uuid())),
-            ]),
-        )
-        .unwrap();
+    let mut retry = prepared_subscribe(&browser, &failed_query, global_subscribe_opts()).unwrap();
     drive();
     assert!(
         matches!(
-            sibling.try_next_event(),
+            retry.try_next_event(),
             Some(SubscriptionEvent::Delta { added, .. })
-                if added.iter().any(|added| added.row.row_uuid() == healthy_row)
+                if added.iter().any(|added| added.row.row_uuid() == failed_row)
         ),
-        "the sibling subscription remains live and publishes a later matching row"
+        "reattaching retrieves the already-committed row without another write"
     );
     assert_eq!(
         block_on(target_write.write_state()).unwrap(),
         fate_before,
         "serving failure must not change the target transaction's persisted fate"
     );
-    assert_eq!(
-        block_on(sibling_write.write_state()).unwrap().fate,
-        Fate::Accepted
-    );
     assert!(
-        core.read(&Query::from("todos").filter(eq(col("title"), lit("union-target"))))
+        core.read(&Query::from("todos").filter(eq(col("title"), lit("projection-target"))))
             .unwrap()
             .iter()
             .any(|row| row.row_uuid() == failed_row),
@@ -3999,4 +4134,79 @@ fn prepared_union_result_projection_failure_is_terminal_and_query_scoped() {
         1,
         "later Core ticks must not repeat the failed query rejection"
     );
+}
+
+/// A Core sends a negotiated protocol rejection to Alice and terminates only
+/// the affected subscription stream.
+///
+/// ```text
+/// Core ──malformed prepared result──► Alice
+///     └─QueryResultProtocol─────────► stream closes
+/// ```
+#[test]
+fn negotiated_result_protocol_rejection_terminates_only_its_stream() {
+    let reader = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+        ),
+    );
+    let server = open_core(0xa1, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xa2, reader, &schema);
+    client.set_non_durable_client();
+
+    let (client_transport, server_transport, _) =
+        duplex_with_admitted_session_context_and_server_outbound_recorder(
+            reader,
+            NodeUuid::from_bytes([0xa2; 16]),
+            1,
+            NodeUuid::from_bytes([0xa1; 16]),
+            1,
+            crate::wire::current_wire_features(),
+        );
+    block_on(client.connect_upstream(client_transport));
+    server.accept_subscriber_with_claims(server_transport, reader, BTreeMap::new());
+
+    let query = Query::from("todos").filter(eq(col("title"), lit("projection-target")));
+    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    let drive = || {
+        for _ in 0..16 {
+            client.tick().unwrap();
+            server.tick().unwrap();
+        }
+    };
+    drive();
+    while subscription.try_next_event().is_some() {}
+
+    crate::node::corrupt_next_current_result_schema_for_test();
+    server
+        .insert_with_id(
+            "todos",
+            row(0xa3),
+            BTreeMap::from([(
+                "title".to_owned(),
+                Value::String("projection-target".to_owned()),
+            )]),
+        )
+        .unwrap();
+    drive();
+    let event = subscription.try_next_event();
+    assert!(
+        matches!(
+            event.as_ref(),
+            Some(SubscriptionEvent::Rejected {
+                reason: SubscribeRejectReason::ServerFailure {
+                    code: SubscribeServerFailureCode::QueryResultProtocol,
+                }
+            })
+        ),
+        "expected a typed maintained-result rejection, got {event:?}"
+    );
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(matches!(
+        futures::Stream::poll_next(std::pin::Pin::new(&mut subscription), &mut context),
+        Poll::Ready(None)
+    ));
 }

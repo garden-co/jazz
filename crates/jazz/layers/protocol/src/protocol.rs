@@ -729,6 +729,13 @@ impl SyncMessage {
             | Self::ChunkUploadStart(_)
             | Self::ChunkUploadNodes(_)
             | Self::ChunkUploadResult(_) => crate::wire::FEATURE_AUXILIARY_CHUNKS,
+            Self::SubscribeRejected {
+                reason:
+                    SubscribeRejectReason::ServerFailure {
+                        code: SubscribeServerFailureCode::QueryResultProtocol,
+                    },
+                ..
+            } => crate::wire::FEATURE_QUERY_RESULT_PROTOCOL,
             _ => crate::wire::FEATURE_NONE,
         }
     }
@@ -3099,6 +3106,8 @@ pub enum SubscribeServerFailureCode {
     PolicyEvaluation,
     /// A server-side failure did not fit a more specific safe class.
     Internal,
+    /// A maintained result payload did not match the receiver's compiled result schema.
+    QueryResultProtocol,
 }
 
 /// Legacy-compatible table-qualified current content row entry:

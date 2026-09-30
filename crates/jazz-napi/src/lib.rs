@@ -1306,7 +1306,7 @@ pub struct SubscriptionServerFailureReason {
     #[napi(js_name = "type", ts_type = "'ServerFailure'")]
     pub reason_type: String,
     #[napi(
-        ts_type = "'TableNotFound' | 'SchemaResolution' | 'QueryValidation' | 'QueryLowering' | 'PolicyEvaluation' | 'Internal'"
+        ts_type = "'TableNotFound' | 'SchemaResolution' | 'QueryValidation' | 'QueryLowering' | 'PolicyEvaluation' | 'Internal' | 'QueryResultProtocol'"
     )]
     pub code: String,
 }
@@ -7528,6 +7528,21 @@ mod tests {
             }) if event_type == "rejected"
                 && reason_type == "ServerFailure"
                 && code == "QueryValidation"
+        ));
+
+        let query_result_protocol =
+            core_subscription_event_to_napi(&CoreSubscriptionEvent::Rejected {
+                reason: SubscribeRejectReason::ServerFailure {
+                    code: SubscribeServerFailureCode::QueryResultProtocol,
+                },
+            })
+            .expect("encode query-result protocol rejection");
+        assert!(matches!(
+            query_result_protocol,
+            Either3::B(crate::SubscriptionRejectedEvent {
+                reason: Either4::C(crate::SubscriptionServerFailureReason { code, .. }),
+                ..
+            }) if code == "QueryResultProtocol"
         ));
 
         let invalid_authority = core_subscription_event_to_napi(&CoreSubscriptionEvent::Rejected {

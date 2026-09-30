@@ -604,6 +604,30 @@ fn queue_direct_control(
     pending.push_back(PendingSubscriberControlResponse::direct(message));
 }
 
+fn queue_query_result_protocol_rejection_for_group(
+    pending: &mut VecDeque<PendingSubscriberControlResponse>,
+    subscribers: &BTreeSet<SubscriptionKey>,
+    transport: &dyn Transport,
+) -> Vec<SubscriptionKey> {
+    let negotiated_features = transport
+        .connection_session_context()
+        .map_or(crate::wire::FEATURE_NONE, |context| {
+            context.negotiated_features
+        });
+    let subscribers = subscribers.iter().copied().collect::<Vec<_>>();
+    for subscription in subscribers.iter().copied() {
+        queue_direct_control(
+            pending,
+            server_subscription_failure_rejection_message_with_feature(
+                subscription,
+                &crate::node::Error::QueryResultProtocol,
+                negotiated_features,
+            ),
+        );
+    }
+    subscribers
+}
+
 pub(super) fn queue_sync_context_control(
     pending: &mut VecDeque<PendingSubscriberControlResponse>,
     message: SyncMessage,
@@ -3843,6 +3867,16 @@ where
                     .remove(&connection_epoch)
                     .unwrap_or_default();
                 for rejection in relay_rejections {
+                    let negotiated_features = self
+                        .transport
+                        .connection_session_context()
+                        .map_or(crate::wire::FEATURE_NONE, |context| {
+                            context.negotiated_features
+                        });
+                    let reason = relay_subscription_rejection_reason_with_feature(
+                        rejection.reason,
+                        negotiated_features,
+                    );
                     let active_subscriptions = coverage_groups
                         .get(&rejection.coverage)
                         .map(|group| {
@@ -3864,7 +3898,7 @@ where
                         queue_direct_control(&mut self.pending_control_responses,
                             SyncMessage::SubscribeRejected {
                                 subscription,
-                                reason: rejection.reason.clone(),
+                                reason: reason.clone(),
                             },
                         );
                     }
@@ -5486,7 +5520,8 @@ where
                     )
                 {
                     let mut serve_again = false;
-                    for (coverage, group) in coverage_groups.iter_mut() {
+                    let mut failed_coverage_groups = Vec::new();
+                    'coverage_groups: for (coverage, group) in coverage_groups.iter_mut() {
                         let runtime_token = self.node.borrow().groove_runtime_token();
                         if group.publication_runtime_token.is_some_and(|saved| saved != runtime_token)
                             && (group.pending_initial_update.is_some() || !group.pending_incremental_updates.is_empty())
@@ -5633,6 +5668,16 @@ where
                                         );
                                         schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
                                         return Ok(true);
+                                    }
+                                    Err(crate::node::Error::QueryResultProtocol) => {
+                                        failed_coverage_groups.push(
+                                            queue_query_result_protocol_rejection_for_group(
+                                                &mut self.pending_control_responses,
+                                                &group.subscribers,
+                                                self.transport.as_ref(),
+                                            ),
+                                        );
+                                        break 'coverage_groups;
                                     }
                                     Err(error) => {
                                         rollback_rejected_subscriber_admission(
@@ -5799,6 +5844,16 @@ where
                                     schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
                                     return Ok(true);
                                 }
+                                Err(crate::node::Error::QueryResultProtocol) => {
+                                    failed_coverage_groups.push(
+                                        queue_query_result_protocol_rejection_for_group(
+                                            &mut self.pending_control_responses,
+                                            &group.subscribers,
+                                            self.transport.as_ref(),
+                                        ),
+                                    );
+                                    break 'coverage_groups;
+                                }
                                 Err(error) => {
                                     rollback_rejected_subscriber_admission(
                                         &self.node,
@@ -5940,9 +5995,20 @@ where
                                 serve_again = true;
                                 continue;
                             }
+                            Err(crate::node::Error::QueryResultProtocol) => {
+                                failed_coverage_groups.push(
+                                    queue_query_result_protocol_rejection_for_group(
+                                        &mut self.pending_control_responses,
+                                        &group.subscribers,
+                                        self.transport.as_ref(),
+                                    ),
+                                );
+                                break 'coverage_groups;
+                            }
                             Err(error) => {
                                 for subscription in group.subscribers.iter().copied() {
-                                    queue_direct_control(&mut self.pending_control_responses,
+                                    queue_direct_control(
+                                        &mut self.pending_control_responses,
                                         server_subscription_failure_rejection_message(
                                             subscription,
                                             &error,
@@ -6037,9 +6103,34 @@ where
                                 sent_view_update = true;
                         }
                     }
-                    *serve_dirty = serve_again;
-                    if serve_again {
-                        schedule_tick_in(&self.scheduler, TickUrgency::Deferred);
+                    let failed_query = !failed_coverage_groups.is_empty();
+                    for subscriptions in failed_coverage_groups {
+                        for subscription in subscriptions {
+                            rollback_rejected_subscriber_admission(
+                                &self.node,
+                                peer,
+                                served,
+                                coverage_groups,
+                                scope_purposes,
+                                scope_aggregates,
+                                &self.relay_upstream_subscription_owners,
+                                upstream_subscriptions,
+                                connection_epoch,
+                                subscription,
+                            );
+                        }
+                    }
+                    if failed_query {
+                        // Re-arm the scan after retiring the exact failed group.
+                        // The queued rejection is flushed at the next turn before
+                        // any remaining dirty coverage can publish.
+                        *serve_dirty = true;
+                        schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                    } else {
+                        *serve_dirty = serve_again;
+                        if serve_again {
+                            schedule_tick_in(&self.scheduler, TickUrgency::Deferred);
+                        }
                     }
                 }
                 if sent_view_update {

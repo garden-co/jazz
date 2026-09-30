@@ -315,6 +315,80 @@ pub(super) fn duplex_with_taps() -> (
     )
 }
 
+struct RecordingTransport {
+    inner: Box<dyn Transport>,
+    sent: Rc<RefCell<Vec<SyncMessage>>>,
+}
+
+impl Transport for RecordingTransport {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        self.inner.send(message.clone())?;
+        self.sent.borrow_mut().push(message);
+        Ok(())
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inner.try_recv()
+    }
+
+    fn connection_session_context(&self) -> Option<ConnectionSessionContext> {
+        self.inner.connection_session_context()
+    }
+}
+
+/// In-memory admitted transport pair with a read-only server outbound recorder.
+pub(super) fn duplex_with_admitted_session_context_and_server_outbound_recorder(
+    identity: AuthorSubject,
+    client_node: NodeUuid,
+    client_epoch: u64,
+    server_node: NodeUuid,
+    server_epoch: u64,
+    negotiated_features: crate::wire::WireFeatures,
+) -> (
+    Box<dyn Transport>,
+    Box<dyn Transport>,
+    Rc<RefCell<Vec<SyncMessage>>>,
+) {
+    use std::collections::VecDeque;
+    let client_to_server = Rc::new(RefCell::new(VecDeque::new()));
+    let server_to_client = Rc::new(RefCell::new(VecDeque::new()));
+    let sent = Rc::new(RefCell::new(Vec::new()));
+    let client = ConnectionSessionContext {
+        local: crate::wire::WireAuthorityEndpoint {
+            node: client_node,
+            epoch: client_epoch,
+        },
+        remote: Some(crate::wire::WireAuthorityEndpoint {
+            node: server_node,
+            epoch: server_epoch,
+        }),
+        link_identity: identity,
+        negotiated_features,
+    };
+    let server = ConnectionSessionContext {
+        local: client.remote.unwrap(),
+        remote: Some(client.local),
+        link_identity: identity,
+        negotiated_features,
+    };
+    (
+        Box::new(DuplexTransport {
+            outbound: Rc::clone(&client_to_server),
+            inbound: Rc::clone(&server_to_client),
+            session_context: Some(client),
+        }),
+        Box::new(RecordingTransport {
+            inner: Box::new(DuplexTransport {
+                outbound: Rc::clone(&server_to_client),
+                inbound: client_to_server,
+                session_context: Some(server),
+            }),
+            sent: Rc::clone(&sent),
+        }),
+        sent,
+    )
+}
+
 /// In-memory transport pair with a read-only tap on server-to-client frames.
 /// The tap lets a Core-serving test inspect the canonical `ViewUpdate` before
 /// the receiving client applies it.
