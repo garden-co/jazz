@@ -64,15 +64,8 @@ impl PeerState {
         // scope-isolated relay, and same-author sessions may differ. A
         // claim-only policy must not become an implicit grant.
         let mut node = node.scoped_active_session_claims(writer, claims);
-        for version in versions {
-            if !node
-                .version_satisfies_write_policy(version, writer, candidate_tx_id, versions)
-                .await?
-            {
-                return Ok(false);
-            }
-        }
-        Ok(true)
+        node.commit_unit_satisfies_write_policy(versions, writer, candidate_tx_id)
+            .await
     }
 
     fn record_outgoing_view_update<S: OrderedKvStorage>(

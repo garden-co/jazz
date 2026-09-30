@@ -1,4 +1,4 @@
-import type { Db } from "jazz-tools";
+import type { Db, TransactionScope } from "jazz-tools";
 import { app } from "../schema.js";
 import { buildTourFixture, DEFAULT_SEED } from "./fixture.js";
 
@@ -23,9 +23,9 @@ export function newInviteCode(): string {
  * so an empty server whose demo band is gone stays empty. Resolves to false when
  * the claim is rejected.
  *
- * The rest of the tour is written after the claim commits (see `writeTour`). If
- * that fails part-way (the tab closes, the connection drops), the band stays with
- * whatever was written, possibly no stops, and is not reseeded; the caller only
+ * The rest of the tour is written in one transaction after the claim commits (see
+ * `stageTour`). If that transaction is lost (the tab closes before it syncs) or
+ * rejected, the band stays without a tour and is not reseeded; the caller only
  * reports the error.
  */
 export async function claimDemoBand(
@@ -41,7 +41,10 @@ export async function claimDemoBand(
   } catch {
     return false;
   }
-  await writeTour(db, DEMO_BAND_ID, { userId, ownerName }, fixture);
+  const tour = await db.transaction((tx) =>
+    stageTour(tx, DEMO_BAND_ID, { userId, ownerName }, fixture),
+  );
+  await tour.wait({ tier: "global" });
   return true;
 }
 
@@ -51,65 +54,47 @@ export async function startDemoTour(
   { userId, ownerName, seed = DEFAULT_SEED }: { userId: string; ownerName: string; seed?: number },
 ): Promise<string> {
   const fixture = buildTourFixture({ seed, start: new Date() });
-  const band = db.insert(app.bands, { name: fixture.bandName, ownerId: userId });
-  await band.wait({ tier: "global" });
-  await writeTour(db, band.value.id, { userId, ownerName }, fixture);
-  return band.value.id;
+  const tour = await db.transaction((tx) => {
+    const band = tx.insert(app.bands, { name: fixture.bandName, ownerId: userId });
+    stageTour(tx, band.id, { userId, ownerName }, fixture);
+    return band.id;
+  });
+  await tour.wait({ tier: "global" });
+  return tour.value;
 }
 
 /**
- * Writes the owner's membership, an invite, and the tour for a band that exists
- * on the server.
- *
- * Four transactions rather than one: permission `exists` checks only see
- * committed rows, not rows staged earlier in the same transaction (INV-RLS-9).
- * The membership and invite need the band, the venues need the membership, the
- * stops need their venues, and the notes need their stops, so each group commits
- * before the next. Whether `exists` should see a transaction's own writes is an
- * open question for the core team; if it does, this becomes one transaction.
+ * Stages the owner's membership, an invite, and the tour for a band into one
+ * transaction. The membership and invite need the band, the venues need the
+ * membership, the stops need their venues, and the notes need their stops; each
+ * row's policy sees the rows staged before it in the same transaction.
  */
-async function writeTour(
-  db: Db,
+function stageTour(
+  tx: TransactionScope<"mergeable">,
   bandId: string,
   { userId, ownerName }: { userId: string; ownerName: string },
   fixture: ReturnType<typeof buildTourFixture>,
-): Promise<void> {
-  const access = await db.transaction((tx) => {
-    tx.insert(app.members, { bandId, userId, name: ownerName });
-    tx.insert(app.bandInvites, { bandId, code: newInviteCode() });
-  });
-  await access.wait({ tier: "global" });
+): void {
+  tx.insert(app.members, { bandId, userId, name: ownerName });
+  tx.insert(app.bandInvites, { bandId, code: newInviteCode() });
 
   // Each band gets its own venues: a shared venue could be moved or deleted by
   // another band, taking this band's stops with it.
-  const venues = await db.transaction((tx) => {
-    const venueIds = new Map<string, string>();
-    for (const { venue } of fixture.stops) {
-      if (!venueIds.has(venue.name))
-        venueIds.set(venue.name, tx.insert(app.venues, { ...venue, ownerId: userId, bandId }).id);
-    }
-    return venueIds;
-  });
-  await venues.wait({ tier: "global" });
+  const venueIds = new Map<string, string>();
+  for (const { venue } of fixture.stops) {
+    if (!venueIds.has(venue.name))
+      venueIds.set(venue.name, tx.insert(app.venues, { ...venue, ownerId: userId, bandId }).id);
+  }
 
-  const tour = await db.transaction((tx) =>
-    fixture.stops.map((stop) => {
-      const row = tx.insert(app.stops, {
-        bandId,
-        venueId: venues.value.get(stop.venue.name)!,
-        date: stop.date,
-        status: stop.status,
-        publicDescription: stop.publicDescription,
-      });
-      return { stopId: row.id, note: stop.privateNote };
-    }),
-  );
-  await tour.wait({ tier: "global" });
-
-  const notes = tour.value.filter((s): s is { stopId: string; note: string } => !!s.note);
-  if (notes.length === 0) return;
-  const written = await db.transaction((tx) => {
-    for (const { stopId, note } of notes) tx.insert(app.stopNotes, { stopId, bandId, body: note });
-  });
-  await written.wait({ tier: "global" });
+  for (const stop of fixture.stops) {
+    const row = tx.insert(app.stops, {
+      bandId,
+      venueId: venueIds.get(stop.venue.name)!,
+      date: stop.date,
+      status: stop.status,
+      publicDescription: stop.publicDescription,
+    });
+    if (stop.privateNote)
+      tx.insert(app.stopNotes, { stopId: row.id, bandId, body: stop.privateNote });
+  }
 }

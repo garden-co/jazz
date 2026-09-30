@@ -2898,7 +2898,20 @@ pub(super) struct UploadOutbox {
     declared_root: bool,
     /// Sticky: set once any upstream attaches, including after the fact.
     upstream_attached: bool,
+    /// Queued commits an upstream link has put on the wire. A Global read
+    /// orders its open after the local writes it must observe (#3839).
+    on_wire: HashSet<TxId>,
+    /// Recent commits whose upload failed, with the reason. Bounded: only a
+    /// read already waiting on one of them consults this.
+    upload_failures: VecDeque<(TxId, &'static str)>,
+    /// Counts upload steps: a message handed to an upstream transport or a
+    /// large-value chunk the server acknowledged. A Global read waiting on
+    /// local writes gives up when this stops moving (see `reads.rs`).
+    upload_progress: u64,
 }
+
+/// How many recent upload failures a waiting Global read can still observe.
+const RECENT_UPLOAD_FAILURES: usize = 64;
 
 impl UploadOutbox {
     /// Whether a subscriber upload this node settled terminally has nobody
@@ -2942,6 +2955,49 @@ impl UploadOutbox {
         self.tx_ids.clear();
         self.tx_ids
             .extend(self.entries.iter().map(|pending| pending.tx_id));
+        let tx_ids = &self.tx_ids;
+        self.on_wire.retain(|tx_id| tx_ids.contains(tx_id));
+    }
+
+    /// Record that an upstream link has sent this queued commit.
+    pub(super) fn mark_on_wire(&mut self, tx_id: TxId) {
+        if self.tx_ids.contains(&tx_id) {
+            self.on_wire.insert(tx_id);
+        }
+        self.note_upload_progress();
+    }
+
+    /// Record that an upload moved: a message went out or was acknowledged.
+    pub(super) fn note_upload_progress(&mut self) {
+        self.upload_progress = self.upload_progress.wrapping_add(1);
+    }
+
+    pub(super) fn upload_progress(&self) -> u64 {
+        self.upload_progress
+    }
+
+    /// Forget what a detached link sent: its successor sends it again.
+    pub(super) fn forget_on_wire(&mut self) {
+        self.on_wire.clear();
+    }
+
+    /// Whether this queued commit still waits to be sent upstream.
+    fn awaits_wire(&self, tx_id: TxId) -> bool {
+        self.tx_ids.contains(&tx_id) && !self.on_wire.contains(&tx_id)
+    }
+
+    /// Record why a commit was dropped from the queue without being sent.
+    pub(super) fn mark_upload_failed(&mut self, tx_id: TxId, reason: &'static str) {
+        if self.upload_failures.len() >= RECENT_UPLOAD_FAILURES {
+            self.upload_failures.pop_front();
+        }
+        self.upload_failures.push_back((tx_id, reason));
+    }
+
+    fn upload_failure(&self, tx_id: TxId) -> Option<&'static str> {
+        self.upload_failures
+            .iter()
+            .find_map(|(failed, reason)| (*failed == tx_id).then_some(*reason))
     }
 
     fn remove_released(&mut self, released: &mut HashSet<TxId>) -> HashSet<TxId> {
@@ -2957,6 +3013,7 @@ impl UploadOutbox {
                 .pop_front()
                 .expect("released outbox front remains present");
             self.tx_ids.remove(&pending.tx_id);
+            self.on_wire.remove(&pending.tx_id);
         }
         if released.is_empty() {
             return completed;
@@ -6242,8 +6299,7 @@ fn apply_terminal_operations_to_subscription_snapshot(
     tier: DurabilityTier,
     settled: bool,
 ) -> Result<SubscriptionEvent, Error> {
-    let mut root_operations = Vec::new();
-    let mut descendant_operations = Vec::new();
+    let mut addressed_operations = Vec::new();
     for operation in operations {
         if operation.root_descriptor != layout.root_descriptor {
             return Err(Error::new(
@@ -6274,9 +6330,9 @@ fn apply_terminal_operations_to_subscription_snapshot(
                         layout.root_union_arm,
                     )
                 })?;
-            root_operations.push((occurrence_id, operation));
+            addressed_operations.push((Some(occurrence_id), operation));
         } else {
-            descendant_operations.push(operation);
+            addressed_operations.push((None, operation));
         }
     }
 
@@ -6290,9 +6346,9 @@ fn apply_terminal_operations_to_subscription_snapshot(
             "maintained snapshot root is missing an occurrence identity",
         ));
     }
-    let affected = root_operations
+    let affected = addressed_operations
         .iter()
-        .map(|(occurrence_id, _)| occurrence_id.clone())
+        .filter_map(|(occurrence_id, _)| occurrence_id.clone())
         .collect::<BTreeSet<_>>();
     for occurrence in &affected {
         materialize_subscription_terminal_record(snapshot, snapshot_index, occurrence)?;
@@ -6305,52 +6361,55 @@ fn apply_terminal_operations_to_subscription_snapshot(
         })
         .collect::<BTreeMap<_, _>>();
 
-    let inserted = root_operations
-        .iter()
-        .filter_map(|(occurrence, operation)| match operation.edit {
-            groove::ivm::TerminalEdit::Insert { .. } => Some((occurrence.clone(), true)),
-            groove::ivm::TerminalEdit::Remove { .. } => Some((occurrence.clone(), false)),
-            _ => None,
-        })
-        .collect::<BTreeMap<_, _>>()
-        .into_iter()
-        .filter_map(|(key, present)| present.then_some(key))
-        .collect::<BTreeSet<_>>();
-    let replaced = root_operations
-        .iter()
-        .filter_map(|(occurrence, operation)| {
-            (matches!(operation.edit, groove::ivm::TerminalEdit::Remove { .. })
-                && inserted.contains(occurrence))
-            .then_some(occurrence.clone())
-        })
-        .collect::<BTreeSet<_>>();
-    for (occurrence, operation) in &root_operations {
-        if replaced.contains(occurrence) {
-            if let groove::ivm::TerminalEdit::Insert { value, .. } = &operation.edit {
-                if let Some(state) = snapshot_index.terminal_records.get_mut(occurrence) {
-                    state.update_record(OwnedRecord::new(
-                        value.clone(),
-                        operation.root_descriptor,
-                    ))?;
-                }
-            }
-            continue;
-        }
-        if let groove::ivm::TerminalEdit::Update { value, .. } = &operation.edit {
-            if let Some(state) = snapshot_index.terminal_records.get_mut(occurrence) {
-                state.update_record(OwnedRecord::new(value.clone(), operation.root_descriptor))?;
-            }
-        } else if !matches!(operation.edit, groove::ivm::TerminalEdit::Move { .. }) {
-            snapshot_index.terminal_records.remove(occurrence);
-        }
-    }
-
     // Apply Groove's positional edits directly to the root order: each edit
     // costs O(log n) index work plus one row-vector shift, and unchanged
     // roots are never renumbered or revisited.
-    for (occurrence_id, operation) in root_operations {
+    let mut descendant_operations = Vec::new();
+    let mut removed_roots = BTreeSet::new();
+    for (occurrence_id, operation) in addressed_operations {
+        let Some(occurrence_id) = occurrence_id else {
+            apply_descendant_terminal_operations_to_snapshot(
+                snapshot,
+                snapshot_index,
+                &removed_roots,
+                std::slice::from_ref(&operation),
+                layout.root_union_arm,
+            )?;
+            descendant_operations.push(operation);
+            continue;
+        };
+        let occurrence = &occurrence_id;
+        if let groove::ivm::TerminalEdit::Update { value, .. } = &operation.edit {
+            // A root which has not received child edits still holds its
+            // collections in the snapshot row. Retain that pre-update state
+            // before replacing the scalar payload below.
+            if !snapshot_index.terminal_records.contains_key(occurrence) {
+                let position = snapshot_index.roots.position(occurrence).ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::Protocol,
+                        "terminal root update addressed a missing result",
+                    )
+                })?;
+                let (descriptor, raw) = snapshot.rows[position].encoded_record();
+                let state = terminal_record::TerminalRecordState::new(OwnedRecord::new(
+                    raw.to_vec(),
+                    *descriptor,
+                ))?;
+                snapshot_index
+                    .terminal_records
+                    .insert(occurrence.clone(), state);
+            }
+            snapshot_index
+                .terminal_records
+                .get_mut(occurrence)
+                .expect("initialized above")
+                .update_record(OwnedRecord::new(value.clone(), operation.root_descriptor))?;
+        } else if !matches!(operation.edit, groove::ivm::TerminalEdit::Move { .. }) {
+            snapshot_index.terminal_records.remove(occurrence);
+        }
         match operation.edit {
             groove::ivm::TerminalEdit::Insert { index, value, .. } => {
+                removed_roots.remove(&occurrence_id);
                 if let Some(existing) = snapshot_index.roots.remove(&occurrence_id) {
                     snapshot.rows.remove(existing);
                     snapshot.root_count -= 1;
@@ -6387,6 +6446,7 @@ fn apply_terminal_operations_to_subscription_snapshot(
                 .row;
             }
             groove::ivm::TerminalEdit::Remove { .. } => {
+                removed_roots.insert(occurrence_id.clone());
                 let Some(index) = snapshot_index.roots.remove(&occurrence_id) else {
                     return Err(Error::new(
                         ErrorCode::Protocol,
@@ -6411,19 +6471,13 @@ fn apply_terminal_operations_to_subscription_snapshot(
         }
     }
 
-    // The facade retains the exact collector tree by folding the same
-    // root/descendant terminal stream it exposes to consumers.  This is not
-    // a second materializer: a later reset is simply a snapshot of this
-    // receiver-local reducer after the ordered operations below have been
-    // applied.  In particular, an authority-covered receiver must never
-    // reconstruct nested children from result membership or authority facts.
-    apply_descendant_terminal_operations_to_snapshot(
-        snapshot,
-        snapshot_index,
-        &affected,
-        &descendant_operations,
-        layout.root_union_arm,
-    )?;
+    // Roots changed in this drain are published as complete final rows below.
+    // Do not replay their earlier child edits on top of those replacements.
+    descendant_operations.retain(|operation| {
+        let occurrence =
+            terminal_root_occurrence_id_with_root_union(&operation.root_key, layout.root_union_arm);
+        !occurrence.is_ok_and(|occurrence| affected.contains(&occurrence))
+    });
 
     for occurrence in &affected {
         materialize_subscription_terminal_record(snapshot, snapshot_index, occurrence)?;
@@ -6485,7 +6539,7 @@ fn apply_terminal_operations_to_subscription_snapshot(
 fn apply_descendant_terminal_operations_to_snapshot(
     snapshot: &mut RelationSnapshot,
     snapshot_index: &mut RelationSnapshotIndex,
-    roots_changed_in_batch: &BTreeSet<OutputOccurrenceId>,
+    removed_roots: &BTreeSet<OutputOccurrenceId>,
     operations: &[groove::ivm::TerminalOperation],
     root_union_arm: bool,
 ) -> Result<(), Error> {
@@ -6497,11 +6551,9 @@ fn apply_descendant_terminal_operations_to_snapshot(
             terminal_root_occurrence_id_with_root_union(&operation.root_key, root_union_arm)?;
         let Some(root_index) = snapshot_index.roots.position(&occurrence) else {
             // A collector can emit the child retractions belonging to a root
-            // it retracts in the same terminal batch.  The public operation
-            // remains useful to a consumer which folds its child state before
-            // the root removal, but the receiver snapshot has already
-            // dropped that root in the root-edit phase above.
-            if roots_changed_in_batch.contains(&occurrence) {
+            // it has already retracted. Ignore those edits only until a new
+            // insertion starts another lifetime for that root.
+            if removed_roots.contains(&occurrence) {
                 continue;
             }
             return Err(Error::new(

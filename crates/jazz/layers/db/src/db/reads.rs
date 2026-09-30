@@ -375,6 +375,151 @@ where
         .await
     }
 
+    /// Order a Global read's open after the local writes it must observe.
+    ///
+    /// A Global read is answered from the authority's state, so it sees this
+    /// node's own writes only when they reach the authority before its open
+    /// does. An ordinary commit normally goes out ahead of a later open, but
+    /// one queued behind a large value that is still uploading is held back
+    /// while the open is not (#3839). Before opening, wait until every local
+    /// write that precedes this read and writes a table it reads is on the
+    /// wire. Writes to other tables never delay the read.
+    ///
+    /// A read consults its table's read policy too, so when that policy
+    /// reaches another table (a membership check through exists, inherits or
+    /// reachable), a write to any table counts: a membership inserted just
+    /// before the read decides which rows it may see.
+    ///
+    /// The wait is bounded by upload progress, not by the read's coverage
+    /// deadline, which starts only once the open is sent: it fails with
+    /// `NotObserved` once no upload step has gone out or been acknowledged,
+    /// and none of those writes has gone on the wire, for
+    /// `LOCAL_WRITE_UPLOAD_STALL_MS` (a stalled upload on a live link, or
+    /// one waiting on transport credit). It fails at once, naming the tables,
+    /// when one of those uploads fails, and never falls back to answering
+    /// without them. It ends when the link is lost: the
+    /// open then waits for coverage as usual, and read-your-writes is not
+    /// guaranteed across a reconnect (garden-co/jazz#3863).
+    async fn await_preceding_local_writes_on_wire(&self, query: &Query) -> Result<(), Error> {
+        let queued: Vec<(TxId, Option<SyncMessage>)> = {
+            let outbox = self.node.outbox.borrow();
+            outbox
+                .iter()
+                .filter(|pending| outbox.awaits_wire(pending.tx_id))
+                .map(|pending| (pending.tx_id, pending.unit.clone()))
+                .collect()
+        };
+        let settling = self.node.pending_local_publication_tables();
+        if queued.is_empty() && settling.is_empty() {
+            return Ok(());
+        }
+        let Some(epoch) = self.node.remote_link.arm() else {
+            return Ok(());
+        };
+        let read_table = self.read_footprint_table(query);
+        let mut waiting: Vec<(TxId, BTreeSet<String>)> = Vec::new();
+        {
+            let mut node = self.node.node.lock().await;
+            for (tx_id, storage_tables) in settling {
+                let tables: BTreeSet<String> = node
+                    .logical_table_names_for_storage_tables(&storage_tables.into_iter().collect())
+                    .into_iter()
+                    .collect();
+                if read_footprint_overlaps(read_table, &tables) {
+                    waiting.push((tx_id, tables));
+                }
+            }
+            for (tx_id, unit) in queued {
+                let unit = match unit {
+                    Some(unit) => Some(unit),
+                    None => node.commit_unit_for(tx_id).await.ok(),
+                };
+                match unit {
+                    Some(unit) => {
+                        let tables: BTreeSet<String> = unit
+                            .uploaded_versions()
+                            .map(|version| version.table().to_owned())
+                            .collect();
+                        if read_footprint_overlaps(read_table, &tables) {
+                            waiting.push((tx_id, tables));
+                        }
+                    }
+                    // An unreadable commit may write anything the read reads.
+                    None => waiting.push((tx_id, BTreeSet::new())),
+                }
+            }
+        }
+        if waiting.is_empty() {
+            return Ok(());
+        }
+        // The upload progress and held count last seen, and when they last
+        // moved, on the upload clock.
+        let mut last_progress: Option<(u64, usize, u64)> = None;
+        let on_wire = std::future::poll_fn(|_| {
+            let outbox = self.node.outbox.borrow();
+            let mut held = 0_usize;
+            let mut held_tables = BTreeSet::new();
+            for (tx_id, tables) in &waiting {
+                if let Some(reason) = outbox.upload_failure(*tx_id) {
+                    return Poll::Ready(Err(local_writes_not_uploaded(tables, reason)));
+                }
+                if outbox.awaits_wire(*tx_id) || self.node.is_pending_local_publication(*tx_id) {
+                    held += 1;
+                    held_tables.extend(tables.iter().cloned());
+                }
+            }
+            if held == 0 {
+                return Poll::Ready(Ok(()));
+            }
+            let progress = outbox.upload_progress();
+            let now_ms = self.node.upload_retry_clock.borrow().now_ms();
+            match last_progress {
+                Some((seen_progress, seen_held, since_ms))
+                    if seen_progress == progress && seen_held == held =>
+                {
+                    if now_ms.saturating_sub(since_ms) >= LOCAL_WRITE_UPLOAD_STALL_MS {
+                        return Poll::Ready(Err(local_writes_upload_stalled(&held_tables)));
+                    }
+                }
+                _ => last_progress = Some((progress, held, now_ms)),
+            }
+            Poll::Pending
+        });
+        self.race_remote_answer(epoch, on_wire)
+            .await
+            .unwrap_or(Ok(()))
+    }
+
+    /// [`Self::await_preceding_local_writes_on_wire`] for a serialized query,
+    /// boxed and built in this frame rather than the caller's.
+    ///
+    /// The wait holds the node lock, commit-unit reads and the upload race.
+    /// Awaited inline, that state would enlarge every one-shot read's future
+    /// and, in unoptimized builds, each poll frame above it, even for reads
+    /// that never wait. That overflowed the 1 MiB WASM stack of the dev build
+    /// ("memory access out of bounds" while preparing a read's sources).
+    fn preceding_local_writes_on_wire<'a>(
+        &'a self,
+        query: &'a [u8],
+    ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + 'a>> {
+        Box::pin(async move {
+            let decoded: Query = crate::wire::decode_postcard_exact(query)
+                .map_err(|error| Error::new(ErrorCode::Query, format!("decode query: {error}")))?;
+            self.await_preceding_local_writes_on_wire(&decoded).await
+        })
+    }
+
+    /// The one table a read's result depends on, or `None` when every table
+    /// counts: the query reaches further, its table is unknown, or its read
+    /// policy consults another table.
+    fn read_footprint_table<'q>(&self, query: &'q Query) -> Option<&'q str> {
+        let table = plain_read_table(query)?;
+        match &self.table_schema(table).ok()?.read_policy {
+            Some(policy) if plain_read_table(policy) != Some(table) => None,
+            _ => Some(table),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn all_serialized_query_once<F, E>(
         &self,
@@ -392,6 +537,14 @@ where
         E: Fn() -> bool,
     {
         let release_coverage = |attachment| release_coverage(attachment);
+        if require_coverage
+            && open_tx.is_none()
+            && opts.propagation == Propagation::Full
+            && opts.tier >= DurabilityTier::Global
+            && opts.local_updates == LocalUpdates::Immediate
+        {
+            self.preceding_local_writes_on_wire(query).await?;
+        }
         {
             let admission = self.await_open_schema_for_read(&opts);
             let mut admission = std::pin::pin!(admission);
@@ -1258,4 +1411,65 @@ fn terminal_operation_value_descriptor(
         }
     }
     Ok(descriptor)
+}
+
+/// The one table a plain read consults, or `None` when its shape reaches
+/// further (joins, includes, subqueries, relations) and every table counts.
+fn plain_read_table(query: &Query) -> Option<&str> {
+    (query.joins.is_empty()
+        && query.flat_join.is_none()
+        && query.policy_branches.is_empty()
+        && query.reachable.is_empty()
+        && query.inherits.is_empty()
+        && query.includes.is_empty()
+        && query.array_subqueries.is_empty()
+        && query.aggregate.is_none()
+        && query.relation.is_none())
+    .then_some(query.table.as_str())
+}
+
+fn read_footprint_overlaps(read_table: Option<&str>, written: &BTreeSet<String>) -> bool {
+    match read_table {
+        Some(table) => written.contains(table),
+        None => true,
+    }
+}
+
+/// How long a Global read waits for the local writes it must observe to make
+/// upload progress before it gives up: the budget a read had for the whole
+/// wait before it ordered its open after those writes (#3839).
+const LOCAL_WRITE_UPLOAD_STALL_MS: u64 = 15_000;
+
+fn local_writes_upload_stalled(tables: &BTreeSet<String>) -> Error {
+    Error::new(
+        ErrorCode::NotObserved,
+        format!(
+            "Timed out waiting for local writes to {} to upload before a Global read: \
+             no upload progress for {} s",
+            quoted_tables(tables),
+            LOCAL_WRITE_UPLOAD_STALL_MS / 1_000
+        ),
+    )
+}
+
+fn quoted_tables(tables: &BTreeSet<String>) -> String {
+    if tables.is_empty() {
+        "its tables".to_owned()
+    } else {
+        tables
+            .iter()
+            .map(|table| format!("`{table}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+fn local_writes_not_uploaded(tables: &BTreeSet<String>, reason: &str) -> Error {
+    let tables = quoted_tables(tables);
+    Error::new(
+        ErrorCode::NotObserved,
+        format!(
+            "Global read waits on local writes to {tables} that could not be uploaded ({reason})"
+        ),
+    )
 }

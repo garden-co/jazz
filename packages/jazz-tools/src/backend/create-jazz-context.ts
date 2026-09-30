@@ -14,7 +14,7 @@ import type { AppContext, Session } from "../runtime/context.js";
 import { RuntimeSource, type RuntimeClientContext } from "../runtime/runtime-source.js";
 import { Db, type DbConfig } from "../runtime/db.js";
 import { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
-import { SYSTEM_READ_SESSION } from "../runtime/system-identity.js";
+import { DbAccessContext } from "../runtime/db-access-context.js";
 import { canonicalAuthorSubject, withCanonicalUser } from "../runtime/author-id.js";
 import { authorBytesForSession } from "../runtime/author-id.js";
 import type { AuthState } from "../runtime/auth-state.js";
@@ -459,11 +459,7 @@ class BackendDb extends Db implements BackendMutationErrorSink {
     private readonly coreSource: BackendRuntimeSource,
     private readonly client: JazzClient,
     private readonly runtimeSchema: WasmSchema,
-    private readonly operationContext: {
-      session?: Session;
-      attribution?: string;
-      readSession?: Session;
-    } | null,
+    private readonly accessContext: DbAccessContext | null,
     scopedAuthState?: AuthState,
   ) {
     super(
@@ -478,12 +474,8 @@ class BackendDb extends Db implements BackendMutationErrorSink {
     );
   }
 
-  protected override getRuntimeOperationContext(): {
-    session?: Session;
-    attribution?: string;
-    readSession?: Session;
-  } | null {
-    return this.operationContext;
+  protected override getAccessContext(): DbAccessContext | null {
+    return this.accessContext;
   }
 
   protected override getClient(_schema: WasmSchema): JazzClient {
@@ -645,24 +637,17 @@ export class JazzContext {
   private wrapDb(
     client: JazzClient,
     schema: WasmSchema,
-    session?: Session,
-    attribution?: string,
+    accessContext: DbAccessContext | null = null,
     backendScoped = false,
-    backendReads = false,
   ): Db {
+    const session = accessContext?.writeSession;
     if (session) this.coreSource.admitSession(session);
     return new BackendDb(
       this.buildDbConfig(),
       this.coreSource,
       client,
       schema,
-      session || attribution || backendReads
-        ? {
-            session,
-            attribution,
-            readSession: backendReads ? SYSTEM_READ_SESSION : undefined,
-          }
-        : null,
+      accessContext,
       backendScoped
         ? {
             authMode: session?.authMode ?? "external",
@@ -721,7 +706,7 @@ export class JazzContext {
   asBackend(source?: BackendSchemaInput): Db {
     const { client, schema } = this.getClientAndSchema(source);
     this.enableBackendSyncIfConfigured(client);
-    return this.wrapDb(client, schema, undefined, undefined, true, false);
+    return this.wrapDb(client, schema, null, true);
   }
 
   /**
@@ -734,9 +719,7 @@ export class JazzContext {
     return this.wrapDb(
       client,
       schema,
-      undefined,
-      canonicalAuthorSubject(issuer, subject),
-      true,
+      DbAccessContext.forAttribution(canonicalAuthorSubject(issuer, subject)),
       true,
     );
   }
@@ -783,7 +766,7 @@ export class JazzContext {
     const session = await this.resolveRequestSession(request, options);
     const { client, schema } = this.getClientAndSchema(source);
     this.enableBackendSyncIfConfigured(client);
-    return this.wrapDb(client, schema, session, undefined, true);
+    return this.wrapDb(client, schema, DbAccessContext.forSession(session), true);
   }
 
   /**
@@ -796,9 +779,10 @@ export class JazzContext {
     return this.wrapDb(
       client,
       schema,
-      session,
-      canonicalAuthorSubject(session.issuer, session.user_id, session.account_id),
-      true,
+      DbAccessContext.forAttribution(
+        canonicalAuthorSubject(session.issuer, session.user_id, session.account_id),
+        session,
+      ),
       true,
     );
   }
@@ -818,7 +802,7 @@ export class JazzContext {
   forSession(session: Session, source?: BackendSchemaInput): Db {
     const { client, schema } = this.getClientAndSchema(source);
     this.enableBackendSyncIfConfigured(client);
-    return this.wrapDb(client, schema, session, undefined, true);
+    return this.wrapDb(client, schema, DbAccessContext.forSession(session), true);
   }
 
   /**

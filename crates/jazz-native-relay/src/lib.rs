@@ -4470,8 +4470,9 @@ impl NativeRelayWire {
 enum NativeRelayWireBridgeError {
     Relay(RelayError),
     /// `WebSocketTransport` closed its outbound receiver after choosing an
-    /// established transport terminal. This is deliberately distinct from a
-    /// relay/wire liveness closure, which means the owner is gone.
+    /// established transport terminal, or the server ended the link with an
+    /// error frame. This is deliberately distinct from a relay/wire liveness
+    /// closure, which means the owner is gone.
     SocketPumpClosed,
 }
 
@@ -4528,6 +4529,18 @@ fn bridge_native_relay_wire_once_classified<T: WireTransport>(
             // whether the socket worker reconnects; every other send error
             // remains a terminal foreground error.
             Err(TransportError::Failed(message)) if message == "websocket pump is closed" => {
+                return Err(NativeRelayWireBridgeError::SocketPumpClosed);
+            }
+            // The server ended this link with a retry-later error frame, and
+            // the adapter latched it before the socket close arrived. The
+            // link is over, not the relay: the established transport terminal
+            // decides whether to reconnect, exactly as when the close wins
+            // the race. Any other remote error still stops the worker.
+            Err(_)
+                if upstream
+                    .remote_wire_error()
+                    .is_some_and(|error| error.asks_reconnect_later()) =>
+            {
                 return Err(NativeRelayWireBridgeError::SocketPumpClosed);
             }
             Err(error) => {
@@ -14089,6 +14102,83 @@ mod tests {
             None,
             "credits are not semantic messages"
         );
+    }
+
+    // Internal bridge seam: the server's error frame and its socket close race,
+    // and only this seam can deterministically land the error first.
+    #[test]
+    fn native_upstream_bridge_leaves_a_server_ended_link_to_the_transport_terminal() {
+        assert!(matches!(
+            bridge_after_remote_error(
+                jazz::wire::WireErrorCode::Backpressure,
+                jazz::wire::WireRetry::Later,
+            ),
+            Err(NativeRelayWireBridgeError::SocketPumpClosed)
+        ));
+        // Errors that retrying cannot fix still stop the worker.
+        for (code, retry) in [
+            (
+                jazz::wire::WireErrorCode::AuthFailed,
+                jazz::wire::WireRetry::AfterAuth,
+            ),
+            (
+                jazz::wire::WireErrorCode::MalformedFrame,
+                jazz::wire::WireRetry::Never,
+            ),
+            (
+                jazz::wire::WireErrorCode::Backpressure,
+                jazz::wire::WireRetry::Never,
+            ),
+        ] {
+            assert!(matches!(
+                bridge_after_remote_error(code, retry),
+                Err(NativeRelayWireBridgeError::Relay(_))
+            ));
+        }
+    }
+
+    fn bridge_after_remote_error(
+        code: jazz::wire::WireErrorCode,
+        retry: jazz::wire::WireRetry,
+    ) -> Result<bool, NativeRelayWireBridgeError> {
+        struct ScriptedWire {
+            inbound: VecDeque<Vec<u8>>,
+        }
+        impl WireTransport for ScriptedWire {
+            fn send_frame(&mut self, _frame: Vec<u8>) -> Result<(), TransportError> {
+                Ok(())
+            }
+            fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+                self.inbound.pop_front()
+            }
+        }
+        let error = jazz::wire::encode_frame(&jazz::wire::WireFrame::Error(
+            jazz::wire::WireError::new(code, retry, "server ended the link"),
+        ))
+        .unwrap();
+        let mut upstream = WireTransportAdapter::current(ScriptedWire {
+            inbound: VecDeque::from([error]),
+        });
+        let relay_wire = NativeRelayWire::default();
+
+        // The error frame lands first and latches the adapter.
+        assert!(!bridge_native_relay_wire_once(&relay_wire, &mut upstream).unwrap());
+        assert!(upstream.remote_wire_error().is_some());
+
+        // A write queued before the close arrives reaches the latched adapter.
+        relay_wire
+            .outbound
+            .lock()
+            .unwrap()
+            .push(
+                SyncMessage::SessionClaims {
+                    identity: AuthorSubject::for_test_bytes([0x63; 16]),
+                    claims: BTreeMap::new(),
+                },
+                "test relay outbound",
+            )
+            .unwrap();
+        bridge_native_relay_wire_once_classified(&relay_wire, &mut upstream)
     }
 
     // Internal bridge seam: a slow native socket is only observable here as

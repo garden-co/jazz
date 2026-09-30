@@ -831,6 +831,30 @@ where
             covered_input_descriptors,
             true,
             None,
+            TransactionWriteOverlay::default(),
+        )
+        .await
+    }
+
+    /// Compile a write-policy candidate program whose committed evidence is
+    /// overlaid with the candidate transaction's own writes (`INV-RLS-9`).
+    /// The overlay is request-owned data, so the result is never cached.
+    pub(super) async fn compile_query_program_request_with_inline_sources_and_transaction_overlay(
+        &mut self,
+        request: QueryProgramRequest,
+        inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
+        access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+        transaction_overlay: TransactionWriteOverlay,
+    ) -> Result<QueryProgram, Error> {
+        self.compile_query_program_request_with_inline_sources_and_access_paths_inner(
+            request,
+            inline_sources,
+            access_paths,
+            BTreeMap::new(),
+            BTreeMap::new(),
+            true,
+            None,
+            transaction_overlay,
         )
         .await
     }
@@ -849,6 +873,7 @@ where
             BTreeMap::new(),
             false,
             bounded_deletion_register,
+            TransactionWriteOverlay::default(),
         )
         .await
     }
@@ -869,6 +894,7 @@ where
             BTreeMap::new(),
             true,
             Some(bounded_deletion_register),
+            TransactionWriteOverlay::default(),
         )
         .await
     }
@@ -877,6 +903,7 @@ where
         feature = "cold-settle-attribution",
         tracing::instrument(skip_all, name = "cold.phase.query_lowering")
     )]
+    #[allow(clippy::too_many_arguments)]
     async fn compile_query_program_request_with_inline_sources_and_access_paths_inner(
         &mut self,
         request: QueryProgramRequest,
@@ -886,6 +913,7 @@ where
         covered_input_descriptors: BTreeMap<SourceId, RecordDescriptor>,
         count_access_path_metrics: bool,
         bounded_deletion_register: Option<(SourceId, GraphBuilder)>,
+        transaction_overlay: TransactionWriteOverlay,
     ) -> Result<QueryProgram, Error> {
         #[cfg(any(test, feature = "testing"))]
         {
@@ -922,6 +950,20 @@ where
         let compilation = QueryProgramCompilation::analyze(request)
             .map_err(|report| Error::QueryCapability(format!("{report:?}")))?;
         let request = compilation.request();
+        // The transaction overlay reaches only this program's own sources.
+        // Nested policy-filtered dependency graphs neither overlay nor record
+        // reads, so a write-policy subplan under an active overlay must read
+        // raw evidence only (`INV-RLS-21`).
+        debug_assert!(
+            !transaction_overlay.is_active()
+                || compilation.sources().iter().all(|source| {
+                    !matches!(
+                        source.authorization,
+                        SourceAuthorizationRequest::PolicyFiltered { .. }
+                    )
+                }),
+            "a write-policy subplan under a transaction overlay read a policy-filtered source"
+        );
         let policy_dependency_footprint = Box::pin(self.prepare_query_program_policy_dependencies(
             request,
             compilation.sources(),
@@ -944,6 +986,7 @@ where
             count_access_path_metrics,
             current_projection_targets: BTreeMap::new(),
             policy_subplan: matches!(request.policy, PolicyContext::AuthorizationSubplan { .. }),
+            transaction_overlay,
         };
         let node_uuid = resolver.node.node_uuid;
         let node_alias = resolver.node.self_node_alias;
@@ -1018,6 +1061,7 @@ where
                 count_access_path_metrics: true,
                 current_projection_targets: BTreeMap::new(),
                 policy_subplan: false,
+                transaction_overlay: TransactionWriteOverlay::default(),
             };
             let mut dependencies = Vec::new();
             let mut footprint = PolicyDependencyFootprint::default();

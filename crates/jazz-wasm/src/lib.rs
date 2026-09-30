@@ -1002,7 +1002,16 @@ impl WasmDbInner {
             ($db:expr) => {{
                 let owner = Rc::clone($db);
                 let release_db = Rc::clone($db);
+                // The coverage budget runs from the first wait on the server.
+                // A Global read that first waits for its own preceding writes
+                // to go out has not asked yet (#3839).
+                let coverage_budget_ms = if coverage_deadline_ms.is_finite() {
+                    coverage_deadline_ms - js_sys::Date::now()
+                } else {
+                    coverage_deadline_ms
+                };
                 let future = async move {
+                    let coverage_started = std::cell::Cell::new(None::<f64>);
                     owner
                         .all_serialized_query(
                             &query,
@@ -1011,7 +1020,14 @@ impl WasmDbInner {
                             request_scope,
                             author,
                             require_coverage,
-                            || js_sys::Date::now() >= coverage_deadline_ms,
+                            || {
+                                let started = coverage_started.get().unwrap_or_else(|| {
+                                    let now = js_sys::Date::now();
+                                    coverage_started.set(Some(now));
+                                    now
+                                });
+                                js_sys::Date::now() - started >= coverage_budget_ms
+                            },
                             move |attachment| release_db.detach_query(attachment),
                         )
                         .await

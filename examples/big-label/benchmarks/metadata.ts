@@ -79,3 +79,24 @@ bigLabelBenchmarks.push({
   },
   source: loads,
 });
+for (const desks of [4, 6]) {
+  const branches = 2 ** desks;
+  bigLabelBenchmarks.push({
+    name: `big_label_sign_off_first_edit[${desks}]`,
+    title: `BigLabel · first release-plan edit under a ${branches}-branch sign-off policy`,
+    description: `Compile and hydrate the update authorization-support view a fresh authority needs for a session's first release-plan edit. The update policy requires a lead or a deputy grant on each of ${desks} sign-off desks (correlated exists checks), so it normalizes to ${branches} branches of ${desks} joins each.`,
+    fixture: `One release-plan table and ${desks * 2} empty grant tables; a fresh in-memory node per sample.`,
+    storage: "In-memory Jazz node",
+    includes: [
+      "Update authorization-support scope compilation",
+      "Hydration of every support subscription",
+    ],
+    excludes: ["Schema compilation and node opening", "Grant rows (tables are empty)"],
+    work: {
+      count: 1,
+      unit: "first edits/s",
+      explanation: `One support scope (${branches} policy branches) compiled and hydrated per iteration.`,
+    },
+    source: loads,
+  });
+}

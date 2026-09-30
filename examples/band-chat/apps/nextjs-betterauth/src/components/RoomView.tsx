@@ -119,8 +119,9 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
       .catch(reportFailure("Could not leave the room"));
   }
 
-  // A creator whose own membership write was rejected (see NewRoomDialog) can
-  // still read the room; this puts them back in.
+  // A creator without a membership (a room created before the room and its
+  // membership were written in one transaction) can still read the room;
+  // this puts them back in.
   const isMember = members.some((member) => member.memberAuthor === author);
   function rejoin() {
     setActionError(null);
@@ -130,16 +131,12 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
   }
 
   function startSketch() {
-    // The canvas is its own write: the message policy checks that the canvas
-    // exists in this room, and `exists` checks only see committed rows
-    // (INV-RLS-9; garden-co/jazz#3755). Once a transaction's own rows are
-    // visible to its `exists` checks, the canvas, its message and the room's
-    // activity become one transaction. Until then, if the second write is
-    // rejected, the canvas is left without a message; only members can read
-    // it and it holds no strokes.
+    // The canvas, its message and the room's activity commit together: the
+    // message policy's check that the canvas exists in this room sees the
+    // canvas inserted earlier in the same transaction.
     setActionError(null);
-    const canvas = db.insert(app.canvases, { roomId, title: "Sketch" }).value;
     db.transaction((tx) => {
+      const canvas = tx.insert(app.canvases, { roomId, title: "Sketch" });
       tx.insert(app.messages, {
         roomId,
         senderId: directory.me.id,

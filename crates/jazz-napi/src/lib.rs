@@ -3134,7 +3134,10 @@ impl NapiDb {
                     let requires_coverage = non_durable_client
                         || (opts.tier >= jazz::tx::DurabilityTier::Global
                             && opts.propagation == CorePropagation::Full);
-                    let coverage_deadline = Instant::now() + Duration::from_secs(15);
+                    // The coverage budget runs from the first wait on the
+                    // server. A Global read that first waits for its own
+                    // preceding writes to go out has not asked yet (#3839).
+                    let coverage_started = std::cell::Cell::new(None::<Instant>);
                     let result = db
                         .all_serialized_query(
                             &query,
@@ -3143,7 +3146,14 @@ impl NapiDb {
                             admission,
                             author,
                             !synchronous && requires_coverage,
-                            || Instant::now() >= coverage_deadline,
+                            || {
+                                let started = coverage_started.get().unwrap_or_else(|| {
+                                    let now = Instant::now();
+                                    coverage_started.set(Some(now));
+                                    now
+                                });
+                                started.elapsed() >= Duration::from_secs(15)
+                            },
                             move |attachment| release_db.detach_query(attachment),
                         )
                         .await
