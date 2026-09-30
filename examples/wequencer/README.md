@@ -22,9 +22,11 @@ several difficult local-first shapes concrete:
   ordered pattern windows, subscription refreshes, and deterministic local
   edit bursts; the browser scenario covers two-client contention and recovery.
 
-The app models clock and presence as observations. They are useful for a UI but
-may remain stale and are not used to authorize or deterministically schedule audio.
-Actual sample-accurate synchronization is intentionally an open extension;
+The app models clock and presence as observations. They may remain stale and
+never authorize anything. Each client schedules Web Audio playback by
+extrapolating the newest transport observation on its own wall clock, so
+bandmates hear roughly the same step. Sample-accurate synchronization is
+intentionally an open extension;
 the current example makes convergence and ordering pressure visible without
 claiming an impossible distributed clock guarantee.
 
