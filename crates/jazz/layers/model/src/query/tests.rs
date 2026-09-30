@@ -447,6 +447,9 @@ mod tests {
         );
     }
 
+    /// Alice may use an array parameter as the `contains` haystack; model
+    /// validation infers its type from the compared UUID column. This
+    /// layer-level test isolates parameter inference before DB preparation.
     #[test]
     fn contains_param_array_against_column_infers_array_type() {
         let validated = Query::from("issues")
@@ -459,6 +462,9 @@ mod tests {
             ColumnType::Array(Box::new(ColumnType::Uuid))
         );
     }
+    /// Alice may leave a `contains` needle untyped; validation infers its array
+    /// member or text type from the haystack. This layer-level test isolates
+    /// inference before database preparation.
     #[test]
     fn contains_unknown_needle_parameter_infers_array_member_and_text_types() {
         let schema = RuntimeSchema::new([TableSchema::new(
@@ -485,7 +491,36 @@ mod tests {
         assert_eq!(text_query.params()["text_needle"], ColumnType::String);
     }
 
+    /// Alice cannot use an untyped claim as a `contains` needle; only query
+    /// parameters may be inferred. This model-level test pins validation
+    /// because runtime claims are not query bindings.
+    #[test]
+    fn contains_unknown_needle_claim_is_rejected() {
+        let error = Query::from("issues")
+            .filter(contains(col("title"), claim("unknown_needle")))
+            .validate_runtime(&schema())
+            .unwrap_err();
 
+        assert!(matches!(error, QueryError::OperandTypeMismatch));
+    }
+
+    /// Alice cannot use an untyped claim as a `contains` haystack; only query
+    /// parameters may be inferred. This model-level test pins validation
+    /// because runtime claims are not query bindings.
+    #[test]
+    fn contains_unknown_haystack_claim_is_rejected() {
+        let error = Query::from("issues")
+            .filter(contains(claim("unknown_haystack"), lit("needle")))
+            .validate_runtime(&schema())
+            .unwrap_err();
+
+        assert!(matches!(error, QueryError::OperandTypeMismatch));
+    }
+
+
+    /// Bob's mismatched needle receives expected and actual types with
+    /// nullability preserved. This model-level test checks typed error
+    /// construction; the DB test covers its public diagnostic.
     #[test]
     fn contains_mismatch_preserves_declared_member_and_actual_nullability() {
         let nullable = |inner| ColumnType::Nullable(Box::new(inner));

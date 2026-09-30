@@ -5516,7 +5516,9 @@ fn db_at_reads_historical_cut_and_partial_requires_server() {
     assert_eq!(err.message, "historical read requires server evaluation");
 }
 
-/// UUID-array membership accepts a typed UUID needle and diagnoses a text needle with both types.
+/// Alice can use a UUID needle for array membership; a text needle is rejected
+/// before execution with both types. This public DB test checks user-visible
+/// query preparation.
 #[test]
 fn typed_uuid_array_contains_reports_expected_and_actual_types() {
     let schema = build_public_db_test_schema(PublicSchemaBuilder::new().table(
