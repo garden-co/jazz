@@ -35,30 +35,27 @@ export function NewRoomDialog({
     const trimmed = name.trim();
     if (!trimmed) return;
     setError(null);
-    try {
-      // Both writes are local-first: the room is usable before the server
-      // confirms them. The creator's own membership is the bootstrap step
-      // the room policy allows only for the creator.
-      //
-      // They are deliberately two writes, not one transaction: the membership
-      // policy's `exists` check on the room only sees committed rows (INV-RLS-9
-      // in the Jazz authorization spec; garden-co/jazz#3755), so a membership
-      // staged in the same transaction as its room would be rejected. Once
-      // #3755 is fixed they become one transaction. Until then, if the
-      // membership write is rejected, the creator still sees the room (they
-      // can read it as its creator) and the room view offers them "Join room".
-      const room = db.insert(app.rooms, { name: trimmed }).value;
-      db.insert(app.roomMembers, {
+    // Local-first: the room is usable before the server confirms it. The
+    // room and its creator's membership commit together; the membership is
+    // the bootstrap step the room policy allows only for the creator, and its
+    // `exists` check sees the room inserted earlier in the same transaction.
+    db.transaction((tx) => {
+      const room = tx.insert(app.rooms, { name: trimmed });
+      tx.insert(app.roomMembers, {
         roomId: room.id,
         memberAuthor: author,
         memberProfileId: profile.id,
       });
-      setName("");
-      onOpenChange(false);
-      onCreated(room.id);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    }
+      return room;
+    })
+      .then((created) => {
+        setName("");
+        onOpenChange(false);
+        onCreated(created.value.id);
+      })
+      .catch((cause: unknown) => {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      });
   }
 
   return (
