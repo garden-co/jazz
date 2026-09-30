@@ -347,29 +347,7 @@ where
                 .insert(read.row_uuid);
         }
         let no_rows = BTreeSet::new();
-        let mut write_target_checks = self.write_target_policy_checks(tx, versions, identity)?;
         for predicate in tx.predicate_read_set.as_deref().unwrap_or(&[]) {
-            // Clients before alpha.58 recorded every write target's read-policy
-            // check as a whole-table read of the written table. Each such check
-            // is validated as those clients' own authority did: nothing in the
-            // table changed outside the base snapshot. For a client that proved
-            // a genuine whole-table read, that is never looser than the proof
-            // check, because such a check is counted only under a row-local
-            // read policy (see `write_target_policy_checks`).
-            if self.predicate_read_is_degenerate_whole_table(predicate)?
-                && let Some(checks) = write_target_checks
-                    .get_mut(predicate.table.as_str())
-                    .filter(|checks| **checks > 0)
-            {
-                *checks -= 1;
-                if self
-                    .global_currency_changed_outside_snapshot(&predicate.table, base_snapshot)
-                    .await?
-                {
-                    return Ok(false);
-                }
-                continue;
-            }
             let proven = proven.get(predicate.table.as_str()).unwrap_or(&no_rows);
             if self
                 .predicate_read_differs_from_proven(predicate, base_snapshot, identity, proven)
@@ -399,44 +377,6 @@ where
             }
         }
         Ok(true)
-    }
-
-    /// Per table, how many written rows a client before alpha.58 checked
-    /// against the table's read policy, each recording a whole-table read:
-    /// content writes to a row the transaction point-read, made as a
-    /// non-system identity, under a read policy that depends only on the row
-    /// and the session. Relational read policies are not counted: their check
-    /// also read other tables, and the proof check still applies to those.
-    fn write_target_policy_checks<'t>(
-        &self,
-        tx: &'t Transaction,
-        versions: &[VersionRecord],
-        identity: AuthorSubject,
-    ) -> Result<BTreeMap<&'t str, usize>, Error> {
-        let mut checks = BTreeMap::new();
-        if identity == AuthorSubject::SYSTEM {
-            return Ok(checks);
-        }
-        let mut targets = BTreeSet::new();
-        for version in versions {
-            if VersionLayer::for_record(version) != VersionLayer::Content {
-                continue;
-            }
-            let Some(read) = tx.row_read_set.as_deref().unwrap_or(&[]).iter().find(|read| {
-                read.table == version.table() && read.row_uuid == version.row_uuid()
-            }) else {
-                continue;
-            };
-            let row_local_policy = self
-                .table_in_schema_ref(version.table(), version.schema_version())?
-                .read_policy
-                .as_ref()
-                .is_some_and(query_is_row_local);
-            if row_local_policy && targets.insert((read.table.as_str(), read.row_uuid)) {
-                *checks.entry(read.table.as_str()).or_insert(0) += 1;
-            }
-        }
-        Ok(checks)
     }
 
     async fn visible_global_row_tx_id_now_memoized(
@@ -1355,19 +1295,4 @@ where
         Ok(rejected_payload)
     }
 
-}
-
-/// Whether a query reads only its root table's rows: no traversal, join,
-/// inheritance, include or nested read reaches another row.
-fn query_is_row_local(query: &crate::query::Query) -> bool {
-    query.joins.is_empty()
-        && query.flat_join.is_none()
-        && query.reachable.is_empty()
-        && query.inherits.is_empty()
-        && query.includes.is_empty()
-        && query.array_subqueries.is_empty()
-        && query.relation.is_none()
-        && query.policy_branches.iter().all(|branch| {
-            branch.joins.is_empty() && branch.reachable.is_empty() && branch.inherits.is_empty()
-        })
 }

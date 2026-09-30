@@ -612,10 +612,10 @@ async function largeValueCell(name, sv, writer, reader) {
 }
 
 /**
- * Exclusive transactions from a `cv` client against an `sv` server: reads of a
- * row by id, and updates and upserts of an existing row, commit while their
- * rows are unchanged and conflict once another client changed them. A query
- * that matched rows conflicts only for an old client on a new server.
+ * Exclusive transactions from a `cv` client against an `sv` server: reads and
+ * updates commit while their rows are unchanged and conflict once another
+ * client changed them. A new server rejects an old client's reads that match
+ * rows and its updates of existing rows; inserts without reads still commit.
  */
 async function exclusiveCell(name, sv, cv) {
   const cell = newCell(name);
@@ -677,46 +677,54 @@ async function exclusiveCell(name, sv, cv) {
       await B.call("one", { id, tier: "global" });
       await B.call("update", { id, values: { body: "changed-by-b" }, wait: "global" });
     };
+    // Only alpha.58 clients prove the rows their reads return (#3694). A new
+    // server rejects an old client's read that matches rows, and its update
+    // of a row in a table holding other rows: the old client records the
+    // update's read-policy check as an unproved read of the whole table.
+    const legacy = sv === V.new && cv === V.old;
     await exclusive(
       "read-by-id+update",
       [
         ["txReadById", { id: rows[0] }],
         ["txUpdate", { id: rows[0], values: { body: "read-then-updated" } }],
       ],
-      accepted,
+      legacy ? conflict : accepted,
     );
-    await check(name, "read-by-id+update:visible", async () => {
-      const row = await B.call("one", { id: rows[0], tier: "global" });
-      assert.equal(row?.body, "read-then-updated");
-    });
+    if (!legacy)
+      await check(name, "read-by-id+update:visible", async () => {
+        const row = await B.call("one", { id: rows[0], tier: "global" });
+        assert.equal(row?.body, "read-then-updated");
+      });
     await exclusive(
       "read-by-id+insert",
       [
         ["txReadById", { id: rows[1] }],
         ["txInsert", { values: { label: "by-id", body: "saw", author: cv.key } }],
       ],
-      // An old client's by-id read proves nothing the server can check (#3694).
-      sv === V.new && cv === V.old ? conflict : accepted,
+      legacy ? conflict : accepted,
     );
     await exclusive(
       "blind-update",
       [["txUpdate", { id: rows[1], values: { body: "blind" } }]],
-      accepted,
+      legacy ? conflict : accepted,
     );
     await exclusive(
       "blind-upsert-existing",
       [["txUpsert", { id: rows[2], values: { body: "upserted" } }]],
-      accepted,
+      legacy ? conflict : accepted,
     );
-    // A query that returned rows carries row proofs only from alpha.58 on, so
-    // an older client's commit conflicts on a newer server (#3694).
     await exclusive(
       "matching-query+insert",
       [
         ["txAllByLabel", { label: "x0" }],
         ["txInsert", { values: { label: "after-query", body: "saw", author: cv.key } }],
       ],
-      sv === V.new && cv === V.old ? conflict : accepted,
+      legacy ? conflict : accepted,
+    );
+    await exclusive(
+      "insert-only",
+      [["txInsert", { values: { label: "insert-only", body: "new", author: cv.key } }]],
+      accepted,
     );
     await exclusive(
       "stale-read-by-id-conflicts",

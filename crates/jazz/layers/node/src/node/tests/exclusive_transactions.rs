@@ -2815,8 +2815,6 @@ enum NotesTx {
     UpdateNote,
     /// Read every note, then update note 1.
     ReadAllThenUpdateNote,
-    /// Read the notes titled "one", then update note 1.
-    ReadTitledThenUpdateNote,
 }
 
 /// Which client sent the transaction.
@@ -2868,13 +2866,9 @@ fn notes_tx_fate(
                 .tx_write(open, "audit", row(0x71), title_cells("read one"), None)
                 .unwrap();
         }
-        NotesTx::UpdateNote | NotesTx::ReadAllThenUpdateNote | NotesTx::ReadTitledThenUpdateNote => {
+        NotesTx::UpdateNote | NotesTx::ReadAllThenUpdateNote => {
             let read_first = match read {
                 NotesTx::ReadAllThenUpdateNote => Some((Query::from("notes"), 2)),
-                NotesTx::ReadTitledThenUpdateNote => Some((
-                    Query::from("notes").filter(eq(col("title"), lit(Value::String("one".into())))),
-                    1,
-                )),
                 _ => None,
             };
             if let Some((read_first, count)) = read_first {
@@ -2937,16 +2931,6 @@ fn edit_note(note: RowUuid, title: &str) -> impl FnOnce(&mut NodeState, &mut Nod
     }
 }
 
-fn delete_note(note: RowUuid) -> impl FnOnce(&mut NodeState, &mut NodeState) {
-    move |other, core| {
-        commit_mergeable_global(
-            other,
-            core,
-            MergeableCommit::new("notes", note, 15).deletion(DeletionEvent::Deleted),
-        );
-    }
-}
-
 /// A read of one row by id proves the row it returned, so it commits while
 /// that row is unchanged. A client before alpha.58 proves nothing, and the
 /// authority cannot tell what its replica returned, so its read conflicts.
@@ -2962,26 +2946,21 @@ fn a_read_by_id_commits_only_with_a_row_proof() {
     assert_eq!(legacy, Fate::Rejected(RejectionReason::ExclusiveConflict));
 }
 
-/// A pre-alpha.58 update records its target's read-policy check as a
-/// whole-table read. The authority validates it as those clients' own
-/// authority did: the update commits while nothing in the table changed.
+/// A client before alpha.58 records an update's read-policy check of its
+/// target as an unproved read of the whole table, so the update conflicts
+/// while the table holds any other row.
 #[test]
-fn a_pre_alpha58_update_commits_while_its_table_is_unchanged() {
-    let fate = notes_tx_fate(Sender::PreAlpha58, NotesTx::UpdateNote, |_, _| {});
-    assert_eq!(fate, Fate::Accepted);
-    for change in [edit_note(row(1), "x"), edit_note(row(2), "x"), edit_note(row(3), "x")] {
-        let fate = notes_tx_fate(Sender::PreAlpha58, NotesTx::UpdateNote, change);
-        assert_eq!(fate, Fate::Rejected(RejectionReason::ExclusiveConflict));
-    }
+fn a_pre_alpha58_update_conflicts_beside_other_rows() {
+    let current = notes_tx_fate(Sender::Current, NotesTx::UpdateNote, |_, _| {});
+    assert_eq!(current, Fate::Accepted);
+    let legacy = notes_tx_fate(Sender::PreAlpha58, NotesTx::UpdateNote, |_, _| {});
+    assert_eq!(legacy, Fate::Rejected(RejectionReason::ExclusiveConflict));
 }
 
-/// The target check accounts for one whole-table read per updated row. A
-/// genuine whole-table read without row proofs still conflicts, and a proved
-/// one still sees a row that appeared since.
+/// A proved whole-table read beside an update commits while the table is
+/// unchanged and sees a row that appeared since.
 #[test]
-fn a_whole_table_read_beside_an_update_is_still_validated() {
-    let fate = notes_tx_fate(Sender::PreAlpha58, NotesTx::ReadAllThenUpdateNote, |_, _| {});
-    assert_eq!(fate, Fate::Rejected(RejectionReason::ExclusiveConflict));
+fn a_proved_whole_table_read_beside_an_update_sees_new_rows() {
     let fate = notes_tx_fate(Sender::Current, NotesTx::ReadAllThenUpdateNote, |_, _| {});
     assert_eq!(fate, Fate::Accepted);
     let fate = notes_tx_fate(
@@ -3469,18 +3448,4 @@ fn exclusive_reads_reject_a_union_of_relations() {
         BTreeMap::new(),
         "a union of relations over `todos`",
     );
-}
-
-/// A row that appeared in a query of a client before alpha.58 conflicts, even
-/// beside an update whose target check the authority accounts for.
-#[test]
-fn pre_alpha58_reads_still_conflict_on_phantoms() {
-    let unchanged = notes_tx_fate(Sender::PreAlpha58, NotesTx::ReadTitledThenUpdateNote, |_, _| {});
-    assert_eq!(unchanged, Fate::Accepted);
-    let phantom = notes_tx_fate(
-        Sender::PreAlpha58,
-        NotesTx::ReadTitledThenUpdateNote,
-        edit_note(row(3), "one"),
-    );
-    assert_eq!(phantom, Fate::Rejected(RejectionReason::ExclusiveConflict));
 }
