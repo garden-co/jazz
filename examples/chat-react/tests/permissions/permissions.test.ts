@@ -513,4 +513,61 @@ describe("chat permissions", () => {
       via_column: "canvasId",
     });
   });
+
+  it("keeps public canvas reads while requiring membership to draw", async () => {
+    const chat = await testApp.seed((db) =>
+      db.insert(app.chats, {
+        name: "Public room",
+        isPublic: true,
+      }),
+    );
+    const canvas = await testApp.seed((db) =>
+      db.insert(app.canvases, {
+        chatId: chat.id,
+      }),
+    );
+    const existingStroke = await testApp.seed((db) =>
+      db.insert(app.strokes, {
+        canvasId: canvas.id,
+        color: "#000000",
+        width: 2,
+        pointsJson: "[]",
+      }),
+    );
+    const bobDb = testApp.as(externalSession("bob"));
+
+    await expect(bobDb.all(app.canvases.where({ id: canvas.id }))).resolves.toEqual([
+      expect.objectContaining({ id: canvas.id }),
+    ]);
+    await expect(bobDb.all(app.strokes.where({ canvasId: canvas.id }))).resolves.toEqual([
+      expect.objectContaining({ id: existingStroke.id }),
+    ]);
+    await bobDb.expectDenied((db) =>
+      db.insert(app.strokes, {
+        canvasId: canvas.id,
+        color: "#ff0000",
+        width: 3,
+        pointsJson: "[]",
+      }),
+    );
+
+    await testApp.seed((db) =>
+      db.insert(app.chatMembers, {
+        chatId: chat.id,
+        userId: alice,
+      }),
+    );
+    const aliceDb = testApp.as(externalSession("alice"));
+    const memberStroke = await aliceDb
+      .insert(app.strokes, {
+        canvasId: canvas.id,
+        color: "#00ff00",
+        width: 4,
+        pointsJson: "[]",
+      })
+      .wait({ tier: "global" });
+    await expect(bobDb.all(app.strokes.where({ canvasId: canvas.id }))).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: memberStroke.id })]),
+    );
+  });
 });
