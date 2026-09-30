@@ -1,5 +1,15 @@
 # cojson-core-rn
 
+## 2.0.0-alpha.58
+
+### Patch Changes
+
+- 6318998: Android builds no longer fail at `mergeConsumerProguardFiles`: jazz-rn now ships the `proguard-rules.pro` its build.gradle names.
+- 94e3090: Keep native client relay ticks recoverable after temporary socket closure and HTTP connection failures (408, 425, 429, 500, 502, 503, 504), as well as hostname-resolution failures or TLS EOF without `close_notify`. Authentication, malformed protocol, certificate, and unclassified I/O failures remain terminal.
+- Updated dependencies [94e3090]
+  - jazz-rn-ios@2.0.0-alpha.58
+  - jazz-rn-android@2.0.0-alpha.58
+
 ## 2.0.0-alpha.57
 
 ### Patch Changes

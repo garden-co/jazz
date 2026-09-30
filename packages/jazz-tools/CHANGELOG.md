@@ -1,5 +1,70 @@
 # jazz-tools
 
+## 2.0.0-alpha.58
+
+### Patch Changes
+
+- dbd893b: Reads inside transactions on a `Db` from `withAttribution` or `withAttributionForRequest` now use the backend authority that the attributed `Db` reads and writes with. They no longer fail with "open transaction identity does not match its bound identity", so the invite-link recipe works as written.
+- 238d0b8: A local read's background refresh can no longer break the server connection when it fails (for example on a query-coverage timeout). Pending global waits on that client no longer fail with the refresh's error, and the client still reconnects after a later network drop instead of staying offline.
+- 26119fe: Report already-connected migrations as skipped with their schema hashes without implying a migration was published or skipping the deploy.
+- 25c1bb2: Resolve plain-record request authorization headers case-insensitively and reject conflicting case variants.
+- 21ba9d5: Reduce memory use and CPU time when reading large values by checking each stored chunk's canonical encoding in place instead of rebuilding a temporary copy of it.
+- 2d1d32e: Speed up reading large values (files, long text and JSON) by no longer re-hashing chunk bytes that the chunk provider has already verified.
+- b7cdad1: Compile policies that reuse subgraphs faster: lowering walks each shared subgraph once instead of once per path to it.
+- 0fc1c89: Closing a transport while an operation on the same runtime is suspended no longer aborts the process. The connection is detached on the next tick instead.
+- 3e4f819: Fix writes failing with `graph field not found: __jazz_claim_typed…` when permissions are published with `deploy` and an insert checks a table whose read policy compares a session claim. Deployed permissions now behave like the same permissions supplied at server startup.
+- fbd68bd: Document the explicit `s.rel` / `s.reverse` relation API in the `jazz-tools` README, list every starter and the `--hosting` values in the `create-jazz` README, and make `PolicyTestApp.seed` throw a descriptive error when its callback returns something other than a write result.
+- aef96a5: Add Effect v4 bindings: `jazz-tools/effect` provides Jazz as an Effect service with live queries as Streams and transactions that commit or roll back with their effect, and `jazz-tools/effect/backend` provides it per request on Node backends.
+- 3a378d3: Queries that compare an array column with an empty array literal are now accepted by query validation.
+- 46f8ccc: Inserting a row with every column omitted (for example `db.insert(table, {})`) now creates the row with null values when the table has at least one optional non-JSON column, instead of failing with "mergeable commits must carry content cells". Tables whose only columns are optional JSON still can't take such an insert; it now fails with an explicit error until optional JSON columns can store null.
+- 7723921: An exclusive transaction that reads with `include()` or a join no longer times out with `not_observed` (or hangs in the browser) when the related table has a read policy that uses the session, such as a `$createdBy` owner check or access inherited from another table.
+- 84e23fe: Exclusive transactions that read through a join, an include or a related list now record only the related rows they could have used. They no longer download every related row the reader can see, and a write to an unrelated row in the related table no longer makes them conflict.
+
+  Reads whose related rows can't be narrowed this way (lookup joins, flat joins, unions, recursive traversals, inherited access, or deleted rows together with related rows) now fail inside an exclusive transaction with an error such as "Reading a flat join of `invites` with `members` is not supported in exclusive transactions yet", instead of reading the whole related table.
+
+- f572ab0: Exclusive transactions no longer act on stale data. The server now checks an exclusive transaction against the rows it actually read, including counts and other aggregates, and rejects the commit with `exclusive_conflict` if any of them was deleted or changed, or if a row now matches one of its queries that it did not see (for example someone else's redemption of a single-use invite). A revoked invite can no longer be redeemed.
+
+  Exclusive transactions can now be prepared offline: reads answer from local data, the commit is stored locally, and the server accepts it once it syncs if everything the transaction read still holds.
+
+  **Upgrade clients and backends that use exclusive transactions.** Only alpha.58 clients send the row records the server checks, so a backend that redeems invites, like the invite links recipe, is protected only once it runs alpha.58. An exclusive transaction from an older client is rejected with `exclusive_conflict`, on every attempt until the client is upgraded, whenever one of its reads (a query, a read by id, a table read or a count) matches rows on the server, and whenever it updates or upserts a row in a table that holds other rows the writer can read. An older client's read is checked only against rows that still exist, so a read of a row that was deleted since, such as a revoked invite, can still commit. Inserts and deletes without reads still commit.
+
+  Exclusive conflicts rely on the writing client reporting its reads, so they are not a security boundary. Enforce rules every writer must follow in permission policies, or write on your backend.
+
+- 1ee1150: A live subscription waiting on cold storage no longer keeps graph garbage collection pending, so later polls stop repeating collection work that cannot reclaim anything.
+- bdba078: Fix session reads with recursive or gather permission policies failing with "graph contains a dependency cycle" in release builds (NAPI and WASM) when one query input is reached through two paths.
+- 6f3f432: `include()` now delivers rows whose nullable JSON column (`s.json().optional()`) is unset. Previously the read timed out with "Timed out waiting for query coverage" and subscriptions never called back, in both include directions.
+- c01f504: Inspector `IN` / `NOT IN` filters split values only on top-level commas, so JSON values that contain commas are kept intact.
+- 94552bc: Make appending to or editing a large text or bytes value cost proportional to the edit rather than the whole value, by validating only the new part of a locally derived value and no longer rebuilding the value to find the row's current version.
+- 2a2dfeb: In-memory databases now honour their storage's eager read retry setting, which lets a read that yields once be re-polled in the same turn.
+- ef56954: Fix `jazz-tools migrations create` recovering a stale lock by taking a live one. When several generators ran against the same migrations directory, one could mistake a freshly acquired lock for the dead owner it had just read, move it aside and fail with "Quarantined migration lock owner did not match", letting two generators run at once. Stale-lock recovery now only ever removes the exact lock instance it observed.
+- f04f7d2: Disable Nagle (TCP_NODELAY) on native Node and React Native client WebSocket connections so small sync frames are not delayed by the server's delayed ACK.
+- 94e3090: Keep native client relay ticks recoverable after temporary socket closure and HTTP connection failures (408, 425, 429, 500, 502, 503, 504), as well as hostname-resolution failures or TLS EOF without `close_notify`. Authentication, malformed protocol, certificate, and unclassified I/O failures remain terminal.
+- 99e2dab: Errors thrown from the native Jazz runtime now carry a stable `code` (for example `not_observed`); in the browser they are now `Error` objects instead of bare strings. Messages are unchanged. React Native: the native relay ABI moves to 2, so a JavaScript-only (OTA) update to this release needs a new native build; a mismatched build fails at startup with "new native development/release build required".
+- 22ec02f: A server pump failure while a native read is waiting now surfaces as a transport error instead of an unhandled promise rejection that could crash Node.
+- 3296dfd: Retained hydration memo lookup and lifecycle cleanup now use a node-scoped key index, avoiding scans across unrelated cached memo entries. Memo reuse, invalidation, eviction, and byte accounting are unchanged.
+- 08605c7: Writing a value to an optional JSON column (`s.json().optional()`) from TypeScript now works. Previously every insert or update that set such a column failed with `value does not match type Internal(InternalValueType(StoredScalar(Json)))`. Writing `null` to it is still tracked in #2733.
+- b1d93bf: Writes into large ordered subscriptions no longer slow down as the result grows: snapshot positions now update incrementally instead of being rebuilt on every change.
+- ce8372d: Permission policies can compare an optional column with a required column of the same type inside `exists.where(...)` (for example an optional invite code against a required one). Publishing such policies no longer fails with `OperandTypeMismatch`; a `null` value still never matches.
+
+  [PR #3732](https://github.com/garden-co/jazz/pull/3732).
+
+- 028a292: Maintained subscriptions that look up a row by id on a table used by permission policies now read that row directly instead of scanning the table.
+- 6a88729: `createPolicyTestApp().as()` can now act as a local-first guest: pass `authMode: "local-first"` without an `issuer` and the test app acts with a real self-signed local-first identity and its founding account, admitted the same way `forRequest()` admits local-first clients. Sessions with an explicit external `issuer` keep their existing behaviour. `testApp.accountFor(session)` returns that account. A missing author issuer or subject now fails with a clear error instead of a `TypeError`.
+- c127b57: Variable-length array fields in stored records now reject offset tables whose arithmetic would overflow, instead of wrapping. Encoded bytes are unchanged.
+- 8b0ed75: Keep large-value chunk installs progressing while a durable relay writes its repair ledger, so a relay no longer stalls when a ledger write waits on a chunk install that holds the storage writer.
+- 60696e8: Node and React Native dev runtimes no longer fail to reopen local storage when a schema adds tables: reopening a RocksDB or SQLite store to add column families now keeps the store's codec profile instead of failing the pinned-profile check.
+- 230e2d5: Session-scoped writes on a backend (`forSession()`, `forRequest()`, and `createPolicyTestApp`) no longer abort the process with "reentered a suspended operation" when they overlap an earlier write that is still in flight, such as two concurrent upserts of the same row. The session's claims now wait behind the earlier write and take effect in the order the writes were made.
+- 9cb0889: Skip rewriting storage when a sync server re-delivers an already-applied acceptance receipt for a complete mergeable transaction, making reconnects with many settled writes cheaper.
+- 9c45b8b: Fix `db.transaction` updates on rows that hold a large text or bytes value in another column. Updating one column inside a transaction no longer fails with "callers must author logical scalar values, not physical large descriptors"; untouched large values are kept unchanged, and reads inside the transaction see the update.
+- f125333: Report a local exclusive transaction conflict as a `PersistedWriteRejectedError` with code `transaction_conflict`, instead of a plain `Error`, so apps can handle it with the same `instanceof` check as an authority rejection.
+- e3e5766: Updating a row that this client has not loaded yet now fails with a clear `not_observed` error ("... is not loaded locally; read or subscribe to the row before updating it") instead of a misleading "read policy denied UPDATE ... requires read permission on the target row", which was reported even when the table's read rule is `always()`. Rows the policy genuinely hides are still denied.
+- d883cf4: In the browser, loading Jazz no longer fetches and decodes the same WASM file again when the account manager and the database both initialize it.
+- 20666e3: Reject an unknown `wait({ tier })` value (for example a typo from plain JavaScript) with a clear `TypeError` that says the write was already applied, instead of a native "unknown durability tier" rejection that looks like a rejected write.
+- Updated dependencies [6318998]
+- Updated dependencies [94e3090]
+  - jazz-rn@2.0.0-alpha.58
+  - jazz-wasm@2.0.0-alpha.58
+
 ## 2.0.0-alpha.57
 
 ### Patch Changes
