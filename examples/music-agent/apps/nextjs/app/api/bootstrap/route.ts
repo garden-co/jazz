@@ -1,6 +1,6 @@
 import { after } from "next/server";
 import { accountRegistryUrl } from "jazz-tools";
-import { resolveRequestSession } from "jazz-tools/backend";
+import { resolveRequestSession } from "@/src/lib/backend-jazz-client";
 import { runTurn } from "@/src/agent/runner";
 import { appOrigin } from "@/src/lib/app-origin";
 import { jazzAppId, jazzServerUrl } from "@/src/lib/jazz-env";

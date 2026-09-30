@@ -499,19 +499,50 @@ h6 {
   .home-figure-wide .home-figure > svg {
     min-width: 44rem;
   }
-  .home-table table {
-    min-width: 44rem;
-  }
 }
 .home-figure-wide .home-figure > svg {
   max-width: 64rem;
   margin-inline: auto;
 }
+/* Three value columns under one sticky header row, with each topic as its own
+   full-width row above its values: narrow enough for phones without sideways
+   scrolling. Sticky needs the page as its scroller, so neither the frame nor
+   the table's own scroll wrapper may scroll; clip keeps the rounded corners. */
 .home-table {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-container);
-  overflow-x: auto;
+  overflow: clip;
   background-color: var(--color-background-card);
+}
+.home-table .astryx-table-scroll-wrapper,
+.home-table [data-scroll-content] {
+  overflow: visible;
+}
+.home-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background-color: var(--color-background-card);
+}
+/* Narrow columns: hyphenate long words instead of splitting them anywhere,
+   and let the call-to-action labels wrap instead of being cut off. */
+.home-table td,
+.home-table td * {
+  word-break: normal;
+  overflow-wrap: anywhere;
+  hyphens: auto;
+}
+.home-table td .astryx-button {
+  max-width: 100%;
+  height: auto;
+  min-height: 2rem;
+  white-space: normal;
+  text-align: center;
+}
+.home-table td .astryx-button * {
+  height: auto;
+  overflow: visible;
+  white-space: normal;
 }
 .home-logos {
   display: flex;
