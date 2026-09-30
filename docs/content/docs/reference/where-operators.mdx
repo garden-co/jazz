@@ -1,7 +1,7 @@
 ---
 title: WHERE Operators
 description: Full reference for filter operators available in Jazz query builders, with examples for each column kind.
-reviewedAt: "4059cdef"
+reviewedAt: "de3155d6"
 ---
 
 import WhereOperatorsTable from "../../partials/where-operators-table.mdx";
@@ -72,7 +72,9 @@ import WhereOperatorsTable from "../../partials/where-operators-table.mdx";
   </Tab>
 </Tabs>
 
-### Null checks on optional references
+### Null checks on optional columns
+
+In TypeScript, `isNull: true` matches missing values and `isNull: false` matches present values. Nullable columns with ordinary filter operators support it, including scalar and array columns, not just references; required columns and payload enums do not expose it.
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
