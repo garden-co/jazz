@@ -1,8 +1,12 @@
 "use client";
 
 import { useState } from "react";
-import { Callout } from "fumadocs-ui/components/callout";
-import { DynamicCodeBlock } from "fumadocs-ui/components/dynamic-codeblock";
+import { Banner } from "@astryxdesign/core/Banner";
+import { Button } from "@astryxdesign/core/Button";
+import { Code as InlineCode } from "@astryxdesign/core/Code";
+import { Link } from "@astryxdesign/core/Link";
+import { Text } from "@astryxdesign/core/Text";
+import { Callout, Code } from "@/components/docs/mdx-client";
 import { Tab, Tabs } from "./tabs";
 import { type GeneratedApp, storeGeneratedApp } from "@/lib/generated-app-store";
 
@@ -35,7 +39,7 @@ function CredentialsBlock({ app }: { app: GeneratedApp }) {
     <Tabs groupId="jazz-bundler" items={[...BUNDLER_ITEMS]} persist updateAnchor>
       {BUNDLER_ITEMS.map((bundler) => (
         <Tab key={bundler} value={bundler}>
-          <DynamicCodeBlock lang="env" code={envBlockFor(bundler, app)} />
+          <Code language="env" code={envBlockFor(bundler, app)} />
         </Tab>
       ))}
     </Tabs>
@@ -44,7 +48,7 @@ function CredentialsBlock({ app }: { app: GeneratedApp }) {
 
 function ConfigBlock({ app }: { app: GeneratedApp }) {
   const code = `{\n  appId: "${app.appId}",\n  serverUrl: "https://v2.sync.jazz.tools/",\n}`;
-  return <DynamicCodeBlock lang="ts" code={code} />;
+  return <Code language="ts" code={code} />;
 }
 
 export function GenerateAppId() {
@@ -75,24 +79,18 @@ export function GenerateAppId() {
           Apps generated here are unclaimed. Claim the app in the dashboard within 14 days.
           Unclaimed apps are automatically deleted after 14 days.
         </Callout>
-        <button
-          onClick={generate}
-          disabled={loading}
-          className="rounded-lg bg-fd-primary px-5 py-2.5 text-sm font-medium text-fd-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
-        >
-          {loading ? "Generating…" : "Generate App ID"}
-        </button>
-        {error && <p className="text-sm text-red-500">{error}</p>}
-        <p className="text-sm text-fd-muted-foreground">
+        <Button label="Generate App ID" variant="primary" isLoading={loading} onClick={generate} />
+        {error && <Banner status="error" title="Could not generate an app" description={error} />}
+        <Text as="p" display="block" color="secondary">
           Or from the command line (AI agents: use this to provision your own app):
-        </p>
-        <DynamicCodeBlock
-          lang="bash"
+        </Text>
+        <Code
+          language="bash"
           code="curl -X POST https://v2.dashboard.jazz.tools/api/apps/generate"
         />
-        <p className="text-sm text-fd-muted-foreground">
-          Jazz Cloud sync URL: <code>{JAZZ_CLOUD_SYNC_URL}</code>
-        </p>
+        <Text as="p" display="block" color="secondary">
+          Jazz Cloud sync URL: <InlineCode>{JAZZ_CLOUD_SYNC_URL}</InlineCode>
+        </Text>
       </div>
     );
   }
@@ -102,20 +100,17 @@ export function GenerateAppId() {
       <Callout type="warn">
         Save these credentials now — they won't be shown again. You'll need the admin secret to
         claim this app in the{" "}
-        <a
-          href="https://v2.dashboard.jazz.tools"
-          className="underline"
-          target="_blank"
-          rel="noreferrer"
-        >
+        <Link href="https://v2.dashboard.jazz.tools" target="_blank" rel="noreferrer">
           dashboard
-        </a>{" "}
+        </Link>{" "}
         within 14 days. Unclaimed apps are automatically deleted after 14 days.
       </Callout>
 
       <CredentialsBlock app={app} />
 
-      <p className="text-sm text-fd-muted-foreground">Use this config in your app:</p>
+      <Text as="p" display="block" color="secondary">
+        Use this config in your app:
+      </Text>
       <ConfigBlock app={app} />
     </div>
   );

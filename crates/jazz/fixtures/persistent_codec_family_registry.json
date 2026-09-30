@@ -265,8 +265,8 @@
         "anchor": "table_and_column_rename_reuses_the_existing_physical_identities"
       },
       "rejection_receipt": {
-        "path": "crates/jazz/layers/node/src/node/tests/recovery.rs",
-        "anchor": "reopen_rejects_unknown_contribution_physical_column_id_before_residency"
+        "path": "crates/jazz/layers/node/src/node/codec.rs",
+        "anchor": "physical_mapping_payload_rejects_unknown_malformed_trailing_and_noncanonical_forms"
       },
       "evidence": [
         {
@@ -406,7 +406,7 @@
       },
       "rejection_receipt": {
         "path": "crates/jazz/layers/node/src/node/tests/recovery.rs",
-        "anchor": "reopen_rejects_noncanonical_contribution_source_dots"
+        "anchor": "unknown_durable_contribution_component_tag_is_rejected_by_the_storage_decoder"
       },
       "evidence": [
         {

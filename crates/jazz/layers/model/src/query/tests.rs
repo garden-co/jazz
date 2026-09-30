@@ -149,6 +149,82 @@ mod tests {
     }
 
     #[test]
+    fn empty_array_literal_compares_with_array_column_on_either_side() {
+        let empty_array = || lit(Value::Array(vec![]));
+
+        Query::from("issues")
+            .filter(eq(col("labels"), empty_array()))
+            .validate_runtime(&schema())
+            .expect("an empty array literal matches an array column");
+        Query::from("issues")
+            .filter(eq(empty_array(), col("labels")))
+            .validate_runtime(&schema())
+            .expect("an empty array literal matches an array column on the left");
+
+        let error = Query::from("issues")
+            .filter(eq(col("labels"), lit(Value::Array(vec![Value::I32(1)]))))
+            .validate_runtime(&schema())
+            .expect_err("a nonempty array with incompatible element type is rejected");
+        assert_eq!(error, QueryError::OperandTypeMismatch);
+    }
+    #[test]
+    fn empty_array_literal_compares_with_nullable_array_column_on_either_side() {
+        let source = PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("issues").nullable_column(
+                    "labels",
+                    PublicColumnType::Array {
+                        element: Box::new(PublicColumnType::Uuid),
+                    },
+                ),
+            )
+            .build();
+        let schema = JazzSchema::new(&source).expect("nullable array schema compiles");
+        let empty_array = || lit(Value::Array(vec![]));
+
+        Query::from("issues")
+            .filter(eq(col("labels"), empty_array()))
+            .validate(&schema)
+            .expect("empty array equality accepts nullable array columns");
+        Query::from("issues")
+            .filter(eq(empty_array(), col("labels")))
+            .validate(&schema)
+            .expect("operand order does not change nullable array equality");
+
+        let error = Query::from("issues")
+            .filter(lt(col("labels"), empty_array()))
+            .validate(&schema)
+            .expect_err("arrays remain invalid for ordered comparisons");
+        assert_eq!(error, QueryError::OperandTypeMismatch);
+    }
+
+
+    #[test]
+    fn empty_array_comparison_does_not_use_inferred_param_type() {
+        let empty_array = || lit(Value::Array(vec![]));
+
+        let column_comparison_first = Query::from("issues")
+            .filter(eq(col("labels"), param("labels")))
+            .filter(eq(empty_array(), param("labels")))
+            .validate_runtime(&schema())
+            .expect_err("an inferred parameter is not a direct array column");
+        assert_eq!(
+            column_comparison_first,
+            QueryError::OperandTypeMismatch
+        );
+
+        let empty_array_comparison_first = Query::from("issues")
+            .filter(eq(empty_array(), param("labels")))
+            .filter(eq(col("labels"), param("labels")))
+            .validate_runtime(&schema())
+            .expect_err("parameter inference order does not enable the empty-array exception");
+        assert_eq!(
+            empty_array_comparison_first,
+            QueryError::OperandTypeMismatch
+        );
+    }
+
+    #[test]
     fn bound_payload_enum_value_returns_param_type_mismatch() {
         let validated = Query::from("events")
             .filter(eq(col("event"), param("event")))
@@ -1122,5 +1198,124 @@ mod tests {
             validated.shape_id().0.to_string(),
             "17acefa1-5bd0-53c6-8451-02ee5bad1a5d"
         );
+    }
+
+    fn nullable_correlation_schema() -> RuntimeSchema {
+        RuntimeSchema::new([
+            TableSchema::new("shows", [ColumnSchema::new("name", ColumnType::String)]),
+            TableSchema::new(
+                "members",
+                [
+                    ColumnSchema::new("show", ColumnType::Uuid),
+                    ColumnSchema::new("parent", ColumnType::Uuid),
+                    ColumnSchema::new("invite_code", ColumnType::String.nullable()),
+                    ColumnSchema::new("venue", ColumnType::String),
+                ],
+            )
+            .with_reference("show", "shows")
+            .with_reference("parent", "shows"),
+            TableSchema::new(
+                "invites",
+                [
+                    ColumnSchema::new("show", ColumnType::Uuid),
+                    ColumnSchema::new("parent", ColumnType::Uuid.nullable()),
+                    ColumnSchema::new("code", ColumnType::String),
+                    ColumnSchema::new("venue", ColumnType::String),
+                ],
+            )
+            .with_reference("show", "shows")
+            .with_reference("parent", "shows"),
+        ])
+    }
+
+    // `exists invites where invites.show = members.show and invites.code = members.invite_code`:
+    // an equality between an optional and a required column of the same type is
+    // well-typed. A NULL side never matches, so nullability can't widen access.
+    #[test]
+    fn join_correlations_accept_optional_and_required_columns_of_one_type() {
+        let schema = nullable_correlation_schema();
+        let optional_text = Query::from("members").join_via_column_with_correlations(
+            "invites",
+            "show",
+            "show",
+            [JoinCorrelation {
+                join_column: "code".to_owned(),
+                source_column: "invite_code".to_owned(),
+            }],
+            [],
+        );
+        optional_text
+            .validate_runtime(&schema)
+            .expect("optional text correlates with required text");
+
+        let optional_ref = Query::from("members").join_via_column_with_correlations(
+            "invites",
+            "show",
+            "show",
+            [JoinCorrelation {
+                join_column: "parent".to_owned(),
+                source_column: "parent".to_owned(),
+            }],
+            [],
+        );
+        optional_ref
+            .validate_runtime(&schema)
+            .expect("a required reference correlates with an optional reference");
+    }
+
+    // `exists invites where invites.venue = members.venue and invites.code = members.invite_code`:
+    // the join key is a plain text column, not a reference, so validation takes
+    // the explicit column-equality path. Its correlations must accept an
+    // optional/required pair of one type too.
+    #[test]
+    fn plain_column_joins_accept_optional_and_required_correlations() {
+        let schema = nullable_correlation_schema();
+        Query::from("members")
+            .join_via_column_with_correlations(
+                "invites",
+                "venue",
+                "venue",
+                [JoinCorrelation {
+                    join_column: "code".to_owned(),
+                    source_column: "invite_code".to_owned(),
+                }],
+                [],
+            )
+            .validate_runtime(&schema)
+            .expect("optional text correlates with required text on a plain column join");
+
+        let error = Query::from("members")
+            .join_via_column_with_correlations(
+                "invites",
+                "venue",
+                "venue",
+                [JoinCorrelation {
+                    join_column: "code".to_owned(),
+                    source_column: "show".to_owned(),
+                }],
+                [],
+            )
+            .validate_runtime(&schema)
+            .expect_err("text never correlates with a UUID on a plain column join");
+        assert_eq!(error, QueryError::OperandTypeMismatch);
+    }
+
+    #[test]
+    fn join_correlations_still_reject_different_types() {
+        let schema = nullable_correlation_schema();
+        let error = Query::from("members")
+            .join_via_column_with_correlations(
+                "invites",
+                "show",
+                "show",
+                [JoinCorrelation {
+                    join_column: "code".to_owned(),
+                    source_column: "parent".to_owned(),
+                }],
+                [],
+            )
+            .validate_runtime(&schema)
+            .expect_err("text never correlates with a UUID");
+        assert_eq!(error, QueryError::OperandTypeMismatch);
     }
 }

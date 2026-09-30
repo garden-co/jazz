@@ -11,13 +11,13 @@ fn main() {
     divan::main();
 }
 
-#[divan::bench(args = [128, 4096])]
+#[divan::bench(args = [4096])]
 fn world_tour_member_calendar_window(bencher: divan::Bencher<'_, '_>, stop_count: usize) {
     let fixture = Fixture::new(stop_count);
     bencher.bench_local(|| divan::black_box(fixture.member_calendar_window_count()));
 }
 
-#[divan::bench(args = [128, 4096])]
+#[divan::bench(args = [4096])]
 fn world_tour_public_calendar_window(bencher: divan::Bencher<'_, '_>, stop_count: usize) {
     let fixture = Fixture::new(stop_count);
     bencher.bench_local(|| divan::black_box(fixture.public_calendar_window_count()));

@@ -45,13 +45,12 @@ describe("todo permissions", () => {
   it("allows owners to update their own todos", async () => {
     const aliceAccount = crypto.randomUUID();
     const bobAccount = crypto.randomUUID();
-    const todo = await testApp.seed((db) => {
-      const { value } = db.insert(app.todos, {
+    const todo = await testApp.seed((db) =>
+      db.insert(app.todos, {
         title: "Buy milk",
         ownerId: aliceAccount,
-      });
-      return value;
-    });
+      }),
+    );
 
     const alice = testApp.as({
       issuer: "https://auth.example.test",
@@ -90,9 +89,18 @@ The returned `PolicyTestApp` provides:
 
 - `testApp.seed(fn)`&hairsp;—&hairsp;run setup writes as an admin, bypassing policy checks, and wait for them to reach the server
 - `testApp.as(session)`&hairsp;—&hairsp;create a `TestDb` client scoped to a specific session
+- `testApp.accountFor(session)`&hairsp;—&hairsp;get the account a session acts for, for example to seed rows a local-first guest owns
+- `testApp.sessionFor(session)`&hairsp;—&hairsp;get the session `as()` acts with, including a local-first guest's derived `user_id`
 - `testDb.expectAllowed(fn)`&hairsp;—&hairsp;check that a write can be staged locally, then roll it back; this does not prove that the server will accept it
 - `testDb.expectDenied(fn)`&hairsp;—&hairsp;wait for the server to reject a write because of a policy
 - `testApp.shutdown()`&hairsp;—&hairsp;stop the local client and server
+
+To test as a local-first guest, pass `authMode: "local-first"` and leave out `issuer` and
+`account_id`, with empty `claims`. The test app derives a local-first key from `user_id` and acts
+exactly like a real local-first client with that key, including its own account. The guest's
+session uses the subject derived from that key, not the `user_id` you passed:
+`testApp.sessionFor(session)` returns the session it acts with. A session with an explicit external
+`issuer` is still used as given: it acts as that issuer's user for its `account_id`.
 
 For read policies, assert on returned rows directly. Denied reads are filtered out rather than
 throwing.
@@ -112,9 +120,11 @@ names your policy reads.
 
 ```typescript
 const invitedUser = testApp.as({
+  issuer: "https://auth.example.test",
   user_id: "bob",
+  account_id: bobAccount,
   claims: { join_code: "invite-123" },
-  authMode: "local-first",
+  authMode: "external",
 });
 ```
 

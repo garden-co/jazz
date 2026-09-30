@@ -351,6 +351,7 @@ jobs:
                     "pkg-jazz-napi",
                     "pkg-jazz-rn",
                     "pkg-create-jazz",
+                    "inspector-prebuilt",
                   ];
 
                   const availableArtifacts = new Set(
@@ -775,17 +776,70 @@ jobs:
 
           npm dist-tag add "create-jazz@${CREATE_JAZZ_VERSION}" latest
 
+  # Read-only check that the Inspector Vercel token can see its project. It runs
+  # in candidate dry-runs too, so a broken token shows up before anything
+  # publishes. It deliberately does not gate npm publication.
+  inspector-preflight:
+    name: Check Inspector Vercel access
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: [release-push-gate]
+    if: needs.release-push-gate.outputs.should_run == 'true'
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    env:
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_INSPECTOR_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_INSPECTOR_PROJECT_ID }}
+      VERCEL_TOKEN: ${{ secrets.VERCEL_INSPECTOR_TOKEN }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+
+      - run: node dev/scripts/promote-inspector-deployment.mjs preflight
+
+  # Deploy the exact inspector-prebuilt bytes that were built for this tree
+  # (the tested candidate's when its artifacts were reused) instead of waiting
+  # for Vercel's Git integration to build `release`, which it never does.
+  stage-inspector-production:
+    name: Stage inspector production
+    needs:
+      - release-push-gate
+      - resolve-preview-artifacts
+      - publish-npm
+      - inspector-preflight
+    if: >-
+      always() &&
+      needs.release-push-gate.outputs.should_run == 'true' &&
+      needs.publish-npm.result == 'success' &&
+      needs.inspector-preflight.result == 'success' &&
+      (inputs.mode || github.event.inputs.mode || 'publish') == 'publish'
+    uses: ./.github/workflows/stage-inspector-production.yml
+    permissions:
+      actions: read
+      contents: read
+    with:
+      artifact-run-id: ${{ needs.resolve-preview-artifacts.outputs.use_preview_artifacts == 'true' && needs.resolve-preview-artifacts.outputs.preview_run_id || '' }}
+      source-sha: ${{ github.sha }}
+      source-branch: release
+    secrets: inherit
+
   deploy-inspector-production:
     name: Promote inspector production
     needs:
       - release-push-gate
       - publish-npm
+      - stage-inspector-production
     if: >-
       always() &&
       needs.release-push-gate.outputs.should_run == 'true' &&
       needs.publish-npm.result == 'success' &&
+      needs.stage-inspector-production.result == 'success' &&
       (inputs.mode || github.event.inputs.mode || 'publish') == 'publish'
     uses: ./.github/workflows/promote-inspector-production.yml
     with:
       deploy-sha: ${{ github.sha }}
+      deployment-url: ${{ needs.stage-inspector-production.outputs.deployment-url }}
     secrets: inherit

@@ -1005,9 +1005,10 @@ fn validate_join(
                 return Err(QueryError::OperandTypeMismatch);
             }
             for correlation in &join.correlated_filters {
-                if planner_column_type(root, &correlation.source_column)?
-                    != planner_column_type(&join_table, &correlation.join_column)?
-                {
+                if !column_types_comparable(
+                    planner_column_type(root, &correlation.source_column)?,
+                    planner_column_type(&join_table, &correlation.join_column)?,
+                ) {
                     return Err(QueryError::OperandTypeMismatch);
                 }
             }
@@ -1070,10 +1071,12 @@ fn validate_join(
     } else {
         root_table.to_owned()
     };
+    // A correlation is an equality, so nullability doesn't change whether the
+    // two sides can be compared: a NULL side simply never matches.
     for correlation in &join.correlated_filters {
         let source_type = planner_column_type(root, &correlation.source_column)?;
         let join_type = planner_column_type(&join_table, &correlation.join_column)?;
-        if source_type != join_type {
+        if !column_types_comparable(source_type, join_type) {
             return Err(QueryError::OperandTypeMismatch);
         }
     }
@@ -1590,6 +1593,31 @@ fn validate_comparable_operands(
     right: &mut Operand,
     params: &mut BTreeMap<String, ColumnType>,
 ) -> Result<ColumnType, QueryError> {
+    // An empty array literal has no element type of its own. Permit it only
+    // when directly paired with a schema-resolved array column; unwrap outer
+    // nullability for the type check but return the original column type.
+    // Do not let an inferred parameter type or the literal fallback widen this case.
+    let empty_array_column = match (&*left, &*right) {
+        (Operand::Literal(Value::Array(values)), Operand::Column(column))
+        | (Operand::Column(column), Operand::Literal(Value::Array(values)))
+            if values.is_empty() =>
+        {
+            Some(column)
+        }
+        _ => None,
+    };
+    if let Some(column) = empty_array_column {
+        let column_type = planner_column_type(table, column)?;
+        let is_array_column = match column_type {
+            ColumnType::Array(_) => true,
+            ColumnType::Nullable(inner) => matches!(inner.as_ref(), ColumnType::Array(_)),
+            _ => false,
+        };
+        if is_array_column {
+            return Ok(column_type.clone());
+        }
+    }
+
     let mut left_type = operand_type(table, left, params)?;
     let mut right_type = operand_type(table, right, params)?;
     if let (Some(left_known), Some(right_known)) = (&left_type, &right_type)

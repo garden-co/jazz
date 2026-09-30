@@ -7,18 +7,27 @@ where
     /// Record exact row versions successfully applied from this durable
     /// relay's selected authority. Deliberately append-only: later authority
     /// removal controls future delivery but cannot erase retained knowledge.
-    pub async fn record_scope_relay_authoritative_bundles(
-        &self,
+    #[cfg(test)]
+    pub(crate) async fn record_scope_relay_authoritative_bundles(
+        &mut self,
         bundles: &[VersionBundle],
+    ) -> Result<(), Error> {
+        self.record_scope_relay_authoritative_bundles_with_progress(bundles, None)
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn record_scope_relay_authoritative_bundles_with_progress(
+        &mut self,
+        bundles: &[VersionBundle],
+        progress_waker: Option<&std::task::Waker>,
     ) -> Result<(), Error> {
         let Some(scope) = self.client_relay_scope() else {
             return Ok(());
         };
         let (owner, subject) = scope.durable_components();
         let digest = scope.durable_digest();
-        let store = self
-            .database
-            .direct_record_store(SCOPE_RELAY_REPAIR_LEDGER_STORE)?;
+
         let mut writes = Vec::new();
         for bundle in bundles {
             for version in &bundle.versions {
@@ -45,7 +54,13 @@ where
             }
         }
         if !writes.is_empty() {
-            store.write_many(&writes).await?;
+            self.database
+                .write_direct_records_with_progress(
+                    SCOPE_RELAY_REPAIR_LEDGER_STORE,
+                    &writes,
+                    progress_waker,
+                )
+                .await?;
         }
         Ok(())
     }
@@ -54,13 +69,29 @@ where
     /// when its pending repair still belongs to the selected authority
     /// receipt. Stale/fallback payloads can be ingested as cache data but are
     /// never repair authority.
-    pub async fn record_scope_relay_authoritative_repair_payloads(
-        &self,
+    #[cfg(test)]
+    pub(crate) async fn record_scope_relay_authoritative_repair_payloads(
+        &mut self,
         bundles: &[VersionBundle],
         authority_receipt_eligible: bool,
     ) -> Result<(), Error> {
+        self.record_scope_relay_authoritative_repair_payloads_with_progress(
+            bundles,
+            authority_receipt_eligible,
+            None,
+        )
+        .await
+    }
+
+    #[doc(hidden)]
+    pub async fn record_scope_relay_authoritative_repair_payloads_with_progress(
+        &mut self,
+        bundles: &[VersionBundle],
+        authority_receipt_eligible: bool,
+        progress_waker: Option<&std::task::Waker>,
+    ) -> Result<(), Error> {
         if authority_receipt_eligible {
-            self.record_scope_relay_authoritative_bundles(bundles)
+            self.record_scope_relay_authoritative_bundles_with_progress(bundles, progress_waker)
                 .await?;
         }
         Ok(())
@@ -70,11 +101,29 @@ where
     /// has accepted it locally. Its caller establishes the live admitted
     /// session and author ownership; this helper only persists the immutable
     /// row-version identities.
-    pub async fn record_scope_relay_authored_pending_versions(
-        &self,
+    #[cfg(test)]
+    pub(crate) async fn record_scope_relay_authored_pending_versions(
+        &mut self,
         tx: &Transaction,
         versions: &[VersionRecord],
         admitted_session: AuthorSubject,
+    ) -> Result<(), Error> {
+        self.record_scope_relay_authored_pending_versions_with_progress(
+            tx,
+            versions,
+            admitted_session,
+            None,
+        )
+        .await
+    }
+
+    #[doc(hidden)]
+    pub async fn record_scope_relay_authored_pending_versions_with_progress(
+        &mut self,
+        tx: &Transaction,
+        versions: &[VersionRecord],
+        admitted_session: AuthorSubject,
+        progress_waker: Option<&std::task::Waker>,
     ) -> Result<(), Error> {
         let Some(scope) = self.client_relay_scope() else {
             return Ok(());
@@ -84,9 +133,7 @@ where
         }
         let (owner, subject) = scope.durable_components();
         let digest = scope.durable_digest();
-        let store = self
-            .database
-            .direct_record_store(SCOPE_RELAY_REPAIR_LEDGER_STORE)?;
+
         let mut writes = Vec::new();
         for version in versions {
             let table_id =
@@ -111,7 +158,13 @@ where
             });
         }
         if !writes.is_empty() {
-            store.write_many(&writes).await?;
+            self.database
+                .write_direct_records_with_progress(
+                    SCOPE_RELAY_REPAIR_LEDGER_STORE,
+                    &writes,
+                    progress_waker,
+                )
+                .await?;
         }
         Ok(())
     }
@@ -750,7 +803,6 @@ where
     #[doc(hidden)]
     pub async fn close(&mut self) -> Result<(), Error> {
         self.database.flush().await?;
-        self.persist_clean_close_marker().await?;
         self.database.close().await?;
         Ok(())
     }
