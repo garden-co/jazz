@@ -55,19 +55,4 @@ export const musicAgentBenchmarks: BenchmarkMetadata[] = [
     work: { count: 1, unit: "reopens/s", explanation: "One reopen plus one full transcript read." },
     source,
   },
-  {
-    name: "music_agent_attachment_seek_8mb",
-    title: "MusicAgent attachment seek · 8 MiB audio",
-    description:
-      "Read a 64 KiB window from the middle of an 8 MiB audio attachment, as a player seek does. Today the cost grows with the attachment's size rather than the window's (#3471).",
-    fixture: "A prompt, a streamed assistant reply and an 8 MiB audio attachment on that reply.",
-    storage,
-    includes: [
-      "Resolving the attachment's large-value reference",
-      "Reading the requested 64 KiB window",
-    ],
-    excludes: ["Uploading the attachment", "Decoding audio"],
-    work: { count: 1, unit: "seeks/s", explanation: "One 64 KiB range read per seek." },
-    source,
-  },
 ];
