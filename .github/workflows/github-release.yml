@@ -2,12 +2,16 @@ name: GitHub release
 
 # Drafts and publishes the GitHub release for an alpha. Release notes are
 # written while a candidate is under test, so this is dispatched by hand
-# (or by an agent) with the final notes rather than generated at publish
-# time:
-#   1. `publish: false` creates the draft, or replaces the notes of an
-#      existing draft, for review on GitHub.
-#   2. `publish: true`, after the npm publish has pushed the version tag,
-#      publishes that release as Latest.
+# (or by an agent) rather than generated at publish time:
+#   1. `publish: false` with `notes` creates the draft, or replaces the notes
+#      of an existing draft, for review on GitHub.
+#   2. `publish: true` publishes the existing draft exactly as it stands, as
+#      Latest, once the npm publish has pushed the version tag. It never
+#      changes the draft's title or notes, and waits for approval on the
+#      `github-release` environment.
+# The dispatch form takes single-line strings; pass multi-line notes with
+# `gh workflow run github-release.yml -f version=... -F notes=@notes.md`
+# or through the REST API.
 # Publishing with the Actions token triggers no `release` workflows; the
 # benchmark timeline already refreshes after "Publish jazz-tools alpha".
 on:
@@ -18,32 +22,36 @@ on:
         required: true
         type: string
       notes:
-        description: "Release notes (Markdown). Replaces the draft's notes."
-        required: true
+        description: "Draft only: release notes (Markdown) replacing the draft's notes."
+        required: false
         type: string
       publish:
-        description: "Publish the release as Latest. Requires the version tag to exist."
+        description: "Publish the existing draft unchanged as Latest. Requires the version tag."
         required: true
         type: boolean
         default: false
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: github-release-${{ inputs.version }}
   cancel-in-progress: false
 
+env:
+  GH_REPO: ${{ github.repository }}
+  VERSION: ${{ inputs.version }}
+
 jobs:
-  release:
+  draft:
+    if: ${{ !inputs.publish }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: write
     env:
       GH_TOKEN: ${{ github.token }}
-      GH_REPO: ${{ github.repository }}
-      VERSION: ${{ inputs.version }}
       NOTES: ${{ inputs.notes }}
-      PUBLISH: ${{ inputs.publish }}
     steps:
       - name: Validate inputs
         run: |
@@ -52,7 +60,7 @@ jobs:
             exit 1
           fi
           if [ -z "${NOTES//[[:space:]]/}" ]; then
-            echo "::error::notes must not be empty"
+            echo "::error::notes are required to create or update a draft"
             exit 1
           fi
           echo "TAG=v${VERSION}" >> "$GITHUB_ENV"
@@ -69,19 +77,48 @@ jobs:
             gh release edit "${TAG}" --title "Jazz ${VERSION}" --notes-file "${RUNNER_TEMP}/notes.md"
             echo "Updated the draft for ${TAG}."
           else
-            gh release create "${TAG}" --draft --title "Jazz ${VERSION}" --notes-file "${RUNNER_TEMP}/notes.md"
+            # Target release, so publishing from the GitHub UI before the npm
+            # publish pushes the tag cannot create it from main.
+            gh release create "${TAG}" --draft --target release --title "Jazz ${VERSION}" \
+              --notes-file "${RUNNER_TEMP}/notes.md"
             echo "Created a draft for ${TAG}."
           fi
           gh release view "${TAG}" --json url --jq '"Draft: " + .url'
 
-      - name: Publish as Latest
-        if: inputs.publish
+  publish:
+    if: ${{ inputs.publish }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Required reviewers on this environment make the publish go structural.
+    environment: github-release
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Validate inputs
         run: |
+          if ! [[ "${VERSION}" =~ ^2\.0\.0-alpha\.[0-9]+$ ]]; then
+            echo "::error::version must look like 2.0.0-alpha.N, got '${VERSION}'"
+            exit 1
+          fi
+          echo "TAG=v${VERSION}" >> "$GITHUB_ENV"
+
+      - name: Publish the draft as Latest
+        run: |
+          if ! is_draft=$(gh release view "${TAG}" --json isDraft --jq .isDraft 2>/dev/null); then
+            echo "::error::No draft release for ${TAG}; create one with publish=false first."
+            exit 1
+          fi
+          if [ "${is_draft}" != true ]; then
+            echo "::error::${TAG} is already published."
+            exit 1
+          fi
           # The npm publish workflow pushes the tag at the release commit.
-          # Never let GitHub create it from the default branch instead.
+          # Never let GitHub create it from the draft's target instead.
           if [ -z "$(git ls-remote --tags "https://github.com/${GH_REPO}.git" "refs/tags/${TAG}")" ]; then
             echo "::error::Tag ${TAG} does not exist yet; publish to npm first."
             exit 1
           fi
           gh release edit "${TAG}" --draft=false --prerelease=false --latest
-          gh release view "${TAG}" --json url,isDraft,isPrerelease --jq '"Published: " + .url'
+          gh release view "${TAG}" --json url --jq '"Published: " + .url'

@@ -87,7 +87,11 @@ jobs:
           RESULT: ${{ needs.test-rust.result }}
           TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          if [ "${RESULT}" = success ]; then state=success; else state=failure; fi
+          case "${RESULT}" in
+            success) state=success ;;
+            failure) state=failure ;;
+            *) state=error ;;
+          esac
           gh api --method POST "repos/${REPO}/statuses/${SHA}" \
             -f state="${state}" \
             -f context=test-rust \
