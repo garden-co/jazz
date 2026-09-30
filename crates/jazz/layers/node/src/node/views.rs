@@ -1533,6 +1533,7 @@ where
         let mut receiver_batch_tx_ids = BTreeSet::new();
         let mut receiver_batch_global_times = Vec::new();
         let mut receiver_batch_content_versions = Vec::new();
+        let mut receiver_batch_rejections = Vec::new();
         let mut receiver_batch_bundle_count = 0u64;
         let mut deferred_bundles = Vec::new();
         for bundle in receiver_candidates.into_values() {
@@ -1543,6 +1544,7 @@ where
                     &mut receiver_batch_tx_ids,
                     &mut receiver_batch_global_times,
                     &mut receiver_batch_content_versions,
+                    &mut receiver_batch_rejections,
                 )
                 .await?;
             if staged {
@@ -1562,6 +1564,11 @@ where
             let applied = self.database.apply_batch(receiver_batch).await?;
             let persisted = applied.persist().await;
             self.database.finish_persistence(persisted)?;
+            for rejected in receiver_batch_rejections {
+                self.rejections
+                    .rejected_transactions
+                    .insert(rejected.tx_id(), rejected);
+            }
             for tx_id in &receiver_batch_tx_ids {
                 self.invalidate_tx_version_tables_cache(*tx_id);
             }
@@ -1570,10 +1577,6 @@ where
             }
             self.settle_completed_parent_batch(&receiver_batch_tx_ids)
                 .await?;
-            if let Some(tx_time) = receiver_batch_tx_ids.iter().map(|tx_id| tx_id.time).max() {
-                self.persist_storage_consistency_marker_through(tx_time)
-                    .await?;
-            }
         }
         let mut preloaded_tx_ids = bulk_loaded_tx_ids;
         preloaded_tx_ids.extend(receiver_batch_tx_ids);
@@ -2442,20 +2445,6 @@ where
                 bundle.durability,
             )
             .await?;
-            if matches!(bundle.fate, Fate::Accepted) {
-                // Ingesting only the previously missing versions replaces the
-                // transaction-version cache with that subset. Reload the full
-                // assembled transaction before applying its fate so every
-                // earlier fragment receives a current index.
-                self.invalidate_tx_version_tables_cache(tx_id);
-                self.apply_fate_update(
-                    tx_id,
-                    bundle.fate,
-                    bundle.global_time,
-                    Some(bundle.durability),
-                )
-                .await?;
-            }
             return Ok(());
         }
         self.ingest_transaction_fragment_without_current_indexes(
@@ -2475,6 +2464,7 @@ where
         staged_tx_ids: &mut BTreeSet<TxId>,
         staged_global_times: &mut Vec<GlobalTime>,
         staged_content_versions: &mut Vec<VersionRow>,
+        staged_rejections: &mut Vec<RejectedTransaction>,
     ) -> Result<bool, Error> {
         validate_received_view_bundle_global_time_durability(
             bundle.global_time,
@@ -2503,6 +2493,7 @@ where
                 bundle.durability,
                 staged_global_times,
                 staged_content_versions,
+                staged_rejections,
             )
             .await?;
             return Ok(true);
@@ -2533,6 +2524,7 @@ where
             bundle.durability,
             staged_global_times,
             staged_content_versions,
+            staged_rejections,
         )
         .await?;
         Ok(true)

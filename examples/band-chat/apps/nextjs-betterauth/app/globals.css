@@ -1,132 +1,70 @@
-:root {
-  color-scheme: dark;
-  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
-  background: #11121a;
-  color: #f6f2ff;
-}
-* {
-  box-sizing: border-box;
-}
+/* Layout glue only. Colour, type, spacing and radii come from design tokens. */
+html,
 body {
+  height: 100%;
   margin: 0;
 }
-button,
-input {
-  font: inherit;
+
+body {
+  background: var(--color-background-body);
+  color: var(--color-text-primary);
 }
-button {
-  cursor: pointer;
+
+.page-fill {
+  min-height: 100dvh;
 }
-.shell {
-  width: min(980px, calc(100% - 2rem));
-  margin: 3rem auto;
+
+.room-view {
+  min-height: 0;
 }
-.eyebrow {
-  color: #c7a7ff;
-  font-size: 0.75rem;
-  font-weight: 700;
-  letter-spacing: 0.13em;
+
+.room-chat {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
-h1 {
-  font-size: clamp(2.2rem, 7vw, 4.3rem);
-  margin: 0.25rem 0;
+
+.room-chat > * {
+  flex: 1;
+  min-height: 0;
 }
-h2 {
-  margin-top: 0;
+
+.message-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
-p {
-  color: #d6d0df;
-  line-height: 1.5;
+
+.attachment-audio {
+  max-inline-size: 100%;
 }
-.auth-card,
-.workspace,
-.conversation,
-aside,
-.empty {
-  border: 1px solid #40385a;
-  border-radius: 0.75rem;
-  background: #1b1925;
-}
-.auth-card {
-  max-width: 25rem;
-  padding: 1.25rem;
-  margin-top: 2rem;
-}
-form,
-label {
-  display: grid;
-  gap: 0.5rem;
-}
-form {
-  margin-block: 0.75rem;
-}
-input {
-  min-width: 0;
-  border: 1px solid #655987;
-  border-radius: 0.4rem;
-  background: #11101a;
-  color: inherit;
-  padding: 0.55rem 0.65rem;
-}
-button {
-  border: 0;
-  border-radius: 0.4rem;
-  background: #b28aff;
-  color: #17111f;
-  font-weight: 700;
-  padding: 0.55rem 0.7rem;
-}
-button.link,
-.room {
-  color: #d9ccff;
-  background: transparent;
-  padding-inline: 0;
-  text-align: left;
-}
-.workspace {
-  display: grid;
-  grid-template-columns: minmax(13rem, 0.7fr) 2fr;
-  gap: 1rem;
-  padding: 1rem;
-}
-aside {
-  padding: 1rem;
-}
-.room {
+
+.sketch-surface {
   display: block;
-  margin: 0.5rem 0;
+  inline-size: 100%;
+  block-size: auto;
+  aspect-ratio: 8 / 5;
+  touch-action: none;
+  cursor: crosshair;
+  background: var(--color-background-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-container);
 }
-.room.active {
-  color: white;
-  text-decoration: underline;
+
+.sketch-surface path {
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
-.conversation,
-.empty {
-  padding: 1rem;
-}
-ol {
-  padding-left: 1.25rem;
-}
-li {
-  display: grid;
-  gap: 0.2rem;
-  border-bottom: 1px solid #332d47;
-  padding: 0.7rem 0;
-}
-small {
-  color: #afa5bd;
-}
-.sign-out {
-  float: right;
-  margin: 1rem;
-  background: #d9ccff;
-}
-.loading-state {
-  margin: 3rem auto;
-  width: min(980px, calc(100% - 2rem));
-}
-@media (max-width: 640px) {
-  .workspace {
-    grid-template-columns: 1fr;
+
+/* Message actions stay reachable on touch; with a pointer they appear on hover. */
+@media (hover: hover) {
+  .message-bubble .message-actions > :not([aria-pressed]) {
+    opacity: 0;
+    transition: opacity 120ms;
+  }
+
+  .message-bubble:hover .message-actions > *,
+  .message-bubble:focus-within .message-actions > * {
+    opacity: 1;
   }
 }

@@ -632,6 +632,11 @@ where
             {
                 return Err(Error::ConflictingCommitUnit(tx.tx_id));
             }
+            let mut reconciled = existing.clone();
+            reconciled.reconcile_fate(fate.clone(), global_time, Some(durability))?;
+            if matches!(reconciled.fate, Fate::Rejected(_)) {
+                return self.ingest_transaction_and_versions(tx, versions, fate, global_time, durability).await;
+            }
             // Normalize aliases before establishing the batch's resident base.
             for schema in versions.iter().map(VersionRecord::schema_version).collect::<BTreeSet<_>>() {
                 self.ensure_schema_version_alias(schema).await?;
@@ -683,6 +688,7 @@ where
         durability: DurabilityTier,
         staged_global_times: &mut Vec<GlobalTime>,
         staged_content_versions: &mut Vec<VersionRow>,
+        staged_rejections: &mut Vec<RejectedTransaction>,
     ) -> Result<(), Error> {
         debug_assert!(
             global_time.is_none() || durability == DurabilityTier::Global,
@@ -708,7 +714,7 @@ where
             )
             .await?;
         }
-        let (staged_versions, fate, global_time) = self.stage_transaction_and_versions_with_current_indexes(
+        let (staged_versions, fate, global_time, rejected_payload) = self.stage_transaction_and_versions_with_current_indexes(
             batch,
             tx.clone(),
             versions,
@@ -720,6 +726,9 @@ where
             Some(staged_content_versions),
         )
         .await?;
+        if let Some(rejected) = rejected_payload {
+            staged_rejections.push(rejected);
+        }
         self.finalize_staged_transaction_ingest(
             batch,
             fate,
@@ -1074,9 +1083,6 @@ where
         if !skip_head_rebuild {
             self.rebuild_merge_heads_after_history_commit(&rebuild_rows)
                 .await?;
-        }
-        if let Some(tx_time) = loaded_tx_ids.iter().map(|tx_id| tx_id.time).max() {
-            self.persist_storage_consistency_marker_through(tx_time).await?;
         }
         #[cfg(test)]
         {

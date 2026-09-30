@@ -615,7 +615,7 @@ where
     }
 
     /// Close maintenance admission, terminalize open transactions and streams,
-    /// flush node-local state, write a clean-close marker, and close storage
+    /// flush node-local state and close storage
     /// without blocking the caller's executor.
     pub async fn close(&self) -> Result<(), Error> {
         if self.schema_view_is_fixed {

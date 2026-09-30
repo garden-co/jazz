@@ -6,7 +6,7 @@ const schema = {
     {
       name: s.string(),
       base_scenario_id: s.uuid().optional(),
-      status: s.enum(["open", "approved", "archived"]),
+      status: s.enum("open", "approved", "archived"),
     },
     {
       base_scenario: s.rel("scenarios", "base_scenario_id"),
