@@ -2126,7 +2126,7 @@ fn binding_descriptor_params_with_user_params(
     request: &LoweringContext<'_>,
     additional_user_params: impl IntoIterator<Item = (String, ColumnType)>,
 ) -> Result<Vec<(String, ColumnType)>, UnsupportedReason> {
-    let domain = parameter_domain_for_request(request)?;
+    let domain = request.parameter_domain()?;
     let mut user_params = request.input.binding.extra_user_params.clone();
     user_params.extend(domain.user_params.clone());
     for (name, ty) in additional_user_params {
@@ -2140,8 +2140,8 @@ fn binding_descriptor_params_with_user_params(
         .chain(
             domain
                 .claim_params
-                .into_iter()
-                .map(|(name, param)| (name, param.ty)),
+                .iter()
+                .map(|(name, param)| (name.clone(), param.ty.clone())),
         )
         .collect())
 }
@@ -2172,7 +2172,7 @@ fn lower_value_source(
     let descriptor = value_source_descriptor(columns);
     match mode {
         ValueSourceMode::Binding => {
-            let domain = parameter_domain_for_request(request)?;
+            let domain = request.parameter_domain()?;
             let params = binding_descriptor_params(request)?;
             for column in columns {
                 match &column.value {
@@ -2978,7 +2978,7 @@ fn lower_equality_param_filter_joins(
             residual.push(predicate.clone());
             continue;
         };
-        let domain = parameter_domain_for_request(request)?;
+        let domain = request.parameter_domain()?;
         let is_claim_param = domain.claim_params.contains_key(&join.param);
         let binding_descriptor = if is_claim_param {
             binding_source_descriptor_with_user_params(request, [])?
