@@ -30,6 +30,9 @@ const permissions = s.definePermissions(app, ({ policy }) => {
 
 let session, db;
 const subs = new Map();
+// Open exclusive transactions by harness key, so one can stay open across
+// commands while another client writes.
+const txs = new Map();
 const out = (msg) => process.stdout.write(`${JSON.stringify(msg)}\n`);
 
 function accountStore(name) {
@@ -166,6 +169,42 @@ const ops = {
       ms,
     );
     return { updates: state.updates, counts: [...counts], ms: Date.now() - started };
+  },
+  // Exclusive transactions, one command per step: begin, read or write,
+  // then commit. `commit` reports the outcome instead of failing on a
+  // rejection, so a harness check can expect either.
+  async txBegin({ tx }) {
+    txs.set(tx, db.beginExclusiveTransaction());
+    return null;
+  },
+  async txReadById({ tx, id }) {
+    return project_(await txs.get(tx).one(app.docs.where({ id })));
+  },
+  async txAllByLabel({ tx, label }) {
+    return (await txs.get(tx).all(app.docs.where({ label }))).map(project_);
+  },
+  async txInsert({ tx, values }) {
+    txs.get(tx).insert(app.docs, values);
+    return null;
+  },
+  async txUpdate({ tx, id, values }) {
+    txs.get(tx).update(app.docs, id, values);
+    return null;
+  },
+  async txUpsert({ tx, id, values }) {
+    txs.get(tx).upsert(app.docs, id, values);
+    return null;
+  },
+  async txCommit({ tx }) {
+    const transaction = txs.get(tx);
+    txs.delete(tx);
+    try {
+      await transaction.commit().wait();
+      return { outcome: "accepted" };
+    } catch (error) {
+      if (!error?.code) throw error;
+      return { outcome: "rejected", code: error.code };
+    }
   },
   async disconnect() {
     await db.disconnect();
