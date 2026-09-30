@@ -2815,6 +2815,8 @@ enum NotesTx {
     UpdateNote,
     /// Read every note, then update note 1.
     ReadAllThenUpdateNote,
+    /// Read the notes titled "one", then update note 1.
+    ReadTitledThenUpdateNote,
 }
 
 /// Which client sent the transaction.
@@ -2866,13 +2868,21 @@ fn notes_tx_fate(
                 .tx_write(open, "audit", row(0x71), title_cells("read one"), None)
                 .unwrap();
         }
-        NotesTx::UpdateNote | NotesTx::ReadAllThenUpdateNote => {
-            if matches!(read, NotesTx::ReadAllThenUpdateNote) {
-                let (shape, binding) = query(Query::from("notes"));
+        NotesTx::UpdateNote | NotesTx::ReadAllThenUpdateNote | NotesTx::ReadTitledThenUpdateNote => {
+            let read_first = match read {
+                NotesTx::ReadAllThenUpdateNote => Some((Query::from("notes"), 2)),
+                NotesTx::ReadTitledThenUpdateNote => Some((
+                    Query::from("notes").filter(eq(col("title"), lit(Value::String("one".into())))),
+                    1,
+                )),
+                _ => None,
+            };
+            if let Some((read_first, count)) = read_first {
+                let (shape, binding) = query(read_first);
                 let rows = client
                     .tx_query_for_identity(open, &shape, &binding, reader)
                     .unwrap();
-                assert_eq!(rows.len(), 2);
+                assert_eq!(rows.len(), count);
             }
             // An update reads its target first, as every client does.
             client.tx_read(open, "notes", row(1)).unwrap();
@@ -2923,6 +2933,16 @@ fn edit_note(note: RowUuid, title: &str) -> impl FnOnce(&mut NodeState, &mut Nod
             other,
             core,
             MergeableCommit::new("notes", note, 15).cells(title_cells(&title)),
+        );
+    }
+}
+
+fn delete_note(note: RowUuid) -> impl FnOnce(&mut NodeState, &mut NodeState) {
+    move |other, core| {
+        commit_mergeable_global(
+            other,
+            core,
+            MergeableCommit::new("notes", note, 15).deletion(DeletionEvent::Deleted),
         );
     }
 }
@@ -3452,4 +3472,22 @@ fn exclusive_reads_reject_a_union_of_relations() {
         BTreeMap::new(),
         "a union of relations over `todos`",
     );
+}
+
+/// garden-co/jazz#3694 stays closed for clients before alpha.58: a row they
+/// read by id that was revoked since conflicts, and so does a row that
+/// appeared in one of their queries, even beside an update whose target
+/// check the authority accounts for.
+#[test]
+fn pre_alpha58_reads_still_conflict_on_revocations_and_phantoms() {
+    let revoked = notes_tx_fate(Sender::PreAlpha58, NotesTx::ReadByIdThenLog, delete_note(row(1)));
+    assert_eq!(revoked, Fate::Rejected(RejectionReason::ExclusiveConflict));
+    let unchanged = notes_tx_fate(Sender::PreAlpha58, NotesTx::ReadTitledThenUpdateNote, |_, _| {});
+    assert_eq!(unchanged, Fate::Accepted);
+    let phantom = notes_tx_fate(
+        Sender::PreAlpha58,
+        NotesTx::ReadTitledThenUpdateNote,
+        edit_note(row(3), "one"),
+    );
+    assert_eq!(phantom, Fate::Rejected(RejectionReason::ExclusiveConflict));
 }
