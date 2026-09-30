@@ -2412,3 +2412,1059 @@ fn exclusive_point_read_and_commit_decode_no_payload_per_row_version() {
         "snapshot coverage must not decode a stored transaction per row version"
     );
 }
+
+fn watched_shape_for(title: &str) -> (ValidatedQuery, Binding) {
+    let shape = crate::query::Query::from("todos")
+        .filter(crate::query::eq(
+            crate::query::col("title"),
+            crate::query::lit(title),
+        ))
+        .validate(&schema())
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    (shape, binding)
+}
+
+/// garden-co/jazz#3694. A partial node's snapshot cut advances with any
+/// authority receipt, not only with receipts that delivered the rows an
+/// exclusive query later reads. A row the reader still holds may therefore be
+/// deleted at the authority before the claimed cut: rebuilding the predicate at
+/// that cut shows it absent both then and now, so only a proof of the row the
+/// reader actually saw can reject the commit.
+#[test]
+fn exclusive_query_conflicts_when_a_returned_row_was_deleted_before_the_claimed_cut() {
+    let (_client_dir, mut client) = open_node_with_uuid(node(1));
+    let (_other_dir, mut other) = open_node_with_uuid(node(2));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let (shape, binding) = watched_shape_for("invite");
+    register_shape_binding(&mut core, &shape, &binding);
+
+    let (_insert, unit) = other
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row(1), 10).cells(title_cells("invite")),
+        )
+        .unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit.clone())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    other.apply_sync_message_settled(fate.clone()).unwrap();
+    client.apply_sync_message_settled(unit).unwrap();
+    client.apply_sync_message_settled(fate).unwrap();
+
+    // The revocation reaches the authority but never this reader.
+    commit_mergeable_global(
+        &mut other,
+        &mut core,
+        MergeableCommit::new("todos", row(1), 12).deletion(DeletionEvent::Deleted),
+    );
+    // An unrelated receipt settles through the revocation's global time.
+    client.record_authoritative_settled_through(core.clock.committed_global_time);
+
+    let open = OpenTransactionId::new();
+    client.open_exclusive(open).unwrap();
+    assert_eq!(client.tx_query(open, &shape, &binding).unwrap().len(), 1);
+    client
+        .tx_write(open, "todos", row(2), title_cells("member"), None)
+        .unwrap();
+    let (_tx_id, unit) = client
+        .commit_exclusive_settled(open, AuthorSubject::SYSTEM, 13)
+        .unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let SyncMessage::FateUpdate { fate, .. } = fate else {
+        panic!("expected fate update");
+    };
+    assert_eq!(fate, Fate::Rejected(RejectionReason::ExclusiveConflict));
+}
+
+/// Whole-table reads validate by table currency after the claimed cut, so they
+/// need the same per-row proof as filtered queries (garden-co/jazz#3694).
+#[test]
+fn exclusive_table_read_conflicts_when_a_returned_row_was_deleted_before_the_claimed_cut() {
+    let (_client_dir, mut client) = open_node_with_uuid(node(1));
+    let (_other_dir, mut other) = open_node_with_uuid(node(2));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+
+    let (_insert, unit) = other
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row(1), 10).cells(title_cells("invite")),
+        )
+        .unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit.clone())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    other.apply_sync_message_settled(fate.clone()).unwrap();
+    client.apply_sync_message_settled(unit).unwrap();
+    client.apply_sync_message_settled(fate).unwrap();
+
+    commit_mergeable_global(
+        &mut other,
+        &mut core,
+        MergeableCommit::new("todos", row(1), 12).deletion(DeletionEvent::Deleted),
+    );
+    client.record_authoritative_settled_through(core.clock.committed_global_time);
+
+    let open = OpenTransactionId::new();
+    client.open_exclusive(open).unwrap();
+    assert_eq!(client.tx_current_rows(open, "todos").unwrap().len(), 1);
+    client
+        .tx_write(open, "todos", row(2), title_cells("member"), None)
+        .unwrap();
+    let (_tx_id, unit) = client
+        .commit_exclusive_settled(open, AuthorSubject::SYSTEM, 13)
+        .unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let SyncMessage::FateUpdate { fate, .. } = fate else {
+        panic!("expected fate update");
+    };
+    assert_eq!(fate, Fate::Rejected(RejectionReason::ExclusiveConflict));
+}
+
+/// Todos readable only while they have a member, plus a table any exclusive
+/// transaction can write.
+fn member_visible_todos_schema() -> JazzSchema {
+    build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_select(public_outer_exists(
+                        "members",
+                        "owner",
+                        "id",
+                        [],
+                    ))),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("members")
+                    .fk_column("owner", "todos")
+                    .column("user", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("audit")
+                    .column("title", PublicColumnType::Text)
+                    .policies(public_all_policies()),
+            ),
+    )
+}
+
+fn todo_member_cells(owner: RowUuid) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("owner".to_owned(), Value::Uuid(owner.0)),
+        ("user".to_owned(), Value::String("member".to_owned())),
+    ])
+}
+
+/// garden-co/jazz#3694: an exclusive read behind a membership read policy
+/// records the rows it returned, not the membership table. The authority
+/// re-runs the read under the same policy, so a membership change conflicts
+/// exactly when it changes what the reader sees.
+fn exclusive_policy_read_fate(
+    read_all_open: bool,
+    change: impl FnOnce(&mut NodeState, &mut NodeState),
+) -> Fate {
+    exclusive_policy_read_fate_with(
+        if read_all_open { PolicyRead::AllOpen } else { PolicyRead::Point },
+        change,
+    )
+}
+
+#[derive(Clone, Copy, Debug)]
+enum PolicyRead {
+    Point,
+    AllOpen,
+    JoinedFromAudit,
+}
+
+fn exclusive_policy_read_fate_with(
+    read: PolicyRead,
+    change: impl FnOnce(&mut NodeState, &mut NodeState),
+) -> Fate {
+    let schema = member_visible_todos_schema();
+    let (_client_dir, mut client) = open_node_with_schema(node(1), schema.clone());
+    let (_other_dir, mut other) = open_node_with_schema(node(2), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
+    let reader = user(0x51);
+    for (todo, title) in [(row(1), "visible"), (row(2), "hidden"), (row(3), "done")] {
+        commit_mergeable_global(
+            &mut client,
+            &mut core,
+            MergeableCommit::new("todos", todo, 10).cells(title_cells(title)),
+        );
+    }
+    commit_mergeable_global(
+        &mut client,
+        &mut core,
+        MergeableCommit::new("members", row(0x61), 11).cells(todo_member_cells(row(1))),
+    );
+    for (entry, title) in [(row(0x81), "visible"), (row(0x82), "hidden")] {
+        commit_mergeable_global(
+            &mut client,
+            &mut core,
+            MergeableCommit::new("audit", entry, 11).cells(title_cells(title)),
+        );
+    }
+    commit_mergeable_global(
+        &mut client,
+        &mut core,
+        MergeableCommit::new("members", row(0x63), 12).cells(todo_member_cells(row(3))),
+    );
+
+    let shape = match read {
+        PolicyRead::AllOpen => {
+            Query::from("todos").filter(ne(col("title"), lit(Value::String("done".to_owned()))))
+        }
+        PolicyRead::Point => Query::from("todos").filter(eq(col("id"), lit(Value::Uuid(row(1).0)))),
+        PolicyRead::JoinedFromAudit => Query::from("audit").join_via_column("todos", "title", "title", []),
+    }
+    .validate(&schema)
+    .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let open = OpenTransactionId::new();
+    client.open_exclusive_for_identity(open, reader).unwrap();
+    let rows = client
+        .tx_query_for_identity(open, &shape, &binding, reader)
+        .unwrap();
+    if !matches!(read, PolicyRead::JoinedFromAudit) {
+        assert_eq!(
+            rows.iter().map(CurrentRow::row_uuid).collect::<Vec<_>>(),
+            vec![row(1)]
+        );
+        assert_eq!(
+            client.open_tx(open).unwrap().row_reads.len(),
+            1,
+            "the membership table is not recorded"
+        );
+    }
+
+    change(&mut other, &mut core);
+    client
+        .tx_write(open, "audit", row(0x71), title_cells("redeemed"), None)
+        .unwrap();
+    let (_tx_id, unit) = client.commit_exclusive_settled(open, reader, 20).unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let SyncMessage::FateUpdate { fate, .. } = fate else {
+        panic!("expected fate update");
+    };
+    fate
+}
+
+#[test]
+fn exclusive_policy_read_conflicts_when_the_membership_is_revoked() {
+    let fate = exclusive_policy_read_fate(false, |other, core| {
+        commit_mergeable_global(
+            other,
+            core,
+            MergeableCommit::new("members", row(0x61), 15).deletion(DeletionEvent::Deleted),
+        );
+    });
+    assert_eq!(fate, Fate::Rejected(RejectionReason::ExclusiveConflict));
+}
+
+#[test]
+fn exclusive_policy_read_conflicts_when_a_grant_reveals_a_matching_row() {
+    let fate = exclusive_policy_read_fate(true, |other, core| {
+        commit_mergeable_global(
+            other,
+            core,
+            MergeableCommit::new("members", row(0x62), 15).cells(todo_member_cells(row(2))),
+        );
+    });
+    assert_eq!(fate, Fate::Rejected(RejectionReason::ExclusiveConflict));
+}
+
+#[test]
+fn exclusive_policy_read_ignores_membership_changes_it_cannot_see() {
+    for read_all_open in [false, true] {
+        let fate = exclusive_policy_read_fate(read_all_open, |other, core| {
+            // Another member of the visible todo, and a revoked membership of
+            // a todo neither read returns.
+            commit_mergeable_global(
+                other,
+                core,
+                MergeableCommit::new("members", row(0x64), 15).cells(todo_member_cells(row(1))),
+            );
+            commit_mergeable_global(
+                other,
+                core,
+                MergeableCommit::new("members", row(0x63), 16).deletion(DeletionEvent::Deleted),
+            );
+        });
+        assert_eq!(fate, Fate::Accepted, "read_all_open={read_all_open}");
+    }
+}
+
+/// Rows of a joined policy-protected table the reader cannot see never enter
+/// the read set, so an unchanged join commits, and the rows it can see are
+/// validated like any other read.
+#[test]
+fn exclusive_join_into_a_policy_protected_table_commits_while_unchanged() {
+    for read in [PolicyRead::Point, PolicyRead::AllOpen, PolicyRead::JoinedFromAudit] {
+        let fate = exclusive_policy_read_fate_with(read, |_, _| {});
+        assert_eq!(fate, Fate::Accepted, "{read:?}");
+    }
+}
+
+#[test]
+fn exclusive_join_into_a_policy_protected_table_conflicts_when_access_is_revoked() {
+    let fate = exclusive_policy_read_fate_with(PolicyRead::JoinedFromAudit, |other, core| {
+        commit_mergeable_global(
+            other,
+            core,
+            MergeableCommit::new("members", row(0x61), 15).deletion(DeletionEvent::Deleted),
+        );
+    });
+    assert_eq!(fate, Fate::Rejected(RejectionReason::ExclusiveConflict));
+}
+
+/// The read set of a point read behind a membership policy stays one row,
+/// however many memberships exist.
+#[test]
+fn exclusive_policy_read_set_does_not_grow_with_the_policy_table() {
+    let schema = member_visible_todos_schema();
+    let (_dir, mut node) = open_node_with_schema(node(1), schema.clone());
+    let reader = user(0x51);
+    node.commit_mergeable_settled(
+        MergeableCommit::new("todos", row(1), 10).cells(title_cells("visible")),
+    )
+    .unwrap();
+    for member in 0..500_u16 {
+        let mut bytes = [0x60; 16];
+        bytes[..2].copy_from_slice(&member.to_be_bytes());
+        node.commit_mergeable_settled(
+            MergeableCommit::new("members", RowUuid::from_bytes(bytes), 11 + u64::from(member))
+                .cells(todo_member_cells(row(1))),
+        )
+        .unwrap();
+    }
+    let shape = Query::from("todos")
+        .filter(eq(col("id"), lit(Value::Uuid(row(1).0))))
+        .validate(&schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let open = OpenTransactionId::new();
+    node.open_exclusive_for_identity(open, reader).unwrap();
+    assert_eq!(
+        node.tx_query_for_identity(open, &shape, &binding, reader)
+            .unwrap()
+            .len(),
+        1
+    );
+    let open_tx = node.open_tx(open).unwrap();
+    assert_eq!(open_tx.row_reads.len(), 1);
+    assert_eq!(open_tx.predicate_reads.len(), 1);
+}
+
+/// The authority validates exclusive reads as the transaction's permission
+/// subject, so that must be the identity the reads ran as: the identity bound
+/// at open. A commit under any other author is refused.
+#[test]
+fn exclusive_reads_and_their_validation_share_one_identity() {
+    let schema = member_visible_todos_schema();
+    let (_dir, mut node) = open_node_with_schema(node(1), schema);
+    let reader = user(0x51);
+    let open = OpenTransactionId::new();
+    node.open_exclusive_for_identity(open, reader).unwrap();
+    node.tx_write(open, "audit", row(0x71), title_cells("redeemed"), None)
+        .unwrap();
+    assert!(matches!(
+        node.commit_exclusive_settled(open, AuthorSubject::SYSTEM, 20),
+        Err(Error::OpenTransactionIdentityMismatch)
+    ));
+}
+
+
+/// Notes and an audit log, both readable by anyone: a read policy that
+/// depends on nothing but the row.
+fn open_notes_schema() -> JazzSchema {
+    build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("notes")
+                    .column("title", PublicColumnType::Text)
+                    .policies(public_all_policies()),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("audit")
+                    .column("title", PublicColumnType::Text)
+                    .policies(public_all_policies()),
+            ),
+    )
+}
+
+#[derive(Clone, Copy, Debug)]
+enum NotesTx {
+    /// Read note 1 by id, then log to the audit table.
+    ReadByIdThenLog,
+    /// Update note 1 without reading it first.
+    UpdateNote,
+    /// Read every note, then update note 1.
+    ReadAllThenUpdateNote,
+}
+
+/// Which client sent the transaction.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Sender {
+    Current,
+    /// A client before alpha.58: no row proofs for predicate reads, and each
+    /// update's read-policy check of its target recorded as a whole-table
+    /// read of the written table.
+    PreAlpha58,
+}
+
+/// The authority's fate for an exclusive transaction over two notes, after
+/// `change` commits elsewhere between the transaction's open and its commit.
+fn notes_tx_fate(
+    sender: Sender,
+    read: NotesTx,
+    change: impl FnOnce(&mut NodeState, &mut NodeState),
+) -> Fate {
+    let schema = open_notes_schema();
+    let (_client_dir, mut client) = open_node_with_schema(node(1), schema.clone());
+    let (_other_dir, mut other) = open_node_with_schema(node(2), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
+    let reader = user(0x51);
+    for (note, title) in [(row(1), "one"), (row(2), "two")] {
+        commit_mergeable_global(
+            &mut client,
+            &mut core,
+            MergeableCommit::new("notes", note, 10).cells(title_cells(title)),
+        );
+    }
+    let open = OpenTransactionId::new();
+    client.open_exclusive_for_identity(open, reader).unwrap();
+    let query = |query: Query| {
+        let shape = query.validate(&schema).unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        (shape, binding)
+    };
+    let mut updates = 0;
+    match read {
+        NotesTx::ReadByIdThenLog => {
+            let (shape, binding) =
+                query(Query::from("notes").filter(eq(col("id"), lit(Value::Uuid(row(1).0)))));
+            let rows = client
+                .tx_query_for_identity(open, &shape, &binding, reader)
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            client
+                .tx_write(open, "audit", row(0x71), title_cells("read one"), None)
+                .unwrap();
+        }
+        NotesTx::UpdateNote | NotesTx::ReadAllThenUpdateNote => {
+            let read_first = match read {
+                NotesTx::ReadAllThenUpdateNote => Some((Query::from("notes"), 2)),
+                _ => None,
+            };
+            if let Some((read_first, count)) = read_first {
+                let (shape, binding) = query(read_first);
+                let rows = client
+                    .tx_query_for_identity(open, &shape, &binding, reader)
+                    .unwrap();
+                assert_eq!(rows.len(), count);
+            }
+            // An update reads its target first, as every client does.
+            client.tx_read(open, "notes", row(1)).unwrap();
+            client
+                .tx_write(open, "notes", row(1), title_cells("edited"), None)
+                .unwrap();
+            updates += 1;
+        }
+    }
+    change(&mut other, &mut core);
+    let (_tx_id, unit) = client.commit_exclusive_settled(open, reader, 20).unwrap();
+    let SyncMessage::CommitUnit { mut tx, versions } = unit else {
+        panic!("expected commit unit");
+    };
+    if sender == Sender::PreAlpha58 {
+        // Only the update's own target read is a point read.
+        let targets = if updates > 0 { vec![row(1)] } else { vec![] };
+        tx.row_read_set
+            .as_mut()
+            .unwrap()
+            .retain(|read| targets.contains(&read.row_uuid));
+        let (shape, binding) = query(Query::from("notes"));
+        for _ in 0..updates {
+            tx.predicate_read_set.get_or_insert_default().push(PredicateRead {
+                table: "notes".to_owned(),
+                shape_id: shape.shape_id(),
+                shape: shape.query().clone(),
+                binding_id: binding.binding_id(),
+                binding_values: binding.values().clone(),
+            });
+        }
+    }
+    let [fate] = core
+        .ingest_commit_unit_settled(tx, versions, 20)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let SyncMessage::FateUpdate { fate, .. } = fate else {
+        panic!("expected fate update");
+    };
+    fate
+}
+
+fn edit_note(note: RowUuid, title: &str) -> impl FnOnce(&mut NodeState, &mut NodeState) {
+    let title = title.to_owned();
+    move |other, core| {
+        commit_mergeable_global(
+            other,
+            core,
+            MergeableCommit::new("notes", note, 15).cells(title_cells(&title)),
+        );
+    }
+}
+
+/// A read of one row by id proves the row it returned, so it commits while
+/// that row is unchanged. A client before alpha.58 proves nothing, so its
+/// read conflicts while the row still exists.
+#[test]
+fn a_read_by_id_commits_only_with_a_row_proof() {
+    let unchanged = notes_tx_fate(Sender::Current, NotesTx::ReadByIdThenLog, |_, _| {});
+    assert_eq!(unchanged, Fate::Accepted);
+    let other_row = notes_tx_fate(Sender::Current, NotesTx::ReadByIdThenLog, edit_note(row(2), "x"));
+    assert_eq!(other_row, Fate::Accepted);
+    let read_row = notes_tx_fate(Sender::Current, NotesTx::ReadByIdThenLog, edit_note(row(1), "x"));
+    assert_eq!(read_row, Fate::Rejected(RejectionReason::ExclusiveConflict));
+    let legacy = notes_tx_fate(Sender::PreAlpha58, NotesTx::ReadByIdThenLog, |_, _| {});
+    assert_eq!(legacy, Fate::Rejected(RejectionReason::ExclusiveConflict));
+}
+
+/// An unproved read is checked only against rows that exist at validation,
+/// so a read by a client before alpha.58 of a row deleted since commits.
+/// Documented limitation: exclusive conflicts rely on writers reporting their
+/// reads and are not a security boundary.
+#[test]
+fn a_pre_alpha58_read_of_a_row_deleted_since_commits() {
+    let delete_note = |other: &mut NodeState, core: &mut NodeState| {
+        commit_mergeable_global(
+            other,
+            core,
+            MergeableCommit::new("notes", row(1), 15).deletion(DeletionEvent::Deleted),
+        );
+    };
+    let legacy = notes_tx_fate(Sender::PreAlpha58, NotesTx::ReadByIdThenLog, delete_note);
+    assert_eq!(legacy, Fate::Accepted);
+    let current = notes_tx_fate(Sender::Current, NotesTx::ReadByIdThenLog, delete_note);
+    assert_eq!(current, Fate::Rejected(RejectionReason::ExclusiveConflict));
+}
+
+/// A client before alpha.58 records an update's read-policy check of its
+/// target as an unproved read of the whole table, so the update conflicts
+/// while the table holds any other row.
+#[test]
+fn a_pre_alpha58_update_conflicts_beside_other_rows() {
+    let current = notes_tx_fate(Sender::Current, NotesTx::UpdateNote, |_, _| {});
+    assert_eq!(current, Fate::Accepted);
+    let legacy = notes_tx_fate(Sender::PreAlpha58, NotesTx::UpdateNote, |_, _| {});
+    assert_eq!(legacy, Fate::Rejected(RejectionReason::ExclusiveConflict));
+}
+
+/// A proved whole-table read beside an update commits while the table is
+/// unchanged and sees a row that appeared since.
+#[test]
+fn a_proved_whole_table_read_beside_an_update_sees_new_rows() {
+    let fate = notes_tx_fate(Sender::Current, NotesTx::ReadAllThenUpdateNote, |_, _| {});
+    assert_eq!(fate, Fate::Accepted);
+    let fate = notes_tx_fate(
+        Sender::Current,
+        NotesTx::ReadAllThenUpdateNote,
+        edit_note(row(3), "new"),
+    );
+    assert_eq!(fate, Fate::Rejected(RejectionReason::ExclusiveConflict));
+}
+
+/// Orgs own projects, projects own todos, todos own comments and comments own
+/// reactions, all readable by anyone.
+fn narrowing_hierarchy_schema() -> JazzSchema {
+    build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("orgs")
+                    .column("name", PublicColumnType::Text)
+                    .policies(public_all_policies()),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("projects")
+                    .column("name", PublicColumnType::Text)
+                    .fk_column("org", "orgs")
+                    .policies(public_all_policies()),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .fk_column("project", "projects")
+                    .array_fk_column("assignees", "people")
+                    .policies(public_all_policies()),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("people")
+                    .column("name", PublicColumnType::Text)
+                    .policies(public_all_policies()),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("comments")
+                    .column("body", PublicColumnType::Text)
+                    .fk_column("todo", "todos")
+                    .policies(public_all_policies()),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("reactions")
+                    .column("emoji", PublicColumnType::Text)
+                    .fk_column("comment", "comments")
+                    .policies(public_all_policies()),
+            ),
+    )
+}
+
+/// The join from a child row to the parent rows `on` identifies in `table`.
+fn narrowing_reverse_join(
+    table: &str,
+    on: &str,
+    child: &str,
+    filters: Vec<crate::query::Predicate>,
+    up: Option<crate::query::JoinVia>,
+) -> crate::query::JoinVia {
+    crate::query::JoinVia {
+        table: table.to_owned(),
+        on_column: on.to_owned(),
+        target: if on == "id" {
+            crate::query::JoinTarget::RowId
+        } else {
+            crate::query::JoinTarget::Column
+        },
+        source_column: Some(child.to_owned()),
+        source_lookup: None,
+        correlated_filters: Vec::new(),
+        filters,
+        nested_joins: up.into_iter().collect(),
+    }
+}
+
+fn narrowing_source(table: &str, path: &[&str]) -> crate::node::query_engine::SourceId {
+    use crate::node::query_engine::{SourcePath, SourceRole};
+    let components = path
+        .iter()
+        .map(|component| match component.split_once('=') {
+            Some(("child", name)) => SourceRole::CorrelatedChild(name.to_owned()),
+            Some(("alias", name)) => SourceRole::Alias(name.to_owned()),
+            _ => SourceRole::Root,
+        })
+        .collect();
+    crate::node::query_engine::SourceId {
+        table: table.to_owned(),
+        path: SourcePath { components },
+    }
+}
+
+/// Assert `query`'s narrowed reads are exactly `expected`, source by source.
+fn assert_narrowed_reads(
+    query: crate::query::Query,
+    expected: Vec<(crate::node::query_engine::SourceId, crate::query::Query)>,
+) {
+    let schema = narrowing_hierarchy_schema();
+    let (_dir, node) = open_node_with_schema(node(1), schema.clone());
+    let shape = query.validate(&schema).unwrap();
+    let values = if shape.params().contains_key("title") {
+        BTreeMap::from([("title".to_owned(), Value::String("a".to_owned()))])
+    } else {
+        BTreeMap::new()
+    };
+    let binding = shape.bind(values).unwrap();
+    let sources = node
+        .exclusive_source_reads(&shape, &binding, false)
+        .unwrap();
+    // Implicit root references are sync payload and record no read.
+    assert!(sources.payload.iter().all(|source| matches!(
+        source.path.components.as_slice(),
+        [
+            crate::node::query_engine::SourceRole::Root,
+            crate::node::query_engine::SourceRole::Alias(alias),
+        ] if alias.starts_with("reference:")
+    )));
+    let reads = sources.reads;
+    assert_eq!(
+        reads.keys().cloned().collect::<Vec<_>>(),
+        expected
+            .iter()
+            .map(|(source, _)| source.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>(),
+    );
+    for (source, narrowed) in expected {
+        assert_eq!(
+            reads[&source].shape.query(),
+            narrowed.validate(&schema).unwrap().query(),
+            "narrowed read of {source:?}"
+        );
+        assert!(reads[&source].shape.params().is_empty());
+    }
+}
+
+fn narrowing_title_is_a() -> crate::query::Predicate {
+    crate::query::eq(crate::query::col("title"), crate::query::lit("a"))
+}
+
+fn narrowing_body_is_hi() -> crate::query::Predicate {
+    crate::query::eq(crate::query::col("body"), crate::query::lit("hi"))
+}
+
+fn narrowing_todos_titled() -> crate::query::Query {
+    crate::query::Query::from("todos").filter(crate::query::eq(
+        crate::query::col("title"),
+        crate::query::param("title"),
+    ))
+}
+
+/// garden-co/jazz#3694: each source a join chain reads is narrowed to the
+/// rows correlated with its parent under the parent's filters, up to the
+/// root's filters with their parameters bound. The root's implicit reference
+/// is narrowed the same way.
+///
+/// White-box: soundness rests on the exact shape of each narrowed read, which
+/// no public API exposes. The `exclusive_snapshot_coverage` integration tests
+/// cover what a client observes (unrelated writes commit, related ones
+/// conflict).
+#[test]
+fn narrowed_reads_follow_a_join_chain_to_the_root() {
+    let mut query = narrowing_todos_titled();
+    query.joins.push(crate::query::JoinVia {
+        table: "comments".to_owned(),
+        on_column: "todo".to_owned(),
+        target: crate::query::JoinTarget::Column,
+        source_column: None,
+        source_lookup: None,
+        correlated_filters: Vec::new(),
+        filters: vec![narrowing_body_is_hi()],
+        nested_joins: vec![crate::query::JoinVia {
+            table: "reactions".to_owned(),
+            on_column: "comment".to_owned(),
+            target: crate::query::JoinTarget::Column,
+            source_column: None,
+            source_lookup: None,
+            correlated_filters: Vec::new(),
+            filters: Vec::new(),
+            nested_joins: Vec::new(),
+        }],
+    });
+    let to_todos =
+        narrowing_reverse_join("todos", "id", "todo", vec![narrowing_title_is_a()], None);
+    let mut comments = crate::query::Query::from("comments").filter(narrowing_body_is_hi());
+    comments.joins.push(to_todos.clone());
+    let mut reactions = crate::query::Query::from("reactions");
+    reactions.joins.push(narrowing_reverse_join(
+        "comments",
+        "id",
+        "comment",
+        vec![narrowing_body_is_hi()],
+        Some(to_todos),
+    ));
+    assert_narrowed_reads(
+        query,
+        vec![
+            (
+                narrowing_source("comments", &["alias=join_via:0"]),
+                comments,
+            ),
+            (
+                narrowing_source("reactions", &["alias=join_via:0:nested:0"]),
+                reactions,
+            ),
+        ],
+    );
+}
+
+/// Each segment of an include path is narrowed to the rows the previous
+/// segment references.
+#[test]
+fn narrowed_reads_follow_an_include_path_to_the_root() {
+    let to_todos =
+        narrowing_reverse_join("todos", "project", "id", vec![narrowing_title_is_a()], None);
+    let mut projects = crate::query::Query::from("projects");
+    projects.joins.push(to_todos.clone());
+    let mut orgs = crate::query::Query::from("orgs");
+    orgs.joins.push(narrowing_reverse_join(
+        "projects",
+        "org",
+        "id",
+        Vec::new(),
+        Some(to_todos),
+    ));
+    assert_narrowed_reads(
+        narrowing_todos_titled().include("project.org"),
+        vec![
+            (
+                narrowing_source("projects", &["root", "alias=include:0:0"]),
+                projects,
+            ),
+            (
+                narrowing_source("orgs", &["root", "alias=include:0:1"]),
+                orgs,
+            ),
+        ],
+    );
+}
+
+/// Correlated arrays, nested ones included, are narrowed to the rows
+/// correlated with their owner rows under the owners' filters.
+#[test]
+fn narrowed_reads_follow_nested_arrays_to_the_root() {
+    let query = narrowing_todos_titled().array_subquery(
+        ArraySubquery::new("comments", "comments", "todo", "id")
+            .filter(narrowing_body_is_hi())
+            .nested(ArraySubquery::new(
+                "reactions",
+                "reactions",
+                "comment",
+                "id",
+            )),
+    );
+    let to_todos =
+        narrowing_reverse_join("todos", "id", "todo", vec![narrowing_title_is_a()], None);
+    let mut comments = crate::query::Query::from("comments").filter(narrowing_body_is_hi());
+    comments.joins.push(to_todos.clone());
+    let mut reactions = crate::query::Query::from("reactions");
+    reactions.joins.push(narrowing_reverse_join(
+        "comments",
+        "id",
+        "comment",
+        vec![narrowing_body_is_hi()],
+        Some(to_todos),
+    ));
+    assert_narrowed_reads(
+        query,
+        vec![
+            (
+                narrowing_source("comments", &["root", "child=0:comments"]),
+                comments,
+            ),
+            (
+                narrowing_source(
+                    "reactions",
+                    &["root", "child=0:comments", "child=0.0:reactions"],
+                ),
+                reactions,
+            ),
+        ],
+    );
+}
+
+/// A relation through an array of references correlates by membership,
+/// which an equality join cannot express: its narrowed read requires at
+/// least one parent row whose array holds it.
+#[test]
+fn narrowed_reads_follow_a_reference_array_by_membership() {
+    let query = crate::query::Query::from("todos")
+        .filter(narrowing_title_is_a())
+        .array_subquery(crate::query::ArraySubquery::new(
+            "assignees",
+            "people",
+            "id",
+            "assignees",
+        ));
+    let mut to_todos = crate::query::ArraySubquery::new("narrowed_parent", "todos", "assignees", "id");
+    to_todos.filters = vec![narrowing_title_is_a()];
+    to_todos.requirement = crate::query::ArraySubqueryRequirement::AtLeastOne;
+    let people = crate::query::Query::from("people").array_subquery(to_todos);
+    assert_narrowed_reads(
+        query,
+        vec![(
+            narrowing_source("people", &["root", "child=0:assignees"]),
+            people,
+        )],
+    );
+}
+
+/// Assert an exclusive read of `query` fails before reading anything, naming
+/// its read pattern.
+fn assert_exclusive_read_unsupported(
+    query: crate::query::Query,
+    values: BTreeMap<String, Value>,
+    pattern: &str,
+) {
+    let schema = narrowing_hierarchy_schema();
+    let (_dir, node) = open_node_with_schema(node(1), schema.clone());
+    let shape = query.validate(&schema).unwrap();
+    let binding = shape.bind(values).unwrap();
+    let Err(error) = node.exclusive_source_reads(&shape, &binding, false) else {
+        panic!("{pattern} has no narrowed reads");
+    };
+    assert_eq!(
+        error.to_string(),
+        format!("Reading {pattern} is not supported in exclusive transactions yet")
+    );
+}
+
+/// A flat join routes its filters per source, so its root rows are not
+/// constrained by the root's own filters alone: it narrows nothing.
+#[test]
+fn exclusive_reads_reject_a_flat_join() {
+    assert_exclusive_read_unsupported(
+        crate::query::Query::from("todos").flat_join("comments", "todos._id", "comments.todo"),
+        BTreeMap::new(),
+        "a flat join of `todos` with `comments`",
+    );
+}
+
+/// A lookup join correlates through a third table (projects sharing the
+/// org of a todo's project), which a reverse join cannot express.
+#[test]
+fn exclusive_reads_reject_a_lookup_join() {
+    let mut query = narrowing_todos_titled();
+    query.joins.push(crate::query::JoinVia {
+        table: "projects".to_owned(),
+        on_column: "org".to_owned(),
+        target: crate::query::JoinTarget::Column,
+        source_column: Some("org".to_owned()),
+        source_lookup: Some(crate::query::JoinSourceLookup {
+            table: "projects".to_owned(),
+            row_id_source_column: "project".to_owned(),
+            value_column: "org".to_owned(),
+        }),
+        correlated_filters: Vec::new(),
+        filters: Vec::new(),
+        nested_joins: Vec::new(),
+    });
+    assert_exclusive_read_unsupported(
+        query,
+        BTreeMap::from([("title".to_owned(), Value::String("a".to_owned()))]),
+        "`projects` through a lookup join from `todos`",
+    );
+}
+
+/// A membership hop has no equality to carry extra correlated keys on.
+#[test]
+fn exclusive_reads_reject_a_reference_array_join_with_extra_keys() {
+    let mut query = crate::query::Query::from("people");
+    query.joins.push(crate::query::JoinVia {
+        table: "todos".to_owned(),
+        on_column: "assignees".to_owned(),
+        target: crate::query::JoinTarget::Column,
+        source_column: Some("id".to_owned()),
+        source_lookup: None,
+        correlated_filters: vec![crate::query::JoinCorrelation {
+            join_column: "title".to_owned(),
+            source_column: "name".to_owned(),
+        }],
+        filters: Vec::new(),
+        nested_joins: Vec::new(),
+    });
+    assert_exclusive_read_unsupported(
+        query,
+        BTreeMap::new(),
+        "`todos` through a reference array together with additional join keys",
+    );
+}
+
+/// Inheriting access evaluates the parent's policy, which is not a
+/// correlation the narrowed read can carry.
+#[test]
+fn exclusive_reads_reject_inherited_access() {
+    let mut query = crate::query::Query::from("todos");
+    query.inherits.push(crate::query::InheritsVia {
+        parent_column: "project".to_owned(),
+        operation: crate::query::InheritsOperation::Select,
+        max_depth: None,
+    });
+    assert_exclusive_read_unsupported(
+        query,
+        BTreeMap::new(),
+        "`todos` inheriting read access from `projects`",
+    );
+}
+
+/// Policy branches are disjunctive, so the root rows are not constrained by
+/// the root's own filters alone.
+#[test]
+fn exclusive_reads_reject_policy_branches() {
+    let mut query = crate::query::Query::from("todos");
+    query.policy_branches.push(crate::query::PolicyBranch {
+        filters: vec![narrowing_title_is_a()],
+        joins: vec![narrowing_reverse_join(
+            "comments",
+            "todo",
+            "id",
+            Vec::new(),
+            None,
+        )],
+        reachable: Vec::new(),
+        inherits: Vec::new(),
+    });
+    assert_exclusive_read_unsupported(
+        query,
+        BTreeMap::new(),
+        "`todos` through policy branches",
+    );
+}
+
+/// A union's rows come from several arms, so they are not constrained by
+/// the root's own filters alone.
+#[test]
+fn exclusive_reads_reject_a_union_of_relations() {
+    use crate::query::{
+        RelationColumnRef, RelationExpr, RelationJoinCondition, RelationJoinKind,
+        RelationProjectColumn, RelationProjectExpr, RelationQuery, RelationUnionArm,
+    };
+    let column = |scope: &str, column: &str| RelationColumnRef {
+        scope: Some(scope.to_owned()),
+        column: column.to_owned(),
+    };
+    let arm = |label: &str| RelationUnionArm {
+        label: label.to_owned(),
+        input: RelationExpr::Project {
+            input: Box::new(RelationExpr::Join {
+                left: Box::new(RelationExpr::TableScan {
+                    table: "todos".to_owned(),
+                    alias: None,
+                }),
+                right: Box::new(RelationExpr::TableScan {
+                    table: "comments".to_owned(),
+                    alias: Some("__hop_0".to_owned()),
+                }),
+                on: vec![RelationJoinCondition {
+                    left: column("todos", "id"),
+                    right: column("__hop_0", "todo"),
+                }],
+                join_kind: RelationJoinKind::Inner,
+            }),
+            columns: vec![
+                RelationProjectColumn {
+                    alias: "id".to_owned(),
+                    expr: RelationProjectExpr::Column(column("todos", "id")),
+                },
+                RelationProjectColumn {
+                    alias: "title".to_owned(),
+                    expr: RelationProjectExpr::Column(column("todos", "title")),
+                },
+            ],
+        },
+    };
+    let query = crate::query::relation_query_to_query(&RelationQuery {
+        rel: RelationExpr::Union {
+            inputs: vec![arm("first"), arm("second")],
+        },
+    })
+    .unwrap();
+    assert_exclusive_read_unsupported(
+        query,
+        BTreeMap::new(),
+        "a union of relations over `todos`",
+    );
+}

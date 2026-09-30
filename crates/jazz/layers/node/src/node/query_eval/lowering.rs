@@ -935,6 +935,7 @@ where
             bounded_deletion_register,
             count_access_path_metrics,
             current_projection_targets: BTreeMap::new(),
+            policy_subplan: matches!(request.policy, PolicyContext::AuthorizationSubplan { .. }),
         };
         let node_uuid = resolver.node.node_uuid;
         let node_alias = resolver.node.self_node_alias;
@@ -1008,6 +1009,7 @@ where
                 bounded_deletion_register: None,
                 count_access_path_metrics: true,
                 current_projection_targets: BTreeMap::new(),
+                policy_subplan: false,
             };
             let mut dependencies = Vec::new();
             let mut footprint = PolicyDependencyFootprint::default();
