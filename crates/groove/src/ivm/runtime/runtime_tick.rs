@@ -124,6 +124,10 @@ pub(super) struct IncrementalEvaluation<'a> {
     /// Affected shared terminals whose route barriers await this tick's
     /// deltas (#3288). Taken once the first frame completes.
     routed_terminals: Vec<NodeId>,
+    /// Completed nodes whose state this evaluation already wrote back to the
+    /// runtime while parked (#3815). A later evaluation may since have
+    /// advanced that live state, so the final install must skip them.
+    early_installed: HashSet<NodeId>,
 }
 
 #[derive(Clone)]
@@ -225,6 +229,7 @@ impl PendingIncrementalState {
     /// installed; incremental evaluations can release nodes as they complete.
     fn release_temporal_successors(
         &mut self,
+        runtime: &IvmRuntime,
         evaluation_id: u64,
         nodes: impl IntoIterator<Item = NodeId>,
     ) {
@@ -241,7 +246,7 @@ impl PendingIncrementalState {
             if let Some(successor) = successor
                 && let Some(later) = self.evaluations.get_mut(&successor)
             {
-                later.work_queue_mut().temporal_ready(node);
+                later.temporal_ready(runtime, node);
             }
         }
     }
@@ -281,6 +286,19 @@ impl PendingEvaluation {
 
     fn has_resident_continuation(&self) -> bool {
         self.work_queue().has_resident_continuation()
+    }
+
+    /// Release this evaluation's temporal wait on `node`. The predecessor has
+    /// written its state for `node` back to `runtime` (or failed without
+    /// changing it), so an incremental evaluation first replaces the copy it
+    /// staged when it began, which predates that predecessor (#3815).
+    fn temporal_ready(&mut self, runtime: &IvmRuntime, node: NodeId) {
+        if let Self::Incremental(evaluation) = self
+            && evaluation.work_queue.is_temporally_waiting(node)
+        {
+            evaluation.restage_released_node(runtime, node);
+        }
+        self.work_queue_mut().temporal_ready(node);
     }
 }
 
@@ -728,6 +746,13 @@ impl EvaluationWorkQueue {
         }
     }
 
+    fn is_temporally_waiting(&self, node: NodeId) -> bool {
+        self.layout
+            .slots
+            .get(&node)
+            .is_some_and(|&slot| self.temporal_waiting[slot] > 0)
+    }
+
     fn temporal_ready(&mut self, node: NodeId) {
         let Some(&slot) = self.layout.slots.get(&node) else {
             return;
@@ -808,6 +833,9 @@ impl<'a> IncrementalEvaluation<'a> {
     ) -> Result<(), IvmRuntimeError> {
         let closure = runtime.graph.downstream_through_routes(touched);
         self.stage_newly_relevant_state(runtime, &closure)?;
+        // This frame evaluates the closure again, so the final install owns
+        // those nodes' state rather than an earlier write-back.
+        self.early_installed.retain(|node| !closure.contains(node));
         let mut roots = self.work_queue.layout.roots.clone();
         for node in &closure {
             let mut meta = self
@@ -1014,6 +1042,115 @@ impl<'a> IncrementalEvaluation<'a> {
             .retain(|node, _| !nodes.contains(node));
     }
 
+    /// Write the state of completed `nodes` back to `runtime` while the rest
+    /// of this evaluation stays parked (#3815). A later evaluation then sees
+    /// these nodes as of this one, as it would had this evaluation installed.
+    ///
+    /// The staged copies stay in place: this evaluation's own incomplete
+    /// consumers and its pending publication still read their uncommitted
+    /// transitions. The final install skips these nodes.
+    fn install_completed_nodes(
+        &mut self,
+        runtime: &mut IvmRuntime,
+        nodes: impl IntoIterator<Item = NodeId>,
+    ) {
+        if self.discarded {
+            return;
+        }
+        let mut installed = HashSet::default();
+        for node in nodes {
+            if !self.early_installed.insert(node) {
+                continue;
+            }
+            installed.insert(node);
+            let key = OperatorStateKey {
+                scope: ScopeId::root(),
+                node,
+            };
+            if let Some(state) = self.operator_states.get(&key) {
+                let mut state = state.clone();
+                commit_operator_state(&mut state);
+                runtime.operator_states.insert(key, state);
+            }
+            if let Some(keys) = self.arrangement_keys_by_input.get(&node) {
+                let mut live_keys = HashSet::default();
+                for key in keys.iter().filter(|key| key.scope == ScopeId::root()) {
+                    if let Some(state) = self.arrangement_states.get(key) {
+                        let mut state = state.clone();
+                        state.value_mut().commit_overlay();
+                        runtime.arrangement_states.insert(key.clone(), state);
+                        live_keys.insert(key.clone());
+                    }
+                }
+                if !live_keys.is_empty() {
+                    runtime
+                        .arrangement_keys_by_input
+                        .entry(node)
+                        .or_default()
+                        .extend(live_keys);
+                }
+            }
+        }
+        if installed.is_empty() {
+            return;
+        }
+        let mut node_meta = installed
+            .iter()
+            .filter_map(|node| self.node_meta.get(node).map(|meta| (*node, meta.clone())))
+            .collect::<HashMap<_, _>>();
+        carry_live_node_lifecycle(&mut node_meta, runtime, &installed);
+        runtime.node_meta.extend(node_meta);
+        // Written-back arrangements are stamped at this evaluation's tick. A
+        // later evaluation must begin at a later tick, or it would take them
+        // for its own already-applied input.
+        runtime.current_tick = runtime.current_tick.max(self.current_tick);
+    }
+
+    /// Replace the state staged for `node` with the live runtime's, once the
+    /// predecessor this evaluation waited on has written it back (#3815).
+    /// This evaluation has not evaluated `node` yet, so nothing it staged for
+    /// the node is its own work, except the input generation it bumped.
+    fn restage_released_node(&mut self, runtime: &IvmRuntime, node: NodeId) {
+        let key = OperatorStateKey {
+            scope: ScopeId::root(),
+            node,
+        };
+        match runtime.operator_states.get(&key) {
+            Some(state) => {
+                self.operator_states.insert(key, state.clone());
+            }
+            None => {
+                self.operator_states.remove(&key);
+            }
+        }
+        if let Some(keys) = self.arrangement_keys_by_input.remove(&node) {
+            for key in keys {
+                self.arrangement_states.remove(&key);
+            }
+        }
+        for key in runtime
+            .arrangement_keys_by_input
+            .get(&node)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(state) = runtime.arrangement_states.get(key) {
+                self.arrangement_states.insert(key.clone(), state.clone());
+                self.arrangement_keys_by_input
+                    .entry(node)
+                    .or_default()
+                    .insert(key.clone());
+            }
+        }
+        carry_live_node_lifecycle(&mut self.node_meta, runtime, &HashSet::from_iter([node]));
+        self.eval_memo.retain(|key, _| key.node != node);
+        self.eval_memo_bytes = self
+            .eval_memo
+            .values()
+            .map(|entry| entry.payload_bytes)
+            .sum();
+    }
+
     fn install(&mut self, runtime: &mut IvmRuntime) {
         if self.discarded {
             return;
@@ -1029,26 +1166,24 @@ impl<'a> IncrementalEvaluation<'a> {
         // Drop the committed entries before folding staged COW state. This
         // makes recursive closures and arrangement bases uniquely owned while
         // leaving unrelated graph state untouched.
+        // Nodes written back while this evaluation was parked may since have
+        // been advanced by a later evaluation. Their staged copies predate
+        // that, so installing them again would lose its changes (#3815).
+        let early_installed = std::mem::take(&mut self.early_installed);
+        if !early_installed.is_empty() {
+            self.operator_states
+                .retain(|key, _| !early_installed.contains(&key.node));
+            self.arrangement_states
+                .retain(|key, _| !early_installed.contains(&key.input));
+            self.arrangement_keys_by_input
+                .retain(|node, _| !early_installed.contains(node));
+            self.node_meta
+                .retain(|node, _| !early_installed.contains(node));
+        }
+        self.early_installed = early_installed;
         for (key, state) in &mut self.operator_states {
             runtime.operator_states.remove(key);
-            if let OperatorState::Recursive(recursive) = state {
-                recursive.value_mut().commit_staged_positive();
-            }
-            if let OperatorState::TopBy(top_by) = state {
-                top_by.value_mut().commit_overlays();
-            }
-            if let OperatorState::ArgBy(arg_by) = state {
-                arg_by.value_mut().commit_overlay();
-            }
-            if let OperatorState::SemiJoin(semi_join) = state {
-                semi_join.commit_published_overlay();
-            }
-            if let OperatorState::AntiJoin(anti_join) = state {
-                anti_join.commit_published_overlay();
-            }
-            if let OperatorState::CollectBy(collect_by) = state {
-                collect_by.groups.commit_overlay();
-            }
+            commit_operator_state(state);
         }
         runtime
             .operator_states
@@ -1534,8 +1669,17 @@ impl<'a> IncrementalEvaluation<'a> {
         for subscription_id in dropped_subscriptions {
             runtime.unsubscribe(subscription_id);
         }
+        // A later evaluation may already have advanced a written-back node.
         debug_assert!(
-            runtime.affected_recursive_nodes_are_current(&self.affected_nodes, self.current_tick)
+            runtime.affected_recursive_nodes_are_current(
+                &self
+                    .affected_nodes
+                    .iter()
+                    .filter(|node| !self.early_installed.contains(*node))
+                    .copied()
+                    .collect(),
+                self.current_tick,
+            )
         );
         runtime.evict_eval_memo();
         if let Some(pending) = &self.pending_resident_publication
@@ -2388,6 +2532,12 @@ impl IvmRuntime {
             Poll::Pending => {
                 evaluation.work_queue.discard_unregistered_completions();
                 evaluation.install_input_frontiers(self);
+                // Nothing waits on a node this evaluation completed before it
+                // parked, so the next write evaluates that node from the live
+                // runtime. Write the finished state back now, or that write
+                // would rerun its transitions from pre-park state (#3815).
+                let completed = evaluation.work_queue.complete_nodes().collect::<Vec<_>>();
+                evaluation.install_completed_nodes(self, completed);
                 let mut pending = self.pending_incremental.0.borrow_mut();
                 let evaluation_id = pending.next_id;
                 pending.next_id = pending.next_id.saturating_add(1);
@@ -2545,9 +2695,12 @@ impl IvmRuntime {
             // a later incremental evaluation would run against the old live
             // runtime, then lose its changes when hydration installs. Treat
             // the whole session as one temporal barrier instead.
-            if matches!(evaluation, PendingEvaluation::Incremental(_)) {
-                let completed = evaluation.work_queue_mut().drain_completed_events();
-                state.release_temporal_successors(evaluation_id, completed);
+            if let PendingEvaluation::Incremental(incremental) = &mut evaluation {
+                let completed = incremental.work_queue.drain_completed_events();
+                // Successors resume from the live runtime, so a node's state
+                // must be there before its waiters are released (#3815).
+                incremental.install_completed_nodes(self, completed.iter().copied());
+                state.release_temporal_successors(self, evaluation_id, completed);
             }
             match progress {
                 Poll::Ready(Ok(())) => {
@@ -2565,7 +2718,7 @@ impl IvmRuntime {
                         if hydration.lifetime == SubscriptionLifetime::Retained {
                             hydration.session.install(self);
                         }
-                        state.release_temporal_successors(evaluation_id, completed);
+                        state.release_temporal_successors(self, evaluation_id, completed);
                         self.record_hydration_memo_metrics(&hydration.metrics);
                         self.evict_eval_memo();
                         match snapshot {
@@ -2645,7 +2798,7 @@ impl IvmRuntime {
                         if let Some(successor) = successor
                             && let Some(later) = state.evaluations.get_mut(&successor)
                         {
-                            later.work_queue_mut().temporal_ready(node);
+                            later.temporal_ready(self, node);
                         }
                     }
                 }
@@ -2845,7 +2998,7 @@ impl IvmRuntime {
                     && let Some(successor) = successor
                     && let Some(later) = state.evaluations.get_mut(&successor)
                 {
-                    later.work_queue_mut().temporal_ready(node);
+                    later.temporal_ready(self, node);
                 }
             }
         }
@@ -3137,6 +3290,7 @@ impl IvmRuntime {
             persist_flush: None,
             discarded: false,
             routed_terminals: activation.routed.clone(),
+            early_installed: HashSet::default(),
         })
     }
 
@@ -3596,6 +3750,21 @@ fn bump_input_frontiers_staged(
 /// unsubscribe while the evaluation is suspended, so keep their live value.
 /// A node the graph no longer has was collected meanwhile; drop its snapshot
 /// entry rather than resurrect metadata for a missing node.
+/// Fold an operator state's uncommitted overlays into its base, as the state
+/// is written to the live runtime.
+fn commit_operator_state(state: &mut OperatorState) {
+    match state {
+        OperatorState::Recursive(recursive) => recursive.value_mut().commit_staged_positive(),
+        OperatorState::TopBy(top_by) => top_by.value_mut().commit_overlays(),
+        OperatorState::ArgBy(arg_by) => arg_by.value_mut().commit_overlay(),
+        OperatorState::SemiJoin(semi_join) => semi_join.commit_published_overlay(),
+        OperatorState::AntiJoin(anti_join) => anti_join.commit_published_overlay(),
+        OperatorState::CollectBy(collect_by) => collect_by.groups.commit_overlay(),
+        OperatorState::Stateless | OperatorState::Join(_) | OperatorState::StreamingChecksum(_) => {
+        }
+    }
+}
+
 fn carry_live_node_lifecycle(
     snapshot: &mut HashMap<NodeId, NodeRuntimeMeta>,
     runtime: &IvmRuntime,
