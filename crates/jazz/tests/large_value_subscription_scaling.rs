@@ -740,6 +740,7 @@ fn an_include_ordered_by_a_large_column_keeps_its_window() {
     included.apply(opening);
     assert_eq!(included.ids(), vec![row(0xb4), row(0xb3)]);
     for id in included.ids() {
+        assert_eq!(included.cell(id, "notes"), None);
         assert_eq!(included.cell(id, "contents"), None);
     }
 
@@ -759,6 +760,10 @@ fn an_include_ordered_by_a_large_column_keeps_its_window() {
         included.cell(row(0xb5), "name"),
         Some(Value::String("e.bin".to_owned()))
     );
+    for id in included.ids() {
+        assert_eq!(included.cell(id, "notes"), None);
+        assert_eq!(included.cell(id, "contents"), None);
+    }
 }
 
 /// A listing that selects only names but filters and orders on a large string
