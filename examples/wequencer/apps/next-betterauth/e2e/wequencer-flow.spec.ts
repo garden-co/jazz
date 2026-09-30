@@ -21,8 +21,19 @@ function expectedPattern() {
   );
 }
 
+/** The starter groove every new session is created with, before any edit. */
+function starterPattern() {
+  return TRACKS.flatMap(({ label, value }) =>
+    Array.from({ length: STEPS_PER_TRACK }, (_, step) => ({
+      label: `${label}, step ${step + 1}`,
+      pressed: starterStep(value, step),
+    })),
+  );
+}
+
+/** The burst test makes no other edits, so it starts from the starter groove. */
 function expectedPatternAfterEditorBurst() {
-  return expectedPattern().map((pad, index) => ({
+  return starterPattern().map((pad, index) => ({
     ...pad,
     // The editor changes the first eight pads in every lane. This is a fixed
     // 64-row fixture, so a dropped write cannot hide behind a row-count check.
@@ -73,13 +84,18 @@ async function invite(page: Page, accountId: string, role: "editor" | "viewer") 
   await page.keyboard.press("Escape");
 }
 
-async function openSession(page: Page) {
+async function openSession(page: Page, via: "keyboard" | "mouse" = "keyboard") {
   await page.reload();
-  // ClickableCard's link is a visually hidden 1px element (the card surface
-  // handles pointer clicks), so it never receives a pointer hit and a mouse
-  // click on it cannot land. Activate it the way keyboard and screen reader
-  // users do.
-  await page.getByRole("link", { name: "Late-night rehearsal" }).press("Enter");
+  if (via === "keyboard") {
+    // ClickableCard's link is a visually hidden 1px element (the card surface
+    // handles pointer clicks), so it never receives a pointer hit and a mouse
+    // click on it cannot land. Activate it the way keyboard and screen reader
+    // users do.
+    await page.getByRole("link", { name: "Late-night rehearsal" }).press("Enter");
+  } else {
+    // A pointer user clicks the card surface, here its title.
+    await page.getByRole("heading", { name: "Late-night rehearsal", level: 2 }).click();
+  }
   await expect(page).toHaveURL(/\/dashboard\/[^/]+$/, { timeout: TIMEOUT });
   await expect(page.getByRole("heading", { name: "Late-night rehearsal" })).toBeVisible({
     timeout: TIMEOUT,
@@ -187,7 +203,7 @@ test("viewers see a read-only session", async ({ browser }) => {
     });
     await createSession(owner.page);
     await invite(owner.page, viewer.memberId, "viewer");
-    await openSession(viewer.page);
+    await openSession(viewer.page, "mouse");
     // The UI is read-only; the sync server rejecting a viewer's writes is
     // covered by the topology test's revoked-editor phase.
     await expect(viewer.page.getByText("You're viewing this session")).toBeVisible();
@@ -229,7 +245,11 @@ test("editor edit burst preserves a readable pattern", async ({ browser }) => {
         editor.page.getByRole("button", { name: `${name}, step ${step + 1}`, exact: true }),
       ),
     );
-    await Promise.all(edits.map((pad) => pad.click()));
+    // Parallel locator clicks share one mouse, so they land on each other's
+    // pads. Wait until every pad can be toggled, then fire all 64 clicks at
+    // once through the pads' own handlers.
+    for (const pad of edits) await expect(pad).toBeEnabled({ timeout: TIMEOUT });
+    await Promise.all(edits.map((pad) => pad.dispatchEvent("click")));
 
     const expected = expectedPatternAfterEditorBurst();
     await expect.poll(() => patternOn(editor.page), { timeout: TIMEOUT }).toEqual(expected);
