@@ -1186,11 +1186,6 @@ impl PeerState {
         } = transitions;
         let result_add_count = result_member_adds.len();
         let result_remove_count = result_member_removes.len();
-        let previous_member_result_set = self
-            .publication_states
-            .get(&subscription)
-            .map(PeerSubscriptionState::member_result_set)
-            .unwrap_or_default();
         let public_result_is_silent =
             result_member_adds.is_empty() && result_member_removes.is_empty();
         // A deletion witness can require a one-shot membership reconciliation
@@ -1217,6 +1212,11 @@ impl PeerState {
                 .maintained_subscription_view
                 .full_diff_fallbacks
                 .membership_reconciliations += 1;
+            let previous_member_result_set = self
+                .publication_states
+                .get(&subscription)
+                .map(PeerSubscriptionState::member_result_set)
+                .unwrap_or_default();
             return self
                 .rehydrate_query_maintained_subscription_view(
                     node,
@@ -1316,11 +1316,6 @@ impl PeerState {
                 allow_storage_witness_fallback: false,
             }));
         }
-        let previous_result_tx_ids = previous_member_result_set
-            .iter()
-            .filter_map(ResultMemberEntry::as_row)
-            .map(|(_, _, tx_id)| tx_id)
-            .collect::<BTreeSet<_>>();
         let (tier, read_view) = self
             .publication_states
             .get(&subscription)
@@ -1363,7 +1358,7 @@ impl PeerState {
                         leave_scan_after: None,
                         complete_exclusive_payloads: self.ship_complete_exclusive_payloads
                             && self.role == PeerRole::Relay,
-                        previous_result_set: previous_result_tx_ids,
+                        previous_result_set: BTreeSet::new(),
                         result_member_adds: result_member_adds.clone(),
                         result_member_removes: result_member_removes.clone(),
                         identity: policy_identity,
@@ -1500,11 +1495,6 @@ impl PeerState {
         }
         node.drive_ready_query_runtime_with_waker(progress_waker)
             .await?;
-        let previous_member_result_set = self
-            .publication_states
-            .get(&subscription)
-            .map(PeerSubscriptionState::member_result_set)
-            .unwrap_or_default();
         let output_tables = self
             .publication_states
             .get(&subscription)
@@ -1538,10 +1528,14 @@ impl PeerState {
         let mut requires_authoritative_membership_reconcile = false;
         let mut initial_deletion_witness = false;
         {
-            let Some(maintained_subscription_view) = self
-                .publication_states
-                .get_mut(&subscription)
-                .and_then(|state| state.maintained_subscription_view.as_mut())
+            // Classify transitions against the membership this link last
+            // shipped. Borrow it: it holds every member, so a copy per drain
+            // would make each incremental publication linear in the result.
+            let Some(state) = self.publication_states.get_mut(&subscription) else {
+                return Ok(ResultTransitions::default());
+            };
+            let previous_member_result_set = &state.result_member_set;
+            let Some(maintained_subscription_view) = state.maintained_subscription_view.as_mut()
             else {
                 return Ok(ResultTransitions::default());
             };
@@ -1622,6 +1616,11 @@ impl PeerState {
             }
         }
         if initial_deletion_witness {
+            let previous_member_result_set = self
+                .publication_states
+                .get(&subscription)
+                .map(PeerSubscriptionState::member_result_set)
+                .unwrap_or_default();
             let (hydrated_active_members, hydrated_published_members) = self
                 .publication_states
                 .get(&subscription)
