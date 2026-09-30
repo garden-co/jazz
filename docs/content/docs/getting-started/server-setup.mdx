@@ -35,9 +35,11 @@ Your app ID namespaces your data for storage and sync. Click below to generate o
 | `--diagnostics-token <TOKEN>`           | Bearer token the diagnostics listener requires (`Authorization: Bearer <TOKEN>`); a read-only scrape credential separate from the admin secret. | `JAZZ_DIAGNOSTICS_TOKEN`      | unset                     |
 
 On Linux, the server samples its heap continuously at low cost. `GET /debug/pprof/heap` returns the
-sampled in-use memory as a gzipped pprof profile, with function names and source lines, for
-`go tool pprof` or a continuous profiler. Send the admin secret in `X-Jazz-Admin-Secret`, or scrape it
-from the diagnostics listener with its token. Other platforms answer `501 Not Implemented`.
+sampled in-use memory as a gzipped pprof profile with function names, for `go tool pprof` or a
+continuous profiler. The profile records the binary's build ID, so tools can add source lines from a
+matching unstripped build. Send the admin secret in `X-Jazz-Admin-Secret`, or scrape it from the
+diagnostics listener with its token. Dumping writes a temporary file, so `$TMPDIR` (usually `/tmp`)
+must be writable. Other platforms answer `501 Not Implemented`.
 
 Local-first auth is enabled by default in development and requires `--allow-local-first-auth` in production. External JWT auth requires either `--jwks-url` or `--jwt-public-key`, but not both.
 The server runs Core directly. It owns the account registry, permission checks,

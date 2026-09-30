@@ -13,9 +13,23 @@
 //! in code built without frame pointers. That happens when configure cannot
 //! find `_Unwind_Backtrace`, for example under `cargo zigbuild`; the release
 //! workflow links LLVM libunwind into jemalloc's configure checks to avoid it.
+//!
+//! Profiles name functions from the executable's symbol table but carry no
+//! file or line: DWARF-based symbolization would keep hundreds of MB of
+//! parsed debug info resident in the server. Each mapping carries its build
+//! ID instead, so `go tool pprof` or a continuous profiler adds file and line
+//! offline from the unstripped binary the release workflow keeps.
+
+mod pprof;
+mod symbols;
+
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use jazz_server::profiling::HeapProfileDump;
 use tikv_jemalloc_ctl::raw;
+
+use symbols::ExecutableSymbols;
 
 /// Switch on heap sampling and return the profile dumper for the server.
 ///
@@ -66,7 +80,31 @@ fn dump_heap_profile() -> Result<Vec<u8>, String> {
     let ctl = jemalloc_pprof::PROF_CTL
         .as_ref()
         .ok_or("jemalloc profiling control is unavailable")?;
-    ctl.blocking_lock()
-        .dump_pprof()
-        .map_err(|error| format!("{error:#}"))
+    let (profile, lg_sample) = {
+        let mut ctl = ctl.blocking_lock();
+        let profile = ctl.dump_profile().map_err(|error| format!("{error:#}"))?;
+        (profile, ctl.lg_sample())
+    };
+    let executable = executable_symbols().map(|(path, symbols)| (path.as_path(), symbols));
+    Ok(pprof::encode(&profile, 1i64 << lg_sample, executable))
+}
+
+/// Symbols of the running executable, indexed on the first dump.
+fn executable_symbols() -> Option<&'static (PathBuf, ExecutableSymbols)> {
+    static SYMBOLS: OnceLock<Option<(PathBuf, ExecutableSymbols)>> = OnceLock::new();
+    SYMBOLS
+        .get_or_init(|| {
+            // Mappings name the executable by `current_exe`, but the file at
+            // that path may have been replaced since start; `/proc/self/exe`
+            // is always the running one.
+            let path = std::env::current_exe().ok()?;
+            match ExecutableSymbols::open(Path::new("/proc/self/exe")) {
+                Ok(symbols) => Some((path, symbols)),
+                Err(error) => {
+                    tracing::warn!("Heap profiles will have no function names: {error}");
+                    None
+                }
+            }
+        })
+        .as_ref()
 }

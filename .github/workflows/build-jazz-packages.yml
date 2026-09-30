@@ -87,8 +87,14 @@ jobs:
 
       - name: Stage artifact
         run: |
-          mkdir -p dist
-          cp target/${{ matrix.target }}/release-server/jazz-tools dist/${{ matrix.output }}
+          mkdir -p dist debug-symbols
+          # The release-server profile keeps line tables for Jazz's crates.
+          # npm ships the binary without them; the unstripped copy (same GNU
+          # build ID) is kept as a separate artifact for offline symbolization
+          # of heap and CPU profiles.
+          cp target/${{ matrix.target }}/release-server/jazz-tools debug-symbols/${{ matrix.output }}
+          zig objcopy --strip-debug debug-symbols/${{ matrix.output }} dist/${{ matrix.output }}
+          ls -l debug-symbols/${{ matrix.output }} dist/${{ matrix.output }}
 
       - name: Check heap profiling in the shipped binary
         if: matrix.arch == 'x64'
@@ -112,7 +118,7 @@ jobs:
             --header 'Authorization: Bearer heap-scrape' \
             http://127.0.0.1:6060/debug/pprof/heap
           for profile in public.pb.gz diagnostics.pb.gz; do
-            # Symbolized in-process from the binary's own line tables.
+            # Function names come from the stripped binary's symbol table.
             gzip --decompress --stdout "$profile" > profile.pb
             grep --quiet --text 'jazz_server' profile.pb
           done
@@ -121,6 +127,13 @@ jobs:
         with:
           name: ${{ matrix.output }}
           path: dist/${{ matrix.output }}
+          if-no-files-found: error
+
+      # Named outside the `jazz-tools-*` pattern the package job downloads.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: debug-symbols-${{ matrix.output }}
+          path: debug-symbols/${{ matrix.output }}
           if-no-files-found: error
 
   build-macos:
