@@ -75,8 +75,9 @@ pub enum StaticScanSpec {
     Prefix(Vec<LiteralValue>),
     /// A prefix scan whose physical source is proven to need no more than this
     /// many entries. This is deliberately distinct from cursor batching: it is
-    /// only emitted by conservative one-shot lowering after every downstream
-    /// operation that could discard or reorder a candidate has been ruled out.
+    /// only emitted by one-shot lowering when downstream operations cannot
+    /// change the page, or by a bounded probe that proves the page after
+    /// applying those operations and falls back if proof fails.
     PrefixLimit {
         prefix: Vec<LiteralValue>,
         max_items: usize,
