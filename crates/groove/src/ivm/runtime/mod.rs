@@ -488,6 +488,17 @@ impl IvmRuntime {
     }
 }
 
+/// Freezes a batch output buffer whose rows are handed out as slices. Each retained slice pins
+/// the whole allocation, so a buffer left mostly unused by an overestimate or by doubling growth
+/// is copied down to its length first.
+fn freeze_batch_buffer(buffer: BytesMut) -> Bytes {
+    if buffer.capacity() - buffer.len() > buffer.len() / 2 {
+        Bytes::copy_from_slice(&buffer)
+    } else {
+        buffer.freeze()
+    }
+}
+
 mod compilation;
 mod graph_lifecycle;
 mod runtime_tick;

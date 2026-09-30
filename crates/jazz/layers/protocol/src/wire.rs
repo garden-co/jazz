@@ -727,6 +727,13 @@ pub fn validate_frame_for_artifact_corpus(
 /// Serialize a semantic sync message with the canonical Jazz payload codec.
 pub fn encode_sync_message(message: &SyncMessage) -> Result<Vec<u8>, postcard::Error> {
     // Our encoder owns correctness; do not decode/revalidate its input rows.
+    if matches!(message, SyncMessage::ViewUpdate(_)) {
+        // A view update can carry a whole snapshot. Growing the buffer while
+        // encoding it holds the old and new allocation at each doubling and
+        // leaves up to twice its bytes queued, so size it exactly first.
+        let len = encoded_sync_message_len(message)?;
+        return postcard::to_extend(message, Vec::with_capacity(len));
+    }
     to_allocvec(message)
 }
 
