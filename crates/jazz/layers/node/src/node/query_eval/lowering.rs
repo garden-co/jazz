@@ -1351,7 +1351,7 @@ where
     /// Subscribes with every root value materialized. Production retained
     /// views choose their representation from the projection through
     /// [`Self::subscribe_lowered_program_with_root_values`].
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     pub(super) async fn subscribe_lowered_program(
         &mut self,
         program: QueryProgram,
