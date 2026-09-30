@@ -2997,6 +2997,7 @@ impl TickEvaluator<'_> {
                 .push(delta.clone());
         }
 
+        let read_fields = collect_by.read_field_indices();
         let mut output = Vec::new();
         for (group_prefix, group_deltas) in touched_groups {
             let after_records = arrangement.value().records_for_key(&group_prefix);
@@ -3006,10 +3007,12 @@ impl TickEvaluator<'_> {
                 } else {
                     records_before_deltas(after_records.clone(), &group_deltas)
                 };
+            // Only the fields the collector reads are rebuilt; the rest never
+            // reach its output (#3830).
             let after_records =
-                self.materialize_arranged_records(input_desc, after_records, None)?;
+                self.materialize_arranged_records(input_desc, after_records, Some(&read_fields))?;
             let before_records =
-                self.materialize_arranged_records(input_desc, before_records, None)?;
+                self.materialize_arranged_records(input_desc, before_records, Some(&read_fields))?;
             match collect_by.mode {
                 CollectByMode::Collect | CollectByMode::Root => {
                     let render = |records: &[(Bytes, i64)]| {

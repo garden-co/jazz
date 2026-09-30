@@ -197,7 +197,10 @@ impl TickEvaluator<'_> {
                     .first()
                     .cloned()
                     .ok_or(IvmRuntimeError::GraphInputMissing(node))?;
-                let input = self.materialize_indirect_input(&canonical)?;
+                let input = self.materialize_indirect_field_indices(
+                    &canonical,
+                    &collect_by.read_field_indices(),
+                )?;
                 self.update_collect_by(node, collect_by, output_desc, &input, &canonical)
             }
             OpType::Aggregate(aggregate) => {
