@@ -160,22 +160,21 @@ pub(super) fn byte_duplex() -> (Box<dyn Transport>, Box<dyn Transport>) {
 
 pub(super) fn byte_duplex_uncompressed() -> (Box<dyn Transport>, Box<dyn Transport>) {
     let (left, right) = byte_duplex_raw();
+    (uncompressed_adapter(left), uncompressed_adapter(right))
+}
+
+/// A current-version adapter that never negotiates transport compression, so
+/// frame sizes on the link match encoded message sizes whichever compression
+/// features the build enables.
+pub(super) fn uncompressed_adapter(raw: ByteDuplexTransport) -> Box<dyn Transport> {
     let features =
         FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS | FEATURE_MESSAGE_FRAGMENTATION;
-    (
-        Box::new(WireTransportAdapter::new(
-            left,
-            WIRE_PROTOCOL_VERSION,
-            features,
-            None,
-        )),
-        Box::new(WireTransportAdapter::new(
-            right,
-            WIRE_PROTOCOL_VERSION,
-            features,
-            None,
-        )),
-    )
+    Box::new(WireTransportAdapter::new(
+        raw,
+        WIRE_PROTOCOL_VERSION,
+        features,
+        None,
+    ))
 }
 
 pub(super) fn rocks_storage(schema: &JazzSchema) -> RocksDbStorage {

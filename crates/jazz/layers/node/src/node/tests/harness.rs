@@ -74,3 +74,5 @@ include!("native_storage_corpus.rs");
 
 include!("accepted_fate_replay.rs");
 include!("author_alias_codec.rs");
+
+include!("linear_history.rs");
