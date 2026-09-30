@@ -276,7 +276,12 @@
     "description": "draft-07 date-time follows RFC 3339 strictly",
     "schema": { "$schema": "http://json-schema.org/draft-07/schema#", "format": "date-time" },
     "valid": ["2026-09-30T12:00:00+01:00", "2026-09-30t12:00:00z", "2024-02-29T00:00:00Z"],
-    "invalid": ["2026-09-30T12:00:00+0100", "2026-09-30T12:00:00", "2026-02-29T00:00:00Z", "2026-09-30 12:00:00Z"]
+    "invalid": [
+      "2026-09-30T12:00:00+0100",
+      "2026-09-30T12:00:00",
+      "2026-02-29T00:00:00Z",
+      "2026-09-30 12:00:00Z"
+    ]
   },
   {
     "description": "draft-07 ipv4 and ipv6 reject leading zeros and zones",
@@ -284,8 +289,16 @@
       "$schema": "http://json-schema.org/draft-07/schema#",
       "properties": { "v4": { "format": "ipv4" }, "v6": { "format": "ipv6" } }
     },
-    "valid": [{ "v4": "1.2.3.4", "v6": "::ffff:1.2.3.4" }, { "v4": "0.0.0.0", "v6": "1:2:3:4:5:6:7::" }],
-    "invalid": [{ "v4": "01.02.03.04" }, { "v4": "256.0.0.1" }, { "v6": "fe80::1%eth0" }, { "v6": "::ffff:01.2.3.4" }]
+    "valid": [
+      { "v4": "1.2.3.4", "v6": "::ffff:1.2.3.4" },
+      { "v4": "0.0.0.0", "v6": "1:2:3:4:5:6:7::" }
+    ],
+    "invalid": [
+      { "v4": "01.02.03.04" },
+      { "v4": "256.0.0.1" },
+      { "v6": "fe80::1%eth0" },
+      { "v6": "::ffff:01.2.3.4" }
+    ]
   },
   {
     "description": "draft-07 hostname rejects a trailing dot and checks punycode labels",
@@ -296,8 +309,20 @@
   {
     "description": "draft-07 email follows the native address parser",
     "schema": { "$schema": "http://json-schema.org/draft-07/schema#", "format": "email" },
-    "valid": ["joe@example.com", "\"joe bloggs\"@example.com", "joe@[127.0.0.1]", "joe@[IPv6:::1]", "Joe <joe@example.com>"],
-    "invalid": ["joe@example.com.", "jo..e@example.com", "joe@[300.0.0.1]", "<joe@example.com>", "joe@ex_ample.com"]
+    "valid": [
+      "joe@example.com",
+      "\"joe bloggs\"@example.com",
+      "joe@[127.0.0.1]",
+      "joe@[IPv6:::1]",
+      "Joe <joe@example.com>"
+    ],
+    "invalid": [
+      "joe@example.com.",
+      "jo..e@example.com",
+      "joe@[300.0.0.1]",
+      "<joe@example.com>",
+      "joe@ex_ample.com"
+    ]
   },
   {
     "description": "draft-07 uri and uri-reference follow RFC 3986",
@@ -305,8 +330,16 @@
       "$schema": "http://json-schema.org/draft-07/schema#",
       "properties": { "uri": { "format": "uri" }, "ref": { "format": "uri-reference" } }
     },
-    "valid": [{ "uri": "http://[::1]:80/x?q#f", "ref": "./a:b" }, { "uri": "urn:isbn:0451450523", "ref": "" }],
-    "invalid": [{ "uri": "http://example.com/a b" }, { "uri": "//example.com" }, { "ref": "%zz" }, { "ref": "a:b c" }]
+    "valid": [
+      { "uri": "http://[::1]:80/x?q#f", "ref": "./a:b" },
+      { "uri": "urn:isbn:0451450523", "ref": "" }
+    ],
+    "invalid": [
+      { "uri": "http://example.com/a b" },
+      { "uri": "//example.com" },
+      { "ref": "%zz" },
+      { "ref": "a:b c" }
+    ]
   },
   {
     "description": "draft-07 regex format uses the native regex syntax",
@@ -368,7 +401,15 @@
       "patternProperties": { "^x\\-": { "type": "integer" } }
     },
     "valid": [
-      { "phone": "123-4567", "bracket": "]", "caseless": "ABC", "end": "a", "lines": "a\nb", "word": "a_1", "punctuation": ":/@" },
+      {
+        "phone": "123-4567",
+        "bracket": "]",
+        "caseless": "ABC",
+        "end": "a",
+        "lines": "a\nb",
+        "word": "a_1",
+        "punctuation": ":/@"
+      },
       { "x-count": 3 }
     ],
     "invalid": [
