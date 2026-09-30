@@ -45,6 +45,8 @@ mod core_fate_authority;
 mod coverage_group_flush_once;
 #[path = "../deferred_local_persistence.rs"]
 mod deferred_local_persistence;
+#[path = "../deployment_preparation.rs"]
+mod deployment_preparation;
 #[path = "../dynamic_schema_views.rs"]
 mod dynamic_schema_views;
 #[path = "../error_code_strings.rs"]

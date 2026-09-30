@@ -8,14 +8,13 @@ import { basename, join, resolve } from "path";
 import { fileURLToPath } from "url";
 import {
   createMigration as createCatalogueMigration,
+  getMigrationGraph,
   deploy as deployCatalogue,
-  exportSchema as exportCatalogueSchema,
-  getCurrentSchemaHash,
-  getPermissionsStatus,
+  compileSchema as compileCatalogueSchema,
   shortSchemaHash,
   validateProject,
 } from "./dev/catalogue-project.js";
-import type { StoredPermissionsHead } from "./runtime/schema-fetch.js";
+import { renderMigrationGraph } from "./dev/migration-graph.js";
 
 export interface BuildOptions {
   jazzBin?: string;
@@ -23,17 +22,9 @@ export interface BuildOptions {
   strictProvenance?: boolean;
 }
 
-export interface SchemaExportOptions {
+export interface SchemaCompileOptions {
   schemaDir: string;
   migrationsDir?: string;
-  schemaHash?: string;
-  appId?: string;
-  serverUrl?: string;
-  adminSecret?: string;
-}
-
-export interface SchemaHashOptions {
-  schemaDir: string;
 }
 
 const PERMISSIONS_LIFECYCLE_NOTE =
@@ -56,13 +47,11 @@ export async function validate(options: BuildOptions): Promise<void> {
       `Conventional provenance columns are forbidden by --strict-provenance:\n${provenanceWarnings.join("\n")}`,
     );
   }
-  console.log(`Loaded structural schema from ${result.schemaFile}.`);
+  console.log(`Loaded schema from ${result.schemaFile}.`);
   if (result.permissionsFile) {
     console.log(`Loaded current permissions from ${result.permissionsFile}.`);
     console.log(PERMISSIONS_LIFECYCLE_NOTE);
-    console.log(
-      "Use `jazz-tools permissions status <appId>` or `jazz-tools deploy <appId>` for auth publication.",
-    );
+    console.log("Use `jazz-tools deploy <appId>` to publish schema, permissions, and migrations.");
   }
   for (const warning of result.warnings) {
     console.warn(`\x1b[33m${warning}\x1b[0m`);
@@ -72,15 +61,9 @@ export async function validate(options: BuildOptions): Promise<void> {
   );
 }
 
-export async function exportSchema(options: SchemaExportOptions): Promise<void> {
-  const result = await exportCatalogueSchema(options);
+export async function compileSchema(options: SchemaCompileOptions): Promise<void> {
+  const result = await compileCatalogueSchema(options);
   process.stdout.write(`${JSON.stringify(result.schema, null, 2)}\n`);
-}
-
-export async function schemaHash(options: SchemaHashOptions): Promise<void> {
-  const result = await getCurrentSchemaHash(options);
-  console.log(`Loaded structural schema from ${result.schemaFile}.`);
-  console.log(`Current schema hash: ${shortSchemaHash(result.hash)}`);
 }
 
 export interface MigrationCommandOptions {
@@ -89,13 +72,6 @@ export interface MigrationCommandOptions {
   adminSecret?: string;
   migrationsDir: string;
   schemaDir?: string;
-}
-
-export interface PermissionsCommandOptions {
-  appId: string;
-  serverUrl: string;
-  adminSecret: string;
-  schemaDir: string;
 }
 
 export interface CreateMigrationOptions extends MigrationCommandOptions {
@@ -110,7 +86,7 @@ export interface DeployOptions {
   serverUrl: string;
   adminSecret: string;
   schemaDir: string;
-  migrationsDir: string;
+  migrationsDir?: string;
 }
 
 // Framework bundlers (Vite, SvelteKit, Next.js, Expo) expose public env vars
@@ -290,28 +266,6 @@ function resolveMigrationOptions(args: string[]): MigrationCommandOptions {
   };
 }
 
-function resolvePermissionsOptions(args: string[]): Omit<PermissionsCommandOptions, "appId"> {
-  const serverUrl = getFlagValue(args, "--server-url") ?? resolveEnvVar(SERVER_URL_ENV_VARS);
-  const adminSecret = getFlagValue(args, "--admin-secret") ?? process.env.JAZZ_ADMIN_SECRET;
-  const schemaDir = resolve(process.cwd(), getFlagValue(args, "--schema-dir") ?? process.cwd());
-
-  if (!serverUrl) {
-    throw new Error(
-      "Missing server URL. Pass --server-url <url> or set JAZZ_SERVER_URL (or a framework-prefixed form such as VITE_JAZZ_SERVER_URL).",
-    );
-  }
-
-  if (!adminSecret) {
-    throw new Error("Missing admin secret. Pass --admin-secret <secret> or set JAZZ_ADMIN_SECRET.");
-  }
-
-  return {
-    serverUrl,
-    adminSecret,
-    schemaDir,
-  };
-}
-
 function requireSchemaExportServerValue(
   value: string | undefined,
   kind: "serverUrl" | "adminSecret",
@@ -362,12 +316,8 @@ export async function createMigration(options: CreateMigrationOptions): Promise<
   const result = await createCatalogueMigration(options);
 
   switch (result.status) {
-    case "initial-snapshot":
-      console.log("Wrote initial schema snapshot: " + result.snapshotPath);
-      console.log("No migration created because there was no previous local schema baseline.");
-      return null;
     case "unchanged":
-      console.log("No structural schema changes detected.");
+      console.log("No schema changes detected.");
       return null;
     case "migration-not-required": {
       const version = await packageVersion();
@@ -383,7 +333,7 @@ export async function createMigration(options: CreateMigrationOptions): Promise<
       const version = await packageVersion();
       console.log("Generated: " + result.filePath);
       console.log("");
-      console.log("Migration stubs are only for structural schema changes.");
+      console.log("Migration stubs are only for schema changes.");
       console.log(PERMISSIONS_LIFECYCLE_NOTE);
       console.log("");
       console.log("Next steps:");
@@ -403,10 +353,6 @@ export async function createMigration(options: CreateMigrationOptions): Promise<
   }
 }
 
-function describePermissionsHead(head: StoredPermissionsHead): string {
-  return `v${head.version} on ${shortSchemaHash(head.schemaHash)}`;
-}
-
 function logDeployWarning(message: string): void {
   if (message.startsWith("Warning: table ")) {
     console.warn(`\x1b[33m${message}\x1b[0m`);
@@ -421,33 +367,6 @@ function logDeployWarning(message: string): void {
   console.warn(`Warning: ${message}`);
 }
 
-export async function permissionsStatus(options: PermissionsCommandOptions): Promise<void> {
-  const result = await getPermissionsStatus(options);
-
-  console.log(`Loaded structural schema from ${result.schemaFile}.`);
-  console.log(`Loaded current permissions from ${result.permissionsFile}.`);
-  console.log(
-    `Local structural schema matches stored hash ${shortSchemaHash(result.localSchemaHash)}.`,
-  );
-  console.log(PERMISSIONS_LIFECYCLE_NOTE);
-
-  if (!result.head) {
-    console.log("Server has no published permissions head yet.");
-    console.log("Next deploy will publish version 1.");
-    return;
-  }
-
-  console.log(`Server permissions head is ${describePermissionsHead(result.head)}.`);
-  if (result.head.schemaHash === result.localSchemaHash) {
-    console.log("Current server permissions already target this structural schema.");
-  } else {
-    console.log(
-      `Current server permissions target ${shortSchemaHash(result.head.schemaHash)}; deploying will retarget the head to ${shortSchemaHash(result.localSchemaHash)}.`,
-    );
-  }
-  console.log(`Next deploy will require parent bundle ${result.head.bundleObjectId}.`);
-}
-
 export async function deploy(options: DeployOptions): Promise<void> {
   const result = await deployCatalogue({
     ...options,
@@ -460,7 +379,7 @@ export async function deploy(options: DeployOptions): Promise<void> {
           logDeployWarning(event.message);
           break;
         case "schema-published":
-          console.log(`Published the current schema as ${shortSchemaHash(event.hash)}.`);
+          console.log(`Published schema ${shortSchemaHash(event.hash)}.`);
           break;
         case "schema-skipped":
           console.log(
@@ -477,7 +396,7 @@ export async function deploy(options: DeployOptions): Promise<void> {
             );
           } else {
             console.log(
-              `Pushed migration ${shortSchemaHash(event.fromHash)} -> ${shortSchemaHash(event.toHash)} without a reviewed migration file because no row transformations are required.`,
+              `Published migration ${shortSchemaHash(event.fromHash)} -> ${shortSchemaHash(event.toHash)}.`,
             );
           }
           break;
@@ -492,19 +411,11 @@ export async function deploy(options: DeployOptions): Promise<void> {
     },
   });
 
-  if (!result.permissions) {
-    return;
-  }
-
-  const previousHead = result.permissions.previousHead;
-  const nextHead = result.permissions.head ?? {
-    schemaHash: result.permissions.schemaHash,
-    version: previousHead ? previousHead.version + 1 : 1,
-    parentBundleObjectId: previousHead?.bundleObjectId ?? null,
-    bundleObjectId: previousHead?.bundleObjectId ?? "",
-  };
-
-  console.log(`Published permissions as ${describePermissionsHead(nextHead)}.`);
+  console.log(
+    result.changed
+      ? `Deployed schema ${shortSchemaHash(result.schema.hash)} and its permissions.`
+      : "Deployment is already up to date.",
+  );
 }
 
 function realpathOrSelf(path: string): string {
@@ -529,41 +440,19 @@ function printHelp(): void {
   console.log("Usage: node <path-to-jazz-tools>/dist/cli.js <command> [options]");
   console.log("\nCommands:");
   console.log("  validate              Validate root schema.ts and permissions.ts");
-  console.log("  schema hash           Print the short hash of the current schema.ts");
-  console.log("  schema export         Print the compiled structural schema as JSON");
+  console.log("  schema compile        Print the compiled schema as JSON");
   console.log("  deploy <appId>        Publish schema, permissions, and required migrations");
-  console.log("  permissions status <appId> Show the current server permissions head for this app");
-  console.log(
-    "  migrations create     Generate a typed structural migration stub between two schema versions",
-  );
+  console.log("  migrations create     Generate a migration stub between two schema versions");
+  console.log("  migrations graph      Visualize the full migration graph");
   console.log("\nValidation options:");
   console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
   console.log("  --strict-provenance   Reject conventional duplicates of Jazz provenance");
-  console.log("\nSchema hash options:");
+  console.log("\nSchema compile options:");
   console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
-  console.log("\nSchema export options:");
-  console.log(
-    "  <appId>               Required for server-backed schema export by hash (or set JAZZ_APP_ID / {VITE,PUBLIC,NEXT_PUBLIC,EXPO_PUBLIC}_JAZZ_APP_ID)",
-  );
-  console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
-  console.log("  --schema-hash <hash>  Export a stored structural schema by hash");
   console.log("  --migrations-dir <p>  Path to migrations directory (default: ./migrations)");
-  console.log(
-    "  --server-url <url>    Jazz server URL (or set JAZZ_SERVER_URL / {VITE,PUBLIC,NEXT_PUBLIC,EXPO_PUBLIC}_JAZZ_SERVER_URL)",
-  );
-  console.log("  --admin-secret <sec>  Admin secret (or set JAZZ_ADMIN_SECRET)");
-  console.log("\nPermissions options:");
-  console.log(
-    "  <appId>               Required (or set JAZZ_APP_ID / {VITE,PUBLIC,NEXT_PUBLIC,EXPO_PUBLIC}_JAZZ_APP_ID)",
-  );
-  console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
-  console.log(
-    "  --server-url <url>    Jazz server URL (or set JAZZ_SERVER_URL / {VITE,PUBLIC,NEXT_PUBLIC,EXPO_PUBLIC}_JAZZ_SERVER_URL)",
-  );
-  console.log("  --admin-secret <sec>  Admin secret (or set JAZZ_ADMIN_SECRET)");
   console.log("\nMigration options:");
   console.log(
-    "  <appId>               Required for remote migration creation and deploy (or set JAZZ_APP_ID / {VITE,PUBLIC,NEXT_PUBLIC,EXPO_PUBLIC}_JAZZ_APP_ID)",
+    "  <appId>               Required for migrations graph, remote migration creation, and deploy (or set JAZZ_APP_ID / {VITE,PUBLIC,NEXT_PUBLIC,EXPO_PUBLIC}_JAZZ_APP_ID)",
   );
   console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
   console.log(
@@ -603,39 +492,33 @@ if (isMainModule()) {
     });
   } else if (command === "schema") {
     const subcommand = args[1] ?? "";
-    if (subcommand === "hash") {
+    if (subcommand === "compile") {
       const commandArgs = args.slice(2);
-      const schemaDirFlag = getFlagValue(commandArgs, "--schema-dir");
-      const schemaDir = resolve(process.cwd(), schemaDirFlag ?? process.cwd());
-      schemaHash({ schemaDir }).catch((err) => {
-        console.error(err.message);
-        process.exit(1);
-      });
-    } else if (subcommand === "export") {
-      const { appId, args: commandArgs } = splitLeadingAppId(args.slice(2));
-      const schemaDirFlag = getFlagValue(commandArgs, "--schema-dir");
-      const schemaHashFlag = getFlagValue(commandArgs, "--schema-hash");
-      if (schemaDirFlag && schemaHashFlag) {
-        console.error("--schema-dir and --schema-hash are mutually exclusive.");
-        process.exit(1);
+      for (let i = 0; i < commandArgs.length; i += 2) {
+        if (!["--schema-dir", "--migrations-dir"].includes(commandArgs[i]!)) {
+          console.error(
+            `Unknown schema compile argument: ${commandArgs[i]}. Only local schema compilation is supported.`,
+          );
+          process.exit(1);
+        }
+        if (!commandArgs[i + 1] || commandArgs[i + 1]!.startsWith("--")) {
+          console.error(`Missing value for ${commandArgs[i]}.`);
+          process.exit(1);
+        }
       }
-
+      const schemaDirFlag = getFlagValue(commandArgs, "--schema-dir");
       const schemaDir = resolve(process.cwd(), schemaDirFlag ?? process.cwd());
-      exportSchema({
+      compileSchema({
         schemaDir,
         migrationsDir: getFlagValue(commandArgs, "--migrations-dir")
           ? resolve(process.cwd(), getFlagValue(commandArgs, "--migrations-dir")!)
           : undefined,
-        schemaHash: schemaHashFlag,
-        appId,
-        serverUrl: getFlagValue(commandArgs, "--server-url") ?? resolveEnvVar(SERVER_URL_ENV_VARS),
-        adminSecret: getFlagValue(commandArgs, "--admin-secret") ?? process.env.JAZZ_ADMIN_SECRET,
       }).catch((err) => {
         console.error(err.message);
         process.exit(1);
       });
     } else {
-      console.error("Usage: node dist/cli.js schema <hash|export> [--schema-dir <path>] [...]");
+      console.error("Usage: node dist/cli.js schema compile [--schema-dir <path>] [...]");
       process.exit(1);
     }
   } else if (command === "migrations") {
@@ -653,29 +536,43 @@ if (isMainModule()) {
         toHash: getFlagValue(commandArgs, "--toHash"),
         name: getFlagValue(commandArgs, "--name"),
       });
+    } else if (subcommand === "graph") {
+      task = (async () => {
+        const { appId, args: commandArgs } = splitLeadingAppId(args.slice(2));
+        for (let i = 0; i < commandArgs.length; i += 2) {
+          if (
+            !["--server-url", "--admin-secret", "--schema-dir", "--migrations-dir"].includes(
+              commandArgs[i]!,
+            )
+          ) {
+            throw new Error(`Unknown migrations graph argument: ${commandArgs[i]}.`);
+          }
+          if (!commandArgs[i + 1] || commandArgs[i + 1]!.startsWith("--")) {
+            throw new Error(`Missing value for ${commandArgs[i]}.`);
+          }
+        }
+        const localOptions = resolveMigrationOptions(commandArgs);
+        const options = requireMigrationServerOptions({ ...localOptions, appId });
+        const graph = await getMigrationGraph({
+          ...options,
+          schemaDir: localOptions.schemaDir ?? process.cwd(),
+          migrationsDir: getFlagValue(commandArgs, "--migrations-dir")
+            ? localOptions.migrationsDir
+            : undefined,
+        });
+        const color =
+          Boolean(process.stdout.isTTY) &&
+          process.env.NO_COLOR === undefined &&
+          process.env.TERM !== "dumb";
+        console.log(renderMigrationGraph(graph, color));
+      })();
     } else {
       task = Promise.reject(
         new Error(
-          "Use `jazz-tools migrations create` to prepare migrations and `jazz-tools deploy <appId>` to publish them.",
+          "Use `jazz-tools migrations create` to prepare migrations, `jazz-tools migrations graph <appId>` to inspect the migration graph, and `jazz-tools deploy <appId>` to publish them.",
         ),
       );
     }
-
-    task.catch((err) => {
-      console.error(err.message);
-      process.exit(1);
-    });
-  } else if (command === "permissions") {
-    const subcommand = args[1] ?? "";
-    const { appId, args: commandArgs } = splitLeadingAppId(args.slice(2));
-    const options = {
-      ...resolvePermissionsOptions(commandArgs),
-      appId: requireAppId(appId),
-    };
-    const task =
-      subcommand === "status"
-        ? permissionsStatus(options)
-        : Promise.reject(new Error("Usage: node dist/cli.js permissions status <appId> [options]"));
 
     task.catch((err) => {
       console.error(err.message);

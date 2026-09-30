@@ -1141,6 +1141,42 @@ impl ServerRuntimeHandle {
         .await
     }
 
+    /// Validate a deployment against the live physical catalogue without mutation.
+    #[doc(hidden)]
+    pub async fn validate_deployment_snapshot(
+        &self,
+        snapshot: crate::protocol::CatalogueSnapshot,
+    ) -> Result<(), String> {
+        self.run(move |shell| {
+            shell
+                .validate_deployment_snapshot(snapshot)
+                .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
+    /// Atomically install the complete committed administrative deployment.
+    #[doc(hidden)]
+    pub async fn apply_deployment_snapshot(
+        &self,
+        snapshot: crate::protocol::CatalogueSnapshot,
+    ) -> Result<(), String> {
+        let result = self
+            .run(move |shell| {
+                shell
+                    .apply_trusted_catalogue_snapshot(snapshot)
+                    .map_err(|error| error.to_string())?;
+                shell
+                    .set_permissions_ready(true)
+                    .map_err(|error| error.to_string())
+            })
+            .await;
+        if result.is_ok() {
+            notify_shell_activity(&self.inner.activity_tx);
+        }
+        result
+    }
+
     /// Replace an already persisted downstream server's authority catalogue through the
     /// same authenticated snapshot path used at first bootstrap. The snapshot
     /// adoption rebuilds the local physical projection registry before this
