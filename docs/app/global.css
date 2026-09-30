@@ -160,6 +160,12 @@ h6 {
      that sticks below it. */
   --site-nav-height: 65px;
 }
+/* Below the drawer breakpoint the bar holds only icon buttons. */
+@media (max-width: 767px) {
+  .site-page-shell {
+    --site-nav-height: 61px;
+  }
+}
 .site-page-shell .astryx-app-shell,
 .site-page-shell .astryx-app-shell-header {
   background-color: var(--color-background-body);
@@ -587,11 +593,14 @@ h6 {
    full-width row above its values: narrow enough for phones without sideways
    scrolling. Sticky needs the page as its scroller, so neither the frame nor
    the table's own scroll wrapper may scroll; clip keeps the rounded corners. */
-/* Pricing table: no outer card. The sticky header row and each row of
-   values are rounded boxes of three columns; the topic rows between them
-   ("Setup", "Topology", ...) and the call-to-action row sit on the page. */
+/* Pricing table. Below 900px: no outer card; each topic ("Setup",
+   "Topology", ...) sits on the page above a rounded three-column box of
+   values, and the sticky header is a box of its own. From 900px: the topics
+   move into a left column on the page, and the values form one ordinary
+   table with a single rounded outline. */
 .home-table {
   --home-table-radius: var(--radius-container);
+  --home-table-line: 1px solid var(--color-border);
 }
 .home-table .astryx-table-scroll-wrapper,
 .home-table [data-scroll-content] {
@@ -605,34 +614,47 @@ h6 {
 .home-table td {
   border-bottom: 0;
 }
-.home-table thead th,
-.home-table .home-table-values td {
-  background-color: var(--color-background-card);
-  border-block: 1px solid var(--color-border);
-}
-.home-table thead th:first-child,
-.home-table .home-table-values td:first-child {
-  border-inline-start: 1px solid var(--color-border);
-  border-start-start-radius: var(--home-table-radius);
-  border-end-start-radius: var(--home-table-radius);
-}
-.home-table thead th:last-child,
-.home-table .home-table-values td:last-child {
-  border-inline-end: 1px solid var(--color-border);
-  border-start-end-radius: var(--home-table-radius);
-  border-end-end-radius: var(--home-table-radius);
-}
-/* Sticks just below the site nav rather than under it. */
 .home-table thead th {
   position: sticky;
   top: var(--site-nav-height);
   z-index: 1;
 }
-.home-table .home-table-topic td {
-  padding-block: var(--spacing-5) var(--spacing-2);
+.home-table thead th:not(.home-table-topic-cell),
+.home-table .home-table-values td:not(.home-table-topic-cell) {
+  background-color: var(--color-background-card);
 }
+.home-table-topic-cell {
+  display: none;
+}
+/* Equal-height call-to-action buttons: the cells stretch to the row and
+   the buttons fill them. */
 .home-table .home-table-actions td {
+  height: 1px;
   padding-block-start: var(--spacing-4);
+}
+.home-table .home-table-actions .astryx-button {
+  height: 100%;
+}
+@media (max-width: 899px) {
+  .home-table thead th:not(.home-table-topic-cell),
+  .home-table .home-table-values td:not(.home-table-topic-cell) {
+    border-block: var(--home-table-line);
+  }
+  .home-table thead th:nth-child(2),
+  .home-table .home-table-values td:nth-child(2) {
+    border-inline-start: var(--home-table-line);
+    border-start-start-radius: var(--home-table-radius);
+    border-end-start-radius: var(--home-table-radius);
+  }
+  .home-table thead th:last-child,
+  .home-table .home-table-values td:last-child {
+    border-inline-end: var(--home-table-line);
+    border-start-end-radius: var(--home-table-radius);
+    border-end-end-radius: var(--home-table-radius);
+  }
+  .home-table .home-table-topic td {
+    padding-block: var(--spacing-5) var(--spacing-2);
+  }
 }
 /* Phones: the table runs edge to edge so the three columns get the room,
    and the boxes lose their side borders and rounding at the screen edge. */
@@ -641,13 +663,60 @@ h6 {
     --home-table-radius: 0;
     margin-inline: calc(-1 * var(--spacing-4));
   }
-  .home-table thead th:first-child,
-  .home-table .home-table-values td:first-child {
+  .home-table thead th:nth-child(2),
+  .home-table .home-table-values td:nth-child(2) {
     border-inline-start: 0;
   }
   .home-table thead th:last-child,
   .home-table .home-table-values td:last-child {
     border-inline-end: 0;
+  }
+}
+@media (min-width: 900px) {
+  .home-table {
+    max-width: calc(900px - 2 * var(--spacing-4));
+  }
+  .home-table .home-table-topic {
+    display: none;
+  }
+  /* Astryx caps every cell at max-width: 0 (for truncation), so the topic
+     column gets an explicit width, sized for its longest label. */
+  .home-table .home-table-topic-cell {
+    display: table-cell;
+    width: 8.5rem;
+    min-width: 8.5rem;
+    max-width: none;
+    padding-inline-end: var(--spacing-6);
+  }
+  /* The empty corner above the topics covers them as the header sticks. */
+  .home-table thead .home-table-topic-cell {
+    background-color: var(--color-background-body);
+  }
+  .home-table thead th:not(.home-table-topic-cell) {
+    border-block: var(--home-table-line);
+  }
+  .home-table .home-table-values td:not(.home-table-topic-cell) {
+    border-bottom: var(--home-table-line);
+  }
+  .home-table thead th:nth-child(2),
+  .home-table .home-table-values td:nth-child(2) {
+    border-inline-start: var(--home-table-line);
+  }
+  .home-table thead th:last-child,
+  .home-table .home-table-values td:last-child {
+    border-inline-end: var(--home-table-line);
+  }
+  .home-table thead th:nth-child(2) {
+    border-start-start-radius: var(--home-table-radius);
+  }
+  .home-table thead th:last-child {
+    border-start-end-radius: var(--home-table-radius);
+  }
+  .home-table .home-table-values:nth-last-child(2) td:nth-child(2) {
+    border-end-start-radius: var(--home-table-radius);
+  }
+  .home-table .home-table-values:nth-last-child(2) td:last-child {
+    border-end-end-radius: var(--home-table-radius);
   }
 }
 /* Narrow columns: hyphenate long words instead of splitting them anywhere,

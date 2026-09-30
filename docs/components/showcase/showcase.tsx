@@ -437,10 +437,9 @@ export function Showcase() {
         <VStack as="header" gap={4} className="max-w-3xl">
           <Heading level={1}>Jazz examples and real-world benchmarks</Heading>
           <Text as="p" type="large" color="secondary" display="block">
-            To show you what you can build with Jazz and how it performs, we&apos;ve created a
-            variety of example apps that are simple enough to read in code or show your agent for
-            inspiration, but close enough to real apps to demonstrate Jazz performance under
-            real-world load patterns.
+            We&apos;ve created a variety of example apps that are simple enough to read in code or
+            show your agent for inspiration, but close enough to real apps to demonstrate Jazz
+            performance under real-world load patterns.
           </Text>
           {error && <Banner status="error" title={error} />}
           {data && !released && (

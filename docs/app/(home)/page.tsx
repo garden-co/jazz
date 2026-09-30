@@ -499,9 +499,15 @@ export default function HomePage() {
             </Text>
           </SectionHeader>
           <div id="pricing" className="home-table home-anchor mt-6">
+            {/* Below 900px each topic gets its own row above a rounded box of
+                values; from 900px the topic moves into a left column and the
+                values form one ordinary table (see .home-table in global.css). */}
             <Table density="balanced" verticalAlign="top">
               <TableHeader>
                 <TableRow>
+                  <TableHeaderCell className="home-table-topic-cell">
+                    <span className="sr-only">Topic</span>
+                  </TableHeaderCell>
                   <TableHeaderCell>Self-hosted</TableHeaderCell>
                   <TableHeaderCell>Jazz Cloud</TableHeaderCell>
                   <TableHeaderCell>Enterprise</TableHeaderCell>
@@ -515,6 +521,9 @@ export default function HomePage() {
                     </TableCell>
                   </TableRow>,
                   <TableRow key={row.topic} className="home-table-values">
+                    <TableCell className="home-table-topic-cell">
+                      <Text weight="medium">{row.topic}</Text>
+                    </TableCell>
                     <TableCell>
                       <Text color="secondary">{row.selfHosted}</Text>
                     </TableCell>
@@ -523,6 +532,7 @@ export default function HomePage() {
                   </TableRow>,
                 ])}
                 <TableRow className="home-table-actions">
+                  <TableCell className="home-table-topic-cell" />
                   <TableCell>
                     <Button
                       label="How to self-host"
@@ -532,14 +542,14 @@ export default function HomePage() {
                   </TableCell>
                   <TableCell>
                     <Button
-                      label="Generate API key"
+                      label={"Generate API\u00a0key"}
                       variant="primary"
                       href="https://v2.dashboard.jazz.tools"
                     />
                   </TableCell>
                   <TableCell>
                     <Button
-                      label="Book a call"
+                      label={"Book a\u00a0call"}
                       variant="primary"
                       href="https://cal.com/anselm-io/cloud-pro-intro"
                     />
@@ -551,9 +561,6 @@ export default function HomePage() {
           <div className="mt-12 grid gap-8 lg:grid-cols-12">
             <div className="lg:col-span-4">
               <Heading level={3}>Estimate your Jazz Cloud bill</Heading>
-              <Text as="p" display="block" color="secondary" className="mt-3">
-                Move the sliders to match your app. The estimate uses the Jazz Cloud prices above.
-              </Text>
             </div>
             {/* Not ported to Astryx yet. A data-astryx-theme attribute ends the
                 theme's @scope, so its element resets (p, h1-h6, code) leave the

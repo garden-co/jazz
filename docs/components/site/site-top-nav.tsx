@@ -124,8 +124,12 @@ export function SiteTopNav() {
             <span className="contents min-[1120px]:hidden">
               <SearchIconButton onOpen={openSearch} />
             </span>
-            <ThemeSwitch />
-            {/* Below the drawer breakpoint the bar keeps only search, theme and
+            {/* Below 900px the switch would crowd the bar; the chosen theme
+              still applies. */}
+            <span className="contents max-[899px]:hidden">
+              <ThemeSwitch />
+            </span>
+            {/* Below the drawer breakpoint the bar keeps only search and
               the drawer toggle; the social links would push the toggle off screen. */}
             <span className="contents max-md:hidden">
               {SOCIAL.map((link) => (
