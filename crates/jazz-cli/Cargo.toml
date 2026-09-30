@@ -16,13 +16,7 @@ otel = ["dep:jazz-otel", "dep:opentelemetry", "dep:opentelemetry_sdk", "jazz-ser
 test = ["jazz/testing", "jazz-server/test"]
 # On Linux, sample `jazz-tools`'s heap all the time and serve it as a pprof
 # profile; see `src/heap_profiling/`. No effect on other platforms.
-heap-profiling = [
-  "dep:backtrace",
-  "dep:flate2",
-  "dep:mappings",
-  "dep:prost",
-  "dep:rustc-demangle",
-]
+heap-profiling = ["dep:backtrace", "dep:flate2", "dep:mappings", "dep:prost", "dep:rustc-demangle"]
 
 [dependencies]
 jazz = { workspace = true, default-features = false, features = ["runtime"] }
