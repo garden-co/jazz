@@ -39,6 +39,11 @@ export function NewRoomDialog({
     // room and its creator's membership commit together; the membership is
     // the bootstrap step the room policy allows only for the creator, and its
     // `exists` check sees the room inserted earlier in the same transaction.
+    //
+    // This stages and commits by hand instead of using `db.transaction`,
+    // which returns a Promise: the dialog must close and select the room in
+    // this handler, before the new room renders, or it would render under the
+    // still-open modal.
     const tx = db.beginTransaction();
     let roomId: string;
     try {
@@ -54,8 +59,9 @@ export function NewRoomDialog({
       setError(cause instanceof Error ? cause.message : String(cause));
       return;
     }
+    let committed: ReturnType<typeof tx.commit>;
     try {
-      tx.commit();
+      committed = tx.commit();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
       return;
@@ -63,6 +69,15 @@ export function NewRoomDialog({
     setName("");
     onOpenChange(false);
     onCreated(roomId);
+    // If the server rejects the room, it disappears; reopen the dialog with
+    // the name and the reason so the creator can see what happened.
+    committed.wait({ tier: "global" }).catch((cause: unknown) => {
+      setName(trimmed);
+      setError(
+        `Could not create the room: ${cause instanceof Error ? cause.message : String(cause)}`,
+      );
+      onOpenChange(true);
+    });
   }
 
   return (
