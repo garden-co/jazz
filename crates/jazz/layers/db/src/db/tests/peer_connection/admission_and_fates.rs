@@ -3210,9 +3210,9 @@ fn row_only_write_policy_proofs_retain_no_support_views() {
         Fate::Accepted
     ));
     assert_eq!(
-        subscriber_proofs_and_support_views(&subscriber).1,
-        0,
-        "denied, update and delete proofs keep no support view either"
+        subscriber_proofs_and_support_views(&subscriber),
+        (11, 0),
+        "the server proves the denied insert, update and delete, keeping no support view"
     );
 }
 
