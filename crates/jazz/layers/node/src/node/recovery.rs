@@ -274,7 +274,6 @@ impl<S: OrderedKvStorage> NodeState<S> {
             None,
             DurabilityTier::Local,
             Value::Nullable(None),
-            &stored.touched_rows,
         )
         .unwrap();
         values[TransactionRowRecord::FIELD_DURABILITY_IDX] = Value::EnumTag(2);

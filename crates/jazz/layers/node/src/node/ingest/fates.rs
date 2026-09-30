@@ -98,7 +98,6 @@ where
                 stored.durability,
                 stored.view_scoped_cardinality,
                 contribution_merge,
-                &stored.touched_rows,
             )?,
         );
         if let Some(global_time) = stored.global_time {
@@ -972,7 +971,14 @@ where
                 self.version_storage_primary_key(version)?,
             );
         }
-        self.mark_tx_touched_rows_cleared(tx_id.time, tx.node_alias);
+        // The rejected images are gone, so is the list naming them.
+        batch.delete(
+            TX_TOUCHED_ROWS_TABLE,
+            PrimaryKeyValue::Composite(vec![
+                PrimaryKeyValue::U64(tx_id.time.0),
+                PrimaryKeyValue::U64(tx.node_alias.0),
+            ]),
+        );
         self.invalidate_tx_version_tables_cache(tx_id);
         let _ = affected;
         Ok(rejected_payload)

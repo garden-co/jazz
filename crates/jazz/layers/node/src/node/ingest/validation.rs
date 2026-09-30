@@ -308,10 +308,6 @@ where
             durability,
             view_scoped_cardinality && !preserve_authoritative_cardinality,
             contribution_merge,
-            &stored_tx
-                .as_ref()
-                .map(|stored| stored.touched_rows.clone())
-                .unwrap_or_default(),
         )?;
         if tx_already_known {
             batch.update("jazz_transactions", tx_values);
@@ -445,7 +441,6 @@ where
                 global_time,
                 durability,
                 view_scoped_cardinality: view_scoped_cardinality && !preserve_authoritative_cardinality,
-                touched_rows: StoredTouchedRows::default(),
             };
             self.remove_rejected_local_versions(tx.tx_id, &rejected_tx, batch).await?
         } else {
@@ -727,7 +722,6 @@ where
                 None,
                 DurabilityTier::Local,
                 contribution_merge,
-                &StoredTouchedRows::default(),
             )?,
         );
         self.flush_ahead_shadows(&mut batch).await?;
