@@ -69,7 +69,11 @@ await write.wait();
 Every subscribed client sees the reply grow. A transaction can't take
 `applyDiffs`, so each batch writes the whole body instead of a page-relative
 splice; the library in `apps/ts-localfirst` shows the splice form, which fits
-a writer that doesn't need the ownership check. Tool calls are rows of their
+a writer that doesn't need the ownership check. Once transactions accept
+`applyDiffs` ([#2087](https://github.com/garden-co/jazz/issues/2087)), each batch becomes a splice at the end of the body. Until
+then, every batch adds the whole reply so far to the row's history, so a long
+reply costs far more than its length: a 20 KB reply streamed over 30 seconds
+leaves roughly 1 to 2 MB of history. Tool calls are rows of their
 own, written as `running` and then updated with their result (in the same
 kind of lease transaction), so they show up in `ChatToolCalls` while they run.
 
