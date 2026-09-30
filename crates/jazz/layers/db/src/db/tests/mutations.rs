@@ -3412,16 +3412,19 @@ fn admitted_server_prepared_write_policy_fails_closed_for_wrong_user_id_type() {
         .unwrap();
 
     client.tick().unwrap();
-    let error = server.tick().unwrap_err();
+    server.tick().unwrap();
+    client.tick().unwrap();
     assert!(
-        error.to_string().contains("claims3:sub has wrong type"),
-        "a non-coercible claim must fail before authorization support can admit the write: {error}"
+        matches!(
+            write.write_state().unwrap().fate,
+            Fate::Rejected(RejectionReason::AuthorizationDenied)
+        ),
+        "a non-coercible claim cannot satisfy the write policy"
     );
     assert!(
         server.read(&Query::from("messages")).unwrap().is_empty(),
         "a malformed session claim must never ingest a protected row"
     );
-    drop(write);
 }
 
 #[test]

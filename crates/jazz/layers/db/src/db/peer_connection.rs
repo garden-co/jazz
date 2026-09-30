@@ -340,9 +340,9 @@ where
                 // already been checked against its server-issued one-binding
                 // capability; a multiplexed relay has passed the corresponding
                 // transport admission check for this request.
-                // Both transaction kinds need this proof. Exclusive writes
-                // also validate their read sets at terminal ingest, but that
-                // cannot replace authorization under the delegated session.
+                // Both transaction kinds need this authorization. Exclusive
+                // writes also validate their read sets at terminal ingest, but
+                // that cannot replace authorization under the delegated session.
                 let permission_subject = match ingest_context.trust {
                     CommitUnitTrust::Session => ingest_context.identity,
                     CommitUnitTrust::Relay => session_claim_binding.0,
@@ -385,30 +385,20 @@ where
                     }
                 }
                 // Only a relay's terminal ingest consumes this receipt. Every
-                // other trust evaluates the write policies itself at ingest, so
-                // it needs the support proof but not a discarded evaluation.
-                let admitted_write_authorization = {
+                // other trust evaluates the write policies itself at ingest.
+                let admitted_write_authorization = if ingest_context.trust == CommitUnitTrust::Relay
+                {
                     let mut node = node.lock().await;
-                    if ingest_context.trust == CommitUnitTrust::Relay {
-                        peer.prove_terminal_commit_authorization(
-                            &mut node,
-                            permission_subject,
-                            session_claim_binding.1,
-                            &versions,
-                            tx.tx_id,
-                        )
-                        .await?
-                    } else {
-                        peer.prove_terminal_commit_support(
-                            &mut node,
-                            permission_subject,
-                            session_claim_binding.1,
-                            &versions,
-                            tx.tx_id,
-                        )
-                        .await?;
-                        false
-                    }
+                    peer.prove_terminal_commit_authorization(
+                        &mut node,
+                        permission_subject,
+                        session_claim_binding.1,
+                        &versions,
+                        tx.tx_id,
+                    )
+                    .await?
+                } else {
+                    false
                 };
                 Ok(node
                     .lock()

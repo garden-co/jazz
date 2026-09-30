@@ -50,20 +50,6 @@ pub struct AuthorizationSupportScope {
     /// local-tier view that merely happens to have the same query identity.
     pub options: RegisterShapeOptions,
     pub subscriptions: Vec<(ValidatedQuery, Binding)>,
-    /// Parallel to `subscriptions`: whether the clause reads any row besides
-    /// the candidate. Only such clauses have inputs a terminal proof must
-    /// hydrate; see [`policy_reads_only_candidate_row`].
-    pub reads_dependencies: Vec<bool>,
-}
-
-impl AuthorizationSupportScope {
-    /// The clauses whose dependency inputs a terminal proof must hydrate.
-    pub fn dependency_subscriptions(&self) -> impl Iterator<Item = &(ValidatedQuery, Binding)> {
-        self.subscriptions
-            .iter()
-            .zip(&self.reads_dependencies)
-            .filter_map(|(subscription, reads)| reads.then_some(subscription))
-    }
 }
 
 fn empty_policy_filtered_current_source_graph(
@@ -259,56 +245,6 @@ fn authorization_scope_action(
             (AuthorizationScopeOperation::Delete, table)
         }
     }
-}
-
-/// A policy whose atoms read only the candidate row's own columns, claims and
-/// literals has no dependency inputs: the terminal evaluation reads the
-/// candidate from the transaction (or its stored preimage) and nothing else.
-/// Hydrating it as a support subscription would materialize every existing
-/// row the predicate matches (the whole table for allow-all or a single
-/// writer's `owner = session.user`), which grows with unrelated data.
-fn policy_reads_only_candidate_row(candidate_table: &str, policy: &JazzQuery) -> bool {
-    // Destructured without `..` so a new query field must be classified here
-    // before it can be treated as row-only.
-    let JazzQuery {
-        table,
-        filters: _,
-        joins,
-        flat_join,
-        policy_branches,
-        reachable,
-        inherits,
-        includes,
-        array_subqueries,
-        select: _,
-        order_by: _,
-        aggregate,
-        limit,
-        offset,
-        relation,
-    } = policy;
-    let branch_reads_only_candidate = |branch: &crate::query::PolicyBranch| {
-        let crate::query::PolicyBranch {
-            filters: _,
-            joins,
-            reachable,
-            inherits,
-        } = branch;
-        joins.is_empty() && reachable.is_empty() && inherits.is_empty()
-    };
-    // A window makes the candidate's admission depend on its neighbours.
-    table == candidate_table
-        && joins.is_empty()
-        && reachable.is_empty()
-        && inherits.is_empty()
-        && flat_join.is_none()
-        && includes.is_empty()
-        && array_subqueries.is_empty()
-        && relation.is_none()
-        && aggregate.is_none()
-        && limit.is_none()
-        && *offset == 0
-        && policy_branches.iter().all(branch_reads_only_candidate)
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -1695,10 +1631,6 @@ where
             operation: operation_key,
             options,
             subscriptions,
-            reads_dependencies: policies
-                .iter()
-                .map(|policy| !policy_reads_only_candidate_row(table_name, policy))
-                .collect(),
         })
     }
 }

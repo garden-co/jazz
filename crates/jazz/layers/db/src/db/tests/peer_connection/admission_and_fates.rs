@@ -3058,7 +3058,7 @@ fn terminal_core_write_fates_prove_exact_insert_update_and_delete_actions() {
         1,
     );
     let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
-    let subscriber = server.accept_subscriber(server_transport, alice);
+    let _subscriber = server.accept_subscriber(server_transport, alice);
 
     let inserted = client
         .insert("todos", cells("owned", false, alice), Default::default())
@@ -3095,27 +3095,13 @@ fn terminal_core_write_fates_prove_exact_insert_update_and_delete_actions() {
         deleted.write_state().unwrap().fate,
         Fate::Accepted
     ));
-
-    let proofs = match &subscriber.borrow().link {
-        ConnectionLink::Subscriber(SubscriberConnectionState { peer, .. }) => {
-            peer.terminal_authority_scope_proof_count()
-        }
-        ConnectionLink::Upstream(_) => unreachable!("server link is a subscriber"),
-    };
-    assert_eq!(
-        proofs, 3,
-        "production terminal fate admission must execute one exact aggregate proof per operation"
-    );
 }
 
-fn subscriber_proofs_and_support_views(
-    subscriber: &Rc<LocalMutex<PeerConnection>>,
-) -> (u64, usize) {
+fn subscriber_support_views(subscriber: &Rc<LocalMutex<PeerConnection>>) -> usize {
     match &subscriber.borrow().link {
-        ConnectionLink::Subscriber(SubscriberConnectionState { peer, .. }) => (
-            peer.terminal_authority_scope_proof_count(),
-            peer.maintained_subscription_count(),
-        ),
+        ConnectionLink::Subscriber(SubscriberConnectionState { peer, .. }) => {
+            peer.maintained_subscription_count()
+        }
         ConnectionLink::Upstream(_) => unreachable!("server link is a subscriber"),
     }
 }
@@ -3166,15 +3152,15 @@ fn row_only_write_policy_proofs_retain_no_support_views() {
         assert!(matches!(write.write_state().unwrap().fate, Fate::Accepted));
     }
     assert_eq!(
-        subscriber_proofs_and_support_views(&subscriber),
-        (8, 0),
-        "every insert is proven, and no proof keeps the rows its policy matches"
+        subscriber_support_views(&subscriber),
+        0,
+        "no proof keeps the rows its policy matches"
     );
 
     // Skipping hydration grants nothing: a write the policy denies is still
     // rejected, and update/delete prove against the stored preimage alike.
     let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
-    let mut settle = || {
+    let settle = || {
         client.tick().unwrap();
         server.tick().unwrap();
         client.tick().unwrap();
@@ -3210,20 +3196,24 @@ fn row_only_write_policy_proofs_retain_no_support_views() {
         Fate::Accepted
     ));
     assert_eq!(
-        subscriber_proofs_and_support_views(&subscriber),
-        (11, 0),
-        "the server proves the denied insert, update and delete, keeping no support view"
+        subscriber_support_views(&subscriber),
+        0,
+        "proving the denied insert, update and delete keeps no support view"
     );
 }
 
-/// Bob's child insert inherits the parent's select policy, so its proof has a
-/// real dependency input (the parent row) and still hydrates support.
+/// Bob's child insert inherits the parent's select policy, so its proof reads
+/// a row besides the candidate. The Core evaluates that dependency from its
+/// own storage and keeps no support view: a view over the policy query would
+/// hold every child the policy matches for the life of Bob's connection.
 ///
 /// ```text
-/// bob ──insert child──► core ──proof: hydrate parent support──► Accepted
+/// bob ──child of existing parent──► core ──reads parent──► Accepted
+/// bob ──child of missing parent───► core ──reads parent──► Rejected
+///                                     └── retains no support view
 /// ```
 #[test]
-fn dependency_write_policy_proofs_still_hydrate_support() {
+fn dependency_write_policy_proofs_retain_no_support_views() {
     let schema = inherited_insert_policy_schema();
     let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
     let server = open_core(0x65, AuthorSubject::SYSTEM, &schema);
@@ -3257,13 +3247,253 @@ fn dependency_write_policy_proofs_still_hydrate_support() {
     server.tick().unwrap();
     client.tick().unwrap();
 
+    let orphan = client
+        .insert(
+            "children",
+            BTreeMap::from([
+                ("parent_id".to_owned(), Value::Uuid(row(0xf2).0)),
+                ("label".to_owned(), Value::String("orphan".to_owned())),
+            ]),
+            Default::default(),
+        )
+        .unwrap();
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+
     assert!(matches!(child.write_state().unwrap().fate, Fate::Accepted));
-    let (proofs, support_views) = subscriber_proofs_and_support_views(&subscriber);
-    assert_eq!(proofs, 1);
-    assert!(
-        support_views > 0,
-        "an inherited policy must still hydrate its parent support"
+    assert!(matches!(
+        orphan.write_state().unwrap().fate,
+        Fate::Rejected(_)
+    ));
+    assert_eq!(
+        subscriber_support_views(&subscriber),
+        0,
+        "proving both inserts against the stored parent keeps no support view"
     );
+}
+
+/// A scope-isolated relay link: the Core consumes its terminal write proof as
+/// the admission receipt instead of re-checking the write policies at ingest.
+struct RelayUpload {
+    transport: Box<dyn Transport>,
+    subscriber: Rc<LocalMutex<PeerConnection>>,
+}
+
+impl RelayUpload {
+    fn open(server: &CoreDb, identity: AuthorSubject, scope: u64) -> Self {
+        let (transport, server_transport) = duplex();
+        let subscriber = server.server.accept_scope_isolated_relay_subscriber(
+            server_transport,
+            identity,
+            test_provider_claims(identity),
+            scope,
+        );
+        Self {
+            transport,
+            subscriber,
+        }
+    }
+
+    /// Forward the client's staged insert unchanged and return its fate.
+    fn upload_insert(&mut self, client: &Db, table: &str, cells: RowCells) -> Fate {
+        self.upload(client, table, cells, Default::default())
+    }
+
+    fn upload_insert_with_id(
+        &mut self,
+        client: &Db,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Fate {
+        let options = InsertOptions {
+            row_id: Some(row),
+            ..Default::default()
+        };
+        self.upload(client, table, cells, options)
+    }
+
+    fn upload(
+        &mut self,
+        client: &Db,
+        table: &str,
+        cells: RowCells,
+        options: InsertOptions,
+    ) -> Fate {
+        let write = client
+            .insert(table, cells, options)
+            .expect("client stages the candidate before terminal proof");
+        let tx_id = write.mergeable_tx_id();
+        let unit = client
+            .node
+            .node
+            .borrow_mut()
+            .commit_unit_for(tx_id)
+            .expect("staged candidate retains its commit unit");
+        self.transport
+            .send(unit)
+            .expect("relay forwards the commit unit");
+        self.subscriber
+            .borrow_mut()
+            .tick()
+            .expect("terminal authority processes the relay upload");
+        std::iter::from_fn(|| self.transport.try_recv())
+            .find_map(|message| match message {
+                SyncMessage::FateUpdate {
+                    tx_id: candidate,
+                    fate,
+                    ..
+                } if candidate == tx_id => Some(fate),
+                _ => None,
+            })
+            .expect("the relay receives the upload's fate")
+    }
+
+    fn support_views(&self) -> usize {
+        subscriber_support_views(&self.subscriber)
+    }
+}
+
+/// Alice may post to a chat only while she is a member. The relay receipt is
+/// the only authorization at ingest, so the proof must read her membership
+/// from the Core's current storage, including one added after earlier proofs.
+///
+/// ```text
+/// relay ──message to chat A (member)──► core ──join chat_members──► Accepted
+/// relay ──message to chat B──────────► core ──no membership──────► Rejected
+/// core  ──adds alice to chat B
+/// relay ──message to chat B──────────► core ──membership─────────► Accepted
+/// ```
+#[test]
+fn relay_join_write_policy_proofs_read_current_dependencies() {
+    let schema = chat_member_write_schema();
+    let alice = AuthorSubject::for_test_bytes([0xa3; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xa3, alice, &schema);
+    let (chat_a, chat_b) = (row(0xc1), row(0xc2));
+    for chat in [chat_a, chat_b] {
+        server
+            .insert_with_id(
+                "chats",
+                chat,
+                BTreeMap::from([("name".to_owned(), Value::String("chat".to_owned()))]),
+            )
+            .unwrap();
+    }
+    let membership = |chat: RowUuid| {
+        BTreeMap::from([
+            ("chat_id".to_owned(), Value::Uuid(chat.0)),
+            ("user_id".to_owned(), Value::Uuid(alice.test_uuid())),
+        ])
+    };
+    server.insert("chat_members", membership(chat_a)).unwrap();
+    let message = |chat: RowUuid| {
+        BTreeMap::from([
+            ("chat_id".to_owned(), Value::Uuid(chat.0)),
+            ("text".to_owned(), Value::String("hi".to_owned())),
+        ])
+    };
+    let mut relay = RelayUpload::open(&server, alice, 11);
+
+    assert!(matches!(
+        relay.upload_insert(&client, "messages", message(chat_a)),
+        Fate::Accepted
+    ));
+    assert!(matches!(
+        relay.upload_insert(&client, "messages", message(chat_b)),
+        Fate::Rejected(_)
+    ));
+    server.insert("chat_members", membership(chat_b)).unwrap();
+    assert!(matches!(
+        relay.upload_insert(&client, "messages", message(chat_b)),
+        Fate::Accepted
+    ));
+    assert_eq!(relay.support_views(), 0);
+}
+
+/// Seeds the reachable-doc schema: Alice holds access to `engineering`, which
+/// is a member of `company`, so she reaches both; `sales` is unrelated.
+/// Returns `(company, sales)`.
+fn seed_reachable_teams(server: &CoreDb, alice: AuthorSubject) -> (RowUuid, RowUuid) {
+    let (engineering, company, sales) = (row(0x71), row(0x72), row(0x73));
+    for team in [engineering, company, sales] {
+        server
+            .insert_with_id(
+                "group",
+                team,
+                BTreeMap::from([("name".to_owned(), Value::String("team".to_owned()))]),
+            )
+            .unwrap();
+    }
+    server
+        .insert(
+            "group_access_edges",
+            BTreeMap::from([
+                ("group_id".to_owned(), Value::Uuid(engineering.0)),
+                ("user_id".to_owned(), Value::Uuid(alice.test_uuid())),
+                ("role".to_owned(), Value::String("member".to_owned())),
+            ]),
+        )
+        .unwrap();
+    server
+        .insert(
+            "group_entry",
+            BTreeMap::from([
+                ("member_id".to_owned(), Value::Uuid(engineering.0)),
+                ("target_id".to_owned(), Value::Uuid(company.0)),
+                ("administrator".to_owned(), Value::Bool(false)),
+                ("date_added".to_owned(), Value::U64(1)),
+            ]),
+        )
+        .unwrap();
+    (company, sales)
+}
+
+fn grant_doc_access(server: &CoreDb, doc: RowUuid, team: RowUuid) {
+    server
+        .insert(
+            "doc_access",
+            BTreeMap::from([
+                ("resource".to_owned(), Value::Uuid(doc.0)),
+                ("team".to_owned(), Value::Uuid(team.0)),
+                ("grant_role".to_owned(), Value::String("editor".to_owned())),
+                ("administrator".to_owned(), Value::Bool(false)),
+            ]),
+        )
+        .unwrap();
+}
+
+/// A doc may be created only when one of its access teams is reachable from
+/// Alice's memberships, so the relay's proof walks several stored hops:
+/// the doc's access rows, her membership, and the group edge to `company`.
+///
+/// ```text
+/// relay ──doc shared with company──► core ──alice → engineering → company──► Accepted
+/// relay ──doc shared with sales────► core ──not reachable──────────────────► Rejected
+/// ```
+#[test]
+fn relay_reachable_write_policy_proofs_walk_stored_edges() {
+    let schema = reachable_doc_write_schema();
+    let alice = AuthorSubject::for_test_bytes([0xa5; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xa5, alice, &schema);
+    let (company, sales) = seed_reachable_teams(&server, alice);
+    let (company_doc, sales_doc) = (row(0x81), row(0x82));
+    grant_doc_access(&server, company_doc, company);
+    grant_doc_access(&server, sales_doc, sales);
+    let doc = || BTreeMap::from([("label".to_owned(), Value::String("doc".to_owned()))]);
+    let mut relay = RelayUpload::open(&server, alice, 12);
+
+    assert!(matches!(
+        relay.upload_insert_with_id(&client, "docs", company_doc, doc()),
+        Fate::Accepted
+    ));
+    assert!(matches!(
+        relay.upload_insert_with_id(&client, "docs", sales_doc, doc()),
+        Fate::Rejected(_)
+    ));
+    assert_eq!(relay.support_views(), 0);
 }
 
 /// A scope-isolated relay carries one binding selected by server admission. A
@@ -3569,25 +3799,21 @@ fn scope_isolated_relay_terminal_write_rejects_empty_handshake_claims() {
     );
 }
 
-/// A terminal support receiver belongs to one admitted link, even if another
-/// live link authenticates the same author with different claims before that
-/// receiver is first proved.
+/// A terminal proof uses its own admitted link's claims, even if another live
+/// link authenticates the same author with different claims first.
 ///
 /// ```text
-/// alice/A link ──admitted──► Core ──terminal proof──► A-bound support
+/// alice/A link ──admitted──► Core ──terminal proof──► A's claims
 ///                                  ▲
 /// alice/B link ──binds B───────────┘
 /// ```
 ///
-/// This targets the opaque terminal-support allocation rather than a public
-/// subscription: its canonical query key is intentionally shared, while its
-/// policy snapshot must not be selected from the node's author-keyed legacy
-/// cache. Replacing the explicit A snapshot below with `session_claims_for`
-/// makes the final assertion observe B and fail.
+/// The policy snapshot must not be selected from the node's author-keyed
+/// legacy cache. Replacing the explicit A snapshot below with
+/// `session_claims_for` makes the first proof observe B and fail.
 #[test]
-fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
-    // The clause must read a row besides the candidate: claim-only clauses
-    // prove without hydrating any support receiver.
+fn terminal_commit_proof_keeps_same_author_sibling_claim_snapshot() {
+    // The clause reads an open workspace as well as the claim.
     let schema = editor_claim_workspace_write_schema();
     let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
     let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
@@ -3649,29 +3875,6 @@ fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
     else {
         panic!("prepared mergeable write must produce one commit unit");
     };
-    let scope = server
-        .node()
-        .borrow()
-        .authorization_support_scope_for_session(
-            alice,
-            Some(&a_claims),
-            &PermissionAdviceAction::Insert {
-                table: "todos".to_owned(),
-                cells: candidate_cells.clone(),
-            },
-        )
-        .expect("editor policy has a support clause");
-    let (shape, binding) = scope
-        .subscriptions
-        .into_iter()
-        .next()
-        .expect("editor policy produces one support subscription");
-    let a_subscription = SubscriptionKey {
-        shape_id: shape.shape_id(),
-        binding_id: binding.binding_id(),
-        read_view: scope.options.read_view_key(),
-    };
-
     {
         let mut a_connection = a_subscriber.borrow_mut();
         let ConnectionLink::Subscriber(a_state) = &mut a_connection.link else {
@@ -3687,40 +3890,12 @@ fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
             ))
             .expect("A terminal proof remains valid after B updates the legacy cache");
         assert!(allowed, "A's editor snapshot authorizes the write");
-        assert_eq!(
-            a_state.peer.subscription_policy_binding(a_subscription),
-            Some((alice, a_claims.clone())),
-            "the maintained terminal support receiver retains A rather than B's sibling snapshot"
-        );
     }
 
-    // 0→1→2 authenticated refreshes reuse the same canonical support key,
-    // but each must replace its maintained receiver before terminal proof.
+    // 0→1→2 authenticated refreshes each prove under their own snapshot.
     a_subscriber
         .borrow_mut()
         .update_authenticated_session_claims(b_claims.clone());
-    let b_scope = server
-        .node()
-        .borrow()
-        .authorization_support_scope_for_session(
-            alice,
-            Some(&b_claims),
-            &PermissionAdviceAction::Insert {
-                table: "todos".to_owned(),
-                cells: candidate_cells.clone(),
-            },
-        )
-        .expect("viewer policy has the same support clause under its own snapshot");
-    let (b_shape, b_binding) = b_scope
-        .subscriptions
-        .into_iter()
-        .next()
-        .expect("viewer policy produces one support subscription");
-    let b_subscription = SubscriptionKey {
-        shape_id: b_shape.shape_id(),
-        binding_id: b_binding.binding_id(),
-        read_view: b_scope.options.read_view_key(),
-    };
     {
         let mut a_connection = a_subscriber.borrow_mut();
         let ConnectionLink::Subscriber(a_state) = &mut a_connection.link else {
@@ -3734,13 +3909,8 @@ fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
                 &versions,
                 tx.tx_id,
             ))
-            .expect("a refreshed terminal proof replaces the stale support receiver");
+            .expect("a refreshed terminal proof uses the refreshed snapshot");
         assert!(!allowed, "the viewer snapshot denies the same write");
-        assert_eq!(
-            a_state.peer.subscription_policy_binding(b_subscription),
-            Some((alice, b_claims)),
-            "terminal support reuse is keyed by exact immutable claims, not just its query key"
-        );
     }
     a_subscriber
         .borrow_mut()
@@ -3758,13 +3928,8 @@ fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
                 &versions,
                 tx.tx_id,
             ))
-            .expect("the next refreshed terminal proof replaces the stale support receiver");
+            .expect("the next refreshed terminal proof uses the restored snapshot");
         assert!(allowed, "the restored editor snapshot authorizes it again");
-        assert_eq!(
-            a_state.peer.subscription_policy_binding(a_subscription),
-            Some((alice, a_claims)),
-            "each claim revision receives a fresh terminal support receiver"
-        );
     }
 }
 
