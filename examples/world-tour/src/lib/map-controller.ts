@@ -78,11 +78,15 @@ const ZOOM_WHEEL_FACTOR = 0.0015;
 const GLOBE_FIT = 0.75;
 const ARC_APEX = 0.15;
 
-const COLOR_OCEAN_INNER = "rgba(15, 19, 32, 1)";
-const COLOR_OCEAN_OUTER = "rgba(8, 9, 14, 1)";
-const COLOR_LIMB_GLOW = "rgba(255, 45, 123, 0.18)";
-const COLOR_STOP = "#ff2d7b";
-const COLOR_PATH = "#00e5cc";
+/**
+ * Globe colours come from the page's design tokens. The container sets
+ * `--globe-ocean`, `--globe-edge`, `--globe-land` and `--globe-accent`; we
+ * resolve them through a hidden probe element (canvas can't read CSS
+ * variables, and tokens may be `light-dark()` pairs) and re-read them when
+ * the colour scheme changes.
+ */
+type Palette = { ocean: string; edge: string; land: [number, number, number]; accent: string };
+const PALETTE_VARS = ["--globe-ocean", "--globe-edge", "--globe-land", "--globe-accent"] as const;
 
 type Vec3 = [number, number, number];
 
@@ -158,6 +162,13 @@ export class MapController {
   private destroyed = false;
   private readyPromise: Promise<void>;
   private bufferZoomFactor = 1;
+  private palette: Palette = {
+    ocean: "transparent",
+    edge: "transparent",
+    land: [0, 0, 0],
+    accent: "black",
+  };
+  private colorScheme = window.matchMedia("(prefers-color-scheme: dark)");
 
   constructor(options: MapControllerOptions) {
     const container =
@@ -202,7 +213,23 @@ export class MapController {
 
     this.resizeObserver = new ResizeObserver(() => this.applyCanvasSize());
     this.resizeObserver.observe(this.container);
+
+    this.readPalette();
+    this.colorScheme.addEventListener("change", this.readPalette);
   }
+
+  private readPalette = (): void => {
+    const probe = document.createElement("span");
+    probe.style.display = "none";
+    this.container.appendChild(probe);
+    const [ocean, edge, land, accent] = PALETTE_VARS.map((name) => {
+      probe.style.color = `var(${name})`;
+      return getComputedStyle(probe).color;
+    });
+    probe.remove();
+    const [r = 0, g = 0, b = 0] = (land.match(/[\d.]+/g) ?? []).map(Number);
+    this.palette = { ocean, edge, land: [r, g, b], accent };
+  };
 
   // -----------------------------------------------------------------------
   // Events
@@ -322,6 +349,7 @@ export class MapController {
     this.canvas.removeEventListener("pointerup", this.handlePointerUp);
     this.canvas.removeEventListener("pointercancel", this.handlePointerUp);
     this.canvas.removeEventListener("wheel", this.handleWheel);
+    this.colorScheme.removeEventListener("change", this.readPalette);
     for (const el of this.stopElements.values()) el.wrapper.remove();
     this.stopElements.clear();
     this.overlay.remove();
@@ -393,36 +421,23 @@ export class MapController {
     p.cy = cssH / 2;
 
     this.ctx.clearRect(0, 0, cssW, cssH);
-    this.renderGlow();
     this.renderOcean();
     this.renderLandDots();
     this.renderRouteArcs();
     this.renderStopsAndOverlay();
   }
 
-  /** Soft halo just outside the visible disc. */
-  private renderGlow(): void {
-    const { cx, cy, radius, cssW, cssH } = this.proj;
-    const ctx = this.ctx;
-    const glow = ctx.createRadialGradient(cx, cy, radius * 0.94, cx, cy, radius * 1.18);
-    glow.addColorStop(0, "rgba(255, 45, 123, 0)");
-    glow.addColorStop(0.4, COLOR_LIMB_GLOW);
-    glow.addColorStop(1, "rgba(255, 45, 123, 0)");
-    ctx.fillStyle = glow;
-    ctx.fillRect(0, 0, cssW, cssH);
-  }
-
-  /** Dark globe disc with subtle centre-bright shading so the sphere reads as a body. */
+  /** Flat globe disc with a hairline edge. */
   private renderOcean(): void {
     const { cx, cy, radius } = this.proj;
     const ctx = this.ctx;
-    const ocean = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
-    ocean.addColorStop(0, COLOR_OCEAN_INNER);
-    ocean.addColorStop(1, COLOR_OCEAN_OUTER);
-    ctx.fillStyle = ocean;
     ctx.beginPath();
     ctx.arc(cx, cy, radius, 0, 2 * Math.PI);
+    ctx.fillStyle = this.palette.ocean;
     ctx.fill();
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = this.palette.edge;
+    ctx.stroke();
   }
 
   /**
@@ -456,7 +471,8 @@ export class MapController {
       const arr = buckets[b];
       if (arr.length === 0) continue;
       const alpha = 0.18 + 0.7 * ((b + 0.5) / bins);
-      ctx.fillStyle = `rgba(245, 242, 237, ${alpha.toFixed(3)})`;
+      const [lr, lg, lb] = this.palette.land;
+      ctx.fillStyle = `rgba(${lr}, ${lg}, ${lb}, ${alpha.toFixed(3)})`;
       for (let i = 0; i < arr.length; i += 2) {
         ctx.fillRect(arr[i] - r, arr[i + 1] - r, d, d);
       }
@@ -467,7 +483,7 @@ export class MapController {
     if (this.routeLegs.length === 0) return;
     const { cf, sf, ct, st, radius, cx, cy } = this.proj;
     const ctx = this.ctx;
-    ctx.strokeStyle = COLOR_PATH;
+    ctx.strokeStyle = this.palette.accent;
     ctx.lineWidth = PATH_LINE_WIDTH_PX;
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
@@ -517,7 +533,7 @@ export class MapController {
       const sy = cy - y2 * radius;
 
       if (visible) {
-        ctx.fillStyle = COLOR_STOP;
+        ctx.fillStyle = this.palette.accent;
         ctx.beginPath();
         ctx.arc(sx, sy, STOP_MARKER_RADIUS_PX, 0, 2 * Math.PI);
         ctx.fill();

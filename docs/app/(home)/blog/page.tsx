@@ -1,5 +1,7 @@
-import Link from "next/link";
 import type { Metadata } from "next";
+import { Heading } from "@astryxdesign/core/Heading";
+import { Link } from "@astryxdesign/core/Link";
+import { Text } from "@astryxdesign/core/Text";
 import { blogSource } from "@/lib/source";
 
 export const metadata: Metadata = {
@@ -18,34 +20,53 @@ export default function BlogIndexPage() {
 
   return (
     <div className="w-full">
-      <section className="w-full pb-24 pt-18 sm:pb-28 sm:pt-22 lg:pb-32 lg:pt-26">
-        <div className="mx-auto w-full max-w-(--fd-layout-width) px-4">
-          <div className="max-w-[42rem] space-y-4">
-            <h1 className="text-[clamp(3rem,8vw,5.5rem)] font-black leading-[0.9] tracking-[-0.05em]">
-              Longer notes on what we&apos;re building
-            </h1>
-            <p className="max-w-[38rem] text-lg leading-relaxed text-fd-muted-foreground sm:text-xl">
-              Essays, technical deep dives, and launch writing about Jazz, sync, local-first data,
-              and the infrastructure around it.
-            </p>
-          </div>
-          <div className="mt-18 grid gap-x-12 gap-y-12 md:grid-cols-2 lg:gap-x-16">
-            {posts.map((post) => (
-              <Link key={post.url} href={post.url} className="group block border-t pt-4">
-                <p className="text-sm text-fd-muted-foreground">
-                  {dateFormatter.format(new Date(post.data.date))}
-                </p>
-                <h2 className="mt-3 text-3xl font-black leading-[0.92] tracking-[-0.04em] transition-colors group-hover:text-fd-primary">
-                  {post.data.title}
-                </h2>
-                <p className="mt-4 max-w-[34rem] text-base leading-relaxed text-fd-muted-foreground">
-                  {post.data.description}
-                </p>
-                <p className="mt-4 text-sm font-medium">By {post.data.author}</p>
-              </Link>
-            ))}
+      <section className="home-container pb-12 pt-16 sm:pt-20">
+        <div className="grid gap-6 lg:grid-cols-12 lg:items-end">
+          <Heading level={1} type="display-2" className="lg:col-span-7">
+            Blog
+          </Heading>
+          <div className="lg:col-span-5">
+            <Text as="p" display="block" type="large" color="secondary" weight="normal">
+              Essays, technical deep dives and launch writing about Jazz, sync, local-first data and
+              the infrastructure around it.
+            </Text>
+            <Text as="p" display="block" color="secondary" className="mt-3">
+              Follow along with the <Link href="/rss.xml">RSS feed</Link>.
+            </Text>
           </div>
         </div>
+      </section>
+      <section className="home-container pb-24">
+        <ol className="blog-list">
+          {posts.map((post) => (
+            <li key={post.url} className="blog-list-item">
+              <Text
+                as="p"
+                display="block"
+                type="supporting"
+                color="secondary"
+                className="blog-list-meta"
+              >
+                <time dateTime={new Date(post.data.date).toISOString().slice(0, 10)}>
+                  {dateFormatter.format(new Date(post.data.date))}
+                </time>
+                <span className="block">{post.data.author}</span>
+              </Text>
+              <div className="blog-list-body">
+                <Heading level={2}>
+                  <a href={post.url} className="blog-list-link">
+                    {post.data.title}
+                  </a>
+                </Heading>
+                {post.data.description ? (
+                  <Text as="p" display="block" color="secondary" className="mt-2">
+                    {post.data.description}
+                  </Text>
+                ) : null}
+              </div>
+            </li>
+          ))}
+        </ol>
       </section>
     </div>
   );

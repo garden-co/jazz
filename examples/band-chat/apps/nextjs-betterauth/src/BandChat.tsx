@@ -1,286 +1,182 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { DbConfig } from "jazz-tools";
-import { JazzProvider, useAll, useDb, useSession } from "jazz-tools/react";
-import { app } from "../schema";
+import { JazzProvider, useAll, useSession } from "jazz-tools/react";
+import { AppShell, Button, Center, EmptyState, Spinner } from "@astryxdesign/core";
+import { app, type Profile } from "../schema";
+import { ThemeProvider } from "../components/theme-provider";
+import { JoinRoom } from "./components/JoinRoom";
+import { NewRoomDialog } from "./components/NewRoomDialog";
+import { ProfileDialog, ProfileSetup } from "./components/ProfileDialog";
+import { RoomNav, type RoomSummary } from "./components/RoomNav";
+import { RoomView } from "./components/RoomView";
+import { ProfileDirectoryProvider } from "./lib/profiles";
+import { memoryStore, ParamStoreProvider, useSearchParam } from "./lib/url-state";
 
-// This only bounds files selected through this component. `s.bytes()` has no
-// corresponding schema or policy size constraint, so it must not be treated as
-// an authorization or security boundary for direct database writes.
-const ATTACHMENT_PICKER_MAX_BYTES = 256 * 1024;
-const allowedAttachmentTypes = new Set([
-  "image/png",
-  "image/jpeg",
-  "image/webp",
-  "text/plain",
-  "application/pdf",
-]);
+export interface BandChatProps {
+  /** Pre-fills the display name on first run (e.g. the Better Auth user name). */
+  defaultDisplayName?: string;
+  onSignOut?: () => void;
+}
 
 /** Rendered inside the external-auth provider in the Next dashboard. */
-export function BandChat() {
+export function BandChat(props: BandChatProps) {
   const session = useSession();
-  return session?.user.account ? (
-    <RoomWorkspace author={session.user.account} />
-  ) : (
-    <p>Loading identity…</p>
-  );
+  const author = session?.user.account;
+  return author ? <Workspace author={author} {...props} /> : <Loading label="Loading identity…" />;
 }
 
 /** Browser receipt entrypoint. The production dashboard never uses local-first auth here. */
-export function BandChatPreview({ config }: { config: DbConfig }) {
-  return (
-    <JazzProvider config={config} fallback={<p>Opening local stage…</p>}>
-      <BandChat />
-    </JazzProvider>
-  );
-}
-
-function RoomWorkspace({ author }: { author: string }) {
-  const db = useDb();
-  const { data: rooms = [] } = useAll(app.rooms.select("*", "$createdBy").orderBy("name", "asc"));
-  const { data: profiles = [] } = useAll(app.profiles.where({ author }));
-  const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null);
-  const [newRoomName, setNewRoomName] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const selectedRoom = rooms.find((room) => room.id === selectedRoomId) ?? rooms[0];
-
-  async function createRoom(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const name = newRoomName.trim();
-    if (!name) return;
-    setError(null);
-    try {
-      // This is an explicit user action. It is intentionally not hidden in a
-      // query hook, so reopening a read-only view cannot provision a room.
-      const profile =
-        profiles[0] ??
-        (
-          await db.insert(app.profiles, {
-            author,
-            displayName: "Band member",
-          })
-        ).value;
-      const room = (await db.insert(app.rooms, { name })).value;
-      await db.insert(app.roomMembers, { roomId: room.id, memberAuthor: author });
-      // Keep the returned profile live so the write order is clear to readers.
-      void profile;
-      setSelectedRoomId(room.id);
-      setNewRoomName("");
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    }
-  }
-
-  return (
-    <main className="shell">
-      <header>
-        <span className="eyebrow">LOCAL-FIRST BAND HQ</span>
-        <h1>BandChat</h1>
-        <p>Room creators admit members; member messages are stored locally before reconnecting.</p>
-      </header>
-      <section className="workspace">
-        <aside>
-          <h2>Rooms</h2>
-          <form onSubmit={(event) => void createRoom(event)}>
-            <label htmlFor="room-name">New room</label>
-            <input
-              id="room-name"
-              value={newRoomName}
-              onChange={(event) => setNewRoomName(event.target.value)}
-              placeholder="Rehearsal"
-            />
-            <button type="submit">Create room</button>
-          </form>
-          {rooms.map((room) => (
-            <button
-              className={room.id === selectedRoom?.id ? "room active" : "room"}
-              key={room.id}
-              onClick={() => setSelectedRoomId(room.id)}
-              type="button"
-            >
-              # {room.name}
-            </button>
-          ))}
-        </aside>
-        {selectedRoom ? (
-          <Conversation
-            canEditMembership={selectedRoom.$createdBy.account === author}
-            roomId={selectedRoom.id}
-            author={author}
-          />
-        ) : (
-          <section className="empty">
-            <h2>Start the soundcheck</h2>
-            <p>
-              Create a room to add your own membership and begin an offline-capable conversation.
-            </p>
-          </section>
-        )}
-      </section>
-      {error ? <p role="alert">{error}</p> : null}
-    </main>
-  );
-}
-
-function Conversation({
-  canEditMembership,
-  roomId,
-  author,
+export function BandChatPreview({
+  config,
+  initialParams,
 }: {
-  canEditMembership: boolean;
-  roomId: string;
-  author: string;
+  config: DbConfig;
+  /** Query-string state for this preview, e.g. `{ join: roomId }` for a room link. */
+  initialParams?: Record<string, string>;
 }) {
-  const { data: rooms = [] } = useAll(app.rooms.where({ id: roomId }));
-  const { data: messages = [] } = useAll(
-    app.messages.where({ roomId }).select("*", "$createdAt").orderBy("$createdAt", "asc"),
-  );
-  const { data: profiles = [] } = useAll(app.profiles.where({ author }));
-  const room = rooms[0];
-  if (!room) return <p>Loading room…</p>;
-
+  const [store] = useState(() => memoryStore(initialParams));
   return (
-    <section className="conversation">
-      <h2># {room.name}</h2>
-      <ol aria-label="Messages">
-        {messages.map((message) => (
-          <li key={message.id}>
-            <strong>{message.senderId === profiles[0]?.id ? "You" : "Bandmate"}</strong>
-            <span>{message.text}</span>
-            {message.attachment ? (
-              <small>
-                📎 {message.attachmentName ?? "attachment"} ({message.attachment.byteLength} bytes)
-              </small>
-            ) : null}
-          </li>
-        ))}
-      </ol>
-      {canEditMembership ? <MembershipEditor roomId={roomId} /> : null}
-      <Composer roomId={roomId} profileId={profiles[0]?.id ?? null} />
-    </section>
+    <ThemeProvider>
+      <ParamStoreProvider store={store}>
+        <JazzProvider config={config} fallback={<Loading label="Opening local stage…" />}>
+          <BandChat />
+        </JazzProvider>
+      </ParamStoreProvider>
+    </ThemeProvider>
   );
 }
 
-function MembershipEditor({ roomId }: { roomId: string }) {
-  const db = useDb();
-  const { data: memberships = [] } = useAll(app.roomMembers.where({ roomId }));
-  const [memberAuthor, setMemberAuthor] = useState("");
-  const [error, setError] = useState<string | null>(null);
-
-  async function invite(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const invitedAuthor = memberAuthor.trim();
-    if (!invitedAuthor || memberships.some((member) => member.memberAuthor === invitedAuthor))
-      return;
-    setError(null);
-    try {
-      await db.insert(app.roomMembers, { roomId, memberAuthor: invitedAuthor });
-      setMemberAuthor("");
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    }
-  }
-
-  async function remove(membershipId: string) {
-    setError(null);
-    try {
-      await db.delete(app.roomMembers, membershipId);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    }
-  }
-
+function Loading({ label }: { label: string }) {
   return (
-    <section aria-label="Room membership">
-      <h3>Members</h3>
-      <ul>
-        {memberships.map((membership) => (
-          <li key={membership.id}>
-            <span>
-              <small>{membership.memberAuthor}</small>
-            </span>
-            <button onClick={() => void remove(membership.id)} type="button">
-              Remove
-            </button>
-          </li>
-        ))}
-      </ul>
-      <form onSubmit={(event) => void invite(event)}>
-        <label>
-          Invite account ID
-          <input
-            aria-label="Invite account ID"
-            onChange={(event) => setMemberAuthor(event.target.value)}
-            value={memberAuthor}
-          />
-        </label>
-        <button type="submit">Invite member</button>
-      </form>
-      {error ? <p role="alert">{error}</p> : null}
-    </section>
+    <Center axis="both" padding={4} className="page-fill">
+      <Spinner label={label} />
+    </Center>
   );
 }
 
-function Composer({ roomId, profileId }: { roomId: string; profileId: string | null }) {
-  const db = useDb();
-  const [text, setText] = useState("");
-  const [file, setFile] = useState<File | null>(null);
-  const [error, setError] = useState<string | null>(null);
+function Workspace({ author, ...props }: BandChatProps & { author: string }) {
+  const { data: myProfiles } = useAll(
+    app.profiles.where({ author }).orderBy("$createdAt", "asc").limit(1),
+  );
+  if (!myProfiles) return <Loading label="Loading your profile…" />;
+  // Profile creation is an explicit first-run action, never a read side effect.
+  // Two tabs finishing setup at once can create two profiles; the oldest wins.
+  const profile = myProfiles[0];
+  if (!profile)
+    return <ProfileSetup author={author} defaultDisplayName={props.defaultDisplayName} />;
+  return (
+    <ProfileDirectoryProvider me={profile}>
+      <Rooms author={author} profile={profile} {...props} />
+    </ProfileDirectoryProvider>
+  );
+}
 
-  function chooseFile(candidate: File | null) {
-    if (!candidate) return setFile(null);
-    if (!allowedAttachmentTypes.has(candidate.type)) {
-      setFile(null);
-      setError("Use PNG, JPEG, WebP, text, or PDF attachments.");
-      return;
+function Rooms({
+  author,
+  profile,
+  onSignOut,
+}: BandChatProps & { author: string; profile: Profile }) {
+  const { data: rooms = [] } = useAll(app.rooms.select("*", "$createdBy", "$createdAt"));
+  const { data: memberships = [] } = useAll(app.roomMembers.where({ memberAuthor: author }));
+  const { data: markers = [] } = useAll(app.readMarkers.where({ reader: author }));
+  const [selectedRoomId, setSelectedRoomId] = useSearchParam("room");
+  const [joinRoomId, setJoinRoomId] = useSearchParam("join");
+  const [isNewRoomOpen, setNewRoomOpen] = useState(false);
+  const [isProfileOpen, setProfileOpen] = useState(false);
+  const [isNavOpen, setNavOpen] = useState(false);
+
+  const summaries = useMemo<RoomSummary[]>(() => {
+    const memberOf = new Set(memberships.map((membership) => membership.roomId));
+    const lastRead = new Map<string, Date>();
+    for (const marker of markers) {
+      const previous = lastRead.get(marker.roomId);
+      if (!previous || previous < marker.lastReadAt) lastRead.set(marker.roomId, marker.lastReadAt);
     }
-    if (candidate.size > ATTACHMENT_PICKER_MAX_BYTES) {
-      setFile(null);
-      setError(
-        "The attachment picker accepts files up to 256 KiB; this is client-side validation only.",
-      );
-      return;
-    }
-    setError(null);
-    setFile(candidate);
+    return rooms
+      .filter((room) => memberOf.has(room.id) || room.$createdBy.account === author)
+      .map((room) => {
+        const activityAt = room.lastActivityAt ?? room.$createdAt;
+        const readAt = lastRead.get(room.id);
+        return {
+          room,
+          activityAt,
+          readAt,
+          isCreator: room.$createdBy.account === author,
+          hasUnread: !!room.lastActivityAt && (!readAt || readAt < room.lastActivityAt),
+        };
+      })
+      .sort((a, b) => b.activityAt.getTime() - a.activityAt.getTime());
+  }, [rooms, memberships, markers, author]);
+
+  const selected =
+    summaries.find((summary) => summary.room.id === selectedRoomId) ??
+    (joinRoomId ? undefined : summaries[0]);
+
+  // A room link for a room you already belong to simply opens it.
+  const joinedRoom = joinRoomId
+    ? summaries.find((summary) => summary.room.id === joinRoomId)
+    : undefined;
+  useEffect(() => {
+    if (!joinedRoom) return;
+    setSelectedRoomId(joinedRoom.room.id);
+    setJoinRoomId(null);
+  }, [joinedRoom, setSelectedRoomId, setJoinRoomId]);
+
+  function selectRoom(roomId: string) {
+    setJoinRoomId(null);
+    setSelectedRoomId(roomId);
+    setNavOpen(false);
   }
 
-  async function send(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!profileId || (!text.trim() && !file)) return;
-    const attachment = file ? new Uint8Array(await file.arrayBuffer()) : undefined;
-    await db.insert(app.messages, {
-      roomId,
-      senderId: profileId,
-      text: text.trim() || "Shared an attachment",
-      attachment,
-      attachmentName: file?.name,
-    });
-    setText("");
-    setFile(null);
+  let main;
+  if (joinRoomId && !joinedRoom) {
+    main = <JoinRoom roomId={joinRoomId} profile={profile} onDismiss={() => setJoinRoomId(null)} />;
+  } else if (selected) {
+    main = <RoomView key={selected.room.id} summary={selected} author={author} />;
+  } else {
+    main = (
+      <Center axis="both" padding={4} className="page-fill">
+        <EmptyState
+          headingLevel={1}
+          title="No rooms yet"
+          description="Create a room for your band, then share its link so bandmates can ask to join."
+          actions={
+            <Button variant="primary" label="Create a room" onClick={() => setNewRoomOpen(true)} />
+          }
+        />
+      </Center>
+    );
   }
 
   return (
     <>
-      <form onSubmit={(event) => void send(event)}>
-        <input
-          aria-label="Message"
-          value={text}
-          onChange={(event) => setText(event.target.value)}
-          placeholder="Write a message"
-        />
-        <label>
-          Attach
-          <input
-            aria-label="Attachment"
-            type="file"
-            onChange={(event) => chooseFile(event.target.files?.[0] ?? null)}
+      <AppShell
+        variant="section"
+        contentPadding={0}
+        mobileNav={{ isOpen: isNavOpen, onOpenChange: setNavOpen }}
+        sideNav={
+          <RoomNav
+            rooms={summaries}
+            selectedRoomId={selected?.room.id ?? null}
+            onSelect={selectRoom}
+            onNewRoom={() => setNewRoomOpen(true)}
+            onEditProfile={() => setProfileOpen(true)}
+            onSignOut={onSignOut}
           />
-        </label>
-        <button type="submit">Send locally</button>
-      </form>
-      {error ? <p role="alert">{error}</p> : null}
+        }
+      >
+        {main}
+      </AppShell>
+      <NewRoomDialog
+        isOpen={isNewRoomOpen}
+        onOpenChange={setNewRoomOpen}
+        author={author}
+        profile={profile}
+        onCreated={selectRoom}
+      />
+      <ProfileDialog isOpen={isProfileOpen} onOpenChange={setProfileOpen} profile={profile} />
     </>
   );
 }
