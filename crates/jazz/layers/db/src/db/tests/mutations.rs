@@ -5006,6 +5006,34 @@ fn client_partial_update_of_unloaded_row_is_not_observed_rather_than_read_denied
     }
 }
 
+// A shape the authority does not support yet is not a malformed transaction:
+// the application gets `write_rejected` with the authority's own
+// "... is not supported yet" sentence, not a "Malformed transaction" prefix.
+#[test]
+fn not_supported_yet_rejection_reaches_the_application_verbatim() {
+    let reason = "Reading more than 262144 rows of a transaction's own writes in its \
+                  write-policy checks is not supported yet"
+        .to_owned();
+    let event = crate::db::mutation_errors::mutation_error_event_for(
+        TxId::new(TxTime(1), NodeUuid::from_bytes([0xe1; 16])),
+        TxKind::Mergeable,
+        &RejectionReason::MalformedCommit(reason.clone()),
+    );
+    assert_eq!(event.code, "write_rejected");
+    assert_eq!(event.reason, reason);
+
+    // A genuinely malformed commit keeps its prefix.
+    let event = crate::db::mutation_errors::mutation_error_event_for(
+        TxId::new(TxTime(2), NodeUuid::from_bytes([0xe1; 16])),
+        TxKind::Mergeable,
+        &RejectionReason::MalformedCommit("malformed version receipt".to_owned()),
+    );
+    assert_eq!(
+        event.reason,
+        "Malformed transaction: malformed version receipt"
+    );
+}
+
 /// A trusted backend serving `alice`'s request (`WriteIdentity::Session`) that
 /// has never loaded her row cannot stage a partial UPDATE for it: the
 /// mergeable commit needs the row's current cells and parent version, and a

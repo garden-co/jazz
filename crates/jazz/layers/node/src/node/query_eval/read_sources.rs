@@ -7,6 +7,7 @@
 
 use super::*;
 use crate::node::query_engine::{BranchViewSourceBase, current_row_field_names};
+use std::sync::{Arc, Mutex};
 use std::{future::Future, pin::Pin};
 
 fn current_row_column_field(
@@ -47,6 +48,205 @@ pub(super) struct JazzSourceGraphPreparer<'a, S> {
     /// Whether these sources feed a policy-authorization subplan, which an
     /// exclusive transaction records no read for (garden-co/jazz#3694).
     pub(super) policy_subplan: bool,
+    /// The candidate transaction's own writes, overlaid on the committed
+    /// evidence a write-policy subplan reads (`INV-RLS-9`). Empty for every
+    /// other program.
+    pub(super) transaction_overlay: TransactionWriteOverlay,
+}
+
+/// A candidate transaction's own writes as write-policy evidence.
+///
+/// A write-policy subplan ordinarily reads committed current rows. While the
+/// fate authority decides one commit unit, the unit's other writes are layered
+/// over that committed view row by row: a row the unit writes either shows its
+/// post-transaction content or is hidden. Rows the unit does not name keep
+/// their committed state, so another in-flight transaction's writes never
+/// become evidence. The overlay only ever holds rows of the candidate unit,
+/// so it is bounded by that unit, never by the size of a table.
+///
+/// The per-table row sets are built once per evaluation round and shared by
+/// every check of that round. The row under check is left out by lookup
+/// (`excluded`), and each table caches its encoded records per output
+/// descriptor, so a check never rebuilds or re-encodes the overlay. A check
+/// can also record which overlay-eligible tables its policy reads, so the
+/// caller re-checks a write only when a table it reads changed.
+///
+/// The overlay also names the tier its committed view is read at. Ordinary
+/// policy checks read Local (read-your-writes); a commit unit's decision
+/// reads authority-accepted state (Global), so neither the candidate, which a
+/// self-finalizing node has already stored Pending, nor any other pending
+/// local transaction is evidence. The tier travels with each check rather
+/// than living on the node, so a dropped or interleaved decision can never
+/// change what another check reads.
+#[derive(Clone)]
+pub(in crate::node) struct TransactionWriteOverlay {
+    tables: Arc<BTreeMap<(SchemaVersionId, String), Arc<TransactionOverlayTable>>>,
+    excluded: Option<(SchemaVersionId, String, RowUuid)>,
+    reads: Option<Arc<Mutex<BTreeSet<(SchemaVersionId, String)>>>>,
+    evidence_tier: DurabilityTier,
+}
+
+impl Default for TransactionWriteOverlay {
+    /// No overlaid rows, over the Local view: an ordinary policy check.
+    fn default() -> Self {
+        Self {
+            tables: Arc::default(),
+            excluded: None,
+            reads: None,
+            evidence_tier: DurabilityTier::Local,
+        }
+    }
+}
+
+/// One table's overlaid rows for one evaluation round: `Some` shows the row
+/// with that content, `None` hides it.
+#[derive(Default)]
+pub(in crate::node) struct TransactionOverlayTable {
+    rows: BTreeMap<RowUuid, Option<CurrentRow>>,
+    live_records: Mutex<Vec<(RecordDescriptor, Arc<Vec<(RowUuid, Vec<u8>)>>)>>,
+    written_records: Mutex<Vec<(RecordDescriptor, Arc<Vec<(RowUuid, Vec<u8>)>>)>>,
+}
+
+impl TransactionOverlayTable {
+    pub(in crate::node) fn new(rows: BTreeMap<RowUuid, Option<CurrentRow>>) -> Self {
+        Self {
+            rows,
+            ..Self::default()
+        }
+    }
+
+    pub(in crate::node) fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub(in crate::node) fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    fn cached(
+        cache: &Mutex<Vec<(RecordDescriptor, Arc<Vec<(RowUuid, Vec<u8>)>>)>>,
+        descriptor: RecordDescriptor,
+        encode: impl FnOnce() -> Result<Vec<(RowUuid, Vec<u8>)>, Error>,
+    ) -> Result<Arc<Vec<(RowUuid, Vec<u8>)>>, Error> {
+        if let Some((_, records)) = cache
+            .lock()
+            .map_err(|_| Error::InvalidStoredValue("transaction overlay cache poisoned"))?
+            .iter()
+            .find(|(cached, _)| *cached == descriptor)
+        {
+            return Ok(Arc::clone(records));
+        }
+        let records = Arc::new(encode()?);
+        cache
+            .lock()
+            .map_err(|_| Error::InvalidStoredValue("transaction overlay cache poisoned"))?
+            .push((descriptor, Arc::clone(&records)));
+        Ok(records)
+    }
+}
+
+impl TransactionWriteOverlay {
+    /// A commit unit decision's overlay of the given per-table row sets over
+    /// authority-accepted state, excluding no row and recording nothing.
+    pub(in crate::node) fn from_tables(
+        tables: Arc<BTreeMap<(SchemaVersionId, String), Arc<TransactionOverlayTable>>>,
+    ) -> Self {
+        Self {
+            tables,
+            excluded: None,
+            reads: None,
+            evidence_tier: DurabilityTier::Global,
+        }
+    }
+
+    /// Authority-accepted state with nothing overlaid: the evidence of a
+    /// commit unit decision's checks that do not see the unit's own writes.
+    pub(in crate::node) fn accepted_state() -> Self {
+        Self::from_tables(Arc::default())
+    }
+
+    /// This overlay's committed view with nothing overlaid, excluded or
+    /// recorded: USING clauses judge the rows a transaction acts on as
+    /// committed, at the same tier as its WITH CHECK evidence.
+    pub(in crate::node) fn committed_view(&self) -> Self {
+        Self {
+            evidence_tier: self.evidence_tier,
+            ..Self::default()
+        }
+    }
+
+    /// The tier whose current rows the policy check reads under the overlay.
+    pub(in crate::node) fn evidence_tier(&self) -> DurabilityTier {
+        self.evidence_tier
+    }
+
+    /// The same overlay with one row left out: the row under check is the
+    /// inline candidate, so its committed state stays as it is.
+    pub(in crate::node) fn excluding(
+        &self,
+        schema: SchemaVersionId,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> Self {
+        Self {
+            tables: Arc::clone(&self.tables),
+            excluded: Some((schema, table.to_owned(), row_uuid)),
+            reads: self.reads.clone(),
+            evidence_tier: self.evidence_tier,
+        }
+    }
+
+    /// The same overlay, also recording every overlay-eligible table a
+    /// policy check reads into `reads`.
+    pub(in crate::node) fn recording(
+        &self,
+        reads: Arc<Mutex<BTreeSet<(SchemaVersionId, String)>>>,
+    ) -> Self {
+        Self {
+            tables: Arc::clone(&self.tables),
+            excluded: self.excluded.clone(),
+            reads: Some(reads),
+            evidence_tier: self.evidence_tier,
+        }
+    }
+
+    /// Whether a check must take the overlay path at all: it has rows to
+    /// overlay or reads to record.
+    pub(in crate::node) fn is_active(&self) -> bool {
+        self.reads.is_some() || self.tables.values().any(|table| !table.is_empty())
+    }
+
+    /// How many overlaid rows the named tables hold: the evidence a check
+    /// that read them was charged for.
+    pub(in crate::node) fn rows_in(&self, tables: &BTreeSet<(SchemaVersionId, String)>) -> usize {
+        tables
+            .iter()
+            .filter_map(|table| self.tables.get(table))
+            .map(|table| table.len())
+            .sum()
+    }
+
+    fn record_read(&self, schema: SchemaVersionId, table: &str) {
+        if let Some(reads) = &self.reads
+            && let Ok(mut reads) = reads.lock()
+        {
+            reads.insert((schema, table.to_owned()));
+        }
+    }
+
+    fn table(&self, schema: SchemaVersionId, table: &str) -> Option<&Arc<TransactionOverlayTable>> {
+        self.tables
+            .get(&(schema, table.to_owned()))
+            .filter(|rows| !rows.is_empty())
+    }
+
+    fn excludes(&self, schema: SchemaVersionId, table: &str, row_uuid: RowUuid) -> bool {
+        self.excluded
+            .as_ref()
+            .is_some_and(|(excluded_schema, excluded_table, excluded_row)| {
+                *excluded_schema == schema && excluded_table == table && *excluded_row == row_uuid
+            })
+    }
 }
 
 pub(super) struct CurrentSourceGraph {
@@ -2147,6 +2347,12 @@ where
             let mut resolved = self
                 .prepare_source_graph_without_local_exclusions(request)
                 .await?;
+            // Only a write-policy check of a multi-row unit carries an
+            // overlay; ordinary reads never await it.
+            if self.transaction_overlay.is_active() {
+                self.boxed_overlay_transaction_writes(request, &mut resolved)
+                    .await?;
+            }
             if let Some(scope) = exclusion_scope
                 && !self.excludes_below_pending(request)
             {
@@ -2170,6 +2376,145 @@ where
 }
 
 impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
+    /// [`Self::overlay_transaction_writes`], boxed and built in this frame
+    /// rather than the caller's.
+    ///
+    /// Boxing at the call site alone still materializes the whole overlay
+    /// future in `prepare_source_graph`'s poll frame in unoptimized builds,
+    /// so every source of every read would pay for it on a recursion that
+    /// already nears the 1 MiB WASM stack of the dev build ("memory access
+    /// out of bounds" while lowering a read's sources).
+    fn boxed_overlay_transaction_writes<'a>(
+        &'a mut self,
+        request: &'a SourceRequest,
+        resolved: &'a mut ResolvedSource,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SourceResolutionError>> + 'a>> {
+        Box::pin(self.overlay_transaction_writes(request, resolved))
+    }
+
+    /// Layer the candidate transaction's own writes over one committed
+    /// write-policy evidence source (`INV-RLS-9`).
+    ///
+    /// Committed rows the transaction writes are removed by row id, and the
+    /// rows it leaves live are added back with their post-transaction
+    /// content. Only an ordinary current source inside a policy subplan takes
+    /// the overlay; the protected candidate itself is already inline.
+    async fn overlay_transaction_writes(
+        &mut self,
+        request: &SourceRequest,
+        resolved: &mut ResolvedSource,
+    ) -> Result<(), SourceResolutionError> {
+        if !self.policy_subplan
+            || request.visibility != RowVisibility::Visible
+            || self.inline_sources.contains_key(&request.source)
+            || self.covered_input_sources.contains_key(&request.source)
+            || !matches!(
+                self.read_view.sources.get(&request.source),
+                Some(SourceExpr::VisibleCurrent {
+                    data: DataSource::Current,
+                    ..
+                })
+            )
+        {
+            return Ok(());
+        }
+        // Every overlay-eligible table the policy reads is recorded, whether
+        // or not it has rows to overlay yet.
+        let read_schema = self.read_view.read_schema;
+        let table_name = request.source.table.clone();
+        self.transaction_overlay
+            .record_read(read_schema, &table_name);
+        let Some(rows) = self
+            .transaction_overlay
+            .table(read_schema, &table_name)
+            .cloned()
+        else {
+            return Ok(());
+        };
+        let overlay_error = || source_resolution_error(request, SourceGap::TransactionReadOverlay);
+        // Policy subplan sources are read as raw evidence (INV-RLS-21), so
+        // they carry no routing fields a synthetic arm would have to invent.
+        if !resolved.routing_fields.is_empty() {
+            return Err(overlay_error());
+        }
+        let schema_version_alias = self
+            .node
+            .ensure_schema_version_alias(read_schema)
+            .await
+            .map_err(|_| overlay_error())?;
+        // Encode the live rows as records of the committed arm's exact
+        // inferred output, so both union arms carry one record shape (field
+        // order, identities and storage cell types included). The declared
+        // row shape is not always that output. The encoding is cached on the
+        // round's shared table, so each descriptor is encoded once per round.
+        let descriptor = self
+            .node
+            .database
+            .graph_output_descriptor(&resolved.graph)
+            .map_err(|_| overlay_error())?;
+        let live_records = TransactionOverlayTable::cached(&rows.live_records, descriptor, || {
+            rows.rows
+                .iter()
+                .filter_map(|(row_uuid, row)| row.as_ref().map(|row| (*row_uuid, row)))
+                .map(|(row_uuid, row)| {
+                    inline_current_record_for_output(
+                        &resolved.table_schema,
+                        &descriptor,
+                        row,
+                        schema_version_alias,
+                        "transaction-overlay",
+                        &request.requirements,
+                    )
+                    .map(|record| (row_uuid, record))
+                })
+                .collect()
+        })
+        .map_err(|_| overlay_error())?;
+        let row_field = resolved.row_shape.row_uuid_field.clone();
+        let written_descriptor = RecordDescriptor::new([(row_field.clone(), ValueType::Uuid)]);
+        let written_records =
+            TransactionOverlayTable::cached(&rows.written_records, written_descriptor, || {
+                rows.rows
+                    .keys()
+                    .map(|row_uuid| {
+                        Ok::<_, Error>((
+                            *row_uuid,
+                            written_descriptor.create(&[Value::Uuid(row_uuid.0)])?,
+                        ))
+                    })
+                    .collect()
+            })
+            .map_err(|_| overlay_error())?;
+        // The row under check is the inline candidate; its committed state
+        // stays untouched.
+        let keep = |row_uuid: &RowUuid| {
+            !self
+                .transaction_overlay
+                .excludes(read_schema, &table_name, *row_uuid)
+        };
+        let live = GraphBuilder::inline_records(
+            descriptor,
+            live_records
+                .iter()
+                .filter(|(row_uuid, _)| keep(row_uuid))
+                .map(|(_, record)| record.clone()),
+        );
+        let committed = GraphBuilder::anti_join(
+            resolved.graph.clone(),
+            GraphBuilder::inline_records(
+                written_descriptor,
+                written_records
+                    .iter()
+                    .filter(|(row_uuid, _)| keep(row_uuid))
+                    .map(|(_, record)| record.clone()),
+            ),
+            [row_field.clone()],
+            [row_field],
+        );
+        resolved.graph = GraphBuilder::union([committed, live]);
+        Ok(())
+    }
+
     fn prepare_source_graph_without_local_exclusions<'a>(
         &'a mut self,
         request: &'a SourceRequest,
@@ -5384,6 +5729,29 @@ fn inline_current_record_with_source_metadata_and_deletion(
     branch_witness: Option<(&str, &BranchKey)>,
     deletion_marker: Option<bool>,
 ) -> Result<Vec<u8>, Error> {
+    let values = inline_current_values_with_source_metadata_and_deletion(
+        table,
+        descriptor,
+        row,
+        schema_version_alias,
+        coverage,
+        branch_witness,
+        deletion_marker,
+    )?;
+    Ok(descriptor.create(&values)?)
+}
+
+/// The field values [`inline_current_record_with_source_metadata_and_deletion`]
+/// encodes, in `descriptor` order.
+fn inline_current_values_with_source_metadata_and_deletion(
+    table: &TableSchema,
+    descriptor: &RecordDescriptor,
+    row: &CurrentRow,
+    schema_version_alias: SchemaVersionAlias,
+    coverage: &str,
+    branch_witness: Option<(&str, &BranchKey)>,
+    deletion_marker: Option<bool>,
+) -> Result<Vec<Value>, Error> {
     let mut values = Vec::new();
     values.push(Value::Uuid(row.row_uuid().0));
     for (column_index, column) in table.columns.iter().enumerate() {
@@ -5446,7 +5814,63 @@ fn inline_current_record_with_source_metadata_and_deletion(
     if let Some(deleted) = deletion_marker {
         values.push(Value::Bool(deleted));
     }
-    Ok(descriptor.create(&values)?)
+    Ok(values)
+}
+
+/// Encode one current row as a record of `output`, the exact inferred output
+/// of the committed source arm it will be unioned with. Fields are filled by
+/// name from the row's inline current-source values, adjusting only nullable
+/// wrapping; any field the inline shape cannot supply fails the encoding.
+fn inline_current_record_for_output(
+    table: &TableSchema,
+    output: &RecordDescriptor,
+    row: &CurrentRow,
+    schema_version_alias: SchemaVersionAlias,
+    coverage: &str,
+    requirements: &SourceRequirements,
+) -> Result<Vec<u8>, Error> {
+    // Supply every field of the canonical current-source vocabulary, not only
+    // the declared requirements: some resolver paths (a selected policy base,
+    // for instance) emit the version fields without declaring them.
+    let mut complete = requirements.clone();
+    complete.metadata.extend([
+        SourceMetadataRequirement::VersionWitnesses,
+        SourceMetadataRequirement::SettlePosition,
+        SourceMetadataRequirement::Coverage,
+    ]);
+    let metadata = inline_source_metadata(&complete, None);
+    let inline =
+        current_row_descriptor_with_hidden_source_fields_for_branch(table, &metadata, false);
+    let values = inline_current_values_with_source_metadata_and_deletion(
+        table,
+        &inline,
+        row,
+        schema_version_alias,
+        coverage,
+        None,
+        None,
+    )?;
+    let missing = || Error::InvalidStoredValue("overlay row cannot supply a source field");
+    let fitted = output
+        .fields()
+        .iter()
+        .map(|field| {
+            let name = field.name.as_deref().ok_or_else(missing)?;
+            let index = inline
+                .fields()
+                .iter()
+                .position(|candidate| candidate.name.as_deref() == Some(name))
+                .ok_or_else(missing)?;
+            let value = values.get(index).cloned().ok_or_else(missing)?;
+            Ok(match (&field.value_type, value) {
+                (ValueType::Nullable(_), value @ Value::Nullable(_)) => value,
+                (ValueType::Nullable(_), value) => Value::Nullable(Some(Box::new(value))),
+                (_, Value::Nullable(Some(value))) => *value,
+                (_, value) => value,
+            })
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    Ok(output.create(&fitted)?)
 }
 
 fn inline_snapshot_include_deleted_current_graph_with_source_metadata(
