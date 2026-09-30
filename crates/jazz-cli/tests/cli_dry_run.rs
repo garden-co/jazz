@@ -1319,7 +1319,7 @@ fn jazz_tools_server_sigint_exits_cleanly_and_releases_storage() {
 /// mallory ──GET /debug/pprof/heap (no secret)──► 401
 /// alice   ──GET /debug/pprof/heap (admin)──────► gzipped pprof naming jazz_server::*
 /// ```
-#[cfg(target_os = "linux")]
+#[cfg(heap_profiling)]
 #[test]
 fn jazz_tools_server_serves_a_symbolized_heap_profile_to_admins() {
     let temp_dir = tempfile::tempdir().expect("create server temp dir");
@@ -1354,7 +1354,7 @@ fn jazz_tools_server_serves_a_symbolized_heap_profile_to_admins() {
     wait_for_successful_exit(&mut server, Duration::from_secs(10));
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(heap_profiling)]
 fn http_get(port: u16, path: &str, admin_secret: Option<&str>) -> (u16, Vec<u8>) {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect server");
     let secret_header = admin_secret

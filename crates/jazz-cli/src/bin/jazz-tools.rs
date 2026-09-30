@@ -12,10 +12,11 @@
 // embedders) keep theirs. Both choices replace the system allocator for
 // throughput on the server's allocation-heavy paths (query/insert/observer).
 //
-// On Linux, where production servers run, jemalloc also samples the heap so
-// operators can see which code holds memory (see `jazz_cli::heap_profiling`).
-// It replaces `malloc` too, so RocksDB's allocations are sampled as well.
-#[cfg(target_os = "linux")]
+// With the `heap-profiling` feature on Linux, where production servers run,
+// jemalloc replaces mimalloc and samples the heap so operators can see which
+// code holds memory (see `jazz_cli::heap_profiling`). It replaces `malloc`
+// too, so RocksDB's allocations are sampled as well.
+#[cfg(heap_profiling)]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
@@ -24,13 +25,13 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 // Background threads return freed memory to the OS while the server is idle.
 // Operators can override any of these with the `MALLOC_CONF` environment
 // variable, for example `MALLOC_CONF=lg_prof_sample:17` for denser sampling.
-#[cfg(target_os = "linux")]
+#[cfg(heap_profiling)]
 #[allow(non_upper_case_globals)]
 #[unsafe(export_name = "malloc_conf")]
 pub static malloc_conf: &[u8] =
     b"prof:true,prof_active:false,lg_prof_sample:19,background_thread:true\0";
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(heap_profiling))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -308,9 +309,9 @@ async fn main() {
                 bound_port_file,
                 std::time::Duration::from_secs(shutdown_timeout_secs),
                 DiagnosticsConfig {
-                    #[cfg(target_os = "linux")]
+                    #[cfg(heap_profiling)]
                     heap_profiler: jazz_cli::heap_profiling::activate(),
-                    #[cfg(not(target_os = "linux"))]
+                    #[cfg(not(heap_profiling))]
                     heap_profiler: None,
                     listen: diagnostics_listen,
                     token: diagnostics_token,

@@ -5,5 +5,5 @@
 //! executable entry points that assemble those library APIs.
 
 pub mod commands;
-#[cfg(target_os = "linux")]
+#[cfg(heap_profiling)]
 pub mod heap_profiling;
