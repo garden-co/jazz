@@ -1033,6 +1033,17 @@ impl PeerIoPump {
             .channel_credits())
     }
 
+    /// The connection-scoped credit ledger, for a host that applies inbound
+    /// credit grants at its socket edge instead of queueing them behind
+    /// semantic work (see `ServerRuntimeHandle::receive_wire_frames`).
+    #[cfg(feature = "runtime")]
+    #[doc(hidden)]
+    pub fn shared_channel_credits(
+        &self,
+    ) -> Result<crate::wire::channel_credit::SharedChannelCredits, String> {
+        self.channel_credits()
+    }
+
     #[cfg(feature = "runtime")]
     #[doc(hidden)]
     pub fn take_canonical_credit_progress(&self) -> bool {
