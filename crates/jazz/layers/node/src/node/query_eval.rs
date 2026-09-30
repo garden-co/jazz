@@ -248,6 +248,7 @@ enum CurrentQueryProgramOutput {
 
 mod read_sources;
 
+pub(in crate::node) use read_sources::TransactionWriteOverlay;
 use read_sources::*;
 
 mod normalization;

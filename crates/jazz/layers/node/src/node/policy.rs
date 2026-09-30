@@ -5,6 +5,7 @@
 //! write ingest. It also retains the transaction memo used by view emission.
 
 use super::query_engine::{NormalizedRowSetShape, RowSetExpr};
+use super::query_eval::TransactionWriteOverlay;
 use super::*;
 use crate::protocol::PermissionAdviceAction;
 
@@ -56,6 +57,69 @@ fn unresolved_provenance() -> RowProvenance {
         updated_by: AuthorSubject::SYSTEM,
         updated_at: 0,
     }
+}
+
+/// One row a candidate commit unit writes on the main branch, prepared as
+/// write-policy evidence for the unit's other writes (`INV-RLS-9`).
+struct CandidateEvidenceRow {
+    /// Logical table as the authored versions name it.
+    authored_table: String,
+    row_uuid: RowUuid,
+    /// Policy schema and table the row is projected into.
+    policy_schema: SchemaVersionId,
+    policy_table: String,
+    /// The row after the transaction, or `None` when the unit deletes it.
+    after: Option<CurrentRow>,
+    /// The committed row an update replaces. It stays evidence until the
+    /// update's own checks pass.
+    before: Option<CurrentRow>,
+}
+
+/// The rows of one candidate commit unit, keyed for the per-write overlays.
+#[derive(Default)]
+struct CandidateUnitEvidence {
+    rows: Vec<CandidateEvidenceRow>,
+}
+
+impl CandidateUnitEvidence {
+    /// The overlay one write's WITH CHECK clause reads. The written row itself
+    /// is the inline candidate, so it is never overlaid. A deleted row is
+    /// hidden. A row whose checks have passed shows its post-transaction
+    /// content; until then an updated row shows its committed content and an
+    /// inserted or restored row is hidden, so writes cannot justify each
+    /// other in a cycle.
+    fn overlay_for(
+        &self,
+        version: &VersionRecord,
+        grounded: &BTreeSet<(String, RowUuid)>,
+    ) -> TransactionWriteOverlay {
+        let mut overlay = TransactionWriteOverlay::default();
+        for row in &self.rows {
+            if row.authored_table == version.table() && row.row_uuid == version.row_uuid() {
+                continue;
+            }
+            let shown = match &row.after {
+                None => None,
+                Some(after) if grounded.contains(&(row.authored_table.clone(), row.row_uuid)) => {
+                    Some(after.clone())
+                }
+                Some(_) => row.before.clone(),
+            };
+            overlay.set(row.policy_schema, &row.policy_table, row.row_uuid, shown);
+        }
+        overlay
+    }
+}
+
+fn current_row_cells(table: &TableSchema, row: &CurrentRow) -> BTreeMap<String, Value> {
+    table
+        .columns
+        .iter()
+        .filter_map(|column| {
+            row.cell(table, &column.name)
+                .map(|value| (column.name.clone(), value))
+        })
+        .collect()
 }
 
 impl<S> NodeState<S>
@@ -152,8 +216,177 @@ where
             None,
             candidate_tx_id,
             candidate_versions,
+            &TransactionWriteOverlay::default(),
         )
         .await
+    }
+
+    /// Decide every write policy of one commit unit (`INV-RLS-9`).
+    ///
+    /// A transaction reads its own writes, so its policy checks do too. Each
+    /// write's WITH CHECK clause (insert check, update check) reads committed
+    /// state overlaid with the unit's other writes, as described by
+    /// [`CandidateUnitEvidence::overlay_for`]. A commit unit carries its
+    /// writes as a canonical set, not in write order, so the checks run to a
+    /// fixpoint: a row's post-transaction content becomes evidence once its
+    /// own checks pass, and the unit is accepted exactly when every check
+    /// passes. That is the case when some order of the writes lets each one be
+    /// checked after the writes it depends on. USING clauses judge the rows
+    /// the transaction acts on as committed. Other transactions' writes are
+    /// never evidence.
+    pub(super) async fn commit_unit_write_policies_allow(
+        &mut self,
+        versions: &[VersionRecord],
+        author: AuthorSubject,
+        candidate_tx_id: TxId,
+    ) -> Result<bool, Error> {
+        let evidence = self
+            .candidate_unit_evidence(versions, author, candidate_tx_id)
+            .await?;
+        let mut passed = vec![false; versions.len()];
+        let mut pending = (0..versions.len()).collect::<Vec<_>>();
+        let mut grounded = BTreeSet::new();
+        loop {
+            let mut failed = Vec::new();
+            for index in pending {
+                let version = &versions[index];
+                let overlay = evidence.overlay_for(version, &grounded);
+                #[cfg(any(test, feature = "testing"))]
+                WRITE_POLICY_VERSION_EVALUATIONS.with(|count| count.set(count.get() + 1));
+                if self
+                    .write_policy_allows_version_record_for_view(
+                        version,
+                        author,
+                        None,
+                        Some(candidate_tx_id),
+                        versions,
+                        &overlay,
+                    )
+                    .await?
+                {
+                    passed[index] = true;
+                } else {
+                    failed.push(index);
+                }
+            }
+            if failed.is_empty() {
+                return Ok(true);
+            }
+            // A row is grounded once every version the unit writes for it
+            // has passed. Only newly grounded rows can change a failed
+            // check's evidence; without one the failure is final.
+            let mut next_grounded = BTreeSet::new();
+            for row in &evidence.rows {
+                let complete = versions.iter().zip(&passed).all(|(version, passed)| {
+                    *passed
+                        || version.table() != row.authored_table
+                        || version.row_uuid() != row.row_uuid
+                });
+                if complete {
+                    next_grounded.insert((row.authored_table.clone(), row.row_uuid));
+                }
+            }
+            if next_grounded.len() == grounded.len() {
+                return Ok(false);
+            }
+            grounded = next_grounded;
+            pending = failed;
+        }
+    }
+
+    /// Prepare the main-branch rows of a candidate unit as evidence for its
+    /// other writes. A unit that writes one row has nothing to overlay.
+    async fn candidate_unit_evidence(
+        &mut self,
+        versions: &[VersionRecord],
+        author: AuthorSubject,
+        candidate_tx_id: TxId,
+    ) -> Result<CandidateUnitEvidence, Error> {
+        if author == AuthorSubject::SYSTEM {
+            return Ok(CandidateUnitEvidence::default());
+        }
+        let mut by_row = BTreeMap::<(String, RowUuid), Vec<&VersionRecord>>::new();
+        for version in versions {
+            // Branch-local writes are evaluated in their own branch view,
+            // which this overlay does not model.
+            if !version.branch_key().values.is_empty() {
+                continue;
+            }
+            by_row
+                .entry((version.table().to_owned(), version.row_uuid()))
+                .or_default()
+                .push(version);
+        }
+        if by_row.len() < 2 {
+            return Ok(CandidateUnitEvidence::default());
+        }
+        let mut rows = Vec::with_capacity(by_row.len());
+        for ((authored_table, row_uuid), row_versions) in by_row {
+            let deleted = row_versions
+                .iter()
+                .any(|version| version.deletion() == Some(DeletionEvent::Deleted));
+            let content = row_versions
+                .iter()
+                .copied()
+                .find(|version| version.deletion().is_none());
+            let subject = content.unwrap_or(row_versions[0]);
+            let (policy_schema, table, cells) =
+                self.policy_projection_for_version_record(subject)?;
+            let (after, before) = if deleted {
+                (None, None)
+            } else {
+                let previous = self
+                    .policy_previous_content_subject_row(
+                        policy_schema,
+                        &table,
+                        subject,
+                        Some(candidate_tx_id),
+                    )
+                    .await?;
+                match content {
+                    Some(content) => {
+                        let mut after_cells = previous
+                            .as_ref()
+                            .map(|previous| current_row_cells(&table, previous))
+                            .unwrap_or_default();
+                        after_cells.extend(cells);
+                        let provenance = match &previous {
+                            Some(previous) => {
+                                let previous =
+                                    previous.provenance()?.unwrap_or_else(unresolved_provenance);
+                                RowProvenance {
+                                    created_by: previous.created_by,
+                                    created_at: previous.created_at,
+                                    updated_by: content.updated_by(),
+                                    updated_at: content.updated_at_ms(),
+                                }
+                            }
+                            None => version_provenance(content),
+                        };
+                        let after = current_row_from_cells_with_explicit_provenance(
+                            &table,
+                            row_uuid,
+                            &after_cells,
+                            provenance,
+                            None,
+                        )?;
+                        (Some(after), previous)
+                    }
+                    // A restore brings back the row's current content, which
+                    // committed state still reports as deleted.
+                    None => (previous, None),
+                }
+            };
+            rows.push(CandidateEvidenceRow {
+                authored_table,
+                row_uuid,
+                policy_schema,
+                policy_table: table.name.clone(),
+                after,
+                before,
+            });
+        }
+        Ok(CandidateUnitEvidence { rows })
     }
 
     /// A session update/upsert of an existing row also requires that the fate
@@ -257,6 +490,7 @@ where
         exact_view: Option<&JazzSchema>,
         candidate_tx_id: Option<TxId>,
         candidate_versions: &[VersionRecord],
+        transaction_overlay: &TransactionWriteOverlay,
     ) -> Result<bool, Error> {
         if author == AuthorSubject::SYSTEM {
             return Ok(true);
@@ -388,8 +622,10 @@ where
                 updated_by: version.updated_by(),
                 updated_at: version.updated_at_ms(),
             };
+            // WITH CHECK judges the row the transaction leaves behind, so its
+            // evidence includes the transaction's other writes (INV-RLS-9).
             return self
-                .write_policy_query_allows_candidate_with_provenance_for_schema(
+                .write_policy_query_allows_candidate_over_transaction(
                     policy_schema_version,
                     &table,
                     &policy,
@@ -398,13 +634,14 @@ where
                     author,
                     false,
                     update_check_provenance,
+                    transaction_overlay,
                 )
                 .await;
         }
         let Some(policy) = table.write_policies.insert_check.clone() else {
             return Ok(false);
         };
-        self.write_policy_query_allows_candidate_with_provenance_for_schema(
+        self.write_policy_query_allows_candidate_over_transaction(
             policy_schema_version,
             &table,
             &policy,
@@ -413,6 +650,7 @@ where
             author,
             true,
             version_provenance(version),
+            transaction_overlay,
         )
         .await
     }
@@ -473,6 +711,7 @@ where
             Some(exact_view),
             None,
             &[],
+            &TransactionWriteOverlay::default(),
         )
         .await
     }

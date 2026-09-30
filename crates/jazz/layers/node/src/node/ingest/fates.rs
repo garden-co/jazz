@@ -798,47 +798,37 @@ where
                 }
             }
         }
-        for version in versions {
-            if tx.kind == TxKind::Mergeable
-                && !self
+        if tx.kind == TxKind::Mergeable {
+            for version in versions {
+                if !self
                     .version_satisfies_read_for_write_visibility(
                         version,
                         permission_subject,
                         Some(tx.tx_id),
                     )
                     .await?
-            {
-                return Ok(false);
-            }
-            if !self
-                .version_satisfies_write_policy(version, permission_subject, tx.tx_id, versions)
-                .await?
-            {
-                return Ok(false);
+                {
+                    return Ok(false);
+                }
             }
         }
-        Ok(true)
+        self.commit_unit_satisfies_write_policy(versions, permission_subject, tx.tx_id)
+            .await
     }
 
-    /// Evaluate one candidate under the active exact session scope. Terminal
-    /// relay admission uses this after its support proof before it may issue a
-    /// non-wire authorization receipt.
-    pub async fn version_satisfies_write_policy(
+    /// Evaluate every write policy of one candidate commit unit under the
+    /// active exact session scope, each write seeing the unit's other writes
+    /// (`INV-RLS-9`). Terminal relay admission uses this after its support
+    /// proof before it may issue a non-wire authorization receipt, so a relay
+    /// and the fate authority decide the unit alike.
+    pub async fn commit_unit_satisfies_write_policy(
         &mut self,
-        version: &VersionRecord,
+        versions: &[VersionRecord],
         author: AuthorSubject,
         candidate_tx_id: TxId,
-        candidate_versions: &[VersionRecord],
     ) -> Result<bool, Error> {
-        #[cfg(any(test, feature = "testing"))]
-        WRITE_POLICY_VERSION_EVALUATIONS.with(|count| count.set(count.get() + 1));
-        self.write_policy_allows_version_record(
-            version,
-            author,
-            Some(candidate_tx_id),
-            candidate_versions,
-        )
-        .await
+        self.commit_unit_write_policies_allow(versions, author, candidate_tx_id)
+            .await
     }
 
     pub(super) async fn cascade_root_for_versions(

@@ -194,15 +194,8 @@ impl PeerState {
         if !evaluate_write_policies {
             return Ok(true);
         }
-        for version in versions {
-            if !node
-                .version_satisfies_write_policy(version, writer, candidate_tx_id, versions)
-                .await?
-            {
-                return Ok(false);
-            }
-        }
-        Ok(true)
+        node.commit_unit_satisfies_write_policy(versions, writer, candidate_tx_id)
+            .await
     }
 
     #[cfg(any(test, feature = "testing"))]

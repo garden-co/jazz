@@ -626,6 +626,39 @@ where
             insert_candidate,
             provenance,
             PolicyDecisionRole::Write,
+            &TransactionWriteOverlay::default(),
+        )
+        .await
+    }
+
+    /// Authorize an inline candidate whose policy evidence is committed
+    /// state overlaid with its own transaction's other writes (`INV-RLS-9`).
+    /// With an empty overlay this is exactly
+    /// [`Self::write_policy_query_allows_candidate_with_provenance_for_schema`].
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::node) async fn write_policy_query_allows_candidate_over_transaction(
+        &mut self,
+        policy_schema_version: SchemaVersionId,
+        table: &TableSchema,
+        policy: &crate::query::Query,
+        row_uuid: RowUuid,
+        cells: &BTreeMap<String, Value>,
+        identity: AuthorSubject,
+        insert_candidate: bool,
+        provenance: RowProvenance,
+        transaction_overlay: &TransactionWriteOverlay,
+    ) -> Result<bool, Error> {
+        self.policy_query_allows_candidate_with_provenance_for_schema(
+            policy_schema_version,
+            table,
+            policy,
+            row_uuid,
+            cells,
+            identity,
+            insert_candidate,
+            provenance,
+            PolicyDecisionRole::Write,
+            transaction_overlay,
         )
         .await
     }
@@ -650,6 +683,7 @@ where
             false,
             provenance,
             PolicyDecisionRole::Read,
+            &TransactionWriteOverlay::default(),
         )
         .await
     }
@@ -666,6 +700,7 @@ where
         insert_candidate: bool,
         provenance: RowProvenance,
         role: PolicyDecisionRole,
+        transaction_overlay: &TransactionWriteOverlay,
     ) -> Result<bool, Error> {
         let mut policy = policy.clone();
         if insert_candidate {
@@ -759,14 +794,26 @@ where
         )?;
         let inline_sources = BTreeMap::from([(root_source, vec![candidate])]);
         let access_paths = self.current_query_primary_key_access_paths(&policy_shape, &binding)?;
-        let program = Box::pin(
-            self.compile_query_program_request_with_inline_sources_and_access_paths(
-                request,
-                inline_sources,
-                access_paths,
-            ),
-        )
-        .await?;
+        let program = if transaction_overlay.is_empty() {
+            Box::pin(
+                self.compile_query_program_request_with_inline_sources_and_access_paths(
+                    request,
+                    inline_sources,
+                    access_paths,
+                ),
+            )
+            .await?
+        } else {
+            Box::pin(
+                self.compile_query_program_request_with_inline_sources_and_transaction_overlay(
+                    request,
+                    inline_sources,
+                    access_paths,
+                    transaction_overlay.clone(),
+                ),
+            )
+            .await?
+        };
         self.write_policy_query_program_allows(&program, &policy_shape, &binding)
             .await
     }

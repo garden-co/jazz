@@ -138,6 +138,13 @@ Sometimes access isn't determined by ownership or a parent relationship, but by 
 
 The callback form `(todo) => ...` gives you access to the current row, so you can correlate it with rows in other tables.
 
+Inside a transaction, `exists` also sees the transaction's own writes, so a row can be written in
+the same transaction as the row that grants it access, such as a task inserted together with its
+project. It does not see rows the transaction deletes, or writes from other transactions that the
+server has not accepted yet. Rows a transaction writes cannot grant each other access in a cycle:
+each one has to be allowed by rows that already exist or that the transaction writes and are
+themselves allowed.
+
 <Accordions type="single">
 <Accordion title="Recursive inheritance">
 
@@ -170,6 +177,7 @@ If you only use `.whereOld(...)`, the same condition is applied to both the old 
 same applies if you only use `.whereNew(...)`. Use both when the old-row and new-row checks differ.
 
 `exists` runs before a write is applied, so it can be used to prevent some columns from being updated.
+The row being written is always seen as it was before the write, even inside a transaction.
 
 <include cwd lang="ts" meta='title="permissions.ts"'>
   ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-update-protected-columns

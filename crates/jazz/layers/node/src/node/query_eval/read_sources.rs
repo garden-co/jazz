@@ -47,6 +47,55 @@ pub(super) struct JazzSourceGraphPreparer<'a, S> {
     /// Whether these sources feed a policy-authorization subplan, which an
     /// exclusive transaction records no read for (garden-co/jazz#3694).
     pub(super) policy_subplan: bool,
+    /// The candidate transaction's own writes, overlaid on the committed
+    /// evidence a write-policy subplan reads (`INV-RLS-9`). Empty for every
+    /// other program.
+    pub(super) transaction_overlay: TransactionWriteOverlay,
+}
+
+/// A candidate transaction's own writes as write-policy evidence.
+///
+/// A write-policy subplan ordinarily reads committed current rows. While the
+/// fate authority decides one commit unit, the unit's other writes are layered
+/// over that committed view row by row: a row the unit writes either shows its
+/// post-transaction content or is hidden. Rows the unit does not name keep
+/// their committed state, so another in-flight transaction's writes never
+/// become evidence. The overlay only ever holds rows of the candidate unit,
+/// so it is bounded by that unit, never by the size of a table.
+#[derive(Clone, Default)]
+pub(in crate::node) struct TransactionWriteOverlay {
+    rows: BTreeMap<(SchemaVersionId, String), BTreeMap<RowUuid, Option<CurrentRow>>>,
+}
+
+impl TransactionWriteOverlay {
+    /// Replace the committed evidence for `row_uuid` in `table` (read in
+    /// `schema`): `Some` shows the row with that content, `None` hides it.
+    pub(in crate::node) fn set(
+        &mut self,
+        schema: SchemaVersionId,
+        table: &str,
+        row_uuid: RowUuid,
+        row: Option<CurrentRow>,
+    ) {
+        self.rows
+            .entry((schema, table.to_owned()))
+            .or_default()
+            .insert(row_uuid, row);
+    }
+
+    pub(in crate::node) fn is_empty(&self) -> bool {
+        self.rows.values().all(BTreeMap::is_empty)
+    }
+
+    fn table(
+        &self,
+        schema: SchemaVersionId,
+        table: &str,
+    ) -> Option<&BTreeMap<RowUuid, Option<CurrentRow>>> {
+        self.rows
+            .get(&(schema, table.to_owned()))
+            .filter(|rows| !rows.is_empty())
+    }
 }
 
 pub(super) struct CurrentSourceGraph {
@@ -2133,6 +2182,7 @@ where
             let mut resolved = self
                 .prepare_source_graph_without_local_exclusions(request)
                 .await?;
+            resolved = self.overlay_transaction_writes(request, resolved).await?;
             if let Some(scope) = exclusion_scope
                 && !self.excludes_below_pending(request)
             {
@@ -2156,6 +2206,87 @@ where
 }
 
 impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
+    /// Layer the candidate transaction's own writes over one committed
+    /// write-policy evidence source (`INV-RLS-9`).
+    ///
+    /// Committed rows the transaction writes are removed by row id, and the
+    /// rows it leaves live are added back with their post-transaction
+    /// content. Only an ordinary current source inside a policy subplan takes
+    /// the overlay; the protected candidate itself is already inline.
+    async fn overlay_transaction_writes(
+        &mut self,
+        request: &SourceRequest,
+        mut resolved: ResolvedSource,
+    ) -> Result<ResolvedSource, SourceResolutionError> {
+        if !self.policy_subplan
+            || request.visibility != RowVisibility::Visible
+            || self.inline_sources.contains_key(&request.source)
+            || self.covered_input_sources.contains_key(&request.source)
+            || !matches!(
+                self.read_view.sources.get(&request.source),
+                Some(SourceExpr::VisibleCurrent {
+                    data: DataSource::Current,
+                    ..
+                })
+            )
+        {
+            return Ok(resolved);
+        }
+        let Some(rows) = self
+            .transaction_overlay
+            .table(self.read_view.read_schema, &request.source.table)
+            .cloned()
+        else {
+            return Ok(resolved);
+        };
+        let overlay_error = || source_resolution_error(request, SourceGap::TransactionReadOverlay);
+        // Policy subplan sources are read as raw evidence (INV-RLS-21), so
+        // they carry no routing fields a synthetic arm would have to invent.
+        if !resolved.routing_fields.is_empty() {
+            return Err(overlay_error());
+        }
+        let schema_version_alias = self
+            .node
+            .ensure_schema_version_alias(self.read_view.read_schema)
+            .await
+            .map_err(|_| overlay_error())?;
+        let (live, live_descriptor, _) = inline_current_graph_with_source_metadata(
+            &resolved.table_schema,
+            rows.values().flatten().cloned().collect(),
+            schema_version_alias,
+            "transaction-overlay",
+            &request.requirements,
+        )
+        .map_err(|_| overlay_error())?;
+        let live = if live_descriptor == resolved.row_shape.descriptor {
+            live
+        } else {
+            let fields = descriptor_field_names(&resolved.row_shape.descriptor)
+                .map_err(|_| overlay_error())?;
+            let live_fields =
+                descriptor_field_names(&live_descriptor).map_err(|_| overlay_error())?;
+            if fields.iter().any(|field| !live_fields.contains(field)) {
+                return Err(overlay_error());
+            }
+            live.project(fields)
+        };
+        let row_field = resolved.row_shape.row_uuid_field.clone();
+        let written_descriptor = RecordDescriptor::new([(row_field.clone(), ValueType::Uuid)]);
+        let written = rows
+            .keys()
+            .map(|row_uuid| written_descriptor.create(&[Value::Uuid(row_uuid.0)]))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| overlay_error())?;
+        let committed = GraphBuilder::anti_join(
+            resolved.graph,
+            GraphBuilder::inline_records(written_descriptor, written),
+            [row_field.clone()],
+            [row_field],
+        );
+        resolved.graph = GraphBuilder::union([committed, live]);
+        Ok(resolved)
+    }
+
     fn prepare_source_graph_without_local_exclusions<'a>(
         &'a mut self,
         request: &'a SourceRequest,

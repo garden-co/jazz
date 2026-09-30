@@ -22,7 +22,17 @@ Invariant digest:
 - `INV-RLS-6`: Read-policy revocation MUST remove rows from future settled subscription result sets and MUST NOT redact previously delivered local copies from the receiving node.
 - `INV-RLS-7`: A deletion-register version by a non-system author MUST satisfy the table write policy against the current global content version for that row; if there is no current...
 - `INV-RLS-8`: A deletion-register version MUST be readable to a non-system identity only when the row has a global content winner and that content winner satisfies the table read po...
-- `INV-RLS-9`: Join-based policies MUST require at least one matching global-current joined row that reaches the protected row and whose filters pass for the same authenticated ident...
+- `INV-RLS-9`: Join-based policies MUST require at least one matching joined
+  row that reaches the protected row and whose filters pass for the same
+  authenticated identity. Joined rows are read from committed state, except
+  that a WITH CHECK clause (insert check, update check) of a write in a commit
+  unit reads committed state overlaid with the unit's other writes: a row the
+  unit deletes is absent, and a row the unit inserts, restores or updates
+  contributes its post-transaction content once that row's own write checks
+  pass (until then an inserted or restored row is absent and an updated row
+  keeps its committed content). The protected row itself, USING clauses and
+  read-for-write checks read committed state, and writes of any other
+  transaction are never evidence.
 - `INV-RLS-10`: Query-driven sync MUST compose the root table read policy into the subscribed query and bind policy claims from server-authenticated identity so a client cannot widen...
 - `INV-RLS-11`: Relay peer links MUST have an explicit relay transport capability and no permission subject; client-to-Core peer links MUST use the admitted client AuthorSubject for policy-composed reads.
 - `INV-RLS-12`: Exclusive transaction view shipping MUST be policy-atomic per recipient and maintained subscription view: a non-system recipient MUST NOT receive a result member or pr...
@@ -230,6 +240,52 @@ update with neither `update_using` nor `update_check` denies; and a missing read
 policy emits no rows. Missing clauses never fall back to another operation's
 policy.
 
+#### Policy evidence inside a transaction
+
+A transaction reads its own writes and nothing else that is uncommitted, and
+its policy checks follow the same rule (`INV-RLS-9`). This holds for mergeable
+and exclusive commit units alike, and wherever a unit's write policies are
+decided: at the fate authority, when a node self-finalizes its own commit, and
+in terminal relay admission. Without it, a client that applies a transaction
+optimistically through its read-your-writes view would have the authority
+reject the same transaction, for example a task inserted together with the show
+its insert policy requires.
+
+A WITH CHECK clause judges the row a write leaves behind, so the rows its policy
+joins read are committed state overlaid, row by row, with the unit's other
+writes:
+
+- a row the unit deletes is absent, so a parent deleted anywhere in the unit
+  never satisfies a child's `exists`;
+- a row the unit inserts, restores or updates shows its post-transaction content
+  once every version the unit writes for that row has passed its own write
+  checks; until then an inserted or restored row is absent and an updated row
+  keeps its committed content;
+- the protected row itself is the inline candidate and is never overlaid, so an
+  `exists` over the written row's own table still sees that row as committed;
+- rows the unit does not name keep their committed state, so another
+  transaction's writes are never evidence, even while it is in flight.
+
+A commit unit carries its versions as a canonical set, not in the order the
+client made them. The authority therefore evaluates the unit's checks to a
+fixpoint: a check that fails is retried after another row of the unit has
+passed its checks, and the unit is rejected when a round grounds no new row.
+The unit is accepted exactly when some order of its writes lets each write be
+checked after the writes it depends on. Because a row becomes evidence only
+after its own checks pass, writes cannot justify each other in a cycle. Policy
+evidence is positive (`exists`, joins, reachability and inheritance only ever
+grant), so the result does not depend on evaluation order.
+
+USING clauses (`update_using`, `delete_using`) and read-for-write checks judge
+the rows the transaction acts on, which are the committed rows, so they read
+committed state. Deleting a group together with its memberships is therefore
+authorized against the memberships the transaction removes. Branch-local
+writes are evaluated in their own branch view and take no overlay.
+
+The overlay only holds rows of the candidate unit, never a table-wide read, and
+it changes no wire or storage encoding: it is formed from the versions the unit
+already carries.
+
 #### Read-for-write authorization
 
 jazz follows PostgreSQL's rule: **reads require read permission, including reads
@@ -392,8 +448,8 @@ user-visible merely because they participated in a policy decision, and any
 unsupported or indeterminate policy evaluation MUST deny.
 
 Join policies extend that same identity-bound evaluation across relationships. A
-join policy passes when a matching global-current row in the joined table reaches
-the protected row and its filters hold under the same identity (`INV-RLS-9`).
+join policy passes when a matching row in the joined table reaches the protected
+row and its filters hold under the same identity (`INV-RLS-9`).
 Policy joins may carry additional source-row equality correlations beyond their
 primary join key; these are part of the same join and must be enforced in direct
 evaluation, one-shot reads, and maintained subscription views.
