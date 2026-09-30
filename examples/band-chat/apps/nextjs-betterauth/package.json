@@ -11,10 +11,11 @@
     "typecheck": "tsc --noEmit",
     "test:permissions": "vitest run tests/permissions.test.ts",
     "test:config": "vitest run tests/config.test.ts",
+    "test:composer": "vitest run tests/write-rejection.test.ts",
     "test:browser": "node ../../../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.browser.ts",
     "test:browser:focused": "node scripts/test-browser-focused.mjs",
     "test:selection": "node --test tests/test-selection.test.mjs",
-    "test": "pnpm test:config && pnpm test:permissions && pnpm test:selection"
+    "test": "pnpm test:config && pnpm test:composer && pnpm test:permissions && pnpm test:selection"
   },
   "dependencies": {
     "@astryxdesign/core": "0.6.3",
