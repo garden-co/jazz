@@ -2531,6 +2531,7 @@ where
                                     }
                                 }
                                 upload.started = true;
+                                outbox.borrow_mut().note_upload_progress();
                                 awaiting_large_value_uploads
                                     .insert(tx_id, upload.value_ref.clone());
                             }
@@ -2551,6 +2552,7 @@ where
                             }
                             large_value_uploads.remove(&tx_id);
                             uploaded.insert(tx_id);
+                            outbox.borrow_mut().mark_on_wire(tx_id);
                         }
                         Ok::<bool, Error>(false)
                     })
@@ -2645,6 +2647,7 @@ where
                                 match result.status {
                                     crate::protocol::ChunkUploadStatus::Need(nodes) => {
                                         if let Some(tx_id) = pending_tx {
+                                            outbox.borrow_mut().note_upload_progress();
                                             awaiting_large_value_uploads.remove(&tx_id);
                                             if let Some(upload) = large_value_uploads
                                                 .get_mut(&tx_id)
@@ -2657,6 +2660,7 @@ where
                                     }
                                     crate::protocol::ChunkUploadStatus::Staged => {
                                         if let Some(tx_id) = pending_tx {
+                                            outbox.borrow_mut().note_upload_progress();
                                             awaiting_large_value_uploads.remove(&tx_id);
                                             if let Some(uploads) =
                                                 large_value_uploads.get_mut(&tx_id)
@@ -2707,9 +2711,14 @@ where
                                             self.large_value_upload_retry_deadlines
                                                 .borrow_mut()
                                                 .remove(&tx_id);
-                                            outbox
-                                                .borrow_mut()
-                                                .retain(|pending| pending.tx_id != tx_id);
+                                            {
+                                                let mut outbox = outbox.borrow_mut();
+                                                outbox.retain(|pending| pending.tx_id != tx_id);
+                                                outbox.mark_upload_failed(
+                                                    tx_id,
+                                                    "its large value was not staged by the server",
+                                                );
+                                            }
                                             self.staged_inbound.push_front(StagedInboundMessage {
                                                 message: SyncMessage::FateUpdate {
                                                     tx_id,

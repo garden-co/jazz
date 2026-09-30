@@ -1041,6 +1041,28 @@ where
         !self.pending_local_publications.borrow().is_empty()
     }
 
+    /// Local commits still settling before they join the upload outbox, with
+    /// the storage tables each one changed.
+    pub(super) fn pending_local_publication_tables(&self) -> Vec<(TxId, Vec<String>)> {
+        self.pending_local_publications
+            .borrow()
+            .iter()
+            .map(|pending| {
+                (
+                    pending.published.tx_id(),
+                    pending.published.changed_tables().to_vec(),
+                )
+            })
+            .collect()
+    }
+
+    pub(super) fn is_pending_local_publication(&self, tx_id: TxId) -> bool {
+        self.pending_local_publications
+            .borrow()
+            .iter()
+            .any(|pending| pending.published.tx_id() == tx_id)
+    }
+
     fn poll_local_publication_settlement(
         &self,
         cx: &mut std::task::Context<'_>,
@@ -3192,6 +3214,9 @@ where
         if upstream_epoch.is_some() {
             // Releases empty openings that were waiting on this link.
             self.remote_link.upstream_detached();
+            // Commits that link sent are resent by the next one; until then a
+            // Global read must not treat them as ahead of its open.
+            self.outbox.borrow_mut().forget_on_wire();
         }
         for request_id in terminal_permission_advice {
             if let Some(waiter) = self
