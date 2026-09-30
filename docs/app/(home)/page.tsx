@@ -473,7 +473,7 @@ export default function HomePage() {
       <section className="home-section">
         <div className="home-container">
           <Heading level={2} type="display-3" id="features" className="home-anchor home-statement">
-            Built into the database.{" "}
+            A database responsible for more.{" "}
             <span className="home-statement-muted">
               The hard parts of shared, live data, handled once instead of in every app.
             </span>
