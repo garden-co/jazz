@@ -4970,3 +4970,54 @@ fn client_partial_update_of_unloaded_row_is_not_observed_rather_than_read_denied
         );
     }
 }
+/// Persistence can finish before the local transaction owner settles its
+/// publication, so cancellation or owner contention must not strand its upload.
+///
+/// ```text
+/// insert ──persist──► owner held ──settle
+///                └──outbox marker is already durable in runtime memory
+/// ```
+#[test]
+fn persisted_publication_queues_upload_before_waiting_for_node_owner() {
+    use groove::storage::{TestStorage, TestStorageOperation};
+    use std::task::{Context, Poll, Waker};
+
+    let schema = owner_write_schema();
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, control) = TestStorage::controlled(&refs);
+    let author = AuthorSubject::for_test_bytes([0xaa; 16]);
+    let db = block_on(Db::open_history_complete(DbConfig::new(
+        schema.clone(),
+        storage,
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xaa; 16]),
+            author,
+        },
+    )))
+    .expect("open controlled test storage");
+    control.pause_on(TestStorageOperation::WriteMany);
+
+    let mut insert = Box::pin(db.insert(
+        "todos",
+        cells("persist before owner", false, author),
+        Default::default(),
+    ));
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    assert!(matches!(insert.as_mut().poll(&mut context), Poll::Pending));
+    assert!(control.poll_count(TestStorageOperation::WriteMany) > 0);
+
+    let node = db.node.node();
+    let owner = block_on(node.lock());
+    control.resume_operation(TestStorageOperation::WriteMany);
+    assert!(matches!(insert.as_mut().poll(&mut context), Poll::Pending));
+    assert!(
+        !db.node.outbox.borrow().entries.is_empty(),
+        "known-persisted transaction enters the upload outbox before NodeState settlement"
+    );
+
+    drop(owner);
+    let write = block_on(insert).expect("settle the persisted local publication");
+    assert!(db.node.outbox.borrow().contains(write.mergeable_tx_id()));
+}
