@@ -3371,8 +3371,8 @@ async fn suspended_resident_chunk_install_joins_assigned_publication() {
 /// subscription with a plain `messages` sink. Message B (id 2, in
 /// `parked_room`) carries a cold large payload, so its evaluation parks while
 /// the `messages` sink materializes it, although every graph node (the
-/// semi-join included) has already completed. Message A (id 3, in room 1) is
-/// written while B is parked.
+/// semi-join included) has already completed. By default, message A (id 3,
+/// in room 1) is written while B is parked.
 struct ParkedSemiJoinFixture {
     database: Database,
     subscription: MultisinkSubscription,
@@ -3382,6 +3382,21 @@ struct ParkedSemiJoinFixture {
 }
 
 async fn parked_semi_join_fixture(parked_room: u64) -> ParkedSemiJoinFixture {
+    parked_semi_join_fixture_with(parked_room, |batch| {
+        batch.insert(
+            "messages",
+            vec![Value::U64(3), Value::U64(1), Value::Bytes(vec![3])],
+        );
+    })
+    .await
+}
+
+/// As [`parked_semi_join_fixture`], with `concurrent` writing the batch that
+/// is applied while B is parked.
+async fn parked_semi_join_fixture_with(
+    parked_room: u64,
+    concurrent: impl FnOnce(&mut DatabaseBatch),
+) -> ParkedSemiJoinFixture {
     let schema = DatabaseSchema::new([
         TableSchema::new(
             "rooms",
@@ -3497,12 +3512,9 @@ async fn parked_semi_join_fixture(parked_room: u64) -> ParkedSemiJoinFixture {
         "the cold payload must park B's publication"
     );
 
-    let mut concurrent = database.open_batch();
-    concurrent.insert(
-        "messages",
-        vec![Value::U64(3), Value::U64(1), Value::Bytes(vec![3])],
-    );
-    let concurrent = database.apply_batch(concurrent).await.unwrap();
+    let mut concurrent_batch = database.open_batch();
+    concurrent(&mut concurrent_batch);
+    let concurrent = database.apply_batch(concurrent_batch).await.unwrap();
 
     ParkedSemiJoinFixture {
         database,
@@ -3577,6 +3589,31 @@ async fn parked_semi_join_install_keeps_later_write_keys() {
         fixture.drain_rooms(),
         vec![(vec![Value::U64(1), Value::String("general".to_owned())], -1)],
         "deleting room 1's only message must retract it"
+    );
+}
+
+/// #3815/#3816: a write which retracts a left row made visible by a parked
+/// evaluation must retract it. Evaluated against pre-park state, renaming
+/// room 1 while B is parked emitted nothing, so subscribers kept the old name
+/// (a lost `-row`), and B later published the old row.
+#[futures_test::test]
+async fn parked_semi_join_retracts_left_row_updated_meanwhile() {
+    let mut fixture = parked_semi_join_fixture_with(1, |batch| {
+        batch.update(
+            "rooms",
+            vec![Value::U64(1), Value::String("renamed".to_owned())],
+        );
+    })
+    .await;
+    let rooms = fixture.settle().await;
+    assert_eq!(
+        rooms,
+        vec![
+            (vec![Value::U64(1), Value::String("general".to_owned())], 1),
+            (vec![Value::U64(1), Value::String("general".to_owned())], -1),
+            (vec![Value::U64(1), Value::String("renamed".to_owned())], 1),
+        ],
+        "subscribers must see B's room, then its rename, in order"
     );
 }
 
