@@ -37,6 +37,12 @@ If you need password-based first boot from rescue mode, include `FORCE_PASSWORD 
 
 ## Bootstrap the runner
 
+The checked-in bootstrap pins Rust `1.93.1`, Node `24.13.0` (official Node.js tarball SHA-256 `6223aad1a81f9d1e7b682c59d12e2de233f7b4c37475cd40d1c89c42b737ffa8`), Actions Runner `2.337.0` (SHA-256 `70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613`), rustup-init `1.28.2` (SHA-256 `20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c`), and wasm-pack `0.13.1`. Downloaded archives must match their fixed publisher hashes before execution/extraction; versions do not float to `latest`.
+
+Bootstrap is fail-closed. Hash mismatches, missing required tools, runner configuration errors, or service installation/start errors stop setup without activating runner configuration or service. Reuse requires a complete, root-owned per-file runner manifest; partial or modified runner packages are rejected without destructive replacement. A complete pinned installation may be rerun without downloading archives. The registration token is treated as data and omitted from diagnostic output.
+
+`INSTALL_SSM_AGENT=0` explicitly disables AWS SSM installation on Hetzner. `auto` also skips SSM on non-AWS hosts; set `INSTALL_SSM_AGENT=1` only on AWS when installation via signed apt/snap repositories is intended, and then failure is fatal.
+
 Use the checked-in bootstrap script from the repo:
 
 ```bash
