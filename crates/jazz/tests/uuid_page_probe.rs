@@ -27,7 +27,7 @@ fn other_reader() -> AuthorSubject {
     AuthorSubject::for_test_bytes([0x72; 16])
 }
 
-fn open_db() -> Db<TestStorage> {
+fn open_db() -> Db {
     let schema = compile_schema(
         &SchemaBuilder::new()
             .table(
@@ -53,7 +53,7 @@ fn open_db() -> Db<TestStorage> {
     .expect("open authority")
 }
 
-fn insert(db: &Db<TestStorage>, id: u8, owner: AuthorSubject) {
+fn insert(db: &Db, id: u8, owner: AuthorSubject) {
     let input = jazz::row_input!("owner" => owner.principal_parts().1);
     let cells = input
         .into_iter()
@@ -75,7 +75,7 @@ fn insert(db: &Db<TestStorage>, id: u8, owner: AuthorSubject) {
         .expect("settle document on authority");
 }
 
-fn page(db: &Db<TestStorage>, identity: AuthorSubject, limit: usize) -> Vec<RowUuid> {
+fn page(db: &Db, identity: AuthorSubject, limit: usize) -> Vec<RowUuid> {
     let prepared = db
         .prepare_query(&Query::from("documents").limit(limit))
         .expect("prepare UUID page");
