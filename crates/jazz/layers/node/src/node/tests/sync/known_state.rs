@@ -1450,7 +1450,6 @@ fn assert_eviction_failure_contract(
     let logical_history_key = history_primary_key(persisted_version).into_bytes();
     let (history_table, history_key) =
         jazz_class_v1_history_physical_target(&logical_history_table, &logical_history_key);
-    assert!(reader.cached_tx_version_tables(tx_id).is_some());
     reader.cache_tx_versions(tx_id, persisted_versions.clone());
     assert!(reader.cached_tx_versions(tx_id).is_some());
     // Internal durable-boundary receipt: a reopened node intentionally lacks
@@ -1508,7 +1507,6 @@ fn assert_eviction_failure_contract(
     // this private receipt can observe cache removal without querying a
     // persistence-poisoned live node.
     assert!(reader.cached_tx_versions(tx_id).is_none());
-    assert!(reader.cached_tx_version_tables(tx_id).is_none());
     drop(reader);
 
     let mut reopened =
@@ -1646,7 +1644,6 @@ fn failed_body_eviction_still_invalidates_volatile_scope_and_cursors() {
         Some(crate::protocol::KnownStateDeclaration::Fast { .. })
     ));
     assert!(reader.cached_tx_versions(tx_id).is_some());
-    assert!(reader.cached_tx_version_tables(tx_id).is_some());
 
     storage.fail_nth_following_write_many(1);
     reader
@@ -1660,7 +1657,6 @@ fn failed_body_eviction_still_invalidates_volatile_scope_and_cursors() {
         assert!(state.applied_view_update_generation > 0);
     }
     assert!(reader.cached_tx_versions(tx_id).is_none());
-    assert!(reader.cached_tx_version_tables(tx_id).is_none());
     drop(reader);
     let mut reopened =
         NodeState::new_with_shared_test_catalogue(node(3), schema(), storage).unwrap();

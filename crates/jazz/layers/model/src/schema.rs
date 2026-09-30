@@ -1066,17 +1066,15 @@ impl TableSchema {
         ));
         columns.extend(self.column_stamp_columns());
 
-        GrooveTableSchema::new(name, columns)
-            .with_primary_key(PrimaryKey::composite([
-                PrimaryKeyColumn::bytes("branch_key"),
-                PrimaryKeyColumn::uuid("row_uuid"),
-                PrimaryKeyColumn::integer("tx_time", IntegerKeyType::U64),
-                PrimaryKeyColumn::integer("tx_node_id", IntegerKeyType::U64),
-            ]))
-            .with_index(GrooveIndexSchema::new(
-                "by_tx",
-                ["tx_time", "tx_node_id", "branch_key", "row_uuid"],
-            ))
+        GrooveTableSchema::new(name, columns).with_primary_key(PrimaryKey::composite([
+            PrimaryKeyColumn::bytes("branch_key"),
+            PrimaryKeyColumn::uuid("row_uuid"),
+            PrimaryKeyColumn::integer("tx_time", IntegerKeyType::U64),
+            PrimaryKeyColumn::integer("tx_node_id", IntegerKeyType::U64),
+        ]))
+        // No secondary index: the rows one transaction wrote are listed in its
+        // `jazz_transactions.touched_rows`, so "versions of transaction T" is a
+        // point read per listed row rather than an index over every version.
     }
 
     /// Return the global-current table: one settled row image per row.
@@ -1173,10 +1171,8 @@ impl TableSchema {
                 PrimaryKeyColumn::bytes("branch_key"),
                 PrimaryKeyColumn::uuid("row_uuid"),
             ]))
-            .with_index(GrooveIndexSchema::new(
-                "by_tx",
-                ["tx_time", "tx_node_id", "branch_key", "row_uuid"],
-            ))
+        // No transaction index: an overlay row is found through the history
+        // rows its pending transaction lists in `touched_rows`.
     }
 
     /// Columns available for constrained global-current reads.
@@ -1459,6 +1455,10 @@ fn transactions_table() -> GrooveTableSchema {
             column("reason_detail", GrooveColumnType::String.nullable()),
             // node-local-derived: updated when the node learns stronger durability.
             column("durability", durability_column()),
+            // node-local-derived: the history rows this node stored for the
+            // transaction, grouped by physical lineage and branch. It replaces a
+            // `by_tx` index over every history version (see `touched_rows_column`).
+            column("touched_rows", touched_rows_column()),
         ],
     )
     .with_primary_key(PrimaryKey::composite([
@@ -1466,6 +1466,21 @@ fn transactions_table() -> GrooveTableSchema {
         PrimaryKeyColumn::integer("node_id", IntegerKeyType::U64),
     ]))
     .with_index(GrooveIndexSchema::new("by_global_time", ["global_time"]))
+}
+
+/// `jazz_transactions.touched_rows`: the rows this node stored in history for
+/// one transaction, as canonical groups `(physical_table_id, branch_key,
+/// row_uuids)`. Groups are strictly increasing by `(physical_table_id,
+/// branch_key bytes)`, every group is non-empty, and each group's row UUIDs are
+/// strictly increasing. A fixed-width `Array<Uuid>` has no count or offsets, so
+/// each touched row costs its 16 UUID bytes plus a small per-group header.
+fn touched_rows_column() -> GrooveColumnType {
+    GrooveColumnType::Record(Box::new(RecordDescriptor::new([
+        ("physical_table_id", ValueType::U64),
+        ("branch_key", ValueType::Bytes),
+        ("row_uuids", ValueType::Uuid.array_of()),
+    ])))
+    .array_of()
 }
 
 fn contribution_component_column() -> GrooveColumnType {

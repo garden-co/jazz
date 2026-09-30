@@ -756,6 +756,10 @@ where
             version.table(),
             PhysicalWriteTarget::History,
         )?;
+        // Every history write goes through this binding; list the row in its
+        // transaction record when the batch is flushed.
+        let table_id = self.physical_table_id_for_schema(schema_version, version.table())?;
+        self.mark_tx_touched_row(table_id, version);
         Ok((
             groove::Intern::new(plan.storage_table.clone()),
             self.encode_physical_version_record(&plan, version, None)?,

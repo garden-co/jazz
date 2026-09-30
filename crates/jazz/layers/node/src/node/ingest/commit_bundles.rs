@@ -846,6 +846,7 @@ where
                     first.durability,
                     view_scoped,
                     contribution_merge,
+                    &TouchedRows::default(),
                 )?,
             );
 
@@ -962,6 +963,7 @@ where
             .values()
             .map(|(stored, global_time)| (stored.clone(), *global_time))
             .collect::<Vec<_>>();
+        self.flush_tx_touched_rows(&mut batch).await?;
         self.flush_ahead_shadows(&mut batch).await?;
         let applied = self.database.apply_batch(batch).await?;
         let persisted = applied.persist().await;

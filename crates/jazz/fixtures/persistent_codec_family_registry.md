@@ -32,3 +32,8 @@ admission. It added `jazz.history-version-current.v2`, the one member of the
 `jazz-node-root` profile that every row-holding root declares on top of the
 epoch-one `jazz-root` base, and the non-profile
 `jazz.subscription-watermark.v1` direct record store.
+
+The touched-rows transaction record (2026-09-30) retired the unreleased
+`jazz.history-version-current.v2` (history and ahead-current `by_tx` indexes)
+in favour of `jazz.history-version-current.v3`, whose `jazz_transactions`
+records list the rows each transaction touched.

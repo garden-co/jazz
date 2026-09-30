@@ -73,8 +73,9 @@ export const JAZZ_EPOCH_1_STORAGE_CODEC_IDS = [
   "jazz.catalogue.schema.v1",
   "jazz.catalogue.write-pointer.v1",
   // Linear row-state history. A browser root written by the DAG layout
-  // (alpha.54 to alpha.57) lacks this family and fails manifest admission.
-  "jazz.history-version-current.v2",
+  // (alpha.54 to alpha.57) or by the v2 row layout (history `by_tx` indexes)
+  // lacks this family and fails manifest admission.
+  "jazz.history-version-current.v3",
   "jazz.subscription-program-fact-key.v1",
 ] as const;
 

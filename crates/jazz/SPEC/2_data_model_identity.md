@@ -280,19 +280,25 @@ SYSTEM capability is not persisted as a row author. Node-local aliases live in `
 
 **Linear-history storage boundary (2026-09-29).** A node root that holds row
 history (Core, relay and client stores on every adapter) declares the codec
-family `jazz.history-version-current.v2` in its storage manifest, in addition
+family `jazz.history-version-current.v3` in its storage manifest, in addition
 to the shared Jazz epoch-one profile. That family is the linear row-state
 layout: one history record per accepted transaction holding the row state after
-Core's merge, keyed `(branch_key, row_uuid, tx_time, tx_node_id)` with index
-`by_tx`; a global-current record per row with `global_time` (the row's seq) and
+Core's merge, keyed `(branch_key, row_uuid, tx_time, tx_node_id)` with no
+secondary index; a global-current record per row with `global_time` (the row's seq) and
 index `by_seq (branch_key, global_time, row_uuid)`; an ahead overlay keyed
 `(branch_key, row_uuid)` with its `ahead_shadow` copy; `_deletion` as an
 ordinary nullable cell; and, after `authored_columns`, one hidden `U48` stamp
-per LWW column then `_ts__deletion` (SPEC 4 §4.6). It has no `parents`, no
+per LWW column then `_ts__deletion` (SPEC 4 §4.6). The history images of one
+transaction are found through that transaction's `touched_rows` audit field
+(§2.8), not through an index: fate replay, relay forwarding and
+materialization read the listed `(table, branch, row)` keys at the
+transaction's `(tx_time, tx_node_id)`. Recovery takes the transaction-clock
+high-water mark from the last `jazz_transactions` key. It has no `parents`, no
 register tables, no shared deletion history, no `jazz_merge_heads`, no
 `jazz_global_changes` and no parked parent edges. A root written by the DAG
-layout (`jazz.history-version-current.v1`, alpha.54 to alpha.57) lacks the v2
-family, so opening it fails at the manifest check, before any record is
+layout (`jazz.history-version-current.v1`, alpha.54 to alpha.57) or by the
+unreleased v2 row layout (history and ahead-current `by_tx` indexes, no
+`touched_rows`) lacks the v3 family, so opening it fails at the manifest check, before any record is
 decoded, with the typed `groove::storage::Error::UnsupportedStorageCodecs`,
 which names the codec IDs the root lacks and the ones this build does not know.
 There is no migration: whether old stores are refused, discarded and resynced,
@@ -381,11 +387,11 @@ by Groove's storage epoch; this section freezes logical record and transport
 bytes, not RocksDB SSTs, SQLite pages, or IndexedDB implementation files.
 
 **Transaction audit record.** `jazz_transactions` has permanent logical field
-positions `0..=18`: `(time: TxTime, node_id: NodeAlias, kind, n_total_writes,
+positions `0..=19`: `(time: TxTime, node_id: NodeAlias, kind, n_total_writes,
 made_by, base_snapshot, row_read_set, absent_read_set, predicate_read_set,
 user_metadata_json, contribution_merge, permission_subject,
 view_scoped_cardinality_marker, fate, global_time, rejection_reason,
-cascade_root, reason_detail, durability)`. `TxKind` is `Mergeable=0`,
+cascade_root, reason_detail, durability, touched_rows)`. `TxKind` is `Mergeable=0`,
 `Exclusive=1`; fate is `Pending=0`, `Accepted=1`, `Rejected=2`; durability is
 `None=0`, `Local=1`, legacy `Edge=2`, `Global=3` (legacy tag 2 reads as Local; new writes never emit it); rejection reasons are
 `ClientClockTooFarAhead=0`, `AuthorizationDenied=1`, `ExclusiveConflict=2`,
@@ -398,6 +404,18 @@ accepted/global uses an authority `GlobalTime`, rejection has no global winner,
 and a receiver never infers one from durability alone. A malformed or stale
 receipt that happens to carry a global-time field with a rejection still cannot
 make that transaction a content or deletion winner (ch. 3).
+
+`touched_rows` (position 19, `Array<{physical_table_id: U64, branch_key:
+Bytes, row_uuids: Array<Uuid>}>`) is node-local storage, never part of a
+receipt. It lists the history rows this node stored for the transaction,
+grouped by physical table and branch in ascending order with strictly
+ascending, unique row UUIDs per group; empty groups and any other order are
+rejected at decode. It is a superset: a listed row whose history image was
+later evicted is skipped on read, and rejection clears the list together with
+the rejected images. Its size is bounded by the transaction's writes (at most
+`MAX_COMMIT_UNIT_VERSIONS` rows, about 16 bytes per row plus about 20 bytes
+per group), so pending history stays findable by transaction until its fate
+arrives without a per-version index.
 
 Positions 5 through 8 are retained nullable layout slots, but the durable audit
 row writes them null in epoch 1. Exclusive snapshot/read/CAS evidence belongs to

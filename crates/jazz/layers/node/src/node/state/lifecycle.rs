@@ -848,7 +848,6 @@ impl NodeState {
                 policy_authorization_graph_cache: BTreeMap::new(),
                 policy_authorization_graph_replacements: BTreeMap::new(),
                 policy_proof_stack: Vec::new(),
-                tx_version_tables_cache: BTreeMap::new(),
                 tx_versions_cache: BTreeMap::new(),
                 tx_version_tables_cache_order: VecDeque::new(),
                 tx_version_tables_cache_order_set: BTreeSet::new(),
@@ -891,6 +890,7 @@ impl NodeState {
             absent_node_alias: None,
             ahead_current_keys: FxHashMap::default(),
             ahead_shadow_dirty: Vec::new(),
+            tx_touched_dirty: BTreeMap::new(),
             minting_global_time: false,
             sync_metrics: SyncMetrics::default(),
             query_engine_read_metrics: QueryEngineReadMetrics::default(),
@@ -1913,7 +1913,6 @@ where
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();
         self.query.policy_authorization_graph_replacements.clear();
-        self.query.tx_version_tables_cache.clear();
         self.query.tx_versions_cache.clear();
         self.query.tx_version_tables_cache_order.clear();
         self.query.tx_version_tables_cache_order_set.clear();

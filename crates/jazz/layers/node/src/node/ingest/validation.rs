@@ -104,9 +104,9 @@ where
             None,
         )
         .await?;
+        self.flush_tx_touched_rows(&mut batch).await?;
         self.flush_ahead_shadows(&mut batch).await?;
         let persistence = self.database.apply_batch(batch).await?;
-        self.invalidate_tx_version_table_names_cache(tx_id);
         self.pending_persistence.insert(tx_id);
         Ok(PublishedTransaction { tx_id, persistence })
     }
@@ -199,6 +199,7 @@ where
         )
         .await?;
         batch.deliver_notifications(groove::db::NotificationTiming::AfterPersistence);
+        self.flush_tx_touched_rows(&mut batch).await?;
         self.flush_ahead_shadows(&mut batch).await?;
         let applied = self.database.apply_batch(batch).await?;
         let persisted = applied.persist().await;
@@ -309,6 +310,10 @@ where
             durability,
             view_scoped_cardinality && !preserve_authoritative_cardinality,
             contribution_merge,
+            &stored_tx
+                .as_ref()
+                .map(|stored| stored.touched_rows.clone())
+                .unwrap_or_default(),
         )?;
         if tx_already_known {
             batch.update("jazz_transactions", tx_values);
@@ -442,6 +447,7 @@ where
                 global_time,
                 durability,
                 view_scoped_cardinality: view_scoped_cardinality && !preserve_authoritative_cardinality,
+                touched_rows: TouchedRows::default(),
             };
             self.remove_rejected_local_versions(tx.tx_id, &rejected_tx, batch).await?
         } else {
@@ -723,8 +729,10 @@ where
                 None,
                 DurabilityTier::Local,
                 contribution_merge,
+                &TouchedRows::default(),
             )?,
         );
+        self.flush_tx_touched_rows(&mut batch).await?;
         self.flush_ahead_shadows(&mut batch).await?;
         let applied = self.database.apply_batch(batch).await?;
 let persisted = applied.persist().await;

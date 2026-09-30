@@ -601,6 +601,10 @@ pub struct NodeState<S = BoxedStorage> {
     /// says whether the row may already hold a shadow (it had an overlay
     /// before this batch touched it).
     ahead_shadow_dirty: Vec<(SchemaVersionId, String, BranchKey, RowUuid, bool)>,
+    /// History rows written in the open batch, per transaction record key
+    /// `(tx_time, tx_node_alias)`; `flush_tx_touched_rows` lists them in the
+    /// transaction's `touched_rows`.
+    tx_touched_dirty: BTreeMap<(TxTime, NodeAlias), TouchedRowsDelta>,
     /// Set while this node (Core) mints a seq for an incoming patch.
     minting_global_time: bool,
 
@@ -1004,13 +1008,11 @@ struct QueryServing {
     /// Policy tables currently being compiled as membership proofs. This is
     /// transient recursion state, not a cache.
     policy_proof_stack: Vec<PolicyProofStackEntry>,
-    /// Logical tables that have history rows for a stored transaction.
-    tx_version_tables_cache: BTreeMap<TxId, BTreeSet<String>>,
     /// Recently staged history rows for a stored transaction, indexed by
     /// authored schema/table/row so parent validation does not rescan wide
     /// transactions on a cache hit.
     tx_versions_cache: BTreeMap<TxId, CachedTransactionVersions>,
-    /// Approximate insertion order for bounding `tx_version_tables_cache`.
+    /// Approximate insertion order for bounding `tx_versions_cache`.
     tx_version_tables_cache_order: VecDeque<TxId>,
     /// Live membership for `tx_version_tables_cache_order`.
     tx_version_tables_cache_order_set: BTreeSet<TxId>,

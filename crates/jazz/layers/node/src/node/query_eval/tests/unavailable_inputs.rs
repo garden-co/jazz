@@ -1314,6 +1314,7 @@ fn local_unavailable_confirmed_row_keeps_pending_successor() {
             DurabilityTier::Global,
             node.contribution_merge_storage_value(stored.tx.contribution_merge.as_ref())
                 .unwrap(),
+            &stored.touched_rows,
         )
         .unwrap(),
     );

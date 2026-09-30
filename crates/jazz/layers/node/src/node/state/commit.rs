@@ -328,6 +328,7 @@ where
                 None,
                 self.authored_commit_durability,
                 contribution_merge,
+                &TouchedRows::default(),
             )?,
         );
         let mut stored_versions = Vec::new();
@@ -485,6 +486,7 @@ where
             self.write_ahead_current_insert(&mut batch, overlay.as_ref().unwrap_or(&stored))?;
             stored_versions.push(stored);
         }
+        self.flush_tx_touched_rows(&mut batch).await?;
         self.flush_ahead_shadows(&mut batch).await?;
         let persistence = self.database.apply_batch(batch).await?;
         self.cache_tx_versions(tx_id, stored_versions.clone());
@@ -1030,8 +1032,73 @@ where
     }
 
 
-    pub(super) fn cached_tx_version_tables(&self, tx_id: TxId) -> Option<BTreeSet<String>> {
-        self.query.tx_version_tables_cache.get(&tx_id).cloned()
+    /// Note that `version`'s history row is written in the open batch, so the
+    /// batch's `flush_tx_touched_rows` lists it in its transaction record.
+    pub(super) fn mark_tx_touched_row(&mut self, table_id: PhysicalTableId, version: &VersionRow) {
+        self.tx_touched_dirty
+            .entry((version.tx_time(), version.tx_node_alias()))
+            .or_default()
+            .rows
+            .insert(
+                table_id,
+                version.branch_key().canonical_bytes(),
+                version.row_uuid(),
+            );
+    }
+
+    /// Note that every history row of the transaction is deleted in the open
+    /// batch (a rejection), so its `touched_rows` becomes empty.
+    pub(super) fn mark_tx_touched_rows_cleared(&mut self, tx_time: TxTime, node_alias: NodeAlias) {
+        self.tx_touched_dirty.insert(
+            (tx_time, node_alias),
+            TouchedRowsDelta {
+                clear: true,
+                rows: TouchedRows::default(),
+            },
+        );
+    }
+
+    /// Bring each transaction record touched by the open batch's history
+    /// writes up to date: its stored `touched_rows` (as staged in this batch)
+    /// plus the rows written since. Call after the batch's last history write
+    /// and before it is applied. A transaction without a record is skipped:
+    /// a history row is only reachable through its transaction.
+    pub(in crate::node) async fn flush_tx_touched_rows(
+        &mut self,
+        batch: &mut DatabaseBatch,
+    ) -> Result<(), Error> {
+        if self.tx_touched_dirty.is_empty() {
+            return Ok(());
+        }
+        let dirty = std::mem::take(&mut self.tx_touched_dirty);
+        for ((tx_time, node_alias), delta) in dirty {
+            let Some(record) = self
+                .database
+                .primary_key_get_raw_in_batch(
+                    batch,
+                    "jazz_transactions",
+                    &[Value::U64(tx_time.0), Value::U64(node_alias.0)],
+                )
+                .await?
+                .map(|raw| raw.owned_record())
+            else {
+                continue;
+            };
+            let stored = TouchedRows::from_transaction_record(record.borrowed())?;
+            let mut touched = if delta.clear {
+                TouchedRows::default()
+            } else {
+                stored.clone()
+            };
+            touched.extend(&delta.rows);
+            if touched == stored {
+                continue;
+            }
+            let mut values = record.to_values()?;
+            values[TransactionRowRecord::FIELD_TOUCHED_ROWS_IDX] = touched.to_value()?;
+            batch.update("jazz_transactions", values);
+        }
+        Ok(())
     }
 
     pub(super) fn cached_tx_versions(&self, tx_id: TxId) -> Option<Vec<VersionRow>> {
@@ -1039,12 +1106,6 @@ where
             .tx_versions_cache
             .get(&tx_id)
             .map(|cached| cached.versions.clone())
-    }
-
-    pub(super) fn cache_tx_version_tables(&mut self, tx_id: TxId, tables: BTreeSet<String>) {
-        self.touch_tx_version_cache_entry(tx_id);
-        self.query.tx_version_tables_cache.insert(tx_id, tables);
-        self.bound_tx_version_cache();
     }
 
     pub(super) fn cache_tx_versions(&mut self, tx_id: TxId, versions: Vec<VersionRow>) {
@@ -1062,28 +1123,20 @@ where
     }
 
     fn bound_tx_version_cache(&mut self) {
-        while self.query.tx_version_tables_cache.len() > TX_VERSION_TABLE_CACHE_MAX_ENTRIES
-            || self.query.tx_versions_cache.len() > TX_VERSION_TABLE_CACHE_MAX_ENTRIES
-        {
+        while self.query.tx_versions_cache.len() > TX_VERSION_TABLE_CACHE_MAX_ENTRIES {
             let Some(oldest) = self.query.tx_version_tables_cache_order.pop_front() else {
                 break;
             };
             if !self.query.tx_version_tables_cache_order_set.remove(&oldest) {
                 continue;
             }
-            self.query.tx_version_tables_cache.remove(&oldest);
             self.query.tx_versions_cache.remove(&oldest);
         }
     }
 
     pub(super) fn invalidate_tx_version_tables_cache(&mut self, tx_id: TxId) {
-        self.query.tx_version_tables_cache.remove(&tx_id);
         self.query.tx_versions_cache.remove(&tx_id);
         self.query.tx_version_tables_cache_order_set.remove(&tx_id);
-    }
-
-    pub(super) fn invalidate_tx_version_table_names_cache(&mut self, tx_id: TxId) {
-        self.query.tx_version_tables_cache.remove(&tx_id);
     }
 
     fn materialize_current_row(

@@ -98,6 +98,7 @@ where
                 stored.durability,
                 stored.view_scoped_cardinality,
                 contribution_merge,
+                &stored.touched_rows,
             )?,
         );
         if let Some(global_time) = stored.global_time {
@@ -145,6 +146,7 @@ where
         } else {
             None
         };
+        self.flush_tx_touched_rows(&mut batch).await?;
         self.flush_ahead_shadows(&mut batch).await?;
         let applied = self.database.apply_batch(batch).await?;
         let persisted = applied.persist().await;
@@ -971,6 +973,7 @@ where
                 self.version_storage_primary_key(version)?,
             );
         }
+        self.mark_tx_touched_rows_cleared(tx_id.time, tx.node_alias);
         self.invalidate_tx_version_tables_cache(tx_id);
         let _ = affected;
         Ok(rejected_payload)

@@ -554,44 +554,29 @@ where
             });
             return Ok(versions);
         }
-        let cached_tables = self.cached_tx_version_tables(tx_id);
-        let tables = cached_tables
-            .clone()
-            .unwrap_or_else(|| self.tx_version_scan_tables());
+        // The transaction record lists every history row this node stored
+        // for it; each is one exact history point read. A listed row that is
+        // no longer stored (evicted) is skipped.
         let mut versions = Vec::new();
-        let mut scanned_sources = BTreeSet::new();
-        for table in tables {
-            let sources = self.version_storage_sources(&table)?;
-            for storage_table in sources {
-                if !scanned_sources.insert(storage_table.clone()) {
-                    continue;
-                }
-                let raws = self
-                    .database
-                    .index_scan_raw(
-                        &storage_table,
-                        "by_tx",
-                        &[Value::U64(tx_id.time.0), Value::U64(tx.node_alias.0)],
-                    )
-                    .await?
-                    .into_iter()
-                    .map(|raw| raw.owned_record())
-                    .collect::<Vec<_>>();
-                for record in raws {
-                    let version =
-                        self.decode_history_owned_record(&table, &storage_table, record)?;
-                    versions.push(version);
-                }
-            }
-        }
-        if cached_tables.is_none() {
-            self.cache_tx_version_tables(
-                tx_id,
-                versions
-                    .iter()
-                    .map(|version| version.table().to_owned())
-                    .collect(),
-            );
+        for (table_id, branch_key, row_uuid) in tx.touched_rows.iter() {
+            let storage_table = physical_history_table_name(table_id);
+            let Some(record) = self
+                .database
+                .primary_key_get_raw(
+                    &storage_table,
+                    &[
+                        Value::Bytes(branch_key.to_vec()),
+                        Value::Uuid(row_uuid.0),
+                        Value::U64(tx_id.time.0),
+                        Value::U64(tx.node_alias.0),
+                    ],
+                )
+                .await?
+                .map(|raw| raw.owned_record())
+            else {
+                continue;
+            };
+            versions.push(self.decode_history_owned_record("", &storage_table, record)?);
         }
         versions.sort_by(|left, right| {
             left.table()
@@ -622,14 +607,6 @@ where
                 .then_with(|| left.row_uuid().cmp(&right.row_uuid()))
         });
         Ok(versions)
-    }
-
-    pub(super) fn tx_version_scan_tables(&self) -> BTreeSet<String> {
-        self.catalogue
-            .physical_mappings
-            .values()
-            .flat_map(|mapping| mapping.tables.keys().cloned())
-            .collect()
     }
 
     pub(super) fn version_storage_sources(&mut self, table: &str) -> Result<Vec<String>, Error> {
@@ -983,6 +960,7 @@ where
             view_scoped_cardinality: record
                 .get_nullable_string(TransactionRowRecord::FIELD_MERGE_STRATEGY_IDX)?
                 .is_some_and(|value| value == "view-scoped-cardinality"),
+            touched_rows: TouchedRows::from_transaction_record(record)?,
         })
     }
 

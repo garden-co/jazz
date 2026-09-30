@@ -122,6 +122,144 @@ groove::define_record! {
         16 => cascade_root: Option<Value>,
         17 => reason_detail: Option<String>,
         18 => durability: DurabilityTier,
+        19 => touched_rows: Vec<Value>,
+    }
+}
+
+/// Pending change to one transaction's `touched_rows` in the open batch.
+#[derive(Clone, Debug, Default)]
+pub(super) struct TouchedRowsDelta {
+    /// The transaction's history rows were deleted (it was rejected): drop
+    /// the stored list before adding `rows`.
+    pub(super) clear: bool,
+    pub(super) rows: TouchedRows,
+}
+
+/// The history rows one transaction wrote on this node, keyed exactly as
+/// history is: `(physical table lineage, branch key bytes) -> row UUIDs`.
+///
+/// Stored in `jazz_transactions.touched_rows` (SPEC 2 §2.8). It is how the
+/// node finds a transaction's versions (fate replay, relay forwarding,
+/// settlement, rejection clean-up) without a `by_tx` index over every
+/// history version: each listed row is one exact history point read at
+/// `(branch, row, tx_time, tx_node)`.
+///
+/// The list is a superset of the transaction's live history rows. Eviction
+/// may delete a listed row, and a listed row that is absent is skipped; a
+/// rejected transaction's rows are deleted with the list. Its size is linear
+/// in the rows the transaction wrote: 16 bytes per row plus about 20 bytes per
+/// `(table, branch)` group, well below the history those rows occupy, and a
+/// commit unit holds at most `MAX_COMMIT_UNIT_VERSIONS` versions.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct TouchedRows(BTreeMap<(PhysicalTableId, Vec<u8>), BTreeSet<RowUuid>>);
+
+impl TouchedRows {
+    pub(super) fn insert(&mut self, table: PhysicalTableId, branch_key: Vec<u8>, row: RowUuid) {
+        self.0.entry((table, branch_key)).or_default().insert(row);
+    }
+
+    pub(super) fn extend(&mut self, other: &TouchedRows) {
+        for ((table, branch_key), rows) in &other.0 {
+            self.0
+                .entry((*table, branch_key.clone()))
+                .or_default()
+                .extend(rows.iter().copied());
+        }
+    }
+
+    /// Every touched row in `(table, branch, row)` order.
+    pub(super) fn iter(&self) -> impl Iterator<Item = (PhysicalTableId, &[u8], RowUuid)> + '_ {
+        self.0.iter().flat_map(|((table, branch_key), rows)| {
+            rows.iter()
+                .map(move |row| (*table, branch_key.as_slice(), *row))
+        })
+    }
+
+    fn group_descriptor() -> records::RecordDescriptor {
+        records::RecordDescriptor::new([
+            ("physical_table_id", records::ValueType::U64),
+            ("branch_key", records::ValueType::Bytes),
+            ("row_uuids", records::ValueType::Uuid.array_of()),
+        ])
+    }
+
+    /// The canonical `touched_rows` cell.
+    pub(super) fn to_value(&self) -> Result<Value, Error> {
+        let descriptor = Self::group_descriptor();
+        let groups = self
+            .0
+            .iter()
+            .map(|((table, branch_key), rows)| {
+                let values = [
+                    Value::U64(table.0),
+                    Value::Bytes(branch_key.clone()),
+                    Value::Array(rows.iter().map(|row| Value::Uuid(row.0)).collect()),
+                ];
+                Ok(Value::Record(OwnedRecord::new(
+                    descriptor.create(&values)?,
+                    descriptor,
+                )))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        Ok(Value::Array(groups))
+    }
+
+    /// Decode a stored `touched_rows` cell, refusing any non-canonical
+    /// spelling: unordered or repeated groups, empty groups, unordered or
+    /// repeated rows.
+    pub(super) fn from_transaction_record(record: BorrowedRecord<'_>) -> Result<Self, Error> {
+        Self::from_value(&record.get_idx(TransactionRowRecord::FIELD_TOUCHED_ROWS_IDX)?)
+    }
+
+    fn from_value(value: &Value) -> Result<Self, Error> {
+        let Value::Array(groups) = value else {
+            return Err(Error::InvalidStoredValue(
+                "transaction touched_rows must be an array",
+            ));
+        };
+        let mut touched = BTreeMap::new();
+        let mut previous: Option<(PhysicalTableId, Vec<u8>)> = None;
+        for group in groups {
+            let Value::Record(group) = group else {
+                return Err(Error::InvalidStoredValue(
+                    "transaction touched_rows group must be a record",
+                ));
+            };
+            let group = group.borrowed();
+            let key = (
+                PhysicalTableId(group.get_u64(0)?),
+                group.get_bytes(1)?.to_vec(),
+            );
+            let Value::Array(rows) = group.get_idx(2)? else {
+                return Err(Error::InvalidStoredValue(
+                    "transaction touched_rows group rows must be an array",
+                ));
+            };
+            let mut uuids = BTreeSet::new();
+            let mut last = None;
+            for row in rows {
+                let Value::Uuid(row) = row else {
+                    return Err(Error::InvalidStoredValue(
+                        "transaction touched row must be a UUID",
+                    ));
+                };
+                if last.is_some_and(|last| last >= row) {
+                    return Err(Error::InvalidStoredValue(
+                        "transaction touched rows are not strictly increasing",
+                    ));
+                }
+                last = Some(row);
+                uuids.insert(RowUuid(row));
+            }
+            if uuids.is_empty() || previous.as_ref().is_some_and(|previous| *previous >= key) {
+                return Err(Error::InvalidStoredValue(
+                    "transaction touched_rows groups are empty or not strictly increasing",
+                ));
+            }
+            previous = Some(key.clone());
+            touched.insert(key, uuids);
+        }
+        Ok(Self(touched))
     }
 }
 
@@ -1974,6 +2112,8 @@ pub(super) struct StoredTransaction {
     pub(super) durability: DurabilityTier,
     /// True when `n_total_writes` is only the locally known view cardinality.
     pub(super) view_scoped_cardinality: bool,
+    /// The history rows this node stored for the transaction.
+    pub(super) touched_rows: TouchedRows,
 }
 
 impl StoredTransaction {
@@ -3265,6 +3405,10 @@ pub(super) fn runtime_result_identity_bytes(
     Ok(encoded)
 }
 
+/// Values of a `jazz_transactions` record. `touched_rows` carries the rows
+/// already listed for the transaction; a batch that writes history rows adds
+/// them when it is flushed (`flush_tx_touched_rows`).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn transaction_values(
     node_alias: NodeAlias,
     tx: &Transaction,
@@ -3272,6 +3416,7 @@ pub(super) fn transaction_values(
     global_time: Option<GlobalTime>,
     durability: DurabilityTier,
     contribution_merge: Value,
+    touched_rows: &TouchedRows,
 ) -> Result<Vec<Value>, Error> {
     transaction_values_with_cardinality_scope(
         node_alias,
@@ -3281,9 +3426,11 @@ pub(super) fn transaction_values(
         durability,
         false,
         contribution_merge,
+        touched_rows,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn transaction_values_with_cardinality_scope(
     node_alias: NodeAlias,
     tx: &Transaction,
@@ -3292,6 +3439,7 @@ pub(super) fn transaction_values_with_cardinality_scope(
     durability: DurabilityTier,
     view_scoped_cardinality: bool,
     contribution_merge: Value,
+    touched_rows: &TouchedRows,
 ) -> Result<Vec<Value>, Error> {
     Ok(vec![
         Value::U64(tx.tx_id.time.0),
@@ -3329,6 +3477,7 @@ pub(super) fn transaction_values_with_cardinality_scope(
             rejection_reason_detail(&fate).map(|detail| Box::new(Value::String(detail))),
         ),
         Value::String(durability_string(durability).to_owned()),
+        touched_rows.to_value()?,
     ])
 }
 
@@ -4429,6 +4578,78 @@ pub(super) fn decode_active_schema(bytes: &[u8]) -> Result<ActiveSchema, Error> 
         schema.schema,
     )?;
     Ok(active)
+}
+
+#[cfg(test)]
+mod touched_rows_tests {
+    use super::*;
+
+    fn group(table: u64, branch: &[u8], rows: &[u8]) -> Value {
+        let descriptor = TouchedRows::group_descriptor();
+        let values = [
+            Value::U64(table),
+            Value::Bytes(branch.to_vec()),
+            Value::Array(
+                rows.iter()
+                    .map(|row| Value::Uuid(RowUuid::from_bytes([*row; 16]).0))
+                    .collect(),
+            ),
+        ];
+        Value::Record(OwnedRecord::new(
+            descriptor.create(&values).unwrap(),
+            descriptor,
+        ))
+    }
+
+    #[test]
+    fn touched_rows_round_trip_and_reject_noncanonical_groups() {
+        let mut touched = TouchedRows::default();
+        touched.insert(
+            PhysicalTableId(2),
+            b"main".to_vec(),
+            RowUuid::from_bytes([9; 16]),
+        );
+        touched.insert(
+            PhysicalTableId(1),
+            b"main".to_vec(),
+            RowUuid::from_bytes([3; 16]),
+        );
+        touched.insert(
+            PhysicalTableId(2),
+            b"main".to_vec(),
+            RowUuid::from_bytes([1; 16]),
+        );
+        touched.insert(
+            PhysicalTableId(2),
+            b"main".to_vec(),
+            RowUuid::from_bytes([9; 16]),
+        );
+        let value = touched.to_value().unwrap();
+        assert_eq!(
+            value,
+            Value::Array(vec![group(1, b"main", &[3]), group(2, b"main", &[1, 9])]),
+            "groups ascend by (table, branch); rows ascend and are unique"
+        );
+        assert_eq!(TouchedRows::from_value(&value).unwrap(), touched);
+        assert_eq!(
+            TouchedRows::from_value(&Value::Array(Vec::new())).unwrap(),
+            TouchedRows::default()
+        );
+
+        for malformed in [
+            Value::Array(vec![group(2, b"main", &[1]), group(1, b"main", &[1])]),
+            Value::Array(vec![group(1, b"main", &[1]), group(1, b"main", &[2])]),
+            Value::Array(vec![group(1, b"main", &[])]),
+            Value::Array(vec![group(1, b"main", &[2, 1])]),
+            Value::Array(vec![group(1, b"main", &[1, 1])]),
+            Value::U64(0),
+        ] {
+            assert!(
+                TouchedRows::from_value(&malformed).is_err(),
+                "{malformed:?} must be refused"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
