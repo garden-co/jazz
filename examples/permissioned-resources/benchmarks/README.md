@@ -17,9 +17,13 @@ Do not interpret differences from the retired `first_sync_27518_rocksdb` server-
 workload as a like-for-like optimization. Its metadata remains for historical runs.
 
 The local profile's warm phase closes and reopens the persistence relay. Its row
-cache survives, but known state never survives a node restart. Reopen checks
-therefore require no known-state declaration and exact resulting row membership;
-they are not same-process reconnect measurements.
+cache survives, and so does the durable "Q at W" watermark of each row-local view
+(a table whose select policy is `true`): the reopened relay declares known state
+for exactly those views and lets Core catch up from W. Policy-dependent views
+(recursive resource access, inherited children) keep no known state across a
+restart and reacquire their scope from Core. Reopen checks therefore require
+exactly the row-local declarations and exact resulting row membership; they are
+not same-process reconnect measurements.
 
 Core seeding is outside the wall-time measurement. Receiver opening, connection,
 query preparation, subscription and settling until every expected row is present

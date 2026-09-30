@@ -318,6 +318,13 @@ where
         } else {
             batch.insert("jazz_transactions", tx_values);
         }
+        if tx.tx_id.node != self.node_uuid {
+            if matches!(fate, Fate::Pending) && global_time.is_none() {
+                self.open_tx.pending_foreign_transactions.insert(tx.tx_id);
+            } else {
+                self.open_tx.pending_foreign_transactions.remove(&tx.tx_id);
+            }
+        }
 
         let mut pending_global_updates =
             BTreeMap::<(String, BranchKey, RowUuid), VersionRow>::new();

@@ -105,12 +105,128 @@ fn compile_permission_scope_policy(
             reachable
         })
         .collect();
+    prune_session_unsatisfiable_branches(&mut query, claim_values);
     let mut values = BTreeMap::new();
     bind_scope_claim_operands(&mut query, claim_values, &mut values);
     let shape = query.validate_runtime(schema)?;
     coerce_binding_values_for_shape(&shape, &mut values);
     let binding = shape.bind(values)?;
     Ok((shape, binding))
+}
+
+/// Drops the policy alternatives this session's claims can never satisfy.
+///
+/// Support is compiled for one immutable claim snapshot, so an alternative
+/// whose filters include a claim-only comparison that is false for these
+/// claims contributes no row, whatever the data. Keeping it would make every
+/// support view hydrate the joins of, for example, another role's branches.
+/// The final write-policy evaluation is unaffected: it still evaluates the
+/// complete policy. When every alternative would be dropped, the query is left
+/// unchanged, so an empty branch list is never mistaken for an unrestricted one.
+fn prune_session_unsatisfiable_branches(
+    query: &mut JazzQuery,
+    claim_values: &BTreeMap<String, Value>,
+) {
+    let satisfiable = query
+        .policy_branches
+        .iter()
+        .map(|branch| {
+            !branch
+                .filters
+                .iter()
+                .any(|predicate| claim_only_predicate_value(predicate, claim_values) == Some(false))
+        })
+        .collect::<Vec<_>>();
+    if satisfiable.iter().all(|keep| *keep) || !satisfiable.iter().any(|keep| *keep) {
+        return;
+    }
+    let mut keep = satisfiable.into_iter();
+    query
+        .policy_branches
+        .retain(|_| keep.next().unwrap_or(true));
+}
+
+/// The exact value of a predicate that compares only claims and literals, or
+/// `None` when it reads row data or cannot be decided without the runtime's
+/// type coercion (differently typed operands, null or missing claims).
+fn claim_only_predicate_value(
+    predicate: &Predicate,
+    claim_values: &BTreeMap<String, Value>,
+) -> Option<bool> {
+    match predicate {
+        Predicate::All(predicates) => {
+            let mut all = Some(true);
+            for predicate in predicates {
+                match claim_only_predicate_value(predicate, claim_values) {
+                    Some(false) => return Some(false),
+                    Some(true) => {}
+                    None => all = None,
+                }
+            }
+            all
+        }
+        Predicate::Any(predicates) => {
+            let mut any = Some(false);
+            for predicate in predicates {
+                match claim_only_predicate_value(predicate, claim_values) {
+                    Some(true) => return Some(true),
+                    Some(false) => {}
+                    None => any = None,
+                }
+            }
+            any
+        }
+        Predicate::Not(predicate) => {
+            claim_only_predicate_value(predicate, claim_values).map(|value| !value)
+        }
+        Predicate::Eq(left, right) => claim_only_operands_equal(left, right, claim_values),
+        Predicate::Ne(left, right) => {
+            claim_only_operands_equal(left, right, claim_values).map(|equal| !equal)
+        }
+        Predicate::In(left, values) => {
+            let mut any = Some(false);
+            for value in values {
+                match claim_only_operands_equal(left, value, claim_values) {
+                    Some(true) => return Some(true),
+                    Some(false) => {}
+                    None => any = None,
+                }
+            }
+            any
+        }
+        _ => None,
+    }
+}
+
+fn claim_only_operands_equal(
+    left: &Operand,
+    right: &Operand,
+    claim_values: &BTreeMap<String, Value>,
+) -> Option<bool> {
+    let (left, right) = (
+        claim_only_operand_value(left, claim_values)?,
+        claim_only_operand_value(right, claim_values)?,
+    );
+    (std::mem::discriminant(&left) == std::mem::discriminant(&right)).then(|| left == right)
+}
+
+fn claim_only_operand_value(
+    operand: &Operand,
+    claim_values: &BTreeMap<String, Value>,
+) -> Option<Value> {
+    let value = match operand {
+        Operand::Literal(value) => value.clone(),
+        Operand::Claim(name) => crate::model::policy_claims::policy_claim_at_path(
+            claim_values,
+            &crate::query::operand_claim_path(name),
+        )?,
+        _ => return None,
+    };
+    match value {
+        Value::Nullable(Some(value)) => Some(*value),
+        Value::Nullable(None) => None,
+        value => Some(value),
+    }
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -1543,6 +1659,203 @@ mod authorization_scope_compiler_tests {
                 update_check: Some(JazzQuery::from("new_support")),
                 delete_using: Some(JazzQuery::from("delete_support")),
             })
+    }
+
+    #[test]
+    fn publisher_support_scope_omits_the_learner_alternative() {
+        use crate::model::public_api::policy::{CmpOp, PolicyValue};
+        let role_is = |role: &str| PublicPolicyExpr::SessionCmp {
+            path: vec!["claims".to_owned(), "role".to_owned()],
+            op: CmpOp::Eq,
+            value: PublicValue::Text(role.to_owned()),
+        };
+        let exists_in = |table: &str, condition: PublicPolicyExpr| PublicPolicyExpr::Exists {
+            table: table.to_owned(),
+            condition: Box::new(condition),
+        };
+        let insert = PublicPolicyExpr::or(vec![
+            PublicPolicyExpr::and(vec![
+                role_is("publisher"),
+                exists_in(
+                    "published_sources",
+                    PublicPolicyExpr::Cmp {
+                        column: "value".to_owned(),
+                        op: CmpOp::Eq,
+                        value: PolicyValue::Literal(PublicValue::Text("public".to_owned())),
+                    },
+                ),
+            ]),
+            PublicPolicyExpr::and(vec![
+                role_is("learner"),
+                exists_in(
+                    "owned_sources",
+                    PublicPolicyExpr::Cmp {
+                        column: "owner".to_owned(),
+                        op: CmpOp::Eq,
+                        value: PolicyValue::SessionRef(vec![
+                            "claims".to_owned(),
+                            "user_id".to_owned(),
+                        ]),
+                    },
+                ),
+            ]),
+        ]);
+        let schema = public_schema(
+            PublicSchemaBuilder::new()
+                .table(
+                    PublicTableSchemaBuilder::new("published_sources")
+                        .column("value", PublicColumnType::Text),
+                )
+                .table(
+                    PublicTableSchemaBuilder::new("owned_sources")
+                        .column("owner", PublicColumnType::Text),
+                )
+                .table(
+                    PublicTableSchemaBuilder::new("protected")
+                        .column("value", PublicColumnType::Text)
+                        .policies(PublicTablePolicies {
+                            select: PublicOperationPolicy::default(),
+                            insert: PublicOperationPolicy::with_check(insert),
+                            update: PublicOperationPolicy::default(),
+                            delete: PublicOperationPolicy::default(),
+                        }),
+                ),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let cfs = schema.column_families();
+        let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage =
+            RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+        let mut node = NodeState::new(NodeUuid::from_bytes([0x71; 16]), schema, storage).unwrap();
+        let support = |node: &mut NodeState<_>, identity: AuthorSubject, role: &str| {
+            node.set_test_provider_claims(
+                identity,
+                BTreeMap::from([
+                    (
+                        crate::query::provider_claim_key("role"),
+                        Value::String(role.to_owned()),
+                    ),
+                    (
+                        crate::query::provider_claim_key("user_id"),
+                        Value::String("owner".to_owned()),
+                    ),
+                ]),
+            );
+            let scope = node
+                .authorization_support_scope(
+                    identity,
+                    &PermissionAdviceAction::Insert {
+                        table: "protected".to_owned(),
+                        cells: BTreeMap::from([(
+                            "value".to_owned(),
+                            Value::String("next".to_owned()),
+                        )]),
+                    },
+                )
+                .unwrap();
+            assert_eq!(scope.subscriptions.len(), 1);
+            format!("{:?}", scope.subscriptions[0].0.query())
+        };
+        let publisher = support(
+            &mut node,
+            AuthorSubject::for_test_bytes([0x72; 16]),
+            "publisher",
+        );
+        let learner = support(
+            &mut node,
+            AuthorSubject::for_test_bytes([0x73; 16]),
+            "learner",
+        );
+        assert!(publisher.contains("published_sources"));
+        assert!(
+            !publisher.contains("owned_sources"),
+            "a publisher's insert support must not hydrate the learner alternative"
+        );
+        assert!(learner.contains("owned_sources"));
+        assert!(!learner.contains("published_sources"));
+    }
+
+    #[test]
+    fn support_compiles_only_the_alternatives_the_session_claims_can_satisfy() {
+        use crate::query::PolicyBranch;
+        let role = || Operand::Claim(crate::query::provider_claim_key("role"));
+        let branch = |role_name: &str, column: &str| PolicyBranch {
+            filters: vec![
+                Predicate::Eq(
+                    role(),
+                    Operand::Literal(Value::String(role_name.to_owned())),
+                ),
+                Predicate::Eq(
+                    Operand::Column(column.to_owned()),
+                    Operand::Literal(Value::String("row".to_owned())),
+                ),
+            ],
+            joins: Vec::new(),
+            reachable: Vec::new(),
+            inherits: Vec::new(),
+        };
+        let mut policy = JazzQuery::from("protected");
+        policy.policy_branches = vec![
+            branch("publisher", "published"),
+            branch("learner", "owned"),
+            // Row-dependent alternatives are never decided from claims.
+            PolicyBranch {
+                filters: vec![Predicate::Eq(
+                    Operand::Column("role".to_owned()),
+                    Operand::Literal(Value::String("learner".to_owned())),
+                )],
+                joins: Vec::new(),
+                reachable: Vec::new(),
+                inherits: Vec::new(),
+            },
+        ];
+        let claims =
+            |role: Value| BTreeMap::from([(crate::query::provider_claim_key("role"), role)]);
+
+        let mut publisher = policy.clone();
+        prune_session_unsatisfiable_branches(
+            &mut publisher,
+            &claims(Value::String("publisher".to_owned())),
+        );
+        assert_eq!(
+            publisher.policy_branches,
+            vec![
+                policy.policy_branches[0].clone(),
+                policy.policy_branches[2].clone()
+            ],
+        );
+
+        let mut learner = policy.clone();
+        prune_session_unsatisfiable_branches(
+            &mut learner,
+            &claims(Value::Nullable(Some(Box::new(Value::String(
+                "learner".to_owned(),
+            ))))),
+        );
+        assert_eq!(
+            learner.policy_branches,
+            vec![
+                policy.policy_branches[1].clone(),
+                policy.policy_branches[2].clone()
+            ],
+        );
+
+        // A differently typed or missing claim is left to the runtime comparison.
+        for claims in [claims(Value::Bool(true)), BTreeMap::new()] {
+            let mut unchanged = policy.clone();
+            prune_session_unsatisfiable_branches(&mut unchanged, &claims);
+            assert_eq!(unchanged.policy_branches, policy.policy_branches);
+        }
+
+        // Never prune every alternative: an empty list would read as unrestricted.
+        let mut only_learner = JazzQuery::from("protected");
+        only_learner.policy_branches = vec![branch("learner", "owned")];
+        let expected = only_learner.policy_branches.clone();
+        prune_session_unsatisfiable_branches(
+            &mut only_learner,
+            &claims(Value::String("publisher".to_owned())),
+        );
+        assert_eq!(only_learner.policy_branches, expected);
     }
 
     #[test]

@@ -104,6 +104,8 @@ mod structured_result_tree;
 #[cfg(feature = "testing")]
 #[path = "../threaded_client_relay.rs"]
 mod threaded_client_relay;
+#[path = "../uuid_page_probe.rs"]
+mod uuid_page_probe;
 #[path = "../warm_reopen_differential.rs"]
 mod warm_reopen_differential;
 #[path = "../wire_fixtures.rs"]

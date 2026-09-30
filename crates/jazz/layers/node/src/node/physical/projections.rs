@@ -147,6 +147,29 @@ where
         index: String,
         scan: groove::ivm::StaticScanSpec,
     ) -> Result<GraphBuilder, Error> {
+        let (table, target) = self.physical_global_marker_target(schema_version, logical_table)?;
+        Ok(GraphBuilder::variant_index_scan(table, index, target, scan))
+    }
+
+    /// Read the global winners that a capped primary-key scan names, through
+    /// the same system-field winner projection as
+    /// `physical_current_marker_source_graph`.
+    pub(crate) fn physical_global_marker_page_graph(
+        &self,
+        schema_version: SchemaVersionId,
+        logical_table: &str,
+        scan: groove::ivm::StaticScanSpec,
+    ) -> Result<GraphBuilder, Error> {
+        let (table, target) = self.physical_global_marker_target(schema_version, logical_table)?;
+        Ok(GraphBuilder::variant_source_scan(table, target, scan))
+    }
+
+    /// The global current table and its system-field winner projection target.
+    fn physical_global_marker_target(
+        &self,
+        schema_version: SchemaVersionId,
+        logical_table: &str,
+    ) -> Result<(String, String), Error> {
         let mapping = self
             .catalogue
             .physical_mappings
@@ -166,11 +189,9 @@ where
                 ))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(GraphBuilder::variant_index_scan(
+        Ok((
             physical_global_current_table_name(mapping.table_id),
-            index,
             physical_current_winner_projection_target(mapping.table_id, &physical_fields),
-            scan,
         ))
     }
 
