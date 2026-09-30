@@ -1,20 +1,10 @@
 import "server-only";
 import { app } from "@/schema";
 import permissions from "@/permissions";
-import type { JazzClient } from "jazz-tools/backend";
-import { createRequire as createRequireFromModule } from "node:module";
+import { createJazzSession, type JazzClient } from "jazz-tools/backend";
 import { appOrigin } from "./app-origin";
 import { jazzAppId, jazzEnv, jazzServerUrl } from "./jazz-env";
 import { serverSecret } from "./server-secret";
-
-const createRequire =
-  process.getBuiltinModule?.("module")?.createRequire ?? createRequireFromModule;
-// Load the backend through Node at runtime, never through the bundler: Turbopack
-// bundles a static "jazz-tools/backend" import (and jazz-napi with it) despite
-// serverExternalPackages, and then fails to resolve the native binding.
-export const { createJazzSession, resolveRequestSession } = createRequire(import.meta.url)(
-  "jazz-tools/backend",
-) as typeof import("jazz-tools/backend");
 
 type BackendSession = Awaited<ReturnType<typeof createJazzSession>>;
 
