@@ -3327,7 +3327,11 @@ async fn publication_drives_a_suspended_chunk_install_holding_the_lifecycle_mute
         .subscribe_one_sink(GraphBuilder::table("objects"))
         .await
         .unwrap();
-    assert!(subscription.recv().unwrap().is_empty());
+    // Hydration waits on storage here, and `recv` would block the thread.
+    within("initial hydration", database.drive_progress())
+        .await
+        .unwrap();
+    assert!(subscription.try_recv().unwrap().is_empty());
 
     let mut first = database.open_batch();
     first.insert(
