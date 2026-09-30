@@ -1328,6 +1328,60 @@ impl WasmDb {
         Ok(())
     }
 
+    /// Typed partial-value updates staged inside an open transaction. The
+    /// transaction's bound identity authors them.
+    #[wasm_bindgen(js_name = updateLargeValuesInTransaction)]
+    pub fn update_large_values_in_transaction(
+        &self,
+        open_transaction_id: String,
+        table: String,
+        row_id: Vec<u8>,
+        patch: Vec<u8>,
+        mutations: JsValue,
+        updated_at_ms: Option<f64>,
+    ) -> Result<(), JsValue> {
+        let open_transaction_id = open_transaction_id
+            .parse::<OpenTransactionId>()
+            .map_err(|error| JsValue::from_str(&error))?;
+        let row_id = row_uuid_from_bytes(&row_id)?;
+        let patch = decode_cells(&patch)?;
+        let mutations: Vec<LargeValueUpdate> =
+            serde_wasm_bindgen::from_value(mutations).map_err(|error| {
+                JsValue::from_str(&format!("invalid partial-value update descriptor: {error}"))
+            })?;
+        let updated_at_ms = updated_at_ms
+            .map(|value| checked_js_u64(value, "updatedAtMs"))
+            .transpose()?;
+        let inner = self.open_inner()?;
+        match &inner {
+            WasmDbInner::Memory(db) => {
+                db.enqueue_transaction_large_value_update(
+                    open_transaction_id,
+                    table,
+                    row_id,
+                    patch,
+                    mutations,
+                    updated_at_ms,
+                )
+                .map_err(to_js_error)?;
+                db.drive_queued_mutation_once();
+            }
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => db
+                .enqueue_transaction_large_value_update(
+                    open_transaction_id,
+                    table,
+                    row_id,
+                    patch,
+                    mutations,
+                    updated_at_ms,
+                )
+                .map_err(to_js_error)?,
+            WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+        }
+        Ok(())
+    }
+
     #[wasm_bindgen(js_name = updateLargeValues)]
     pub fn update_large_values(
         &self,

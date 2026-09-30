@@ -202,6 +202,32 @@ with the value your application last read. `update(..., { applyDiffs })` is for
 existing rows only; inserts and full replacement continue to use the ordinary
 mutation methods.
 
+`applyDiffs` also works inside a transaction. Coordinates are relative to the
+value the transaction sees, including its own earlier writes, so an append
+after an append in the same transaction lands after both, and every diff
+commits together with the transaction's other writes:
+
+```ts
+await db.transaction(async (tx) => {
+  tx.update(
+    app.documents,
+    documentId,
+    { editedAt: new Date() },
+    {
+      applyDiffs: {
+        text: {
+          within: { from: length, to: length }, // an empty page at the end
+          splices: [{ at: 0, delete: 0, insert: nextTokens }],
+        },
+      },
+    },
+  );
+});
+```
+
+Only the pages a diff touches are rewritten, so streaming many small appends
+into a long value stays cheap however long it grows.
+
 ## Write durability tiers
 
 For ordinary mutations and mergeable transactions, `wait({ tier })` controls which

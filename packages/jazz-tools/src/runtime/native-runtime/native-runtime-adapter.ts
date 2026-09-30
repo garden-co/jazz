@@ -385,6 +385,14 @@ type NativeDb = {
     descriptors: unknown,
     updatedAtMs?: number | null,
   ): Write;
+  updateLargeValuesInTransaction?(
+    openTransactionId: string,
+    table: string,
+    rowId: Uint8Array,
+    patch: Uint8Array,
+    descriptors: unknown,
+    updatedAtMs?: number | null,
+  ): void;
   connectUpstream(): Transport | Promise<Transport>;
   connectUpstreamWithSession?(
     protocolVersion: number,
@@ -1646,15 +1654,43 @@ export class NativeRuntimeAdapter implements Runtime {
     const branchView = branchViewFromWriteContext(writeContext);
     const tx = this.currentTx(writeContext, "Update");
 
-    // The first partial-value API is intentionally root-context only (#2087).
-    // Do not silently substitute the adapter's root author for a session or
-    // attributed write, nor read/stage through a transaction or branch view.
+    // Branch views have no partial-value coordinate space yet (#2087). Do not
+    // silently read or stage through the root instead.
     if (branchView) {
       throw new Error("Typed large-value updates are not supported in branch views.");
     }
     if (tx) {
-      throw writeError("Update", "typed partial-value updates are not supported in transactions");
+      // The transaction was opened with its identity, and the core stages the
+      // splices against the transaction's own view of the row, so a session
+      // or attributed transaction authors them like any other staged write.
+      const writeSession = sessionFromWriteContext(writeContext);
+      this.applySessionClaims(writeSession);
+      const writeIdentity = this.trustedWriteIdentity(writeSession);
+      const attribution = this.backendAttribution(writeContext);
+      this.assertTransactionAttribution(tx, attribution);
+      this.assertTransactionWriteIdentity(tx, attribution ? undefined : writeIdentity);
+      const updateInTransaction = this.db.updateLargeValuesInTransaction;
+      if (!updateInTransaction) {
+        throw writeError(
+          "Update",
+          "typed partial-value updates in transactions are not supported by this runtime",
+        );
+      }
+      const patch = encodeCellsForPatch(this.table(table), values);
+      updateInTransaction.call(
+        this.db,
+        tx.id,
+        table,
+        rowId,
+        patch,
+        descriptors,
+        updatedAtMs ?? undefined,
+      );
+      tx.hasStagedMutations = true;
+      return { kind: "staged", openTransactionId: txIdFromContext(writeContext)! };
     }
+    // Outside a transaction the binding writes as the adapter's own identity.
+    // Do not silently substitute it for a session or attributed write.
     if (largeValueWriteHasIncompatibleIdentity(writeContext, this.peerIdentity)) {
       throw new Error("Typed large-value updates do not yet support an attributed identity.");
     }
