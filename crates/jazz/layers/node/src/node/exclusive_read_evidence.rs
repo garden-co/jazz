@@ -215,22 +215,38 @@ pub(super) fn evidence_slot_values(tx: &Transaction, pending: bool) -> Result<[V
             None => return Ok(none()),
         },
     };
-    Ok([
-        slot(Some(encode_base_snapshot(snapshot)?)),
-        slot(
-            tx.row_read_set
-                .as_deref()
-                .map(encode_row_reads)
-                .transpose()?,
-        ),
-        slot(
-            tx.absent_read_set
-                .as_deref()
-                .map(encode_absent_reads)
-                .transpose()?,
-        ),
-        slot(predicate),
-    ])
+    let base = encode_base_snapshot(snapshot)?;
+    let rows = tx
+        .row_read_set
+        .as_deref()
+        .map(encode_row_reads)
+        .transpose()?;
+    let absent = tx
+        .absent_read_set
+        .as_deref()
+        .map(encode_absent_reads)
+        .transpose()?;
+    // Store only evidence the decoder reads back as exactly this transaction's
+    // evidence. A relay persists downstream units it did not author, so a
+    // malformed unit (for example a binding id that does not match its
+    // bindings) must not become a row every later read rejects. Anything
+    // that does not round-trip is stored as no evidence and fails closed.
+    let round_trips = decode_evidence_slots(
+        Some(&base),
+        rows.as_deref(),
+        absent.as_deref(),
+        predicate.as_deref(),
+    )
+    .is_ok_and(|decoded| {
+        decoded.base_snapshot.as_ref() == Some(snapshot)
+            && decoded.row_read_set == tx.row_read_set
+            && decoded.absent_read_set == tx.absent_read_set
+            && decoded.predicate_read_set == tx.predicate_read_set
+    });
+    if !round_trips {
+        return Ok(none());
+    }
+    Ok([slot(Some(base)), slot(rows), slot(absent), slot(predicate)])
 }
 
 fn invalid(message: &'static str) -> Error {
@@ -556,6 +572,11 @@ mod tests {
             .binding_values
             .insert("r".to_owned(), nested(&record, &[Value::U8(1)]).unwrap());
         assert_eq!(encoded(&unrepresentable), none);
+
+        let mut mismatched = tx.clone();
+        mismatched.predicate_read_set.as_mut().unwrap()[0].binding_id =
+            BindingId(uuid::Uuid::from_bytes([0x55; 16]));
+        assert_eq!(encoded(&mismatched), none);
 
         let mut empty_reads = tx.clone();
         empty_reads.row_read_set = None;

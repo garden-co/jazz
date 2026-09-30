@@ -127,7 +127,14 @@ is null when the `Transaction` field is `None`, and a record with an empty
 `reads` array when it is `Some(vec![])`.
 
 Evidence is all-or-nothing per row. If any component cannot be encoded, all
-four slots are written null.
+four slots are written null. The writer also decodes what it just encoded and
+compares it with the transaction's evidence; on any difference it writes all
+four null. This matters on a relay, which stores downstream units it did not
+author: a malformed unit (for example a `binding_id` that is not the hash of
+its bindings) is stored without evidence and fails closed on replay, instead
+of leaving a row that every later read rejects. The decoder does not check
+that `shape_id` matches `query`; the authority re-derives the shape when it
+validates, and a mismatch fails validation there.
 
 Decoding follows the native-record rules of `local-row-availability.v1`:
 
@@ -286,6 +293,12 @@ tolerates evidence being present or absent on duplicates.
   receiver's stored-versus-incoming identity checks (`node/views.rs`) compare
   the payload through `known_transaction_payload_matches`, which already
   ignores evidence on either side, instead of exact equality.
+- Relay (`jazz-node`):
+  `node::tests::harness::relay_stores_only_decodable_exclusive_evidence_and_replays_after_restart`.
+  A relay stores a genuine downstream unit with evidence and, after a
+  restart, `commit_unit_for` returns it unchanged and Core accepts it. A unit
+  with a mismatched `binding_id` is stored without evidence; after the
+  restart it still replays, Core rejects it, and the fate lands.
 - Binding decoder (`jazz-model`):
   `query::tests::canonical_binding_bytes_decode_round_trips_and_rejects_the_rest`.
 - End to end (`jazz-db`, `db::tests::node_runtime`), each through a real

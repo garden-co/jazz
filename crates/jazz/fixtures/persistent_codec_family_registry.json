@@ -436,6 +436,10 @@
           "anchor": "fn exclusive_evidence_is_stored_while_pending_and_cleared_at_settlement"
         },
         {
+          "path": "crates/jazz/layers/node/src/node/tests/exclusive_read_evidence.rs",
+          "anchor": "fn relay_stores_only_decodable_exclusive_evidence_and_replays_after_restart"
+        },
+        {
           "path": "crates/jazz/layers/db/src/db/tests/node_runtime.rs",
           "anchor": "fn exclusive_transaction_in_flight_at_restart_replays_without_false_conflict"
         },

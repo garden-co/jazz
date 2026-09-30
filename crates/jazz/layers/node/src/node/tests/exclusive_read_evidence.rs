@@ -247,3 +247,109 @@ fn view_bundle_for_a_pending_exclusive_transaction_matches_its_stored_evidence()
         vec![(row(1), title_cells("one"))]
     );
 }
+
+/// A relay stores downstream exclusive units it did not author. A genuine
+/// unit keeps its evidence across a relay restart and is forwarded intact.
+/// A malformed one (a binding id that does not match its bindings) is stored
+/// without evidence, so the row still decodes: the relay can replay it, the
+/// authority rejects it as before, and that fate lands.
+///
+/// ```
+/// alice ──unit──► relay (stored, restart) ──commit_unit_for──► core ──fate──► relay
+/// ```
+#[test]
+fn relay_stores_only_decodable_exclusive_evidence_and_replays_after_restart() {
+    let (_alice_dir, mut alice) = open_node_with_uuid(node(1));
+    let (relay_dir, mut relay) = open_node_with_uuid(node(5));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let shape = Query::from("todos")
+        .filter(eq(col("title"), param("title")))
+        .validate(&alice.catalogue.schema)
+        .unwrap();
+    let binding = shape
+        .bind(BTreeMap::from([("title".to_owned(), v("x"))]))
+        .unwrap();
+    let mut commit = |alice: &mut NodeState, row_byte: u8, time: u64| {
+        let open_id = OpenTransactionId::new();
+        alice.open_exclusive(open_id).unwrap();
+        assert!(
+            alice
+                .tx_query(open_id, &shape, &binding)
+                .unwrap()
+                .is_empty()
+        );
+        alice
+            .tx_write(open_id, "todos", row(row_byte), title_cells("new"), None)
+            .unwrap();
+        let (tx_id, unit) = alice
+            .commit_exclusive_settled(open_id, AuthorSubject::SYSTEM, time)
+            .unwrap();
+        let SyncMessage::CommitUnit { tx, versions } = unit else {
+            panic!("expected commit unit");
+        };
+        assert!(
+            tx.predicate_read_set
+                .as_ref()
+                .is_some_and(|reads| !reads.is_empty())
+        );
+        (tx_id, tx, versions)
+    };
+    let (good_id, good_tx, good_versions) = commit(&mut alice, 1, 10);
+    let (bad_id, mut bad_tx, bad_versions) = commit(&mut alice, 2, 11);
+    bad_tx.predicate_read_set.as_mut().unwrap()[0].binding_id =
+        crate::query::BindingId(uuid::Uuid::from_bytes([0x55; 16]));
+
+    relay
+        .ingest_relay_commit_unit(good_tx.clone(), good_versions.clone())
+        .unwrap();
+    relay
+        .ingest_relay_commit_unit(bad_tx, bad_versions)
+        .unwrap();
+    assert!(
+        stored_exclusive_evidence_slots(&relay, good_id)
+            .iter()
+            .all(|slot| matches!(slot, Value::Nullable(Some(_))))
+    );
+    assert!(
+        stored_exclusive_evidence_slots(&relay, bad_id)
+            .iter()
+            .all(|slot| *slot == Value::Nullable(None))
+    );
+
+    drop(relay);
+    let mut relay = reopen_node_at(&relay_dir, node(5), schema());
+    let good_unit = relay.commit_unit_for(good_id).unwrap();
+    assert_eq!(
+        good_unit,
+        SyncMessage::CommitUnit {
+            tx: Transaction {
+                permission_subject: None,
+                ..good_tx
+            },
+            versions: good_versions,
+        }
+    );
+    let bad_unit = relay.commit_unit_for(bad_id).unwrap();
+
+    for (tx_id, unit, expected) in [
+        (good_id, good_unit, Fate::Accepted),
+        (
+            bad_id,
+            bad_unit,
+            Fate::Rejected(RejectionReason::ExclusiveConflict),
+        ),
+    ] {
+        let [fate] = core
+            .apply_sync_message_settled(unit)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        relay.apply_sync_message_settled(fate).unwrap();
+        assert_eq!(relay.transaction_state_settled(tx_id).unwrap().0, expected);
+        assert!(
+            stored_exclusive_evidence_slots(&relay, tx_id)
+                .iter()
+                .all(|slot| *slot == Value::Nullable(None))
+        );
+    }
+}
