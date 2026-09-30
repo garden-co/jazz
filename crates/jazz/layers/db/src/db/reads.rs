@@ -524,9 +524,19 @@ where
             && opts.tier >= DurabilityTier::Global
             && opts.local_updates == LocalUpdates::Immediate
         {
-            let decoded: Query = crate::wire::decode_postcard_exact(query)
-                .map_err(|error| Error::new(ErrorCode::Query, format!("decode query: {error}")))?;
-            self.await_preceding_local_writes_on_wire(&decoded).await?;
+            // Boxed: this wait holds the node lock, commit-unit reads and the
+            // upload race. Inline, that state would enlarge every one-shot
+            // read's future and each host poll frame above it, which overflows
+            // the 1 MiB WASM stack in dev builds ("memory access out of
+            // bounds" while preparing the read's sources).
+            Box::pin(async {
+                let decoded: Query =
+                    crate::wire::decode_postcard_exact(query).map_err(|error| {
+                        Error::new(ErrorCode::Query, format!("decode query: {error}"))
+                    })?;
+                self.await_preceding_local_writes_on_wire(&decoded).await
+            })
+            .await?;
         }
         {
             let admission = self.await_open_schema_for_read(&opts);
