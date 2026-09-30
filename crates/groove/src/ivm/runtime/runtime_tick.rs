@@ -2299,10 +2299,28 @@ impl IvmRuntime {
     }
 
     fn fail_evaluation_nodes(&mut self, failure: &EvaluationFailure) {
+        let affected = &failure.affected_nodes;
+        // A recursive node also owns the state of its child scopes, whose
+        // arrangements are keyed by their body inputs.
+        let owned_by_affected = |scope: ScopeId| {
+            scope
+                .outermost()
+                .is_some_and(|node| affected.contains(&node))
+        };
         self.operator_states
-            .retain(|key, _| !failure.affected_nodes.contains(&key.node));
-        self.remove_retained_eval_memos_for_nodes(&failure.affected_nodes);
-        for node in &failure.affected_nodes {
+            .retain(|key, _| !affected.contains(&key.node) && !owned_by_affected(key.scope));
+        self.remove_retained_eval_memos_for_nodes(affected);
+        let scoped_memos = self
+            .eval_memo_keys_by_node
+            .values()
+            .flatten()
+            .filter(|key| owned_by_affected(key.scope))
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in scoped_memos {
+            self.remove_retained_eval_memo(&key);
+        }
+        for node in affected {
             if let Some(keys) = self.arrangement_keys_by_input.remove(node) {
                 for key in keys {
                     self.arrangement_states.remove(&key);
@@ -2311,6 +2329,21 @@ impl IvmRuntime {
             if let Some(meta) = self.node_meta.get_mut(node) {
                 meta.input_signature = None;
                 meta.input_generation = meta.input_generation.saturating_add(1);
+            }
+        }
+        let scoped = self
+            .arrangement_states
+            .keys()
+            .filter(|key| owned_by_affected(key.scope))
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in scoped {
+            self.arrangement_states.remove(&key);
+            if let Some(keys) = self.arrangement_keys_by_input.get_mut(&key.input) {
+                keys.remove(&key);
+                if keys.is_empty() {
+                    self.arrangement_keys_by_input.remove(&key.input);
+                }
             }
         }
         for subscription in self.multisink_subscriptions.values_mut() {
@@ -2781,15 +2814,22 @@ impl IvmRuntime {
                 let completed = incremental.work_queue.drain_completed_events();
                 // Successors resume from the live runtime, so a node's state
                 // must be there before its waiters are released (#3815).
-                let released = if matches!(progress, Poll::Ready(Ok(()))) {
-                    // Installed: every node, held ones included, is live.
-                    let mut released = completed;
-                    released.extend(incremental.held_barriers.drain());
-                    released
-                } else {
-                    incremental.write_back_or_hold(self, completed)
-                };
-                state.release_temporal_successors(self, evaluation_id, released);
+                match &progress {
+                    Poll::Ready(Ok(())) => {
+                        // Installed: every node, held ones included, is live.
+                        let mut released = completed;
+                        released.extend(incremental.held_barriers.drain());
+                        state.release_temporal_successors(self, evaluation_id, released);
+                    }
+                    Poll::Pending => {
+                        let released = incremental.write_back_or_hold(self, completed);
+                        state.release_temporal_successors(self, evaluation_id, released);
+                    }
+                    // A failed evaluation writes nothing more back. Its
+                    // failure branch resets and releases these with the
+                    // nodes it held.
+                    Poll::Ready(Err(_)) => incremental.held_barriers.extend(completed),
+                }
             }
             match progress {
                 Poll::Ready(Ok(())) => {
@@ -2834,7 +2874,7 @@ impl IvmRuntime {
                         }
                     }
                 }
-                Poll::Ready(Err(failure)) => {
+                Poll::Ready(Err(mut failure)) => {
                     if let PendingEvaluation::SubscriptionHydration(hydration) = &evaluation {
                         if let Some(subscription) =
                             self.multisink_subscriptions.get(&hydration.subscription_id)
@@ -2858,6 +2898,16 @@ impl IvmRuntime {
                             state,
                             Poll::Ready(Err(failure.into_error())),
                         );
+                    }
+                    // Held nodes were never installed, while the nodes this
+                    // evaluation wrote back carry its rows. Reset the held
+                    // ones too, or a later write would derive from their
+                    // state as of before this evaluation beside inputs as of
+                    // after it. Resetting makes that write rehydrate them.
+                    if let PendingEvaluation::Incremental(incremental) = &evaluation {
+                        failure
+                            .affected_nodes
+                            .extend(incremental.held_barriers.iter().copied());
                     }
                     // A failed first-result session has not published mutable
                     // state. Its scoped error cannot invalidate live siblings.
