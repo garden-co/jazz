@@ -2301,7 +2301,6 @@ impl VersionRow {
             self.branch_key(),
             self.tx_time(),
             self.tx_node_alias(),
-            self.layer(),
         )
             .hash(&mut hasher);
         groove::cold_settle_attribution::conversions::record(site, hasher.finish(), bytes);
