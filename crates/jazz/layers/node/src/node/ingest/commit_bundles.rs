@@ -187,6 +187,11 @@ where
             self.ingest_rejected_transaction(stored.tx, fate).await?;
             return Ok(PublicationOutcome::settled(()));
         }
+        if let Some(reason) = self.cross_schema_merge_op_rejection(&records).await? {
+            let fate = Fate::Rejected(reason);
+            self.ingest_rejected_transaction(stored.tx, fate).await?;
+            return Ok(PublicationOutcome::settled(()));
+        }
         let global_time = self
             .clock
             .allocate_global_time(tx_id.time.physical_ms())?;
@@ -243,6 +248,11 @@ where
         // AND per-write first-committer-wins (INV-TX-20). Do not reimplement.
         if !self.validate_exclusive_commit_unit(&tx, &versions).await? {
             let fate = Fate::Rejected(RejectionReason::ExclusiveConflict);
+            self.ingest_rejected_transaction(tx, fate.clone()).await?;
+            return Ok(PublicationOutcome::settled(fate));
+        }
+        if let Some(reason) = self.cross_schema_merge_op_rejection(&versions).await? {
+            let fate = Fate::Rejected(reason);
             self.ingest_rejected_transaction(tx, fate.clone()).await?;
             return Ok(PublicationOutcome::settled(fate));
         }
@@ -528,6 +538,16 @@ where
             && !self.validate_exclusive_commit_unit(&tx, &versions).await?
         {
             let fate = Fate::Rejected(RejectionReason::ExclusiveConflict);
+            self.ingest_rejected_transaction(tx.clone(), fate.clone()).await?;
+            return Ok(PublicationOutcome::settled(vec![SyncMessage::FateUpdate {
+                tx_id: tx.tx_id,
+                fate,
+                global_time: None,
+                durability: None,
+            }]));
+        }
+        if let Some(reason) = self.cross_schema_merge_op_rejection(&versions).await? {
+            let fate = Fate::Rejected(reason);
             self.ingest_rejected_transaction(tx.clone(), fate.clone()).await?;
             return Ok(PublicationOutcome::settled(vec![SyncMessage::FateUpdate {
                 tx_id: tx.tx_id,

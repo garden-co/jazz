@@ -830,3 +830,88 @@ fn unsigned_counter_decrement_sums_with_a_concurrent_increment_at_core() {
         expected
     );
 }
+
+/// `counter_schema()` plus a `notes` column, published as a descendant.
+fn counter_schema_with_notes() -> JazzSchema {
+    let source = [(
+        PublicTableName::new("counters"),
+        PublicTableSchema::new(PublicRowDescriptor::new(vec![
+            PublicColumnDescriptor::new("count", PublicColumnType::Integer)
+                .merge_strategy(PublicColumnMergeStrategy::Counter),
+            PublicColumnDescriptor::new("title", PublicColumnType::Text),
+            PublicColumnDescriptor::new("notes", PublicColumnType::Text),
+        ])),
+    )]
+    .into_iter()
+    .collect::<PublicSchema>();
+    compile_public_test_schema(&source)
+}
+
+/// A merge-column write whose schema differs from the schema the row's
+/// current image is stored under. Core cannot apply the op yet: across
+/// layouts the row is still whole-row last-writer-wins (#3899), which would
+/// store the counter's delta as its value, or drop it when the write loses.
+/// Core refuses the write with an explicit reason instead, and the row keeps
+/// its value.
+///
+/// ```text
+/// alice (v1) ──count=1──► core            row stored under v1
+/// bob   (v2) ──count +5──► core ──✗ Rejected("… not supported yet …")
+/// ```
+#[test]
+fn merge_column_write_over_a_row_of_another_schema_is_refused() {
+    let base = counter_schema();
+    let evolved_schema = counter_schema_with_notes();
+    let evolved = SchemaVersion::new(evolved_schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), base.clone());
+    publish_schema_lineage(
+        &mut core,
+        evolved.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            evolved.id,
+            vec![TableLens {
+                source_table: "counters".to_owned(),
+                target_table: "counters".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "notes".to_owned(),
+                    default: v(""),
+                }],
+            }],
+        )
+        .expect("valid migration lens"),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    let (_alice_dir, mut alice) = open_node_with_schema(node(1), base);
+    let (_bob_dir, mut bob) = open_node_with_schema(node(2), evolved_schema);
+    let target = row(0x71);
+
+    commit_mergeable_global(
+        &mut alice,
+        &mut core,
+        MergeableCommit::new("counters", target, 10).cells(counter_cells(1, "base")),
+    );
+
+    // bob has not seen the row: his +5 is made over an empty base.
+    let (_bob_tx, bob_unit) = bob
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("counters", target, 20)
+                .cells(BTreeMap::from([("count".to_owned(), Value::I32(5))])),
+        )
+        .unwrap();
+    let fate = core_fate(&mut core, bob_unit);
+    let SyncMessage::FateUpdate {
+        fate: Fate::Rejected(RejectionReason::MalformedCommit(reason)),
+        ..
+    } = &fate
+    else {
+        panic!("Core must refuse a cross-schema merge op, got {fate:?}");
+    };
+    assert!(reason.contains("not supported yet"), "{reason}");
+    assert_eq!(
+        rows_at(&mut core, "counters", DurabilityTier::Global),
+        BTreeMap::from([(target, counter_cells(1, "base"))])
+    );
+}
