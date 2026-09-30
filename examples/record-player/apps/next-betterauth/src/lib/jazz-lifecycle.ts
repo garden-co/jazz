@@ -10,6 +10,8 @@ export class JazzLifecycle {
   private activeSessionId: string | undefined;
   private chain = Promise.resolve();
   private closed = false;
+  /** Bumped by close() and transition(), which cancel reconciliations queued before them. */
+  private epoch = 0;
   private reconciliation: Promise<void> | undefined;
   private reconcilingPrincipal: string | undefined;
   private requestedSessionId: string | undefined;
@@ -31,7 +33,9 @@ export class JazzLifecycle {
     this.closed = false;
     this.requestedSessionId = sessionId;
     if (this.reconciliation && this.reconcilingPrincipal === sessionId) return this.reconciliation;
+    const epoch = this.epoch;
     const reconciliation = this.enqueue(async () => {
+      if (epoch !== this.epoch) return;
       const selected = this.accounts.getLoggedIn();
       if (
         this.client &&
@@ -48,7 +52,7 @@ export class JazzLifecycle {
       // repeats: loginJWT validates and selects the issuer/sub handle anew.
       if (current?.identity.subject !== principal || this.activeSessionId !== sessionId)
         await enroll(this.accounts);
-      if (this.requestedSessionId !== sessionId) return;
+      if (epoch !== this.epoch || this.requestedSessionId !== sessionId) return;
       await this.openSelected(principal, sessionId);
     });
     this.reconciliation = reconciliation;
@@ -61,7 +65,7 @@ export class JazzLifecycle {
   }
 
   transition(action: (accounts: Accounts) => Promise<unknown> | unknown): Promise<void> {
-    this.forgetReconciliation();
+    this.cancelReconciliation();
     return this.enqueue(async () => {
       await this.closeCurrent(true);
       await action(this.accounts);
@@ -70,7 +74,7 @@ export class JazzLifecycle {
 
   close(): Promise<void> {
     this.closed = true;
-    this.forgetReconciliation();
+    this.cancelReconciliation();
     return this.enqueue(() => this.closeCurrent(false));
   }
 
@@ -110,12 +114,14 @@ export class JazzLifecycle {
   }
 
   /**
-   * A reconciliation queued before a close or transition is undone by it, so
-   * a later reconcile for the same session must queue a new one instead of
-   * reusing it. React development mode does exactly this on every mount:
-   * reconcile, clean up (close), reconcile again.
+   * A close or transition supersedes any reconciliation queued before it: that
+   * reconciliation must not enroll or open, and a later reconcile for the same
+   * session queues a new one instead of reusing it. React development mode does
+   * this on every mount: reconcile, clean up (close), reconcile again. Letting
+   * the first one run would enroll twice, which registration rejects.
    */
-  private forgetReconciliation(): void {
+  private cancelReconciliation(): void {
+    this.epoch += 1;
     this.reconciliation = undefined;
     this.reconcilingPrincipal = undefined;
   }
