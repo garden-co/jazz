@@ -1064,14 +1064,28 @@ where
         let Some(content) = content else {
             return Ok(None);
         };
-        let tx_id = self.version_tx_id(&content)?;
+        self.authored_content_winner(&content, None)
+    }
+
+    /// Materialize `content` in its authored schema. With `skip_schema`, a
+    /// version authored under that schema returns `None` before its cells
+    /// are decoded.
+    fn authored_content_winner(
+        &self,
+        content: &VersionRow,
+        skip_schema: Option<SchemaVersionId>,
+    ) -> Result<Option<AuthoredContentWinner>, Error> {
         let schema = self
             .schema_version_for_alias(content.schema_version_alias())
             .ok_or(Error::InvalidStoredValue(
                 "current version schema alias must exist",
             ))?;
+        if skip_schema == Some(schema) {
+            return Ok(None);
+        }
+        let tx_id = self.version_tx_id(content)?;
         let authored_table = self.table_in_schema_ref(content.table(), schema)?;
-        let cells = self.materialized_cells_for_version(authored_table, &content)?;
+        let cells = self.materialized_cells_for_version(authored_table, content)?;
         Ok(Some(AuthoredContentWinner {
             schema,
             table: content.table().to_owned(),
@@ -1080,26 +1094,85 @@ where
         }))
     }
 
-    /// Author a local update under its base version's schema when the
-    /// writer's own schema cannot carry every cell of that base (`INV-LENS-26`).
+    /// Re-express one local content write under its base version's schema
+    /// when the writer's schema cannot carry every base cell (`INV-LENS-26`).
     ///
-    /// A mergeable content version stores a complete row in its authored
-    /// schema. When an older-schema writer updates a row whose base version
-    /// was authored under a newer schema, encoding the result in the writer's
-    /// schema would drop the base's newer columns, and every lens projection
-    /// would then refill them with the migration default. The writer never
-    /// asserted those columns, so they must carry forward from the exact base
-    /// the update applied to. That base's schema is an admitted, registered
+    /// A content version stores a complete row in its authored schema. When
+    /// an older-schema writer updates a row whose base version was authored
+    /// under a newer schema, encoding the result in the writer's schema would
+    /// drop the base's newer columns, and every lens projection would then
+    /// refill them with the migration default. The writer never asserted
+    /// those columns, so they must carry forward from the exact base the
+    /// update applied to. That base's schema is an admitted, registered
     /// variant on this node (its version is stored here), so authoring under
-    /// it needs no new encoding: the translated authored columns overlay the
-    /// base's own cells, and `authored_columns` stays the writer's intent.
+    /// it needs no new encoding: the translated `authored` columns overlay
+    /// the base's own cells.
     ///
-    /// The writer's schema is kept when nothing would be lost (same schema,
-    /// or a lossless round trip such as an older base), when the update does
-    /// not name exactly one parent that is still the local content winner,
-    /// when it targets a named branch, or when an authored column has no
-    /// counterpart in the base schema (a column the base schema dropped); the
-    /// last case cannot be expressed as one authored variant.
+    /// Returns `None`, keeping the writer's schema, when nothing would be lost
+    /// (same schema, or a lossless round trip such as an older base) or when
+    /// an authored column has no counterpart in the base schema (a column the
+    /// base schema dropped); the last case cannot be expressed as one
+    /// authored variant.
+    fn rebase_write_onto_base_schema(
+        &mut self,
+        writer_schema: SchemaVersionId,
+        writer_table: &str,
+        writer_cells: &BTreeMap<String, Value>,
+        authored: &BTreeSet<String>,
+        base: AuthoredContentWinner,
+    ) -> Result<Option<RebasedWrite>, Error> {
+        if base.schema == writer_schema {
+            return Ok(None);
+        }
+        let mut round_trip = base.cells.clone();
+        if self
+            .translate_cells(base.schema, writer_schema, &base.table, &mut round_trip)?
+            .is_none()
+        {
+            return Ok(None);
+        }
+        let Some(path) = self.compiled_lens_path(writer_schema, base.schema, writer_table)? else {
+            return Ok(None);
+        };
+        let base_table = apply_compiled_lens_path(&path, &mut round_trip);
+        if round_trip == base.cells || base_table != base.table {
+            return Ok(None);
+        }
+        let mut base_authored = BTreeSet::new();
+        for column in authored {
+            let translated = compiled_lens_path_column_targets(&path, column);
+            if translated.is_empty() {
+                return Ok(None);
+            }
+            base_authored.extend(translated);
+        }
+        let mut translated_cells = writer_cells.clone();
+        apply_compiled_lens_path(&path, &mut translated_cells);
+        let mut cells = base.cells;
+        for column in &base_authored {
+            let value = translated_cells
+                .remove(column)
+                .ok_or(Error::InvalidMergeableCommit(
+                    "authored column is missing after lens translation",
+                ))?;
+            cells.insert(column.clone(), value);
+        }
+        Ok(Some(RebasedWrite {
+            schema: base.schema,
+            table: base.table,
+            cells,
+            authored: base_authored,
+            path,
+        }))
+    }
+
+    /// Author a local mergeable update under its base version's schema when
+    /// the writer's own schema cannot carry every cell of that base
+    /// (`INV-LENS-26`); `authored_columns` stays the writer's intent,
+    /// translated.
+    ///
+    /// Applies only to a default-branch content write whose single parent is
+    /// still the local content winner; otherwise the writer's schema is kept.
     async fn author_update_under_lossless_base_schema(
         &mut self,
         schema_version: &mut SchemaVersionId,
@@ -1126,60 +1199,58 @@ where
                 .map_err(Error::InvalidBranchKey)?
                 .0
         };
-        let Some(base) = self
-            .authored_content_winner_in_branch(&commit.table, &branch_key, commit.row_uuid)
+        let content = match self
+            .query_local_layer_winner_in_branch(
+                &commit.table,
+                &branch_key,
+                commit.row_uuid,
+                VersionLayer::Content,
+            )
             .await?
-        else {
-            return Ok(());
-        };
-        if base.schema == writer_schema || base.tx_id != commit.parents[0] {
-            return Ok(());
-        }
-        let mut round_trip = base.cells.clone();
-        if self
-            .translate_cells(base.schema, writer_schema, &base.table, &mut round_trip)?
-            .is_none()
         {
-            return Ok(());
-        }
-        let Some(path) = self.compiled_lens_path(writer_schema, base.schema, &commit.table)? else {
+            Some(version) => Some(version),
+            None => {
+                self.query_global_layer_winner_in_branch(
+                    &commit.table,
+                    &branch_key,
+                    commit.row_uuid,
+                    VersionLayer::Content,
+                )
+                .await?
+            }
+        };
+        let Some(content) = content else {
             return Ok(());
         };
-        let base_table = apply_compiled_lens_path(&path, &mut round_trip);
-        if round_trip == base.cells || base_table != base.table {
+        // The common same-schema update stops here without decoding cells.
+        let Some(base) = self.authored_content_winner(&content, Some(writer_schema))? else {
+            return Ok(());
+        };
+        if base.tx_id != commit.parents[0] {
             return Ok(());
         }
-        let writer_authored = commit
+        let authored = commit
             .authored_columns
             .clone()
             .unwrap_or_else(|| commit.cells.keys().cloned().collect());
-        let mut base_authored = BTreeSet::new();
-        for column in &writer_authored {
-            let translated = compiled_lens_path_column_targets(&path, column);
-            if translated.is_empty() {
-                return Ok(());
-            }
-            base_authored.extend(translated);
-        }
-        let mut writer_cells = commit.cells.clone();
-        apply_compiled_lens_path(&path, &mut writer_cells);
-        let mut cells = base.cells;
-        for column in &base_authored {
-            let value = writer_cells
-                .remove(column)
-                .ok_or(Error::InvalidMergeableCommit(
-                    "authored column is missing after lens translation",
-                ))?;
-            cells.insert(column.clone(), value);
-        }
+        let Some(rebased) = self.rebase_write_onto_base_schema(
+            writer_schema,
+            &commit.table,
+            &commit.cells,
+            &authored,
+            base,
+        )?
+        else {
+            return Ok(());
+        };
         commit.prepared_large_columns = std::mem::take(&mut commit.prepared_large_columns)
             .iter()
-            .flat_map(|column| compiled_lens_path_column_targets(&path, column))
+            .flat_map(|column| compiled_lens_path_column_targets(&rebased.path, column))
             .collect();
-        commit.table = base.table;
-        commit.cells = cells;
-        commit.authored_columns = Some(base_authored);
-        *schema_version = base.schema;
+        commit.table = rebased.table;
+        commit.cells = rebased.cells;
+        commit.authored_columns = Some(rebased.authored);
+        *schema_version = rebased.schema;
         Ok(())
     }
 

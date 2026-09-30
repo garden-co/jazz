@@ -1704,6 +1704,15 @@ pub(super) fn compiled_lens_path_column_targets(
     names
 }
 
+/// A local write re-expressed under its base version's schema.
+struct RebasedWrite {
+    schema: SchemaVersionId,
+    table: String,
+    cells: BTreeMap<String, Value>,
+    authored: BTreeSet<String>,
+    path: CompiledLensPath,
+}
+
 /// A content winner in the schema variant that authored it.
 struct AuthoredContentWinner {
     schema: SchemaVersionId,

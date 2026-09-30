@@ -762,3 +762,85 @@ fn physical_schema_variants_survive_pointer_changes_and_reopen() {
         1
     );
 }
+
+/// `INV-LENS-26` at the storage boundary. This is a node-level test because
+/// the public Db API does not expose a stored version's authored schema or
+/// `authored_columns`; the black-box behavior is covered by
+/// `jazz::tests::dynamic_schema_views`.
+///
+/// ```text
+/// bob(v2) ──insert {title, body: "kept"}──► row
+/// alice(v1) ──update {title}, parent = bob──► stored as v2 {title, body: "kept"},
+///                                             authored_columns = {title}
+/// ```
+#[test]
+fn older_schema_update_is_authored_under_richer_base_schema() {
+    let base = schema();
+    let evolved = catalogue_evolved_schema();
+    let evolved_payload = SchemaVersion::new(evolved.clone());
+    let (_dir, mut core) = open_node_with_schema(node(0x48), base.clone());
+    publish_schema_lineage(
+        &mut core,
+        evolved_payload.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            evolved_payload.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: v(""),
+                }],
+            }],
+        )
+        .expect("valid migration lens"),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    core.activate_catalogue_schema_settled(CurrentWriteSchema {
+        revision: 1,
+        schema: evolved_payload.id,
+    })
+    .unwrap();
+    let todo = row(0x48);
+    let bob_tx = core
+        .commit_mergeable_settled(MergeableCommit::new("todos", todo, 10).cells(
+            BTreeMap::from([
+                ("title".to_owned(), v("draft")),
+                ("body".to_owned(), v("kept")),
+            ]),
+        ))
+        .unwrap();
+
+    let alice_tx = core
+        .commit_mergeable_in_schema_settled(
+            base.version_id(),
+            MergeableCommit::new("todos", todo, 11)
+                .parents(vec![bob_tx])
+                .cells(title_cells("final"))
+                .authored_columns(BTreeSet::from(["title".to_owned()])),
+        )
+        .unwrap();
+
+    let stored = core
+        .query_table_versions("todos")
+        .unwrap()
+        .into_iter()
+        .find(|version| core.version_tx_id(version).unwrap() == alice_tx)
+        .expect("alice's version is stored");
+    let record = core.version_record_from_row(&stored).unwrap();
+    assert_eq!(record.schema_version(), evolved_payload.id);
+    assert_eq!(
+        record.authored_columns(),
+        Some(&BTreeSet::from(["title".to_owned()]))
+    );
+    assert_eq!(
+        version_record_cells(&record, &evolved.tables[0]),
+        BTreeMap::from([
+            ("title".to_owned(), v("final")),
+            ("body".to_owned(), v("kept")),
+        ])
+    );
+}

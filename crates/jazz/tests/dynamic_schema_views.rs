@@ -782,3 +782,49 @@ fn alternating_schema_updates_keep_each_writers_columns() {
         );
     });
 }
+
+/// An exclusive transaction staged through an older schema view also keeps a
+/// newer column it never saw: the replacement carries it forward from the
+/// snapshot base it was staged against.
+///
+/// ```text
+/// bob(v2) ──insert {dueDate: "2026-10-01"}──────────► row
+/// alice(v1) ──exclusive {read row, update done}──────► commit
+/// bob(v2) ──read──► {done: true, dueDate: "2026-10-01"}
+/// ```
+#[test]
+fn older_schema_exclusive_update_keeps_newer_schema_column() {
+    futures::executor::block_on(async {
+        let owner = open_owner(tasks_v1()).await;
+        let alice_v1 = owner.register_schema_view(tasks_v1()).await.unwrap();
+        let bob_v2 = owner.register_schema_view(tasks_v2()).await.unwrap();
+        let row = RowUuid::from_bytes([0x38; 16]);
+        insert_v2_task(&bob_v2, row).await;
+        let due_date = task_cell(&bob_v2, &tasks_v2(), row, "dueDate");
+        assert!(due_date.is_some());
+
+        let batch = OpenTransactionId::new();
+        owner.begin_exclusive(batch).await.unwrap();
+        let tx = alice_v1.exclusive_tx_ref(batch);
+        assert!(tx.read("tasks", row).await.unwrap().is_some());
+        tx.update(
+            "tasks",
+            row,
+            [("done".to_owned(), Value::Bool(true))].into(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+        owner.commit_exclusive_handle(batch).await.unwrap();
+
+        assert_eq!(
+            task_cell(&bob_v2, &tasks_v2(), row, "done"),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(task_cell(&bob_v2, &tasks_v2(), row, "dueDate"), due_date);
+        assert_eq!(
+            task_cell(&alice_v1, &tasks_v1(), row, "done"),
+            Some(Value::Bool(true))
+        );
+    });
+}

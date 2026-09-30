@@ -20,7 +20,7 @@ Invariant digest:
 - `INV-LENS-7`: `CurrentWriteSchema` updates MUST be monotone by `revision`; stale revisions MUST leave `current_write_schema` unchanged.
 - `INV-LENS-8`: Durable catalogue schemas, lenses, current-write pointer, schema-version aliases, and physical mappings MUST survive node restart; installing an authority snapshot MUST preserve the node-local storage identity of an already-open schema so pre-snapshot local writes remain addressable.
 - `INV-LENS-9`: Publishing a non-genesis schema and its lineage-defining lens MUST durably stage the complete ordered bundle, keep it invisible while every physical table and schema variant is registered, then durably activate it before acknowledging or draining parked work; one activation batch MUST replace its durable pending obligation with the schema, lens, physical mapping, and active receipt; reopen MUST resume staged activation idempotently.
-- `INV-LENS-10`: New local writes MUST retain `current_write_schema.schema` as their schema discriminator and resolve storage through that schema's durable physical mapping.
+- `INV-LENS-10`: New local writes MUST retain `current_write_schema.schema` as their schema discriminator, except as `INV-LENS-26` authors an update under its base version's schema, and resolve storage through that schema's durable physical mapping.
 - `INV-LENS-11`: Incoming commit units MUST retain their authored schema discriminator and resolve storage through that schema's durable physical mapping, even when the current write pointer names another schema.
 - `INV-LENS-12`: Natural lens reads MUST select winners from the shared physical lineage before projecting rows into the requested schema.
 - `INV-LENS-13`: Natural lens projection MUST apply supported operations deterministically in both directions and MUST reject unsupported transformations.
@@ -38,7 +38,7 @@ Invariant digest:
   encodings.
 - `INV-LENS-22`: A content version's explicit authored-column presence MUST be stored only as a nullable, strictly increasing array of nonzero local `PhysicalColumnId`s; the exact authored schema/table mapping converts it to or from logical wire names, and malformed or unmapped ids MUST fail before any derived current row is persisted.
 - `INV-LENS-24`: A global physical UUID is permanently issued across the whole durable catalogue lineage. Admission, pending/staged replay, snapshot installation, reopen, and authority allocation MUST reject or avoid reusing any retired table, column epoch, or recursive enum-occurrence UUID; only an exact compatible source-to-target coordinate may retain its UUID.
-- `INV-LENS-26`: A local content update whose single parent is the current content winner authored under another schema MUST NOT drop that base's cells: when the writer's schema cannot carry every base cell and every authored column has a counterpart in the base schema, the version MUST be authored under the base schema, with the lens-translated authored columns overlaying the base cells and `authored_columns` naming only the translated authored columns.
+- `INV-LENS-26`: A local content write whose single parent is the content winner it was prepared against (the current winner for a mergeable write, the snapshot winner for an exclusive write), authored under another schema, MUST NOT drop that base's cells: when the writer's schema cannot carry every base cell and every authored column has a counterpart in the base schema, the version MUST be authored under the base schema, with the lens-translated authored columns overlaying the base cells and, for a mergeable write, `authored_columns` naming only the translated authored columns. This is a local authoring rule, not a merge rule: a mergeable update whose base is read, whose lock is then released, and which commits after a newer version became the winner keeps the writer's schema, as do multi-parent writes; both can still lose the newer base's columns exactly as before this rule.
 
 ## Details
 
@@ -574,7 +574,9 @@ cross-node semantic identity converges.
 
 New local writes carry the schema selected by `current_write_schema` as their
 Groove discriminator and resolve their table and columns through that schema's
-durable physical mapping (`INV-LENS-10`).
+durable physical mapping (`INV-LENS-10`), except that an update onto a base
+authored under a schema its writer cannot fully represent is authored under
+that base schema (`INV-LENS-26`, below).
 
 Incoming work retains the schema under which it was authored, regardless of the
 current write pointer (`INV-LENS-11`). Before ingest, Jazz verifies that every
@@ -614,13 +616,20 @@ admitted schema. For example, `v1.tasks { title, done }` evolving to
 (v2) inserts `{ dueDate: "2026-10-01" }`, Alice (v1) updates `{ done: true }`,
 and her version is authored as `v2 { done: true, dueDate: "2026-10-01" }`
 with `authored_columns = { done }`; Alice's own reads project it back to v1.
-The writer's schema is kept when nothing would be lost (the base is the same
-or an older schema), when the update does not name exactly the current
-content winner as its only parent, for named-branch writes, and when an
-authored column has no counterpart in the base schema (the base schema
-dropped it). The last case cannot be expressed as one authored variant and
-still loses the base-only columns; representing a version that asserts
-columns from two schemas needs a new encoding.
+Exclusive transactions follow the same rule against the snapshot winner
+their replacement was staged over; every staged cell is the writer's
+assertion. The writer's schema is kept when nothing would be lost (the base
+is the same or an older schema), when the write does not name exactly that
+winner as its only parent, for named-branch writes, and when an authored
+column has no counterpart in the base schema (the base schema dropped it).
+The last case cannot be expressed as one authored variant and still loses the
+base-only columns; representing a version that asserts columns from two
+schemas needs a new encoding. The rule is decided at local authoring time, so
+it does not close a race: a mergeable update reads its base, releases the
+node lock, and commits later; if a newer-schema version became the winner in
+between, the parent is no longer that winner and the writer's schema is kept.
+Multi-parent writes likewise keep the writer's schema. Both behave exactly as
+before this rule.
 
 A current-write-pointer flip is a core-ordered, monotone catalogue write
 (§10.2) and **never invalidates in-flight work**. The pointer selects the schema

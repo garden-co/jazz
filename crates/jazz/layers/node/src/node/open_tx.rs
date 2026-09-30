@@ -1234,7 +1234,18 @@ where
                 self.prepare_and_stage_large_scalar(value, semantic_kind)
                     .await?;
             }
-            let table_schema = self.table_in_schema_ref(&write.table, write.schema_version)?;
+            let (schema_version, cells) = self.rebase_exclusive_write_onto_base_schema(
+                ExclusiveWriteTarget {
+                    schema_version: write.schema_version,
+                    table: &write.table,
+                    branch: &write.branch,
+                    deletion: write.deletion,
+                    parents: &write.parents,
+                },
+                cells,
+                snapshot_content.as_ref(),
+            )?;
+            let table_schema = self.table_in_schema_ref(&write.table, schema_version)?;
             let cells = positional_cells_from_map(table_schema, &cells)?;
             let provenance_at =
                 TxTime::from_physical_ms(write.now_ms.unwrap_or(now_ms)).map_err(|_| {
@@ -1248,7 +1259,7 @@ where
                 .unwrap_or((made_by, provenance_at));
             versions.push(VersionRecord::encode(
                 table_schema,
-                write.schema_version,
+                schema_version,
                 write.row_uuid,
                 write.parents,
                 created_by,
@@ -1964,6 +1975,51 @@ where
         })
     }
 
+    /// Exclusive counterpart of the mergeable `INV-LENS-26` rebase: a
+    /// replacement staged in an older schema over a snapshot base authored
+    /// under a schema the writer cannot fully represent is encoded under the
+    /// base schema, so columns the writer does not know carry forward from
+    /// that exact base. Every staged cell is the writer's assertion.
+    ///
+    /// Returns the schema to encode under together with the cells in it; the
+    /// writer's own schema and cells when no rebase applies. A write across a
+    /// table rename keeps the writer's schema.
+    fn rebase_exclusive_write_onto_base_schema(
+        &mut self,
+        write: ExclusiveWriteTarget<'_>,
+        cells: BTreeMap<String, Value>,
+        base_version: Option<&VersionRow>,
+    ) -> Result<(SchemaVersionId, BTreeMap<String, Value>), Error> {
+        if self.catalogue.catalogue_schemas.len() < 2
+            || write.deletion.is_some()
+            || write.parents.len() != 1
+            || !write.branch.values.is_empty()
+        {
+            return Ok((write.schema_version, cells));
+        }
+        let Some(base_version) = base_version else {
+            return Ok((write.schema_version, cells));
+        };
+        let Some(base) = self.authored_content_winner(base_version, Some(write.schema_version))?
+        else {
+            return Ok((write.schema_version, cells));
+        };
+        if base.tx_id != write.parents[0] || base.table != write.table {
+            return Ok((write.schema_version, cells));
+        }
+        let authored = cells.keys().cloned().collect::<BTreeSet<_>>();
+        match self.rebase_write_onto_base_schema(
+            write.schema_version,
+            write.table,
+            &cells,
+            &authored,
+            base,
+        )? {
+            Some(rebased) => Ok((rebased.schema, rebased.cells)),
+            None => Ok((write.schema_version, cells)),
+        }
+    }
+
     pub(super) async fn snapshot_layer_winner(
         &mut self,
         schema_version: SchemaVersionId,
@@ -2184,6 +2240,16 @@ impl OpenTransaction {
 enum PendingCells {
     Replace(BTreeMap<String, Value>),
     Patch(BTreeMap<String, Value>),
+}
+
+/// The coordinate of one staged exclusive write, borrowed after its cells
+/// were taken for encoding.
+struct ExclusiveWriteTarget<'a> {
+    schema_version: SchemaVersionId,
+    table: &'a str,
+    branch: &'a BranchSelector,
+    deletion: Option<DeletionEvent>,
+    parents: &'a [TxId],
 }
 
 #[derive(Clone, Debug, PartialEq)]
