@@ -29,6 +29,15 @@ impl SupportingFrontier {
 
     pub(super) fn apply(&mut self, origin: usize, row: SupportingRow, weight: i64) -> Option<bool> {
         let before = self.contains(&row);
+        tracing::debug!(
+            "DIAG3816 frontier {:p} origin={} table={} time={:?} weight={} journal={}",
+            self as *const Self,
+            origin,
+            &*row.version_table,
+            row.version.tx.time,
+            weight,
+            self.unpublished.is_some()
+        );
         if let Some(unpublished) = &mut self.unpublished {
             unpublished.entry(row.clone()).or_insert(before);
         }
@@ -83,10 +92,15 @@ impl SupportingFrontier {
     }
 
     pub(super) fn acknowledge(&mut self) {
+        tracing::debug!("DIAG3816 frontier {:p} acknowledge", self as *const Self);
         self.unpublished.get_or_insert_with(BTreeMap::new).clear();
     }
 
     pub(super) fn forget_predecessor(&mut self) {
+        tracing::debug!(
+            "DIAG3816 frontier {:p} forget_predecessor",
+            self as *const Self
+        );
         self.unpublished = None;
     }
 
