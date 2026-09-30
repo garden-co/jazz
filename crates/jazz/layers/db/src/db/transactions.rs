@@ -24,7 +24,7 @@ where
             .await
     }
 
-    async fn lock_for_transaction_operation(
+    pub(super) async fn lock_for_transaction_operation(
         &self,
         open_tx_id: OpenTransactionId,
     ) -> Result<futures::lock::MutexGuard<'_, NodeState<S>>, Error> {
@@ -1025,6 +1025,37 @@ where
         )
     }
 
+    /// Queue typed partial large-value descriptors (the `applyDiffs` DSL)
+    /// behind earlier operations of an open transaction. See
+    /// [`Self::stage_transaction_large_value_update`].
+    #[doc(hidden)]
+    pub fn enqueue_transaction_large_value_update(
+        &self,
+        id: OpenTransactionId,
+        table: String,
+        row: RowUuid,
+        patch: RowCells,
+        mutations: Vec<LargeValueUpdate>,
+        updated_at_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        super::mutations::validate_updated_at_ms(updated_at_ms)?;
+        let db = self.clone_for_owner_operation();
+        self.node.enqueue_transaction_operation(
+            id,
+            Box::pin(async move {
+                db.stage_transaction_large_value_update(
+                    id,
+                    &table,
+                    row,
+                    patch,
+                    mutations,
+                    updated_at_ms,
+                )
+                .await
+            }),
+        )
+    }
+
     #[doc(hidden)]
     pub fn enqueue_transaction_upsert(
         &self,
@@ -1456,10 +1487,31 @@ where
         operation: &str,
         allow_absent: bool,
     ) -> Result<Option<RowCells>, Error> {
+        // Exclusive transactions are the only callers that may skip the kind
+        // check: the subject lookup rejects a mergeable id.
+        self.lock_for_transaction_operation(tx_id)
+            .await?
+            .exclusive_transaction_permission_subject(tx_id)?;
+        self.transaction_target_for_write(tx_id, table, row, operation, allow_absent)
+            .await
+    }
+
+    /// Read the storage-form row a transaction write builds on, as the
+    /// transaction sees it (its snapshot plus its own staged writes), after
+    /// proving the transaction's permission subject may read it. The read is
+    /// recorded like any other transaction point read.
+    pub(super) async fn transaction_target_for_write(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        row: RowUuid,
+        operation: &str,
+        allow_absent: bool,
+    ) -> Result<Option<RowCells>, Error> {
         let identity = self
             .lock_for_transaction_operation(tx_id)
             .await?
-            .exclusive_transaction_permission_subject(tx_id)?;
+            .transaction_permission_subject(tx_id)?;
         let read_policy = self.table_schema(table)?.read_policy.clone();
         // This authoritative point read distinguishes a hidden target from a
         // genuinely absent one and records the exact snapshot/absence read for

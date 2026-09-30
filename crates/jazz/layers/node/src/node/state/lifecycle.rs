@@ -1443,6 +1443,20 @@ where
         Ok(evicted)
     }
 
+    /// Ids of every unpublished Groove staging root, for leak assertions.
+    #[doc(hidden)]
+    pub async fn staged_large_value_ids(
+        &self,
+    ) -> Result<Vec<groove::large_values::StagedLargeValueId>, Error> {
+        Ok(self
+            .database
+            .staged_large_values()
+            .await?
+            .into_iter()
+            .map(|staged| staged.id)
+            .collect())
+    }
+
     /// Evict an opaque Groove staging root selected by Jazz policy. All
     /// persisted mechanics remain in Groove and repeated eviction is harmless.
     pub async fn evict_staged_large_value(
