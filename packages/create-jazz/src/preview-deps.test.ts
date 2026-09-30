@@ -137,4 +137,26 @@ describe("bundled preview dependency selection", () => {
     ).rejects.toThrow(/ERR_PNPM_NO_MATCHING_VERSION planted[\s\S]*additional stderr detail/);
     expect(fs.existsSync(path.join(targetDir, "package.json"))).toBe(true);
   });
+
+  it("scaffolds successfully when the package manager emits more than 1 MiB", async () => {
+    const { directory, snapshot } = fixture();
+    process.env.JAZZ_STARTER_PATH = path.join(root, "starters/ts-localfirst");
+    const targetDir = path.join(directory, "app");
+    await scaffold(
+      {
+        appName: "preview-app",
+        targetDir,
+        pm: process.execPath,
+        git: false,
+        preInstall: async ({ dir }) => {
+          fs.writeFileSync(
+            path.join(dir, "install"),
+            'process.stdout.write("x".repeat(2 * 1024 * 1024));',
+          );
+        },
+      },
+      snapshot,
+    );
+    expect(fs.existsSync(path.join(targetDir, "package.json"))).toBe(true);
+  });
 });

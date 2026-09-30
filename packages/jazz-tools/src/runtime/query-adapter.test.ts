@@ -43,8 +43,10 @@ const scalarApp = s.defineApp({
     {
       timestamp: s.timestamp(),
       bytes: s.bytes(),
+      nullableBytes: s.bytes().optional(),
       metadata: s.json(),
       tags: s.array(s.string()),
+      nullableTags: s.array(s.string()).optional(),
     },
     {},
   ),
@@ -569,6 +571,23 @@ describe("translateQuery", () => {
         },
       },
     ]);
+  });
+
+  it("lowers nullable Bytea null checks without converting flags as bytes", () => {
+    expect(
+      translatedConditions(scalarApp.filters.where({ nullableBytes: { isNull: true } })),
+    ).toEqual([{ IsNull: { column: { column: "nullableBytes" } } }]);
+    expect(
+      translatedConditions(scalarApp.filters.where({ nullableBytes: { isNull: false } })),
+    ).toEqual([{ IsNotNull: { column: { column: "nullableBytes" } } }]);
+  });
+  it("lowers nullable Array null checks", () => {
+    expect(
+      translatedConditions(scalarApp.filters.where({ nullableTags: { isNull: true } })),
+    ).toEqual([{ IsNull: { column: { column: "nullableTags" } } }]);
+    expect(
+      translatedConditions(scalarApp.filters.where({ nullableTags: { isNull: false } })),
+    ).toEqual([{ IsNotNull: { column: { column: "nullableTags" } } }]);
   });
 
   it("lowers direct JSON objects as one equality", () => {
