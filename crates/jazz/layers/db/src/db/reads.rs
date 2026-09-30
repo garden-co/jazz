@@ -490,6 +490,25 @@ where
             .unwrap_or(Ok(()))
     }
 
+    /// [`Self::await_preceding_local_writes_on_wire`] for a serialized query,
+    /// boxed and built in this frame rather than the caller's.
+    ///
+    /// The wait holds the node lock, commit-unit reads and the upload race.
+    /// Awaited inline, that state would enlarge every one-shot read's future
+    /// and, in unoptimized builds, each poll frame above it, even for reads
+    /// that never wait. That overflowed the 1 MiB WASM stack of the dev build
+    /// ("memory access out of bounds" while preparing a read's sources).
+    fn preceding_local_writes_on_wire<'a>(
+        &'a self,
+        query: &'a [u8],
+    ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + 'a>> {
+        Box::pin(async move {
+            let decoded: Query = crate::wire::decode_postcard_exact(query)
+                .map_err(|error| Error::new(ErrorCode::Query, format!("decode query: {error}")))?;
+            self.await_preceding_local_writes_on_wire(&decoded).await
+        })
+    }
+
     /// The one table a read's result depends on, or `None` when every table
     /// counts: the query reaches further, its table is unknown, or its read
     /// policy consults another table.
@@ -524,19 +543,7 @@ where
             && opts.tier >= DurabilityTier::Global
             && opts.local_updates == LocalUpdates::Immediate
         {
-            // Boxed: this wait holds the node lock, commit-unit reads and the
-            // upload race. Inline, that state would enlarge every one-shot
-            // read's future and each host poll frame above it, which overflows
-            // the 1 MiB WASM stack in dev builds ("memory access out of
-            // bounds" while preparing the read's sources).
-            Box::pin(async {
-                let decoded: Query =
-                    crate::wire::decode_postcard_exact(query).map_err(|error| {
-                        Error::new(ErrorCode::Query, format!("decode query: {error}"))
-                    })?;
-                self.await_preceding_local_writes_on_wire(&decoded).await
-            })
-            .await?;
+            self.preceding_local_writes_on_wire(query).await?;
         }
         {
             let admission = self.await_open_schema_for_read(&opts);
