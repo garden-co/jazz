@@ -5,8 +5,9 @@ const GITHUB_LOOKUP_TIMEOUT_MS = 5_000;
 const TRUSTED_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
 // The Version Packages PR that changesets-release-pr.yml opens with the
 // Actions token. Only a workflow in this repository can author it, and its
-// head is built from the protected release branch, so it previews each
-// release candidate's docs without a label.
+// head branch is written by that workflow; anyone who could push there could
+// already label a PR `docs`. So it previews each release candidate's docs
+// without a label.
 const RELEASE_PR = {
   author: "github-actions[bot]",
   head: "changeset-release/release",
