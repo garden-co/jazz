@@ -702,6 +702,12 @@ pub enum IvmRuntimeError {
     UnsupportedOperator,
 }
 
+/// Arrangement folds on this thread that had to copy a shared join index.
+#[cfg(test)]
+pub(crate) fn shared_arrangement_index_folds() -> usize {
+    join::shared_index_folds()
+}
+
 #[cfg(test)]
 mod retained_gc_tests;
 #[cfg(test)]
