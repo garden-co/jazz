@@ -487,6 +487,47 @@ mod tests {
 
 
     #[test]
+    fn contains_mismatch_preserves_declared_member_and_actual_nullability() {
+        let nullable = |inner| ColumnType::Nullable(Box::new(inner));
+        let schema = RuntimeSchema::new([TableSchema::new(
+            "items",
+            [
+                ColumnSchema::new(
+                    "nullable_uuids",
+                    nullable(ColumnType::Array(Box::new(nullable(ColumnType::Uuid)))),
+                ),
+                ColumnSchema::new("nullable_text", nullable(ColumnType::String)),
+                ColumnSchema::new("nullable_uuid", nullable(ColumnType::Uuid)),
+            ],
+        )]);
+
+        for (predicate, expected, actual) in [
+            (
+                contains(col("nullable_uuids"), col("nullable_text")),
+                nullable(ColumnType::Uuid),
+                nullable(ColumnType::String),
+            ),
+            (
+                contains(col("nullable_text"), col("nullable_uuid")),
+                ColumnType::String,
+                nullable(ColumnType::Uuid),
+            ),
+        ] {
+            let error = Query::from("items")
+                .filter(predicate)
+                .validate_runtime(&schema)
+                .unwrap_err();
+            assert_eq!(
+                error,
+                QueryError::ContainsNeedleTypeMismatch {
+                    expected: Box::new(expected),
+                    actual: Box::new(actual),
+                }
+            );
+        }
+    }
+
+    #[test]
     fn validates_same_table_reachability_correlation_column() {
         let schema = RuntimeSchema::new([
             TableSchema::new("resources", [ColumnSchema::new("name", ColumnType::String)]),

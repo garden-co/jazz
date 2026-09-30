@@ -208,10 +208,16 @@ Supported matrix:
 | Array<T>          | Membership in a list of whole-array values.                                                               | Element membership with a needle of type `T`; this includes arrays of numbers, booleans, UUID/reference values, enums, timestamps, and text. |
 
 Invalid operator/type combinations must be rejected before execution with a
-clear type error. In particular, `contains` on a scalar non-text column is never
-interpreted as stringification, and `in` candidates (including parameters) must
-match the column's whole-value type except for the narrow compatibility
-coercions listed above. Integer literals are the one scalar compatibility rule:
+clear type error. For a supported text or array `contains` haystack and a known
+mismatched needle, validation MUST report the expected and actual needle types:
+expected is `String` for text or the declared array member type (including
+member nullability), while actual preserves operand nullability. Outer
+haystack nullability is ignored only when selecting text/array semantics;
+unknown needle parameters infer the expected type. `contains` on a scalar
+non-text column is never interpreted as stringification, and `in` candidates
+(including parameters) must match the column's whole-value type except for the
+narrow compatibility coercions listed above. Integer literals are the one
+scalar compatibility rule:
 for equality, ordering, and `in`, an Integer (`I32`) literal is widened when
 compared with a BigInt (`I64`) column, and a BigInt literal is narrowed for an
 Integer column only when its value is representable as `I32`. This normalization

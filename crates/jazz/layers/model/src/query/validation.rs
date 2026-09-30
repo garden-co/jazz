@@ -127,6 +127,14 @@ pub enum QueryError {
     /// Operand types do not match.
     #[error("operand type mismatch")]
     OperandTypeMismatch,
+    /// A `contains` needle has a different type than its text/array haystack requires.
+    #[error("contains needle has type {actual:?}; expected {expected:?}")]
+    ContainsNeedleTypeMismatch {
+        /// Required needle type from the text or array haystack.
+        expected: Box<ColumnType>,
+        /// Inferred type of the supplied needle.
+        actual: Box<ColumnType>,
+    },
     /// An `in` candidate does not match its column's whole-value type.
     #[error(
         "in candidate for column {column} has type {candidate_type:?}, but the column has type {column_type:?}"
@@ -1532,21 +1540,31 @@ fn validate_predicate(
         Predicate::Contains(left, right) => {
             let left_type = operand_type(table, left, params)?;
             let right_type = operand_type(table, right, params)?;
-            match (
-                left_type.map(|column_type| non_null_column_type(&column_type)),
-                right_type,
-            ) {
-                (Some(ColumnType::String), _) => {
-                    validate_operand_against_type(table, right, ColumnType::String, params)
+            let expected = match left_type {
+                Some(column_type) => match non_null_column_type(&column_type) {
+                    ColumnType::String => ColumnType::String,
+                    ColumnType::Array(member) => *member,
+                    _ => return Err(QueryError::OperandTypeMismatch),
+                },
+                None => {
+                    return match right_type {
+                        Some(right_type) => {
+                            infer_param(left, ColumnType::Array(Box::new(right_type)), params)
+                        }
+                        None => Err(QueryError::OperandTypeMismatch),
+                    };
                 }
-                (Some(ColumnType::Array(member)), _) => {
-                    validate_operand_against_type(table, right, *member, params)
+            };
+
+            match right_type {
+                Some(actual) if actual != expected => {
+                    Err(QueryError::ContainsNeedleTypeMismatch {
+                        expected: Box::new(expected),
+                        actual: Box::new(actual),
+                    })
                 }
-                (Some(_), _) => Err(QueryError::OperandTypeMismatch),
-                (None, Some(right_type)) => {
-                    infer_param(left, ColumnType::Array(Box::new(right_type)), params)
-                }
-                (None, None) => Err(QueryError::OperandTypeMismatch),
+                Some(_) => Ok(()),
+                None => infer_param(right, expected, params),
             }
         }
         Predicate::EnumMatch {
@@ -1662,18 +1680,6 @@ fn validate_comparable_operands(
     }
 }
 
-fn validate_operand_against_type(
-    table: &TableSchema,
-    operand: &Operand,
-    expected: ColumnType,
-    params: &mut BTreeMap<String, ColumnType>,
-) -> Result<(), QueryError> {
-    match operand_type(table, operand, params)? {
-        Some(actual) if actual == expected => Ok(()),
-        Some(_) => Err(QueryError::OperandTypeMismatch),
-        None => infer_param(operand, expected, params),
-    }
-}
 
 fn is_orderable(column_type: &ColumnType) -> bool {
     let column_type = non_null_column_type(column_type);
