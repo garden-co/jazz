@@ -213,11 +213,29 @@ impl Database {
                     variant_tag,
                     record,
                     ..
-                } => OwnedWriteOperation::Set {
-                    cf: table,
-                    key,
-                    value: encode_variant_record(variant_tag, &record),
-                },
+                } => {
+                    let value = encode_variant_record(variant_tag, &record);
+                    #[cfg(feature = "cold-settle-attribution")]
+                    {
+                        use std::hash::{Hash, Hasher};
+                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                        (&table, &key).hash(&mut hasher);
+                        crate::cold_settle_attribution::conversions::record(
+                            "groove_record_write",
+                            hasher.finish(),
+                            value.len(),
+                        );
+                        crate::cold_settle_attribution::conversions::record_table_write(
+                            &table,
+                            value.len(),
+                        );
+                    }
+                    OwnedWriteOperation::Set {
+                        cf: table,
+                        key,
+                        value,
+                    }
+                }
                 PendingTableWrite::Delete { table, key, .. } => {
                     OwnedWriteOperation::Delete { cf: table, key }
                 }

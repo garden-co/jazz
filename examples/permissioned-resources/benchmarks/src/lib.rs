@@ -830,6 +830,8 @@ pub struct RunSummary {
 #[derive(Clone, Default)]
 struct AttributionSummary {
     phase_timing: JsonValue,
+    conversions: JsonValue,
+    table_writes: JsonValue,
     core_tick_ns: u64,
     relay_tick_ns: u64,
     client_tick_ns: u64,
@@ -1975,6 +1977,7 @@ fn run_connect_and_subscribe(
         jazz_sim::phase_attribution::reset();
         jazz::cold_settle_attribution::reset();
         jazz::groove::cold_settle_attribution::reset();
+        jazz::groove::cold_settle_attribution::conversions::reset();
         if std::env::var_os("GROOVE_TRACE_ARRANGEMENT_SNAPSHOTS").is_some() {
             eprintln!("ARRANGEMENT_CAPTURE_BEGIN\t{label}");
         }
@@ -2082,9 +2085,13 @@ fn run_connect_and_subscribe(
         let core_operators_before = jazz::groove::cold_settle_attribution::snapshot();
         let core_tick_start = Instant::now();
         #[cfg(feature = "cold-settle-attribution")]
+        jazz::groove::cold_settle_attribution::conversions::set_role("core");
+        #[cfg(feature = "cold-settle-attribution")]
         tracing::trace_span!("cold.phase.core")
             .in_scope(|| block_on(seeded.core.tick()))
             .unwrap();
+        #[cfg(feature = "cold-settle-attribution")]
+        jazz::groove::cold_settle_attribution::conversions::set_role("outside_node_ticks");
         #[cfg(not(feature = "cold-settle-attribution"))]
         block_on(seeded.core.tick()).unwrap();
         tick_wall_us[0] += core_tick_start.elapsed().as_micros();
@@ -2105,9 +2112,13 @@ fn run_connect_and_subscribe(
         let relay_operators_before = jazz::groove::cold_settle_attribution::snapshot();
         let relay_tick_start = Instant::now();
         #[cfg(feature = "cold-settle-attribution")]
+        jazz::groove::cold_settle_attribution::conversions::set_role("relay");
+        #[cfg(feature = "cold-settle-attribution")]
         tracing::trace_span!("cold.phase.relay")
             .in_scope(|| block_on(relay.db.tick()))
             .unwrap();
+        #[cfg(feature = "cold-settle-attribution")]
+        jazz::groove::cold_settle_attribution::conversions::set_role("outside_node_ticks");
         #[cfg(not(feature = "cold-settle-attribution"))]
         block_on(relay.db.tick()).unwrap();
         tick_wall_us[1] += relay_tick_start.elapsed().as_micros();
@@ -2128,9 +2139,13 @@ fn run_connect_and_subscribe(
         let client_operators_before = jazz::groove::cold_settle_attribution::snapshot();
         let client_tick_start = Instant::now();
         #[cfg(feature = "cold-settle-attribution")]
+        jazz::groove::cold_settle_attribution::conversions::set_role("client");
+        #[cfg(feature = "cold-settle-attribution")]
         tracing::trace_span!("cold.phase.client")
             .in_scope(|| block_on(client.db.tick()))
             .unwrap();
+        #[cfg(feature = "cold-settle-attribution")]
+        jazz::groove::cold_settle_attribution::conversions::set_role("outside_node_ticks");
         #[cfg(not(feature = "cold-settle-attribution"))]
         block_on(client.db.tick()).unwrap();
         tick_wall_us[2] += client_tick_start.elapsed().as_micros();
@@ -2208,6 +2223,28 @@ fn run_connect_and_subscribe(
     #[cfg(feature = "cold-settle-attribution")]
     {
         attribution.phase_timing = jazz_sim::phase_attribution::snapshot();
+        attribution.conversions = JsonValue::Array(
+            jazz::groove::cold_settle_attribution::conversions::snapshot()
+                .into_iter()
+                .map(|((role, site), work)| {
+                    json!({
+                        "role": role,
+                        "site": site,
+                        "calls": work.calls,
+                        "distinct_versions": work.distinct,
+                        "bytes": work.bytes,
+                    })
+                })
+                .collect(),
+        );
+        attribution.table_writes = JsonValue::Array(
+            jazz::groove::cold_settle_attribution::conversions::table_writes()
+                .into_iter()
+                .map(|((role, table), (writes, bytes))| {
+                    json!({"role": role, "table": table, "writes": writes, "bytes": bytes})
+                })
+                .collect(),
+        );
         if let Some(mut path) = std::env::var_os("JAZZ_PHASE_TIMELINE") {
             path.push(format!(".{label}.json"));
             jazz_sim::phase_attribution::write_timeline(std::path::Path::new(&path))
@@ -3192,6 +3229,14 @@ fn emit_summary(config: &Config, phase: &str, summary: &RunSummary) {
     fields.insert(
         "settle_phase_timing".to_owned(),
         attribution.phase_timing.clone(),
+    );
+    fields.insert(
+        "representation_conversions".to_owned(),
+        attribution.conversions.clone(),
+    );
+    fields.insert(
+        "physical_table_writes".to_owned(),
+        attribution.table_writes.clone(),
     );
     let operator_json = |operators: &OperatorAttribution| {
         json!({
