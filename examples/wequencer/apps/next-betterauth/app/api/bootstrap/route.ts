@@ -1,5 +1,5 @@
 import { accountRegistryUrl } from "jazz-tools";
-import { resolveRequestSession } from "jazz-tools/backend";
+import { jazzBackend } from "@/lib/jazz-backend";
 import { ensureProfile } from "@/lib/bootstrap";
 import { APP_ORIGIN } from "@/lib/app-origin";
 
@@ -8,7 +8,7 @@ export const runtime = "nodejs";
 export async function POST(request: Request) {
   const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID!;
   const serverUrl = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!;
-  const session = await resolveRequestSession(request, {
+  const session = await jazzBackend.resolveRequestSession(request, {
     appId,
     accountRegistry: accountRegistryUrl(serverUrl, appId),
     jwksUrl: `${APP_ORIGIN}/api/auth/jwks`,

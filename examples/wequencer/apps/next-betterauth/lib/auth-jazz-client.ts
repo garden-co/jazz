@@ -3,14 +3,9 @@ import permissions from "@/permissions";
 import { serverSecret } from "@/lib/server-secret";
 import { JAZZ_ENV } from "@/lib/jazz-env";
 import type { JazzClient } from "jazz-tools/backend";
-import { createRequire as createRequireFromModule } from "node:module";
+import { jazzBackend } from "@/lib/jazz-backend";
 
-const createRequire =
-  process.getBuiltinModule?.("module")?.createRequire ?? createRequireFromModule;
-const nodeRequire = createRequire(import.meta.url);
-const { createJazzSession } = nodeRequire(
-  "jazz-tools/backend",
-) as typeof import("jazz-tools/backend");
+const { createJazzSession } = jazzBackend;
 
 type AuthSession = Awaited<ReturnType<typeof createJazzSession>>;
 
