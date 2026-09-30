@@ -31,9 +31,14 @@ const schema = {
     .table(
       {
         title: s.string(),
+        optionalTitle: s.string().optional(),
         done: s.boolean(),
+        optionalRank: s.int().optional(),
         tags: s.array(s.string()),
+        optionalTags: s.array(s.string()).optional(),
         attachment: s.bytes(),
+        optionalAttachment: s.bytes().optional(),
+        optionalStatus: s.enum("new", "done").optional(),
         project: s.uuid(),
         owner: s.uuid().optional(),
       },
@@ -43,7 +48,6 @@ const schema = {
 };
 type AppSchema = s.Schema<typeof schema>;
 const app: s.App<AppSchema> = s.defineApp(schema);
-
 const defaultedSchema = {
   users: s.table(
     {
@@ -88,6 +92,15 @@ const payloadEnumSchema = {
           defaultedText: s.string().default("default"),
         },
       }),
+      optionalEvent: s
+        .enum({
+          message: {
+            requiredText: s.string(),
+            nullableText: s.string().optional(),
+            defaultedText: s.string().default("default"),
+          },
+        })
+        .optional(),
     },
     {},
   ),
@@ -547,6 +560,18 @@ describe("typed app prototype", () => {
         }
       | undefined
     >();
+
+    app.todos.where({
+      optionalTitle: { isNull: true },
+      optionalRank: { isNull: false },
+      optionalTags: { isNull: true },
+      optionalAttachment: { isNull: false },
+      optionalStatus: { isNull: true },
+    });
+    // @ts-expect-error required scalar columns do not support isNull
+    app.todos.where({ done: { isNull: true } });
+    // @ts-expect-error nullable payload enums keep their dedicated match operator
+    payloadEnumApp.events.where({ optionalEvent: { isNull: true } });
 
     // Membership is deliberately non-nullable. Express null handling with
     // isNull/isNotNull rather than SQL-style null membership semantics.

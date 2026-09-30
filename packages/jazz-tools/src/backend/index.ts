@@ -11,6 +11,8 @@ export {
   type BackendSchemaSource,
 } from "./create-jazz-context.js";
 export {
+  isRequestAuthenticationError,
+  RequestAuthenticationError,
   resolveRequestSession,
   type BackendRequestAuthConfig,
   type BackendRequestOptions,
