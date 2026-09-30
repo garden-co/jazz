@@ -1,185 +1,126 @@
 <template>
-  <div class="tour-calendar">
-    <div class="cal-header">
-      <button class="cal-nav" @click="prevMonth">&larr;</button>
-      <span class="cal-title">{{ monthLabel }}</span>
-      <button class="cal-nav" @click="nextMonth">&rarr;</button>
-    </div>
+  <section class="calendar" aria-label="Tour calendar">
+    <header class="row-between">
+      <h3 class="heading-4">{{ monthLabel }}</h3>
+      <div class="actions">
+        <Button variant="ghost" icon-only aria-label="Previous month" @click="shiftMonth(-1)">
+          <Icon name="chevron-left" />
+        </Button>
+        <Button variant="ghost" icon-only aria-label="Next month" @click="shiftMonth(1)">
+          <Icon name="chevron-right" />
+        </Button>
+      </div>
+    </header>
 
-    <div class="cal-grid">
-      <div class="cal-day-header" v-for="d in dayHeaders" :key="d">{{ d }}</div>
-
-      <template v-for="(week, wi) in grid" :key="wi">
-        <div
-          v-for="(day, di) in week"
-          :key="di"
-          class="cal-cell"
-          :class="{
-            dimmed: !day.isCurrentMonth,
-            selected: isSelectedDate(day),
-            'drag-over': dragOverKey === dateKey(day),
-          }"
-          @dragover.prevent="onDragOver(day)"
-          @dragleave="onDragLeave"
-          @drop.prevent="onDrop(day, $event)"
+    <div class="calendar__grid">
+      <span v-for="d in weekdays" :key="d" class="calendar__weekday">{{ d }}</span>
+      <div
+        v-for="day in days"
+        :key="day.key"
+        class="calendar__day"
+        :class="{ outside: !day.isCurrentMonth, 'drop-target': dropKey === day.key }"
+        @dragover.prevent="dropKey = day.key"
+        @dragleave="dropKey = null"
+        @drop.prevent="onDrop(day.date, $event)"
+      >
+        <span class="calendar__date">{{ day.dayOfMonth }}</span>
+        <button
+          v-for="stop in stopsByDay.get(day.key) ?? []"
+          :key="stop.id"
+          type="button"
+          class="calendar__stop"
+          :data-status="stop.status"
+          :aria-pressed="stop.id === selectedStopId"
+          draggable="true"
+          :title="`${stop.venue?.name} (${statusLabels[stop.status]})`"
+          :aria-label="`${stop.venue?.city}, ${statusLabels[stop.status]}`"
+          @click="emit('selectStop', stop.id)"
+          @dragstart="$event.dataTransfer?.setData('text/plain', stop.id)"
         >
-          <span class="cal-day-num">{{ day.dayOfMonth }}</span>
-          <div
-            v-for="stop in stopsForDay(day)"
-            :key="stop.id"
-            class="stop-chip"
-            :draggable="canEdit"
-            @click.stop="$emit('selectStop', stop.id)"
-            @dragstart="onDragStart($event, stop.id)"
-          >
-            {{ stop.name }}
-          </div>
-        </div>
-      </template>
+          <span class="status-mark" :data-status="stop.status" aria-hidden="true" />{{
+            stop.venue?.city
+          }}
+        </button>
+      </div>
     </div>
-  </div>
+    <ul class="calendar__legend" aria-hidden="true">
+      <li v-for="(label, status) in statusLabels" :key="status">
+        <span class="status-mark" :data-status="status" />{{ label }}
+      </li>
+    </ul>
+  </section>
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from "vue";
-import { useDb, useSession } from "jazz-tools/vue";
-import { app } from "../../schema.js";
-import { buildMonthGrid, mapStopsToGrid } from "../lib/calendar-grid.js";
+import { computed, ref, watch } from "vue";
+import { useAll, useDb } from "jazz-tools/vue";
+import { app, type StopWithVenue } from "../../schema.js";
+import { buildMonthGrid } from "../lib/calendar-grid.js";
+import { statusLabels, toDateInput } from "../lib/format.js";
+import Button from "./ui/Button.vue";
+import Icon from "./ui/Icon.vue";
 
-interface StopProp {
-  id: string;
-  date: Date;
-  venue: { name: string };
-}
-
-const props = defineProps<{
-  stops: StopProp[];
-  selectedStopId: string | null;
-}>();
-
-const emit = defineEmits<{
-  selectStop: [stopId: string];
-}>();
+const props = defineProps<{ bandId: string; anchor: Date; selectedStopId: string | null }>();
+const emit = defineEmits<{ selectStop: [stopId: string] }>();
 
 const db = useDb();
-const session = useSession();
-const canEdit = !!session.value;
+const weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
-const dayHeaders = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+// Open on the anchor's month (the selected stop, or the next one) until the user pages.
+const offset = ref(0);
+const month = computed(
+  () => new Date(props.anchor.getFullYear(), props.anchor.getMonth() + offset.value, 1),
+);
+const monthLabel = computed(() =>
+  month.value.toLocaleDateString("en-GB", { month: "long", year: "numeric" }),
+);
 
-const monthFormatter = new Intl.DateTimeFormat("en-GB", { month: "long" });
+const days = computed(() =>
+  buildMonthGrid(month.value.getFullYear(), month.value.getMonth())
+    .flat()
+    .map((day) => ({ ...day, key: toDateInput(day.date) })),
+);
 
-// Default to earliest stop's month, or current month
-const initialDate = computed(() => {
-  if (props.stops.length > 0) {
-    const sorted = [...props.stops].sort((a, b) => a.date.getTime() - b.date.getTime());
-    return sorted[0]!.date;
+// Every stop in the visible grid, including the padding days of the next and
+// previous months. The stops policy hides tentative and cancelled dates from
+// non-members, but only members see the calendar.
+const { data: stopRows } = useAll(() => {
+  const first = days.value[0].date;
+  const end = new Date(days.value[days.value.length - 1].date);
+  end.setDate(end.getDate() + 1);
+  return app.stops
+    .where({ bandId: props.bandId, date: { gte: first, lt: end } })
+    .include({ venue: true })
+    .orderBy("date", "asc");
+});
+const stops = computed(() => (stopRows.value ?? []).filter((s) => s.venue));
+
+const stopsByDay = computed(() => {
+  const map = new Map<string, StopWithVenue[]>();
+  for (const stop of stops.value) {
+    const key = toDateInput(stop.date);
+    map.set(key, [...(map.get(key) ?? []), stop]);
   }
-  return new Date();
+  return map;
 });
 
-const viewYear = ref<number | null>(null);
-const viewMonth = ref<number | null>(null);
+watch(
+  () => props.selectedStopId,
+  () => (offset.value = 0),
+);
 
-const currentYear = computed(() => viewYear.value ?? initialDate.value.getFullYear());
-const currentMonth = computed(() => viewMonth.value ?? initialDate.value.getMonth());
-
-const monthLabel = computed(() => {
-  const name = monthFormatter.format(new Date(currentYear.value, currentMonth.value, 1));
-  return `${name} ${currentYear.value}`;
-});
-
-function prevMonth() {
-  const y = currentYear.value;
-  const m = currentMonth.value;
-  if (m === 0) {
-    viewYear.value = y - 1;
-    viewMonth.value = 11;
-  } else {
-    viewYear.value = y;
-    viewMonth.value = m - 1;
-  }
+function shiftMonth(delta: number) {
+  offset.value += delta;
 }
 
-function nextMonth() {
-  const y = currentYear.value;
-  const m = currentMonth.value;
-  if (m === 11) {
-    viewYear.value = y + 1;
-    viewMonth.value = 0;
-  } else {
-    viewYear.value = y;
-    viewMonth.value = m + 1;
-  }
-}
-
-const grid = computed(() => buildMonthGrid(currentYear.value, currentMonth.value));
-
-const stopMap = computed(() => {
-  const mapped = props.stops.map((s) => ({ id: s.id, date: s.date }));
-  return mapStopsToGrid(mapped, grid.value);
-});
-
-// Build a lookup from stop id to venue name
-const stopNameMap = computed(() => {
-  const m = new Map<string, string>();
-  for (const s of props.stops) {
-    m.set(s.id, s.venue.name);
-  }
-  return m;
-});
-
-function dateKey(day: { date: Date }): string {
-  const y = day.date.getFullYear();
-  const m = String(day.date.getMonth() + 1).padStart(2, "0");
-  const d = String(day.date.getDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
-}
-
-function stopsForDay(day: { date: Date }): Array<{ id: string; name: string }> {
-  const key = dateKey(day);
-  const entries = stopMap.value.get(key);
-  if (!entries) return [];
-  return entries.map((e) => ({
-    id: e.id,
-    name: stopNameMap.value.get(e.id) ?? "",
-  }));
-}
-
-function isSelectedDate(day: { date: Date }): boolean {
-  if (!props.selectedStopId) return false;
-  const selected = props.stops.find((s) => s.id === props.selectedStopId);
-  if (!selected) return false;
-  return dateKey(day) === dateKey({ date: selected.date });
-}
-
-// Drag-and-drop
-const dragOverKey = ref<string | null>(null);
-
-function onDragStart(event: DragEvent, stopId: string) {
-  if (!canEdit) return;
-  event.dataTransfer?.setData("text/plain", stopId);
-}
-
-function onDragOver(day: { date: Date }) {
-  if (!canEdit) return;
-  dragOverKey.value = dateKey(day);
-}
-
-function onDragLeave() {
-  dragOverKey.value = null;
-}
-
-function onDrop(day: { date: Date }, event: DragEvent) {
-  dragOverKey.value = null;
-  if (!canEdit) return;
-  const stopId = event.dataTransfer?.getData("text/plain");
-  if (!stopId) return;
-  // day.date is already local midnight from the calendar grid — no UTC parsing issue
-  db.update(app.stops, stopId, { date: day.date });
+// Drag a stop onto another day to move it; the show keeps its time of day.
+const dropKey = ref<string | null>(null);
+function onDrop(day: Date, event: DragEvent) {
+  dropKey.value = null;
+  const stop = stops.value.find((s) => s.id === event.dataTransfer?.getData("text/plain"));
+  if (!stop) return;
+  const date = new Date(day);
+  date.setHours(stop.date.getHours(), stop.date.getMinutes());
+  db.update(app.stops, stop.id, { date });
 }
 </script>
-
-<style scoped>
-@import "../styles/tour-calendar.css";
-</style>

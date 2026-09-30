@@ -5,13 +5,24 @@ on:
     types: [labeled, synchronize, reopened]
   # Every main merge queues a baseline (bursts coalesce, see concurrency).
   # Without it CodSpeed compares PRs against the newest older main run and
-  # attributes intervening merges to the PR (#3488).
-  # No nightly schedule: it would only re-measure the last merge. Use a manual
-  # dispatch on main if a push was made with the Actions token (which does not
-  # trigger push workflows) or a main run failed.
+  # attributes intervening merges to the PR (#3488). Use a manual dispatch on
+  # main if a push was made with the Actions token (which does not trigger
+  # push workflows) or a main run failed.
   push:
     branches: [main]
+  # The nightly suite: only the workloads' nightly extras (the `nightly` bench
+  # targets and the Groove reference-engine sweep), listed in
+  # dev/benchmarks/codspeed-artifact.mjs. It never re-measures a merge case,
+  # so each case gets one perf-timeline point per commit.
+  schedule:
+    - cron: "17 3 * * *"
   workflow_dispatch:
+    inputs:
+      suite:
+        description: "merge: the per-merge cases; nightly: only the nightly extras"
+        type: choice
+        options: [merge, nightly]
+        default: merge
 
 permissions:
   contents: read
@@ -22,41 +33,49 @@ permissions:
 # merge replaces the pending one. A burst of merges measures the commit already
 # running and the latest one; a PR based on a skipped commit compares against
 # the nearest earlier main run (footnoted by CodSpeed), at most one burst old.
+# Nightly runs have their own group, so a merge never replaces a pending one.
 concurrency:
-  group: codspeed-example-benchmarks-${{ github.event.pull_request.number || github.ref }}
+  group: codspeed-example-benchmarks-${{ github.event.pull_request.number || github.ref }}${{ (github.event_name == 'schedule' || inputs.suite == 'nightly') && '-nightly' || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Read by dev/benchmarks/codspeed-artifact.mjs in every job: which cases
+  # to build, seal, verify and measure.
+  JAZZ_CODSPEED_SUITE: ${{ (github.event_name == 'schedule' || inputs.suite == 'nightly') && 'nightly' || 'merge' }}
 
 jobs:
   native-workloads-plan:
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark')
-    name: List wall-time workloads
+    name: List wall-time workload groups
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       contents: read
     outputs:
-      workloads: ${{ steps.list.outputs.workloads }}
+      groups: ${{ steps.list.outputs.groups }}
       measure: ${{ steps.list.outputs.measure }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       # One table, in dev/benchmarks/codspeed-artifact.mjs, feeds both matrices
-      # below, each workload's build/run arguments and measurement settings, and
-      # the artifact verifier. Add a workload there only.
-      - name: List workloads
+      # below (one entry per workload group), each workload's build/run
+      # arguments and measurement settings, and the artifact verifier. Add a
+      # workload there only.
+      - name: List workload groups
         id: list
         run: |
-          workloads="$(node dev/benchmarks/codspeed-artifact.mjs matrix)"
-          measure="$(node dev/benchmarks/codspeed-artifact.mjs measure)"
-          echo "workloads=$workloads" >> "$GITHUB_OUTPUT"
+          groups="$(node dev/benchmarks/codspeed-artifact.mjs groups)"
+          measure="$(node dev/benchmarks/codspeed-artifact.mjs group-measure)"
+          echo "groups=$groups" >> "$GITHUB_OUTPUT"
           echo "measure=$measure" >> "$GITHUB_OUTPUT"
 
   native-workloads-build:
     needs: native-workloads-plan
-    name: Build ${{ matrix.workload }} native benchmark
+    name: Build ${{ matrix.group }} native benchmarks
     # Match the measurement host's ABI, but do not spend macro-runner time on
-    # compilation. One Cargo invocation per workload keeps each workload's
-    # package, benches and features exactly as measured; feature unification
-    # across workloads can never change a receipt.
+    # compilation. One job per group shares one target directory, and so the
+    # dependency builds, across the group's workloads. One Cargo invocation per
+    # workload keeps each workload's package, benches and features exactly as
+    # measured; feature unification across workloads can never change a receipt.
     runs-on: blacksmith-16vcpu-ubuntu-2204-arm
     timeout-minutes: 45
     permissions:
@@ -64,7 +83,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        workload: ${{ fromJSON(needs.native-workloads-plan.outputs.workloads) }}
+        group: ${{ fromJSON(needs.native-workloads-plan.outputs.groups) }}
     env:
       CARGO_BUILD_JOBS: 16
       RUST_MIN_STACK: 4194304
@@ -77,19 +96,22 @@ jobs:
         with:
           cache-bin: true
           cache-targets: false
-          shared-key: codspeed-native-builder-${{ matrix.workload }}-${{ runner.arch }}-ubuntu2204-v5
+          shared-key: codspeed-native-builder-${{ matrix.group }}-${{ runner.arch }}-ubuntu2204-v5
           workspaces: . -> target
       - name: Restore native compiler outputs
         id: native-build-cache
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: target/release
-          # Compatibility includes toolchain, CodSpeed, workload (and so its
-          # features), remap contract, lockfile and Cargo config. Only the save
-          # key includes source SHA.
-          key: codspeed-native-v5-${{ matrix.workload }}-${{ runner.os }}-${{ runner.arch }}-ubuntu2204-rust1.93.1-codspeed5.0.1-per-workload-absolute-remap-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml') }}-${{ github.sha }}
+          # Compatibility includes toolchain, CodSpeed, group (and so its
+          # workloads' features), remap contract, lockfile and Cargo config.
+          # Only the save key includes source SHA.
+          # The suite is after the restore prefix: a nightly build restores a
+          # merge build's outputs and saves its own, and neither overwrites
+          # the other's key for the same SHA.
+          key: codspeed-native-v6-${{ matrix.group }}-${{ runner.os }}-${{ runner.arch }}-ubuntu2204-rust1.93.1-codspeed5.0.1-per-workload-absolute-remap-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml') }}-${{ env.JAZZ_CODSPEED_SUITE }}-${{ github.sha }}
           restore-keys: |
-            codspeed-native-v5-${{ matrix.workload }}-${{ runner.os }}-${{ runner.arch }}-ubuntu2204-rust1.93.1-codspeed5.0.1-per-workload-absolute-remap-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml') }}-
+            codspeed-native-v6-${{ matrix.group }}-${{ runner.os }}-${{ runner.arch }}-ubuntu2204-rust1.93.1-codspeed5.0.1-per-workload-absolute-remap-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml') }}-
       - name: Test benchmark artifact handoff
         run: node --test dev/benchmarks/codspeed-artifact.test.mjs
       - name: Install cargo-codspeed
@@ -104,7 +126,7 @@ jobs:
           cc --version
           c++ --version
           getconf GNU_LIBC_VERSION
-      - name: Build native workload
+      - name: Build native workloads
         run: |
           export JAZZ_REAL_CARGO="$(command -v cargo)"
           export PATH="$PWD/dev/benchmarks/timed-cargo:$PATH"
@@ -112,11 +134,16 @@ jobs:
           # install rejects runner path drift; relative paths classify unknown.
           RUSTFLAGS="$(node dev/benchmarks/codspeed-artifact.mjs rustflags)"
           export RUSTFLAGS
-          # Assign first so an unknown workload fails the step instead of
-          # building every bench in the workspace.
-          args="$(node dev/benchmarks/codspeed-artifact.mjs build-args ${{ matrix.workload }})"
-          read -ra args <<<"$args"
-          /usr/bin/time -v cargo codspeed build -m walltime "${args[@]}" --locked
+          # Assign first so an unknown group or workload fails the step instead
+          # of building every bench in the workspace.
+          workloads="$(node dev/benchmarks/codspeed-artifact.mjs group-workloads ${{ matrix.group }})"
+          for workload in $workloads; do
+            args="$(node dev/benchmarks/codspeed-artifact.mjs build-args "$workload")"
+            read -ra args <<<"$args"
+            echo "::group::cargo codspeed build $workload"
+            /usr/bin/time -v cargo codspeed build -m walltime "${args[@]}" --locked
+            echo "::endgroup::"
+          done
       - name: Save native compiler outputs
         if: steps.native-build-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
@@ -124,12 +151,22 @@ jobs:
           path: target/release
           key: ${{ steps.native-build-cache.outputs.cache-primary-key }}
       - name: Seal benchmark executables
-        run: node dev/benchmarks/codspeed-artifact.mjs seal ${{ matrix.workload }}
+        run: |
+          for workload in $(node dev/benchmarks/codspeed-artifact.mjs group-workloads ${{ matrix.group }}); do
+            node dev/benchmarks/codspeed-artifact.mjs seal "$workload"
+          done
+          echo "${{ matrix.group }}" > target/codspeed-group.txt
+      # One artifact per group holding one sealed bundle per workload
+      # (target/codspeed-artifact-<workload>/), restored under target/. The
+      # group marker keeps target/ the artifact root even for a one-workload
+      # group, since upload-artifact roots at the paths' common ancestor.
       - name: Upload benchmark executables
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: codspeed-native-${{ matrix.workload }}-${{ github.sha }}
-          path: target/codspeed-artifact-${{ matrix.workload }}/
+          name: codspeed-native-${{ matrix.group }}-${{ github.sha }}
+          path: |
+            target/codspeed-group.txt
+            target/codspeed-artifact-*/
           if-no-files-found: error
           overwrite: true
           retention-days: 7
@@ -137,28 +174,24 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: codspeed-build-timings-${{ matrix.workload }}-${{ github.run_attempt }}
+          name: codspeed-build-timings-${{ matrix.group }}-${{ github.run_attempt }}
           path: target/cargo-timings/
           retention-days: 7
 
   native-workloads-walltime:
     needs: [native-workloads-plan, native-workloads-build]
-    # A matrix `needs` waits for every build. Still measure the workloads that
+    # A matrix `needs` waits for every build. Still measure the groups that
     # built when another failed; a missing bundle fails only its own download.
     if: ${{ !cancelled() && needs.native-workloads-build.result != 'skipped' }}
-    name: ${{ matrix.workload }} native wall time
+    name: ${{ matrix.group }} native wall time
     runs-on: codspeed-macro
-    # Each workload keeps the limit its former build-and-run job had; the
-    # build no longer counts against it.
-    timeout-minutes: ${{ fromJSON(needs.native-workloads-plan.outputs.measure)[matrix.workload].timeout }}
+    # The sum of the group's workloads' limits; the build does not count
+    # against it.
+    timeout-minutes: ${{ fromJSON(needs.native-workloads-plan.outputs.measure)[matrix.group].timeout }}
     strategy:
       fail-fast: false
       matrix:
-        workload: ${{ fromJSON(needs.native-workloads-plan.outputs.workloads) }}
-    env:
-      # Only the native examples raise the thread stack while measuring; an
-      # empty value is unset to Rust std.
-      RUST_MIN_STACK: ${{ fromJSON(needs.native-workloads-plan.outputs.measure)[matrix.workload].min_stack }}
+        group: ${{ fromJSON(needs.native-workloads-plan.outputs.groups) }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -167,17 +200,21 @@ jobs:
       - name: Download this run's benchmark executables
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
-          name: codspeed-native-${{ matrix.workload }}-${{ github.sha }}
-          path: target/codspeed-artifact-${{ matrix.workload }}/
+          name: codspeed-native-${{ matrix.group }}-${{ github.sha }}
+          path: target/
       - name: Verify and install benchmark executables
         id: install
         run: |
-          node dev/benchmarks/codspeed-artifact.mjs install ${{ matrix.workload }}
-          args="$(node dev/benchmarks/codspeed-artifact.mjs run-args ${{ matrix.workload }})"
-          echo "run-args=$args" >> "$GITHUB_OUTPUT"
-      - name: Run native workload
+          for workload in $(node dev/benchmarks/codspeed-artifact.mjs group-workloads ${{ matrix.group }}); do
+            node dev/benchmarks/codspeed-artifact.mjs install "$workload"
+          done
+          # Each workload with its own thread stack: only the native examples
+          # raise it; the others use Rust std's default.
+          command="$(node dev/benchmarks/codspeed-artifact.mjs run-command ${{ matrix.group }})"
+          echo "run-command=$command" >> "$GITHUB_OUTPUT"
+      - name: Run native workloads
         uses: CodSpeedHQ/action@4296e51e7041e24dadb86d1d6e8b9320d223dbe8 # v5.0.3
         with:
           mode: walltime
           # Features were fixed at build time; cargo-codspeed rejects them on run.
-          run: cargo codspeed run -m walltime ${{ steps.install.outputs.run-args }}
+          run: ${{ steps.install.outputs.run-command }}

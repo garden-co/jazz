@@ -1,5 +1,7 @@
 import { app } from "@/schema";
 import permissions from "@/permissions";
+import { serverSecret } from "@/lib/server-secret";
+import { JAZZ_ENV } from "@/lib/jazz-env";
 import type { JazzClient } from "jazz-tools/backend";
 import { createRequire as createRequireFromModule } from "node:module";
 
@@ -25,9 +27,9 @@ export async function authJazzClient(): Promise<JazzClient> {
     driver: { type: "memory" },
     serverUrl: process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!,
     initial: {
-      backendSecret: process.env.BACKEND_SECRET ?? "wequencer-development-backend-secret",
+      backendSecret: serverSecret("BACKEND_SECRET", "wequencer-development-backend-secret"),
     },
-    env: process.env.NODE_ENV === "production" ? "prod" : "dev",
+    env: JAZZ_ENV,
     tier: "global",
   }));
   try {

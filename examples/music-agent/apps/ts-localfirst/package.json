@@ -8,6 +8,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "jazz-napi": "workspace:*",
     "jazz-tools": "workspace:*"
   },
   "devDependencies": {

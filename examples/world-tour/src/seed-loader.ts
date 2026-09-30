@@ -1,111 +1,115 @@
 import type { Db } from "jazz-tools";
 import { app } from "../schema.js";
-import type { Venue } from "../schema.js";
-import { defaultBandName, venues as seedVenues, descriptions, privateNotes } from "./seed-data.js";
+import { buildTourFixture, DEFAULT_SEED } from "./fixture.js";
 
-function pickWeightedStatus(rand: number): "confirmed" | "tentative" | "cancelled" {
-  if (rand < 0.7) return "confirmed";
-  if (rand < 0.95) return "tentative";
-  return "cancelled";
+/**
+ * The band an empty server's first visitor creates. A fixed id lets the server
+ * accept exactly one of two concurrent first visits (see `claimDemoBand`).
+ */
+export const DEMO_BAND_ID = "1917d0e0-5eed-4b0d-8a4d-000000001917";
+
+/** A fresh invite code. Codes are bearer secrets, so keep the full UUID's entropy. */
+export function newInviteCode(): string {
+  return crypto.randomUUID();
 }
 
-export async function ensureData(
+/**
+ * Creates the demo band on an empty server.
+ *
+ * The band insert runs in an exclusive transaction with the fixed DEMO_BAND_ID, and
+ * an exclusive insert with an explicit id is create-only: when two first visitors
+ * race, the server commits one band and rejects the other, whose app then shows
+ * the winner's tour. The same rejection happens if the demo band was ever deleted,
+ * so an empty server whose demo band is gone stays empty. Resolves to false when
+ * the claim is rejected.
+ *
+ * The rest of the tour is written after the claim commits (see `writeTour`). If
+ * that fails part-way (the tab closes, the connection drops), the band stays with
+ * whatever was written, possibly no stops, and is not reseeded; the caller only
+ * reports the error.
+ */
+export async function claimDemoBand(
   db: Db,
-  userId: string | undefined,
-  isMember: boolean,
+  { userId, ownerName }: { userId: string; ownerName: string },
+): Promise<boolean> {
+  const fixture = buildTourFixture({ seed: DEFAULT_SEED, start: new Date() });
+  try {
+    const claim = await db.exclusiveTransaction((tx) =>
+      tx.insert(app.bands, { name: fixture.bandName, ownerId: userId }, { id: DEMO_BAND_ID }),
+    );
+    await claim.wait();
+  } catch {
+    return false;
+  }
+  await writeTour(db, DEMO_BAND_ID, { userId, ownerName }, fixture);
+  return true;
+}
+
+/** Creates a new band owned by `userId` with the seeded demo tour starting today. */
+export async function startDemoTour(
+  db: Db,
+  { userId, ownerName, seed = DEFAULT_SEED }: { userId: string; ownerName: string; seed?: number },
+): Promise<string> {
+  const fixture = buildTourFixture({ seed, start: new Date() });
+  const band = db.insert(app.bands, { name: fixture.bandName, ownerId: userId });
+  await band.wait({ tier: "global" });
+  await writeTour(db, band.value.id, { userId, ownerName }, fixture);
+  return band.value.id;
+}
+
+/**
+ * Writes the owner's membership, an invite, and the tour for a band that exists
+ * on the server.
+ *
+ * Four transactions rather than one: permission `exists` checks only see
+ * committed rows, not rows staged earlier in the same transaction (INV-RLS-9).
+ * The membership and invite need the band, the venues need the membership, the
+ * stops need their venues, and the notes need their stops, so each group commits
+ * before the next. Whether `exists` should see a transaction's own writes is an
+ * open question for the core team; if it does, this becomes one transaction.
+ */
+async function writeTour(
+  db: Db,
+  bandId: string,
+  { userId, ownerName }: { userId: string; ownerName: string },
+  fixture: ReturnType<typeof buildTourFixture>,
 ): Promise<void> {
-  const existingBands = await db.all(app.bands);
-  let bandId: string;
+  const access = await db.transaction((tx) => {
+    tx.insert(app.members, { bandId, userId, name: ownerName });
+    tx.insert(app.bandInvites, { bandId, code: newInviteCode() });
+  });
+  await access.wait({ tier: "global" });
 
-  if (existingBands.length === 0) {
-    const { value: band } = db.insert(app.bands, { name: defaultBandName });
-    bandId = band.id;
-  } else {
-    bandId = existingBands[0].id;
-  }
-
-  if (userId && isMember) {
-    const myMembership = await db.all(app.members.where({ userId }));
-    if (myMembership.length === 0) {
-      db.insert(app.members, { bandId, userId });
+  // Each band gets its own venues: a shared venue could be moved or deleted by
+  // another band, taking this band's stops with it.
+  const venues = await db.transaction((tx) => {
+    const venueIds = new Map<string, string>();
+    for (const { venue } of fixture.stops) {
+      if (!venueIds.has(venue.name))
+        venueIds.set(venue.name, tx.insert(app.venues, { ...venue, ownerId: userId, bandId }).id);
     }
-  }
+    return venueIds;
+  });
+  await venues.wait({ tier: "global" });
 
-  const existingVenues = await db.all(app.venues);
-  const existingNames = new Set(existingVenues.map((v: any) => v.name));
-  const insertedVenues: Venue[] = [];
-  for (const v of seedVenues) {
-    if (!existingNames.has(v.name)) {
-      try {
-        const { value: venue } = db.insert(app.venues, v);
-        insertedVenues.push(venue);
-      } catch (err) {
-        console.warn("[ensureData] venue insert skipped:", (err as Error).message);
-      }
-    }
-  }
-
-  const allVenues = [...existingVenues, ...insertedVenues];
-
-  if (!isMember) return;
-
-  const now = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const threeWeeks = new Date(today.getTime() + 21 * 24 * 60 * 60 * 1000);
-
-  const upcomingStops = await db.all(
-    app.stops.where({ date: { gte: today, lte: threeWeeks } }).limit(12),
-  );
-
-  const needed = 12 - upcomingStops.length;
-  if (needed <= 0) return;
-
-  if (allVenues.length === 0) return;
-
-  const existingDates = new Set(
-    upcomingStops.map((s: any) => {
-      const d = s.date instanceof Date ? s.date : new Date(s.date);
-      return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+  const tour = await db.transaction((tx) =>
+    fixture.stops.map((stop) => {
+      const row = tx.insert(app.stops, {
+        bandId,
+        venueId: venues.value.get(stop.venue.name)!,
+        date: stop.date,
+        status: stop.status,
+        publicDescription: stop.publicDescription,
+      });
+      return { stopId: row.id, note: stop.privateNote };
     }),
   );
+  await tour.wait({ tier: "global" });
 
-  const rand = Math.random;
-  const availableDays: Date[] = [];
-  for (let i = 0; i < 21; i++) {
-    const d = new Date(today.getTime() + i * 24 * 60 * 60 * 1000);
-    const key = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
-    if (!existingDates.has(key)) {
-      availableDays.push(d);
-    }
-  }
-
-  // Shuffle available days then pick `needed`
-  for (let i = availableDays.length - 1; i > 0; i--) {
-    const j = Math.floor(rand() * (i + 1));
-    [availableDays[i], availableDays[j]] = [availableDays[j], availableDays[i]];
-  }
-  const pickedDays = availableDays.slice(0, needed).sort((a, b) => a.getTime() - b.getTime());
-
-  // Pick random venues, sort by longitude for a believable west-to-east route
-  const shuffledVenues = [...allVenues].sort(() => rand() - 0.5);
-  const pickedVenues = shuffledVenues.slice(0, needed).sort((a, b) => (a.lng ?? 0) - (b.lng ?? 0));
-
-  for (let i = 0; i < pickedDays.length; i++) {
-    const day = pickedDays[i];
-    const venue = pickedVenues[i % pickedVenues.length];
-    if (!venue?.id) continue;
-
-    const hour = 18 + Math.floor(rand() * 4);
-    day.setHours(hour, 0, 0, 0);
-
-    db.insert(app.stops, {
-      bandId,
-      venueId: venue.id,
-      date: day,
-      status: pickWeightedStatus(rand()),
-      publicDescription: descriptions[Math.floor(rand() * descriptions.length)],
-      privateNotes:
-        rand() > 0.3 ? privateNotes[Math.floor(rand() * privateNotes.length)] : undefined,
-    });
-  }
+  const notes = tour.value.filter((s): s is { stopId: string; note: string } => !!s.note);
+  if (notes.length === 0) return;
+  const written = await db.transaction((tx) => {
+    for (const { stopId, note } of notes) tx.insert(app.stopNotes, { stopId, bandId, body: note });
+  });
+  await written.wait({ tier: "global" });
 }
