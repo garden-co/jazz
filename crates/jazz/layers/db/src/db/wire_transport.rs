@@ -697,6 +697,12 @@ impl<T: WireTransport> Transport for WireTransportAdapter<T> {
             WireSendOutcome::Rejected(_) => Err(TransportError::Backpressure),
         }
     }
+    fn try_send(&mut self, message: SyncMessage) -> Result<Option<SyncMessage>, TransportError> {
+        match self.offer(message)? {
+            WireSendOutcome::Accepted => Ok(None),
+            WireSendOutcome::Rejected(message) => Ok(Some(message)),
+        }
+    }
     fn try_recv(&mut self) -> Option<SyncMessage> {
         self.try_recv_result().ok().flatten()
     }

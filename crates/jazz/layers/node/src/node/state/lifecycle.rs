@@ -871,6 +871,7 @@ impl NodeState {
                 open_transactions: BTreeMap::new(),
                 closed_batches: BTreeSet::new(),
                 local_permission_subjects: BTreeMap::new(),
+                released_large_values: Vec::new(),
                 pending_foreign_transactions: BTreeSet::new(),
             },
             rejections: RejectionTracking::default(),
@@ -1442,6 +1443,20 @@ where
             }
         }
         Ok(evicted)
+    }
+
+    /// Ids of every unpublished Groove staging root, for leak assertions.
+    #[doc(hidden)]
+    pub async fn staged_large_value_ids(
+        &self,
+    ) -> Result<Vec<groove::large_values::StagedLargeValueId>, Error> {
+        Ok(self
+            .database
+            .staged_large_values()
+            .await?
+            .into_iter()
+            .map(|staged| staged.id)
+            .collect())
     }
 
     /// Evict an opaque Groove staging root selected by Jazz policy. All

@@ -35,11 +35,12 @@ impl PeerState {
             .count() as u64;
     }
 
-    /// Establish the same all-clause aggregate proof used by wire advice
-    /// before a terminal authority admits a client commit.  The action list is
-    /// reconstructed by `NodeState` from the actual version records, so
-    /// insert, update (including candidate patch), and delete each compile the
-    /// correct policy clauses rather than sharing a placeholder update.
+    /// Evaluate a client commit's write policies at the terminal authority,
+    /// under the exact claims admitted for this connection. Each policy input
+    /// is already at the authority cut in this node's own storage, so the
+    /// evaluation reads it directly and keeps no per-connection support view.
+    /// Cross-authority support (INV-SHARD-13) would have to be bound to the
+    /// candidate's dependency closure; see #3794.
     pub async fn prove_terminal_commit_authorization<S>(
         &mut self,
         node: &mut NodeState<S>,
@@ -51,149 +52,18 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
-        self.prove_terminal_commit(node, writer, claims, versions, candidate_tx_id, true)
-            .await
-    }
-
-    /// Establish the terminal support proof without evaluating the final
-    /// write policies. For admission paths whose terminal ingest evaluates
-    /// those policies itself, so a second evaluation here would be discarded.
-    pub async fn prove_terminal_commit_support<S>(
-        &mut self,
-        node: &mut NodeState<S>,
-        writer: AuthorSubject,
-        claims: BTreeMap<String, Value>,
-        versions: &[VersionRecord],
-        candidate_tx_id: TxId,
-    ) -> Result<(), Error>
-    where
-        S: OrderedKvStorage,
-    {
-        self.prove_terminal_commit(node, writer, claims, versions, candidate_tx_id, false)
-            .await
-            .map(|_| ())
-    }
-
-    async fn prove_terminal_commit<S>(
-        &mut self,
-        node: &mut NodeState<S>,
-        writer: AuthorSubject,
-        claims: BTreeMap<String, Value>,
-        versions: &[VersionRecord],
-        candidate_tx_id: TxId,
-        evaluate_write_policies: bool,
-    ) -> Result<bool, Error>
-    where
-        S: OrderedKvStorage,
-    {
         // SYSTEM is the trusted backend policy subject. Row-policy admission
-        // already bypasses it, so it must not try to hydrate an authorization
-        // support proof: claim and join predicates have no SYSTEM session to
-        // bind and are irrelevant to the bypass decision.
+        // already bypasses it: claim and join predicates have no SYSTEM
+        // session to bind and are irrelevant to the bypass decision.
         if writer == AuthorSubject::SYSTEM {
             return Ok(true);
         }
-        // Both support hydration and the final policy evaluation below read
-        // the active session scope. Keep the immutable admitted snapshot
-        // installed for the entire proof; the author-keyed compatibility map
-        // is neither sufficient nor safe for a scope-isolated relay.
-        let mut node = node.scoped_active_session_claims(writer, claims.clone());
-        for action in node
-            .authorization_actions_for_versions_in_transaction(versions, Some(candidate_tx_id))
-            .await?
-        {
-            // Terminal proof is bound to this connection's immutable admitted
-            // snapshot. Never fall back to the node's author-keyed
-            // compatibility map: a scope relay deliberately keeps its binding
-            // out of that mutable map, and same-author sessions may differ.
-            let scope =
-                node.authorization_support_scope_for_session(writer, Some(&claims), &action)?;
-            if scope.subscriptions.is_empty() {
-                continue;
-            }
-            let mut aggregate = AuthorityScopeAggregate::new(
-                scope
-                    .subscriptions
-                    .iter()
-                    .map(|(shape, binding)| (shape.shape_id(), binding.binding_id()))
-                    .collect(),
-            );
-            for (shape, binding) in scope.subscriptions {
-                let subscription = SubscriptionKey {
-                    shape_id: shape.shape_id(),
-                    binding_id: binding.binding_id(),
-                    read_view: scope.options.read_view_key(),
-                };
-                if !aggregate.register(subscription, (shape.shape_id(), binding.binding_id())) {
-                    continue;
-                }
-                let policy_binding = (writer, claims.clone());
-                let maintained = self
-                    .publication_states
-                    .get(&subscription)
-                    .is_some_and(|state| state.maintained_subscription_view.is_some());
-                if maintained
-                    && self.subscription_policy_binding(subscription)
-                        != Some(policy_binding.clone())
-                {
-                    // A canonical support key does not encode the session
-                    // snapshot. Reusing a receiver installed by an earlier
-                    // claim revision (or a sibling link) would prove this
-                    // commit under the wrong immutable policy binding.
-                    self.forget_subscription_with_node(&mut node, subscription);
-                }
-                let (cut, progress) = if self
-                    .publication_states
-                    .get(&subscription)
-                    .is_some_and(|state| state.maintained_subscription_view.is_some())
-                    && self.subscription_policy_binding(subscription) == Some(policy_binding)
-                {
-                    (
-                        node.committed_global_time(),
-                        self.authorization_progress_for_subscription(subscription),
-                    )
-                } else {
-                    let update = self
-                        .rehydrate_authorization_support_query_for_identity(
-                            &mut node,
-                            writer,
-                            claims.clone(),
-                            subscription,
-                            &shape,
-                            &binding,
-                            scope.options.clone(),
-                        )
-                        .await;
-                    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
-                        settled_through,
-                        ..
-                    }) = update?
-                    else {
-                        return Err(Error::UnsupportedSyncMessage(
-                            "terminal authority support hydration did not return a view",
-                        ));
-                    };
-                    (
-                        settled_through,
-                        self.authorization_progress_for_subscription(subscription),
-                    )
-                };
-                let _ = aggregate.apply(subscription, cut, progress);
-            }
-            if aggregate.bounds().is_none() {
-                return Err(Error::UnsupportedSyncMessage(
-                    "terminal authority support proof is incomplete",
-                ));
-            }
-            self.authority_scope_proofs = self.authority_scope_proofs.saturating_add(1);
-        }
-        // Support subscriptions prove that every policy-dependent input has
-        // reached a stable authority cut. The terminal result still has to be
-        // evaluated under this exact snapshot; a claim-only policy has no
-        // support subscription at all and must not become an implicit grant.
-        if !evaluate_write_policies {
-            return Ok(true);
-        }
+        // The policy evaluation reads the active session scope. Keep the
+        // immutable admitted snapshot installed for the entire proof; the
+        // author-keyed compatibility map is neither sufficient nor safe for a
+        // scope-isolated relay, and same-author sessions may differ. A
+        // claim-only policy must not become an implicit grant.
+        let mut node = node.scoped_active_session_claims(writer, claims);
         for version in versions {
             if !node
                 .version_satisfies_write_policy(version, writer, candidate_tx_id, versions)
@@ -203,12 +73,6 @@ impl PeerState {
             }
         }
         Ok(true)
-    }
-
-    #[cfg(any(test, feature = "testing"))]
-    #[doc(hidden)]
-    pub fn terminal_authority_scope_proof_count(&self) -> u64 {
-        self.authority_scope_proofs
     }
 
     fn record_outgoing_view_update<S: OrderedKvStorage>(
