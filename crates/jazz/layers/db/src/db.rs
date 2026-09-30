@@ -4686,10 +4686,14 @@ where
     }
 }
 
+/// The message keeps the core diagnostic (transaction and reason tokens) and
+/// ends with the same readable reason `onMutationError` events carry, so
+/// bindings can surface one consistent `reason` for waits and events.
 fn write_rejected(transaction_id: impl std::fmt::Debug, reason: RejectionReason) -> Error {
+    let (_, readable) = mutation_errors::mutation_error_details(&reason);
     Error::new(
         ErrorCode::WriteRejected,
-        format!("transaction {transaction_id:?} was rejected: {reason:?}"),
+        format!("transaction {transaction_id:?} was rejected: {reason:?} (reason: {readable})"),
     )
 }
 

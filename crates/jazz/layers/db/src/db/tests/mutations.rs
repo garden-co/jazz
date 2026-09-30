@@ -2657,6 +2657,71 @@ fn wait_after_rejection_suppresses_queued_mutation_error() {
     );
 }
 
+/// A cascade rejection reads the same through `wait` and `onMutationError`:
+/// alice waits on one rejected write, the other falls back to the callback,
+/// and both describe the ancestor by its public transaction id rather than
+/// core `TxId` debug output (garden-co/jazz#3663).
+///
+/// ```text
+/// authority ──Rejected(Cascade{root})──► client ──wait()──► error.message
+///                                              └──fallback──► event.reason
+/// ```
+#[test]
+fn cascade_rejection_reason_is_readable_and_matches_between_wait_and_event() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xc6; 16]);
+    let client = open_db(0xc6, alice, &schema);
+    let (client_transport, mut authority_transport) = duplex();
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let callback_events = Rc::clone(&events);
+    client.on_mutation_error(Rc::new(move |event| {
+        callback_events.borrow_mut().push(event.clone());
+    }));
+
+    let root = client
+        .insert("todos", cells("ancestor", false, alice), Default::default())
+        .unwrap()
+        .mergeable_tx_id();
+    let waited = client
+        .insert("todos", cells("waited", false, alice), Default::default())
+        .unwrap();
+    let unwaited = client
+        .insert("todos", cells("unwaited", false, alice), Default::default())
+        .unwrap();
+    for tx_id in [waited.mergeable_tx_id(), unwaited.mergeable_tx_id()] {
+        authority_transport
+            .send(SyncMessage::FateUpdate {
+                tx_id,
+                fate: Fate::Rejected(RejectionReason::Cascade { root }),
+                global_time: None,
+                durability: Some(DurabilityTier::Global),
+            })
+            .unwrap();
+    }
+    client.tick().unwrap();
+    let error =
+        block_on(client.wait_for_transaction(waited.mergeable_tx_id(), DurabilityTier::Global))
+            .unwrap_err();
+    client.tick().unwrap();
+
+    let expected = format!(
+        "Transaction was rejected because ancestor transaction {} was rejected",
+        TransactionId::from_committed_tx(root)
+    );
+    assert_eq!(error.code, ErrorCode::WriteRejected);
+    assert!(
+        error.message.ends_with(&format!("(reason: {expected})")),
+        "{}",
+        error.message
+    );
+    let events = events.borrow();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].code, "cascade_rejected");
+    assert_eq!(events[0].reason, expected);
+    assert!(!events[0].reason.contains("TxId"));
+}
+
 /// A rejected transaction that was not delivered before shutdown is recovered
 /// from durable storage and delivered after the reopened client registers its
 /// callback.

@@ -4983,11 +4983,10 @@ function rejectionCode(message: string): string {
 }
 
 /**
- * Readable reasons for structured authority rejections. These follow the
- * `reason` text the core attaches to the same codes on `onMutationError`
- * events (`mutation_errors.rs`), so a wait rejection and a fallback event
- * describe one rejection the same way. The Rust diagnostic (with its `TxId`/enum debug tokens) stays on
- * the non-enumerable `message`.
+ * Fallback readable reasons for structured authority rejections, used only
+ * when the core diagnostic does not carry its own readable reason (older
+ * native bindings). The core appends ` (reason: …)` with the same text it puts
+ * on `onMutationError` events, so waits and events agree.
  */
 const READABLE_REJECTION_REASONS: Readonly<Record<string, string>> = {
   permission_denied: "Write rejected by server authorization",
@@ -5000,8 +4999,10 @@ const READABLE_REJECTION_REASONS: Readonly<Record<string, string>> = {
 function rejectionReason(message: string): string {
   const reason = extractWriteRejectedReason(message);
   if (reason === null) return message;
-  const readable = READABLE_REJECTION_REASONS[rejectionCode(reason)];
+  const readable = /^transaction .* was rejected: .* \(reason: (.*)\)$/s.exec(reason)?.[1];
   if (readable) return readable;
+  const fallback = READABLE_REJECTION_REASONS[rejectionCode(reason)];
+  if (fallback) return fallback;
   return reason || "Write rejected";
 }
 

@@ -4,7 +4,9 @@ import type { WasmSchema } from "../drivers/types.js";
 import type { CompiledPermissions } from "../permissions/index.js";
 import type { AppContext, Session } from "../runtime/context.js";
 import { SYSTEM_READ_SESSION } from "../runtime/system-identity.js";
-import { createJazzContext } from "./create-jazz-context.js";
+import { setFlagsFromString } from "node:v8";
+import { runInNewContext } from "node:vm";
+import { MAX_PENDING_MUTATION_ERROR_EVENTS, createJazzContext } from "./create-jazz-context.js";
 
 const mocks = vi.hoisted(() => {
   const resolveRequestSession = vi.fn();
@@ -782,6 +784,94 @@ describe("backend/create-jazz-context", () => {
       // Only the rejection that arrived with no listener is reported unhandled.
       expect(consoleError).toHaveBeenCalledTimes(1);
       expect(consoleError).toHaveBeenCalledWith("Unhandled Jazz mutation error", replayed);
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  function mutationErrorEvent(transactionId: string) {
+    return {
+      code: "exclusive_conflict",
+      reason: "Exclusive transaction conflicted with another write",
+      transaction: {
+        transactionId,
+        kind: "exclusive",
+        sealed: true,
+        latestSettlement: {
+          kind: "rejected",
+          transactionId,
+          code: "exclusive_conflict",
+          reason: "Exclusive transaction conflicted with another write",
+        },
+      },
+    };
+  }
+
+  it("BC-U11: a dropped per-request Db does not keep its mutation-error listener alive", async () => {
+    setFlagsFromString("--expose-gc");
+    const gc = runInNewContext("gc") as () => void;
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const context = createJazzContext({
+        appId: "server-app",
+        app: { wasmSchema: SCHEMA_A },
+        permissions: {},
+        driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
+      });
+      const retained = context.db();
+      const retainedListener = vi.fn();
+      retained.onMutationError(retainedListener);
+      const emit = mocks.clients[0]!.onMutationError.mock.calls[0]![0] as (event: unknown) => void;
+
+      const droppedListener = vi.fn();
+      (() => {
+        const perRequest = context.forSession({
+          issuer: "https://issuer.example",
+          user_id: "u1",
+          claims: {},
+          authMode: "external",
+        });
+        perRequest.onMutationError(droppedListener);
+      })();
+      for (let round = 0; round < 5; round += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        gc();
+      }
+
+      emit(mutationErrorEvent("00000000000070008000000000000011"));
+      expect(retainedListener).toHaveBeenCalledTimes(1);
+      expect(droppedListener).not.toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("BC-U12: bounds the pre-listener buffer and reports how many rejections were dropped", () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const context = createJazzContext({
+        appId: "server-app",
+        app: { wasmSchema: SCHEMA_A },
+        permissions: {},
+        driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
+      });
+      const db = context.db();
+      const emit = mocks.clients[0]!.onMutationError.mock.calls[0]![0] as (event: unknown) => void;
+      const overflow = 3;
+      const total = MAX_PENDING_MUTATION_ERROR_EVENTS + overflow;
+      for (let index = 0; index < total; index += 1) {
+        emit(mutationErrorEvent(index.toString(16).padStart(32, "0")));
+      }
+      // Every rejection is still logged as unhandled when it arrives.
+      expect(consoleError).toHaveBeenCalledTimes(total);
+
+      const listener = vi.fn();
+      db.onMutationError(listener);
+      expect(listener).toHaveBeenCalledTimes(MAX_PENDING_MUTATION_ERROR_EVENTS);
+      expect(listener.mock.calls[0]![0]).toEqual(mutationErrorEvent("0".padStart(32, "0")));
+      expect(consoleError).toHaveBeenLastCalledWith(
+        expect.stringContaining(`dropped ${overflow} unhandled mutation error(s)`),
+      );
     } finally {
       consoleError.mockRestore();
     }

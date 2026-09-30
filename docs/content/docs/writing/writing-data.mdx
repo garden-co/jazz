@@ -282,6 +282,14 @@ rejection arrived.
 `onMutationError` returns an unsubscribe function. Without a listener, Jazz logs the rejection and
 keeps it so that a listener registered later can receive it.
 
+On a server, every `Db` from one `createJazzContext` (`db()`, `asBackend()`, `forRequest()`,
+`forSession()`) shares one runtime, so `onMutationError` is context-wide. A listener sees rejections
+of writes made through any of them, for every session, so a per-request handler must match events
+against its own transaction IDs. Rejections that arrive before any listener exists, such as writes
+that were still in flight when the process stopped and are settled on restart, go to whichever `Db`
+registers a listener first. Jazz keeps up to 256 of them and reports how many it dropped beyond
+that. A dropped or shut-down `Db` releases its listeners.
+
 ## Transactions
 
 Use a transaction when several reads and writes must share one commit. Use a mergeable transaction

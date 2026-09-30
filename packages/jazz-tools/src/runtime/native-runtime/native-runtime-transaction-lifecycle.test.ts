@@ -1087,19 +1087,34 @@ it("does not emit onMutationError when an active wait handles the rejection", as
   expect(listener).not.toHaveBeenCalled();
 });
 
+const CASCADE_ANCESTOR = "4f6c0b6f3a1e9d2c8b7a6f5e4d3c2b1a";
 it.each([
+  [
+    "ExclusiveConflict (reason: Exclusive transaction conflicted with another write)",
+    "exclusive_conflict",
+    "Exclusive transaction conflicted with another write",
+  ],
+  [
+    `Cascade { root: TxId { time: TxTime(7), node: NodeUuid(00000000-0000-0000-0000-000000000007) } } (reason: Transaction was rejected because ancestor transaction ${CASCADE_ANCESTOR} was rejected)`,
+    "cascade_rejected",
+    `Transaction was rejected because ancestor transaction ${CASCADE_ANCESTOR} was rejected`,
+  ],
+  [
+    "CausalityViolation (reason: Transaction violated causal ordering)",
+    "causality_violation",
+    "Transaction violated causal ordering",
+  ],
+  [
+    "ClientClockTooFarAhead (reason: Client clock is too far ahead)",
+    "client_clock_too_far_ahead",
+    "Client clock is too far ahead",
+  ],
+  // Older native bindings without the appended readable reason.
   [
     "ExclusiveConflict",
     "exclusive_conflict",
     "Exclusive transaction conflicted with another write",
   ],
-  [
-    "Cascade { root: TxId { time: TxTime(7), node: NodeUuid(00000000-0000-0000-0000-000000000007) } }",
-    "cascade_rejected",
-    "Transaction was rejected because an ancestor transaction was rejected",
-  ],
-  ["CausalityViolation", "causality_violation", "Transaction violated causal ordering"],
-  ["ClientClockTooFarAhead", "client_clock_too_far_ahead", "Client clock is too far ahead"],
 ])(
   "gives a readable reason for a %s wait rejection and keeps the core diagnostic",
   async (debugReason, code, reason) => {
