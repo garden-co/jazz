@@ -312,6 +312,26 @@ h6 {
   border-top: 1px solid var(--color-border);
   padding-block: var(--spacing-12) calc(var(--spacing-12) * 1.5);
 }
+.home-hero {
+  position: relative;
+  overflow: clip;
+  isolation: isolate;
+}
+/* Stippled pattern centred on the hero's top-right corner, fading out
+   towards the headline in the bottom-left. */
+.home-hero-pattern {
+  position: absolute;
+  z-index: -1;
+  top: 0;
+  left: 100%;
+  width: max(72rem, 110vw);
+  max-width: none;
+  height: auto;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  user-select: none;
+  mask-image: radial-gradient(closest-side, #000 45%, transparent 100%);
+}
 .home-anchor {
   scroll-margin-top: 5rem;
 }

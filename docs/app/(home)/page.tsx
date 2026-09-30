@@ -356,7 +356,8 @@ function latestPosts(count: number) {
 export default function HomePage() {
   return (
     <div className="w-full">
-      <section className="h-[80vh] w-full">
+      <section className="home-hero h-[80vh] w-full">
+        <img src="/home/hero-pattern.webp" alt="" aria-hidden className="home-hero-pattern" />
         <div className="mx-auto flex h-full w-full max-w-(--fd-layout-width) items-end px-4 relative">
           <aside className="absolute right-4 top-4 z-30 max-w-sm">
             <Card className="border-fd-border/70 shadow dark:border-white/50">
