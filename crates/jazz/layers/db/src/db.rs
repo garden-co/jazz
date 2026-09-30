@@ -2887,7 +2887,16 @@ pub(super) struct UploadOutbox {
     declared_root: bool,
     /// Sticky: set once any upstream attaches, including after the fact.
     upstream_attached: bool,
+    /// Queued commits an upstream link has put on the wire. A Global read
+    /// orders its open after the local writes it must observe (#3839).
+    on_wire: HashSet<TxId>,
+    /// Recent commits whose upload failed, with the reason. Bounded: only a
+    /// read already waiting on one of them consults this.
+    upload_failures: VecDeque<(TxId, &'static str)>,
 }
+
+/// How many recent upload failures a waiting Global read can still observe.
+const RECENT_UPLOAD_FAILURES: usize = 64;
 
 impl UploadOutbox {
     /// Whether a subscriber upload this node settled terminally has nobody
@@ -2931,6 +2940,39 @@ impl UploadOutbox {
         self.tx_ids.clear();
         self.tx_ids
             .extend(self.entries.iter().map(|pending| pending.tx_id));
+        let tx_ids = &self.tx_ids;
+        self.on_wire.retain(|tx_id| tx_ids.contains(tx_id));
+    }
+
+    /// Record that an upstream link has sent this queued commit.
+    pub(super) fn mark_on_wire(&mut self, tx_id: TxId) {
+        if self.tx_ids.contains(&tx_id) {
+            self.on_wire.insert(tx_id);
+        }
+    }
+
+    /// Forget what a detached link sent: its successor sends it again.
+    pub(super) fn forget_on_wire(&mut self) {
+        self.on_wire.clear();
+    }
+
+    /// Whether this queued commit still waits to be sent upstream.
+    fn awaits_wire(&self, tx_id: TxId) -> bool {
+        self.tx_ids.contains(&tx_id) && !self.on_wire.contains(&tx_id)
+    }
+
+    /// Record why a commit was dropped from the queue without being sent.
+    pub(super) fn mark_upload_failed(&mut self, tx_id: TxId, reason: &'static str) {
+        if self.upload_failures.len() >= RECENT_UPLOAD_FAILURES {
+            self.upload_failures.pop_front();
+        }
+        self.upload_failures.push_back((tx_id, reason));
+    }
+
+    fn upload_failure(&self, tx_id: TxId) -> Option<&'static str> {
+        self.upload_failures
+            .iter()
+            .find_map(|(failed, reason)| (*failed == tx_id).then_some(*reason))
     }
 
     fn remove_released(&mut self, released: &mut HashSet<TxId>) -> HashSet<TxId> {
@@ -2946,6 +2988,7 @@ impl UploadOutbox {
                 .pop_front()
                 .expect("released outbox front remains present");
             self.tx_ids.remove(&pending.tx_id);
+            self.on_wire.remove(&pending.tx_id);
         }
         if released.is_empty() {
             return completed;

@@ -2030,32 +2030,8 @@ where
                             }
                         }
                         let pending_index = 0;
-                        // A Global usage is answered from the authority's state
-                        // alone: its reader overlays none of this node's pending
-                        // writes. Read-your-writes therefore rests on wire order,
-                        // with each earlier local commit reaching the authority
-                        // before the usage opens. The upload loop below holds
-                        // ordinary commits back behind a large value that is
-                        // still uploading, so an open must not overtake those.
-                        // It waits, and the commands behind it keep their order
-                        // (#3839). The large-value commit itself stays
-                        // unordered: a fresh open never queues behind bulk bytes.
-                        let mut deferred_global_open = false;
                         while pending_index < pending.len() {
                             match &mut pending[pending_index] {
-                                PendingUpstreamCommand::Subscribe(pending_subscription)
-                                    if pending_subscription.opts.tier >= DurabilityTier::Global
-                                        && outbox_holds_commits_behind_large_value(
-                                            &outbox.borrow(),
-                                            uploaded,
-                                            large_value_uploads,
-                                            awaiting_large_value_uploads,
-                                            failed_large_value_uploads,
-                                        ) =>
-                                {
-                                    deferred_global_open = true;
-                                    break;
-                                }
                                 PendingUpstreamCommand::Subscribe(pending_subscription) => {
                                     let shape = &pending_subscription.shape;
                                     let binding = &pending_subscription.binding;
@@ -2578,21 +2554,7 @@ where
                             }
                             large_value_uploads.remove(&tx_id);
                             uploaded.insert(tx_id);
-                        }
-                        // The commits a deferred open waited behind are on the
-                        // wire now; send the open on the next turn. While they
-                        // are still held, the large value's chunk receipt or
-                        // retry deadline schedules that turn.
-                        if deferred_global_open
-                            && !outbox_holds_commits_behind_large_value(
-                                &outbox.borrow(),
-                                uploaded,
-                                large_value_uploads,
-                                awaiting_large_value_uploads,
-                                failed_large_value_uploads,
-                            )
-                        {
-                            schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                            outbox.borrow_mut().mark_on_wire(tx_id);
                         }
                         Ok::<bool, Error>(false)
                     })
@@ -2749,9 +2711,14 @@ where
                                             self.large_value_upload_retry_deadlines
                                                 .borrow_mut()
                                                 .remove(&tx_id);
-                                            outbox
-                                                .borrow_mut()
-                                                .retain(|pending| pending.tx_id != tx_id);
+                                            {
+                                                let mut outbox = outbox.borrow_mut();
+                                                outbox.retain(|pending| pending.tx_id != tx_id);
+                                                outbox.mark_upload_failed(
+                                                    tx_id,
+                                                    "its large value was not staged by the server",
+                                                );
+                                            }
                                             self.staged_inbound.push_front(StagedInboundMessage {
                                                 message: SyncMessage::FateUpdate {
                                                     tx_id,
@@ -6140,38 +6107,6 @@ where
             *serve_dirty = true;
         }
     }
-}
-
-/// Whether this link holds an ordinary commit back only to keep it behind an
-/// earlier commit whose large value has not finished uploading. The commit
-/// that carries the large value does not count itself.
-fn outbox_holds_commits_behind_large_value(
-    outbox: &UploadOutbox,
-    uploaded: &BTreeSet<TxId>,
-    large_value_uploads: &LargeValueUploadQueues,
-    awaiting_large_value_uploads: &BTreeMap<TxId, groove::large_values::LargeValueRef>,
-    failed: &BTreeSet<TxId>,
-) -> bool {
-    let mut behind_large_value = false;
-    for pending in outbox.iter() {
-        if uploaded.contains(&pending.tx_id) || failed.contains(&pending.tx_id) {
-            continue;
-        }
-        let carries_large_value = awaiting_large_value_uploads.contains_key(&pending.tx_id)
-            || large_value_uploads
-                .get(&pending.tx_id)
-                .is_some_and(|uploads| !uploads.is_empty())
-            || pending
-                .unit
-                .as_ref()
-                .is_some_and(|unit| !commit_unit_large_value_refs(unit).is_empty());
-        if carries_large_value {
-            behind_large_value = true;
-        } else if behind_large_value {
-            return true;
-        }
-    }
-    false
 }
 
 pub(super) fn schedule_tick_in(scheduler: &SharedTickScheduler, urgency: TickUrgency) {

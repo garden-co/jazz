@@ -2,4 +2,4 @@
 "jazz-tools": patch
 ---
 
-Keep read-your-writes for Global reads after a streaming insert: a query no longer reaches the server ahead of writes that were held back while a streamed value uploaded.
+Keep read-your-writes for Global reads during large-value uploads: a Global read now waits until the local writes it depends on (writes to the tables it reads, including a streamed row itself) have gone out to the server, and fails with an explicit error if one of those uploads fails. Reads of other tables are not delayed, and the wait no longer counts against the read's coverage timeout.

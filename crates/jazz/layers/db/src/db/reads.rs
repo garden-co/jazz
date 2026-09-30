@@ -375,6 +375,94 @@ where
         .await
     }
 
+    /// Order a Global read's open after the local writes it must observe.
+    ///
+    /// A Global read is answered from the authority's state, so it sees this
+    /// node's own writes only when they reach the authority before its open
+    /// does. An ordinary commit normally goes out ahead of a later open, but
+    /// one queued behind a large value that is still uploading is held back
+    /// while the open is not (#3839). Before opening, wait until every local
+    /// write that precedes this read and writes a table it reads is on the
+    /// wire. Writes to other tables never delay the read.
+    ///
+    /// The wait is bounded by upload progress, not by the read's coverage
+    /// deadline, which starts only once the open is sent. It ends when the
+    /// link is lost (the open then waits for coverage as usual) and fails at
+    /// once, naming the tables, when one of those uploads fails. It never
+    /// falls back to answering without them.
+    async fn await_preceding_local_writes_on_wire(&self, query: &Query) -> Result<(), Error> {
+        let queued: Vec<(TxId, Option<SyncMessage>)> = {
+            let outbox = self.node.outbox.borrow();
+            outbox
+                .iter()
+                .filter(|pending| outbox.awaits_wire(pending.tx_id))
+                .map(|pending| (pending.tx_id, pending.unit.clone()))
+                .collect()
+        };
+        let settling = self.node.pending_local_publication_tables();
+        if queued.is_empty() && settling.is_empty() {
+            return Ok(());
+        }
+        let Some(epoch) = self.node.remote_link.arm() else {
+            return Ok(());
+        };
+        let read_table = plain_read_table(query);
+        let mut waiting: Vec<(TxId, BTreeSet<String>)> = Vec::new();
+        {
+            let mut node = self.node.node.lock().await;
+            for (tx_id, storage_tables) in settling {
+                let tables: BTreeSet<String> = node
+                    .logical_table_names_for_storage_tables(&storage_tables.into_iter().collect())
+                    .into_iter()
+                    .collect();
+                if read_footprint_overlaps(read_table, &tables) {
+                    waiting.push((tx_id, tables));
+                }
+            }
+            for (tx_id, unit) in queued {
+                let unit = match unit {
+                    Some(unit) => Some(unit),
+                    None => node.commit_unit_for(tx_id).await.ok(),
+                };
+                match unit {
+                    Some(unit) => {
+                        let tables: BTreeSet<String> = unit
+                            .uploaded_versions()
+                            .map(|version| version.table().to_owned())
+                            .collect();
+                        if read_footprint_overlaps(read_table, &tables) {
+                            waiting.push((tx_id, tables));
+                        }
+                    }
+                    // An unreadable commit may write anything the read reads.
+                    None => waiting.push((tx_id, BTreeSet::new())),
+                }
+            }
+        }
+        if waiting.is_empty() {
+            return Ok(());
+        }
+        let on_wire = std::future::poll_fn(|_| {
+            let outbox = self.node.outbox.borrow();
+            let mut held = false;
+            for (tx_id, tables) in &waiting {
+                if let Some(reason) = outbox.upload_failure(*tx_id) {
+                    return Poll::Ready(Err(local_writes_not_uploaded(tables, reason)));
+                }
+                held |=
+                    outbox.awaits_wire(*tx_id) || self.node.is_pending_local_publication(*tx_id);
+            }
+            if held {
+                Poll::Pending
+            } else {
+                Poll::Ready(Ok(()))
+            }
+        });
+        self.race_remote_answer(epoch, on_wire)
+            .await
+            .unwrap_or(Ok(()))
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn all_serialized_query_once<F, E>(
         &self,
@@ -392,6 +480,16 @@ where
         E: Fn() -> bool,
     {
         let release_coverage = |attachment| release_coverage(attachment);
+        if require_coverage
+            && open_tx.is_none()
+            && opts.propagation == Propagation::Full
+            && opts.tier >= DurabilityTier::Global
+            && opts.local_updates == LocalUpdates::Immediate
+        {
+            let decoded: Query = crate::wire::decode_postcard_exact(query)
+                .map_err(|error| Error::new(ErrorCode::Query, format!("decode query: {error}")))?;
+            self.await_preceding_local_writes_on_wire(&decoded).await?;
+        }
         {
             let admission = self.await_open_schema_for_read(&opts);
             let mut admission = std::pin::pin!(admission);
@@ -1258,4 +1356,44 @@ fn terminal_operation_value_descriptor(
         }
     }
     Ok(descriptor)
+}
+
+/// The one table a plain read consults, or `None` when its shape reaches
+/// further (joins, includes, subqueries, relations) and every table counts.
+fn plain_read_table(query: &Query) -> Option<&str> {
+    (query.joins.is_empty()
+        && query.flat_join.is_none()
+        && query.policy_branches.is_empty()
+        && query.reachable.is_empty()
+        && query.inherits.is_empty()
+        && query.includes.is_empty()
+        && query.array_subqueries.is_empty()
+        && query.aggregate.is_none()
+        && query.relation.is_none())
+    .then_some(query.table.as_str())
+}
+
+fn read_footprint_overlaps(read_table: Option<&str>, written: &BTreeSet<String>) -> bool {
+    match read_table {
+        Some(table) => written.contains(table),
+        None => true,
+    }
+}
+
+fn local_writes_not_uploaded(tables: &BTreeSet<String>, reason: &str) -> Error {
+    let tables = if tables.is_empty() {
+        "its tables".to_owned()
+    } else {
+        tables
+            .iter()
+            .map(|table| format!("`{table}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    Error::new(
+        ErrorCode::NotObserved,
+        format!(
+            "Global read waits on local writes to {tables} that could not be uploaded ({reason})"
+        ),
+    )
 }

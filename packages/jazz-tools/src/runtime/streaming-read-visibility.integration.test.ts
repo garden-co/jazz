@@ -69,4 +69,53 @@ describe("read-your-writes after a streaming insert (#3839)", () => {
       await testApp.shutdown();
     }
   }, 20_000);
+
+  it("sees the streamed row itself right after insertStreaming", async () => {
+    const testApp = await createPolicyTestApp(app, permissions, expect);
+    try {
+      const db = testApp.as(listener);
+      const album = db.insert(app.albums, { title: "Album", artist: "A" }).value.id;
+      const id = (
+        await db.insertStreaming(app.tracks, {
+          album_id: album,
+          title: "Streamed",
+          ordinal: 1,
+          audio_bytes: audio(),
+        })
+      ).value.id;
+
+      await expect(db.all(app.tracks.where({ id }))).resolves.toEqual([
+        expect.objectContaining({ id, title: "Streamed" }),
+      ]);
+    } finally {
+      await testApp.shutdown();
+    }
+  }, 20_000);
+
+  it("sees every album and track of an import that interleaves streamed and plain writes", async () => {
+    const testApp = await createPolicyTestApp(app, permissions, expect);
+    try {
+      const db = testApp.as(listener);
+      const albums: string[] = [];
+      for (let album = 0; album < 3; album++) {
+        const id = db.insert(app.albums, { title: `Album ${album}`, artist: "A" }).value.id;
+        albums.push(id);
+        for (let ordinal = 1; ordinal <= 2; ordinal++) {
+          await db.insertStreaming(app.tracks, {
+            album_id: id,
+            title: `Track ${album}.${ordinal}`,
+            ordinal,
+            audio_bytes: audio(),
+          });
+        }
+        // Each album's own lookup, as an import computes the next position.
+        await expect(db.all(app.tracks.where({ album_id: id }))).resolves.toHaveLength(2);
+      }
+
+      await expect(db.all(app.albums)).resolves.toHaveLength(albums.length);
+      await expect(db.all(app.tracks)).resolves.toHaveLength(albums.length * 2);
+    } finally {
+      await testApp.shutdown();
+    }
+  }, 30_000);
 });
