@@ -3367,6 +3367,262 @@ async fn suspended_resident_chunk_install_joins_assigned_publication() {
     );
 }
 
+/// Fixture for #3815: a `rooms` semi-join over `messages.room_id` shares a
+/// subscription with a plain `messages` sink. Message B (id 2, in
+/// `parked_room`) carries a cold large payload, so its evaluation parks while
+/// the `messages` sink materializes it, although every graph node (the
+/// semi-join included) has already completed. By default, message A (id 3,
+/// in room 1) is written while B is parked.
+struct ParkedSemiJoinFixture {
+    database: Database,
+    subscription: MultisinkSubscription,
+    resolver_ready: Rc<Cell<bool>>,
+    parked: AppliedBatch,
+    concurrent: AppliedBatch,
+}
+
+async fn parked_semi_join_fixture(parked_room: u64) -> ParkedSemiJoinFixture {
+    parked_semi_join_fixture_with(parked_room, |batch| {
+        batch.insert(
+            "messages",
+            vec![Value::U64(3), Value::U64(1), Value::Bytes(vec![3])],
+        );
+    })
+    .await
+}
+
+/// As [`parked_semi_join_fixture`], with `concurrent` writing the batch that
+/// is applied while B is parked.
+async fn parked_semi_join_fixture_with(
+    parked_room: u64,
+    concurrent: impl FnOnce(&mut DatabaseBatch),
+) -> ParkedSemiJoinFixture {
+    let schema = DatabaseSchema::new([
+        TableSchema::new(
+            "rooms",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("name", ColumnType::String),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
+        TableSchema::new(
+            "messages",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("room_id", ColumnType::U64),
+                ColumnSchema::new("payload", ColumnType::Bytes),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
+    ]);
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let mut database = Database::new(schema, storage).await.unwrap();
+    database.set_chunk_storage(chunks.clone());
+    let prepared = crate::large_values::prepare(
+        crate::large_values::LargeValueKind::Bytes,
+        &vec![7; crate::large_values::INLINE_VALUE_MAX_BYTES * 4],
+    )
+    .unwrap();
+    let staged = database
+        .stage_large_value_preparation(prepared.clone())
+        .await
+        .unwrap();
+    let root = prepared
+        .staged_chunks
+        .iter()
+        .find(|chunk| chunk.node_ref == prepared.value_ref.root)
+        .unwrap()
+        .clone();
+    crate::chunks::ChunkStorage::delete(&*chunks, root.node_ref.locator, root.node_ref.object_hash)
+        .await
+        .unwrap();
+    database
+        .storage
+        .delete(
+            LARGE_VALUE_METADATA_CF.to_owned(),
+            large_value_node_key(&root.node_ref).unwrap(),
+        )
+        .await
+        .unwrap();
+    let resolver_ready = Rc::new(Cell::new(false));
+    database.set_missing_chunk_resolver(Rc::new(DeferredFixtureChunkResolver {
+        chunks: Rc::new(std::collections::BTreeMap::from([(
+            crate::chunks::ChunkRequest {
+                object_hash: root.node_ref.object_hash.0,
+                locator: root.node_ref.locator,
+            },
+            Bytes::from(root.encoded),
+        )])),
+        ready: Rc::clone(&resolver_ready),
+    }));
+
+    let mut rooms = database.open_batch();
+    rooms.insert(
+        "rooms",
+        vec![Value::U64(1), Value::String("general".to_owned())],
+    );
+    rooms.insert(
+        "rooms",
+        vec![Value::U64(2), Value::String("random".to_owned())],
+    );
+    database.commit_batch(rooms).await.unwrap();
+
+    let subscription = database
+        .subscribe([
+            (
+                "rooms",
+                GraphBuilder::semi_join(
+                    GraphBuilder::table("rooms"),
+                    GraphBuilder::table("messages"),
+                    ["id"],
+                    ["room_id"],
+                ),
+            ),
+            ("messages", GraphBuilder::table("messages")),
+        ])
+        .unwrap();
+    let initial = database
+        .next_multisink_subscription(&subscription)
+        .await
+        .unwrap();
+    assert!(
+        initial
+            .sinks
+            .values()
+            .all(|deltas| deltas.to_values().unwrap().is_empty()),
+        "no room has a message yet: {initial:?}"
+    );
+
+    let mut parked = database.open_batch();
+    parked.insert(
+        "messages",
+        vec![
+            Value::U64(2),
+            Value::U64(parked_room),
+            Value::Large(Box::new(staged.value_ref)),
+        ],
+    );
+    parked.accept_large_value(staged.id);
+    let parked = database.apply_batch(parked).await.unwrap();
+    assert!(
+        subscription.try_recv().is_err(),
+        "the cold payload must park B's publication"
+    );
+
+    let mut concurrent_batch = database.open_batch();
+    concurrent(&mut concurrent_batch);
+    let concurrent = database.apply_batch(concurrent_batch).await.unwrap();
+
+    ParkedSemiJoinFixture {
+        database,
+        subscription,
+        resolver_ready,
+        parked,
+        concurrent,
+    }
+}
+
+impl ParkedSemiJoinFixture {
+    /// Persist both writes, release B's chunk and return every `rooms` row
+    /// the subscription published meanwhile.
+    async fn settle(&mut self) -> Vec<(Vec<Value>, i64)> {
+        let parked = self.parked.persist().await;
+        self.database.finish_persistence(parked).unwrap();
+        let concurrent = self.concurrent.persist().await;
+        self.database.finish_persistence(concurrent).unwrap();
+        self.resolver_ready.set(true);
+        self.database.flush().await.unwrap();
+        self.drain_rooms()
+    }
+
+    fn drain_rooms(&self) -> Vec<(Vec<Value>, i64)> {
+        let mut rooms = Vec::new();
+        while let Ok(update) = self.subscription.try_recv() {
+            if let Some(deltas) = update.sinks.get("rooms") {
+                rooms.extend(deltas.to_values().unwrap());
+            }
+        }
+        rooms
+    }
+}
+
+/// #3815: a semi-join which completed inside a parked evaluation must hand its
+/// published keys to the next write. Otherwise that write evaluates against
+/// the pre-park state, sees the room's first match a second time and
+/// publishes a duplicate `+room`.
+#[futures_test::test]
+async fn parked_semi_join_does_not_republish_left_row_for_same_key() {
+    let mut fixture = parked_semi_join_fixture(1).await;
+    let rooms = fixture.settle().await;
+    assert_eq!(
+        rooms,
+        vec![(vec![Value::U64(1), Value::String("general".to_owned())], 1)],
+        "the room must become visible exactly once"
+    );
+}
+
+/// #3815: the parked evaluation must not install its pre-park semi-join
+/// state over the later write's. B's evaluation stages whole arrangements, so
+/// even with B in another room its install would drop message A's key. Then
+/// deleting A would not retract room 1.
+#[futures_test::test]
+async fn parked_semi_join_install_keeps_later_write_keys() {
+    let mut fixture = parked_semi_join_fixture(2).await;
+    let mut rooms = fixture.settle().await;
+    rooms.sort_by_key(|(values, _)| format!("{values:?}"));
+    assert_eq!(
+        rooms,
+        vec![
+            (vec![Value::U64(1), Value::String("general".to_owned())], 1),
+            (vec![Value::U64(2), Value::String("random".to_owned())], 1),
+        ],
+    );
+
+    let mut delete = fixture.database.open_batch();
+    delete.delete("messages", PrimaryKeyValue::U64(3));
+    fixture.database.commit_batch(delete).await.unwrap();
+    fixture.database.flush().await.unwrap();
+    assert_eq!(
+        fixture.drain_rooms(),
+        vec![(vec![Value::U64(1), Value::String("general".to_owned())], -1)],
+        "deleting room 1's only message must retract it"
+    );
+}
+
+/// #3815/#3816: a write which retracts a left row made visible by a parked
+/// evaluation must retract it. Evaluated against pre-park state, renaming
+/// room 1 while B is parked emitted nothing, so subscribers kept the old name
+/// (a lost `-row`), and B later published the old row.
+///
+/// This asserts the net rows only. The rename's publication is delivered
+/// before the parked one's, a separate delivery-order issue (#3869).
+#[futures_test::test]
+async fn parked_semi_join_retracts_left_row_updated_meanwhile() {
+    let mut fixture = parked_semi_join_fixture_with(1, |batch| {
+        batch.update(
+            "rooms",
+            vec![Value::U64(1), Value::String("renamed".to_owned())],
+        );
+    })
+    .await;
+    let mut net = std::collections::BTreeMap::<String, i64>::new();
+    for (values, weight) in fixture.settle().await {
+        *net.entry(format!("{values:?}")).or_default() += weight;
+    }
+    net.retain(|_, weight| *weight != 0);
+    assert_eq!(
+        net,
+        std::collections::BTreeMap::from([(
+            format!("{:?}", [Value::U64(1), Value::String("renamed".to_owned())]),
+            1
+        )]),
+        "subscribers must end with only the renamed room"
+    );
+}
+
 /// A late lifecycle metadata write is part of publication durability, not an
 /// ordinary query-local chunk failure. If it fails after B's table snapshot is
 /// durable, database progress and the affected subscription both terminate.
