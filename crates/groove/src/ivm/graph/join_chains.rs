@@ -1,6 +1,6 @@
 //! Demand-driven narrowing of flattened inner-join chains.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use super::{FieldRef, GraphBuilder, ProjectExpr, ProjectField};
@@ -23,13 +23,17 @@ impl GraphBuilder {
     /// dropping an unread field never changes the result.
     ///
     /// Only projections directly over a join are narrowed; other inputs, such
-    /// as source graphs, stay as they are and stay shared. A positional field
-    /// reference, or a name the pass cannot trace, leaves that part unchanged.
+    /// as source graphs, stay as they are and stay shared. A narrowed input is
+    /// a new node, so a join-chain input reused elsewhere is compiled once per
+    /// distinct demand. A positional field reference, or a name the pass
+    /// cannot trace, leaves that part unchanged.
     pub fn narrow_projected_join_chain(self) -> Self {
         let GraphBuilder::Project { input, fields } = self else {
             return self;
         };
-        let narrowed = demanded_names(&fields).and_then(|demand| narrow_chain(&input, &demand));
+        let mut narrowed_nodes = Narrowed::new();
+        let narrowed = demanded_names(&fields)
+            .and_then(|demand| narrow_chain(&input, &demand, &mut narrowed_nodes));
         GraphBuilder::Project {
             input: narrowed.unwrap_or(input),
             fields,
@@ -37,9 +41,18 @@ impl GraphBuilder {
     }
 }
 
+/// Narrowed rebuilds by input node and demand. A chain can reach one input
+/// along several paths; each (node, demand) pair is rebuilt once, so the walk
+/// stays linear in the graph and repeated inputs stay shared.
+type Narrowed = HashMap<(*const GraphBuilder, BTreeSet<String>), Option<Arc<GraphBuilder>>>;
+
 /// Rebuilds a chain node so that it still provides every demanded name.
 /// Returns `None` when nothing below it changed.
-fn narrow_chain(node: &GraphBuilder, demand: &BTreeSet<String>) -> Option<Arc<GraphBuilder>> {
+fn narrow_chain(
+    node: &GraphBuilder,
+    demand: &BTreeSet<String>,
+    narrowed: &mut Narrowed,
+) -> Option<Arc<GraphBuilder>> {
     match node {
         GraphBuilder::Join {
             left,
@@ -50,8 +63,8 @@ fn narrow_chain(node: &GraphBuilder, demand: &BTreeSet<String>) -> Option<Arc<Gr
         } => {
             let left_demand = join_side_demand(demand, LEFT, left_on)?;
             let right_demand = join_side_demand(demand, RIGHT, right_on)?;
-            let narrowed_left = narrow_join_input(left, &left_demand);
-            let narrowed_right = narrow_join_input(right, &right_demand);
+            let narrowed_left = narrow_join_input(left, &left_demand, narrowed);
+            let narrowed_right = narrow_join_input(right, &right_demand, narrowed);
             if narrowed_left.is_none() && narrowed_right.is_none() {
                 return None;
             }
@@ -76,7 +89,7 @@ fn narrow_chain(node: &GraphBuilder, demand: &BTreeSet<String>) -> Option<Arc<Gr
             for key in left_on {
                 left_demand.insert(field_ref_name(key)?);
             }
-            let narrowed_left = narrow_join_input(left, &left_demand)?;
+            let narrowed_left = narrow_join_input(left, &left_demand, narrowed)?;
             Some(Arc::new(GraphBuilder::SemiJoin {
                 left: narrowed_left,
                 right: right.clone(),
@@ -88,7 +101,7 @@ fn narrow_chain(node: &GraphBuilder, demand: &BTreeSet<String>) -> Option<Arc<Gr
         GraphBuilder::UnwrapNullable { input, field } => {
             let mut input_demand = demand.clone();
             input_demand.insert(field_ref_name(field)?);
-            let input = narrow_join_input(input, &input_demand)?;
+            let input = narrow_join_input(input, &input_demand, narrowed)?;
             Some(Arc::new(GraphBuilder::UnwrapNullable {
                 input,
                 field: field.clone(),
@@ -101,7 +114,7 @@ fn narrow_chain(node: &GraphBuilder, demand: &BTreeSet<String>) -> Option<Arc<Gr
         } => {
             let mut input_demand = demand.clone();
             predicate.referenced_fields(&mut input_demand);
-            let input = narrow_join_input(input, &input_demand)?;
+            let input = narrow_join_input(input, &input_demand, narrowed)?;
             Some(Arc::new(GraphBuilder::Filter {
                 input,
                 predicate: predicate.clone(),
@@ -117,9 +130,24 @@ fn narrow_chain(node: &GraphBuilder, demand: &BTreeSet<String>) -> Option<Arc<Gr
 fn narrow_join_input(
     node: &Arc<GraphBuilder>,
     demand: &BTreeSet<String>,
+    narrowed: &mut Narrowed,
+) -> Option<Arc<GraphBuilder>> {
+    let key = (Arc::as_ptr(node), demand.clone());
+    if let Some(rebuilt) = narrowed.get(&key) {
+        return rebuilt.clone();
+    }
+    let rebuilt = narrow_input_uncached(node, demand, narrowed);
+    narrowed.insert(key, rebuilt.clone());
+    rebuilt
+}
+
+fn narrow_input_uncached(
+    node: &Arc<GraphBuilder>,
+    demand: &BTreeSet<String>,
+    narrowed: &mut Narrowed,
 ) -> Option<Arc<GraphBuilder>> {
     let GraphBuilder::Project { input, fields } = node.as_ref() else {
-        return narrow_chain(node, demand);
+        return narrow_chain(node, demand, narrowed);
     };
     if !matches!(
         input.as_ref(),
@@ -141,7 +169,8 @@ fn narrow_join_input(
     {
         return None;
     }
-    let narrowed_input = demanded_names(&kept).and_then(|demand| narrow_chain(input, &demand));
+    let narrowed_input =
+        demanded_names(&kept).and_then(|demand| narrow_chain(input, &demand, narrowed));
     if kept.len() == fields.len() && narrowed_input.is_none() {
         return None;
     }
