@@ -101,6 +101,18 @@ afterEach(() => {
   jest.dontMock("../NativeJazzRelay");
 });
 
+it("exports the current ABI version and preserves the legacy alias", () => {
+  loadRelay(null);
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const publicAbi = require("../index") as typeof import("../native-relay-abi");
+
+  expect(publicAbi).toMatchObject({
+    NATIVE_RELAY_ABI_VERSION: 3,
+    NATIVE_RELAY_ABI_V1: 3,
+    NATIVE_RELAY_ABI: { minimum: 3, maximum: 3 },
+  });
+});
+
 it("tells Expo Go and old development builds that a native artifact is required", async () => {
   const relay = loadRelay(null);
 

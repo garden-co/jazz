@@ -453,6 +453,7 @@ function assertExactTsRelaySurface(nativeSpec, relay, index) {
     [
       "NATIVE_RELAY_ABI",
       "NATIVE_RELAY_ABI_V1",
+      "NATIVE_RELAY_ABI_VERSION",
       "decodeNativeForegroundResponse",
       "encodeNativeForegroundCommand",
       "executeNativeRelayCommand",
