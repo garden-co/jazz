@@ -314,11 +314,11 @@ h6 {
 }
 /* Hero pattern (a live stipple canvas, see components/brand/stipple-presets.ts),
    pinned to the hero's top-right corner. Tune these in devtools on
-   `.home-hero`: --pattern-height (the canvas height; its width follows the
+   `.home-hero`: --pattern-width (the canvas width; its height follows the
    pattern's 1.1 aspect ratio), --pattern-top / --pattern-right (offsets from
    that corner), --pattern-opacity. */
 .home-hero {
-  --pattern-height: 100%;
+  --pattern-width: 100%;
   --pattern-top: 0px;
   --pattern-right: 0px;
   --pattern-opacity: 1;
@@ -331,7 +331,7 @@ h6 {
   z-index: -1;
   top: var(--pattern-top);
   right: var(--pattern-right);
-  height: var(--pattern-height);
+  width: var(--pattern-width);
   aspect-ratio: 1.1;
   max-width: none;
   opacity: var(--pattern-opacity);

@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
 import { Button } from "@astryxdesign/core/Button";
-import { Card } from "@astryxdesign/core/Card";
 import { Heading } from "@astryxdesign/core/Heading";
 import { Link as AstryxLink } from "@astryxdesign/core/Link";
 import {
@@ -361,27 +360,6 @@ export default function HomePage() {
       <section className="home-hero h-[80vh] w-full">
         <StippleCanvas pattern={heroPattern} className="home-hero-pattern" />
         <div className="mx-auto flex h-full w-full max-w-(--fd-layout-width) items-end px-4 relative">
-          <aside className="absolute right-4 top-4 z-30 max-w-sm">
-            <Card className="border-fd-border/70 shadow dark:border-white/50">
-              <Text as="p" display="block" className="leading-relaxed">
-                Announcing the Jazz v2 alpha!
-              </Text>
-              <Text as="p" display="block" className="leading-relaxed">
-                See the{" "}
-                <AppLink href="/blog/what-is-jazz" color="inherit" className="font-medium">
-                  announcement post
-                </AppLink>
-                .
-              </Text>
-              <Text as="p" display="block" color="secondary" className="leading-relaxed">
-                (Looking for{" "}
-                <AstryxLink href="https://classic.jazz.tools" color="inherit">
-                  classic Jazz
-                </AstryxLink>
-                ?)
-              </Text>
-            </Card>
-          </aside>
           <div className="w-full max-w-[42rem] space-y-6 pb-2 sm:space-y-10">
             <Heading level={1} type="display-1">
               <span className="block">the</span>
