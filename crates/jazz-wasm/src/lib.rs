@@ -1002,7 +1002,16 @@ impl WasmDbInner {
             ($db:expr) => {{
                 let owner = Rc::clone($db);
                 let release_db = Rc::clone($db);
+                // The coverage budget runs from the first wait on the server.
+                // A Global read that first waits for its own preceding writes
+                // to go out has not asked yet (#3839).
+                let coverage_budget_ms = if coverage_deadline_ms.is_finite() {
+                    coverage_deadline_ms - js_sys::Date::now()
+                } else {
+                    coverage_deadline_ms
+                };
                 let future = async move {
+                    let coverage_started = std::cell::Cell::new(None::<f64>);
                     owner
                         .all_serialized_query(
                             &query,
@@ -1011,7 +1020,14 @@ impl WasmDbInner {
                             request_scope,
                             author,
                             require_coverage,
-                            || js_sys::Date::now() >= coverage_deadline_ms,
+                            || {
+                                let started = coverage_started.get().unwrap_or_else(|| {
+                                    let now = js_sys::Date::now();
+                                    coverage_started.set(Some(now));
+                                    now
+                                });
+                                js_sys::Date::now() - started >= coverage_budget_ms
+                            },
                             move |attachment| release_db.detach_query(attachment),
                         )
                         .await
@@ -1322,6 +1338,60 @@ impl WasmDb {
             #[cfg(target_arch = "wasm32")]
             WasmDbInner::Browser(db) => db
                 .enqueue_transaction_update(open_transaction_id, table, row_id, patch, options)
+                .map_err(to_js_error)?,
+            WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+        }
+        Ok(())
+    }
+
+    /// Typed partial-value updates staged inside an open transaction. The
+    /// transaction's bound identity authors them.
+    #[wasm_bindgen(js_name = updateLargeValuesInTransaction)]
+    pub fn update_large_values_in_transaction(
+        &self,
+        open_transaction_id: String,
+        table: String,
+        row_id: Vec<u8>,
+        patch: Vec<u8>,
+        mutations: JsValue,
+        updated_at_ms: Option<f64>,
+    ) -> Result<(), JsValue> {
+        let open_transaction_id = open_transaction_id
+            .parse::<OpenTransactionId>()
+            .map_err(|error| JsValue::from_str(&error))?;
+        let row_id = row_uuid_from_bytes(&row_id)?;
+        let patch = decode_cells(&patch)?;
+        let mutations: Vec<LargeValueUpdate> =
+            serde_wasm_bindgen::from_value(mutations).map_err(|error| {
+                JsValue::from_str(&format!("invalid partial-value update descriptor: {error}"))
+            })?;
+        let updated_at_ms = updated_at_ms
+            .map(|value| checked_js_u64(value, "updatedAtMs"))
+            .transpose()?;
+        let inner = self.open_inner()?;
+        match &inner {
+            WasmDbInner::Memory(db) => {
+                db.enqueue_transaction_large_value_update(
+                    open_transaction_id,
+                    table,
+                    row_id,
+                    patch,
+                    mutations,
+                    updated_at_ms,
+                )
+                .map_err(to_js_error)?;
+                db.drive_queued_mutation_once();
+            }
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => db
+                .enqueue_transaction_large_value_update(
+                    open_transaction_id,
+                    table,
+                    row_id,
+                    patch,
+                    mutations,
+                    updated_at_ms,
+                )
                 .map_err(to_js_error)?,
             WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
         }

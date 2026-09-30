@@ -692,7 +692,7 @@ impl NodeState {
         }
         #[cfg(feature = "cold-settle-attribution")]
         crate::cold_settle_attribution::record_map_buffer(output.capacity(), output.len());
-        let output = output.freeze();
+        let output = super::freeze_batch_buffer(output);
         let deltas: Vec<_> = spans
             .into_iter()
             .map(|(span, weight)| RecordDelta {
@@ -855,7 +855,7 @@ impl NodeState {
                 spans.push((span, delta.weight));
             }
         }
-        let output = output.freeze();
+        let output = super::freeze_batch_buffer(output);
         let deltas = spans
             .into_iter()
             .map(|(span, weight)| RecordDelta {

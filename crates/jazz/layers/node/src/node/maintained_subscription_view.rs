@@ -3383,6 +3383,8 @@ fn decode_typed_version_witness(
         record: OwnedRecord::new(raw, plan.descriptor),
     };
     version.validate_canonical()?;
+    #[cfg(feature = "cold-settle-attribution")]
+    version.record_conversion("witness_to_version_row", version.record.raw().len());
     Ok(version)
 }
 

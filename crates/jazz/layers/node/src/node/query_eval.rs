@@ -49,7 +49,7 @@ use super::query_engine::{
     UnionInput, ValueSourceColumn, ValueSourceMode, VersionIdentityFields, VersionedRowRefSchema,
     aggregate_output_column, aggregate_output_field, authorized_deletion_preimage_source_request,
     claim_param_field, claim_path_from_param_field, left_field, query_program_source_requests,
-    right_field, route_param_field, user_column_field,
+    right_field, route_param_field, table_user_column_field, user_column_field,
 };
 use crate::object::{ObjectId, OutputOccurrenceId};
 #[cfg(test)]
@@ -242,6 +242,7 @@ enum CurrentQueryProgramOutput {
 mod read_sources;
 
 use read_sources::*;
+pub(in crate::node) use read_sources::{TransactionOverlayTable, TransactionWriteOverlay};
 
 mod normalization;
 
@@ -2225,6 +2226,40 @@ where
         } else {
             RootIndirectValues::PhysicalFields(std::sync::Arc::new(dropped))
         })
+    }
+
+    /// Root fields a retained maintained view can leave as physical
+    /// large-value descriptors, for its whole lifetime.
+    ///
+    /// Beside the app-row cells named in [`Self::projection_dropped_root_values`],
+    /// a maintained view's version and replacement witnesses carry every
+    /// stored column of the root table under its table-qualified field. The
+    /// receiver decodes those witnesses into history rows, whose canonical
+    /// form keeps large values physical, and projects the dropped columns away
+    /// before any row is published. Rebuilding them there made a listing fetch
+    /// every chunk of each large value it excludes (#3830).
+    fn maintained_projection_dropped_root_values(
+        &self,
+        query: &crate::query::Query,
+        schema_version: SchemaVersionId,
+    ) -> Result<RootIndirectValues, Error> {
+        let RootIndirectValues::PhysicalFields(dropped) =
+            self.projection_dropped_root_values(query, schema_version)?
+        else {
+            return Ok(RootIndirectValues::Materialize);
+        };
+        let table = self.table_in_schema(&query.table, schema_version)?;
+        let witnessed = table
+            .columns
+            .iter()
+            .filter(|column| dropped.contains(&user_column_field(&column.name)))
+            .map(|column| table_user_column_field(&table.name, &column.name))
+            .collect::<Vec<_>>();
+        let mut dropped = (*dropped).clone();
+        dropped.extend(witnessed);
+        Ok(RootIndirectValues::PhysicalFields(std::sync::Arc::new(
+            dropped,
+        )))
     }
 
     /// Materialize one-shot current rows and expose the canonical public
@@ -4606,13 +4641,28 @@ where
             .collect::<BTreeSet<_>>();
         #[cfg(any(test, feature = "testing"))]
         let compiled_authorization_mode = program.request.authorization_mode;
+        // A retained view never reads the stored columns its projection
+        // drops, so it keeps them physical for its whole lifetime. Rebuilding
+        // them made a listing fetch every chunk of a large value it excludes,
+        // and hold back its other rows until the last chunk arrived (#3830).
+        let root_indirect_values = match self
+            .maintained_projection_dropped_root_values(shape.query(), shape.schema_version())
+        {
+            Ok(root_indirect_values) => root_indirect_values,
+            Err(error) => {
+                self.retire_covered_input_sources(&covered_input_sources)
+                    .await?;
+                return Err(error);
+            }
+        };
         let subscription = match self
-            .subscribe_lowered_program(
+            .subscribe_lowered_program_with_root_values(
                 program,
                 &binding,
                 binding_source_shape,
                 prepared_claim_binding_mode,
                 progress_waker,
+                root_indirect_values,
             )
             .await
         {

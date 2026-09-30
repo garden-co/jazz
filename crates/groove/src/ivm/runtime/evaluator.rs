@@ -3002,6 +3002,7 @@ impl TickEvaluator<'_> {
                 .push(delta.clone());
         }
 
+        let read_fields = collect_by.read_field_indices();
         let mut output = Vec::new();
         for (group_prefix, group_deltas) in touched_groups {
             let after_records = arrangement.value().records_for_key(&group_prefix);
@@ -3011,10 +3012,12 @@ impl TickEvaluator<'_> {
                 } else {
                     records_before_deltas(after_records.clone(), &group_deltas)
                 };
+            // Only the fields the collector reads are rebuilt; the rest never
+            // reach its output (#3830).
             let after_records =
-                self.materialize_arranged_records(input_desc, after_records, None)?;
+                self.materialize_arranged_records(input_desc, after_records, Some(&read_fields))?;
             let before_records =
-                self.materialize_arranged_records(input_desc, before_records, None)?;
+                self.materialize_arranged_records(input_desc, before_records, Some(&read_fields))?;
             match collect_by.mode {
                 CollectByMode::Collect | CollectByMode::Root => {
                     let render = |records: &[(Bytes, i64)]| {
@@ -3380,6 +3383,10 @@ impl TickEvaluator<'_> {
         self.arrangement_states.insert(key, state);
     }
 
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.op_recursive")
+    )]
     async fn update_recursive(
         &mut self,
         node: NodeId,
@@ -3613,6 +3620,10 @@ impl TickEvaluator<'_> {
         self.update_node(input).await
     }
 
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.op_other")
+    )]
     async fn update_streaming_checksum(
         &mut self,
         node: NodeId,
@@ -3802,7 +3813,7 @@ impl TickEvaluator<'_> {
         self.materialize_indirect_field_indices(input, &indices)
     }
 
-    fn materialize_indirect_field_indices(
+    pub(super) fn materialize_indirect_field_indices(
         &mut self,
         input: &Arc<RecordDeltas>,
         indices: &[usize],

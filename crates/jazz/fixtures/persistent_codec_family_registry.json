@@ -423,6 +423,40 @@
       ]
     },
     {
+      "id": "jazz.exclusive-read-evidence.v1",
+      "boundary": "durable-storage",
+      "spec": {
+        "path": "crates/jazz/SPEC/2_data_model_identity.md",
+        "anchor": "Positions 5 through 8 hold exclusive read evidence"
+      },
+      "semantic_fixture": {
+        "path": "crates/jazz/layers/node/src/node/exclusive_read_evidence.rs",
+        "anchor": "fn exclusive_read_evidence_v1_bytes_are_pinned"
+      },
+      "rejection_receipt": {
+        "path": "crates/jazz/layers/node/src/node/exclusive_read_evidence.rs",
+        "anchor": "fn exclusive_read_evidence_rejects_malformed_noncanonical_and_unknown_versions"
+      },
+      "evidence": [
+        {
+          "path": "crates/jazz/layers/node/src/node/tests/exclusive_read_evidence.rs",
+          "anchor": "fn exclusive_evidence_is_stored_while_pending_and_cleared_at_settlement"
+        },
+        {
+          "path": "crates/jazz/layers/node/src/node/tests/exclusive_read_evidence.rs",
+          "anchor": "fn relay_stores_only_decodable_exclusive_evidence_and_replays_after_restart"
+        },
+        {
+          "path": "crates/jazz/layers/db/src/db/tests/node_runtime.rs",
+          "anchor": "fn exclusive_transaction_in_flight_at_restart_replays_without_false_conflict"
+        },
+        {
+          "path": "dev/proofs/exclusive-read-evidence-storage-compatibility.md",
+          "anchor": "## Mixed versions"
+        }
+      ]
+    },
+    {
       "id": "groove.durable-index.v2",
       "boundary": "durable-storage",
       "profile": "jazz-node-root",

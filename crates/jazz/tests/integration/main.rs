@@ -68,6 +68,8 @@ mod large_value_append;
 mod large_value_read_scaling;
 #[path = "../large_value_streaming_create.rs"]
 mod large_value_streaming_create;
+#[path = "../large_value_subscription_scaling.rs"]
+mod large_value_subscription_scaling;
 #[path = "../large_value_tx_update.rs"]
 mod large_value_tx_update;
 #[cfg(feature = "testing")]

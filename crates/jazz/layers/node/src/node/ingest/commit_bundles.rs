@@ -173,17 +173,17 @@ where
             .copied()
             .or(stored.tx.permission_subject)
             .unwrap_or(stored.tx.made_by);
-        if !self.commit_unit_satisfies_write_policies(
+        if let Some(reason) = Box::pin(self.commit_unit_write_policy_rejection(
             &Transaction {
                 permission_subject: Some(permission_subject),
                 ..stored.tx.clone()
             },
             &records,
             None,
-        )
+        ))
         .await?
         {
-            let fate = Fate::Rejected(RejectionReason::AuthorizationDenied);
+            let fate = Fate::Rejected(reason);
             self.ingest_rejected_transaction(stored.tx, fate).await?;
             return Ok(PublicationOutcome::settled(()));
         }
@@ -205,11 +205,11 @@ where
     /// authority, returning the accepted or rejected fate.
     ///
     /// Validation runs against the in-memory commit unit (`tx` + `versions`),
-    /// NOT a re-query of the stored transaction: the stored transaction record
-    /// does not persist `base_snapshot` or the read sets (they travel only on
-    /// the commit unit), so re-querying would drop the §3.7 read evidence and
-    /// spuriously reject. This mirrors the foreign authority path, which
-    /// validates the arriving commit unit before it is ingested.
+    /// the evidence the author captured. The stored row keeps the same
+    /// evidence only while the fate is pending, for retransmission after a
+    /// restart (`jazz.exclusive-read-evidence.v1`). This mirrors the foreign
+    /// authority path, which validates the arriving commit unit before it is
+    /// ingested.
     pub async fn finalize_local_exclusive_commit(
         &mut self,
         tx: Transaction,
@@ -231,11 +231,10 @@ where
         // Locally finalized exclusive commits bypass `ingest_commit_unit_once`,
         // so they must still take the common fate-policy path before their
         // optimistic local versions become globally accepted.
-        if !self
-            .commit_unit_satisfies_write_policies(&tx, &versions, None)
-            .await?
+        if let Some(reason) =
+            Box::pin(self.commit_unit_write_policy_rejection(&tx, &versions, None)).await?
         {
-            let fate = Fate::Rejected(RejectionReason::AuthorizationDenied);
+            let fate = Fate::Rejected(reason);
             self.ingest_rejected_transaction(tx, fate.clone()).await?;
             return Ok(PublicationOutcome::settled(fate));
         }
@@ -509,15 +508,14 @@ where
                 durability: None,
             }]));
         }
-
-        if !Box::pin(self.commit_unit_satisfies_write_policies(
+        if let Some(reason) = Box::pin(self.commit_unit_write_policy_rejection(
             &tx,
             &versions,
             ingest_context,
         ))
         .await?
         {
-            let fate = Fate::Rejected(RejectionReason::AuthorizationDenied);
+            let fate = Fate::Rejected(reason);
             self.ingest_rejected_transaction(tx.clone(), fate.clone()).await?;
             return Ok(PublicationOutcome::settled(vec![SyncMessage::FateUpdate {
                 tx_id: tx.tx_id,
@@ -964,7 +962,7 @@ where
             .collect::<Vec<_>>();
         self.flush_ahead_shadows(&mut batch).await?;
         let applied = self.apply_node_batch(batch).await?;
-        let persisted = applied.persist().await;
+        let persisted = self.database.persist_with_progress(&applied).await;
         self.database.finish_persistence(persisted)?;
         #[cfg(test)]
         {

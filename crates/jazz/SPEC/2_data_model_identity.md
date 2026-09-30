@@ -440,13 +440,30 @@ transaction's versions, which reads every listed row anyway, so pending
 history stays findable by transaction until its fate arrives without a
 per-version index.
 
-Positions 5 through 8 are retained nullable layout slots, but the durable audit
-row writes them null in epoch 1. Exclusive snapshot/read/CAS evidence belongs to
-the immutable `Transaction` commit-unit payload and authority validation seam;
-it is deliberately not a recovery-time revalidation log. Validation MUST finish
-before lowering discards that evidence. Reopen recovers the resulting fate and
-immutable versions, and MUST NOT reconstruct exclusive dependencies from
-parents or user metadata.
+Positions 5 through 8 hold exclusive read evidence in the
+`jazz.exclusive-read-evidence.v1` family, and only while it can still be
+retransmitted. Exclusive snapshot/read/CAS evidence belongs to the immutable
+`Transaction` commit-unit payload and authority validation seam. A node that
+authored or relays an `Exclusive` transaction whose fate is still `Pending`
+stores that payload's `base_snapshot`, `row_read_set`, `absent_read_set` and
+`predicate_read_set` in these slots, so a unit rebuilt from storage after a
+restart (outbox or relay recovery) is byte-for-byte the unit that was
+committed. The row rewrite that records a settled fate writes all four back to
+null; the slots are not an audit or revalidation log. Every other row, and any
+exclusive row whose evidence v1 cannot represent, writes all four null, and a
+missing snapshot still fails authority validation. Each non-null slot is the
+Groove typed-record v1 bytes of one fixed descriptor led by `format_v1 = 1`:
+`(format_v1, owner, global_base, local_base, dots[(time, node)])`,
+`(format_v1, reads[(table, row_uuid, version_time, version_node)])`,
+`(format_v1, reads[(table, row_uuid)])` and
+`(format_v1, reads[(table, shape_id, query, binding_id, bindings)])`, where
+`query` is the native query Postcard carrier and `bindings` the canonical
+`jazz-binding-v0` preimage of `binding_id`. Decoders MUST reject non-canonical
+bytes, an unknown `format_v1`, a binding id that does not match its bindings,
+read sets without a snapshot, and evidence on a `Mergeable` row, as corrupt
+storage. Validation MUST still finish before lowering discards the evidence.
+Reopen recovers the resulting fate and immutable versions, and MUST NOT
+reconstruct exclusive dependencies from parents or user metadata.
 
 The optional audit fields have kind-specific meaning; their shared physical
 slots do not make their semantics interchangeable:

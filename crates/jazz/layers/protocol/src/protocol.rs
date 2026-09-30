@@ -2001,16 +2001,18 @@ impl VersionBundleRun {
     pub fn from_adjacent_singletons(
         bundles: &[VersionBundle],
     ) -> Result<Self, VersionBundleRunError> {
+        Self::from_adjacent_singleton_bundles(bundles.to_vec())
+    }
+
+    /// Like [`Self::from_adjacent_singletons`], but moves the bundles' versions into the run
+    /// instead of cloning them.
+    pub fn from_adjacent_singleton_bundles(
+        bundles: Vec<VersionBundle>,
+    ) -> Result<Self, VersionBundleRunError> {
         let Some(first) = bundles.first() else {
             return Err(VersionBundleRunError::EmptyRun);
         };
-        let table = common_run_table(bundles);
-        let bodies = bundles
-            .iter()
-            .map(|bundle| VersionBundleRunBody {
-                versions: bundle.versions.clone(),
-            })
-            .collect::<Vec<_>>();
+        let table = common_run_table(&bundles);
         let overrides = bundles
             .iter()
             .enumerate()
@@ -2028,16 +2030,23 @@ impl VersionBundleRun {
                 override_.has_overrides().then_some(override_)
             })
             .collect::<Vec<_>>();
+        let header = VersionBundleRunHeader {
+            table,
+            tx: first.tx.clone(),
+            scope: first.scope,
+            body_count: bundles.len() as u32,
+            fate: first.fate.clone(),
+            global_time: first.global_time,
+            durability: first.durability,
+        };
+        let bodies = bundles
+            .into_iter()
+            .map(|bundle| VersionBundleRunBody {
+                versions: bundle.versions,
+            })
+            .collect::<Vec<_>>();
         let run = Self {
-            header: VersionBundleRunHeader {
-                table,
-                tx: first.tx.clone(),
-                scope: first.scope,
-                body_count: bodies.len() as u32,
-                fate: first.fate.clone(),
-                global_time: first.global_time,
-                durability: first.durability,
-            },
+            header,
             bodies,
             overrides,
         };
@@ -2299,7 +2308,7 @@ pub fn build_version_carriers_from_singletons(
         return Ok(bundles.into_iter().map(VersionCarrier::Bundle).collect());
     }
     Ok(vec![VersionCarrier::Run(
-        VersionBundleRun::from_adjacent_singletons(&bundles)?,
+        VersionBundleRun::from_adjacent_singleton_bundles(bundles)?,
     )])
 }
 

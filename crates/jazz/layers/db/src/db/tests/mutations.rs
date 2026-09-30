@@ -2657,6 +2657,71 @@ fn wait_after_rejection_suppresses_queued_mutation_error() {
     );
 }
 
+/// A cascade rejection reads the same through `wait` and `onMutationError`:
+/// alice waits on one rejected write, the other falls back to the callback,
+/// and both describe the ancestor by its public transaction id rather than
+/// core `TxId` debug output (garden-co/jazz#3663).
+///
+/// ```text
+/// authority ──Rejected(Cascade{root})──► client ──wait()──► error.message
+///                                              └──fallback──► event.reason
+/// ```
+#[test]
+fn cascade_rejection_reason_is_readable_and_matches_between_wait_and_event() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xc6; 16]);
+    let client = open_db(0xc6, alice, &schema);
+    let (client_transport, mut authority_transport) = duplex();
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let callback_events = Rc::clone(&events);
+    client.on_mutation_error(Rc::new(move |event| {
+        callback_events.borrow_mut().push(event.clone());
+    }));
+
+    let root = client
+        .insert("todos", cells("ancestor", false, alice), Default::default())
+        .unwrap()
+        .mergeable_tx_id();
+    let waited = client
+        .insert("todos", cells("waited", false, alice), Default::default())
+        .unwrap();
+    let unwaited = client
+        .insert("todos", cells("unwaited", false, alice), Default::default())
+        .unwrap();
+    for tx_id in [waited.mergeable_tx_id(), unwaited.mergeable_tx_id()] {
+        authority_transport
+            .send(SyncMessage::FateUpdate {
+                tx_id,
+                fate: Fate::Rejected(RejectionReason::Cascade { root }),
+                global_time: None,
+                durability: Some(DurabilityTier::Global),
+            })
+            .unwrap();
+    }
+    client.tick().unwrap();
+    let error =
+        block_on(client.wait_for_transaction(waited.mergeable_tx_id(), DurabilityTier::Global))
+            .unwrap_err();
+    client.tick().unwrap();
+
+    let expected = format!(
+        "Transaction was rejected because ancestor transaction {} was rejected",
+        TransactionId::from_committed_tx(root)
+    );
+    assert_eq!(error.code, ErrorCode::WriteRejected);
+    assert!(
+        error.message.ends_with(&format!("(reason: {expected})")),
+        "{}",
+        error.message
+    );
+    let events = events.borrow();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].code, "cascade_rejected");
+    assert_eq!(events[0].reason, expected);
+    assert!(!events[0].reason.contains("TxId"));
+}
+
 /// A rejected transaction that was not delivered before shutdown is recovered
 /// from durable storage and delivered after the reopened client registers its
 /// callback.
@@ -3347,16 +3412,19 @@ fn admitted_server_prepared_write_policy_fails_closed_for_wrong_user_id_type() {
         .unwrap();
 
     client.tick().unwrap();
-    let error = server.tick().unwrap_err();
+    server.tick().unwrap();
+    client.tick().unwrap();
     assert!(
-        error.to_string().contains("claims3:sub has wrong type"),
-        "a non-coercible claim must fail before authorization support can admit the write: {error}"
+        matches!(
+            write.write_state().unwrap().fate,
+            Fate::Rejected(RejectionReason::AuthorizationDenied)
+        ),
+        "a non-coercible claim cannot satisfy the write policy"
     );
     assert!(
         server.read(&Query::from("messages")).unwrap().is_empty(),
         "a malformed session claim must never ingest a protected row"
     );
-    drop(write);
 }
 
 #[test]
@@ -4936,6 +5004,34 @@ fn client_partial_update_of_unloaded_row_is_not_observed_rather_than_read_denied
             "{label}: the partial update preserves unauthored cells"
         );
     }
+}
+
+// A shape the authority does not support yet is not a malformed transaction:
+// the application gets `write_rejected` with the authority's own
+// "... is not supported yet" sentence, not a "Malformed transaction" prefix.
+#[test]
+fn not_supported_yet_rejection_reaches_the_application_verbatim() {
+    let reason = "Reading more than 262144 rows of a transaction's own writes in its \
+                  write-policy checks is not supported yet"
+        .to_owned();
+    let event = crate::db::mutation_errors::mutation_error_event_for(
+        TxId::new(TxTime(1), NodeUuid::from_bytes([0xe1; 16])),
+        TxKind::Mergeable,
+        &RejectionReason::MalformedCommit(reason.clone()),
+    );
+    assert_eq!(event.code, "write_rejected");
+    assert_eq!(event.reason, reason);
+
+    // A genuinely malformed commit keeps its prefix.
+    let event = crate::db::mutation_errors::mutation_error_event_for(
+        TxId::new(TxTime(2), NodeUuid::from_bytes([0xe1; 16])),
+        TxKind::Mergeable,
+        &RejectionReason::MalformedCommit("malformed version receipt".to_owned()),
+    );
+    assert_eq!(
+        event.reason,
+        "Malformed transaction: malformed version receipt"
+    );
 }
 
 /// A trusted backend serving `alice`'s request (`WriteIdentity::Session`) that

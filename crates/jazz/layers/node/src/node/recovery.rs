@@ -264,6 +264,35 @@ where
 // writes the retired tag; the replay tests use normal Db reopen and transport.
 #[cfg(any(test, feature = "testing"))]
 impl<S: OrderedKvStorage> NodeState<S> {
+    /// Rewrite a pending transaction's audit row as a build from before
+    /// `jazz.exclusive-read-evidence.v1` wrote it: slots 5-8 null.
+    #[doc(hidden)]
+    pub async fn persist_without_exclusive_read_evidence_for_test(&mut self, tx_id: TxId) {
+        let stored = self.query_transaction(tx_id).await.unwrap().unwrap();
+        let mut tx = stored.tx.clone();
+        tx.base_snapshot = None;
+        tx.row_read_set = None;
+        tx.absent_read_set = None;
+        tx.predicate_read_set = None;
+        let contribution_merge = self
+            .contribution_merge_storage_value(tx.contribution_merge.as_ref())
+            .unwrap();
+        let values = transaction_values(
+            stored.node_alias,
+            &tx,
+            stored.fate.clone(),
+            stored.global_time,
+            stored.durability,
+            contribution_merge,
+        )
+        .unwrap();
+        let mut batch = self.database.open_batch();
+        batch.update("jazz_transactions", values);
+        let applied = self.database.apply_batch(batch).await.unwrap();
+        let persisted = applied.persist().await;
+        self.database.finish_persistence(persisted).unwrap();
+    }
+
     #[doc(hidden)]
     pub async fn persist_legacy_edge_receipt_for_test(&mut self, tx_id: TxId) {
         let stored = self.query_transaction(tx_id).await.unwrap().unwrap();
@@ -280,7 +309,7 @@ impl<S: OrderedKvStorage> NodeState<S> {
         let mut batch = self.database.open_batch();
         batch.update("jazz_transactions", values);
         let applied = self.apply_node_batch(batch).await.unwrap();
-        let persisted = applied.persist().await;
+        let persisted = self.database.persist_with_progress(&applied).await;
         self.database.finish_persistence(persisted).unwrap();
     }
 }
