@@ -456,3 +456,219 @@ fn failed_large_value_upload_rejects_a_waiting_global_read() {
         "unexpected error: {error}"
     );
 }
+
+/// A writer linked to a scripted upstream that never answers, on a manual
+/// upload clock. Its first large value starts uploading and then stalls.
+struct StalledUpload {
+    writer: Db,
+    writer_transport: Option<Box<dyn Transport>>,
+    _server_end: Box<dyn Transport>,
+    clock: Rc<Cell<u64>>,
+}
+
+impl StalledUpload {
+    fn new(node: u8) -> Self {
+        let schema = music_schema();
+        let author = AuthorSubject::for_test_bytes([node; 16]);
+        let writer = open_db(node, author, &schema);
+        let clock = Rc::new(Cell::new(10_000));
+        writer
+            .node
+            .set_upload_retry_clock_for_test(Rc::new(ManualUploadRetryClock(Rc::clone(&clock))));
+        writer.set_tick_scheduler(Some(Rc::new(RecordingScheduler::default())));
+        let (writer_transport, server_end, _) =
+            duplex_with_admitted_session_context_and_client_outbound_tap(
+                author,
+                NodeUuid::from_bytes([node; 16]),
+                1,
+                NodeUuid::from_bytes([node + 1; 16]),
+                1,
+            );
+        Self {
+            writer,
+            writer_transport: Some(writer_transport),
+            _server_end: server_end,
+            clock,
+        }
+    }
+
+    /// Queue a large track and a plain one behind it, and start the upload.
+    fn queue_tracks(&self) {
+        self.writer
+            .insert("tracks", large_title("stalled"), Default::default())
+            .unwrap();
+        self.writer
+            .insert("tracks", title("behind it"), Default::default())
+            .unwrap();
+        self.writer.tick().unwrap();
+        self.writer.tick().unwrap();
+    }
+}
+
+fn is_stall_error(result: &Result<SerializedReadResult, Error>) -> bool {
+    matches!(result, Err(error) if error.to_string().contains("no upload progress"))
+}
+
+/// alice's large value starts uploading on a live link and then nothing
+/// moves: the server never answers. Her Global read of `tracks` waits for it,
+/// but not forever: after 15 s without upload progress it fails with
+/// `NotObserved` instead of hanging.
+#[test]
+fn stalled_upload_on_a_live_link_rejects_a_waiting_global_read() {
+    let mut stalled = StalledUpload::new(0xe1);
+    let _upstream = crate::local_executor::block_on(
+        stalled
+            .writer
+            .connect_upstream(stalled.writer_transport.take().unwrap()),
+    );
+    stalled.queue_tracks();
+
+    let budget_expired = || false;
+    let mut read = global_read(&stalled.writer, "tracks", &budget_expired);
+    assert!(poll_read(&mut read).is_pending());
+    let started_ms = stalled.clock.get();
+
+    let mut outcome = None;
+    for _ in 0..60 {
+        stalled.clock.set(stalled.clock.get() + 1_000);
+        stalled.writer.tick().unwrap();
+        if let Poll::Ready(result) = poll_read(&mut read) {
+            outcome = Some(result);
+            break;
+        }
+    }
+    let waited_ms = stalled.clock.get() - started_ms;
+    let result = outcome.expect("a stalled upload does not hang the read");
+    assert!(
+        waited_ms >= 15_000,
+        "the read waits 15 s for progress first, gave up after {waited_ms} ms"
+    );
+    let error = match result {
+        Ok(_) => panic!("a read must not answer without the writes it waits on"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error.code,
+        ErrorCode::NotObserved,
+        "unexpected error: {error}"
+    );
+    assert!(
+        error.to_string().contains(
+            "Timed out waiting for local writes to `tracks` to upload before a Global read"
+        ),
+        "unexpected error: {error}"
+    );
+}
+
+/// alice's Global read of `tracks` waits on her stalled upload. When the link
+/// drops, the wait ends at once, before any stall timeout: the read goes on
+/// to its usual coverage wait.
+#[test]
+fn losing_the_link_releases_a_global_read_waiting_on_local_writes() {
+    let mut stalled = StalledUpload::new(0xe3);
+    let upstream = crate::local_executor::block_on(
+        stalled
+            .writer
+            .connect_upstream(stalled.writer_transport.take().unwrap()),
+    );
+    stalled.queue_tracks();
+
+    // An expired coverage budget settles the read as soon as it gets past
+    // waiting for its local writes, which ignores that budget.
+    let budget_checks = Cell::new(0_usize);
+    let budget_expired = || {
+        budget_checks.set(budget_checks.get() + 1);
+        true
+    };
+    let mut read = global_read(&stalled.writer, "tracks", &budget_expired);
+    for _ in 0..8 {
+        assert!(
+            poll_read(&mut read).is_pending(),
+            "the read waits for its table's writes while the link is up"
+        );
+        stalled.writer.tick().unwrap();
+    }
+    assert_eq!(budget_checks.get(), 0, "the read has not reached its open");
+
+    crate::local_executor::block_on(stalled.writer.detach_connection_async(&upstream)).unwrap();
+    let mut outcome = None;
+    for _ in 0..16 {
+        if let Poll::Ready(result) = poll_read(&mut read) {
+            outcome = Some(result);
+            break;
+        }
+        stalled.writer.tick().unwrap();
+    }
+    let result = outcome.expect("losing the link releases the wait");
+    assert!(
+        !is_stall_error(&result),
+        "the wait ended on link loss, not on the stall timeout"
+    );
+}
+
+/// With the link already gone, alice's Global read of `tracks` does not wait
+/// on her queued writes at all: nothing could put them on the wire.
+#[test]
+fn global_read_issued_while_offline_does_not_wait_on_local_writes() {
+    let mut stalled = StalledUpload::new(0xe5);
+    let upstream = crate::local_executor::block_on(
+        stalled
+            .writer
+            .connect_upstream(stalled.writer_transport.take().unwrap()),
+    );
+    stalled.queue_tracks();
+    crate::local_executor::block_on(stalled.writer.detach_connection_async(&upstream)).unwrap();
+
+    let budget_expired = || true;
+    let mut read = global_read(&stalled.writer, "tracks", &budget_expired);
+    let mut outcome = None;
+    for _ in 0..16 {
+        if let Poll::Ready(result) = poll_read(&mut read) {
+            outcome = Some(result);
+            break;
+        }
+        stalled.writer.tick().unwrap();
+    }
+    let result = outcome.expect("an offline read does not wait on local writes");
+    assert!(!is_stall_error(&result), "the read never waited on uploads");
+}
+
+/// alice gives up on a Global read while it waits for her held large value.
+/// Dropping it releases what the wait held, and a later read still works once
+/// the upload goes through.
+#[test]
+fn dropping_a_waiting_global_read_releases_its_wait() {
+    let fixture = Fixture::holding_large_values(0xe7);
+    fixture
+        .writer
+        .insert("tracks", large_title("streamed"), Default::default())
+        .unwrap();
+    fixture.pump(6);
+
+    let baseline = Rc::strong_count(&fixture.writer.node.remote_link);
+    let budget_expired = || false;
+    let mut read = global_read(&fixture.writer, "tracks", &budget_expired);
+    assert!(poll_read(&mut read).is_pending(), "the read waits");
+    assert!(
+        Rc::strong_count(&fixture.writer.node.remote_link) > baseline,
+        "the waiting read watches the link"
+    );
+    drop(read);
+    assert_eq!(
+        Rc::strong_count(&fixture.writer.node.remote_link),
+        baseline,
+        "dropping the read stops watching the link"
+    );
+
+    fixture.release_uploads();
+    let mut read = global_read(&fixture.writer, "tracks", &budget_expired);
+    let mut rows = None;
+    for _ in 0..256 {
+        fixture.pump(1);
+        if let Poll::Ready(result) = poll_read(&mut read) {
+            rows = Some(row_count(result.expect("a later read resolves")));
+            break;
+        }
+    }
+    assert_eq!(rows, Some(1), "the later read sees the streamed track");
+}

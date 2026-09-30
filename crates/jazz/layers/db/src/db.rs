@@ -2893,6 +2893,10 @@ pub(super) struct UploadOutbox {
     /// Recent commits whose upload failed, with the reason. Bounded: only a
     /// read already waiting on one of them consults this.
     upload_failures: VecDeque<(TxId, &'static str)>,
+    /// Counts upload steps: a message handed to an upstream transport or a
+    /// large-value chunk the server acknowledged. A Global read waiting on
+    /// local writes gives up when this stops moving (see `reads.rs`).
+    upload_progress: u64,
 }
 
 /// How many recent upload failures a waiting Global read can still observe.
@@ -2949,6 +2953,16 @@ impl UploadOutbox {
         if self.tx_ids.contains(&tx_id) {
             self.on_wire.insert(tx_id);
         }
+        self.note_upload_progress();
+    }
+
+    /// Record that an upload moved: a message went out or was acknowledged.
+    pub(super) fn note_upload_progress(&mut self) {
+        self.upload_progress = self.upload_progress.wrapping_add(1);
+    }
+
+    pub(super) fn upload_progress(&self) -> u64 {
+        self.upload_progress
     }
 
     /// Forget what a detached link sent: its successor sends it again.

@@ -2534,6 +2534,7 @@ where
                                     }
                                 }
                                 upload.started = true;
+                                outbox.borrow_mut().note_upload_progress();
                                 awaiting_large_value_uploads
                                     .insert(tx_id, upload.value_ref.clone());
                             }
@@ -2649,6 +2650,7 @@ where
                                 match result.status {
                                     crate::protocol::ChunkUploadStatus::Need(nodes) => {
                                         if let Some(tx_id) = pending_tx {
+                                            outbox.borrow_mut().note_upload_progress();
                                             awaiting_large_value_uploads.remove(&tx_id);
                                             if let Some(upload) = large_value_uploads
                                                 .get_mut(&tx_id)
@@ -2661,6 +2663,7 @@ where
                                     }
                                     crate::protocol::ChunkUploadStatus::Staged => {
                                         if let Some(tx_id) = pending_tx {
+                                            outbox.borrow_mut().note_upload_progress();
                                             awaiting_large_value_uploads.remove(&tx_id);
                                             if let Some(uploads) =
                                                 large_value_uploads.get_mut(&tx_id)

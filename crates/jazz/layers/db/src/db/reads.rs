@@ -391,9 +391,13 @@ where
     /// before the read decides which rows it may see.
     ///
     /// The wait is bounded by upload progress, not by the read's coverage
-    /// deadline, which starts only once the open is sent. It fails at once,
-    /// naming the tables, when one of those uploads fails, and never falls
-    /// back to answering without them. It ends when the link is lost: the
+    /// deadline, which starts only once the open is sent: it fails with
+    /// `NotObserved` once no upload step has gone out or been acknowledged,
+    /// and none of those writes has gone on the wire, for
+    /// `LOCAL_WRITE_UPLOAD_STALL_MS` (a stalled upload on a live link, or
+    /// one waiting on transport credit). It fails at once, naming the tables,
+    /// when one of those uploads fails, and never falls back to answering
+    /// without them. It ends when the link is lost: the
     /// open then waits for coverage as usual, and read-your-writes is not
     /// guaranteed across a reconnect (garden-co/jazz#3863).
     async fn await_preceding_local_writes_on_wire(&self, query: &Query) -> Result<(), Error> {
@@ -448,21 +452,38 @@ where
         if waiting.is_empty() {
             return Ok(());
         }
+        // The upload progress and held count last seen, and when they last
+        // moved, on the upload clock.
+        let mut last_progress: Option<(u64, usize, u64)> = None;
         let on_wire = std::future::poll_fn(|_| {
             let outbox = self.node.outbox.borrow();
-            let mut held = false;
+            let mut held = 0_usize;
+            let mut held_tables = BTreeSet::new();
             for (tx_id, tables) in &waiting {
                 if let Some(reason) = outbox.upload_failure(*tx_id) {
                     return Poll::Ready(Err(local_writes_not_uploaded(tables, reason)));
                 }
-                held |=
-                    outbox.awaits_wire(*tx_id) || self.node.is_pending_local_publication(*tx_id);
+                if outbox.awaits_wire(*tx_id) || self.node.is_pending_local_publication(*tx_id) {
+                    held += 1;
+                    held_tables.extend(tables.iter().cloned());
+                }
             }
-            if held {
-                Poll::Pending
-            } else {
-                Poll::Ready(Ok(()))
+            if held == 0 {
+                return Poll::Ready(Ok(()));
             }
+            let progress = outbox.upload_progress();
+            let now_ms = self.node.upload_retry_clock.borrow().now_ms();
+            match last_progress {
+                Some((seen_progress, seen_held, since_ms))
+                    if seen_progress == progress && seen_held == held =>
+                {
+                    if now_ms.saturating_sub(since_ms) >= LOCAL_WRITE_UPLOAD_STALL_MS {
+                        return Poll::Ready(Err(local_writes_upload_stalled(&held_tables)));
+                    }
+                }
+                _ => last_progress = Some((progress, held, now_ms)),
+            }
+            Poll::Pending
         });
         self.race_remote_answer(epoch, on_wire)
             .await
@@ -1397,8 +1418,25 @@ fn read_footprint_overlaps(read_table: Option<&str>, written: &BTreeSet<String>)
     }
 }
 
-fn local_writes_not_uploaded(tables: &BTreeSet<String>, reason: &str) -> Error {
-    let tables = if tables.is_empty() {
+/// How long a Global read waits for the local writes it must observe to make
+/// upload progress before it gives up: the budget a read had for the whole
+/// wait before it ordered its open after those writes (#3839).
+const LOCAL_WRITE_UPLOAD_STALL_MS: u64 = 15_000;
+
+fn local_writes_upload_stalled(tables: &BTreeSet<String>) -> Error {
+    Error::new(
+        ErrorCode::NotObserved,
+        format!(
+            "Timed out waiting for local writes to {} to upload before a Global read: \
+             no upload progress for {} s",
+            quoted_tables(tables),
+            LOCAL_WRITE_UPLOAD_STALL_MS / 1_000
+        ),
+    )
+}
+
+fn quoted_tables(tables: &BTreeSet<String>) -> String {
+    if tables.is_empty() {
         "its tables".to_owned()
     } else {
         tables
@@ -1406,7 +1444,11 @@ fn local_writes_not_uploaded(tables: &BTreeSet<String>, reason: &str) -> Error {
             .map(|table| format!("`{table}`"))
             .collect::<Vec<_>>()
             .join(", ")
-    };
+    }
+}
+
+fn local_writes_not_uploaded(tables: &BTreeSet<String>, reason: &str) -> Error {
+    let tables = quoted_tables(tables);
     Error::new(
         ErrorCode::NotObserved,
         format!(
