@@ -15,6 +15,7 @@ import {
   validateProject,
 } from "./dev/catalogue-project.js";
 import { renderMigrationGraph } from "./dev/migration-graph.js";
+import { isCloudCommand, runCloudCommand } from "./cloud/commands.js";
 
 export interface BuildOptions {
   jazzBin?: string;
@@ -444,6 +445,9 @@ function printHelp(): void {
   console.log("  deploy <appId>        Publish schema, permissions, and required migrations");
   console.log("  migrations create     Generate a migration stub between two schema versions");
   console.log("  migrations graph      Visualize the full migration graph");
+  console.log("  login | logout | whoami");
+  console.log("                        Sign in to Jazz Cloud with your dashboard account");
+  console.log("  teams, apps           Manage Jazz Cloud teams and apps (see `apps --help`)");
   console.log("\nValidation options:");
   console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
   console.log("  --strict-provenance   Reject conventional duplicates of Jazz provenance");
@@ -471,7 +475,10 @@ function printHelp(): void {
 
 if (isMainModule()) {
   const { args, envFiles } = normalizeArgs(process.argv.slice(2));
-  if (args.some((arg) => arg === "--help" || arg === "-h")) {
+  const command = args[0] ?? "";
+  // Cloud commands (login, apps, ...) have their own help.
+  const cloudCommand = isCloudCommand(command);
+  if (!cloudCommand && args.some((arg) => arg === "--help" || arg === "-h")) {
     printHelp();
     process.exit(0);
   }
@@ -482,9 +489,14 @@ if (isMainModule()) {
   } else {
     loadDotEnv();
   }
-  const command = args[0] ?? "";
 
-  if (command === "validate") {
+  if (cloudCommand) {
+    runCloudCommand(args, {
+      stdout: (text) => process.stdout.write(text),
+      stderr: (text) => process.stderr.write(text),
+      env: process.env,
+    }).then((code) => process.exit(code));
+  } else if (command === "validate") {
     const { options } = parseArgs(args);
     validate(options).catch((err) => {
       console.error(err.message);
