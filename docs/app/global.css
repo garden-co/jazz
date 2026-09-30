@@ -327,6 +327,7 @@ h6 {
   width: max(72rem, 110vw);
   max-width: none;
   height: auto;
+  aspect-ratio: 11 / 10;
   transform: translate(-50%, -50%);
   pointer-events: none;
   user-select: none;

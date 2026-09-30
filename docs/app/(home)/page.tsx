@@ -13,6 +13,8 @@ import {
   TableRow,
 } from "@astryxdesign/core/Table";
 import { Text } from "@astryxdesign/core/Text";
+import { StippleCanvas } from "@/components/brand/stipple-canvas";
+import { gridPattern } from "@/components/brand/stipple-presets";
 import { AppLink } from "@/components/design/app-link";
 import {
   BackendDiagram,
@@ -357,7 +359,7 @@ export default function HomePage() {
   return (
     <div className="w-full">
       <section className="home-hero h-[80vh] w-full">
-        <img src="/home/hero-pattern.webp" alt="" aria-hidden className="home-hero-pattern" />
+        <StippleCanvas pattern={gridPattern} className="home-hero-pattern" />
         <div className="mx-auto flex h-full w-full max-w-(--fd-layout-width) items-end px-4 relative">
           <aside className="absolute right-4 top-4 z-30 max-w-sm">
             <Card className="border-fd-border/70 shadow dark:border-white/50">
