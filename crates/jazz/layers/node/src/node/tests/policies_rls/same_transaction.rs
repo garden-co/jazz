@@ -808,3 +808,217 @@ fn not_policy_keeps_the_full_post_state_pass() {
         );
     }
 }
+
+/// Projects belong to their owner; a task may be written by whoever may
+/// update its project (`allowedTo.update("project")`).
+fn project_task_schema() -> JazzSchema {
+    build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("projects")
+                    .column("owner", PublicColumnType::Uuid)
+                    .policies(public_owner_policies("owner")),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("tasks")
+                    .fk_column("project", "projects")
+                    .column("title", PublicColumnType::Text)
+                    .policies(
+                        public_write_policies(PublicPolicyExpr::Inherits {
+                            operation: PublicOperation::Update,
+                            via_column: "project".to_owned(),
+                            max_depth: None,
+                        })
+                        .with_select(PublicPolicyExpr::True),
+                    ),
+            ),
+    )
+}
+
+/// An inherited (`allowedTo`) write policy sees its parent inserted in the
+/// same transaction, like an `exists`.
+///
+/// ```text
+/// alice ──tx{ task(project) }────────────────► core ──► Rejected
+/// alice ──tx{ project(owner: alice), task }──► core ──► Accepted
+/// ```
+#[test]
+fn inherited_policy_parent_inserted_in_same_transaction_is_accepted() {
+    let alice = user(0xa1);
+    let schema = project_task_schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    install_test_uuid_sub_claim(&mut core, alice);
+    let project = row(0xc0);
+    let task = |task: RowUuid, now_ms: u64| {
+        MergeableCommit::new("tasks", task, now_ms)
+            .made_by(alice)
+            .cells(BTreeMap::from([
+                ("project".to_owned(), Value::Uuid(project.0)),
+                ("title".to_owned(), Value::String("Mix".to_owned())),
+            ]))
+    };
+
+    // Planted negative: the project is not evidence until it exists.
+    let (_, fate) = deliver_mergeable_transaction(&mut writer, &mut core, vec![task(row(0xc1), 10)]);
+    assert_eq!(fate, Fate::Rejected(RejectionReason::AuthorizationDenied));
+
+    let (_, fate) = deliver_mergeable_transaction(
+        &mut writer,
+        &mut core,
+        vec![
+            MergeableCommit::new("projects", project, 11)
+                .made_by(alice)
+                .cells(BTreeMap::from([(
+                    "owner".to_owned(),
+                    Value::Uuid(alice.test_uuid()),
+                )])),
+            task(row(0xc2), 11),
+        ],
+    );
+    assert_eq!(fate, Fate::Accepted);
+}
+
+/// One staged write of an exclusive transaction: table, row, cells and an
+/// optional deletion event.
+type ExclusiveWrite = (&'static str, RowUuid, BTreeMap<String, Value>, Option<DeletionEvent>);
+
+/// Commit an exclusive transaction on `core` and let `core`, its own
+/// authority, finalize it: the transaction is stored Pending and Local
+/// before its write policies are decided.
+fn self_finalize_exclusive(
+    core: &mut NodeState,
+    author: AuthorSubject,
+    writes: Vec<ExclusiveWrite>,
+    now_ms: u64,
+) -> Fate {
+    let open = OpenTransactionId::new();
+    core.open_exclusive_for_identity(open, author).unwrap();
+    for (table, row_uuid, cells, deletion) in writes {
+        core.tx_write(open, table, row_uuid, cells, deletion).unwrap();
+    }
+    let (_, unit) = core.commit_exclusive_settled(open, author, now_ms).unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("an exclusive commit yields a commit unit");
+    };
+    let outcome =
+        crate::local_executor::block_on(core.finalize_local_exclusive_commit(tx, versions))
+            .unwrap();
+    crate::local_executor::block_on(core.persist_and_settle_outcome(outcome)).unwrap()
+}
+
+fn show_cells(chief: AuthorSubject) -> BTreeMap<String, Value> {
+    BTreeMap::from([("chief".to_owned(), Value::Uuid(chief.test_uuid()))])
+}
+
+fn task_cells(show: RowUuid) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("show".to_owned(), Value::Uuid(show.0)),
+        ("title".to_owned(), Value::String("Load-in".to_owned())),
+    ])
+}
+
+/// On a node that is its own authority, the unit being finalized is already
+/// stored Pending and Local. Its policy evidence is still authority-accepted
+/// state plus the unit's own grounded writes, never the Local view:
+///
+/// - a parent inserted in the same unit is evidence;
+/// - rows that justify only each other stay rejected;
+/// - a committed parent the unit deletes is still evidence;
+/// - another still-pending local transaction's parent is not.
+///
+/// ```text
+/// core(self) ──exclusive{ show, task(show) }─────────► Accepted
+/// core(self) ──exclusive{ a(parent: b), b(parent: a) }► Rejected
+/// core(self) ──exclusive{ delete show, task(show) }──► Accepted
+/// core(self) ──mergeable{ show2 } (pending)
+/// core(self) ──exclusive{ task(show2) }──────────────► Rejected
+/// ```
+#[test]
+fn self_finalized_exclusive_units_read_accepted_state_as_policy_evidence() {
+    let alice = user(0xa1);
+    let mallory = user(0x3d);
+
+    let (_core_dir, mut core) = open_node_with_schema(node(9), show_task_schema());
+    install_test_uuid_sub_claim(&mut core, alice);
+    let show = row(0xd0);
+    let fate = self_finalize_exclusive(
+        &mut core,
+        alice,
+        vec![
+            ("shows", show, show_cells(alice), None),
+            ("tasks", row(0xd1), task_cells(show), None),
+        ],
+        10,
+    );
+    assert_eq!(fate, Fate::Accepted, "a same-unit parent is evidence");
+
+    let fate = self_finalize_exclusive(
+        &mut core,
+        alice,
+        vec![
+            ("shows", show, BTreeMap::new(), Some(DeletionEvent::Deleted)),
+            ("tasks", row(0xd2), task_cells(show), None),
+        ],
+        11,
+    );
+    assert_eq!(
+        fate,
+        Fate::Accepted,
+        "a committed parent the unit deletes is still evidence"
+    );
+
+    let pending_show = row(0xd3);
+    let pending_tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("shows", pending_show, 12)
+                .made_by(alice)
+                .cells(show_cells(alice)),
+        )
+        .unwrap();
+    let fate = self_finalize_exclusive(
+        &mut core,
+        alice,
+        vec![("tasks", row(0xd4), task_cells(pending_show), None)],
+        13,
+    );
+    assert_eq!(
+        fate,
+        Fate::Rejected(RejectionReason::AuthorizationDenied),
+        "another pending local transaction's parent is not evidence"
+    );
+    // Planted positive: once that transaction is accepted, it is evidence.
+    core.finalize_local_mergeable_commit_settled(pending_tx)
+        .unwrap();
+    let fate = self_finalize_exclusive(
+        &mut core,
+        alice,
+        vec![("tasks", row(0xd5), task_cells(pending_show), None)],
+        14,
+    );
+    assert_eq!(fate, Fate::Accepted);
+
+    let (_folders_dir, mut folders) = open_node_with_schema(node(8), folder_schema());
+    install_test_uuid_sub_claim(&mut folders, mallory);
+    let (a, b) = (row(0xd6), row(0xd7));
+    let folder_cells = |parent: RowUuid| {
+        BTreeMap::from([
+            ("owner".to_owned(), Value::Uuid(mallory.test_uuid())),
+            ("parent".to_owned(), Value::Uuid(parent.0)),
+        ])
+    };
+    let fate = self_finalize_exclusive(
+        &mut folders,
+        mallory,
+        vec![
+            ("folders", a, folder_cells(b), None),
+            ("folders", b, folder_cells(a), None),
+        ],
+        15,
+    );
+    assert_eq!(
+        fate,
+        Fate::Rejected(RejectionReason::AuthorizationDenied),
+        "rows that justify only each other are rejected"
+    );
+}

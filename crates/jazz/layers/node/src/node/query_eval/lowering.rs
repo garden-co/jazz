@@ -942,6 +942,20 @@ where
         let compilation = QueryProgramCompilation::analyze(request)
             .map_err(|report| Error::QueryCapability(format!("{report:?}")))?;
         let request = compilation.request();
+        // The transaction overlay reaches only this program's own sources.
+        // Nested policy-filtered dependency graphs neither overlay nor record
+        // reads, so a write-policy subplan under an active overlay must read
+        // raw evidence only (`INV-RLS-21`).
+        debug_assert!(
+            !transaction_overlay.is_active()
+                || compilation.sources().iter().all(|source| {
+                    !matches!(
+                        source.authorization,
+                        SourceAuthorizationRequest::PolicyFiltered { .. }
+                    )
+                }),
+            "a write-policy subplan under a transaction overlay read a policy-filtered source"
+        );
         let policy_dependency_footprint = Box::pin(self.prepare_query_program_policy_dependencies(
             request,
             compilation.sources(),

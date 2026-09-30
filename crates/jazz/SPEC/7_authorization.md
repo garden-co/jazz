@@ -34,7 +34,9 @@ Invariant digest:
   visible as committed, and a row the unit both inserts and deletes never
   counts. The protected row itself, USING clauses and
   read-for-write checks read committed state, and writes of any other
-  transaction are never evidence. A unit is accepted only if every WITH CHECK
+  transaction are never evidence, including other pending transactions on a
+  self-finalizing node: committed state is authority-accepted (Global) state
+  on every decision path. A unit is accepted only if every WITH CHECK
   clause also passes against the unit's full post-state; a write whose policy
   is monotone in the rows present is re-checked there only when a table it
   reads holds a unit update that was not yet grounded when it passed.
@@ -255,6 +257,16 @@ in terminal relay admission. Without it, a client that applies a transaction
 optimistically through its read-your-writes view would have the authority
 reject the same transaction, for example a task inserted together with the show
 its insert policy requires.
+
+"Committed" here means authority-accepted: every policy subplan of a unit's
+write-policy decision (WITH CHECK, USING and read-for-write alike) reads the
+Global tier, the current rows whose transactions the authority has accepted,
+never the Local read-your-writes view. This holds on every path that decides a
+unit: foreign ingest, a node finalizing its own mergeable or exclusive commit
+(where the unit is already stored Pending and Local, `INV-TX-2`) and relay
+admission. So the candidate never justifies itself through its own pending
+rows, a committed row the unit deletes is not hidden by that pending deletion,
+and no other still-pending local transaction is evidence.
 
 A WITH CHECK clause judges the row a write leaves behind, so the rows its policy
 joins read are committed main-branch state overlaid, row by row, with the unit's

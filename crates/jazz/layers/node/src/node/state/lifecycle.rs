@@ -904,6 +904,7 @@ impl NodeState {
             merge_head_reachability_nodes: 0,
             #[cfg(any(test, feature = "testing"))]
             query_program_compilations: 0,
+            policy_evidence_tier: DurabilityTier::Local,
             session_claims: BTreeMap::new(),
             session_claim_revisions: BTreeMap::new(),
             active_session_claims: None,

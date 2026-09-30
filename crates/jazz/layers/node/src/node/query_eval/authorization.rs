@@ -777,7 +777,7 @@ where
                 &input.shape,
                 policy_shape.schema_version(),
                 policy_shape.schema_version(),
-                DurabilityTier::Local,
+                self.policy_evidence_tier,
                 None,
                 None,
                 false,
