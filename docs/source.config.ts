@@ -23,7 +23,7 @@ const parseCodeBlockMetaString: ParseMetaString = (meta, code, lang) => {
 
 // You can customise Zod schemas for frontmatter and `meta.json` here
 // see https://fumadocs.dev/docs/mdx/collections
-// Blog posts and slides keep Shiki highlighting; docs pages and the partials
+// Slides keep Shiki highlighting; docs pages, blog posts and the partials
 // they import use the global options below.
 const shikiMdxOptions = applyMdxPreset({
   rehypeCodeOptions: {
@@ -64,7 +64,6 @@ export const docs = defineDocs({
 export const blogPosts = defineCollections({
   type: "doc",
   dir: "content/blog",
-  mdxOptions: shikiMdxOptions,
   schema: pageSchema.extend({
     author: z.string(),
     date: z.string().date().or(z.date()),
@@ -78,7 +77,7 @@ export const presentationDecks = defineCollections({
   schema: pageSchema,
 });
 
-// Docs pages and the `content/partials` they import render code with Astryx
+// Docs pages, blog posts and the `content/partials` they import render code with Astryx
 // CodeBlock (client-side highlighting from the raw source), so Shiki is off.
 export default defineConfig({
   mdxOptions: {
