@@ -480,17 +480,37 @@ textarea.input {
   box-shadow: var(--shadow-high);
 }
 
+/* Header and footer keep their size; the body between them scrolls. */
+.dialog[open] {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
 .dialog::backdrop {
   background: var(--color-overlay);
 }
 
-.dialog__body {
-  padding: var(--spacing-6);
+.dialog__header {
+  flex: none;
+  align-items: flex-start;
+  padding: var(--spacing-6) var(--spacing-3) var(--spacing-4) var(--spacing-6);
 }
 
-.dialog__header {
-  align-items: flex-start;
-  margin-right: calc(-1 * var(--spacing-3));
+.dialog__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 var(--spacing-6) var(--spacing-6);
+}
+
+.dialog__body:has(+ .dialog__footer) {
+  padding-bottom: var(--spacing-4);
+}
+
+.dialog__footer {
+  flex: none;
+  padding: 0 var(--spacing-6) var(--spacing-6);
 }
 
 .poster-date {
