@@ -3,6 +3,8 @@
 use super::*;
 use crate::storage::TestStorage;
 
+use futures::FutureExt;
+use std::panic::AssertUnwindSafe;
 fn storage_name_table(name: impl Into<String>) -> TableSchema {
     TableSchema::new(name, [ColumnSchema::new("id", ColumnType::U64)])
         .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
@@ -14,6 +16,117 @@ fn storage_name_direct_store(name: impl Into<String>) -> DirectRecordStoreSchema
         RecordDescriptor::new([("id", ValueType::U64)]),
         RecordDescriptor::new([("value", ValueType::Bytes)]),
     )
+}
+
+/// alice writes scalar and fixed-tuple direct-store keys containing enum tags.
+/// Both keys remain readable after the database is reopened.
+#[futures_test::test]
+async fn enum_tag_direct_store_keys_round_trip() {
+    let enum_tag = ValueType::EnumTag(ScalarEnumSchema::new("status", ["new", "done"]).unwrap());
+    let schema = DatabaseSchema::new([])
+        .with_direct_record_store(DirectRecordStoreSchema::new(
+            "enum_tag_key",
+            RecordDescriptor::new([("key", enum_tag.clone())]),
+            RecordDescriptor::new([("payload", ValueType::Bytes)]),
+        ))
+        .with_direct_record_store(DirectRecordStoreSchema::new(
+            "tuple_enum_tag_key",
+            RecordDescriptor::new([("key", ValueType::Tuple(vec![enum_tag, ValueType::U64]))]),
+            RecordDescriptor::new([("payload", ValueType::Bytes)]),
+        ));
+    let keys = [
+        ("enum_tag_key", vec![Value::EnumTag(1)]),
+        (
+            "tuple_enum_tag_key",
+            vec![Value::Tuple(vec![Value::EnumTag(0), Value::U64(7)])],
+        ),
+    ];
+    let storage = MemoryStorage::new(&schema.column_families()).expect("valid storage families");
+    let database = Database::new(schema.clone(), storage).await.unwrap();
+    for (name, key) in &keys {
+        database
+            .direct_record_store(name)
+            .unwrap()
+            .set(key, &[Value::Bytes(b"payload".to_vec())])
+            .await
+            .unwrap();
+    }
+
+    let storage = database.into_storage();
+    let reopened = Database::new(schema, storage).await.unwrap();
+    for (name, key) in &keys {
+        assert_eq!(
+            reopened
+                .direct_record_store(name)
+                .unwrap()
+                .get(key)
+                .await
+                .unwrap()
+                .unwrap()
+                .get("payload")
+                .unwrap(),
+            Value::Bytes(b"payload".to_vec())
+        );
+    }
+}
+
+/// Public schema fields can bypass descriptor validation; admission must reject
+/// variable-width tuple members instead of panicking while rebuilding a descriptor.
+#[futures_test::test]
+async fn variable_width_tuple_direct_store_keys_fail_before_durable_open() {
+    let schema = DatabaseSchema::new([]).with_direct_record_store(DirectRecordStoreSchema {
+        name: "tuple_string_key".to_owned(),
+        key: vec![("key".to_owned(), ValueType::Tuple(vec![ValueType::String]))],
+        value: vec![("payload".to_owned(), ValueType::Bytes)],
+    });
+    let mut column_families = schema.column_families();
+    column_families.push("__groove_class_meta");
+    let (storage, control) = TestStorage::controlled(&column_families);
+    let result = AssertUnwindSafe(Database::new_with_storage_layout(
+        schema,
+        storage,
+        StorageLayout::jazz_class_v1(),
+    ))
+    .catch_unwind()
+    .await;
+
+    assert!(matches!(
+        result,
+        Ok(Err(Error::InvalidDirectRecordStoreKey(name))) if name == "tuple_string_key"
+    ));
+    assert!(control.observed().is_empty());
+}
+
+/// alice writes a direct-store entry under a Bytes key and reads back its payload.
+#[futures_test::test]
+async fn bytes_direct_store_keys_round_trip() {
+    let schema = DatabaseSchema::new([]).with_direct_record_store(DirectRecordStoreSchema::new(
+        "bytes_keys",
+        RecordDescriptor::new([("key", ValueType::Bytes)]),
+        RecordDescriptor::new([("payload", ValueType::Bytes)]),
+    ));
+    let storage =
+        MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
+    let database = Database::new(schema, storage).await.unwrap();
+    let store = database.direct_record_store("bytes_keys").unwrap();
+    store
+        .set(
+            &[Value::Bytes(b"key".to_vec())],
+            &[Value::Bytes(b"payload".to_vec())],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store
+            .get(&[Value::Bytes(b"key".to_vec())])
+            .await
+            .unwrap()
+            .unwrap()
+            .get("payload")
+            .unwrap(),
+        Value::Bytes(b"payload".to_vec())
+    );
 }
 
 /// Schema names are rejected before `LayoutStorage` can create its durable

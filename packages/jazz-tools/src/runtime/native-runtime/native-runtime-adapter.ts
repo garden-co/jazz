@@ -3723,7 +3723,13 @@ export class NativeRuntimeAdapter implements Runtime {
       (error.code === "websocket_closed" ||
         error.code === "websocket_error" ||
         error.code === "not_ready") &&
-      (attempt.carrier.hasNegotiated || this.networkRetryCount > 0)
+      // A local-first client opened while offline must also reach its server
+      // once the network returns, so a first connection that fails at the
+      // network layer is retried like a dropped established link.
+      (attempt.carrier.hasNegotiated ||
+        this.networkRetryCount > 0 ||
+        error.code === "websocket_closed" ||
+        error.code === "websocket_error")
     );
   }
 
