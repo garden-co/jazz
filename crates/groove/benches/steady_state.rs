@@ -34,8 +34,15 @@
 //! measuring, every engine replays the same write sequence and must reach the
 //! same caches as the others (benchmark validity, INV-PERF-2).
 //!
+//! CodSpeed (the Engine section of the examples page) measures only `ivm` at
+//! 100 subscribers on every merge. `GROOVE_BENCH_SWEEP=1`, which the nightly
+//! CodSpeed run sets, measures the rest instead: the reference engines and
+//! the smaller subscriber count. The two runs never share a case, so each
+//! case gets one CodSpeed point per commit. Run both for the full sweep:
+//!
 //! ```text
 //! cargo bench -p groove --bench steady_state
+//! GROOVE_BENCH_SWEEP=1 cargo bench -p groove --bench steady_state
 //! ```
 
 use std::cell::RefCell;
@@ -69,6 +76,21 @@ fn main() {
     }
     verify_engines_agree();
     divan::main();
+}
+
+/// Per merge, CodSpeed measures only Groove's IVM engine at the larger
+/// subscriber count. `GROOVE_BENCH_SWEEP=1` measures the rest instead: the
+/// smaller count and the reference engines (SQLite, pull, snapshot).
+fn sweep() -> bool {
+    std::env::var_os("GROOVE_BENCH_SWEEP").is_some()
+}
+
+fn ivm_subscriber_counts() -> Vec<u64> {
+    if sweep() {
+        SUBSCRIBER_COUNTS[..SUBSCRIBER_COUNTS.len() - 1].to_vec()
+    } else {
+        vec![SUBSCRIBER_COUNTS[SUBSCRIBER_COUNTS.len() - 1]]
+    }
 }
 
 /// Diagnostic, not a benchmark: split the `ivm` engine's per-write time into
@@ -887,22 +909,22 @@ macro_rules! workload_benches {
         mod $module {
             use super::*;
 
-            #[divan::bench(args = SUBSCRIBER_COUNTS)]
+            #[divan::bench(args = ivm_subscriber_counts())]
             fn ivm(bencher: divan::Bencher, subs: u64) {
                 bench(bencher, EngineKind::Ivm, $workload, subs);
             }
 
-            #[divan::bench(args = SUBSCRIBER_COUNTS)]
+            #[divan::bench(args = SUBSCRIBER_COUNTS, ignore = !sweep())]
             fn sqlite_touched(bencher: divan::Bencher, subs: u64) {
                 bench(bencher, EngineKind::SqliteTouched, $workload, subs);
             }
 
-            #[divan::bench(args = SUBSCRIBER_COUNTS)]
+            #[divan::bench(args = SUBSCRIBER_COUNTS, ignore = !sweep())]
             fn sqlite_all(bencher: divan::Bencher, subs: u64) {
                 bench(bencher, EngineKind::SqliteAll, $workload, subs);
             }
 
-            #[divan::bench(args = SUBSCRIBER_COUNTS)]
+            #[divan::bench(args = SUBSCRIBER_COUNTS, ignore = !sweep())]
             fn pull_touched(bencher: divan::Bencher, subs: u64) {
                 bench(bencher, EngineKind::PullTouched, $workload, subs);
             }
@@ -910,7 +932,7 @@ macro_rules! workload_benches {
             // Groove's snapshot rerun is O(table) per touched subscriber; the
             // 10-subscriber case already shows that, and 100 subscribers would
             // cost seconds per iteration on the hosted runner.
-            #[divan::bench(args = [SUBSCRIBER_COUNTS[0]])]
+            #[divan::bench(args = [SUBSCRIBER_COUNTS[0]], ignore = !sweep())]
             fn snapshot_touched(bencher: divan::Bencher, subs: u64) {
                 bench(bencher, EngineKind::SnapshotTouched, $workload, subs);
             }

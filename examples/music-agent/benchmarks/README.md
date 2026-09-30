@@ -8,8 +8,10 @@ and work denominators used by the examples page.
 
 `benches/walltime.rs` measures what a user of an agent chat notices: streaming
 a 1,000-chunk assistant reply onto a turn that is already a large value,
-opening a 200-turn conversation, reopening it after an app restart, and a
-64 KiB seek into an 8 MiB audio attachment. Correctness tests also reopen the
+opening a 200-turn conversation, and reopening it after an app restart. The
+64 KiB attachment seek is exercised by the tests; seeking into a large value is
+measured by RecordPlayer's `record_player_scrub_track_64mb`. Correctness tests
+also reopen the
 same durable fixture and verify that the transcript remains readable after
 restart.
 

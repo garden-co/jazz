@@ -81,8 +81,11 @@ describe("BigLabel deployed tenant authority", () => {
         organizationId: seeded.org.id,
         artistId: seeded.foreignArtist.id,
         title: "Cross-tenant release",
+        catalogNumber: "X-001",
+        format: "Single",
         releaseDate: new Date(),
         status: "scheduled",
+        searchKey: "cross-tenant release",
       }),
     );
     await admin.expectDenied((db) =>
@@ -164,6 +167,7 @@ async function seed(test: PolicyTestApp) {
       name: "Artist",
       genre: "Jazz",
       status: "active",
+      searchKey: "artist jazz",
     }),
   );
   const release = await test.seed((db) =>
@@ -171,8 +175,11 @@ async function seed(test: PolicyTestApp) {
       organizationId: org.id,
       artistId: artist.id,
       title: "Release",
+      catalogNumber: "OWN-001",
+      format: "Album",
       releaseDate: new Date(),
       status: "scheduled",
+      searchKey: "release own-001",
     }),
   );
   const foreignArtist = await test.seed((db) =>
@@ -181,6 +188,7 @@ async function seed(test: PolicyTestApp) {
       name: "Foreign artist",
       genre: "Jazz",
       status: "active",
+      searchKey: "foreign artist jazz",
     }),
   );
   const foreignMembership = await test.seed((db) =>

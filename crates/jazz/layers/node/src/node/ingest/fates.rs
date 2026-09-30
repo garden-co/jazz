@@ -51,6 +51,9 @@ where
         terminal_fate_persisted: &mut bool,
         cascade_descendants: bool,
     ) -> Result<(), Error> {
+        if !matches!(fate, Fate::Pending) || global_time.is_some() {
+            self.open_tx.pending_foreign_transactions.remove(&tx_id);
+        }
         let mut stored = self
             .query_transaction(tx_id).await?
             .ok_or(Error::MissingTransaction(tx_id))?;
