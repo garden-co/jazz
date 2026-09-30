@@ -704,6 +704,32 @@ function requirePageRange(from: number, to: number, column: string): void {
   }
 }
 
+/** Validate an `update` call's `applyDiffs` option and lower it to wire descriptors. */
+function lowerApplyDiffs(
+  table: TableProxy<any, any, any, any, any>,
+  data: Record<string, unknown>,
+  diffs: unknown,
+): WireLargeValueUpdate[] {
+  if (diffs === undefined) return [];
+  if (typeof diffs !== "object" || diffs === null || Array.isArray(diffs)) {
+    throw new Error("update option applyDiffs must be an object keyed by column name.");
+  }
+  if (Object.keys(data).some((column) => Object.hasOwn(diffs, column))) {
+    throw new Error("update replacements and applyDiffs must not both specify the same column.");
+  }
+  const { ordinary, descriptors } = splitLargeValueUpdate(
+    diffs as Record<string, unknown>,
+    table._schema,
+    table._table,
+  );
+  if (Object.keys(ordinary).length > 0) {
+    throw new Error(
+      "update option applyDiffs accepts only field diff descriptors, not whole-column values.",
+    );
+  }
+  return descriptors;
+}
+
 function splitLargeValueUpdate(
   data: Record<string, unknown>,
   schema: WasmSchema,
@@ -1390,13 +1416,37 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    * The update is scoped to this transaction, and will only be globally visible
    * once it's committed.
    */
+  update<
+    T,
+    Init,
+    StreamingInit,
+    StreamingUpdate,
+    LargeValueUpdate,
+    TReplacements extends Partial<Init>,
+  >(
+    table: TableProxy<T, Init, StreamingInit, StreamingUpdate, LargeValueUpdate> & {
+      readonly _largeValueUpdateType: LargeValueUpdate;
+    },
+    id: string,
+    data: TReplacements,
+    options?: TypedUpdateOptionsWithDiffs<TReplacements, LargeValueUpdate>,
+  ): void;
   update<T, Init>(
     table: TableProxy<T, Init>,
     id: string,
     data: Partial<Init>,
     options?: UpdateOptions,
+  ): void;
+  update(
+    table: TableProxy<any, any, any, any, any>,
+    id: string,
+    data: Record<string, unknown>,
+    options?: UpdateOptions & { applyDiffs?: object },
   ): void {
     this.bindTable(table);
+    // Diffs are staged against this transaction's own view of the row, so
+    // they compose with its earlier writes and commit atomically with them.
+    const descriptors = lowerApplyDiffs(table, data, options?.applyDiffs);
     const transformedData = transformInputColumns(table, data);
     const updates = toWriteRecordForOperation(
       "Update",
@@ -1407,6 +1457,20 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     const client = this.resolveClient(table._schema);
     const { openTransactionId, session, attribution } = this.requireBinding("update");
     const normalizedOptions = normalizeUpdateOptions(table._schema, table._table, options);
+    if (descriptors.length > 0) {
+      client.updateLargeValuesInternal(
+        table._table,
+        id,
+        updates,
+        descriptors,
+        normalizedOptions?.updatedAt,
+        session,
+        attribution,
+        openTransactionId,
+        normalizedOptions?.branch,
+      );
+      return;
+    }
     client.updateInternal(
       table._table,
       id,
@@ -2315,16 +2379,7 @@ export class Db {
     options?: UpdateOptions & { applyDiffs?: object },
   ): WriteHandle {
     const client = this.getClient(table._schema);
-    const diffs = options?.applyDiffs;
-    if (
-      diffs !== undefined &&
-      (typeof diffs !== "object" || diffs === null || Array.isArray(diffs))
-    ) {
-      throw new Error("update option applyDiffs must be an object keyed by column name.");
-    }
-    if (diffs && Object.keys(data).some((column) => Object.hasOwn(diffs, column))) {
-      throw new Error("update replacements and applyDiffs must not both specify the same column.");
-    }
+    const descriptors = lowerApplyDiffs(table, data, options?.applyDiffs);
     const transformedData = transformInputColumns(table, data);
     const updates = toWriteRecordForOperation(
       "Update",
@@ -2333,30 +2388,18 @@ export class Db {
       table._table,
     );
     const context = this.getRuntimeOperationContext();
-    if (diffs !== undefined) {
-      const { ordinary, descriptors } = splitLargeValueUpdate(
-        diffs as Record<string, unknown>,
-        table._schema,
-        table._table,
+    if (descriptors.length > 0) {
+      return this.wrapWriteWait(
+        client.updateLargeValues(
+          table._table,
+          id,
+          updates,
+          descriptors,
+          normalizeUpdateOptions(table._schema, table._table, options),
+          context?.session,
+          context?.attribution,
+        ),
       );
-      if (Object.keys(ordinary).length > 0) {
-        throw new Error(
-          "update option applyDiffs accepts only field diff descriptors, not whole-column values.",
-        );
-      }
-      if (descriptors.length > 0) {
-        return this.wrapWriteWait(
-          client.updateLargeValues(
-            table._table,
-            id,
-            updates,
-            descriptors,
-            normalizeUpdateOptions(table._schema, table._table, options),
-            context?.session,
-            context?.attribution,
-          ),
-        );
-      }
     }
     return this.wrapWriteWait(
       client.update(
