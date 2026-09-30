@@ -1800,21 +1800,6 @@ where
             })
     }
 
-    /// The version a point read of `row_uuid` at `snapshot` records: the
-    /// deleting transaction while deleted, otherwise the content transaction.
-    pub(super) async fn snapshot_read_version(
-        &mut self,
-        schema_version: SchemaVersionId,
-        table: &str,
-        row_uuid: RowUuid,
-        snapshot: &Snapshot,
-    ) -> Result<Option<TxId>, Error> {
-        Ok(self
-            .snapshot_row_in_schema(schema_version, table, row_uuid, snapshot)
-            .await?
-            .read_version)
-    }
-
     pub(super) async fn snapshot_row_in_schema(
         &mut self,
         schema_version: SchemaVersionId,

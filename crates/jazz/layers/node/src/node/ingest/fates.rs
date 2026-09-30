@@ -349,18 +349,6 @@ where
         let no_rows = BTreeSet::new();
         let mut write_target_checks = self.write_target_policy_checks(tx, versions, identity)?;
         for predicate in tx.predicate_read_set.as_deref().unwrap_or(&[]) {
-            // A read of one row by id, under a read policy that depends only on
-            // that row and the session, is a point read whatever API made it.
-            if let Some(row_uuid) = point_predicate_row(predicate)
-                && let Some(changed) = self
-                    .point_predicate_read_changed(predicate, row_uuid, base_snapshot)
-                    .await?
-            {
-                if changed {
-                    return Ok(false);
-                }
-                continue;
-            }
             // Clients before alpha.58 recorded every write target's read-policy
             // check as a whole-table read of the written table. Each such check
             // is validated as those clients' own authority did: nothing in the
@@ -411,40 +399,6 @@ where
             }
         }
         Ok(true)
-    }
-
-    /// Whether a predicate read of one row by id no longer holds: the row's
-    /// state at the transaction's base snapshot, which is what the read
-    /// observed, is not its state now. With a row-local read policy the row's
-    /// visibility to the reader follows its state, so unchanged state means an
-    /// unchanged result. `None` under a relational read policy, whose
-    /// visibility other rows decide: the proof check applies there.
-    async fn point_predicate_read_changed(
-        &mut self,
-        predicate: &PredicateRead,
-        row_uuid: RowUuid,
-        snapshot: &Snapshot,
-    ) -> Result<Option<bool>, Error> {
-        let Some((shape, _)) = self.predicate_read_validation_shape(predicate)? else {
-            return Ok(Some(true));
-        };
-        let schema_version = shape.schema_version();
-        let table = shape.query().table.clone();
-        if !self
-            .table_in_schema_ref(&table, schema_version)?
-            .read_policy
-            .as_ref()
-            .is_none_or(query_is_row_local)
-        {
-            return Ok(None);
-        }
-        let at_base = self
-            .snapshot_read_version(schema_version, &table, row_uuid, snapshot)
-            .await?;
-        let now = self
-            .visible_global_row_tx_id_now(schema_version, &table, row_uuid)
-            .await;
-        Ok(Some(at_base != now))
     }
 
     /// Per table, how many written rows a client before alpha.58 checked
@@ -1401,37 +1355,6 @@ where
         Ok(rejected_payload)
     }
 
-}
-
-/// The row a predicate read names when its only condition is `id = <uuid>`
-/// on one table, so it returns that row or nothing.
-fn point_predicate_row(predicate: &PredicateRead) -> Option<RowUuid> {
-    use crate::query::{Operand, Predicate};
-    let query = &predicate.shape;
-    if !query_is_row_local(query)
-        || query.aggregate.is_some()
-        || query.offset != 0
-        || query.limit == Some(0)
-    {
-        return None;
-    }
-    let [Predicate::Eq(left, right)] = query.filters.as_slice() else {
-        return None;
-    };
-    let value = match (left, right) {
-        (Operand::Column(column), value) | (value, Operand::Column(column)) if column == "id" => {
-            value
-        }
-        _ => return None,
-    };
-    match value {
-        Operand::Literal(Value::Uuid(uuid)) => Some(RowUuid(*uuid)),
-        Operand::Param(name) => match predicate.binding_values.get(name) {
-            Some(Value::Uuid(uuid)) => Some(RowUuid(*uuid)),
-            _ => None,
-        },
-        _ => None,
-    }
 }
 
 /// Whether a query reads only its root table's rows: no traversal, join,

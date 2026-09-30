@@ -2947,22 +2947,19 @@ fn delete_note(note: RowUuid) -> impl FnOnce(&mut NodeState, &mut NodeState) {
     }
 }
 
-/// A read of one row by id is a point read, so a client that proves no
-/// predicate reads commits it while that row is unchanged, and only then.
+/// A read of one row by id proves the row it returned, so it commits while
+/// that row is unchanged. A client before alpha.58 proves nothing, and the
+/// authority cannot tell what its replica returned, so its read conflicts.
 #[test]
-fn a_read_by_id_without_a_row_proof_is_validated_as_a_point_read() {
-    for sender in [Sender::Current, Sender::PreAlpha58] {
-        let unchanged = notes_tx_fate(sender, NotesTx::ReadByIdThenLog, |_, _| {});
-        assert_eq!(unchanged, Fate::Accepted, "{sender:?}");
-        let other_row = notes_tx_fate(sender, NotesTx::ReadByIdThenLog, edit_note(row(2), "x"));
-        assert_eq!(other_row, Fate::Accepted, "{sender:?}");
-        let read_row = notes_tx_fate(sender, NotesTx::ReadByIdThenLog, edit_note(row(1), "x"));
-        assert_eq!(
-            read_row,
-            Fate::Rejected(RejectionReason::ExclusiveConflict),
-            "{sender:?}"
-        );
-    }
+fn a_read_by_id_commits_only_with_a_row_proof() {
+    let unchanged = notes_tx_fate(Sender::Current, NotesTx::ReadByIdThenLog, |_, _| {});
+    assert_eq!(unchanged, Fate::Accepted);
+    let other_row = notes_tx_fate(Sender::Current, NotesTx::ReadByIdThenLog, edit_note(row(2), "x"));
+    assert_eq!(other_row, Fate::Accepted);
+    let read_row = notes_tx_fate(Sender::Current, NotesTx::ReadByIdThenLog, edit_note(row(1), "x"));
+    assert_eq!(read_row, Fate::Rejected(RejectionReason::ExclusiveConflict));
+    let legacy = notes_tx_fate(Sender::PreAlpha58, NotesTx::ReadByIdThenLog, |_, _| {});
+    assert_eq!(legacy, Fate::Rejected(RejectionReason::ExclusiveConflict));
 }
 
 /// A pre-alpha.58 update records its target's read-policy check as a
