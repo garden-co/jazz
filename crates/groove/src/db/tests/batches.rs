@@ -3376,16 +3376,56 @@ struct ParkedEvaluationFixture {
     database: Database,
     subscription: MultisinkSubscription,
     resolver_ready: Rc<Cell<bool>>,
+    /// When set, B's chunk fetch fails once released instead of delivering.
+    resolver_fails: Rc<Cell<bool>>,
+    /// A second subscription over `observer_sinks`, opened before B.
+    observer: Option<MultisinkSubscription>,
     parked: AppliedBatch,
     concurrent: AppliedBatch,
     /// Arrangement folds that copied a shared join index while B parked.
     index_folds_while_parking: usize,
 }
 
+/// Resolves B's cold chunk once released, or fails the fetch.
+struct ParkedFixtureChunkResolver {
+    resolver: DeferredFixtureChunkResolver,
+    fails: Rc<Cell<bool>>,
+}
+
+impl crate::chunks::MissingChunkResolver for ParkedFixtureChunkResolver {
+    fn resolve(
+        &self,
+        request: crate::chunks::ChunkRequest,
+    ) -> crate::chunks::ChunkFuture<'_, Result<Bytes, crate::chunks::ChunkError>> {
+        let resolved = crate::chunks::MissingChunkResolver::resolve(&self.resolver, request);
+        let fails = Rc::clone(&self.fails);
+        Box::pin(async move {
+            let bytes = resolved.await?;
+            if fails.get() {
+                return Err(crate::chunks::ChunkError::Unavailable);
+            }
+            Ok(bytes)
+        })
+    }
+}
+
 async fn parked_evaluation_fixture(
     tables: Vec<TableSchema>,
     setup: impl FnOnce(&mut DatabaseBatch),
     sinks: Vec<(&'static str, GraphBuilder)>,
+    parked: impl FnOnce(&mut DatabaseBatch, Value),
+    concurrent: impl FnOnce(&mut DatabaseBatch),
+) -> ParkedEvaluationFixture {
+    parked_evaluation_fixture_observed(tables, setup, sinks, Vec::new(), parked, concurrent).await
+}
+
+/// [`parked_evaluation_fixture`] with a second subscription over
+/// `observer_sinks`, which outlives a failure of the first.
+async fn parked_evaluation_fixture_observed(
+    tables: Vec<TableSchema>,
+    setup: impl FnOnce(&mut DatabaseBatch),
+    sinks: Vec<(&'static str, GraphBuilder)>,
+    observer_sinks: Vec<(&'static str, GraphBuilder)>,
     parked: impl FnOnce(&mut DatabaseBatch, Value),
     concurrent: impl FnOnce(&mut DatabaseBatch),
 ) -> ParkedEvaluationFixture {
@@ -3422,15 +3462,19 @@ async fn parked_evaluation_fixture(
         .await
         .unwrap();
     let resolver_ready = Rc::new(Cell::new(false));
-    database.set_missing_chunk_resolver(Rc::new(DeferredFixtureChunkResolver {
-        chunks: Rc::new(std::collections::BTreeMap::from([(
-            crate::chunks::ChunkRequest {
-                object_hash: root.node_ref.object_hash.0,
-                locator: root.node_ref.locator,
-            },
-            Bytes::from(root.encoded),
-        )])),
-        ready: Rc::clone(&resolver_ready),
+    let resolver_fails = Rc::new(Cell::new(false));
+    database.set_missing_chunk_resolver(Rc::new(ParkedFixtureChunkResolver {
+        resolver: DeferredFixtureChunkResolver {
+            chunks: Rc::new(std::collections::BTreeMap::from([(
+                crate::chunks::ChunkRequest {
+                    object_hash: root.node_ref.object_hash.0,
+                    locator: root.node_ref.locator,
+                },
+                Bytes::from(root.encoded),
+            )])),
+            ready: Rc::clone(&resolver_ready),
+        },
+        fails: Rc::clone(&resolver_fails),
     }));
 
     let mut setup_batch = database.open_batch();
@@ -3442,6 +3486,16 @@ async fn parked_evaluation_fixture(
         .next_multisink_subscription(&subscription)
         .await
         .unwrap();
+    let observer = if observer_sinks.is_empty() {
+        None
+    } else {
+        let observer = database.subscribe(observer_sinks).unwrap();
+        database
+            .next_multisink_subscription(&observer)
+            .await
+            .unwrap();
+        Some(observer)
+    };
 
     let mut parked_batch = database.open_batch();
     parked(&mut parked_batch, Value::Large(Box::new(staged.value_ref)));
@@ -3463,6 +3517,8 @@ async fn parked_evaluation_fixture(
         database,
         subscription,
         resolver_ready,
+        resolver_fails,
+        observer,
         parked,
         concurrent,
         index_folds_while_parking,
@@ -3483,14 +3539,22 @@ impl ParkedEvaluationFixture {
     }
 
     fn drain(&self, sink: &str) -> Vec<(Vec<Value>, i64)> {
-        let mut rows = Vec::new();
-        while let Ok(update) = self.subscription.try_recv() {
-            if let Some(deltas) = update.sinks.get(sink) {
-                rows.extend(deltas.to_values().unwrap());
-            }
-        }
-        rows
+        drain_sink(&self.subscription, sink)
     }
+
+    fn drain_observer(&self, sink: &str) -> Vec<(Vec<Value>, i64)> {
+        drain_sink(self.observer.as_ref().expect("observed fixture"), sink)
+    }
+}
+
+fn drain_sink(subscription: &MultisinkSubscription, sink: &str) -> Vec<(Vec<Value>, i64)> {
+    let mut rows = Vec::new();
+    while let Ok(update) = subscription.try_recv() {
+        if let Some(deltas) = update.sinks.get(sink) {
+            rows.extend(deltas.to_values().unwrap());
+        }
+    }
+    rows
 }
 
 fn rooms_and_messages_tables() -> Vec<TableSchema> {
@@ -3797,6 +3861,53 @@ async fn parked_recursion_hands_its_closure_to_the_next_write() {
             (vec![Value::U64(1), Value::U64(2)], 1),
             (vec![Value::U64(1), Value::U64(3)], 1),
             (vec![Value::U64(2), Value::U64(3)], 1),
+        ],
+    );
+}
+
+/// #3815: a parked evaluation that fails holds its recursive nodes without
+/// installing them, while the nodes it wrote back carry its rows. B adds edge
+/// 1->2 with a cold blob whose chunk fetch then fails. Its recursion must be
+/// reset rather than left as of before B beside B's written-back edges, so
+/// later writes rehydrate it: C's edge 3->4 then derives 1->4.
+#[futures_test::test]
+async fn failed_parked_recursion_is_rehydrated_by_later_writes() {
+    let edge = |id: u64, src: u64, dst: u64| vec![Value::U64(id), Value::U64(src), Value::U64(dst)];
+    // Renamed, so this sink's output is not the recursive node itself.
+    let reach = reach_graph().project_fields([
+        ProjectField::renamed("src", "from"),
+        ProjectField::renamed("dst", "to"),
+    ]);
+    let mut fixture = parked_evaluation_fixture_observed(
+        edges_and_blobs_tables(),
+        |batch| batch.insert("edges", edge(10, 10, 11)),
+        vec![("blobs", GraphBuilder::table("blobs"))],
+        vec![("reach", reach)],
+        |batch, payload| {
+            batch.insert("edges", edge(1, 1, 2));
+            batch.insert("blobs", vec![Value::U64(1), payload]);
+        },
+        |batch| batch.insert("edges", edge(2, 2, 3)),
+    )
+    .await;
+    fixture.resolver_fails.set(true);
+    fixture.settle("blobs").await;
+    fixture.drain_observer("reach");
+
+    let mut later = fixture.database.open_batch();
+    later.insert("edges", edge(3, 3, 4));
+    let later = fixture.database.apply_batch(later).await.unwrap();
+    let persisted = later.persist().await;
+    fixture.database.finish_persistence(persisted).unwrap();
+    fixture.database.flush().await.unwrap();
+    let mut reach = fixture.drain_observer("reach");
+    reach.sort_by_key(|(values, _)| format!("{values:?}"));
+    assert_eq!(
+        reach,
+        vec![
+            (vec![Value::U64(1), Value::U64(4)], 1),
+            (vec![Value::U64(2), Value::U64(4)], 1),
+            (vec![Value::U64(3), Value::U64(4)], 1),
         ],
     );
 }
