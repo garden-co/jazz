@@ -1065,7 +1065,7 @@ where
             .map(|(stored, global_time)| (stored.clone(), *global_time))
             .collect::<Vec<_>>();
         let applied = self.database.apply_batch(batch).await?;
-        let persisted = applied.persist().await;
+        let persisted = self.database.persist_with_progress(&applied).await;
         self.database.finish_persistence(persisted)?;
         let rebuild_rows = content_rows.iter()
             .filter(|(table_id, _, _, _)| !empty_history_tables.contains(table_id))

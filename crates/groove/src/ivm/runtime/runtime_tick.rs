@@ -5,13 +5,31 @@ use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Mutex;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Wake, Waker};
 
 use super::evaluation_session::{
     EvaluationInputs, EvaluationRequestFailure, EvaluationRequestKey, EvaluationRequests,
 };
 use super::*;
 use crate::storage::{OwnedStorage, StagedWriteOverlay, StagedWriteState, WriteManyOutcome};
+
+/// Wakes both a direct poller and the runtime owner; see
+/// `IvmRuntime::owner_fanout_waker_for`.
+struct OwnerFanoutWake {
+    caller: Waker,
+    owner: Waker,
+}
+
+impl Wake for OwnerFanoutWake {
+    fn wake(self: std::sync::Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &std::sync::Arc<Self>) {
+        self.caller.wake_by_ref();
+        self.owner.wake_by_ref();
+    }
+}
 
 /// Hydration can discover a large resident graph in one poll. Keep every
 /// owner turn bounded so a browser worker returns to transport ingress between
@@ -2815,6 +2833,15 @@ impl IvmRuntime {
             "pending evaluation polling is not reentrant"
         );
         self.pending_incremental_polling = true;
+        // Suspended storage and chunk futures retain only the waker of their
+        // latest poll. Direct operations (subscription openings, one-shot
+        // reads, write admission) poll this queue with their own transient
+        // or no-op wakers; without the owner's bridge, whichever of them
+        // polled last would silently take the continuation of an older cold
+        // hydration with it, and that hydration would never be resumed.
+        let fanout = self.owner_fanout_waker_for(cx.waker());
+        let mut owner_cx = Context::from_waker(fanout.as_ref().unwrap_or(cx.waker()));
+        let cx = &mut owner_cx;
         let slot = Rc::clone(&self.pending_incremental.0);
         let mut state = std::mem::take(&mut *slot.borrow_mut());
         if state.order.is_empty() {
@@ -3043,6 +3070,41 @@ impl IvmRuntime {
                 Poll::Pending
             },
         )
+    }
+
+    /// Remember the durable wake bridge of the runtime owner. Cold work that
+    /// any later caller polls keeps waking this owner as well as that caller.
+    pub(crate) fn retain_owner_progress_waker(&mut self, owner: &Waker) {
+        if self
+            .owner_progress_waker
+            .as_ref()
+            .is_some_and(|retained| retained.will_wake(owner))
+        {
+            return;
+        }
+        self.owner_progress_waker = Some(owner.clone());
+        self.owner_fanout_waker = None;
+    }
+
+    /// The waker a poll by `caller` must install on suspended work: the
+    /// caller's own waker plus the retained owner bridge. `None` when no
+    /// owner is known or the caller is the owner.
+    fn owner_fanout_waker_for(&mut self, caller: &Waker) -> Option<Waker> {
+        let owner = self.owner_progress_waker.as_ref()?;
+        if owner.will_wake(caller) {
+            return None;
+        }
+        if let Some((cached_caller, fanout)) = &self.owner_fanout_waker
+            && cached_caller.will_wake(caller)
+        {
+            return Some(fanout.clone());
+        }
+        let fanout = Waker::from(std::sync::Arc::new(OwnerFanoutWake {
+            caller: caller.clone(),
+            owner: owner.clone(),
+        }));
+        self.owner_fanout_waker = Some((caller.clone(), fanout.clone()));
+        Some(fanout)
     }
 
     fn finish_pending_incremental_poll(
