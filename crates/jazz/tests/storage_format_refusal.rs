@@ -15,6 +15,7 @@ use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use sha2::{Digest, Sha256};
 
 const ROW_HISTORY_V2: &str = "jazz.history-version-current.v2";
+const AUTHOR_ALIAS_V1: &str = "jazz.author-alias.v1";
 
 fn notes_schema() -> JazzSchema {
     let source = SchemaBuilder::new()
@@ -86,7 +87,12 @@ fn assert_refused(result: Result<(), StorageError>, expected_unknown: &[&str], s
             unknown,
         }) => {
             assert_eq!(epoch, 1, "{store}");
-            assert_eq!(missing, vec![ROW_HISTORY_V2.to_owned()], "{store}");
+            // A DAG-layout root predates both node-root families.
+            assert_eq!(
+                missing,
+                vec![AUTHOR_ALIAS_V1.to_owned(), ROW_HISTORY_V2.to_owned()],
+                "{store}"
+            );
             assert_eq!(unknown, expected_unknown, "{store}");
         }
         Err(other) => panic!("{store}: expected a typed format refusal, got {other}"),
@@ -103,7 +109,8 @@ fn assert_refused(result: Result<(), StorageError>, expected_unknown: &[&str], s
 ///
 /// ```text
 /// alice's alpha.54 root ──open(node profile)──✗ UnsupportedStorageCodecs
-///                                               missing [jazz.history-version-current.v2]
+///                                               missing [jazz.author-alias.v1,
+///                                                        jazz.history-version-current.v2]
 /// ```
 #[test]
 fn published_alpha54_rocksdb_root_is_refused_with_a_typed_format_error() {
@@ -194,5 +201,58 @@ fn pre_linear_native_corpora_are_refused_before_any_mutation() {
         open_rocksdb(&path),
         &[],
         "pre-linear current RocksDB corpus",
+    );
+}
+
+/// A linear-history root written before row-author aliasing (it declares
+/// `jazz.history-version-current.v2` but not `jazz.author-alias.v1`, and
+/// stores full `RowAuthor` records where current code reads a 4-byte alias)
+/// is refused at open with the typed error naming only the alias family, and
+/// the SQLite file is left byte-for-byte unchanged.
+///
+/// Actors: `dave` upgrades a client whose store was written by the first
+/// linear-history build, before author aliases.
+///
+/// ```text
+/// dave's pre-alias root ──open(node profile)──✗ UnsupportedStorageCodecs
+///                                               missing [jazz.author-alias.v1]
+/// ```
+#[test]
+fn pre_alias_linear_history_root_is_refused_with_a_typed_format_error() {
+    let families = notes_schema().column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let pre_alias_profile = jazz::storage_codec_profile::epoch_1_storage_codec_profile()
+        .expect("base profile")
+        .with_additional_codecs([ROW_HISTORY_V2])
+        .expect("pre-alias node profile");
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("root.sqlite");
+    jazz_storage_sqlite::SqliteStorage::open_with_durability_and_codec_profile(
+        &path,
+        &refs,
+        jazz_storage_sqlite::Durability::FullSync,
+        &pre_alias_profile,
+    )
+    .map(drop)
+    .expect("a pre-alias build creates its root");
+    let written = std::fs::read(&path).unwrap();
+
+    match open_sqlite(&path) {
+        Err(StorageError::UnsupportedStorageCodecs {
+            epoch,
+            missing,
+            unknown,
+        }) => {
+            assert_eq!(epoch, 1);
+            assert_eq!(missing, vec![AUTHOR_ALIAS_V1.to_owned()]);
+            assert!(unknown.is_empty());
+        }
+        Err(other) => panic!("expected a typed format refusal, got {other}"),
+        Ok(()) => panic!("a pre-alias root must not open"),
+    }
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        written,
+        "the refused root is not mutated"
     );
 }

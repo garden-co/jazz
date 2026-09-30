@@ -73,3 +73,4 @@ include!("view_update_capture.rs");
 include!("native_storage_corpus.rs");
 
 include!("accepted_fate_replay.rs");
+include!("author_alias_codec.rs");

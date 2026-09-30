@@ -32,3 +32,10 @@ admission. It added `jazz.history-version-current.v2`, the one member of the
 `jazz-node-root` profile that every row-holding root declares on top of the
 epoch-one `jazz-root` base, and the non-profile
 `jazz.subscription-watermark.v1` direct record store.
+
+Row-author aliasing (2026-09-30) added `jazz.author-alias.v1` to the
+`jazz-node-root` profile: physical row-author columns and
+`jazz_transactions.made_by` store a 4-byte `U32` alias resolved through the
+`jazz_authors` table. A linear-history root written before aliasing declares
+only `jazz.history-version-current.v2` and is refused at manifest admission
+with `missing: ["jazz.author-alias.v1"]`.

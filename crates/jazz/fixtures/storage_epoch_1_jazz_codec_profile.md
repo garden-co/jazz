@@ -59,3 +59,29 @@ base profile. Manifest admission refuses it with the typed
 `groove::storage::Error::UnsupportedStorageCodecs { epoch: 1, missing:
 ["jazz.history-version-current.v2"], unknown: [...] }` before any ordinary key
 is decoded or written (`tests/storage_format_refusal.rs`). No migration exists.
+
+## Row-author aliases (2026-09-30)
+
+The node-root profile adds `jazz.author-alias.v1` (SPEC 2 §2.2): physical
+content rows store `created_by` / `updated_by`, and `jazz_transactions` stores
+`made_by`, as a 4-byte little-endian `U32` `AuthorAlias`; the `jazz_authors`
+table maps each alias to the exact `RowAuthor` record bytes. The exact row
+bytes are pinned by
+`node::tests::harness::author_alias_codec_v1_pins_physical_bytes`.
+
+- codec registry, in canonical order: the node-root list above with
+  `jazz.author-alias.v1` inserted after `groove.ordered-kv.v1` (14 families)
+- SHA-256 of the committed canonical `JSM1` bytes (adapter sample `memory`,
+  `key-order=unsigned-lexicographic`):
+  `13a1e05bd9f954d92a0af43c1916c493d50da6863421d0562082722cf6da6faf`
+  (the 13-family node-root checksum above is superseded)
+- receipts:
+  `storage_codec_profile::tests::node_profile_has_a_pinned_manifest_receipt_and_refuses_base_only_roots`,
+  `storage_codec_profile::tests::node_profile_refuses_a_pre_alias_linear_history_root`
+
+A linear-history root written before aliasing declares
+`jazz.history-version-current.v2` but not `jazz.author-alias.v1`. Manifest
+admission refuses it with `UnsupportedStorageCodecs { epoch: 1, missing:
+["jazz.author-alias.v1"], unknown: [] }` before any record is decoded
+(`tests/storage_format_refusal.rs`). A DAG-layout root now reports both
+node-root families as missing. No migration exists.

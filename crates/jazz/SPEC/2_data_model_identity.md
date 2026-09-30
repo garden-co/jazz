@@ -127,7 +127,8 @@ provenance, or sent across a node boundary. Missing, malformed, or colliding
 mappings fail closed before decode or mutation. Different replicas may assign
 different local aliases to the same global identity.
 
-Row authors follow the same discipline. Physical content row tables
+**Row-author alias storage codec (`jazz.author-alias.v1`).** Row authors
+follow the same discipline. Physical content row tables
 (`jazz_physical_{id}_history`, `_global_current`, `_ahead_current` and
 `_ahead_shadow`) do not repeat the full structured `RowAuthor`
 record (§2.7) in every `created_by` / `updated_by` cell: each node interns the exact author record bytes to a local
@@ -173,6 +174,16 @@ fate/replay decisions, `$madeBy`, policy evaluation and every sync message
 still carry the full author. The pending-replay scan compares aliases directly,
 which is exact because the mapping is a bijection on record bytes.
 `jazz_rejected_transactions.made_by` still stores the full record.
+
+This layout is the storage codec family `jazz.author-alias.v1`, which every
+node root declares in its manifest next to `jazz.history-version-current.v2`
+(§2.7.1). A linear-history root written before aliasing stores the full
+`RowAuthor` record in these fields and lacks the family, so opening it fails at
+the manifest check, before any record is decoded, with the typed
+`groove::storage::Error::UnsupportedStorageCodecs { missing:
+["jazz.author-alias.v1"] }` rather than reading a record as a `U32`. The exact
+bytes of one `jazz_authors` row, a stored `made_by` and a history row's author
+cells are pinned by `author_alias_codec_v1_pins_physical_bytes`.
 
 ### 2.3 Application schema
 
@@ -327,8 +338,9 @@ SYSTEM capability is not persisted as a row author. Node-local aliases live in `
 
 **Linear-history storage boundary (2026-09-29).** A node root that holds row
 history (Core, relay and client stores on every adapter) declares the codec
-family `jazz.history-version-current.v2` in its storage manifest, in addition
-to the shared Jazz epoch-one profile. That family is the linear row-state
+family `jazz.history-version-current.v2` (and the row-author alias family
+`jazz.author-alias.v1`, §2.2) in its storage manifest, in addition to the
+shared Jazz epoch-one profile. That family is the linear row-state
 layout: one history record per accepted transaction holding the row state after
 Core's merge, keyed `(branch_key, row_uuid, tx_time, tx_node_id)` with index
 `by_tx`; a global-current record per row with `global_time` (the row's seq) and

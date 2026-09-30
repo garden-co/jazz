@@ -50,7 +50,17 @@ pub fn epoch_1_storage_codec_profile() -> Result<StorageCodecProfile, Error> {
 /// a manifest member. A root written by that layout lacks this family and is
 /// refused at manifest admission with
 /// [`Error::UnsupportedStorageCodecs`] before any record is decoded.
-pub const JAZZ_NODE_STORAGE_CODECS: &[&str] = &["jazz.history-version-current.v2"];
+///
+/// `jazz.author-alias.v1` is the node-local row-author alias layout: physical
+/// content rows (`created_by` / `updated_by`) and `jazz_transactions.made_by`
+/// store a 4-byte little-endian `U32` `AuthorAlias`, and the `jazz_authors`
+/// table (`id: U32` primary key, `author: RowAuthor` record) maps each alias
+/// back to the exact author record bytes. A linear-history root written before
+/// aliasing stores the full `RowAuthor` record in those fields; it lacks this
+/// family and is refused at manifest admission in the same way, instead of
+/// decoding a record as a `U32`.
+pub const JAZZ_NODE_STORAGE_CODECS: &[&str] =
+    &["jazz.author-alias.v1", "jazz.history-version-current.v2"];
 
 /// The closed profile for a root that stores Jazz rows: the epoch-one base
 /// plus [`JAZZ_NODE_STORAGE_CODECS`]. Auxiliary roots that hold no row
@@ -110,8 +120,8 @@ mod tests {
 
     /// Internal manifest receipt: the node-root inventory is a durable byte
     /// contract that no public API exposes. It differs from the epoch-one
-    /// base only by the row-history family, so an old node root (base only)
-    /// is refused with the typed codec-inventory error.
+    /// base only by the row-history and author-alias families, so an old node
+    /// root (base only) is refused with the typed codec-inventory error.
     #[test]
     fn node_profile_has_a_pinned_manifest_receipt_and_refuses_base_only_roots() {
         use std::collections::BTreeMap;
@@ -125,7 +135,7 @@ mod tests {
             &node_storage_codec_profile().expect("valid node profile"),
         )
         .expect("valid manifest");
-        let expected = b"JSM1\0\x01\0\x01\x06memory\x0d\x15groove.large-value.v1\x1fgroove.ordered-chunk-storage.v1\x14groove.ordered-kv.v1\x12jazz.branch-key.v1\x1cjazz.catalogue.activation.v1\x21jazz.catalogue.bootstrap-ready.v1\x16jazz.catalogue.lens.v1\x19jazz.catalogue.lineage.v1\x22jazz.catalogue.physical-mapping.v1\x18jazz.catalogue.schema.v1\x1fjazz.catalogue.write-pointer.v1\x1fjazz.history-version-current.v2\x25jazz.subscription-program-fact-key.v1\x01\x09key-order\0\x16unsigned-lexicographic";
+        let expected = b"JSM1\0\x01\0\x01\x06memory\x0e\x15groove.large-value.v1\x1fgroove.ordered-chunk-storage.v1\x14groove.ordered-kv.v1\x14jazz.author-alias.v1\x12jazz.branch-key.v1\x1cjazz.catalogue.activation.v1\x21jazz.catalogue.bootstrap-ready.v1\x16jazz.catalogue.lens.v1\x19jazz.catalogue.lineage.v1\x22jazz.catalogue.physical-mapping.v1\x18jazz.catalogue.schema.v1\x1fjazz.catalogue.write-pointer.v1\x1fjazz.history-version-current.v2\x25jazz.subscription-program-fact-key.v1\x01\x09key-order\0\x16unsigned-lexicographic";
         assert_eq!(node.encode().expect("canonical manifest"), expected);
 
         let base_root = crate::groove::storage::StorageEpochManifest::epoch_1_with_codec_profile(
@@ -143,10 +153,60 @@ mod tests {
                 missing,
                 unknown,
             }) => {
-                assert_eq!(missing, vec!["jazz.history-version-current.v2".to_owned()]);
+                assert_eq!(
+                    missing,
+                    vec![
+                        "jazz.author-alias.v1".to_owned(),
+                        "jazz.history-version-current.v2".to_owned(),
+                    ]
+                );
                 assert!(unknown.is_empty());
             }
             other => panic!("expected a typed refusal of a base-only root, got {other:?}"),
+        }
+    }
+
+    /// A linear-history root written before row-author aliasing declares the
+    /// row-history family but not `jazz.author-alias.v1`: its physical author
+    /// fields and `jazz_transactions.made_by` hold full `RowAuthor` records.
+    /// Admission refuses it with the typed error naming only the alias family.
+    #[test]
+    fn node_profile_refuses_a_pre_alias_linear_history_root() {
+        use std::collections::BTreeMap;
+
+        let parameters =
+            BTreeMap::from([("key-order".to_owned(), b"unsigned-lexicographic".to_vec())]);
+        let node = crate::groove::storage::StorageEpochManifest::epoch_1_with_codec_profile(
+            "memory",
+            1,
+            parameters.clone(),
+            &node_storage_codec_profile().expect("valid node profile"),
+        )
+        .expect("valid manifest");
+        let pre_alias_profile = epoch_1_storage_codec_profile()
+            .expect("valid base profile")
+            .with_additional_codecs(["jazz.history-version-current.v2"])
+            .expect("valid pre-alias profile");
+        let pre_alias_root =
+            crate::groove::storage::StorageEpochManifest::epoch_1_with_codec_profile(
+                "memory",
+                1,
+                parameters,
+                &pre_alias_profile,
+            )
+            .expect("valid manifest")
+            .encode()
+            .expect("canonical manifest");
+        match node.admit(Some(&pre_alias_root)) {
+            Err(Error::UnsupportedStorageCodecs {
+                epoch: 1,
+                missing,
+                unknown,
+            }) => {
+                assert_eq!(missing, vec!["jazz.author-alias.v1".to_owned()]);
+                assert!(unknown.is_empty());
+            }
+            other => panic!("expected a typed refusal of a pre-alias root, got {other:?}"),
         }
     }
 }

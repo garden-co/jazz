@@ -372,6 +372,37 @@
       ]
     },
     {
+      "id": "jazz.author-alias.v1",
+      "boundary": "durable-storage",
+      "profile": "jazz-node-root",
+      "spec": {
+        "path": "crates/jazz/SPEC/2_data_model_identity.md",
+        "anchor": "**Row-author alias storage codec (`jazz.author-alias.v1`).**"
+      },
+      "semantic_fixture": {
+        "path": "crates/jazz/layers/node/src/node/tests/author_alias_codec.rs",
+        "anchor": "fn author_alias_codec_v1_pins_physical_bytes"
+      },
+      "rejection_receipt": {
+        "path": "crates/jazz/tests/storage_format_refusal.rs",
+        "anchor": "fn pre_alias_linear_history_root_is_refused_with_a_typed_format_error"
+      },
+      "evidence": [
+        {
+          "path": "crates/jazz/layers/protocol/src/storage_codec_profile.rs",
+          "anchor": "fn node_profile_refuses_a_pre_alias_linear_history_root"
+        },
+        {
+          "path": "crates/jazz/tests/row_provenance.rs",
+          "anchor": "fn row_authors_round_trip_across_restarts"
+        },
+        {
+          "path": "crates/jazz/layers/node/src/node/author_aliases.rs",
+          "anchor": "fn staging_fails_closed_when_u32_aliases_are_exhausted"
+        }
+      ]
+    },
+    {
       "id": "jazz.history-version-current.v2",
       "boundary": "durable-storage",
       "profile": "jazz-node-root",
