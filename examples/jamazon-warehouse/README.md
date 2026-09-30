@@ -118,7 +118,8 @@ makes that candidate set complete.
   handover and revocation, the cross-warehouse rejections, the two-operator stock race, the
   two-phase checkout (placing an interrupted draft, refusing a reused key with different lines,
   and releasing a reservation whose placement was rejected), retried checkout and delivery
-  batches.
+  batches. It also checks that bundled modules import each other without a `.js` extension,
+  which Turbopack (`next dev`, `next build`) cannot map to the `.ts` source.
 - `pnpm --dir examples/jamazon-warehouse test:browser` runs the browser topology receipt: a
   duplicated and dropped checkout hand-off, reconnect, persistent reopen and ownership transfer.
 
