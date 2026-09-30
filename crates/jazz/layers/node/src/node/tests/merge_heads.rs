@@ -746,6 +746,100 @@ fn same_target_head_sweep_reuses_common_ancestry() {
         .unwrap();
 }
 
+/// Contract: unresolved row ancestry is not settled as a negative; when the
+/// missing parent arrives, a fresh query sees the target, and a proven path
+/// wins over an unknown sibling. This private NodeState seam is needed to
+/// create partial row history; no client actors participate.
+///
+/// ```text
+/// writer --ingest start -> missing--> query(false)
+/// writer --ingest missing -> target--> new query(true)
+/// writer --ingest witnessed -> {missing, target}--> query(true)
+/// ```
+#[test]
+fn shared_reachability_memo_keeps_unknown_history_unsettled() {
+    let schema = two_column_schema();
+    let (_dir, mut writer) = open_node_with_schema(node(0xf8), schema.clone());
+    let table = &schema.tables[0];
+    let row_uuid = row(0xf9);
+    let table_id = writer
+        .physical_table_id_for_schema(writer.catalogue.active_schema.schema, "todos")
+        .unwrap();
+    let target = TxId::new(TxTime::from(20), node(0xfa));
+    let missing = TxId::new(TxTime::from(30), node(0xfb));
+    let start = TxId::new(TxTime::from(40), node(0xfc));
+    ingest_without_current_indexes(
+        &mut writer,
+        &schema,
+        table,
+        row_uuid,
+        start,
+        vec![missing],
+    );
+
+    let first = crate::local_executor::block_on(
+        writer.content_versions_reach_tx_with_shared_memo_for_test(
+            table_id,
+            &BranchKey::default(),
+            row_uuid,
+            &[start],
+            target,
+        ),
+    )
+    .unwrap();
+    assert_eq!(first, vec![false], "missing ancestry remains unresolved");
+
+    // The intermediate transaction arrives with the queried target as its
+    // parent; a new query scope must observe the repaired row history.
+    ingest_without_current_indexes(
+        &mut writer,
+        &schema,
+        table,
+        row_uuid,
+        missing,
+        vec![target],
+    );
+    let second = crate::local_executor::block_on(
+        writer.content_versions_reach_tx_with_shared_memo_for_test(
+            table_id,
+            &BranchKey::default(),
+            row_uuid,
+            &[start],
+            target,
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        second,
+        vec![true],
+        "late intermediate history must repair reachability"
+    );
+
+    // A proven target path remains positive even when a sibling parent is
+    // still missing from this row's local history.
+    let missing_sibling = TxId::new(TxTime::from(32), node(0xfd));
+    let witnessed = TxId::new(TxTime::from(42), node(0xfe));
+    ingest_without_current_indexes(
+        &mut writer,
+        &schema,
+        table,
+        row_uuid,
+        witnessed,
+        vec![missing_sibling, target],
+    );
+    let positive_with_unknown = crate::local_executor::block_on(
+        writer.content_versions_reach_tx_with_shared_memo_for_test(
+            table_id,
+            &BranchKey::default(),
+            row_uuid,
+            &[witnessed],
+            target,
+        ),
+    )
+    .unwrap();
+    assert_eq!(positive_with_unknown, vec![true]);
+}
+
 // Internal work-count receipt: transaction fate handling may read the full
 // unit once; exact row matching must not add another transaction-wide read.
 #[test]

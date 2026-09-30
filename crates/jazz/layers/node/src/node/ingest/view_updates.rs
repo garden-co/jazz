@@ -1,3 +1,71 @@
+const CONTENT_VERSION_REACHABILITY_QUERY_MEMO_MAX_ENTRIES: usize = 65_536;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ContentVersionReachabilityOutcome {
+    Reaches,
+    DoesNotReach,
+    Unknown,
+}
+
+/// Results shared by the head sweep for one fixed row coordinate and target.
+struct ContentVersionReachabilityQueryMemo {
+    table_id: PhysicalTableId,
+    branch_key: BranchKey,
+    row_uuid: RowUuid,
+    target: TxId,
+    outcomes: rustc_hash::FxHashMap<TxId, ContentVersionReachabilityOutcome>,
+}
+
+impl ContentVersionReachabilityQueryMemo {
+    fn new(
+        table_id: PhysicalTableId,
+        branch_key: BranchKey,
+        row_uuid: RowUuid,
+        target: TxId,
+    ) -> Self {
+        Self {
+            table_id,
+            branch_key,
+            row_uuid,
+            target,
+            outcomes: rustc_hash::FxHashMap::default(),
+        }
+    }
+
+    fn matches_scope(
+        &self,
+        table_id: PhysicalTableId,
+        branch_key: &BranchKey,
+        row_uuid: RowUuid,
+        target: TxId,
+    ) -> bool {
+        self.table_id == table_id
+            && &self.branch_key == branch_key
+            && self.row_uuid == row_uuid
+            && self.target == target
+    }
+
+    fn outcome(&self, tx_id: TxId) -> Option<ContentVersionReachabilityOutcome> {
+        self.outcomes.get(&tx_id).copied()
+    }
+
+    fn remember(&mut self, tx_id: TxId, outcome: ContentVersionReachabilityOutcome) {
+        if outcome == ContentVersionReachabilityOutcome::Unknown {
+            return;
+        }
+        let can_insert = self.outcomes.len() < CONTENT_VERSION_REACHABILITY_QUERY_MEMO_MAX_ENTRIES;
+        match self.outcomes.entry(tx_id) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                entry.insert(outcome);
+            }
+            std::collections::hash_map::Entry::Vacant(entry) if can_insert => {
+                entry.insert(outcome);
+            }
+            std::collections::hash_map::Entry::Vacant(_) => {}
+        }
+    }
+}
+
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
@@ -495,14 +563,21 @@ where
             heads.remove(&parent);
         }
         let mut dominated_by_existing_head = false;
+        let mut reachability_memo = ContentVersionReachabilityQueryMemo::new(
+            table_id,
+            version.branch_key().clone(),
+            version.row_uuid(),
+            new_tx,
+        );
         for head in heads.iter().copied() {
             if self
-                .content_version_reaches_tx(
+                .content_version_reaches_tx_with_query_memo(
                     table_id,
                     version.branch_key(),
                     version.row_uuid(),
                     head,
                     new_tx,
+                    &mut reachability_memo,
                 )
                 .await?
             {
@@ -707,6 +782,12 @@ where
                         heads.remove(&head);
                     }
                 }
+                let mut reachability_memo = ContentVersionReachabilityQueryMemo::new(
+                    table_id,
+                    branch_key.clone(),
+                    row_uuid,
+                    new_tx,
+                );
                 let mut dominated_by_existing_head = false;
                 for head in heads.iter().copied() {
                     let reaches = match content_version_reaches_tx_in_staged_parents(
@@ -716,12 +797,13 @@ where
                     ) {
                         Some(reaches) => reaches,
                         None => {
-                            self.content_version_reaches_tx(
+                            self.content_version_reaches_tx_with_query_memo(
                                 table_id,
                                 &branch_key,
                                 row_uuid,
                                 head,
                                 new_tx,
+                                &mut reachability_memo,
                             )
                             .await?
                         }
@@ -764,6 +846,195 @@ where
         let persisted = applied.persist().await;
         self.database.finish_persistence(persisted)?;
         Ok(())
+    }
+
+    async fn content_version_reaches_tx_with_query_memo(
+        &mut self,
+        table_id: PhysicalTableId,
+        branch_key: &BranchKey,
+        row_uuid: RowUuid,
+        start: TxId,
+        target: TxId,
+        memo: &mut ContentVersionReachabilityQueryMemo,
+    ) -> Result<bool, Error> {
+        #[cfg(any(test, feature = "testing"))]
+        {
+            self.merge_head_reachability_walks += 1;
+        }
+        debug_assert!(memo.matches_scope(table_id, branch_key, row_uuid, target));
+        if start == target {
+            memo.remember(start, ContentVersionReachabilityOutcome::Reaches);
+            return Ok(true);
+        }
+        if target.time >= start.time {
+            memo.remember(start, ContentVersionReachabilityOutcome::DoesNotReach);
+            return Ok(false);
+        }
+        if let Some(outcome) = memo.outcome(start) {
+            return Ok(outcome == ContentVersionReachabilityOutcome::Reaches);
+        }
+
+        let key = ContentVersionReachabilityCacheKey {
+            table_id,
+            branch_key: branch_key.clone(),
+            row_uuid,
+            start,
+        };
+        if let Some(reaches) = self.cached_content_version_reachability(&key, target) {
+            let outcome = if reaches {
+                ContentVersionReachabilityOutcome::Reaches
+            } else {
+                ContentVersionReachabilityOutcome::DoesNotReach
+            };
+            memo.remember(start, outcome);
+            return Ok(reaches);
+        }
+
+        let mut stack = vec![(start, false)];
+        let mut visiting = FxHashSet::default();
+        let mut parents_by_tx = rustc_hash::FxHashMap::<TxId, Vec<TxId>>::default();
+        let mut outcomes =
+            rustc_hash::FxHashMap::<TxId, ContentVersionReachabilityOutcome>::default();
+        while let Some((tx_id, exiting)) = stack.pop() {
+            if exiting {
+                visiting.remove(&tx_id);
+                let Some(parents) = parents_by_tx.remove(&tx_id) else {
+                    outcomes.insert(tx_id, ContentVersionReachabilityOutcome::Unknown);
+                    continue;
+                };
+                let mut outcome = ContentVersionReachabilityOutcome::DoesNotReach;
+                for parent in parents {
+                    match outcomes
+                        .get(&parent)
+                        .copied()
+                        .or_else(|| memo.outcome(parent))
+                        .unwrap_or(ContentVersionReachabilityOutcome::Unknown)
+                    {
+                        ContentVersionReachabilityOutcome::Reaches => {
+                            outcome = ContentVersionReachabilityOutcome::Reaches;
+                            break;
+                        }
+                        ContentVersionReachabilityOutcome::DoesNotReach => {}
+                        ContentVersionReachabilityOutcome::Unknown => {
+                            outcome = ContentVersionReachabilityOutcome::Unknown;
+                        }
+                    }
+                }
+                outcomes.insert(tx_id, outcome);
+                memo.remember(tx_id, outcome);
+                continue;
+            }
+
+            if outcomes.contains_key(&tx_id) || memo.outcome(tx_id).is_some() {
+                continue;
+            }
+            if tx_id == target {
+                // A witness settles this query; leave unvisited siblings uncached.
+                memo.remember(start, ContentVersionReachabilityOutcome::Reaches);
+                return Ok(true);
+            }
+            if !visiting.insert(tx_id) {
+                // Keep back-edges unresolved; a cycle cannot establish a miss.
+                continue;
+            }
+            #[cfg(any(test, feature = "testing"))]
+            {
+                self.merge_head_reachability_nodes += 1;
+            }
+            let Some(tx) = self.query_transaction(tx_id).await? else {
+                visiting.remove(&tx_id);
+                outcomes.insert(tx_id, ContentVersionReachabilityOutcome::Unknown);
+                continue;
+            };
+            let mut found_content_version = false;
+            let mut parents = Vec::new();
+            if self.query.tx_versions_cache.contains_key(&tx_id) {
+                for version in self
+                    .query_versions_for_tx_physical_coordinate(tx_id, table_id, row_uuid)
+                    .await?
+                {
+                    if version.branch_key() == branch_key
+                        && version.layer() == VersionLayer::Content
+                    {
+                        found_content_version = true;
+                        parents.extend(version.parents());
+                    }
+                }
+            } else if let Some(version) = self
+                .query_exact_parent_version(
+                    tx_id,
+                    tx.node_alias,
+                    &ParentCoordinate {
+                        physical_table_id: table_id,
+                        branch_key: branch_key.clone(),
+                        row_uuid,
+                        layer: VersionLayer::Content,
+                    },
+                )
+                .await?
+            {
+                found_content_version = true;
+                parents.extend(version.parents());
+            }
+            if !found_content_version {
+                visiting.remove(&tx_id);
+                outcomes.insert(tx_id, ContentVersionReachabilityOutcome::Unknown);
+                continue;
+            }
+
+            parents_by_tx.insert(tx_id, parents);
+            stack.push((tx_id, true));
+            if let Some(parents) = parents_by_tx.get(&tx_id) {
+                for parent in parents.iter().rev().copied() {
+                    if outcomes.contains_key(&parent)
+                        || memo.outcome(parent).is_some()
+                        || visiting.contains(&parent)
+                    {
+                        continue;
+                    }
+                    stack.push((parent, false));
+                }
+            }
+        }
+
+        let outcome = outcomes
+            .get(&start)
+            .copied()
+            .or_else(|| memo.outcome(start))
+            .unwrap_or(ContentVersionReachabilityOutcome::Unknown);
+        Ok(outcome == ContentVersionReachabilityOutcome::Reaches)
+    }
+
+    #[cfg(test)]
+    pub(super) async fn content_versions_reach_tx_with_shared_memo_for_test(
+        &mut self,
+        table_id: PhysicalTableId,
+        branch_key: &BranchKey,
+        row_uuid: RowUuid,
+        starts: &[TxId],
+        target: TxId,
+    ) -> Result<Vec<bool>, Error> {
+        let mut memo = ContentVersionReachabilityQueryMemo::new(
+            table_id,
+            branch_key.clone(),
+            row_uuid,
+            target,
+        );
+        let mut results = Vec::with_capacity(starts.len());
+        for start in starts {
+            results.push(
+                self.content_version_reaches_tx_with_query_memo(
+                    table_id,
+                    branch_key,
+                    row_uuid,
+                    *start,
+                    target,
+                    &mut memo,
+                )
+                .await?,
+            );
+        }
+        Ok(results)
     }
 
     pub(super) async fn content_version_reaches_tx(
@@ -1535,4 +1806,57 @@ where
         Ok(())
     }
 
+}
+
+#[cfg(test)]
+mod content_version_reachability_query_memo_tests {
+    use super::*;
+
+    /// Contract: the operation-local memo enforces its entry cap, updates a
+    /// known outcome at capacity, and never stores `Unknown`. This private
+    /// unit seam checks cap and tri-state policy without constructing a full
+    /// row history; no client actors participate.
+    #[test]
+    fn complete_outcomes_obey_hard_entry_cap() {
+        let node_uuid = NodeUuid::from_bytes([0x21; 16]);
+        let target = TxId::new(TxTime::from(0), node_uuid);
+        let mut memo = ContentVersionReachabilityQueryMemo::new(
+            PhysicalTableId(1),
+            BranchKey::default(),
+            RowUuid::from_bytes([0x22; 16]),
+            target,
+        );
+        let first = TxId::new(TxTime::from(0), NodeUuid::from_bytes([0x23; 16]));
+        let last = TxId::new(
+            TxTime::from(CONTENT_VERSION_REACHABILITY_QUERY_MEMO_MAX_ENTRIES as u64),
+            NodeUuid::from_bytes([0x23; 16]),
+        );
+        for index in 0..=CONTENT_VERSION_REACHABILITY_QUERY_MEMO_MAX_ENTRIES as u64 {
+            memo.remember(
+                TxId::new(TxTime::from(index), NodeUuid::from_bytes([0x23; 16])),
+                ContentVersionReachabilityOutcome::DoesNotReach,
+            );
+        }
+        assert_eq!(
+            memo.outcomes.len(),
+            CONTENT_VERSION_REACHABILITY_QUERY_MEMO_MAX_ENTRIES
+        );
+        assert_eq!(
+            memo.outcome(first),
+            Some(ContentVersionReachabilityOutcome::DoesNotReach)
+        );
+        assert_eq!(memo.outcome(last), None);
+
+        memo.remember(first, ContentVersionReachabilityOutcome::Reaches);
+        assert_eq!(
+            memo.outcome(first),
+            Some(ContentVersionReachabilityOutcome::Reaches)
+        );
+        memo.remember(last, ContentVersionReachabilityOutcome::Unknown);
+        assert_eq!(memo.outcome(last), None);
+        assert_eq!(
+            memo.outcomes.len(),
+            CONTENT_VERSION_REACHABILITY_QUERY_MEMO_MAX_ENTRIES
+        );
+    }
 }
