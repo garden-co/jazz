@@ -60,56 +60,6 @@ const frame = 1 / 60;
 
 export const heroExamples: HeroExample[] = [
   {
-    id: "stage-plan",
-    title: "StagePlan",
-    tagline: "A stage crew's task board: shows, departments, live lists and permissions.",
-    description:
-      "A crew prepares shows together: each show has a board of stage-prep tasks with discussion and an activity log, and every crew member's dashboard mounts dozens of live department lists at once. Every write lands locally first and syncs in the background. Crews only see their own shows, enforced by inherited row-level permissions, and tasks can be archived and restored.",
-    highlights: [
-      "Two crew members add and check off tasks and see each other's changes live",
-      "Moving a card to Done updates every open filtered view",
-      "A dashboard mounts dozens of live department lists at once",
-      "Another crew's shows are invisible, enforced by inherited permissions",
-    ],
-    sources: [
-      { label: "App", path: "examples/stage-plan" },
-      { label: "Benchmarks", path: "examples/stage-plan/benchmarks" },
-    ],
-    benchmarks: "examples/stage-plan/benchmarks",
-    video: {
-      src: "/examples/videos/stage-plan.mp4",
-      poster: "/examples/videos/stage-plan.jpg",
-      caption:
-        "A crew chief and a crew member in two browsers: the invite link, card moves on each other's board, and edits made with Sync off arriving once it's back on.",
-    },
-    metrics: [
-      {
-        benchmark: "stage_plan_add_task_1350",
-        label: "Add a task",
-        per: { count: 1350, unit: "task" },
-        interpret: (s) =>
-          `Each task is its own durable transaction, persisted and delivered back to the live list${s / 1350 < frame ? " well inside one 60 fps frame" : ""}. Averaged over 1,350 additions in a row (${t(s)} total).`,
-      },
-      {
-        benchmark: "stage_plan_open_board",
-        label: "Open a show's board",
-        interpret: (s) => `Filtering and ordering a show's tasks from 3,000 on disk takes ${t(s)}.`,
-      },
-      {
-        benchmark: "stage_plan_move_card_to_done",
-        label: "Move a card to Done",
-        interpret: (s) =>
-          `Changing a task's status so it leaves one live filtered view and enters another, until the view has the change, takes ${t(s)}.`,
-      },
-      {
-        benchmark: "stage_plan_crew_dashboard[(600, 60)]",
-        label: "Crew dashboard with 60 live lists",
-        interpret: (s) =>
-          `Opening one overview plus 60 permissioned department lists until all have settled takes ${t(s)}, about ${each(61, s)} per subscription.`,
-      },
-    ],
-  },
-  {
     id: "band-chat",
     title: "BandChat",
     tagline: "Private rooms with membership boundaries, attachments and fast resume.",
@@ -159,6 +109,56 @@ export const heroExamples: HeroExample[] = [
           const scale = small ? ` With 100 messages it takes ${t(small)}.` : "";
           return `A client that has already seen all 10,000 messages reconnects in ${t(s)}: the server confirms it is current without resending any message.${scale}`;
         },
+      },
+    ],
+  },
+  {
+    id: "stage-plan",
+    title: "StagePlan",
+    tagline: "A stage crew's task board: shows, departments, live lists and permissions.",
+    description:
+      "A crew prepares shows together: each show has a board of stage-prep tasks with discussion and an activity log, and every crew member's dashboard mounts dozens of live department lists at once. Every write lands locally first and syncs in the background. Crews only see their own shows, enforced by inherited row-level permissions, and tasks can be archived and restored.",
+    highlights: [
+      "Two crew members add and check off tasks and see each other's changes live",
+      "Moving a card to Done updates every open filtered view",
+      "A dashboard mounts dozens of live department lists at once",
+      "Another crew's shows are invisible, enforced by inherited permissions",
+    ],
+    sources: [
+      { label: "App", path: "examples/stage-plan" },
+      { label: "Benchmarks", path: "examples/stage-plan/benchmarks" },
+    ],
+    benchmarks: "examples/stage-plan/benchmarks",
+    video: {
+      src: "/examples/videos/stage-plan.mp4",
+      poster: "/examples/videos/stage-plan.jpg",
+      caption:
+        "A crew chief and a crew member in two browsers: the invite link, card moves on each other's board, and edits made with Sync off arriving once it's back on.",
+    },
+    metrics: [
+      {
+        benchmark: "stage_plan_add_task_1350",
+        label: "Add a task",
+        per: { count: 1350, unit: "task" },
+        interpret: (s) =>
+          `Each task is its own durable transaction, persisted and delivered back to the live list${s / 1350 < frame ? " well inside one 60 fps frame" : ""}. Averaged over 1,350 additions in a row (${t(s)} total).`,
+      },
+      {
+        benchmark: "stage_plan_open_board",
+        label: "Open a show's board",
+        interpret: (s) => `Filtering and ordering a show's tasks from 3,000 on disk takes ${t(s)}.`,
+      },
+      {
+        benchmark: "stage_plan_move_card_to_done",
+        label: "Move a card to Done",
+        interpret: (s) =>
+          `Changing a task's status so it leaves one live filtered view and enters another, until the view has the change, takes ${t(s)}.`,
+      },
+      {
+        benchmark: "stage_plan_crew_dashboard[(600, 60)]",
+        label: "Crew dashboard with 60 live lists",
+        interpret: (s) =>
+          `Opening one overview plus 60 permissioned department lists until all have settled takes ${t(s)}, about ${each(61, s)} per subscription.`,
       },
     ],
   },
