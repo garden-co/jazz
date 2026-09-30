@@ -634,7 +634,7 @@ where
         .await?;
         batch.deliver_notifications(groove::db::NotificationTiming::AfterPersistence);
         let applied = self.database.apply_batch(batch).await?;
-        let persisted = applied.persist().await;
+        let persisted = self.database.persist_with_progress(&applied).await;
         self.database.finish_persistence(persisted)?;
         if let Some(rejected) = rejected_payload {
             self.rejections.rejected_transactions.insert(tx_id, rejected);
@@ -1216,7 +1216,7 @@ where
             )?,
         );
         let applied = self.database.apply_batch(batch).await?;
-let persisted = applied.persist().await;
+let persisted = self.database.persist_with_progress(&applied).await;
 self.database.finish_persistence(persisted)?;
         Ok(())
     }

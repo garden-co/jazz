@@ -341,7 +341,7 @@ impl<S: OrderedKvStorage> NodeState<S> {
         let mut batch = self.database.open_batch();
         batch.update("jazz_transactions", values);
         let applied = self.database.apply_batch(batch).await.unwrap();
-        let persisted = applied.persist().await;
+        let persisted = self.database.persist_with_progress(&applied).await;
         self.database.finish_persistence(persisted).unwrap();
     }
 }
