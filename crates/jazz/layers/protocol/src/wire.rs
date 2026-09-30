@@ -602,6 +602,18 @@ impl WireError {
             message: message.into(),
         }
     }
+
+    /// Whether this error ends a link without ending the client: the peer is
+    /// overloaded or still bootstrapping and asks to be reconnected with
+    /// backoff. `Later` alone is not enough, since an authentication or
+    /// malformed-frame error can carry it and retrying those cannot succeed.
+    pub fn asks_reconnect_later(&self) -> bool {
+        self.retry == WireRetry::Later
+            && matches!(
+                self.code,
+                WireErrorCode::Backpressure | WireErrorCode::NotReady
+            )
+    }
 }
 
 /// Admit one decoded complete envelope through the canonical wire checks.

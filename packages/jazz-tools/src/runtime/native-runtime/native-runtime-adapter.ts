@@ -77,6 +77,7 @@ import { nativeCoreErrorCode } from "./native-error-code.js";
 import {
   WebSocketCarrier,
   WIRE_PROTOCOL_VERSION,
+  isReconnectLaterWireError,
   isRetryablePreHelloWireError,
   normalizeBackendWebSocketAuth,
   peerIdentityForWebSocketAuth,
@@ -2284,7 +2285,7 @@ export class NativeRuntimeAdapter implements Runtime {
         }
       },
       onError: (error) => {
-        if (error.code === "not_ready" && error.retry === "later") return;
+        if (isReconnectLaterWireError(error)) return;
         if (attempt && this.canRetryNetworkConnection(attempt, error)) return;
         if (
           this.serverTransportError &&
@@ -2297,8 +2298,7 @@ export class NativeRuntimeAdapter implements Runtime {
       },
       onTerminal: (error) => {
         if (!attempt) return;
-        if (error.code === "not_ready" && error.retry === "later" && !attempt.carrier.hasNegotiated)
-          return;
+        if (isReconnectLaterWireError(error) && !attempt.carrier.hasNegotiated) return;
         if (this.canRetryNetworkConnection(attempt, error)) {
           const recovery = this.retryNetworkConnection(attempt, error);
           if (recovery) return;
@@ -3722,7 +3722,7 @@ export class NativeRuntimeAdapter implements Runtime {
       error.retry === "later" &&
       (error.code === "websocket_closed" ||
         error.code === "websocket_error" ||
-        error.code === "not_ready") &&
+        isReconnectLaterWireError(error)) &&
       // A local-first client opened while offline must also reach its server
       // once the network returns, so a first connection that fails at the
       // network layer is retried like a dropped established link.

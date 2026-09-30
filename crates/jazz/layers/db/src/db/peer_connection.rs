@@ -1495,6 +1495,13 @@ where
         Ok(true)
     }
 
+    /// The structured error the remote peer sent before ending this link, if
+    /// any. An upstream owner reconnects when it
+    /// [asks to reconnect later](crate::wire::WireError::asks_reconnect_later).
+    pub fn remote_wire_error(&self) -> Option<crate::wire::WireError> {
+        self.transport.remote_wire_error()
+    }
+
     /// Return the serialized byte size of the latest resume/catch-up response
     /// sent by this connection.
     pub fn last_resume_bytes(&self) -> Option<usize> {
