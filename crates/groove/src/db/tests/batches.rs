@@ -3367,55 +3367,29 @@ async fn suspended_resident_chunk_install_joins_assigned_publication() {
     );
 }
 
-/// Fixture for #3815: a `rooms` semi-join over `messages.room_id` shares a
-/// subscription with a plain `messages` sink. Message B (id 2, in
-/// `parked_room`) carries a cold large payload, so its evaluation parks while
-/// the `messages` sink materializes it, although every graph node (the
-/// semi-join included) has already completed. By default, message A (id 3,
-/// in room 1) is written while B is parked.
-struct ParkedSemiJoinFixture {
+/// Fixture for #3815: write B carries a cold large value, so its evaluation
+/// parks until the value's chunk is released. Write A is applied while B is
+/// parked. `setup` is committed before `sinks` are subscribed and their
+/// initial rows are consumed; `parked` writes B given the cold value;
+/// `concurrent` writes A.
+struct ParkedEvaluationFixture {
     database: Database,
     subscription: MultisinkSubscription,
     resolver_ready: Rc<Cell<bool>>,
     parked: AppliedBatch,
     concurrent: AppliedBatch,
+    /// Arrangement folds that copied a shared join index while B parked.
+    index_folds_while_parking: usize,
 }
 
-async fn parked_semi_join_fixture(parked_room: u64) -> ParkedSemiJoinFixture {
-    parked_semi_join_fixture_with(parked_room, |batch| {
-        batch.insert(
-            "messages",
-            vec![Value::U64(3), Value::U64(1), Value::Bytes(vec![3])],
-        );
-    })
-    .await
-}
-
-/// As [`parked_semi_join_fixture`], with `concurrent` writing the batch that
-/// is applied while B is parked.
-async fn parked_semi_join_fixture_with(
-    parked_room: u64,
+async fn parked_evaluation_fixture(
+    tables: Vec<TableSchema>,
+    setup: impl FnOnce(&mut DatabaseBatch),
+    sinks: Vec<(&'static str, GraphBuilder)>,
+    parked: impl FnOnce(&mut DatabaseBatch, Value),
     concurrent: impl FnOnce(&mut DatabaseBatch),
-) -> ParkedSemiJoinFixture {
-    let schema = DatabaseSchema::new([
-        TableSchema::new(
-            "rooms",
-            [
-                ColumnSchema::new("id", ColumnType::U64),
-                ColumnSchema::new("name", ColumnType::String),
-            ],
-        )
-        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
-        TableSchema::new(
-            "messages",
-            [
-                ColumnSchema::new("id", ColumnType::U64),
-                ColumnSchema::new("room_id", ColumnType::U64),
-                ColumnSchema::new("payload", ColumnType::Bytes),
-            ],
-        )
-        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
-    ]);
+) -> ParkedEvaluationFixture {
+    let schema = DatabaseSchema::new(tables);
     let storage =
         MemoryStorage::new(&schema.column_families()).expect("valid memory storage families");
     let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
@@ -3459,19 +3433,123 @@ async fn parked_semi_join_fixture_with(
         ready: Rc::clone(&resolver_ready),
     }));
 
-    let mut rooms = database.open_batch();
-    rooms.insert(
+    let mut setup_batch = database.open_batch();
+    setup(&mut setup_batch);
+    database.commit_batch(setup_batch).await.unwrap();
+
+    let subscription = database.subscribe(sinks).unwrap();
+    database
+        .next_multisink_subscription(&subscription)
+        .await
+        .unwrap();
+
+    let mut parked_batch = database.open_batch();
+    parked(&mut parked_batch, Value::Large(Box::new(staged.value_ref)));
+    parked_batch.accept_large_value(staged.id);
+    let folds_before = crate::ivm::runtime::shared_arrangement_index_folds();
+    let parked = database.apply_batch(parked_batch).await.unwrap();
+    let index_folds_while_parking =
+        crate::ivm::runtime::shared_arrangement_index_folds() - folds_before;
+    assert!(
+        subscription.try_recv().is_err(),
+        "the cold value must park B's publication"
+    );
+
+    let mut concurrent_batch = database.open_batch();
+    concurrent(&mut concurrent_batch);
+    let concurrent = database.apply_batch(concurrent_batch).await.unwrap();
+
+    ParkedEvaluationFixture {
+        database,
+        subscription,
+        resolver_ready,
+        parked,
+        concurrent,
+        index_folds_while_parking,
+    }
+}
+
+impl ParkedEvaluationFixture {
+    /// Persist both writes, release B's chunk and return every `sink` row
+    /// the subscription published meanwhile.
+    async fn settle(&mut self, sink: &str) -> Vec<(Vec<Value>, i64)> {
+        let parked = self.parked.persist().await;
+        self.database.finish_persistence(parked).unwrap();
+        let concurrent = self.concurrent.persist().await;
+        self.database.finish_persistence(concurrent).unwrap();
+        self.resolver_ready.set(true);
+        self.database.flush().await.unwrap();
+        self.drain(sink)
+    }
+
+    fn drain(&self, sink: &str) -> Vec<(Vec<Value>, i64)> {
+        let mut rows = Vec::new();
+        while let Ok(update) = self.subscription.try_recv() {
+            if let Some(deltas) = update.sinks.get(sink) {
+                rows.extend(deltas.to_values().unwrap());
+            }
+        }
+        rows
+    }
+}
+
+fn rooms_and_messages_tables() -> Vec<TableSchema> {
+    vec![
+        TableSchema::new(
+            "rooms",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("name", ColumnType::String),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
+        TableSchema::new(
+            "messages",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("room_id", ColumnType::U64),
+                ColumnSchema::new("payload", ColumnType::Bytes),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
+    ]
+}
+
+fn insert_rooms(batch: &mut DatabaseBatch) {
+    batch.insert(
         "rooms",
         vec![Value::U64(1), Value::String("general".to_owned())],
     );
-    rooms.insert(
+    batch.insert(
         "rooms",
         vec![Value::U64(2), Value::String("random".to_owned())],
     );
-    database.commit_batch(rooms).await.unwrap();
+}
 
-    let subscription = database
-        .subscribe([
+fn insert_inline_message(batch: &mut DatabaseBatch) {
+    batch.insert(
+        "messages",
+        vec![Value::U64(3), Value::U64(1), Value::Bytes(vec![3])],
+    );
+}
+
+/// A `rooms` semi-join over `messages.room_id` shares a subscription with a
+/// plain `messages` sink. Message B (id 2, in `parked_room`) carries the cold
+/// payload, so its evaluation parks while the `messages` sink materializes
+/// it, although every graph node (the semi-join included) has already
+/// completed. By default, message A (id 3, in room 1) is written meanwhile.
+async fn parked_semi_join_fixture(parked_room: u64) -> ParkedEvaluationFixture {
+    parked_semi_join_fixture_with(parked_room, insert_inline_message).await
+}
+
+async fn parked_semi_join_fixture_with(
+    parked_room: u64,
+    concurrent: impl FnOnce(&mut DatabaseBatch),
+) -> ParkedEvaluationFixture {
+    parked_evaluation_fixture(
+        rooms_and_messages_tables(),
+        insert_rooms,
+        vec![
             (
                 "rooms",
                 GraphBuilder::semi_join(
@@ -3482,71 +3560,16 @@ async fn parked_semi_join_fixture_with(
                 ),
             ),
             ("messages", GraphBuilder::table("messages")),
-        ])
-        .unwrap();
-    let initial = database
-        .next_multisink_subscription(&subscription)
-        .await
-        .unwrap();
-    assert!(
-        initial
-            .sinks
-            .values()
-            .all(|deltas| deltas.to_values().unwrap().is_empty()),
-        "no room has a message yet: {initial:?}"
-    );
-
-    let mut parked = database.open_batch();
-    parked.insert(
-        "messages",
-        vec![
-            Value::U64(2),
-            Value::U64(parked_room),
-            Value::Large(Box::new(staged.value_ref)),
         ],
-    );
-    parked.accept_large_value(staged.id);
-    let parked = database.apply_batch(parked).await.unwrap();
-    assert!(
-        subscription.try_recv().is_err(),
-        "the cold payload must park B's publication"
-    );
-
-    let mut concurrent_batch = database.open_batch();
-    concurrent(&mut concurrent_batch);
-    let concurrent = database.apply_batch(concurrent_batch).await.unwrap();
-
-    ParkedSemiJoinFixture {
-        database,
-        subscription,
-        resolver_ready,
-        parked,
+        |batch, payload| {
+            batch.insert(
+                "messages",
+                vec![Value::U64(2), Value::U64(parked_room), payload],
+            );
+        },
         concurrent,
-    }
-}
-
-impl ParkedSemiJoinFixture {
-    /// Persist both writes, release B's chunk and return every `rooms` row
-    /// the subscription published meanwhile.
-    async fn settle(&mut self) -> Vec<(Vec<Value>, i64)> {
-        let parked = self.parked.persist().await;
-        self.database.finish_persistence(parked).unwrap();
-        let concurrent = self.concurrent.persist().await;
-        self.database.finish_persistence(concurrent).unwrap();
-        self.resolver_ready.set(true);
-        self.database.flush().await.unwrap();
-        self.drain_rooms()
-    }
-
-    fn drain_rooms(&self) -> Vec<(Vec<Value>, i64)> {
-        let mut rooms = Vec::new();
-        while let Ok(update) = self.subscription.try_recv() {
-            if let Some(deltas) = update.sinks.get("rooms") {
-                rooms.extend(deltas.to_values().unwrap());
-            }
-        }
-        rooms
-    }
+    )
+    .await
 }
 
 /// #3815: a semi-join which completed inside a parked evaluation must hand its
@@ -3556,7 +3579,7 @@ impl ParkedSemiJoinFixture {
 #[futures_test::test]
 async fn parked_semi_join_does_not_republish_left_row_for_same_key() {
     let mut fixture = parked_semi_join_fixture(1).await;
-    let rooms = fixture.settle().await;
+    let rooms = fixture.settle("rooms").await;
     assert_eq!(
         rooms,
         vec![(vec![Value::U64(1), Value::String("general".to_owned())], 1)],
@@ -3571,7 +3594,7 @@ async fn parked_semi_join_does_not_republish_left_row_for_same_key() {
 #[futures_test::test]
 async fn parked_semi_join_install_keeps_later_write_keys() {
     let mut fixture = parked_semi_join_fixture(2).await;
-    let mut rooms = fixture.settle().await;
+    let mut rooms = fixture.settle("rooms").await;
     rooms.sort_by_key(|(values, _)| format!("{values:?}"));
     assert_eq!(
         rooms,
@@ -3586,7 +3609,7 @@ async fn parked_semi_join_install_keeps_later_write_keys() {
     fixture.database.commit_batch(delete).await.unwrap();
     fixture.database.flush().await.unwrap();
     assert_eq!(
-        fixture.drain_rooms(),
+        fixture.drain("rooms"),
         vec![(vec![Value::U64(1), Value::String("general".to_owned())], -1)],
         "deleting room 1's only message must retract it"
     );
@@ -3609,7 +3632,7 @@ async fn parked_semi_join_retracts_left_row_updated_meanwhile() {
     })
     .await;
     let mut net = std::collections::BTreeMap::<String, i64>::new();
-    for (values, weight) in fixture.settle().await {
+    for (values, weight) in fixture.settle("rooms").await {
         *net.entry(format!("{values:?}")).or_default() += weight;
     }
     net.retain(|_, weight| *weight != 0);
@@ -3620,6 +3643,161 @@ async fn parked_semi_join_retracts_left_row_updated_meanwhile() {
             1
         )]),
         "subscribers must end with only the renamed room"
+    );
+}
+
+/// #3815: here B parks inside the graph, on a filter that reads its cold
+/// payload, before the semi-join runs. A then waits temporally behind B's
+/// filter, so both evaluations are parked. When B resumes, its semi-join
+/// completes after the park, and A must evaluate from B's result rather than
+/// from the copy it staged when it began.
+#[futures_test::test]
+async fn parked_semi_join_hands_late_completion_to_waiting_write() {
+    let mut fixture = parked_evaluation_fixture(
+        rooms_and_messages_tables(),
+        insert_rooms,
+        vec![(
+            "rooms",
+            GraphBuilder::semi_join(
+                GraphBuilder::table("rooms"),
+                GraphBuilder::table("messages").filter(PredicateExpr::EqField {
+                    field: "payload".to_owned(),
+                    value_field: "payload".to_owned(),
+                }),
+                ["id"],
+                ["room_id"],
+            ),
+        )],
+        |batch, payload| {
+            batch.insert("messages", vec![Value::U64(2), Value::U64(1), payload]);
+        },
+        insert_inline_message,
+    )
+    .await;
+    assert!(
+        fixture.subscription.try_recv().is_err(),
+        "A must wait behind B's parked filter"
+    );
+    assert_eq!(
+        fixture.settle("rooms").await,
+        vec![(vec![Value::U64(1), Value::String("general".to_owned())], 1)],
+        "the room must become visible exactly once"
+    );
+}
+
+/// Scale canary for #3815: writing a parked evaluation's finished state back
+/// must not fold its overlays. Its staged copy still shares the arrangement's
+/// base index, so a fold there would copy the whole index on every parked
+/// write.
+#[futures_test::test]
+async fn parked_write_back_does_not_copy_arrangement_index() {
+    let fixture = parked_evaluation_fixture(
+        rooms_and_messages_tables(),
+        |batch| {
+            insert_rooms(batch);
+            for id in 100..356 {
+                batch.insert(
+                    "messages",
+                    vec![Value::U64(id), Value::U64(2), Value::Bytes(vec![1])],
+                );
+            }
+        },
+        vec![
+            (
+                "rooms",
+                GraphBuilder::semi_join(
+                    GraphBuilder::table("rooms"),
+                    GraphBuilder::table("messages"),
+                    ["id"],
+                    ["room_id"],
+                ),
+            ),
+            ("messages", GraphBuilder::table("messages")),
+        ],
+        |batch, payload| {
+            batch.insert("messages", vec![Value::U64(2), Value::U64(1), payload]);
+        },
+        insert_inline_message,
+    )
+    .await;
+    assert_eq!(fixture.index_folds_while_parking, 0);
+}
+
+fn edges_and_blobs_tables() -> Vec<TableSchema> {
+    vec![
+        TableSchema::new(
+            "edges",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("src", ColumnType::U64),
+                ColumnSchema::new("dst", ColumnType::U64),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
+        TableSchema::new(
+            "blobs",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("payload", ColumnType::Bytes),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
+    ]
+}
+
+fn reach_graph() -> GraphBuilder {
+    let frontier = GraphBuilder::frontier_source(
+        "frontier",
+        RecordDescriptor::new([("src", ColumnType::U64), ("dst", ColumnType::U64)]),
+    );
+    let step = GraphBuilder::join(
+        frontier,
+        GraphBuilder::table("edges").project(["src", "dst"]),
+        ["dst"],
+        ["src"],
+    )
+    .project_fields([
+        ProjectField::renamed("left.src", "src"),
+        ProjectField::renamed("right.dst", "dst"),
+    ]);
+    GraphBuilder::recursive(
+        GraphBuilder::table("edges").project(["src", "dst"]),
+        step,
+        "frontier",
+        16,
+    )
+}
+
+/// #3815: a recursive node keeps its body state in child scopes, so it is not
+/// handed over while its evaluation is parked. B adds edge 1->2 together
+/// with a cold blob and parks on the blob sink; A adds edge 2->3 through the
+/// same recursion. A must wait for B's recursion and then derive 1->3.
+#[futures_test::test]
+async fn parked_recursion_hands_its_closure_to_the_next_write() {
+    let edge = |id: u64, src: u64, dst: u64| vec![Value::U64(id), Value::U64(src), Value::U64(dst)];
+    let mut fixture = parked_evaluation_fixture(
+        edges_and_blobs_tables(),
+        |batch| batch.insert("edges", edge(10, 10, 11)),
+        vec![
+            ("reach", reach_graph()),
+            ("blobs", GraphBuilder::table("blobs")),
+        ],
+        |batch, payload| {
+            batch.insert("edges", edge(1, 1, 2));
+            batch.insert("blobs", vec![Value::U64(1), payload]);
+        },
+        |batch| batch.insert("edges", edge(2, 2, 3)),
+    )
+    .await;
+    let mut reach = fixture.settle("reach").await;
+    reach.sort_by_key(|(values, _)| format!("{values:?}"));
+    assert_eq!(
+        reach,
+        vec![
+            (vec![Value::U64(1), Value::U64(2)], 1),
+            (vec![Value::U64(1), Value::U64(3)], 1),
+            (vec![Value::U64(2), Value::U64(3)], 1),
+        ],
     );
 }
 
