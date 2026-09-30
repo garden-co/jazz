@@ -1842,14 +1842,19 @@ where
 
     /// Abandon an open transaction.
     ///
-    /// Groove roots staged by its partial large-value updates are left to the
-    /// staging TTL, exactly like an abandoned streaming upload.
+    /// Groove roots its partial large-value updates staged become unreachable;
+    /// they are queued for [`Self::evict_released_large_values`], and the
+    /// staging TTL reclaims any that eviction misses.
     pub fn abandon_tx(&mut self, tx_id: OpenTransactionId) -> Result<(), Error> {
-        self.open_tx
+        let open_tx = self
+            .open_tx
             .open_transactions
             .remove(&tx_id)
             .ok_or(Error::MissingOpenBatch(tx_id))?;
         self.open_tx.closed_batches.insert(tx_id);
+        self.open_tx
+            .released_large_values
+            .extend(open_tx.staged_large_value_ids());
         Ok(())
     }
 
@@ -1858,9 +1863,27 @@ where
     /// Database shutdown closes transaction admission before calling this, so
     /// moving the live ids into `closed_batches` is the final ownership pass.
     pub fn abandon_all_open_transactions(&mut self) {
-        self.open_tx
-            .closed_batches
-            .extend(std::mem::take(&mut self.open_tx.open_transactions).into_keys());
+        for (tx_id, open_tx) in std::mem::take(&mut self.open_tx.open_transactions) {
+            self.open_tx.closed_batches.insert(tx_id);
+            self.open_tx
+                .released_large_values
+                .extend(open_tx.staged_large_value_ids());
+        }
+    }
+
+    /// Whether abandoned transactions left Groove roots awaiting eviction.
+    pub fn has_released_large_values(&self) -> bool {
+        !self.open_tx.released_large_values.is_empty()
+    }
+
+    /// Evict Groove roots staged by abandoned transactions.
+    ///
+    /// Call with earlier local publications settled: while one is resident,
+    /// Groove defers eviction. Eviction is idempotent, and a root that
+    /// survives a failed eviction is reclaimed by the staging TTL.
+    pub async fn evict_released_large_values(&mut self) {
+        let released = std::mem::take(&mut self.open_tx.released_large_values);
+        self.evict_superseded_large_values(released).await;
     }
 
     /// Return whether local transaction time advanced after this transaction opened.
@@ -2402,6 +2425,21 @@ pub(super) struct PendingWrite {
     /// staged, unpublished descriptor may enter a transaction commit; public
     /// input can never create it.
     staged_large_cells: BTreeMap<String, groove::large_values::StagedLargeValue>,
+}
+
+impl OpenTransaction {
+    /// Every Groove root this transaction staged and has not yet released.
+    fn staged_large_value_ids(&self) -> Vec<groove::large_values::StagedLargeValueId> {
+        self.superseded_large_values
+            .iter()
+            .copied()
+            .chain(
+                self.writes
+                    .iter()
+                    .flat_map(|write| write.staged_large_cells.values().map(|staged| staged.id)),
+            )
+            .collect()
+    }
 }
 
 impl PendingWrite {

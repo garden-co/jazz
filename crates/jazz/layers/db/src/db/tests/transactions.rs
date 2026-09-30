@@ -795,6 +795,137 @@ fn transaction_splice_rejects_invalid_targets_without_staging() {
     assert_eq!(staged_large_value_count(&db), 0);
 }
 
+/// Abandoning a transaction releases the roots its splices staged instead of
+/// leaving them to the staging TTL.
+#[test]
+fn abandoned_transaction_releases_its_staged_splices() {
+    for exclusive in [false, true] {
+        let db = block_on(doctest_support::open_todos_db()).unwrap();
+        let base = "d".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 32);
+        let row = db
+            .insert(
+                "todos",
+                doctest_support::todo_cells(&base, false),
+                Default::default(),
+            )
+            .unwrap()
+            .row_uuid();
+        let stage = |tx_id| {
+            for (offset, text) in [(0, "one"), (3, "two")] {
+                block_on(db.stage_transaction_large_value_update(
+                    tx_id,
+                    "todos",
+                    row,
+                    BTreeMap::new(),
+                    append_text("title", base.len() as u64 + offset, text),
+                    None,
+                ))
+                .unwrap();
+            }
+        };
+        if exclusive {
+            let tx = db.exclusive_tx().unwrap();
+            stage(tx.tx_id());
+            assert_ne!(staged_large_value_count(&db), 0);
+            drop(tx);
+        } else {
+            let tx = db.mergeable_tx().unwrap();
+            stage(tx.tx_id());
+            assert_ne!(staged_large_value_count(&db), 0);
+            drop(tx);
+        }
+        block_on(db.tick()).unwrap();
+        assert_eq!(committed_title(&db), Some(Value::String(base)));
+        assert_eq!(staged_large_value_count(&db), 0);
+    }
+}
+
+/// Bindings roll back through the queued cleanup (wasm, React Native) or the
+/// synchronous handle abandon (napi); both release the staged roots.
+#[test]
+fn binding_rollback_paths_release_staged_splices() {
+    for queued in [false, true] {
+        let db = block_on(doctest_support::open_todos_db()).unwrap();
+        let base = "f".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 32);
+        let row = db
+            .insert(
+                "todos",
+                doctest_support::todo_cells(&base, false),
+                Default::default(),
+            )
+            .unwrap()
+            .row_uuid();
+        let open = OpenTransactionId::new();
+        block_on(db.begin_exclusive(open)).unwrap();
+        block_on(db.stage_transaction_large_value_update(
+            open,
+            "todos",
+            row,
+            BTreeMap::new(),
+            append_text("title", base.len() as u64, "tail"),
+            None,
+        ))
+        .unwrap();
+        assert_ne!(staged_large_value_count(&db), 0);
+        if queued {
+            db.enqueue_abandon_transaction_handle(open);
+            while db.queued_mutation_count() > 0 {
+                db.drive_queued_mutation_once();
+            }
+        } else {
+            db.abandon_transaction_handle(open).unwrap();
+            block_on(db.tick()).unwrap();
+        }
+        assert_eq!(staged_large_value_count(&db), 0, "queued: {queued}");
+    }
+}
+
+/// Deleting a row after splicing it in the same transaction leaves no staged
+/// root behind once the transaction commits.
+#[test]
+fn transaction_delete_after_splice_leaves_no_staged_root() {
+    for exclusive in [false, true] {
+        let db = block_on(doctest_support::open_todos_db()).unwrap();
+        let base = "e".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 32);
+        let row = db
+            .insert(
+                "todos",
+                doctest_support::todo_cells(&base, false),
+                Default::default(),
+            )
+            .unwrap()
+            .row_uuid();
+        let splice = |tx_id| {
+            block_on(db.stage_transaction_large_value_update(
+                tx_id,
+                "todos",
+                row,
+                BTreeMap::new(),
+                append_text("title", base.len() as u64, "tail"),
+                None,
+            ))
+            .unwrap();
+        };
+        if exclusive {
+            let tx = db.exclusive_tx().unwrap();
+            splice(tx.tx_id());
+            tx.delete("todos", row, Default::default()).unwrap();
+            block_on(tx.commit()).unwrap();
+        } else {
+            let tx = db.mergeable_tx().unwrap();
+            splice(tx.tx_id());
+            tx.delete("todos", row, Default::default()).unwrap();
+            block_on(tx.commit()).unwrap();
+        }
+        assert!(
+            db.read(&db.prepare_query(&db.table("todos")).unwrap())
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(staged_large_value_count(&db), 0);
+    }
+}
+
 /// A branch-view update starts a physical overlay with every visible base
 /// cell. Its untouched large descriptor is engine-derived, while a descriptor
 /// from another source remains untrusted even if both have the same shape.

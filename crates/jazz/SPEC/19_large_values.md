@@ -563,7 +563,9 @@ is authored like any patched column and resolves last-writer-wins at commit.
 The diff is authored by the transaction's bound identity, so session and
 attributed transactions need no separate path. A staged root that outlives the
 staging TTL before commit fails the commit with a staging-expired error rather
-than publishing a partial value. Branch views still reject `applyDiffs`
+than publishing a partial value. Roots superseded inside the transaction are
+evicted at commit, and rolling the transaction back evicts every root it
+staged; the staging TTL only covers evictions that fail. Branch views still reject `applyDiffs`
 explicitly, as do React Native transactions until its foreground codec carries
 the descriptor.
 
