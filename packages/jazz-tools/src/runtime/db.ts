@@ -1,3 +1,4 @@
+import type { DbAccessContext } from "./db-access-context.js";
 import { Utf8Decoder } from "./utf8.js";
 import { runtimeRandomBytes } from "./runtime-entropy.js";
 import type { AccountHandle } from "../accounts/state.js";
@@ -334,14 +335,6 @@ export interface DeleteOptions extends TimestampOverrideOptions {
   branch?: Branch;
   base?: BranchBase;
 }
-
-type DbRuntimeOperationContext = {
-  session?: Session;
-  attribution?: string;
-  // Attributed backend operations read with backend authority while `session`
-  // supplies write provenance. Otherwise reads use `session` as well.
-  readSession?: Session;
-};
 
 function branchColumn(schema: WasmSchema, name: string): ColumnDescriptor {
   const matches = Object.values(schema)
@@ -1234,10 +1227,9 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
   constructor(
     readonly kind: TKind,
     private readonly resolveClient: (schema: WasmSchema) => JazzClient,
-    private readonly context: DbRuntimeOperationContext | null = null,
+    private readonly context: DbAccessContext | null = null,
     ownerClient?: JazzClient,
   ) {
-    this.context = context ? { ...context } : null;
     if (ownerClient) this.bindOwnerClient(ownerClient);
   }
 
@@ -1261,7 +1253,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
   }
 
   private bindOwnerClient(ownerClient: JazzClient): void {
-    const { session, attribution } = this.context ?? {};
+    const { writeSession: session, attribution } = this.context ?? {};
     dbTxHandleBindings.set(this, {
       ownerClient,
       openTransactionId: ownerClient.beginTransaction(this.kind, session, attribution),
@@ -1520,7 +1512,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
   private async readAll<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
     this.bindQuery(query);
     const client = this.resolveClient(query._schema);
-    const { openTransactionId, session } = this.requireBinding("query");
+    const { openTransactionId } = this.requireBinding("query");
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson));
     const planningSchema = requireSchemaWithTable(query._schema, builtQuery.table);
@@ -1542,7 +1534,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
         localUpdates: "deferred",
         openTransactionId,
       },
-      this.context?.readSession ?? session,
+      this.context?.readSession,
     );
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const outputTransforms = resolveOutputColumnTransforms(query, builtQuery.table, outputTable);
@@ -1635,7 +1627,6 @@ export class Db {
   private localFirstRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private shutdownPromise: Promise<void> | null = null;
   private readonly shutdownAbort = new AbortController();
-  private runtimeOperationContextOverride: DbRuntimeOperationContext | null = null;
   private readonly activeQuerySubscriptionTraces = new Map<
     string,
     StoredActiveQuerySubscriptionTrace
@@ -1961,8 +1952,10 @@ export class Db {
     return setWriteWaitReadiness(handle, (tier) => this.ensureReady(tier));
   }
 
-  protected getRuntimeOperationContext(): DbRuntimeOperationContext | null {
-    return this.runtimeOperationContextOverride;
+  protected getAccessContext(): DbAccessContext | null {
+    // Ordinary Dbs use the client's session. BackendDb overrides this to supply
+    // per-Db session and attribution without changing the shared client's identity.
+    return null;
   }
 
   private handleMutationError(event: MutationErrorEvent): void {
@@ -1973,19 +1966,6 @@ export class Db {
     }
     for (const listener of this.mutationErrorListeners) {
       listener(event);
-    }
-  }
-
-  private withRuntimeOperationContext<TResult>(
-    context: DbRuntimeOperationContext,
-    operation: () => TResult,
-  ): TResult {
-    const previous = this.runtimeOperationContextOverride;
-    this.runtimeOperationContextOverride = context;
-    try {
-      return operation();
-    } finally {
-      this.runtimeOperationContextOverride = previous;
     }
   }
 
@@ -2165,12 +2145,12 @@ export class Db {
       table._schema,
       table._table,
     );
-    const context = this.getRuntimeOperationContext();
+    const context = this.getAccessContext();
     const inserted = client.insert(
       table._table,
       values,
       normalizeInsertOptions(table._schema, table._table, options),
-      context?.session,
+      context?.writeSession,
       context?.attribution,
     );
     return this.wrapWriteWait(
@@ -2202,7 +2182,7 @@ export class Db {
       table._schema,
       table._table,
     );
-    const context = this.getRuntimeOperationContext();
+    const context = this.getAccessContext();
     const branch = deriveStreamingInsertBranch(table, ordinaryData);
     return client.insertStreaming(
       table._table,
@@ -2214,7 +2194,7 @@ export class Db {
         table._table,
         branch ? { ...options, branch } : options,
       ),
-      context?.session,
+      context?.writeSession,
       context?.attribution,
     );
   }
@@ -2234,7 +2214,7 @@ export class Db {
       table._schema,
       table._table,
     );
-    const context = this.getRuntimeOperationContext();
+    const context = this.getAccessContext();
     return client.updateStreaming(
       table._table,
       id,
@@ -2242,7 +2222,7 @@ export class Db {
       column,
       source,
       normalizeUpdateOptions(table._schema, table._table, options),
-      context?.session,
+      context?.writeSession,
       context?.attribution,
     );
   }
@@ -2262,7 +2242,7 @@ export class Db {
       table._schema,
       table._table,
     );
-    const context = this.getRuntimeOperationContext();
+    const context = this.getAccessContext();
     return client.upsertStreaming(
       table._table,
       id,
@@ -2270,7 +2250,7 @@ export class Db {
       column,
       source,
       normalizeUpdateOptions(table._schema, table._table, options),
-      context?.session,
+      context?.writeSession,
       context?.attribution,
     );
   }
@@ -2294,13 +2274,13 @@ export class Db {
       table._schema,
       table._table,
     );
-    const context = this.getRuntimeOperationContext();
+    const context = this.getAccessContext();
     const restored = client.restore(
       table._table,
       id,
       values,
       normalizeRestoreOptions(table._schema, table._table, options),
-      context?.session,
+      context?.writeSession,
       context?.attribution,
     );
     return this.wrapWriteWait(
@@ -2331,14 +2311,14 @@ export class Db {
       table._schema,
       table._table,
     );
-    const context = this.getRuntimeOperationContext();
+    const context = this.getAccessContext();
     return this.wrapWriteWait(
       client.upsert(
         table._table,
         id,
         values,
         normalizeUpdateOptions(table._schema, table._table, options),
-        context?.session,
+        context?.writeSession,
         context?.attribution,
       ),
     );
@@ -2385,7 +2365,7 @@ export class Db {
       table._schema,
       table._table,
     );
-    const context = this.getRuntimeOperationContext();
+    const context = this.getAccessContext();
     if (descriptors.length > 0) {
       return this.wrapWriteWait(
         client.updateLargeValues(
@@ -2394,7 +2374,7 @@ export class Db {
           updates,
           descriptors,
           normalizeUpdateOptions(table._schema, table._table, options),
-          context?.session,
+          context?.writeSession,
           context?.attribution,
         ),
       );
@@ -2405,7 +2385,7 @@ export class Db {
         id,
         updates,
         normalizeUpdateOptions(table._schema, table._table, options),
-        context?.session,
+        context?.writeSession,
         context?.attribution,
       ),
     );
@@ -2418,13 +2398,13 @@ export class Db {
    */
   delete<T, Init>(table: TableProxy<T, Init>, id: string, options?: DeleteOptions): WriteHandle {
     const client = this.getClient(table._schema);
-    const context = this.getRuntimeOperationContext();
+    const context = this.getAccessContext();
     return this.wrapWriteWait(
       client.delete(
         table._table,
         id,
         normalizeUpdateOptions(table._schema, table._table, options),
-        context?.session,
+        context?.writeSession,
         context?.attribution,
       ),
     );
@@ -2440,19 +2420,15 @@ export class Db {
       table._schema,
       table._table,
     );
-    const context = this.getRuntimeOperationContext();
-    return client.requestInsertPermissionAdvice(table._table, values, context?.session);
+    const context = this.getAccessContext();
+    return client.requestInsertPermissionAdvice(table._table, values, context?.writeSession);
   }
 
   /** Request authoritative permission advice for reading a row. */
   async canRead<T, Init>(table: TableProxy<T, Init>, id: string): Promise<PermissionAdvice> {
     const client = this.getClient(table._schema);
-    const context = this.getRuntimeOperationContext();
-    return client.requestReadPermissionAdvice(
-      table._table,
-      id,
-      context?.readSession ?? context?.session,
-    );
+    const context = this.getAccessContext();
+    return client.requestReadPermissionAdvice(table._table, id, context?.readSession);
   }
 
   /** Request authoritative permission advice for updating a row. */
@@ -2469,20 +2445,20 @@ export class Db {
       table._schema,
       table._table,
     );
-    const context = this.getRuntimeOperationContext();
-    return client.requestUpdatePermissionAdvice(table._table, id, updates, context?.session);
+    const context = this.getAccessContext();
+    return client.requestUpdatePermissionAdvice(table._table, id, updates, context?.writeSession);
   }
 
   /** Request authoritative permission advice for deleting a row. */
   async canDelete<T, Init>(table: TableProxy<T, Init>, id: string): Promise<PermissionAdvice> {
     const client = this.getClient(table._schema);
-    const context = this.getRuntimeOperationContext();
-    return client.requestDeletePermissionAdvice(table._table, id, context?.session);
+    const context = this.getAccessContext();
+    return client.requestDeletePermissionAdvice(table._table, id, context?.writeSession);
   }
 
   private createTransaction<TKind extends TransactionKind>(kind: TKind): Transaction<TKind> {
     this.assertOpen();
-    const context = this.getRuntimeOperationContext();
+    const context = this.getAccessContext();
     const ownerClient = this.getCurrentClient();
     if (kind === "exclusive" && !ownerClient) {
       throw new Error(
@@ -2610,7 +2586,7 @@ export class Db {
     const queryOptions = nativeDbQueryOptions(query._schema, builtQuery.table, options);
     const wasmQuery = translateQuery(builderJson, planningSchema);
     const usesRelationTraversal = queryUsesRelationTraversal(builtQuery);
-    const context = this.getRuntimeOperationContext();
+    const context = this.getAccessContext();
     const effectiveTier = resolveEffectiveQueryExecutionOptions(
       { ...this.config, defaultDurabilityTier: this.runtimeSource.defaultDurabilityTier },
       queryOptions,
@@ -2618,11 +2594,7 @@ export class Db {
     await this.ensureReady(readinessTier(effectiveTier));
     const rows =
       context || usesRelationTraversal
-        ? await client.queryInternal(
-            wasmQuery,
-            queryOptions,
-            context?.readSession ?? context?.session,
-          )
+        ? await client.queryInternal(wasmQuery, queryOptions, context?.readSession)
         : await client.queryInternal(wasmQuery, queryOptions);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const outputTransforms = resolveOutputColumnTransforms(query, builtQuery.table, outputTable);
@@ -2764,7 +2736,7 @@ export class Db {
     const bufferedDeltas: SubscriptionDelta<T>[] = [];
 
     const queryOptions = nativeDbQueryOptions(query._schema, builtQuery.table, options);
-    const context = this.getRuntimeOperationContext();
+    const context = this.getAccessContext();
     type NativeSubscription = {
       id: number | null;
       installing: boolean;
@@ -2906,7 +2878,7 @@ export class Db {
             },
           },
           subscriptionOptions,
-          context?.readSession ?? context?.session ?? session,
+          context?.readSession ?? session,
         );
       } catch (error) {
         subscription.installing = false;
