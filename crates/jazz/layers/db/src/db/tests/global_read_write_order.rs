@@ -19,6 +19,39 @@ fn music_schema() -> JazzSchema {
     )
 }
 
+/// `documents` are readable only while a `memberships` row grants them, so a
+/// read of `documents` depends on writes to `memberships`.
+fn membership_gated_schema() -> JazzSchema {
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("tracks")
+                    .column("title", PublicColumnType::Text)
+                    .allow_all(),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("memberships")
+                    .column("role", PublicColumnType::Text)
+                    .allow_all(),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("documents")
+                    .column("title", PublicColumnType::Text)
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(public_exists(
+                                "memberships",
+                                [public_literal_eq(
+                                    "role",
+                                    PublicValue::Text("member".to_owned()),
+                                )],
+                            ))
+                            .with_insert(PublicPolicyExpr::True),
+                    ),
+            ),
+    )
+}
+
 #[derive(Clone)]
 struct ManualUploadRetryClock(Rc<Cell<u64>>);
 
@@ -86,9 +119,12 @@ impl Fixture {
     /// A writer whose Core accepts an upload start but rate-limits its bytes,
     /// holding a large value until [`Fixture::release_uploads`].
     fn holding_large_values(node: u8) -> Self {
-        let schema = music_schema();
+        Self::holding_large_values_with(node, &music_schema())
+    }
+
+    fn holding_large_values_with(node: u8, schema: &JazzSchema) -> Self {
         let author = AuthorSubject::for_test_bytes([node; 16]);
-        let core = open_core(node + 1, AuthorSubject::SYSTEM, &schema);
+        let core = open_core(node + 1, AuthorSubject::SYSTEM, schema);
         core.node().borrow_mut().set_large_value_staging_policy(
             crate::node::LargeValueStagingPolicy {
                 incoming_bytes_per_window:
@@ -97,7 +133,7 @@ impl Fixture {
                 max_age_ms: 10 * 60 * 1_000,
             },
         );
-        let writer = open_db(node, author, &schema);
+        let writer = open_db(node, author, schema);
         let clock = Rc::new(Cell::new(10_000));
         writer
             .node
@@ -279,6 +315,78 @@ fn interleaved_import_read_waits_only_for_the_writes_before_it() {
     let rows = rows.expect("the read is not starved by writes issued after it");
     assert!(rows >= 1, "the read sees the album written before it");
     let _ = later_track;
+}
+
+/// alice streams a track, then joins as a member, which is what lets her read
+/// `documents`. Her Global read of `documents` waits for the membership held
+/// behind the track, though it writes another table, and then sees the
+/// document the membership grants.
+///
+/// ```text
+/// alice ──document──────────────────────────────────────► core
+/// alice ──large track──► (held by core) ··· release ─────► core
+/// alice ──membership─────────────────────────────────────► core
+/// alice ──read documents── waits ───────────── open ─────► core ──► 1 row
+/// ```
+#[test]
+fn global_read_waits_for_a_held_write_its_read_policy_consults() {
+    let fixture = Fixture::holding_large_values_with(0xd9, &membership_gated_schema());
+    let document = fixture
+        .writer
+        .insert("documents", title("minutes"), Default::default())
+        .unwrap();
+    for _ in 0..64 {
+        if fixture.is_global(document.tx_id) {
+            break;
+        }
+        fixture.pump(1);
+    }
+    assert!(fixture.is_global(document.tx_id), "Core holds the document");
+
+    let streamed = fixture
+        .writer
+        .insert("tracks", large_title("streamed"), Default::default())
+        .unwrap();
+    fixture.pump(6);
+    assert!(
+        !fixture.is_global(streamed.tx_id),
+        "Core holds the large value back"
+    );
+    fixture
+        .writer
+        .insert(
+            "memberships",
+            BTreeMap::from([("role".to_owned(), Value::String("member".to_owned()))]),
+            Default::default(),
+        )
+        .unwrap();
+
+    let budget_expired = || false;
+    let mut read = global_read(&fixture.writer, "documents", &budget_expired);
+    for _ in 0..8 {
+        assert!(
+            poll_read(&mut read).is_pending(),
+            "the read waits for the membership its read policy consults"
+        );
+        fixture.pump(1);
+    }
+
+    fixture.release_uploads();
+    let mut rows = None;
+    for _ in 0..256 {
+        fixture.pump(1);
+        if let Poll::Ready(result) = poll_read(&mut read) {
+            rows = Some(row_count(
+                result.expect("the read resolves once the membership is out"),
+            ));
+            break;
+        }
+    }
+    assert_eq!(
+        rows,
+        Some(1),
+        "the read sees the document the membership grants"
+    );
 }
 
 /// When the upstream rejects alice's large value, her Global read of that

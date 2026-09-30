@@ -385,11 +385,17 @@ where
     /// write that precedes this read and writes a table it reads is on the
     /// wire. Writes to other tables never delay the read.
     ///
+    /// A read consults its table's read policy too, so when that policy
+    /// reaches another table (a membership check through exists, inherits or
+    /// reachable), a write to any table counts: a membership inserted just
+    /// before the read decides which rows it may see.
+    ///
     /// The wait is bounded by upload progress, not by the read's coverage
-    /// deadline, which starts only once the open is sent. It ends when the
-    /// link is lost (the open then waits for coverage as usual) and fails at
-    /// once, naming the tables, when one of those uploads fails. It never
-    /// falls back to answering without them.
+    /// deadline, which starts only once the open is sent. It fails at once,
+    /// naming the tables, when one of those uploads fails, and never falls
+    /// back to answering without them. It ends when the link is lost: the
+    /// open then waits for coverage as usual, and read-your-writes is not
+    /// guaranteed across a reconnect (garden-co/jazz#3863).
     async fn await_preceding_local_writes_on_wire(&self, query: &Query) -> Result<(), Error> {
         let queued: Vec<(TxId, Option<SyncMessage>)> = {
             let outbox = self.node.outbox.borrow();
@@ -406,7 +412,7 @@ where
         let Some(epoch) = self.node.remote_link.arm() else {
             return Ok(());
         };
-        let read_table = plain_read_table(query);
+        let read_table = self.read_footprint_table(query);
         let mut waiting: Vec<(TxId, BTreeSet<String>)> = Vec::new();
         {
             let mut node = self.node.node.lock().await;
@@ -461,6 +467,17 @@ where
         self.race_remote_answer(epoch, on_wire)
             .await
             .unwrap_or(Ok(()))
+    }
+
+    /// The one table a read's result depends on, or `None` when every table
+    /// counts: the query reaches further, its table is unknown, or its read
+    /// policy consults another table.
+    fn read_footprint_table<'q>(&self, query: &'q Query) -> Option<&'q str> {
+        let table = plain_read_table(query)?;
+        match &self.table_schema(table).ok()?.read_policy {
+            Some(policy) if plain_read_table(policy) != Some(table) => None,
+            _ => Some(table),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
