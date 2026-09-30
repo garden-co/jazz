@@ -3789,6 +3789,10 @@ impl IvmRuntime {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.query_bind")
+    )]
     pub(crate) fn bind_shape_with_lifetime<S>(
         &mut self,
         shape_id: PreparedShapeId,
@@ -4939,6 +4943,10 @@ impl IvmRuntime {
     ///
     /// Returns `None`, having changed nothing, whenever that precondition is
     /// not certain; the caller then takes the ordinary hydration path.
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(skip_all, name = "cold.phase.live_attach")
+    )]
     pub(crate) async fn prepare_live_attach<S>(
         &mut self,
         shape_id: PreparedShapeId,

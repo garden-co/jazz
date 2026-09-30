@@ -9,7 +9,10 @@ import { serverSecret } from "./server-secret";
 
 const createRequire =
   process.getBuiltinModule?.("module")?.createRequire ?? createRequireFromModule;
-const { createJazzSession } = createRequire(import.meta.url)(
+// Load the backend through Node at runtime, never through the bundler: Turbopack
+// bundles a static "jazz-tools/backend" import (and jazz-napi with it) despite
+// serverExternalPackages, and then fails to resolve the native binding.
+export const { createJazzSession, resolveRequestSession } = createRequire(import.meta.url)(
   "jazz-tools/backend",
 ) as typeof import("jazz-tools/backend");
 
