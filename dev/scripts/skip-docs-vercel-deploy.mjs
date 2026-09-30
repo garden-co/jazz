@@ -3,6 +3,15 @@ import { pathToFileURL } from "node:url";
 const DOCS_LABEL = "docs";
 const GITHUB_LOOKUP_TIMEOUT_MS = 5_000;
 const TRUSTED_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+// The Version Packages PR that changesets-release-pr.yml opens with the
+// Actions token. Only a workflow in this repository can author it, and its
+// head is built from the protected release branch, so it previews each
+// release candidate's docs without a label.
+const RELEASE_PR = {
+  author: "github-actions[bot]",
+  head: "changeset-release/release",
+  base: "release",
+};
 
 function isNonEmptyString(value) {
   return typeof value === "string" && value.length > 0;
@@ -42,13 +51,19 @@ export async function shouldSkipDocsDeploy({
     const pullRequest = await response.json();
     const repository = `${env.VERCEL_GIT_REPO_OWNER}/${env.VERCEL_GIT_REPO_SLUG}`;
     const labels = Array.isArray(pullRequest?.labels) ? pullRequest.labels : [];
-    return !(
+    const sameRepository =
       pullRequest?.state === "open" &&
       pullRequest?.head?.repo?.full_name === repository &&
-      pullRequest?.base?.repo?.full_name === repository &&
+      pullRequest?.base?.repo?.full_name === repository;
+    const labelledByTrustedAuthor =
       TRUSTED_ASSOCIATIONS.has(pullRequest?.author_association) &&
-      labels.some((label) => label?.name === DOCS_LABEL)
-    );
+      labels.some((label) => label?.name === DOCS_LABEL);
+    const releaseCandidate =
+      pullRequest?.user?.login === RELEASE_PR.author &&
+      pullRequest?.user?.type === "Bot" &&
+      pullRequest?.head?.ref === RELEASE_PR.head &&
+      pullRequest?.base?.ref === RELEASE_PR.base;
+    return !(sameRepository && (labelledByTrustedAuthor || releaseCandidate));
   } catch {
     return true;
   }
