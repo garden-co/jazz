@@ -443,7 +443,7 @@ fn hash_equal_hydration_roots_share_one_in_flight_storage_request() {
 #[test]
 fn blocked_index_source_retains_its_storage_request_across_polls() {
     let (storage, control) = TestStorage::controlled(&["albums", "indices"]);
-    let mut database = block_on(Database::new(indexed_schema(), storage)).unwrap();
+    let mut database = block_on(Database::new(indexed_schema(), storage.clone())).unwrap();
     let mut batch = database.open_batch();
     batch.insert(
         "albums",
@@ -451,6 +451,10 @@ fn blocked_index_source_retains_its_storage_request_across_polls() {
     );
     block_on(database.commit_batch(batch)).unwrap();
 
+    // Opening the store probes the `indices` family for its durable-index
+    // layout, which leaves the (then empty) family resident in this test
+    // double. Evict it so the source's hydration needs a cold scan.
+    storage.evict_scans("indices");
     control.take_observed();
     control.pause_on(TestStorageOperation::ScanOpen);
     let subscription =
@@ -637,12 +641,16 @@ fn recursive_hydration_reuses_the_sessions_table_snapshot() {
 #[test]
 fn blocked_recursive_index_source_retains_the_sessions_request() {
     let (storage, control) = TestStorage::controlled(&["edges", "indices"]);
-    let mut database = block_on(Database::new(indexed_edges_schema(), storage)).unwrap();
+    let mut database = block_on(Database::new(indexed_edges_schema(), storage.clone())).unwrap();
     let mut batch = database.open_batch();
     batch.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
     batch.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(3)]);
     block_on(database.commit_batch(batch)).unwrap();
 
+    // Opening the store probes the `indices` family for its durable-index
+    // layout, which leaves the (then empty) family resident in this test
+    // double. Evict it so the source's hydration needs a cold scan.
+    storage.evict_scans("indices");
     control.take_observed();
     control.pause_on(TestStorageOperation::ScanOpen);
     let subscription = block_on(database.subscribe_one_sink(indexed_reachability_graph())).unwrap();

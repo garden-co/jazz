@@ -94,7 +94,9 @@ impl Database {
     ///
     /// let rows = database.primary_key_scan("albums", &[Value::U64(1)]).await?;
     /// assert_eq!(rows[0].get("title")?, Value::String("Kind of Blue".into()));
-    /// assert_eq!(database.last_commit_metrics().unwrap().storage_write_count, 2);
+    /// // The row and its index entry, plus the index's one-time durable id
+    /// // registration and layout marker, which the first publication carries.
+    /// assert_eq!(database.last_commit_metrics().unwrap().storage_write_count, 4);
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// # }).unwrap();
     /// ```
