@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { IntegralFloat, parseJson } from "./json-schema-json.js";
+import { parseJson, toJsonText as toJson } from "./json-schema-json.js";
 import { compileJsonSchema, compileJsonSchemaText } from "./json-schema-validator.js";
 
 type ParityCase = {
@@ -25,24 +25,6 @@ const parityCases = parseJson(
     "utf8",
   ),
 ) as ParityCase[];
-
-/** JSON text for a fixture value, keeping big integers and whole floats as written. */
-function toJson(value: unknown): string {
-  if (typeof value === "bigint") return value.toString();
-  // Integers the parser kept as doubles are exact; print every digit.
-  if (typeof value === "number" && Number.isInteger(value)) return BigInt(value).toString();
-  if (value instanceof IntegralFloat) {
-    const text = String(value.value);
-    return /[.e]/.test(text) ? text : `${text}.0`;
-  }
-  if (Array.isArray(value)) return `[${value.map(toJson).join(",")}]`;
-  if (typeof value === "object" && value !== null) {
-    return `{${Object.entries(value)
-      .map(([key, entry]) => `${JSON.stringify(key)}:${toJson(entry)}`)
-      .join(",")}}`;
-  }
-  return JSON.stringify(value);
-}
 
 describe("browser JSON Schema validator", () => {
   describe("matches the native validator on the parity fixture", () => {

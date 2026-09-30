@@ -4,7 +4,9 @@ import { createBrowserTestDb, TestCleanup } from "./support.js";
 
 // The browser WASM build has no Rust JSON Schema validator: the WASM loader
 // installs the JS one with `setJsonSchemaValidator`. These run through that
-// real path; the parity fixture pins the verdicts themselves.
+// real path; the parity fixture pins the verdicts themselves. The invalid
+// values break keywords (`multipleOf`, `uniqueItems`) the TS write pre-check
+// in `value-converter.ts` does not look at, so only the WASM path rejects them.
 
 const jobs = s.defineApp({
   jobs: s.table(
@@ -14,7 +16,8 @@ const jobs = s.defineApp({
         properties: {
           // `\-` is valid in the native regex syntax and not in a JS `u` regex.
           code: { type: "string", pattern: "^[a-z]+\\-[0-9]+$" },
-          count: { type: "integer", minimum: 0 },
+          count: { type: "integer", minimum: 0, multipleOf: 2 },
+          tags: { type: "array", uniqueItems: true },
         },
         required: ["code"],
       }),
@@ -58,11 +61,11 @@ describe("browser JSON Schema validation through WASM", () => {
   it("rejects a value that does not match the column's schema", async () => {
     const db = ctx.track(await createBrowserTestDb({ appId: appId("invalid") }));
 
-    expect(() => db.insert(jobs.jobs, { meta: { code: "build-7", count: -1 } })).toThrow(
-      "JSON schema validation failed for column `meta`: -1 is less than 0. (at /count)",
+    expect(() => db.insert(jobs.jobs, { meta: { code: "build-7", count: 3 } })).toThrow(
+      "JSON schema validation failed for column `meta`: 3 is not a multiple of 2. (at /count)",
     );
-    expect(() => db.insert(jobs.jobs, { meta: { code: "build 7" } })).toThrow(
-      /JSON schema validation failed for column `meta`: .*\(at \/code\)/,
+    expect(() => db.insert(jobs.jobs, { meta: { code: "build-7", tags: ["a", "a"] } })).toThrow(
+      "JSON schema validation failed for column `meta`: Duplicate items at indexes 0 and 1. (at /tags)",
     );
   });
 

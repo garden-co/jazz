@@ -453,5 +453,40 @@
     "description": "a possessive quantifier",
     "schema": { "pattern": "^a*+b$" },
     "browserUnsupported": true
+  },
+  {
+    "description": "case-insensitive \\W folds before negating",
+    "schema": { "type": "string", "pattern": "(?i)^\\W$" },
+    "valid": ["!", " "],
+    "invalid": ["k", "K", "ſ", "K", "a"]
+  },
+  {
+    "description": "case-insensitive \\P{Lu} folds before negating",
+    "schema": { "type": "string", "pattern": "(?i)^\\P{Lu}$" },
+    "valid": ["1", "!"],
+    "invalid": ["a", "A"]
+  },
+  {
+    "description": "case-insensitive negated POSIX class folds before negating",
+    "schema": { "type": "string", "pattern": "(?i)^[[:^alpha:]]$" },
+    "valid": ["1"],
+    "invalid": ["k", "K"]
+  },
+  {
+    "description": "a multipleOf below the double epsilon accepts any number",
+    "schema": { "multipleOf": 1e-20 },
+    "valid": [0.5, 1, 7]
+  },
+  {
+    "description": "uniqueItems tells 0 and -0.0 apart only in arrays of more than 15 items",
+    "schema": { "uniqueItems": true },
+    "valid": [[0, -0.0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]],
+    "invalid": [[0, -0.0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]]
+  },
+  {
+    "description": "draft 4 does not count -0 as an integer",
+    "schema": { "$schema": "http://json-schema.org/draft-04/schema#", "type": "integer" },
+    "valid": [0],
+    "invalid": [-0]
   }
 ]

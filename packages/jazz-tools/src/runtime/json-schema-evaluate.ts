@@ -1,9 +1,36 @@
+/*!
+ * Portions of this file are adapted from @cfworker/json-schema 4.1.1
+ * (https://github.com/cfworker/cfworker), used under the MIT License:
+ *
+ * MIT License
+ *
+ * Copyright (c) 2020 Jeremy Danyow
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+
 /**
  * The JSON Schema evaluator behind the browser runtime's JSON column checks.
  *
- * Adapted from `@cfworker/json-schema` 4.1.1 (MIT License, Copyright (c)
- * Jeremy Danyow), which evaluates schemas without `eval` and so works under a
- * strict Content-Security-Policy. Changes from upstream, all so verdicts match
+ * Adapted from `@cfworker/json-schema` 4.1.1 (MIT, notice above), which
+ * evaluates schemas without `eval` and so works under a strict
+ * Content-Security-Policy. Changes from upstream, all so verdicts match
  * the native runtime (`jsonschema` 0.42):
  * - numbers may be `bigint` or `IntegralFloat` (see `json-schema-json.ts`) and
  *   compare exactly; draft 4 counts only integer literals as integers;
@@ -25,6 +52,7 @@ import {
   isMultipleOf,
   jsonEqual,
   numericValue,
+  toJsonText,
 } from "./json-schema-json.js";
 import { compileRegex } from "./json-schema-regex.js";
 
@@ -430,7 +458,7 @@ function validate(
       instanceLocation,
       keyword: "const",
       keywordLocation: `${schemaLocation}/const`,
-      error: `Instance does not match ${describeValue($const)}.`,
+      error: `Instance does not match ${toJsonText($const)}.`,
     });
   }
 
@@ -439,7 +467,7 @@ function validate(
       instanceLocation,
       keyword: "enum",
       keywordLocation: `${schemaLocation}/enum`,
-      error: `Instance does not match any of ${describeValue($enum)}.`,
+      error: `Instance does not match any of ${toJsonText($enum)}.`,
     });
   }
 
@@ -1140,9 +1168,12 @@ function validate(
     }
 
     if ($uniqueItems) {
+      // Natively, arrays of more than 15 items are checked by hashing, which
+      // tells 0 and -0.0 apart.
+      const signedZero = length > 15;
       outer: for (let j = 0; j < length; j++) {
         for (let k = j + 1; k < length; k++) {
-          if (jsonEqual(array[j], array[k])) {
+          if (jsonEqual(array[j], array[k], signedZero)) {
             errors.push({
               instanceLocation,
               keyword: "uniqueItems",
@@ -1261,10 +1292,4 @@ function validate(
   }
 
   return { valid: errors.length === 0, errors };
-}
-
-function describeValue(value: unknown): string {
-  return JSON.stringify(value, (_key, entry) =>
-    typeof entry === "bigint" ? Number(entry) : isJsonNumber(entry) ? numericValue(entry) : entry,
-  );
 }

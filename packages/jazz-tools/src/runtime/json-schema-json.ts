@@ -69,6 +69,8 @@ export function parseJson(text: string): unknown {
     if (match[1] !== undefined || match[2] !== undefined) {
       return Number.isInteger(value) ? new IntegralFloat(value) : value;
     }
+    // serde_json reads `-0` as the float -0.0.
+    if (Object.is(value, -0)) return new IntegralFloat(value);
     if (Number.isSafeInteger(value)) return value;
     const exact = BigInt(literal);
     if (exact < I64_MIN || exact > U64_MAX) return new IntegralFloat(value);
@@ -164,6 +166,30 @@ export function isJsonInteger(value: JsonNumber, draft4: boolean): boolean {
   return Number.isInteger(value);
 }
 
+/** JSON text for a parsed value, printing big integers and whole floats exactly. */
+export function toJsonText(value: unknown): string {
+  if (typeof value === "bigint") return value.toString();
+  if (value instanceof IntegralFloat) {
+    if (Object.is(value.value, -0)) return "-0.0";
+    const text = Number.isSafeInteger(value.value) ? String(value.value) : exactDouble(value.value);
+    return /[.e]/.test(text) ? text : `${text}.0`;
+  }
+  if (typeof value === "number" && Number.isInteger(value)) return exactDouble(value);
+  if (Array.isArray(value)) return `[${value.map(toJsonText).join(",")}]`;
+  if (typeof value === "object" && value !== null) {
+    return `{${Object.entries(value)
+      .map(([key, entry]) => `${JSON.stringify(key)}:${toJsonText(entry)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function exactDouble(value: number): string {
+  return Number.isFinite(value) && Math.abs(value) < 1e21
+    ? BigInt(value).toString()
+    : String(value);
+}
+
 /** Replace `IntegralFloat`s with their values (for schemas, once meta-validated). */
 export function withPlainNumbers(value: unknown): unknown {
   if (value instanceof IntegralFloat) return value.value;
@@ -174,16 +200,24 @@ export function withPlainNumbers(value: unknown): unknown {
   return object;
 }
 
-/** JSON Schema equality: numbers compare by value, objects ignore key order. */
-export function jsonEqual(a: unknown, b: unknown): boolean {
+/**
+ * JSON Schema equality: numbers compare by value, objects ignore key order.
+ * With `signedZero`, 0 and -0.0 differ, as they do in the native runtime's
+ * hashed `uniqueItems` check for arrays of more than 15 items.
+ */
+export function jsonEqual(a: unknown, b: unknown, signedZero = false): boolean {
   if (isJsonNumber(a)) {
+    if (!isJsonNumber(b)) return false;
+    const left = numericValue(a);
+    const right = numericValue(b);
+    if (signedZero && left === 0 && right === 0) return Object.is(left, right);
     // `==` compares a `bigint` with a double exactly.
     // eslint-disable-next-line eqeqeq
-    return isJsonNumber(b) && numericValue(a) == numericValue(b);
+    return left == right;
   }
   if (Array.isArray(a)) {
     if (!Array.isArray(b) || a.length !== b.length) return false;
-    return a.every((entry, index) => jsonEqual(entry, b[index]));
+    return a.every((entry, index) => jsonEqual(entry, b[index], signedZero));
   }
   if (typeof a === "object" && a !== null) {
     if (typeof b !== "object" || b === null || Array.isArray(b) || isJsonNumber(b)) return false;
@@ -192,7 +226,11 @@ export function jsonEqual(a: unknown, b: unknown): boolean {
     return aKeys.every(
       (key) =>
         Object.prototype.hasOwnProperty.call(b, key) &&
-        jsonEqual((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key]),
+        jsonEqual(
+          (a as Record<string, unknown>)[key],
+          (b as Record<string, unknown>)[key],
+          signedZero,
+        ),
     );
   }
   return a === b;
@@ -214,6 +252,9 @@ export function isMultipleOf(value: JsonNumber, multiple: JsonNumber): boolean {
   if (instance < divisor) return false;
   const [instanceNumerator, instanceDenominator] = toFraction(instance);
   const [divisorNumerator, divisorDenominator] = toFraction(divisor);
+  // A divisor below `EPSILON` becomes 0; natively the quotient is then
+  // infinite, which has no denominator and so counts as a whole number.
+  if (divisorNumerator === 0n) return true;
   const denominator = instanceDenominator * divisorNumerator;
   return (instanceNumerator * divisorDenominator) % denominator === 0n;
 }

@@ -722,17 +722,6 @@ function rangesFragment(ranges: [number, number][]): string {
     .join("");
 }
 
-function complement(ranges: [number, number][]): [number, number][] {
-  const result: [number, number][] = [];
-  let next = 0;
-  for (const [start, end] of ranges) {
-    if (start > next) result.push([next, start - 1]);
-    next = end + 1;
-  }
-  if (next <= 0x10ffff) result.push([next, 0x10ffff]);
-  return result;
-}
-
 /** A JS class body (`frag`) when one exists, and an expression matching one code point. */
 interface Emitted {
   fragment?: string;
@@ -823,24 +812,14 @@ class Emitter {
         return { fragment, atom: `[${fragment}]` };
       }
       case "perl":
-        if (this.parsed.fancy) {
-          const fragment = UNICODE_PERL[item.perl];
-          return item.negated
-            ? item.perl === "w"
-              ? { atom: `[^${fragment}]` }
-              : {
-                  fragment: fragment.replace("\\p", "\\P"),
-                  atom: `[${fragment.replace("\\p", "\\P")}]`,
-                }
-            : { fragment, atom: `[${fragment}]` };
-        }
-        return this.ranges(RANGES[item.perl], item.negated);
+        return negatable(
+          this.parsed.fancy ? UNICODE_PERL[item.perl] : rangesFragment(RANGES[item.perl]),
+          item.negated,
+        );
       case "ascii":
-        return this.ranges(RANGES[item.ascii], item.negated);
-      case "unicode": {
-        const fragment = unicodeProperty(item.name, item.negated);
-        return { fragment, atom: `[${fragment}]` };
-      }
+        return negatable(rangesFragment(RANGES[item.ascii]), item.negated);
+      case "unicode":
+        return negatable(unicodeProperty(item.name), item.negated);
       case "bracket": {
         const inner = this.set(item.set);
         if (!item.negated) return inner;
@@ -849,11 +828,6 @@ class Emitter {
           : { atom: `(?:(?!${inner.atom})[^])` };
       }
     }
-  }
-
-  private ranges(ranges: [number, number][], negated: boolean): Emitted {
-    const fragment = rangesFragment(negated ? complement(ranges) : ranges);
-    return { fragment, atom: `[${fragment}]` };
   }
 
   private set(set: ClassSet): Emitted {
@@ -878,13 +852,23 @@ class Emitter {
   }
 }
 
-/** A JS `\p{…}`/`\P{…}` for a native Unicode class name, if JS knows the name. */
-function unicodeProperty(name: string, negated: boolean): string {
-  const escape = negated ? "\\P" : "\\p";
+/**
+ * A class and its complement. The native runtime case-folds a class before
+ * negating it, so a negated class is emitted as a JS negated class (which
+ * folds, then negates) rather than as precomputed complement ranges or
+ * `\P{…}` (which a JS `i` flag would fold after negating: `(?i)\W` would
+ * then match `k` through the Kelvin sign).
+ */
+function negatable(fragment: string, negated: boolean): Emitted {
+  return negated ? { atom: `[^${fragment}]` } : { fragment, atom: `[${fragment}]` };
+}
+
+/** A JS `\p{…}` for a native Unicode class name, if JS knows the name. */
+function unicodeProperty(name: string): string {
   for (const candidate of [name, `Script=${name}`]) {
     try {
-      new RegExp(`${escape}{${candidate}}`, "u");
-      return `${escape}{${candidate}}`;
+      new RegExp(`\\p{${candidate}}`, "u");
+      return `\\p{${candidate}}`;
     } catch {
       // Try the next spelling.
     }
