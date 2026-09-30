@@ -3242,6 +3242,166 @@ async fn first_cold_publication_persists_before_resolver_without_deadlock() {
     );
 }
 
+/// Poll `future` a bounded number of times. Every storage wait in
+/// [`TestStorage`] completes on its next poll, so a future still pending after
+/// this waits on something nothing will release.
+async fn within<T>(label: &str, future: impl std::future::Future<Output = T>) -> T {
+    let mut future = std::pin::pin!(future);
+    for _ in 0..1024 {
+        if let Poll::Ready(value) = futures::poll!(future.as_mut()) {
+            return value;
+        }
+    }
+    panic!("{label} did not complete");
+}
+
+/// #3815: A's cold root parks its evaluation, and A is persisted, so no
+/// resident publication holds the lifecycle mutex any more. When the root
+/// arrives, A's resumed install takes the mutex and waits for storage. Only an
+/// owner turn polls A again. B's own root needs the mutex, and B's write is
+/// that owner turn, so B must drive A to release the mutex rather than wait on
+/// it alone.
+///
+/// A ──park──► persisted ──root arrives──► install holds mutex ──storage──┐
+/// B ──apply──► needs mutex ──────────► drives A until it releases ◄──────┘
+#[futures_test::test]
+async fn publication_drives_a_suspended_chunk_install_holding_the_lifecycle_mutex() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    // Cold storage operations suspend once, as a browser store does.
+    let storage = TestStorage::new(&schema.column_families());
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let mut database = Database::new(schema, storage).await.unwrap();
+    database.set_chunk_storage(chunks.clone());
+    let cold = crate::large_values::prepare(
+        crate::large_values::LargeValueKind::Bytes,
+        &vec![5; crate::large_values::INLINE_VALUE_MAX_BYTES * 4],
+    )
+    .unwrap();
+    let cold_staged = database
+        .stage_large_value_preparation(cold.clone())
+        .await
+        .unwrap();
+    let warm_staged = database
+        .prepare_and_stage_large_value(
+            crate::large_values::LargeValueKind::Bytes,
+            &vec![6; crate::large_values::INLINE_VALUE_MAX_BYTES * 4],
+        )
+        .await
+        .unwrap();
+    let root = cold
+        .staged_chunks
+        .iter()
+        .find(|chunk| chunk.node_ref == cold.value_ref.root)
+        .unwrap()
+        .clone();
+    crate::chunks::ChunkStorage::delete(&*chunks, root.node_ref.locator, root.node_ref.object_hash)
+        .await
+        .unwrap();
+    database
+        .storage
+        .delete(
+            LARGE_VALUE_METADATA_CF.to_owned(),
+            large_value_node_key(&root.node_ref).unwrap(),
+        )
+        .await
+        .unwrap();
+    let resolver_ready = Rc::new(Cell::new(false));
+    database.set_missing_chunk_resolver(Rc::new(DeferredFixtureChunkResolver {
+        chunks: Rc::new(std::collections::BTreeMap::from([(
+            crate::chunks::ChunkRequest {
+                object_hash: root.node_ref.object_hash.0,
+                locator: root.node_ref.locator,
+            },
+            Bytes::from(root.encoded),
+        )])),
+        ready: Rc::clone(&resolver_ready),
+    }));
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::table("objects"))
+        .await
+        .unwrap();
+    // Hydration waits on storage here, and `recv` would block the thread.
+    within("initial hydration", database.drive_progress())
+        .await
+        .unwrap();
+    assert!(subscription.try_recv().unwrap().is_empty());
+
+    let mut first = database.open_batch();
+    first.insert(
+        "objects",
+        vec![Value::U64(1), Value::Large(Box::new(cold_staged.value_ref))],
+    );
+    first.accept_large_value(cold_staged.id);
+    let first = within("A's write", database.apply_batch(first))
+        .await
+        .unwrap();
+    assert!(subscription.try_recv().is_err(), "A's cold root parks it");
+    let persisted = within("A's persistence", first.persist()).await;
+    database.finish_persistence(persisted).unwrap();
+    assert!(
+        database.large_value_publication_lifecycle_guard.is_none(),
+        "no publication holds the mutex for A's install"
+    );
+
+    // The root arrives. Owner turns resume A until its install waits for
+    // storage while it holds the mutex.
+    resolver_ready.set(true);
+    let mut cx = std::task::Context::from_waker(Waker::noop());
+    let mut install_holds_mutex = false;
+    for _ in 0..64 {
+        if database.large_value_lifecycle.try_lock().is_none() {
+            install_holds_mutex = true;
+            break;
+        }
+        assert!(
+            database.poll_progress(&mut cx).is_pending(),
+            "A's install waits for storage"
+        );
+    }
+    assert!(install_holds_mutex, "A's install holds the lifecycle mutex");
+
+    let mut second = database.open_batch();
+    second.insert(
+        "objects",
+        vec![Value::U64(2), Value::Large(Box::new(warm_staged.value_ref))],
+    );
+    second.accept_large_value(warm_staged.id);
+    let second = within(
+        "B's write, which needs the mutex that only A's suspended install can release",
+        database.apply_batch(second),
+    )
+    .await
+    .unwrap();
+    let persisted = within("B's persistence", second.persist()).await;
+    database.finish_persistence(persisted).unwrap();
+    within("the final flush", database.flush()).await.unwrap();
+
+    let mut inserted = 0;
+    while let Ok(update) = subscription.try_recv_with_publication() {
+        inserted += update.deltas.to_values().unwrap().len();
+    }
+    assert_eq!(inserted, 2, "both rows are published");
+    assert!(
+        database
+            .storage
+            .get(
+                LARGE_VALUE_METADATA_CF.to_owned(),
+                large_value_node_key(&root.node_ref).unwrap(),
+            )
+            .await
+            .unwrap()
+            .is_some(),
+        "A's install finished"
+    );
+}
+
 /// A cold B evaluation may detach after its publication is assigned while its
 /// install observer remains pending. Once B's snapshot is durable, a resumed
 /// observer must commit its lifecycle writes as a durable follow-on operation.

@@ -323,7 +323,7 @@ impl Database {
             if roots.is_empty() || self.large_value_publication_lifecycle_guard.is_some() {
                 None
             } else {
-                Some(self.large_value_lifecycle.clone().lock_owned().await)
+                Some(self.lock_large_value_lifecycle().await?)
             };
         if !roots.is_empty() {
             let mut node_transitions = Vec::<(crate::large_values::NodeRef, i8)>::new();
@@ -422,6 +422,37 @@ impl Database {
             lifecycle: Rc::new(Cell::new(AppliedBatchLifecycle::Applied)),
             abandoned_application: Rc::clone(&self.abandoned_application),
         })
+    }
+
+    /// Take the large-value lifecycle mutex for a publication's root
+    /// transitions.
+    ///
+    /// A suspended evaluation can hold this mutex: its chunk install takes it
+    /// once no resident publication holds it on the evaluation's behalf, then
+    /// waits for storage (#3815). Only an owner turn polls that evaluation
+    /// again, and this write is the owner turn, so waiting on the mutex alone
+    /// would never see it released. While the mutex is contended, keep
+    /// driving suspended evaluations until their installs let it go.
+    ///
+    /// This is the deliberate exception to `poll_resident_progress`'s rule that
+    /// a direct operation must never repoll a storage-pending evaluation merely
+    /// because another direct operation started later: under contention, only
+    /// this owner turn can advance the evaluation that holds the mutex.
+    async fn lock_large_value_lifecycle(
+        &mut self,
+    ) -> Result<futures::lock::OwnedMutexGuard<()>, Error> {
+        let mut lock = std::pin::pin!(self.large_value_lifecycle.clone().lock_owned());
+        std::future::poll_fn(|cx| {
+            if let Poll::Ready(guard) = lock.as_mut().poll(cx) {
+                return Poll::Ready(Ok(guard));
+            }
+            if let Poll::Ready(Err(error)) = self.poll_progress(cx) {
+                return Poll::Ready(Err(error));
+            }
+            // An install that finished just now released the mutex.
+            lock.as_mut().poll(cx).map(Ok)
+        })
+        .await
     }
 
     /// Install one persistence result and advance only the contiguous durable
