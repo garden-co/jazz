@@ -1156,6 +1156,21 @@ pub(super) fn owner_write_schema() -> JazzSchema {
     )
 }
 
+/// Owner-scoped reads and writes: every clause reads only the candidate row
+/// and the session's claims.
+pub(super) fn owner_read_write_schema() -> JazzSchema {
+    let owner = || public_session_eq("owner", &["claims", "sub"]);
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(public_legacy_write_policy(owner()).with_select(owner())),
+        ),
+    )
+}
+
 pub(super) fn editor_claim_write_schema() -> JazzSchema {
     let editor = PublicPolicyExpr::SessionCmp {
         path: vec!["claims".to_owned(), "role".to_owned()],
@@ -1170,6 +1185,38 @@ pub(super) fn editor_claim_write_schema() -> JazzSchema {
                 .column("owner", PublicColumnType::Uuid)
                 .policies(public_legacy_write_policy(editor)),
         ),
+    )
+}
+
+/// Like [`editor_claim_write_schema`], but the editor clause also reads an
+/// open workspace, so a terminal proof must hydrate claim-bound support.
+pub(super) fn editor_claim_workspace_write_schema() -> JazzSchema {
+    let editor = PublicPolicyExpr::SessionCmp {
+        path: vec!["claims".to_owned(), "role".to_owned()],
+        op: PublicCmpOp::Eq,
+        value: PublicValue::Text("editor".to_owned()),
+    };
+    let open_workspace = public_exists(
+        "workspaces",
+        [public_literal_eq("open", PublicValue::Boolean(true))],
+    );
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("workspaces")
+                    .column("open", PublicColumnType::Boolean)
+                    .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .column("done", PublicColumnType::Boolean)
+                    .column("owner", PublicColumnType::Uuid)
+                    .policies(public_legacy_write_policy(PublicPolicyExpr::and(vec![
+                        editor,
+                        open_workspace,
+                    ]))),
+            ),
     )
 }
 

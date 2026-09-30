@@ -3108,6 +3108,164 @@ fn terminal_core_write_fates_prove_exact_insert_update_and_delete_actions() {
     );
 }
 
+fn subscriber_proofs_and_support_views(
+    subscriber: &Rc<LocalMutex<PeerConnection>>,
+) -> (u64, usize) {
+    match &subscriber.borrow().link {
+        ConnectionLink::Subscriber(SubscriberConnectionState { peer, .. }) => (
+            peer.terminal_authority_scope_proof_count(),
+            peer.maintained_subscription_count(),
+        ),
+        ConnectionLink::Upstream(_) => unreachable!("server link is a subscriber"),
+    }
+}
+
+/// Alice's writes under `owner = session.sub` are proven without hydrating the
+/// rows that policy matches. The policy reads only the candidate row and her
+/// claims, so it has no support inputs. A support view over it would hold
+/// every todo Alice ever wrote for the life of her connection, so an import
+/// through one session would grow server memory with the whole dataset.
+///
+/// ```text
+/// alice ──insert × N──► core ──proof: no support inputs──► Accepted × N
+///                         └── retains no support view
+/// ```
+#[test]
+fn row_only_write_policy_proofs_retain_no_support_views() {
+    let schema = owner_read_write_schema();
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0xa1, alice, &schema);
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        alice,
+        NodeUuid::from_bytes([0xa1; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
+    let subscriber = server.accept_subscriber(server_transport, alice);
+
+    let writes = (0..8)
+        .map(|index| {
+            let write = client
+                .insert(
+                    "todos",
+                    cells(&format!("todo {index}"), false, alice),
+                    Default::default(),
+                )
+                .unwrap();
+            client.tick().unwrap();
+            server.tick().unwrap();
+            client.tick().unwrap();
+            write
+        })
+        .collect::<Vec<_>>();
+
+    for write in &writes {
+        assert!(matches!(write.write_state().unwrap().fate, Fate::Accepted));
+    }
+    assert_eq!(
+        subscriber_proofs_and_support_views(&subscriber),
+        (8, 0),
+        "every insert is proven, and no proof keeps the rows its policy matches"
+    );
+
+    // Skipping hydration grants nothing: a write the policy denies is still
+    // rejected, and update/delete prove against the stored preimage alike.
+    let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
+    let mut settle = || {
+        client.tick().unwrap();
+        server.tick().unwrap();
+        client.tick().unwrap();
+    };
+    let foreign = client
+        .insert("todos", cells("bob's", false, bob), Default::default())
+        .unwrap();
+    settle();
+    let updated = client
+        .update(
+            "todos",
+            writes[0].row_uuid(),
+            BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+            Default::default(),
+        )
+        .unwrap();
+    settle();
+    let deleted = client
+        .delete("todos", writes[1].row_uuid(), Default::default())
+        .unwrap();
+    settle();
+
+    assert!(matches!(
+        foreign.write_state().unwrap().fate,
+        Fate::Rejected(_)
+    ));
+    assert!(matches!(
+        updated.write_state().unwrap().fate,
+        Fate::Accepted
+    ));
+    assert!(matches!(
+        deleted.write_state().unwrap().fate,
+        Fate::Accepted
+    ));
+    assert_eq!(
+        subscriber_proofs_and_support_views(&subscriber),
+        (11, 0),
+        "the server proves the denied insert, update and delete, keeping no support view"
+    );
+}
+
+/// Bob's child insert inherits the parent's select policy, so its proof has a
+/// real dependency input (the parent row) and still hydrates support.
+///
+/// ```text
+/// bob ──insert child──► core ──proof: hydrate parent support──► Accepted
+/// ```
+#[test]
+fn dependency_write_policy_proofs_still_hydrate_support() {
+    let schema = inherited_insert_policy_schema();
+    let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
+    let server = open_core(0x65, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0x66, bob, &schema);
+    let parent = row(0xf1);
+    server
+        .insert_with_id(
+            "parents",
+            parent,
+            BTreeMap::from([
+                ("owner".to_owned(), Value::Uuid(bob.test_uuid())),
+                ("locked".to_owned(), Value::Bool(false)),
+            ]),
+        )
+        .unwrap();
+    let (client_transport, server_transport) = duplex();
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
+    let subscriber = server.accept_subscriber(server_transport, bob);
+
+    let child = client
+        .insert(
+            "children",
+            BTreeMap::from([
+                ("parent_id".to_owned(), Value::Uuid(parent.0)),
+                ("label".to_owned(), Value::String("child".to_owned())),
+            ]),
+            Default::default(),
+        )
+        .unwrap();
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+
+    assert!(matches!(child.write_state().unwrap().fate, Fate::Accepted));
+    let (proofs, support_views) = subscriber_proofs_and_support_views(&subscriber);
+    assert_eq!(proofs, 1);
+    assert!(
+        support_views > 0,
+        "an inherited policy must still hydrate its parent support"
+    );
+}
+
 /// A scope-isolated relay carries one binding selected by server admission. A
 /// raw `SessionClaims` frame must neither replace that binding nor make the
 /// later terminal write proof use the forged editor role.
@@ -3428,9 +3586,18 @@ fn scope_isolated_relay_terminal_write_rejects_empty_handshake_claims() {
 /// makes the final assertion observe B and fail.
 #[test]
 fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
-    let schema = editor_claim_write_schema();
+    // The clause must read a row besides the candidate: claim-only clauses
+    // prove without hydrating any support receiver.
+    let schema = editor_claim_workspace_write_schema();
     let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
     let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    server
+        .insert_with_id(
+            "workspaces",
+            row(0x3e),
+            BTreeMap::from([("open".to_owned(), Value::Bool(true))]),
+        )
+        .unwrap();
     let a_claims = BTreeMap::from([(
         crate::query::provider_claim_key("role"),
         Value::String("editor".to_owned()),
@@ -3510,14 +3677,16 @@ fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
         let ConnectionLink::Subscriber(a_state) = &mut a_connection.link else {
             unreachable!("A is an admitted subscriber link");
         };
-        crate::local_executor::block_on(a_state.peer.prove_terminal_commit_authorization(
-            &mut server.node().borrow_mut(),
-            alice,
-            a_state.session_claims.clone(),
-            &versions,
-            tx.tx_id,
-        ))
-        .expect("A terminal proof remains valid after B updates the legacy cache");
+        let allowed =
+            crate::local_executor::block_on(a_state.peer.prove_terminal_commit_authorization(
+                &mut server.node().borrow_mut(),
+                alice,
+                a_state.session_claims.clone(),
+                &versions,
+                tx.tx_id,
+            ))
+            .expect("A terminal proof remains valid after B updates the legacy cache");
+        assert!(allowed, "A's editor snapshot authorizes the write");
         assert_eq!(
             a_state.peer.subscription_policy_binding(a_subscription),
             Some((alice, a_claims.clone())),
@@ -3557,14 +3726,16 @@ fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
         let ConnectionLink::Subscriber(a_state) = &mut a_connection.link else {
             unreachable!("A remains an admitted subscriber link");
         };
-        crate::local_executor::block_on(a_state.peer.prove_terminal_commit_authorization(
-            &mut server.node().borrow_mut(),
-            alice,
-            a_state.session_claims.clone(),
-            &versions,
-            tx.tx_id,
-        ))
-        .expect("a refreshed terminal proof replaces the stale support receiver");
+        let allowed =
+            crate::local_executor::block_on(a_state.peer.prove_terminal_commit_authorization(
+                &mut server.node().borrow_mut(),
+                alice,
+                a_state.session_claims.clone(),
+                &versions,
+                tx.tx_id,
+            ))
+            .expect("a refreshed terminal proof replaces the stale support receiver");
+        assert!(!allowed, "the viewer snapshot denies the same write");
         assert_eq!(
             a_state.peer.subscription_policy_binding(b_subscription),
             Some((alice, b_claims)),
@@ -3579,14 +3750,16 @@ fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
         let ConnectionLink::Subscriber(a_state) = &mut a_connection.link else {
             unreachable!("A remains an admitted subscriber link");
         };
-        crate::local_executor::block_on(a_state.peer.prove_terminal_commit_authorization(
-            &mut server.node().borrow_mut(),
-            alice,
-            a_state.session_claims.clone(),
-            &versions,
-            tx.tx_id,
-        ))
-        .expect("the next refreshed terminal proof replaces the stale support receiver");
+        let allowed =
+            crate::local_executor::block_on(a_state.peer.prove_terminal_commit_authorization(
+                &mut server.node().borrow_mut(),
+                alice,
+                a_state.session_claims.clone(),
+                &versions,
+                tx.tx_id,
+            ))
+            .expect("the next refreshed terminal proof replaces the stale support receiver");
+        assert!(allowed, "the restored editor snapshot authorizes it again");
         assert_eq!(
             a_state.peer.subscription_policy_binding(a_subscription),
             Some((alice, a_claims)),

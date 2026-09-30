@@ -108,17 +108,23 @@ impl PeerState {
             // out of that mutable map, and same-author sessions may differ.
             let scope =
                 node.authorization_support_scope_for_session(writer, Some(&claims), &action)?;
-            if scope.subscriptions.is_empty() {
+            let dependencies = scope.dependency_subscriptions().cloned().collect::<Vec<_>>();
+            if dependencies.is_empty() {
+                // Clauses that read only the candidate row and claims have no
+                // inputs to hydrate: the proof is complete at any authority
+                // cut. Hydrating them would materialize every row they match.
+                if !scope.subscriptions.is_empty() {
+                    self.authority_scope_proofs = self.authority_scope_proofs.saturating_add(1);
+                }
                 continue;
             }
             let mut aggregate = AuthorityScopeAggregate::new(
-                scope
-                    .subscriptions
+                dependencies
                     .iter()
                     .map(|(shape, binding)| (shape.shape_id(), binding.binding_id()))
                     .collect(),
             );
-            for (shape, binding) in scope.subscriptions {
+            for (shape, binding) in dependencies {
                 let subscription = SubscriptionKey {
                     shape_id: shape.shape_id(),
                     binding_id: binding.binding_id(),
