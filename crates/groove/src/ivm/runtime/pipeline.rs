@@ -334,8 +334,7 @@ impl TickEvaluator<'_> {
         frame_inputs: super::evaluator::FrameInputs<'_>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<Arc<RecordDeltas>, IvmRuntimeError>> {
-        #[cfg(feature = "cold-settle-attribution")]
-        let _phase = tracing::trace_span!("cold.phase.op_map").entered();
+        let _phase = tracing::trace_span!(target: "jazz::profile", "cold.phase.op_map").entered();
         let tail = *nodes.last().expect("nonempty pipeline");
         if let std::collections::hash_map::Entry::Vacant(entry) = pending.entry(tail) {
             if self

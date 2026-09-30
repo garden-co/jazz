@@ -894,7 +894,12 @@ impl Database {
     /// and [`Database::prepare_one_sink_with_routing`] as thin convenience wrappers.
     #[cfg_attr(
         feature = "cold-settle-attribution",
-        tracing::instrument(skip_all, name = "cold.phase.query_prepare")
+        tracing::instrument(
+            target = "jazz::profile",
+            level = "debug",
+            skip_all,
+            name = "cold.phase.query_prepare"
+        )
     )]
     pub async fn prepare(
         &mut self,
@@ -921,7 +926,12 @@ impl Database {
     /// see [`crate::ivm::IvmRuntime::prepare_shared`].
     #[cfg_attr(
         feature = "cold-settle-attribution",
-        tracing::instrument(skip_all, name = "cold.phase.query_prepare")
+        tracing::instrument(
+            target = "jazz::profile",
+            level = "debug",
+            skip_all,
+            name = "cold.phase.query_prepare"
+        )
     )]
     pub async fn prepare_shared(
         &mut self,

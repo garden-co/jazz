@@ -35,6 +35,9 @@ pub struct WasmLayerConfig {
     ///
     /// `false` by default.
     pub console_group_spans: bool,
+    /// Targets (and their children) this layer never reports, whatever the
+    /// level, so opt-in instrumentation stays off under a verbose log level.
+    pub excluded_targets: Vec<&'static str>,
 }
 
 impl Default for WasmLayerConfig {
@@ -48,6 +51,7 @@ impl Default for WasmLayerConfig {
             show_origin: true,
             origin_base_url: None,
             console_group_spans: false,
+            excluded_targets: Vec::new(),
         }
     }
 }
@@ -66,6 +70,12 @@ impl WasmLayerConfig {
     /// Removes color from the logs
     pub fn with_colorless_logs(mut self) -> Self {
         self.color = false;
+        self
+    }
+
+    /// Never report `target` or any `target::…` below it.
+    pub fn with_excluded_target(mut self, target: &'static str) -> Self {
+        self.excluded_targets.push(target);
         self
     }
 
@@ -115,6 +125,7 @@ fn test_default_built_config() {
             show_origin: true,
             origin_base_url: None,
             console_group_spans: false,
+            excluded_targets: Vec::new(),
         }
     )
 }

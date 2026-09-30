@@ -739,7 +739,10 @@ where
         .await
     }
 
-    #[cfg_attr(feature = "cold-settle-attribution", tracing::instrument(skip_all, name = "cold.phase.ingest"))]
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(target = "jazz::profile", level = "debug", skip_all, name = "cold.phase.ingest")
+    )]
     pub(super) async fn ingest_reset_view_bundle_refs_in_bulk(
         &mut self,
         bundles: &[VersionBundleRef<'_>],

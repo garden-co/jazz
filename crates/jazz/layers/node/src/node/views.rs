@@ -779,7 +779,12 @@ where
 
     #[cfg_attr(
         feature = "cold-settle-attribution",
-        tracing::instrument(skip_all, name = "cold.phase.publish_supporting_rows")
+        tracing::instrument(
+            target = "jazz::profile",
+            level = "debug",
+            skip_all,
+            name = "cold.phase.publish_supporting_rows"
+        )
     )]
     #[doc(hidden)]
     pub async fn view_update_for_maintained_result_members(
@@ -1412,7 +1417,12 @@ where
 
     #[cfg_attr(
         feature = "cold-settle-attribution",
-        tracing::instrument(skip_all, name = "cold.phase.receive_updates")
+        tracing::instrument(
+            target = "jazz::profile",
+            level = "debug",
+            skip_all,
+            name = "cold.phase.receive_updates"
+        )
     )]
     #[doc(hidden)]
     pub async fn apply_view_updates_in_batch(
@@ -2739,7 +2749,12 @@ where
     /// duplicate row versions rather than repairing them.
     #[cfg_attr(
         feature = "cold-settle-attribution",
-        tracing::instrument(skip_all, name = "cold.phase.canonical_supporting_version")
+        tracing::instrument(
+            target = "jazz::profile",
+            level = "debug",
+            skip_all,
+            name = "cold.phase.canonical_supporting_version"
+        )
     )]
     pub(super) async fn canonical_history_version_for_maintained_witness(
         &mut self,

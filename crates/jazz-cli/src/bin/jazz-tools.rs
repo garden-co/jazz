@@ -340,10 +340,17 @@ fn validate_server_cli_options(command: &Commands) -> Result<(), String> {
 }
 
 fn make_env_filter() -> tracing_subscriber::EnvFilter {
-    tracing_subscriber::EnvFilter::from_default_env()
+    let filter = tracing_subscriber::EnvFilter::from_default_env()
         .add_directive("jazz=info".parse().unwrap())
         .add_directive("jazz_tools=info".parse().unwrap())
-        .add_directive("tower_http=debug".parse().unwrap())
+        .add_directive("tower_http=debug".parse().unwrap());
+    // Profiling spans are opt-in by name (`RUST_LOG=jazz::profile=debug`), so
+    // a blanket `RUST_LOG=trace` does not time every IVM kernel call.
+    if std::env::var("RUST_LOG").is_ok_and(|value| value.contains("jazz::profile")) {
+        filter
+    } else {
+        filter.add_directive("jazz::profile=off".parse().unwrap())
+    }
 }
 
 #[cfg(feature = "otel")]

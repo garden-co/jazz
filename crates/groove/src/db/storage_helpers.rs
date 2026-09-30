@@ -911,7 +911,12 @@ impl PendingTableWrite {
 
 #[cfg_attr(
     feature = "cold-settle-attribution",
-    tracing::instrument(skip_all, name = "cold.phase.table_deltas")
+    tracing::instrument(
+        target = "jazz::profile",
+        level = "debug",
+        skip_all,
+        name = "cold.phase.table_deltas"
+    )
 )]
 pub(super) async fn compute_table_deltas<S>(
     pending_writes: &[PendingTableWrite],
