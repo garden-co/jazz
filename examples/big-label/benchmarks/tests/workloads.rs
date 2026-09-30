@@ -46,3 +46,12 @@ fn batched_generated_id_ingest_preserves_values_and_indexed_label_order() {
         .collect::<Vec<_>>();
     assert_eq!(fixture.label_release_titles_and_order(3), expected);
 }
+
+#[test]
+fn live_release_view_hydrates_through_the_label_index() {
+    use jazz_example_big_label_benchmark::live_view::LiveViewFixture;
+    let fixture = LiveViewFixture::new(2_000);
+    let baseline = fixture.active_groove_subscriptions();
+    fixture.assert_selective_hydration();
+    fixture.assert_subscription_baseline(baseline, "test hydration");
+}

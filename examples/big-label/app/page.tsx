@@ -9,15 +9,26 @@ import {
   type JazzClient,
   type JWTAuth,
 } from "jazz-tools/react";
+import {
+  Banner,
+  Button,
+  Card,
+  Center,
+  HStack,
+  Heading,
+  Spinner,
+  Text,
+  TextInput,
+  VStack,
+} from "@astryxdesign/core";
 import { Operations } from "../src/App";
 import { authClient, getJwtFromBetterAuth } from "../src/lib/auth-client";
+import { beginSignupIntent, clearSignupIntent, enrollAndBootstrap } from "../src/lib/enrollment";
 import { JazzLifecycle } from "../src/lib/jazz-lifecycle";
 
 const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID!;
 const serverUrl = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!;
-const signupMarker = "big-label-register-external-account";
 
-type SignupIntent = { email: string; identityId?: string };
 type ManagerSlot = {
   sessionId: string;
   identityId: string;
@@ -25,79 +36,116 @@ type ManagerSlot = {
   error?: Error;
 };
 
-function beginSignupIntent(email: string) {
-  sessionStorage.setItem(signupMarker, JSON.stringify({ email } satisfies SignupIntent));
-}
-
-function clearSignupIntent() {
-  sessionStorage.removeItem(signupMarker);
-}
-
-function claimsSignupIntent(email: string, identityId: string) {
-  const encoded = sessionStorage.getItem(signupMarker);
-  if (!encoded) return false;
-  try {
-    const intent = JSON.parse(encoded) as SignupIntent;
-    if (intent.email !== email) return false;
-    if (intent.identityId && intent.identityId !== identityId) return false;
-    if (!intent.identityId)
-      sessionStorage.setItem(signupMarker, JSON.stringify({ ...intent, identityId }));
-    return true;
-  } catch {
-    clearSignupIntent();
-    return false;
-  }
-}
-
 function toError(cause: unknown) {
   return cause instanceof Error ? cause : new Error(String(cause));
 }
 
 function SignIn() {
+  const [mode, setMode] = React.useState<"sign-in" | "sign-up">("sign-in");
+  const [name, setName] = React.useState("");
   const [email, setEmail] = React.useState("label@example.com");
   const [password, setPassword] = React.useState("big-label-demo");
   const [error, setError] = React.useState<string | null>(null);
   const [pending, setPending] = React.useState(false);
-  async function authenticate(mode: "sign-in" | "sign-up") {
+  async function authenticate() {
     setPending(true);
     setError(null);
-    if (mode === "sign-up") beginSignupIntent(email);
+    if (mode === "sign-up") beginSignupIntent(sessionStorage, email);
     const result =
       mode === "sign-in"
         ? await authClient.signIn.email({ email, password })
-        : await authClient.signUp.email({ email, password, name: email });
+        : await authClient.signUp.email({ email, password, name: name.trim() || email });
     setPending(false);
     if (result.error) {
-      if (mode === "sign-up") clearSignupIntent();
+      if (mode === "sign-up") clearSignupIntent(sessionStorage);
       setError(result.error.message ?? "Authentication failed");
     }
   }
   return (
-    <main className="auth-shell">
-      <h1>BigLabel</h1>
-      <p>Sign in to provision and operate your label.</p>
-      <label>
-        Email
-        <input value={email} onChange={(event) => setEmail(event.target.value)} />
-      </label>
-      <label>
-        Password
-        <input
-          type="password"
-          value={password}
-          onChange={(event) => setPassword(event.target.value)}
-        />
-      </label>
-      <div>
-        <button disabled={pending} onClick={() => void authenticate("sign-in")}>
-          Sign in
-        </button>
-        <button disabled={pending} onClick={() => void authenticate("sign-up")}>
-          Create account
-        </button>
-      </div>
-      {error && <p role="alert">{error}</p>}
-    </main>
+    <AuthScreen>
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          void authenticate();
+        }}
+      >
+        <VStack gap={4}>
+          <VStack gap={1}>
+            <Heading level={1}>
+              {mode === "sign-in" ? "Sign in to BigLabel" : "Create an account"}
+            </Heading>
+            <Text color="secondary">
+              Run artists, releases and teams for your labels, live on every device.
+            </Text>
+          </VStack>
+          {mode === "sign-up" && (
+            <TextInput label="Your name" value={name} onChange={setName} autoComplete="name" />
+          )}
+          <TextInput
+            label="Email"
+            type="email"
+            value={email}
+            onChange={setEmail}
+            autoComplete="email"
+          />
+          <TextInput
+            label="Password"
+            type="password"
+            value={password}
+            onChange={setPassword}
+            autoComplete={mode === "sign-in" ? "current-password" : "new-password"}
+          />
+          {error && <Banner status="error" title={error} />}
+          <Button
+            type="submit"
+            label={mode === "sign-in" ? "Sign in" : "Create account"}
+            isLoading={pending}
+            width="100%"
+          />
+          <Button
+            label={mode === "sign-in" ? "Create an account instead" : "I already have an account"}
+            variant="ghost"
+            onClick={() => {
+              setMode(mode === "sign-in" ? "sign-up" : "sign-in");
+              setError(null);
+            }}
+          />
+        </VStack>
+      </form>
+    </AuthScreen>
+  );
+}
+
+/** Centred card for the signed-out and connecting states. */
+function AuthScreen({ children }: { children: React.ReactNode }) {
+  return (
+    <Center minHeight="100dvh" padding={4}>
+      <Card padding={6} width="100%" maxWidth={420}>
+        {children}
+      </Card>
+    </Center>
+  );
+}
+
+function Waiting({ message }: { message: string }) {
+  return (
+    <AuthScreen>
+      <HStack gap={3} vAlign="center">
+        <Spinner size="sm" />
+        <Text>{message}</Text>
+      </HStack>
+    </AuthScreen>
+  );
+}
+
+function Failure({ error, onRetry }: { error: Error; onRetry: () => void }) {
+  return (
+    <AuthScreen>
+      <VStack gap={4}>
+        <Banner status="error" title="BigLabel couldn't connect" description={error.message} />
+        <Button label="Retry" variant="secondary" onClick={onRetry} />
+      </VStack>
+    </AuthScreen>
   );
 }
 
@@ -127,19 +175,15 @@ export default function Page() {
     };
   }, [identityId, retry, sessionId]);
 
-  if (isPending) return <main className="auth-shell">Loading your session…</main>;
+  if (isPending) return <Waiting message="Loading your session…" />;
   if (!sessionId || !identityId || !data) return <SignIn />;
   // Never let session B render session A's manager or client while effects
   // prepare the replacement manager.
   if (slot?.sessionId !== sessionId || slot.identityId !== identityId)
-    return <main className="auth-shell">Preparing your personal label…</main>;
+    return <Waiting message="Preparing your personal label…" />;
   if (slot.error)
-    return (
-      <main className="auth-shell" role="alert">
-        {slot.error.message} <button onClick={() => setRetry((value) => value + 1)}>Retry</button>
-      </main>
-    );
-  if (!slot.manager) return <main className="auth-shell">Preparing your personal label…</main>;
+    return <Failure error={slot.error} onRetry={() => setRetry((value) => value + 1)} />;
+  if (!slot.manager) return <Waiting message="Preparing your personal label…" />;
   return (
     <AccountApp
       key={sessionId}
@@ -173,37 +217,41 @@ function AccountApp({
     );
   const lifecycle = lifecycleRef.current;
 
-  const enrollAndBootstrap = React.useCallback(async () => {
-    const registering = claimsSignupIntent(email, identityId);
+  React.useEffect(() => {
+    // Each run owns its own flag: strict mode's discarded run must stay
+    // discarded after the next run marks the component active again.
+    let current = true;
+    active.current = true;
     setError(undefined);
     setReady(false);
-    await lifecycle.transition(
-      (manager) =>
-        registering
-          ? manager.registerJWT({ getToken: requireJazzToken })
-          : manager.loginJWT({ getToken: requireJazzToken }),
-      () => active.current,
+    enrollAndBootstrap({
+      lifecycle,
+      storage: sessionStorage,
+      email,
+      identityId,
+      getToken: requireJazzToken,
+      bootstrap: async (token) => {
+        const response = await fetch("/api/bootstrap", {
+          method: "POST",
+          headers: { authorization: `Bearer ${token}` },
+        });
+        if (!response.ok) throw new Error(`bootstrap failed (${response.status})`);
+      },
+      isCurrent: () => current,
+    }).then(
+      (finished) => {
+        if (finished) setReady(true);
+      },
+      (cause) => {
+        if (current) setError(toError(cause));
+      },
     );
-    if (registering) clearSignupIntent();
-    const token = await requireJazzToken();
-    const response = await fetch("/api/bootstrap", {
-      method: "POST",
-      headers: { authorization: `Bearer ${token}` },
-    });
-    if (!response.ok) throw new Error(`bootstrap failed (${response.status})`);
-    if (active.current) setReady(true);
-  }, [email, identityId, lifecycle]);
-
-  React.useEffect(() => {
-    active.current = true;
-    void enrollAndBootstrap().catch((cause) => {
-      if (active.current) setError(toError(cause));
-    });
     return () => {
+      current = false;
       active.current = false;
       void lifecycle.close().catch((cause) => console.error("Jazz shutdown failed", cause));
     };
-  }, [enrollAndBootstrap, lifecycle, retry]);
+  }, [email, identityId, lifecycle, retry]);
 
   const signOut = React.useCallback(async () => {
     try {
@@ -220,16 +268,11 @@ function AccountApp({
     }
   }, [lifecycle]);
 
-  if (error)
-    return (
-      <main className="auth-shell" role="alert">
-        {error.message} <button onClick={() => setRetry((value) => value + 1)}>Retry</button>
-      </main>
-    );
-  if (!client || !ready) return <main className="auth-shell">Preparing your personal label…</main>;
+  if (error) return <Failure error={error} onRetry={() => setRetry((value) => value + 1)} />;
+  if (!client || !ready) return <Waiting message="Preparing your personal label…" />;
   return (
     <JazzClientProvider client={client}>
-      <Operations onSignOut={() => void signOut().catch(() => {})} />
+      <Operations email={email} onSignOut={() => void signOut().catch(() => {})} />
     </JazzClientProvider>
   );
 }
