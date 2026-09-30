@@ -1,10 +1,11 @@
 import { accountRegistryUrl } from "jazz-tools";
-import { resolveRequestSession } from "jazz-tools/backend";
+import { isRequestAuthenticationError, resolveRequestSession } from "jazz-tools/backend";
 
 /**
  * Verifies the Better Auth JWT on a request and resolves its Jazz account.
- * Resolves null when the request carries no bearer token Jazz accepts, so
- * routes answer 401 rather than failing with a 500.
+ * Resolves null when the caller's credentials are missing or rejected, so
+ * routes answer 401. A failure on the server's side, such as an unreachable
+ * JWKS endpoint or account registry, is rethrown and becomes a logged 500.
  */
 export async function requestAccount(request: Request) {
   const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID!;
@@ -18,8 +19,9 @@ export async function requestAccount(request: Request) {
       jwksUrl: `${origin}/api/auth/jwks`,
       jwtIssuer: origin,
     });
-  } catch {
-    return null;
+  } catch (error) {
+    if (isRequestAuthenticationError(error)) return null;
+    throw error;
   }
   if (!session.account_id) return null;
   const { name, email } = session.claims;
