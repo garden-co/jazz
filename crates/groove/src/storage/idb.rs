@@ -6,6 +6,34 @@ use std::rc::Rc;
 use std::task::Poll;
 
 use futures::lock::Mutex;
+
+struct DiagGateGuard<'a> {
+    _guard: futures::lock::MutexGuard<'a, ()>,
+    site: &'static str,
+}
+
+impl Drop for DiagGateGuard<'_> {
+    fn drop(&mut self) {
+        tracing::debug!("DIAG3816 gate released by {}", self.site);
+    }
+}
+
+async fn diag_gate<'a>(gate: &'a Mutex<()>, site: &'static str) -> DiagGateGuard<'a> {
+    if let Some(guard) = gate.try_lock() {
+        tracing::debug!("DIAG3816 gate acquired by {} immediately", site);
+        return DiagGateGuard {
+            _guard: guard,
+            site,
+        };
+    }
+    tracing::debug!("DIAG3816 gate waits at {}", site);
+    let guard = gate.lock().await;
+    tracing::debug!("DIAG3816 gate acquired by {} after waiting", site);
+    DiagGateGuard {
+        _guard: guard,
+        site,
+    }
+}
 use idb_tree::{IdbTree, Options, PageStore, WriteOperation};
 
 use super::{
@@ -136,7 +164,7 @@ where
             {
                 return Ok(value);
             }
-            let guard = self.mutation_gate.lock().await;
+            let guard = diag_gate(&self.mutation_gate, "read_resident:139").await;
             self.ensure_ready().await?;
             let epoch = self.tree_epoch.get();
             let mut pending = std::pin::pin!(read(self.tree()));
@@ -146,7 +174,7 @@ where
                 Poll::Pending => {
                     drop(guard);
                     if let Err(error) = pending.await {
-                        let _guard = self.mutation_gate.lock().await;
+                        let _guard = diag_gate(&self.mutation_gate, "read_resident:149").await;
                         self.ensure_ready().await?;
                         if self.tree_epoch.get() == epoch {
                             return Err(error.into());
@@ -338,7 +366,7 @@ where
     ) -> StorageFuture<'_, Result<Option<Value>, Error>> {
         Box::pin(async move {
             self.ensure_cf(&cf)?;
-            let _guard = self.mutation_gate.lock().await;
+            let _guard = diag_gate(&self.mutation_gate, "put_if_absent:341").await;
             self.ensure_ready().await?;
             let encoded_key = self.encoded_key(&cf, &key)?;
             for retry in 0..=MAX_GENERATION_CONFLICT_RETRIES {
@@ -377,7 +405,7 @@ where
     ) -> StorageFuture<'_, Result<bool, Error>> {
         Box::pin(async move {
             self.ensure_cf(&cf)?;
-            let _guard = self.mutation_gate.lock().await;
+            let _guard = diag_gate(&self.mutation_gate, "compare_and_delete:380").await;
             self.ensure_ready().await?;
             let encoded_key = self.encoded_key(&cf, &key)?;
             for retry in 0..=MAX_GENERATION_CONFLICT_RETRIES {
@@ -416,7 +444,7 @@ where
         Box::pin(async move {
             let operations = vec![OwnedWriteOperation::Set { cf, key, value }];
             self.prevalidate_write_many(&operations)?;
-            let _guard = self.mutation_gate.lock().await;
+            let _guard = diag_gate(&self.mutation_gate, "set:419").await;
             self.ensure_ready().await?;
             self.write_many_replaying_generation_conflicts(&operations)
                 .await
@@ -427,7 +455,7 @@ where
         Box::pin(async move {
             let operations = vec![OwnedWriteOperation::Delete { cf, key }];
             self.prevalidate_write_many(&operations)?;
-            let _guard = self.mutation_gate.lock().await;
+            let _guard = diag_gate(&self.mutation_gate, "delete:430").await;
             self.ensure_ready().await?;
             self.write_many_replaying_generation_conflicts(&operations)
                 .await
@@ -436,7 +464,7 @@ where
 
     fn close(&self) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
-            let _guard = self.mutation_gate.lock().await;
+            let _guard = diag_gate(&self.mutation_gate, "close:439").await;
             self.ensure_ready().await?;
             self.flush_tree().await
         })
@@ -444,7 +472,7 @@ where
 
     fn flush_write_boundary(&self) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
-            let _guard = self.mutation_gate.lock().await;
+            let _guard = diag_gate(&self.mutation_gate, "flush_write_boundary:447").await;
             self.ensure_ready().await?;
             self.flush_tree().await
         })
@@ -540,7 +568,7 @@ where
     ) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
             self.prevalidate_write_many(&operations)?;
-            let _guard = self.mutation_gate.lock().await;
+            let _guard = diag_gate(&self.mutation_gate, "write_many:543").await;
             self.ensure_ready().await?;
             self.write_many_replaying_generation_conflicts(&operations)
                 .await
