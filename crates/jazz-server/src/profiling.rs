@@ -176,8 +176,8 @@ async fn heap_profile_response(heap_profiler: Option<HeapProfileDump>) -> Respon
 
 #[cfg(test)]
 mod tests {
-    //! Router-level tests: the Linux binary always installs a working
-    //! jemalloc profiler, so the no-profiler and failed-dump branches, and the
+    //! Router-level tests: the Linux binary always installs a working heap
+    //! profiler, so the no-profiler and failed-dump branches, and the
     //! diagnostics router in isolation, are only reachable from here. The
     //! end-to-end path is covered by `jazz-cli`'s process test.
 
@@ -194,7 +194,7 @@ mod tests {
     }
 
     fn failing_dump() -> Result<Vec<u8>, String> {
-        Err("prof.dump failed".to_owned())
+        Err("heap dump failed".to_owned())
     }
 
     fn admin_auth(secret: Option<&str>) -> AuthConfig {
@@ -338,7 +338,7 @@ mod tests {
         assert!(
             String::from_utf8(body)
                 .unwrap()
-                .contains("prof.dump failed")
+                .contains("heap dump failed")
         );
     }
 }

@@ -76,13 +76,6 @@ jobs:
           tool: cargo-zigbuild@0.20.1
 
       - name: Build CLI binary
-        env:
-          # jemalloc's configure looks for `_Unwind_Backtrace` in libgcc, which
-          # zig does not ship. Point it at zig's bundled LLVM libunwind so heap
-          # profiling uses a real unwinder (jazz_cli::heap_profiling refuses
-          # to sample without one).
-          X86_64_UNKNOWN_LINUX_MUSL_LDFLAGS: -lunwind
-          AARCH64_UNKNOWN_LINUX_MUSL_LDFLAGS: -lunwind
         run: cargo zigbuild -p jazz-cli --bin jazz-tools --features otel --profile release-server --target ${{ matrix.target }}
 
       - name: Stage artifact
@@ -101,7 +94,7 @@ jobs:
         run: |
           set -euo pipefail
           # Sample every allocation so startup allocations are always present.
-          MALLOC_CONF=lg_prof_sample:0 ./dist/${{ matrix.output }} server 00000000-0000-0000-0000-000000000001 \
+          JAZZ_HEAP_PROFILE_SAMPLE_BYTES=1 ./dist/${{ matrix.output }} server 00000000-0000-0000-0000-000000000001 \
             --in-memory --port 1625 --admin-secret heap-check \
             --diagnostics-listen 127.0.0.1:6060 --diagnostics-token heap-scrape \
             > server.log 2>&1 &

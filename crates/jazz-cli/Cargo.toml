@@ -14,16 +14,14 @@ transport-compression-zstd = ["jazz/transport-compression-zstd"]
 transport-compression-ruzstd = ["jazz/transport-compression-ruzstd"]
 otel = ["dep:jazz-otel", "dep:opentelemetry", "dep:opentelemetry_sdk", "jazz-server/otel"]
 test = ["jazz/testing", "jazz-server/test"]
-# On Linux, run `jazz-tools` on jemalloc with always-on sampled heap
-# profiling instead of mimalloc; see `src/heap_profiling/`. No effect on
-# other platforms.
+# On Linux, sample `jazz-tools`'s heap all the time and serve it as a pprof
+# profile; see `src/heap_profiling/`. No effect on other platforms.
 heap-profiling = [
+  "dep:backtrace",
   "dep:flate2",
-  "dep:jemalloc_pprof",
+  "dep:mappings",
   "dep:prost",
   "dep:rustc-demangle",
-  "dep:tikv-jemalloc-ctl",
-  "dep:tikv-jemallocator",
 ]
 
 [dependencies]
@@ -53,15 +51,11 @@ uuid = "1.18.1"
 
 # Used only on Linux with the `heap-profiling` feature.
 [target.'cfg(target_os = "linux")'.dependencies]
+backtrace = { version = "0.3", optional = true }
 flate2 = { version = "1", optional = true }
-jemalloc_pprof = { version = "0.9", optional = true }
+mappings = { version = "0.7", optional = true }
 prost = { version = "0.14", optional = true }
 rustc-demangle = { version = "0.1", optional = true }
-tikv-jemalloc-ctl = { version = "0.7", features = ["use_std"], optional = true }
-tikv-jemallocator = { version = "0.7", features = [
-  "profiling",
-  "unprefixed_malloc_on_supported_platforms",
-], optional = true }
 
 [dev-dependencies]
 base64 = "0.22"
@@ -75,9 +69,6 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 tempfile = "3.27.0"
 tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
-
-[target.'cfg(target_os = "linux")'.dev-dependencies]
-mappings = "0.7"
 
 [[bin]]
 name = "jazz-tools"

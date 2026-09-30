@@ -9,27 +9,17 @@
 
 // The global allocator is a per-binary choice; library code in `jazz-tools`
 // does not declare one so that consumers (jazz-napi, todo-server, third-party
-// embedders) keep theirs. Both choices replace the system allocator for
+// embedders) keep theirs. mimalloc replaces the system allocator for
 // throughput on the server's allocation-heavy paths (query/insert/observer).
 //
 // With the `heap-profiling` feature on Linux, where production servers run,
-// jemalloc replaces mimalloc and samples the heap so operators can see which
-// code holds memory (see `jazz_cli::heap_profiling`). It replaces `malloc`
-// too, so RocksDB's allocations are sampled as well.
+// a sampling wrapper records a stack for about one allocation per 512 KiB,
+// so operators can see which code holds memory (see
+// `jazz_cli::heap_profiling`).
 #[cfg(heap_profiling)]
 #[global_allocator]
-static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
-
-// Read by jemalloc before `main`. Profiling starts inactive so that
-// `heap_profiling::activate` can refuse builds without a safe unwinder.
-// Background threads return freed memory to the OS while the server is idle.
-// Operators can override any of these with the `MALLOC_CONF` environment
-// variable, for example `MALLOC_CONF=lg_prof_sample:17` for denser sampling.
-#[cfg(heap_profiling)]
-#[allow(non_upper_case_globals)]
-#[unsafe(export_name = "malloc_conf")]
-pub static malloc_conf: &[u8] =
-    b"prof:true,prof_active:false,lg_prof_sample:19,background_thread:true\0";
+static GLOBAL: jazz_cli::heap_profiling::SamplingAllocator<mimalloc::MiMalloc> =
+    jazz_cli::heap_profiling::SamplingAllocator::new(mimalloc::MiMalloc);
 
 #[cfg(not(heap_profiling))]
 #[global_allocator]
@@ -310,7 +300,7 @@ async fn main() {
                 std::time::Duration::from_secs(shutdown_timeout_secs),
                 DiagnosticsConfig {
                     #[cfg(heap_profiling)]
-                    heap_profiler: jazz_cli::heap_profiling::activate(),
+                    heap_profiler: Some(jazz_cli::heap_profiling::activate()),
                     #[cfg(not(heap_profiling))]
                     heap_profiler: None,
                     listen: diagnostics_listen,

@@ -38,8 +38,9 @@ On Linux, the server samples its heap continuously at low cost. `GET /debug/ppro
 sampled in-use memory as a gzipped pprof profile with function names, for `go tool pprof` or a
 continuous profiler. The profile records the binary's build ID, so tools can add source lines from a
 matching unstripped build. Send the admin secret in `X-Jazz-Admin-Secret`, or scrape it from the
-diagnostics listener with its token. Dumping writes a temporary file, so `$TMPDIR` (usually `/tmp`)
-must be writable. Other platforms answer `501 Not Implemented`.
+diagnostics listener with its token. The profile covers memory the server allocates from Rust, not
+memory RocksDB allocates internally. `JAZZ_HEAP_PROFILE_SAMPLE_BYTES` sets the mean bytes allocated
+between samples (default 524288). Other platforms answer `501 Not Implemented`.
 
 Local-first auth is enabled by default in development and requires `--allow-local-first-auth` in production. External JWT auth requires either `--jwks-url` or `--jwt-public-key`, but not both.
 The server runs Core directly. It owns the account registry, permission checks,

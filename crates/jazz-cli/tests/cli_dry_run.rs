@@ -105,7 +105,11 @@ fn server_command_report(command: &mut Command) -> String {
 }
 
 fn jazz_tools_command() -> Command {
-    let mut command = Command::new(cargo_binary("jazz-tools"));
+    jazz_tools_command_at(cargo_binary("jazz-tools"))
+}
+
+fn jazz_tools_command_at(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut command = Command::new(program);
     command
         .env_remove("JAZZ_SERVER_PORT")
         .env_remove("JAZZ_SERVER_DATA_DIR")
@@ -147,8 +151,17 @@ fn start_jazz_tools_server_with_env(
     bound_port_file: &Path,
     env: &[(&str, &str)],
 ) -> (Child, u16) {
-    let mut child = jazz_tools_command()
-        .envs(env.iter().copied())
+    let mut command = jazz_tools_command();
+    command.envs(env.iter().copied());
+    start_jazz_tools_server_with(command, data_dir, bound_port_file)
+}
+
+fn start_jazz_tools_server_with(
+    mut command: Command,
+    data_dir: &Path,
+    bound_port_file: &Path,
+) -> (Child, u16) {
+    let mut child = command
         .args([
             "server",
             "00000000-0000-0000-0000-000000000001",
@@ -1325,13 +1338,17 @@ fn jazz_tools_server_serves_a_symbolized_heap_profile_to_admins() {
     let temp_dir = tempfile::tempdir().expect("create server temp dir");
     let data_dir = temp_dir.path().join("data");
     let port_file = temp_dir.path().join("port");
-    // Sample every allocation so the profile deterministically contains the
-    // server's startup allocations; the shipped rate samples ~1 per 512 KiB.
-    let (mut server, port) = start_jazz_tools_server_with_env(
-        &data_dir,
-        &port_file,
-        &[("MALLOC_CONF", "lg_prof_sample:0")],
-    );
+    // Sample about every allocation so the profile deterministically
+    // contains the server's startup allocations; the shipped rate samples
+    // ~1 per 512 KiB.
+    // Started as `./jazz-tools`, the way operators often run it: the
+    // profile must still find the executable's symbols.
+    let binary = cargo_binary("jazz-tools");
+    let mut command = jazz_tools_command_at("./jazz-tools");
+    command
+        .current_dir(binary.parent().expect("binary has a directory"))
+        .env("JAZZ_HEAP_PROFILE_SAMPLE_BYTES", "1");
+    let (mut server, port) = start_jazz_tools_server_with(command, &data_dir, &port_file);
 
     let (status, _) = http_get(port, "/debug/pprof/heap", None);
     assert_eq!(status, 401);
