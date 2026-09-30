@@ -121,40 +121,38 @@ where
                 == coordinate.physical_table_id)
     }
 
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(target = "jazz::profile", level = "debug", skip_all, name = "cold.phase.parent_completion")
+    )]
     async fn complete_parent_versions<V: std::borrow::Borrow<VersionRecord>>(
         &mut self,
         tx: &Transaction,
         incoming: &[V],
     ) -> Result<Option<Vec<VersionRecord>>, Error> {
-        tracing::Instrument::instrument(
-            async move {
-            let mut assembled = BTreeMap::new();
-            if self.query_transaction(tx.tx_id).await?.is_some() {
-                for stored in self.query_versions_for_tx(tx.tx_id).await? {
-                    let version = self.version_record_from_row(&stored)?;
-                    assembled.insert(view_version_key_for_ingest(&version), version);
+        let mut assembled = BTreeMap::new();
+        if self.query_transaction(tx.tx_id).await?.is_some() {
+            for stored in self.query_versions_for_tx(tx.tx_id).await? {
+                let version = self.version_record_from_row(&stored)?;
+                assembled.insert(view_version_key_for_ingest(&version), version);
+            }
+        }
+        for version in incoming {
+            let version = version.borrow();
+            match assembled.get(&view_version_key_for_ingest(version)) {
+                Some(existing) if existing != version => {
+                    return Err(Error::ConflictingCommitUnit(tx.tx_id));
+                }
+                Some(_) => {}
+                None => {
+                    assembled.insert(view_version_key_for_ingest(version), version.clone());
                 }
             }
-            for version in incoming {
-                let version = version.borrow();
-                match assembled.get(&view_version_key_for_ingest(version)) {
-                    Some(existing) if existing != version => {
-                        return Err(Error::ConflictingCommitUnit(tx.tx_id));
-                    }
-                    Some(_) => {}
-                    None => {
-                        assembled.insert(view_version_key_for_ingest(version), version.clone());
-                    }
-                }
-            }
-            if usize::try_from(tx.n_total_writes).ok() != Some(assembled.len()) {
-                return Ok(None);
-            }
-            Ok(Some(assembled.into_values().collect()))
-            },
-            tracing::debug_span!(target: "jazz::profile", "cold.phase.parent_completion"),
-        )
-        .await
+        }
+        if usize::try_from(tx.n_total_writes).ok() != Some(assembled.len()) {
+            return Ok(None);
+        }
+        Ok(Some(assembled.into_values().collect()))
     }
 
     /// Validate durable constraints owned by already-accepted partial children

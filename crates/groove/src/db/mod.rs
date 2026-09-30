@@ -1442,128 +1442,131 @@ impl AppliedBatch {
         &self.changed_tables
     }
 
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(
+            target = "jazz::profile",
+            level = "debug",
+            skip_all,
+            name = "cold.phase.storage_persist"
+        )
+    )]
     pub async fn persist(&self) -> PersistedBatch {
-        tracing::Instrument::instrument(
-            async move {
-                assert_eq!(
-                    self.lifecycle.replace(AppliedBatchLifecycle::Persisting),
-                    AppliedBatchLifecycle::Applied,
-                    "an applied batch may have only one persistence attempt at a time",
+        assert_eq!(
+            self.lifecycle.replace(AppliedBatchLifecycle::Persisting),
+            AppliedBatchLifecycle::Applied,
+            "an applied batch may have only one persistence attempt at a time",
+        );
+        let storage = self
+            .storage
+            .borrow()
+            .as_ref()
+            .expect("an applied publication retains storage until settlement")
+            .clone();
+        let mut attempt = PersistenceAttempt {
+            lifecycle: Rc::clone(&self.lifecycle),
+            order: Rc::clone(&self.order),
+            publication: self.publication,
+            abandoned_application: Rc::clone(&self.abandoned_application),
+            write_started: false,
+            completed: false,
+        };
+        let turn = std::future::poll_fn(|cx| {
+            let mut order = self.order.borrow_mut();
+            if let Some(message) = &order.failure {
+                return Poll::Ready(Err(crate::storage::Error::Backend {
+                    backend: "publication order",
+                    message: message.clone(),
+                }));
+            }
+            if order.next == self.publication.0 {
+                return Poll::Ready(Ok(()));
+            }
+            order.waiters.insert(self.publication.0, cx.waker().clone());
+            Poll::Pending
+        })
+        .await;
+        let snapshot = self.operations.borrow().snapshot();
+        let operations = snapshot
+            .iter()
+            .flat_map(|block| block.iter())
+            .map(OwnedWriteOperation::as_write_operation)
+            .collect::<Vec<_>>();
+        let storage_writes = StorageWriteMetrics::from_operations(&operations);
+        let storage_start = Instant::now();
+        let outcome = match turn {
+            Ok(()) => {
+                attempt.write_started = true;
+                storage.write_many_borrowed_outcome(operations).await
+            }
+            Err(error) => WriteManyOutcome::Uncommitted(error),
+        };
+        let result = match outcome {
+            WriteManyOutcome::Committed => Ok(()),
+            WriteManyOutcome::Uncommitted(error) => Err(error),
+            WriteManyOutcome::PossiblyCommitted(error) => {
+                // Runtime state already reflects this publication. Without a
+                // definite non-commit receipt it cannot be rolled back or
+                // retried safely; every database entry point must fail closed
+                // even before the host settles the returned receipt.
+                self.abandoned_application.set(true);
+                Err(error)
+            }
+        };
+        let storage_write_time = storage_start.elapsed();
+        if result.is_ok()
+            && let Some(durable) = &self.resident_install_durable
+        {
+            durable.set(true);
+        }
+        self.lifecycle
+            .set(AppliedBatchLifecycle::PersistenceComplete);
+        attempt.completed = true;
+        let waiter = {
+            let mut order = self.order.borrow_mut();
+            if result.is_ok() {
+                order.next = order.next.saturating_add(1);
+                let next = order.next;
+                order.waiters.remove(&next)
+            } else {
+                order.failure = Some(
+                    result
+                        .as_ref()
+                        .expect_err("failed persistence has an error")
+                        .to_string(),
                 );
-                let storage = self
-                    .storage
-                    .borrow()
-                    .as_ref()
-                    .expect("an applied publication retains storage until settlement")
-                    .clone();
-                let mut attempt = PersistenceAttempt {
-                    lifecycle: Rc::clone(&self.lifecycle),
-                    order: Rc::clone(&self.order),
-                    publication: self.publication,
-                    abandoned_application: Rc::clone(&self.abandoned_application),
-                    write_started: false,
-                    completed: false,
-                };
-                let turn = std::future::poll_fn(|cx| {
-                    let mut order = self.order.borrow_mut();
-                    if let Some(message) = &order.failure {
-                        return Poll::Ready(Err(crate::storage::Error::Backend {
-                            backend: "publication order",
-                            message: message.clone(),
-                        }));
-                    }
-                    if order.next == self.publication.0 {
-                        return Poll::Ready(Ok(()));
-                    }
-                    order.waiters.insert(self.publication.0, cx.waker().clone());
-                    Poll::Pending
-                })
-                .await;
-                let snapshot = self.operations.borrow().snapshot();
-                let operations = snapshot
-                    .iter()
-                    .flat_map(|block| block.iter())
-                    .map(OwnedWriteOperation::as_write_operation)
-                    .collect::<Vec<_>>();
-                let storage_writes = StorageWriteMetrics::from_operations(&operations);
-                let storage_start = Instant::now();
-                let outcome = match turn {
-                    Ok(()) => {
-                        attempt.write_started = true;
-                        storage.write_many_borrowed_outcome(operations).await
-                    }
-                    Err(error) => WriteManyOutcome::Uncommitted(error),
-                };
-                let result = match outcome {
-                    WriteManyOutcome::Committed => Ok(()),
-                    WriteManyOutcome::Uncommitted(error) => Err(error),
-                    WriteManyOutcome::PossiblyCommitted(error) => {
-                        // Runtime state already reflects this publication. Without a
-                        // definite non-commit receipt it cannot be rolled back or
-                        // retried safely; every database entry point must fail closed
-                        // even before the host settles the returned receipt.
-                        self.abandoned_application.set(true);
-                        Err(error)
-                    }
-                };
-                let storage_write_time = storage_start.elapsed();
-                if result.is_ok()
-                    && let Some(durable) = &self.resident_install_durable
-                {
-                    durable.set(true);
-                }
-                self.lifecycle
-                    .set(AppliedBatchLifecycle::PersistenceComplete);
-                attempt.completed = true;
-                let waiter = {
-                    let mut order = self.order.borrow_mut();
-                    if result.is_ok() {
-                        order.next = order.next.saturating_add(1);
-                        let next = order.next;
-                        order.waiters.remove(&next)
-                    } else {
-                        order.failure = Some(
-                            result
-                                .as_ref()
-                                .expect_err("failed persistence has an error")
-                                .to_string(),
-                        );
-                        let waiters = std::mem::take(&mut order.waiters);
-                        for (_, waiter) in waiters {
-                            waiter.wake();
-                        }
-                        None
-                    }
-                };
-                if let Some(waiter) = waiter {
+                let waiters = std::mem::take(&mut order.waiters);
+                for (_, waiter) in waiters {
                     waiter.wake();
                 }
-                if self.abandoned_application.get() {
-                    wake_publication_owner(&self.order);
-                }
-                PersistedBatch {
-                    publication: self.publication,
-                    result,
-                    notifications_deferred: self.notifications_deferred,
-                    metrics: CommitMetrics {
-                        storage_write_time,
-                        ivm_tick_time: self.ivm_tick_time,
-                        storage_write_count: storage_writes.total.count,
-                        storage_write_bytes: storage_writes.total.bytes,
-                        storage_writes,
-                        tick: self.tick.clone(),
-                    },
-                    receipt: PersistenceReceipt {
-                        storage: Rc::clone(&self.storage),
-                        lifecycle: Rc::clone(&self.lifecycle),
-                        order: Rc::clone(&self.order),
-                        abandoned_application: Rc::clone(&self.abandoned_application),
-                    },
-                }
+                None
+            }
+        };
+        if let Some(waiter) = waiter {
+            waiter.wake();
+        }
+        if self.abandoned_application.get() {
+            wake_publication_owner(&self.order);
+        }
+        PersistedBatch {
+            publication: self.publication,
+            result,
+            notifications_deferred: self.notifications_deferred,
+            metrics: CommitMetrics {
+                storage_write_time,
+                ivm_tick_time: self.ivm_tick_time,
+                storage_write_count: storage_writes.total.count,
+                storage_write_bytes: storage_writes.total.bytes,
+                storage_writes,
+                tick: self.tick.clone(),
             },
-            tracing::debug_span!(target: "jazz::profile", "cold.phase.storage_persist"),
-        )
-        .await
+            receipt: PersistenceReceipt {
+                storage: Rc::clone(&self.storage),
+                lifecycle: Rc::clone(&self.lifecycle),
+                order: Rc::clone(&self.order),
+                abandoned_application: Rc::clone(&self.abandoned_application),
+            },
+        }
     }
 }
 

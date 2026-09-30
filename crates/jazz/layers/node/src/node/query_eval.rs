@@ -4319,6 +4319,15 @@ where
         )
     }
 
+    #[cfg_attr(
+        feature = "cold-settle-attribution",
+        tracing::instrument(
+            target = "jazz::profile",
+            level = "debug",
+            skip_all,
+            name = "cold.phase.query_setup"
+        )
+    )]
     async fn open_seeded_maintained_subscription_view_in_authorization_mode(
         &mut self,
         shape: &ValidatedQuery,
@@ -4345,391 +4354,385 @@ where
         ),
         Error,
     > {
-        tracing::Instrument::instrument(
-            async move {
-            let schema = self
-                .catalogue
-                .catalogue_schemas
-                .get(&shape.schema_version())
-                .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
-            let shape = bind_query_params_with_mode(
-                shape,
-                binding,
-                &schema.schema,
-                ParamBindingMode::RetainAllParams,
-            )?;
-            let binding = shape.bind(binding.values().clone())?;
-            // A lone Local-tier subscription gains nothing from routing through a
-            // shared binding source, and its literal graph hydrates faster. Share
-            // only once a sibling of the same shape with a different binding is
-            // open: the first subscriber keeps its literal graph for its lifetime
-            // and holds a token so later siblings know to prepare the shared
-            // shape. Reopening the same binding (a remount, or a resubscribe
-            // whose predecessor's teardown is still queued) gains nothing from
-            // sharing either, so it stays literal too.
-            let lone_client_local_source = if authorization_mode == QueryAuthorizationMode::ClientLocal
-                && tier == DurabilityTier::Local
-                && read_view.is_default()
-                && settled_binding_view.is_none()
-            {
-                self.client_local_prepared_source_name(&shape, &binding, identity)?
-                    .filter(|source_shape| {
-                        !self
-                            .client_local_literal_shapes
-                            .get(source_shape)
-                            .is_some_and(|(token, literal_binding)| {
-                                token.strong_count() > 0 && *literal_binding != binding
-                            })
-                            && !self.database.prepared_binding_source_is_bound(source_shape)
-                    })
-            } else {
-                None
-            };
-            let mut request = self.current_query_program_request_with_prepared_claim_mode(
-                &shape,
-                &binding,
-                tier,
-                identity,
-                CurrentQueryProgramOutput::MaintainedView,
-                read_view,
-                settled_binding_view,
-                authorization_mode,
-                prepared_claim_binding_mode,
-                lone_client_local_source.is_some(),
-            )?;
-            if let Some(authority_result_key) = settled_authority_result_key.as_ref() {
-                for source in request.reads.primary.sources.values_mut() {
-                    if let SourceExpr::SettledBindingView {
-                        authority_result_key: selected,
-                        ..
-                    } = source
-                    {
-                        *selected = Some(authority_result_key.clone());
-                    }
-                }
-            }
-            if pending_overlay {
-                if authorization_mode != QueryAuthorizationMode::ClientLocal {
-                    return Err(Error::InvalidStoredValue(
-                        "pending receiver overlay requires client-local execution",
-                    ));
-                }
-                for source in request.reads.primary.sources.values_mut() {
-                    if matches!(source, SourceExpr::SettledBindingView { .. }) {
-                        *source = SourceExpr::WithOverlays {
-                            input: Box::new(source.clone()),
-                            overlays: OverlayStack {
-                                entries: vec![OverlayRef::PendingLocal],
-                            },
-                        };
-                    }
-                }
-            }
-            let access_paths = self.current_query_hydration_access_paths(
-                &request,
-                &shape,
-                &binding,
-                HydrationLifetime::Retained,
-            )?;
-            // Receiver inputs are allocated from the compiler's source
-            // requirements before any source is resolved. This keeps the initial
-            // lowering from consulting an authority result just to discover a
-            // descriptor.
-            let (runtime_sources, runtime_source_descriptors, covered_input_sources) =
-                if authorization_mode == QueryAuthorizationMode::ClientLocal {
-                    // Local-first uses ordinary local current state for its entire
-                    // lifetime. Receiving an authority scope does not revoke cached
-                    // knowledge. Only settled remote source expressions require an
-                    // exact receiver input; do not convert Local into a provisional
-                    // authority-scoped read.
-                    self.allocate_client_receiver_input_sources(&request)?
-                } else {
-                    (BTreeMap::new(), BTreeMap::new(), BTreeMap::new())
-                };
-            let program = if runtime_sources.is_empty() {
-                match self
-                    .compile_query_program_request_with_access_paths(request, access_paths)
-                    .await
-                {
-                    Ok(program) => program,
-                    Err(error) => {
-                        self.retire_covered_input_sources(&covered_input_sources)
-                            .await?;
-                        return Err(error);
-                    }
-                }
-            } else {
-                match self
-                    .compile_query_program_request_with_inline_sources_access_paths_and_covered_inputs(
-                        request,
-                        BTreeMap::new(),
-                        access_paths,
-                        runtime_sources,
-                        runtime_source_descriptors,
-                    )
-                    .await
-                {
-                    Ok(program) => program,
-                    Err(error) => {
-                        self.retire_covered_input_sources(&covered_input_sources)
-                            .await?;
-                        return Err(error);
-                    }
-                }
-            };
-            if crate::debug_env::covered_input_trace() {
-                eprintln!(
-                    "JAZZ_COVERED_INPUT_TRACE stage=opened_program table={} node={:?} mode={authorization_mode:?} identity={identity:?} tier={tier:?} settled_view={settled_binding_view:?} authority_key={settled_authority_result_key:?} sources={:?} descriptors={:?}",
-                    shape.query().table,
-                    self.node_uuid,
-                    program
-                        .request
-                        .reads
-                        .primary
-                        .sources
-                        .keys()
-                        .collect::<Vec<_>>(),
-                    program.source_descriptors.keys().collect::<Vec<_>>(),
-                );
-            }
-
-            let tables = program.lowered.maintained_terminal_tables.clone();
-            let targeted_refresh_tables = program.lowered.targeted_refresh_tables.clone();
-            let targeted_refresh_uncertain = program.lowered.targeted_refresh_uncertain;
-            let terminal_schemas = MaintainedSubscriptionView::terminal_schemas_for_program(&program);
-            let binding_source_shape = program
-                .request
-                .input
-                .binding
-                .source_shape
-                .clone()
-                .unwrap_or_else(|| {
-                    query_binding_source_shape_for_prepared_params(&prepared_params_from_domain(
-                        &program.lowered.parameters,
-                    ))
-                });
-            let storage_backed_result_materialization = !program
-                .request
-                .output
-                .facts
-                .contains(&ProgramFactKey::VersionWitnesses);
-            let inline_content_branch_keys = program
-                .request
-                .reads
-                .primary
-                .sources
-                .values()
-                .filter_map(|source| match source {
-                    SourceExpr::BranchView {
-                        base: Some(BranchViewSourceBase::Snapshot(branch_key, _)),
-                        ..
-                    } => Some(branch_key.clone()),
-                    _ => None,
+        let schema = self
+            .catalogue
+            .catalogue_schemas
+            .get(&shape.schema_version())
+            .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
+        let shape = bind_query_params_with_mode(
+            shape,
+            binding,
+            &schema.schema,
+            ParamBindingMode::RetainAllParams,
+        )?;
+        let binding = shape.bind(binding.values().clone())?;
+        // A lone Local-tier subscription gains nothing from routing through a
+        // shared binding source, and its literal graph hydrates faster. Share
+        // only once a sibling of the same shape with a different binding is
+        // open: the first subscriber keeps its literal graph for its lifetime
+        // and holds a token so later siblings know to prepare the shared
+        // shape. Reopening the same binding (a remount, or a resubscribe
+        // whose predecessor's teardown is still queued) gains nothing from
+        // sharing either, so it stays literal too.
+        let lone_client_local_source = if authorization_mode == QueryAuthorizationMode::ClientLocal
+            && tier == DurabilityTier::Local
+            && read_view.is_default()
+            && settled_binding_view.is_none()
+        {
+            self.client_local_prepared_source_name(&shape, &binding, identity)?
+                .filter(|source_shape| {
+                    !self
+                        .client_local_literal_shapes
+                        .get(source_shape)
+                        .is_some_and(|(token, literal_binding)| {
+                            token.strong_count() > 0 && *literal_binding != binding
+                        })
+                        && !self.database.prepared_binding_source_is_bound(source_shape)
                 })
-                .collect::<BTreeSet<_>>();
-            #[cfg(any(test, feature = "testing"))]
-            let compiled_authorization_mode = program.request.authorization_mode;
-            let subscription = match self
-                .subscribe_lowered_program(
-                    program,
-                    &binding,
-                    binding_source_shape,
-                    prepared_claim_binding_mode,
-                    progress_waker,
-                )
+        } else {
+            None
+        };
+        let mut request = self.current_query_program_request_with_prepared_claim_mode(
+            &shape,
+            &binding,
+            tier,
+            identity,
+            CurrentQueryProgramOutput::MaintainedView,
+            read_view,
+            settled_binding_view,
+            authorization_mode,
+            prepared_claim_binding_mode,
+            lone_client_local_source.is_some(),
+        )?;
+        if let Some(authority_result_key) = settled_authority_result_key.as_ref() {
+            for source in request.reads.primary.sources.values_mut() {
+                if let SourceExpr::SettledBindingView {
+                    authority_result_key: selected,
+                    ..
+                } = source
+                {
+                    *selected = Some(authority_result_key.clone());
+                }
+            }
+        }
+        if pending_overlay {
+            if authorization_mode != QueryAuthorizationMode::ClientLocal {
+                return Err(Error::InvalidStoredValue(
+                    "pending receiver overlay requires client-local execution",
+                ));
+            }
+            for source in request.reads.primary.sources.values_mut() {
+                if matches!(source, SourceExpr::SettledBindingView { .. }) {
+                    *source = SourceExpr::WithOverlays {
+                        input: Box::new(source.clone()),
+                        overlays: OverlayStack {
+                            entries: vec![OverlayRef::PendingLocal],
+                        },
+                    };
+                }
+            }
+        }
+        let access_paths = self.current_query_hydration_access_paths(
+            &request,
+            &shape,
+            &binding,
+            HydrationLifetime::Retained,
+        )?;
+        // Receiver inputs are allocated from the compiler's source
+        // requirements before any source is resolved. This keeps the initial
+        // lowering from consulting an authority result just to discover a
+        // descriptor.
+        let (runtime_sources, runtime_source_descriptors, covered_input_sources) =
+            if authorization_mode == QueryAuthorizationMode::ClientLocal {
+                // Local-first uses ordinary local current state for its entire
+                // lifetime. Receiving an authority scope does not revoke cached
+                // knowledge. Only settled remote source expressions require an
+                // exact receiver input; do not convert Local into a provisional
+                // authority-scoped read.
+                self.allocate_client_receiver_input_sources(&request)?
+            } else {
+                (BTreeMap::new(), BTreeMap::new(), BTreeMap::new())
+            };
+        let program = if runtime_sources.is_empty() {
+            match self
+                .compile_query_program_request_with_access_paths(request, access_paths)
                 .await
             {
-                Ok(subscription) => subscription,
+                Ok(program) => program,
                 Err(error) => {
                     self.retire_covered_input_sources(&covered_input_sources)
                         .await?;
                     return Err(error);
                 }
-            };
-            if crate::debug_env::covered_input_trace() {
-                eprintln!("JAZZ_COVERED_INPUT_TRACE stage=receiver_subscription_opened");
             }
-            let mut maintained = MaintainedSubscriptionView::default();
-            #[cfg(any(test, feature = "testing"))]
+        } else {
+            match self
+                .compile_query_program_request_with_inline_sources_access_paths_and_covered_inputs(
+                    request,
+                    BTreeMap::new(),
+                    access_paths,
+                    runtime_sources,
+                    runtime_source_descriptors,
+                )
+                .await
             {
-                maintained.compiled_authorization_mode = Some(compiled_authorization_mode);
-            }
-            maintained.physical_tables = self
-                .catalogue
-                .physical_mappings
-                .get(&shape.schema_version())
-                .ok_or(Error::InvalidStoredValue(
-                    "maintained scope schema has no physical mapping",
-                ))?
-                .identities
-                .tables
-                .iter()
-                .map(|(name, table)| (name.clone().into(), table.id))
-                .collect();
-            maintained.targeted_refresh_tables = targeted_refresh_tables;
-            maintained.targeted_refresh_uncertain = targeted_refresh_uncertain;
-            maintained.set_read_view(read_view_key);
-            // Resolve names from permanent physical catalogue identities, never
-            // from equal row UUIDs or a search for the first matching table label.
-            // Keep logical source identity unchanged: only the immutable payload
-            // coordinate follows the row's authored schema across a table rename.
-            let mut witness_table_names = BTreeMap::new();
-            for logical_name in tables.keys() {
-                let table_id =
-                    self.physical_table_id_for_schema(shape.schema_version(), logical_name)?;
-                for (schema_id, mapping) in &self.catalogue.physical_mappings {
-                    let Some(alias) = self.catalogue.schema_version_aliases.get(schema_id) else {
-                        continue;
-                    };
-                    for (authored_name, table_mapping) in &mapping.tables {
-                        if table_mapping.table_id == table_id && authored_name != logical_name {
-                            witness_table_names
-                                .insert((logical_name.clone(), *alias), authored_name.clone());
-                        }
-                    }
-                }
-            }
-            maintained.set_witness_table_names(witness_table_names);
-            if storage_backed_result_materialization {
-                maintained.enable_storage_backed_result_materialization();
-            }
-            for branch_key in &inline_content_branch_keys {
-                maintained.enable_inline_content_branch_key(branch_key);
-            }
-            let mut transitions = super::maintained_subscription_view::ResultTransitions::default();
-            // A cold opening may depend on a peer that can only be advanced after
-            // this call returns. Keep Stream A unpublished until the first
-            // complete Stream B snapshot arrives; publication drains this same
-            // subscription and gates ViewUpdate on `initial_received`.
-            let mut receiver_cx =
-                std::task::Context::from_waker(progress_waker.unwrap_or(std::task::Waker::noop()));
-            let initial_received = match subscription.poll_next_event(&mut receiver_cx) {
-                std::task::Poll::Ready(GrooveSubscriptionEvent::Update(update)) => {
-                    let snapshot = update.deltas;
-                    if crate::debug_env::covered_input_trace() {
-                        eprintln!("JAZZ_COVERED_INPUT_TRACE stage=receiver_initial_snapshot");
-                    }
-                    let snapshot_transitions = match maintained.apply_multisink_deltas(
-                        snapshot,
-                        &terminal_schemas,
-                        &tables,
-                        &self.node_aliases,
-                    ) {
-                        Ok(transitions) => transitions,
-                        Err(error) => {
-                            self.database.unsubscribe(subscription.id());
-                            self.retire_covered_input_sources(&covered_input_sources)
-                                .await?;
-                            return Err(error);
-                        }
-                    };
-                    transitions.adds.extend(snapshot_transitions.adds);
-                    transitions.removes.extend(snapshot_transitions.removes);
-                    transitions
-                        .result_payload_adds
-                        .extend(snapshot_transitions.result_payload_adds);
-                    transitions
-                        .result_payload_removes
-                        .extend(snapshot_transitions.result_payload_removes);
-                    transitions.supporting_changed |= snapshot_transitions.supporting_changed;
-                    transitions
-                        .program_fact_adds
-                        .extend(snapshot_transitions.program_fact_adds);
-                    transitions
-                        .program_fact_removes
-                        .extend(snapshot_transitions.program_fact_removes);
-                    // A root collector's opening is its first ordinary terminal
-                    // transition.  Retain the same root and descendant edits that
-                    // seeded `maintained`, so the first published/reset snapshot
-                    // is folded from the receiver-local terminal tree rather than
-                    // a relational root record with empty nested collections.
-                    transitions
-                        .terminal_operations
-                        .extend(snapshot_transitions.terminal_operations);
-                    true
-                }
-                std::task::Poll::Pending => false,
-                std::task::Poll::Ready(GrooveSubscriptionEvent::Error(error)) => {
-                    self.database.unsubscribe(subscription.id());
+                Ok(program) => program,
+                Err(error) => {
                     self.retire_covered_input_sources(&covered_input_sources)
                         .await?;
-                    return Err(Error::Groove(error.into()));
+                    return Err(error);
                 }
-            };
-            if initial_received {
-                loop {
-                    match subscription.poll_next_event(&mut receiver_cx) {
-                        std::task::Poll::Ready(GrooveSubscriptionEvent::Update(update)) => {
-                            let deltas = update.deltas;
-                            let delta_transitions = match maintained.apply_multisink_deltas(
-                                deltas,
-                                &terminal_schemas,
-                                &tables,
-                                &self.node_aliases,
-                            ) {
-                                Ok(transitions) => transitions,
-                                Err(error) => {
-                                    self.database.unsubscribe(subscription.id());
-                                    self.retire_covered_input_sources(&covered_input_sources)
-                                        .await?;
-                                    return Err(error);
-                                }
-                            };
-                            transitions.adds.extend(delta_transitions.adds);
-                            transitions.removes.extend(delta_transitions.removes);
-                            transitions
-                                .result_payload_adds
-                                .extend(delta_transitions.result_payload_adds);
-                            transitions
-                                .result_payload_removes
-                                .extend(delta_transitions.result_payload_removes);
-                            transitions.supporting_changed |= delta_transitions.supporting_changed;
-                            transitions
-                                .program_fact_adds
-                                .extend(delta_transitions.program_fact_adds);
-                            transitions
-                                .program_fact_removes
-                                .extend(delta_transitions.program_fact_removes);
-                            transitions
-                                .terminal_operations
-                                .extend(delta_transitions.terminal_operations);
-                        }
-                        std::task::Poll::Pending => break,
-                        std::task::Poll::Ready(GrooveSubscriptionEvent::Error(error)) => {
-                            self.database.unsubscribe(subscription.id());
-                            self.retire_covered_input_sources(&covered_input_sources)
-                                .await?;
-                            return Err(Error::Groove(error.into()));
-                        }
+            }
+        };
+        if crate::debug_env::covered_input_trace() {
+            eprintln!(
+                "JAZZ_COVERED_INPUT_TRACE stage=opened_program table={} node={:?} mode={authorization_mode:?} identity={identity:?} tier={tier:?} settled_view={settled_binding_view:?} authority_key={settled_authority_result_key:?} sources={:?} descriptors={:?}",
+                shape.query().table,
+                self.node_uuid,
+                program
+                    .request
+                    .reads
+                    .primary
+                    .sources
+                    .keys()
+                    .collect::<Vec<_>>(),
+                program.source_descriptors.keys().collect::<Vec<_>>(),
+            );
+        }
+
+        let tables = program.lowered.maintained_terminal_tables.clone();
+        let targeted_refresh_tables = program.lowered.targeted_refresh_tables.clone();
+        let targeted_refresh_uncertain = program.lowered.targeted_refresh_uncertain;
+        let terminal_schemas = MaintainedSubscriptionView::terminal_schemas_for_program(&program);
+        let binding_source_shape = program
+            .request
+            .input
+            .binding
+            .source_shape
+            .clone()
+            .unwrap_or_else(|| {
+                query_binding_source_shape_for_prepared_params(&prepared_params_from_domain(
+                    &program.lowered.parameters,
+                ))
+            });
+        let storage_backed_result_materialization = !program
+            .request
+            .output
+            .facts
+            .contains(&ProgramFactKey::VersionWitnesses);
+        let inline_content_branch_keys = program
+            .request
+            .reads
+            .primary
+            .sources
+            .values()
+            .filter_map(|source| match source {
+                SourceExpr::BranchView {
+                    base: Some(BranchViewSourceBase::Snapshot(branch_key, _)),
+                    ..
+                } => Some(branch_key.clone()),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        #[cfg(any(test, feature = "testing"))]
+        let compiled_authorization_mode = program.request.authorization_mode;
+        let subscription = match self
+            .subscribe_lowered_program(
+                program,
+                &binding,
+                binding_source_shape,
+                prepared_claim_binding_mode,
+                progress_waker,
+            )
+            .await
+        {
+            Ok(subscription) => subscription,
+            Err(error) => {
+                self.retire_covered_input_sources(&covered_input_sources)
+                    .await?;
+                return Err(error);
+            }
+        };
+        if crate::debug_env::covered_input_trace() {
+            eprintln!("JAZZ_COVERED_INPUT_TRACE stage=receiver_subscription_opened");
+        }
+        let mut maintained = MaintainedSubscriptionView::default();
+        #[cfg(any(test, feature = "testing"))]
+        {
+            maintained.compiled_authorization_mode = Some(compiled_authorization_mode);
+        }
+        maintained.physical_tables = self
+            .catalogue
+            .physical_mappings
+            .get(&shape.schema_version())
+            .ok_or(Error::InvalidStoredValue(
+                "maintained scope schema has no physical mapping",
+            ))?
+            .identities
+            .tables
+            .iter()
+            .map(|(name, table)| (name.clone().into(), table.id))
+            .collect();
+        maintained.targeted_refresh_tables = targeted_refresh_tables;
+        maintained.targeted_refresh_uncertain = targeted_refresh_uncertain;
+        maintained.set_read_view(read_view_key);
+        // Resolve names from permanent physical catalogue identities, never
+        // from equal row UUIDs or a search for the first matching table label.
+        // Keep logical source identity unchanged: only the immutable payload
+        // coordinate follows the row's authored schema across a table rename.
+        let mut witness_table_names = BTreeMap::new();
+        for logical_name in tables.keys() {
+            let table_id =
+                self.physical_table_id_for_schema(shape.schema_version(), logical_name)?;
+            for (schema_id, mapping) in &self.catalogue.physical_mappings {
+                let Some(alias) = self.catalogue.schema_version_aliases.get(schema_id) else {
+                    continue;
+                };
+                for (authored_name, table_mapping) in &mapping.tables {
+                    if table_mapping.table_id == table_id && authored_name != logical_name {
+                        witness_table_names
+                            .insert((logical_name.clone(), *alias), authored_name.clone());
                     }
                 }
             }
-            if crate::debug_env::covered_input_trace() {
-                eprintln!("JAZZ_COVERED_INPUT_TRACE stage=receiver_initial_applied");
+        }
+        maintained.set_witness_table_names(witness_table_names);
+        if storage_backed_result_materialization {
+            maintained.enable_storage_backed_result_materialization();
+        }
+        for branch_key in &inline_content_branch_keys {
+            maintained.enable_inline_content_branch_key(branch_key);
+        }
+        let mut transitions = super::maintained_subscription_view::ResultTransitions::default();
+        // A cold opening may depend on a peer that can only be advanced after
+        // this call returns. Keep Stream A unpublished until the first
+        // complete Stream B snapshot arrives; publication drains this same
+        // subscription and gates ViewUpdate on `initial_received`.
+        let mut receiver_cx =
+            std::task::Context::from_waker(progress_waker.unwrap_or(std::task::Waker::noop()));
+        let initial_received = match subscription.poll_next_event(&mut receiver_cx) {
+            std::task::Poll::Ready(GrooveSubscriptionEvent::Update(update)) => {
+                let snapshot = update.deltas;
+                if crate::debug_env::covered_input_trace() {
+                    eprintln!("JAZZ_COVERED_INPUT_TRACE stage=receiver_initial_snapshot");
+                }
+                let snapshot_transitions = match maintained.apply_multisink_deltas(
+                    snapshot,
+                    &terminal_schemas,
+                    &tables,
+                    &self.node_aliases,
+                ) {
+                    Ok(transitions) => transitions,
+                    Err(error) => {
+                        self.database.unsubscribe(subscription.id());
+                        self.retire_covered_input_sources(&covered_input_sources)
+                            .await?;
+                        return Err(error);
+                    }
+                };
+                transitions.adds.extend(snapshot_transitions.adds);
+                transitions.removes.extend(snapshot_transitions.removes);
+                transitions
+                    .result_payload_adds
+                    .extend(snapshot_transitions.result_payload_adds);
+                transitions
+                    .result_payload_removes
+                    .extend(snapshot_transitions.result_payload_removes);
+                transitions.supporting_changed |= snapshot_transitions.supporting_changed;
+                transitions
+                    .program_fact_adds
+                    .extend(snapshot_transitions.program_fact_adds);
+                transitions
+                    .program_fact_removes
+                    .extend(snapshot_transitions.program_fact_removes);
+                // A root collector's opening is its first ordinary terminal
+                // transition.  Retain the same root and descendant edits that
+                // seeded `maintained`, so the first published/reset snapshot
+                // is folded from the receiver-local terminal tree rather than
+                // a relational root record with empty nested collections.
+                transitions
+                    .terminal_operations
+                    .extend(snapshot_transitions.terminal_operations);
+                true
             }
-            if let Some(source_shape) = lone_client_local_source {
-                let token = std::sync::Arc::new(());
-                self.client_local_literal_shapes
-                    .retain(|_, (token, _)| token.strong_count() > 0);
-                self.client_local_literal_shapes.insert(
-                    source_shape,
-                    (std::sync::Arc::downgrade(&token), binding.clone()),
-                );
-                maintained.hold_client_local_literal_token(token);
+            std::task::Poll::Pending => false,
+            std::task::Poll::Ready(GrooveSubscriptionEvent::Error(error)) => {
+                self.database.unsubscribe(subscription.id());
+                self.retire_covered_input_sources(&covered_input_sources)
+                    .await?;
+                return Err(Error::Groove(error.into()));
             }
-            Ok((
-                subscription,
-                maintained,
-                terminal_schemas,
-                transitions,
-                tables,
-                initial_received,
-                covered_input_sources,
-            ))
-            },
-            tracing::debug_span!(target: "jazz::profile", "cold.phase.query_setup"),
-        )
-        .await
+        };
+        if initial_received {
+            loop {
+                match subscription.poll_next_event(&mut receiver_cx) {
+                    std::task::Poll::Ready(GrooveSubscriptionEvent::Update(update)) => {
+                        let deltas = update.deltas;
+                        let delta_transitions = match maintained.apply_multisink_deltas(
+                            deltas,
+                            &terminal_schemas,
+                            &tables,
+                            &self.node_aliases,
+                        ) {
+                            Ok(transitions) => transitions,
+                            Err(error) => {
+                                self.database.unsubscribe(subscription.id());
+                                self.retire_covered_input_sources(&covered_input_sources)
+                                    .await?;
+                                return Err(error);
+                            }
+                        };
+                        transitions.adds.extend(delta_transitions.adds);
+                        transitions.removes.extend(delta_transitions.removes);
+                        transitions
+                            .result_payload_adds
+                            .extend(delta_transitions.result_payload_adds);
+                        transitions
+                            .result_payload_removes
+                            .extend(delta_transitions.result_payload_removes);
+                        transitions.supporting_changed |= delta_transitions.supporting_changed;
+                        transitions
+                            .program_fact_adds
+                            .extend(delta_transitions.program_fact_adds);
+                        transitions
+                            .program_fact_removes
+                            .extend(delta_transitions.program_fact_removes);
+                        transitions
+                            .terminal_operations
+                            .extend(delta_transitions.terminal_operations);
+                    }
+                    std::task::Poll::Pending => break,
+                    std::task::Poll::Ready(GrooveSubscriptionEvent::Error(error)) => {
+                        self.database.unsubscribe(subscription.id());
+                        self.retire_covered_input_sources(&covered_input_sources)
+                            .await?;
+                        return Err(Error::Groove(error.into()));
+                    }
+                }
+            }
+        }
+        if crate::debug_env::covered_input_trace() {
+            eprintln!("JAZZ_COVERED_INPUT_TRACE stage=receiver_initial_applied");
+        }
+        if let Some(source_shape) = lone_client_local_source {
+            let token = std::sync::Arc::new(());
+            self.client_local_literal_shapes
+                .retain(|_, (token, _)| token.strong_count() > 0);
+            self.client_local_literal_shapes.insert(
+                source_shape,
+                (std::sync::Arc::downgrade(&token), binding.clone()),
+            );
+            maintained.hold_client_local_literal_token(token);
+        }
+        Ok((
+            subscription,
+            maintained,
+            terminal_schemas,
+            transitions,
+            tables,
+            initial_received,
+            covered_input_sources,
+        ))
     }
 
     async fn bind_shape_snapshot(
