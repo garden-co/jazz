@@ -315,14 +315,12 @@ h6 {
 /* Hero pattern placement. Tune these in devtools on `.home-hero`:
    --pattern-x / --pattern-y: where the pattern's centre sits in the hero
    (0% 0% = top-left, 100% 0% = top-right); --pattern-width: its width at
-   scale 1; --pattern-scale: multiplies the width; --pattern-fade: how far
-   from the centre it starts fading out (100% = no fade); --pattern-opacity. */
+   scale 1; --pattern-scale: multiplies the width; --pattern-opacity. */
 .home-hero {
-  --pattern-x: 100%;
-  --pattern-y: 0%;
+  --pattern-x: 92%;
+  --pattern-y: 17.5%;
   --pattern-width: max(72rem, 110vw);
-  --pattern-scale: 1;
-  --pattern-fade: 45%;
+  --pattern-scale: 0.8;
   --pattern-opacity: 1;
   position: relative;
   overflow: clip;
@@ -330,16 +328,16 @@ h6 {
 }
 @media (max-width: 1023px) {
   .home-hero {
-    --pattern-x: 100%;
-    --pattern-y: 0%;
-    --pattern-scale: 1;
+    --pattern-x: 92%;
+    --pattern-y: 17.5%;
+    --pattern-scale: 0.8;
   }
 }
 @media (max-width: 639px) {
   .home-hero {
-    --pattern-x: 100%;
-    --pattern-y: 0%;
-    --pattern-scale: 1;
+    --pattern-x: 92%;
+    --pattern-y: 17.5%;
+    --pattern-scale: 0.8;
   }
 }
 .home-hero-pattern {
@@ -354,7 +352,6 @@ h6 {
   opacity: var(--pattern-opacity);
   pointer-events: none;
   user-select: none;
-  mask-image: radial-gradient(closest-side, #000 var(--pattern-fade), transparent 100%);
 }
 .home-anchor {
   scroll-margin-top: 5rem;
