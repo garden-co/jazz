@@ -3368,10 +3368,11 @@ async fn suspended_resident_chunk_install_joins_assigned_publication() {
 }
 
 /// Fixture for #3815: a `rooms` semi-join over `messages.room_id` shares a
-/// subscription with a plain `messages` sink. Message B carries a cold large
-/// payload, so its evaluation parks while the `messages` sink materializes it,
-/// although every graph node (the semi-join included) has already completed.
-/// Message A joins the same room while B is parked.
+/// subscription with a plain `messages` sink. Message B (id 2, in
+/// `parked_room`) carries a cold large payload, so its evaluation parks while
+/// the `messages` sink materializes it, although every graph node (the
+/// semi-join included) has already completed. Message A (id 3, in room 1) is
+/// written while B is parked.
 struct ParkedSemiJoinFixture {
     database: Database,
     subscription: MultisinkSubscription,
@@ -3380,7 +3381,7 @@ struct ParkedSemiJoinFixture {
     concurrent: AppliedBatch,
 }
 
-async fn parked_semi_join_fixture() -> ParkedSemiJoinFixture {
+async fn parked_semi_join_fixture(parked_room: u64) -> ParkedSemiJoinFixture {
     let schema = DatabaseSchema::new([
         TableSchema::new(
             "rooms",
@@ -3443,12 +3444,16 @@ async fn parked_semi_join_fixture() -> ParkedSemiJoinFixture {
         ready: Rc::clone(&resolver_ready),
     }));
 
-    let mut room = database.open_batch();
-    room.insert(
+    let mut rooms = database.open_batch();
+    rooms.insert(
         "rooms",
         vec![Value::U64(1), Value::String("general".to_owned())],
     );
-    database.commit_batch(room).await.unwrap();
+    rooms.insert(
+        "rooms",
+        vec![Value::U64(2), Value::String("random".to_owned())],
+    );
+    database.commit_batch(rooms).await.unwrap();
 
     let subscription = database
         .subscribe([
@@ -3481,7 +3486,7 @@ async fn parked_semi_join_fixture() -> ParkedSemiJoinFixture {
         "messages",
         vec![
             Value::U64(2),
-            Value::U64(1),
+            Value::U64(parked_room),
             Value::Large(Box::new(staged.value_ref)),
         ],
     );
@@ -3538,7 +3543,7 @@ impl ParkedSemiJoinFixture {
 /// publishes a duplicate `+room`.
 #[futures_test::test]
 async fn parked_semi_join_does_not_republish_left_row_for_same_key() {
-    let mut fixture = parked_semi_join_fixture().await;
+    let mut fixture = parked_semi_join_fixture(1).await;
     let rooms = fixture.settle().await;
     assert_eq!(
         rooms,
@@ -3548,21 +3553,30 @@ async fn parked_semi_join_does_not_republish_left_row_for_same_key() {
 }
 
 /// #3815: the parked evaluation must not install its pre-park semi-join
-/// arrangement over the later write's. Otherwise message A's key is lost and
-/// deleting message B retracts a room which A still references.
+/// state over the later write's. B's evaluation stages whole arrangements, so
+/// even with B in another room its install would drop message A's key. Then
+/// deleting A would not retract room 1.
 #[futures_test::test]
 async fn parked_semi_join_install_keeps_later_write_keys() {
-    let mut fixture = parked_semi_join_fixture().await;
-    fixture.settle().await;
+    let mut fixture = parked_semi_join_fixture(2).await;
+    let mut rooms = fixture.settle().await;
+    rooms.sort_by_key(|(values, _)| format!("{values:?}"));
+    assert_eq!(
+        rooms,
+        vec![
+            (vec![Value::U64(1), Value::String("general".to_owned())], 1),
+            (vec![Value::U64(2), Value::String("random".to_owned())], 1),
+        ],
+    );
 
     let mut delete = fixture.database.open_batch();
-    delete.delete("messages", PrimaryKeyValue::U64(2));
+    delete.delete("messages", PrimaryKeyValue::U64(3));
     fixture.database.commit_batch(delete).await.unwrap();
     fixture.database.flush().await.unwrap();
     assert_eq!(
         fixture.drain_rooms(),
-        Vec::<(Vec<Value>, i64)>::new(),
-        "message A still references the room"
+        vec![(vec![Value::U64(1), Value::String("general".to_owned())], -1)],
+        "deleting room 1's only message must retract it"
     );
 }
 
