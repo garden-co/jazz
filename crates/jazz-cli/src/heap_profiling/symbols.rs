@@ -112,6 +112,16 @@ impl ExecutableSymbols {
         })
     }
 
+    /// Link-time address of the first function whose demangled name is
+    /// `name`.
+    #[cfg(test)]
+    pub(super) fn address_of(&self, name: &str) -> Option<u64> {
+        self.functions
+            .iter()
+            .find(|function| self.function_at(function.start).as_deref() == Some(name))
+            .map(|function| function.start)
+    }
+
     fn read_name(&self, name: u32) -> Option<String> {
         let start = u64::from(name);
         let available = self.strtab_size.checked_sub(start)?;

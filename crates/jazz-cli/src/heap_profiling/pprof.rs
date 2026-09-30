@@ -138,13 +138,16 @@ struct Frame {
 /// Frames of jemalloc and the Rust allocator shims at the leaf of a sampled
 /// stack: the sampling path (`prof_backtrace_impl`, `_rjem_je_prof_*`) and
 /// the allocation entry points, which `unprefixed_malloc_on_supported_platforms`
-/// exports under their libc names.
+/// exports under their libc names. Rust's shims demangle as
+/// `__rustc::__rust_alloc` on current toolchains and as bare `__rust_alloc`
+/// on older ones.
 fn is_allocator_frame(name: &str) -> bool {
     name.starts_with("_rjem_")
         || name.starts_with("prof_")
         || name.starts_with("tikv_jemallocator::")
+        || name.starts_with("<tikv_jemallocator::")
         || matches!(
-            name,
+            name.strip_prefix("__rustc::").unwrap_or(name),
             "malloc"
                 | "calloc"
                 | "realloc"
@@ -318,9 +321,9 @@ mod tests {
             .collect()
     }
 
-    /// A sample taken inside `malloc` is attributed to the function that
-    /// called it, and its mapping keeps the runtime range and file offset
-    /// offline symbolizers need.
+    /// A sample taken inside `malloc`, reached through Rust's allocation
+    /// shim, is attributed to the function that allocated, and its mapping
+    /// keeps the runtime range and file offset offline symbolizers need.
     #[test]
     fn samples_start_at_the_allocating_caller() {
         let symbols = ExecutableSymbols::open(Path::new("/proc/self/exe")).unwrap();
@@ -337,11 +340,26 @@ mod tests {
         }
         let caller = pprof_allocating_caller_marker as *const () as usize;
         let malloc = libc::malloc as *const () as usize;
+        // Rust's allocation shim, under whatever name this toolchain
+        // demangles it to.
+        let shim_vaddr = symbols
+            .address_of("__rustc::__rust_alloc")
+            .or_else(|| symbols.address_of("__rust_alloc"))
+            .unwrap() as usize;
+        let shim = profile
+            .mappings
+            .iter()
+            .find(|mapping| {
+                let len = mapping.memory_end - mapping.memory_start;
+                (mapping.memory_offset..mapping.memory_offset + len).contains(&shim_vaddr)
+            })
+            .map(|mapping| shim_vaddr - mapping.memory_offset + mapping.memory_start)
+            .unwrap();
         // Root first, as `parse_jeheap` stores stacks; +1 because stacks
         // hold return addresses.
         profile.push_stack(
             WeightedStack {
-                addrs: vec![caller + 1, malloc + 1],
+                addrs: vec![caller + 1, shim + 1, malloc + 1],
                 weight: 4096.0,
             },
             None,
