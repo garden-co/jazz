@@ -1,8 +1,10 @@
 import { accountRegistryUrl } from "jazz-tools";
-import { resolveRequestSession } from "jazz-tools/backend";
 import { auth } from "./auth";
+import { jazzBackend } from "./backend";
 import { serverConfig } from "./config";
 import { CheckoutError } from "./orders";
+
+const { resolveRequestSession } = jazzBackend;
 
 /**
  * Resolve the signed-in shopper behind a store API request. The request must

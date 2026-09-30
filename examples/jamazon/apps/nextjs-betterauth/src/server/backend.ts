@@ -6,11 +6,14 @@ import { jazzEnv } from "@/src/lib/jazz-env";
 import { serverConfig } from "./config";
 
 // Load the native backend at runtime rather than through the Next bundler.
+// Turbopack still bundles workspace packages listed in `serverExternalPackages`,
+// so every server module takes `jazz-tools/backend` from here.
 const createRequire =
   process.getBuiltinModule?.("module")?.createRequire ?? createRequireFromModule;
-const { createJazzSession } = createRequire(import.meta.url)(
+export const jazzBackend = createRequire(import.meta.url)(
   "jazz-tools/backend",
 ) as typeof import("jazz-tools/backend");
+const { createJazzSession } = jazzBackend;
 
 type BackendSession = Awaited<ReturnType<typeof createJazzSession>>;
 
