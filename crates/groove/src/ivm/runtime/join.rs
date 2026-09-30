@@ -375,7 +375,7 @@ impl JoinState {
                 )?;
             }
         }
-        let bytes = output.bytes.freeze();
+        let bytes = super::freeze_batch_buffer(output.bytes);
         Ok(consolidate_deltas(
             output
                 .deltas
