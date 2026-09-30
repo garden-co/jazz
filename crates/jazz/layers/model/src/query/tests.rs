@@ -459,6 +459,32 @@ mod tests {
             ColumnType::Array(Box::new(ColumnType::Uuid))
         );
     }
+    #[test]
+    fn contains_unknown_needle_parameter_infers_array_member_and_text_types() {
+        let schema = RuntimeSchema::new([TableSchema::new(
+            "items",
+            [
+                ColumnSchema::new(
+                    "uuids",
+                    ColumnType::Array(Box::new(ColumnType::Uuid)),
+                ),
+                ColumnSchema::new("text", ColumnType::String),
+            ],
+        )]);
+
+        let uuid_query = Query::from("items")
+            .filter(contains(col("uuids"), param("uuid_needle")))
+            .validate_runtime(&schema)
+            .unwrap();
+        assert_eq!(uuid_query.params()["uuid_needle"], ColumnType::Uuid);
+
+        let text_query = Query::from("items")
+            .filter(contains(col("text"), param("text_needle")))
+            .validate_runtime(&schema)
+            .unwrap();
+        assert_eq!(text_query.params()["text_needle"], ColumnType::String);
+    }
+
 
     #[test]
     fn validates_same_table_reachability_correlation_column() {
