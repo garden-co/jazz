@@ -797,7 +797,9 @@ impl MaintainedSubscriptionView {
         // This is deliberately proportional to changed facts: cloning the
         // whole active closure here would turn every incremental tick into a
         // snapshot-sized operation.
+        self.supporting.begin_diag_batch();
         for (sink, terminal) in deltas.terminal_sinks {
+            self.supporting.set_diag_tag(format!("t{sink}"));
             if crate::debug_env::covered_input_trace() && !terminal.operations.is_empty() {
                 eprintln!(
                     "JAZZ_COVERED_INPUT_TRACE stage=terminal_operations sink={sink} kind={:?} operations={}",
@@ -880,6 +882,7 @@ impl MaintainedSubscriptionView {
             }
         }
         for (sink, deltas) in deltas.sinks {
+            self.supporting.set_diag_tag(format!("s{sink}"));
             if crate::debug_env::covered_input_trace() && !deltas.is_empty() {
                 eprintln!(
                     "JAZZ_COVERED_INPUT_TRACE stage=terminal_sink sink={sink} kind={:?} records={}",

@@ -20,6 +20,8 @@ pub(super) struct SupportingFrontier {
     unpublished: Option<BTreeMap<SupportingRow, bool>>,
     /// Diagnostic (#3815): the last contributions to each retained row.
     history: BTreeMap<SupportingRow, std::collections::VecDeque<String>>,
+    diag_batch: u64,
+    diag_tag: String,
 }
 
 impl SupportingFrontier {
@@ -43,12 +45,26 @@ impl SupportingFrontier {
             self.history.remove(&row);
         } else {
             let history = self.history.entry(row).or_default();
-            history.push_back(format!("o{origin}{weight:+}"));
+            history.push_back(format!(
+                "b{} {} o{origin}{weight:+}",
+                self.diag_batch, self.diag_tag
+            ));
             while history.len() > 12 {
                 history.pop_front();
             }
         }
         (before != after).then_some(after)
+    }
+
+    /// Diagnostic (#3815): number each terminal batch.
+    pub(super) fn begin_diag_batch(&mut self) {
+        self.diag_batch += 1;
+        self.diag_tag.clear();
+    }
+
+    /// Diagnostic (#3815): name the terminal sink contributing next.
+    pub(super) fn set_diag_tag(&mut self, tag: String) {
+        self.diag_tag = tag;
     }
 
     /// Diagnostic (#3815): annotate the latest contribution with its source.
