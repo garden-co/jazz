@@ -3132,7 +3132,7 @@ fn subscriber_proofs_and_support_views(
 /// ```
 #[test]
 fn row_only_write_policy_proofs_retain_no_support_views() {
-    let schema = owner_write_schema();
+    let schema = owner_read_write_schema();
     let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
     let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xa1, alice, &schema);
@@ -3169,6 +3169,50 @@ fn row_only_write_policy_proofs_retain_no_support_views() {
         subscriber_proofs_and_support_views(&subscriber),
         (8, 0),
         "every insert is proven, and no proof keeps the rows its policy matches"
+    );
+
+    // Skipping hydration grants nothing: a write the policy denies is still
+    // rejected, and update/delete prove against the stored preimage alike.
+    let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
+    let mut settle = || {
+        client.tick().unwrap();
+        server.tick().unwrap();
+        client.tick().unwrap();
+    };
+    let foreign = client
+        .insert("todos", cells("bob's", false, bob), Default::default())
+        .unwrap();
+    settle();
+    let updated = client
+        .update(
+            "todos",
+            writes[0].row_uuid(),
+            BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+            Default::default(),
+        )
+        .unwrap();
+    settle();
+    let deleted = client
+        .delete("todos", writes[1].row_uuid(), Default::default())
+        .unwrap();
+    settle();
+
+    assert!(matches!(
+        foreign.write_state().unwrap().fate,
+        Fate::Rejected(_)
+    ));
+    assert!(matches!(
+        updated.write_state().unwrap().fate,
+        Fate::Accepted
+    ));
+    assert!(matches!(
+        deleted.write_state().unwrap().fate,
+        Fate::Accepted
+    ));
+    assert_eq!(
+        subscriber_proofs_and_support_views(&subscriber).1,
+        0,
+        "denied, update and delete proofs keep no support view either"
     );
 }
 
@@ -3633,14 +3677,16 @@ fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
         let ConnectionLink::Subscriber(a_state) = &mut a_connection.link else {
             unreachable!("A is an admitted subscriber link");
         };
-        crate::local_executor::block_on(a_state.peer.prove_terminal_commit_authorization(
-            &mut server.node().borrow_mut(),
-            alice,
-            a_state.session_claims.clone(),
-            &versions,
-            tx.tx_id,
-        ))
-        .expect("A terminal proof remains valid after B updates the legacy cache");
+        let allowed =
+            crate::local_executor::block_on(a_state.peer.prove_terminal_commit_authorization(
+                &mut server.node().borrow_mut(),
+                alice,
+                a_state.session_claims.clone(),
+                &versions,
+                tx.tx_id,
+            ))
+            .expect("A terminal proof remains valid after B updates the legacy cache");
+        assert!(allowed, "A's editor snapshot authorizes the write");
         assert_eq!(
             a_state.peer.subscription_policy_binding(a_subscription),
             Some((alice, a_claims.clone())),
@@ -3680,14 +3726,16 @@ fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
         let ConnectionLink::Subscriber(a_state) = &mut a_connection.link else {
             unreachable!("A remains an admitted subscriber link");
         };
-        crate::local_executor::block_on(a_state.peer.prove_terminal_commit_authorization(
-            &mut server.node().borrow_mut(),
-            alice,
-            a_state.session_claims.clone(),
-            &versions,
-            tx.tx_id,
-        ))
-        .expect("a refreshed terminal proof replaces the stale support receiver");
+        let allowed =
+            crate::local_executor::block_on(a_state.peer.prove_terminal_commit_authorization(
+                &mut server.node().borrow_mut(),
+                alice,
+                a_state.session_claims.clone(),
+                &versions,
+                tx.tx_id,
+            ))
+            .expect("a refreshed terminal proof replaces the stale support receiver");
+        assert!(!allowed, "the viewer snapshot denies the same write");
         assert_eq!(
             a_state.peer.subscription_policy_binding(b_subscription),
             Some((alice, b_claims)),
@@ -3702,14 +3750,16 @@ fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
         let ConnectionLink::Subscriber(a_state) = &mut a_connection.link else {
             unreachable!("A remains an admitted subscriber link");
         };
-        crate::local_executor::block_on(a_state.peer.prove_terminal_commit_authorization(
-            &mut server.node().borrow_mut(),
-            alice,
-            a_state.session_claims.clone(),
-            &versions,
-            tx.tx_id,
-        ))
-        .expect("the next refreshed terminal proof replaces the stale support receiver");
+        let allowed =
+            crate::local_executor::block_on(a_state.peer.prove_terminal_commit_authorization(
+                &mut server.node().borrow_mut(),
+                alice,
+                a_state.session_claims.clone(),
+                &versions,
+                tx.tx_id,
+            ))
+            .expect("the next refreshed terminal proof replaces the stale support receiver");
+        assert!(allowed, "the restored editor snapshot authorizes it again");
         assert_eq!(
             a_state.peer.subscription_policy_binding(a_subscription),
             Some((alice, a_claims)),
