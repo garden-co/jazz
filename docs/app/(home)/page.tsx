@@ -258,7 +258,7 @@ const hostingRows: {
     topic: "Setup",
     selfHosted: "One open-source, single-tenant server binary",
     cloud: "Zero config; create an app from the CLI or dashboard",
-    enterprise: "Dedicated deployment, set up with you",
+    enterprise: "Dedicated deployment or bring your own cloud, set up with you",
   },
   {
     topic: "Topology",
