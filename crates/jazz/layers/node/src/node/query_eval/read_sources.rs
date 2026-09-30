@@ -293,6 +293,11 @@ pub(super) struct CurrentIndexCandidateFilter {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum CurrentAccessPath {
     PrimaryKey(Vec<Value>),
+    /// First-result Global listing in physical row-UUID order. The caller
+    /// re-proves the page after policy and deletion filtering before returning.
+    PrimaryKeyPage {
+        cap: usize,
+    },
     Index {
         column: String,
         /// Second key of an explicitly declared two-column composite index.
@@ -317,6 +322,15 @@ pub(super) enum CurrentAccessPath {
         /// never selected by policy compilation or subscriptions.
         source_limit: Option<usize>,
     },
+}
+
+fn primary_key_page_scan(cap: usize) -> StaticScanSpec {
+    // The physical source helper prepends the shared branch coordinate. The
+    // remaining primary-key column is row_uuid, matching default result order.
+    StaticScanSpec::PrefixLimit {
+        prefix: Vec::new(),
+        max_items: cap,
+    }
 }
 
 impl<S> JazzSourceGraphPreparer<'_, S>
@@ -2796,6 +2810,23 @@ where
                     table, tier, prefix,
                 )))
             }
+            CurrentAccessPath::PrimaryKeyPage { cap } => {
+                if tier != DurabilityTier::Global {
+                    return Ok(None);
+                }
+                let projection_target = self.current_projection_target(request, table)?;
+                let rows = self
+                    .node
+                    .physical_current_source_scan_graph_with_projection_target(
+                        self.read_view.read_schema,
+                        &request.source.table,
+                        PhysicalCurrentClass::Global,
+                        projection_target,
+                        primary_key_page_scan(cap),
+                    )
+                    .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+                Ok(Some(rows))
+            }
             CurrentAccessPath::Index {
                 column,
                 order_column,
@@ -3155,6 +3186,18 @@ where
                                 source_resolution_error(request, SourceGap::SchemaProjection)
                             })?
                     }
+                    Some(CurrentAccessPath::PrimaryKeyPage { cap }) => self
+                        .node
+                        .physical_current_source_scan_graph_with_projection_target(
+                            self.read_view.read_schema,
+                            &request.source.table,
+                            PhysicalCurrentClass::Global,
+                            projection_target,
+                            primary_key_page_scan(cap),
+                        )
+                        .map_err(|_| {
+                            source_resolution_error(request, SourceGap::SchemaProjection)
+                        })?,
                     Some(CurrentAccessPath::Index {
                         column,
                         order_column,
@@ -3262,6 +3305,16 @@ where
                             source_resolution_error(request, SourceGap::SchemaProjection)
                         })?
                 }
+                Some(CurrentAccessPath::PrimaryKeyPage { cap }) => self
+                    .node
+                    .physical_current_source_scan_graph_with_projection_target(
+                        self.read_view.read_schema,
+                        &request.source.table,
+                        PhysicalCurrentClass::Global,
+                        projection_target.clone(),
+                        primary_key_page_scan(*cap),
+                    )
+                    .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?,
                 Some(CurrentAccessPath::Index {
                     column,
                     order_column,

@@ -226,7 +226,7 @@ impl PendingPipeline {
         if let Some((_, error)) = self.error {
             return Err(error);
         }
-        let bytes = self.output.freeze();
+        let bytes = freeze_batch_buffer(self.output);
         let deltas = if self.spans.is_empty() {
             self.borrowed
         } else {
@@ -334,6 +334,8 @@ impl TickEvaluator<'_> {
         frame_inputs: super::evaluator::FrameInputs<'_>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<Arc<RecordDeltas>, IvmRuntimeError>> {
+        #[cfg(feature = "cold-settle-attribution")]
+        let _phase = tracing::trace_span!("cold.phase.op_map").entered();
         let tail = *nodes.last().expect("nonempty pipeline");
         if let std::collections::hash_map::Entry::Vacant(entry) = pending.entry(tail) {
             if self

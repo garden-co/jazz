@@ -57,7 +57,7 @@ fn mutation_error_event_with_details(
     }
 }
 
-fn mutation_error_details(reason: &RejectionReason) -> (String, String) {
+pub(super) fn mutation_error_details(reason: &RejectionReason) -> (String, String) {
     match reason {
         RejectionReason::ClientClockTooFarAhead => (
             "client_clock_too_far_ahead".to_owned(),
@@ -77,7 +77,10 @@ fn mutation_error_details(reason: &RejectionReason) -> (String, String) {
         ),
         RejectionReason::Cascade { root } => (
             "cascade_rejected".to_owned(),
-            format!("Transaction was rejected because ancestor {root:?} was rejected"),
+            format!(
+                "Transaction was rejected because ancestor transaction {} was rejected",
+                TransactionId::from_committed_tx(*root)
+            ),
         ),
         // A well-formed transaction whose shape the authority does not
         // support yet carries its own "... is not supported yet" sentence;

@@ -9,7 +9,7 @@ import { EmptyState } from "@astryxdesign/core/EmptyState";
 import { Heading } from "@astryxdesign/core/Heading";
 import { Icon } from "@astryxdesign/core/Icon";
 import { IconButton } from "@astryxdesign/core/IconButton";
-import { List, ListItem } from "@astryxdesign/core/List";
+import { SideNav, SideNavItem, SideNavSection } from "@astryxdesign/core/SideNav";
 import { HStack, VStack } from "@astryxdesign/core/Stack";
 import { Table, pixel, proportional } from "@astryxdesign/core/Table";
 import { Text } from "@astryxdesign/core/Text";
@@ -17,7 +17,7 @@ import { TextInput } from "@astryxdesign/core/TextInput";
 import { app } from "../schema";
 import type { PlayableTrack } from "../src/audio-stream";
 import { positionBetween } from "../src/record-player";
-import { formatDuration } from "./format";
+import { countLabel, formatDuration } from "./format";
 import { FIRST_READ, usePlaylists, useStore, type PlaylistSummary } from "./library-data";
 import { usePlayer } from "./player";
 import { ShareDialog } from "./share-dialog";
@@ -46,10 +46,16 @@ export function Playlists() {
 
   return (
     <div className="rp-split">
-      <VStack gap={2}>
-        <List density="compact" header={<Text type="label">Your playlists</Text>}>
+      {/* Choosing a playlist navigates the detail pane, so the list is a
+          SideNav: its items are nav rows with aria-current on the open one. */}
+      <SideNav
+        topContent={
+          <Button label="Create playlist" variant="secondary" width="100%" onClick={create} />
+        }
+      >
+        <SideNavSection title="Your playlists">
           {playlists.map((playlist) => (
-            <ListItem
+            <SideNavItem
               key={playlist.id}
               label={playlist.name}
               endContent={
@@ -61,9 +67,8 @@ export function Playlists() {
               onClick={() => setSelectedId(playlist.id)}
             />
           ))}
-        </List>
-        <Button label="Create playlist" variant="secondary" onClick={create} />
-      </VStack>
+        </SideNavSection>
+      </SideNav>
       {selected && <PlaylistDetail key={selected.id} playlist={selected} />}
     </div>
   );
@@ -145,7 +150,7 @@ function PlaylistDetail({ playlist }: { playlist: PlaylistSummary }) {
             label={ROLE_LABEL[playlist.role]}
           />
           <Text color="secondary">
-            {rows.length} tracks · {formatDuration(totalMs)}
+            {countLabel(rows.length, "track")} · {formatDuration(totalMs)}
           </Text>
         </HStack>
         <HStack gap={2} wrap="wrap">
