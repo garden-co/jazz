@@ -39,23 +39,30 @@ export function NewRoomDialog({
     // room and its creator's membership commit together; the membership is
     // the bootstrap step the room policy allows only for the creator, and its
     // `exists` check sees the room inserted earlier in the same transaction.
-    db.transaction((tx) => {
+    const tx = db.beginTransaction();
+    let roomId: string;
+    try {
       const room = tx.insert(app.rooms, { name: trimmed });
       tx.insert(app.roomMembers, {
         roomId: room.id,
         memberAuthor: author,
         memberProfileId: profile.id,
       });
-      return room;
-    })
-      .then((created) => {
-        setName("");
-        onOpenChange(false);
-        onCreated(created.value.id);
-      })
-      .catch((cause: unknown) => {
-        setError(cause instanceof Error ? cause.message : String(cause));
-      });
+      roomId = room.id;
+    } catch (cause) {
+      void tx.rollback().catch(() => {});
+      setError(cause instanceof Error ? cause.message : String(cause));
+      return;
+    }
+    try {
+      tx.commit();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      return;
+    }
+    setName("");
+    onOpenChange(false);
+    onCreated(roomId);
   }
 
   return (
