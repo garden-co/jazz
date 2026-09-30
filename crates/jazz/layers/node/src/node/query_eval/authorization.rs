@@ -794,7 +794,7 @@ where
         )?;
         let inline_sources = BTreeMap::from([(root_source, vec![candidate])]);
         let access_paths = self.current_query_primary_key_access_paths(&policy_shape, &binding)?;
-        let program = if transaction_overlay.is_empty() {
+        let program = if !transaction_overlay.is_active() {
             Box::pin(
                 self.compile_query_program_request_with_inline_sources_and_access_paths(
                     request,

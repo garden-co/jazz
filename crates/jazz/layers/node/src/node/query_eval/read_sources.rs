@@ -7,6 +7,7 @@
 
 use super::*;
 use crate::node::query_engine::{BranchViewSourceBase, current_row_field_names};
+use std::sync::{Arc, Mutex};
 use std::{future::Future, pin::Pin};
 
 fn current_row_column_field(
@@ -62,39 +63,144 @@ pub(super) struct JazzSourceGraphPreparer<'a, S> {
 /// their committed state, so another in-flight transaction's writes never
 /// become evidence. The overlay only ever holds rows of the candidate unit,
 /// so it is bounded by that unit, never by the size of a table.
+///
+/// The per-table row sets are built once per evaluation round and shared by
+/// every check of that round. The row under check is left out by lookup
+/// (`excluded`), and each table caches its encoded records per output
+/// descriptor, so a check never rebuilds or re-encodes the overlay. A check
+/// can also record which overlay-eligible tables its policy reads, so the
+/// caller re-checks a write only when a table it reads changed.
 #[derive(Clone, Default)]
 pub(in crate::node) struct TransactionWriteOverlay {
-    rows: BTreeMap<(SchemaVersionId, String), BTreeMap<RowUuid, Option<CurrentRow>>>,
+    tables: Arc<BTreeMap<(SchemaVersionId, String), Arc<TransactionOverlayTable>>>,
+    excluded: Option<(SchemaVersionId, String, RowUuid)>,
+    reads: Option<Arc<Mutex<BTreeSet<(SchemaVersionId, String)>>>>,
 }
 
-impl TransactionWriteOverlay {
-    /// Replace the committed evidence for `row_uuid` in `table` (read in
-    /// `schema`): `Some` shows the row with that content, `None` hides it.
-    pub(in crate::node) fn set(
-        &mut self,
-        schema: SchemaVersionId,
-        table: &str,
-        row_uuid: RowUuid,
-        row: Option<CurrentRow>,
-    ) {
-        self.rows
-            .entry((schema, table.to_owned()))
-            .or_default()
-            .insert(row_uuid, row);
+/// One table's overlaid rows for one evaluation round: `Some` shows the row
+/// with that content, `None` hides it.
+#[derive(Default)]
+pub(in crate::node) struct TransactionOverlayTable {
+    rows: BTreeMap<RowUuid, Option<CurrentRow>>,
+    live_records: Mutex<Vec<(RecordDescriptor, Arc<Vec<(RowUuid, Vec<u8>)>>)>>,
+    written_records: Mutex<Vec<(RecordDescriptor, Arc<Vec<(RowUuid, Vec<u8>)>>)>>,
+}
+
+impl TransactionOverlayTable {
+    pub(in crate::node) fn new(rows: BTreeMap<RowUuid, Option<CurrentRow>>) -> Self {
+        Self {
+            rows,
+            ..Self::default()
+        }
+    }
+
+    pub(in crate::node) fn len(&self) -> usize {
+        self.rows.len()
     }
 
     pub(in crate::node) fn is_empty(&self) -> bool {
-        self.rows.values().all(BTreeMap::is_empty)
+        self.rows.is_empty()
     }
 
-    fn table(
+    fn cached(
+        cache: &Mutex<Vec<(RecordDescriptor, Arc<Vec<(RowUuid, Vec<u8>)>>)>>,
+        descriptor: RecordDescriptor,
+        encode: impl FnOnce() -> Result<Vec<(RowUuid, Vec<u8>)>, Error>,
+    ) -> Result<Arc<Vec<(RowUuid, Vec<u8>)>>, Error> {
+        if let Some((_, records)) = cache
+            .lock()
+            .map_err(|_| Error::InvalidStoredValue("transaction overlay cache poisoned"))?
+            .iter()
+            .find(|(cached, _)| *cached == descriptor)
+        {
+            return Ok(Arc::clone(records));
+        }
+        let records = Arc::new(encode()?);
+        cache
+            .lock()
+            .map_err(|_| Error::InvalidStoredValue("transaction overlay cache poisoned"))?
+            .push((descriptor, Arc::clone(&records)));
+        Ok(records)
+    }
+}
+
+impl TransactionWriteOverlay {
+    /// An overlay of the given per-table row sets, excluding no row and
+    /// recording nothing.
+    pub(in crate::node) fn from_tables(
+        tables: Arc<BTreeMap<(SchemaVersionId, String), Arc<TransactionOverlayTable>>>,
+    ) -> Self {
+        Self {
+            tables,
+            excluded: None,
+            reads: None,
+        }
+    }
+
+    /// The same overlay with one row left out: the row under check is the
+    /// inline candidate, so its committed state stays as it is.
+    pub(in crate::node) fn excluding(
         &self,
         schema: SchemaVersionId,
         table: &str,
-    ) -> Option<&BTreeMap<RowUuid, Option<CurrentRow>>> {
-        self.rows
+        row_uuid: RowUuid,
+    ) -> Self {
+        Self {
+            tables: Arc::clone(&self.tables),
+            excluded: Some((schema, table.to_owned(), row_uuid)),
+            reads: self.reads.clone(),
+        }
+    }
+
+    /// The same overlay, also recording every overlay-eligible table a
+    /// policy check reads into `reads`.
+    pub(in crate::node) fn recording(
+        &self,
+        reads: Arc<Mutex<BTreeSet<(SchemaVersionId, String)>>>,
+    ) -> Self {
+        Self {
+            tables: Arc::clone(&self.tables),
+            excluded: self.excluded.clone(),
+            reads: Some(reads),
+        }
+    }
+
+    /// Whether a check must take the overlay path at all: it has rows to
+    /// overlay or reads to record.
+    pub(in crate::node) fn is_active(&self) -> bool {
+        self.reads.is_some() || self.tables.values().any(|table| !table.is_empty())
+    }
+
+    /// How many overlaid rows the named tables hold: the evidence a check
+    /// that read them was charged for.
+    pub(in crate::node) fn rows_in(&self, tables: &BTreeSet<(SchemaVersionId, String)>) -> usize {
+        tables
+            .iter()
+            .filter_map(|table| self.tables.get(table))
+            .map(|table| table.len())
+            .sum()
+    }
+
+    fn record_read(&self, schema: SchemaVersionId, table: &str) {
+        if let Some(reads) = &self.reads
+            && let Ok(mut reads) = reads.lock()
+        {
+            reads.insert((schema, table.to_owned()));
+        }
+    }
+
+    fn table(&self, schema: SchemaVersionId, table: &str) -> Option<&Arc<TransactionOverlayTable>> {
+        self.tables
             .get(&(schema, table.to_owned()))
             .filter(|rows| !rows.is_empty())
+    }
+
+    fn excludes(&self, schema: SchemaVersionId, table: &str, row_uuid: RowUuid) -> bool {
+        self.excluded
+            .as_ref()
+            .is_some_and(|(excluded_schema, excluded_table, excluded_row)| {
+                *excluded_schema == schema && excluded_table == table && *excluded_row == row_uuid
+            })
     }
 }
 
@@ -2184,7 +2290,7 @@ where
                 .await?;
             // Only a write-policy check of a multi-row unit carries an
             // overlay. Box it so ordinary reads keep their poll frames.
-            if !self.transaction_overlay.is_empty() {
+            if self.transaction_overlay.is_active() {
                 Box::pin(self.overlay_transaction_writes(request, &mut resolved)).await?;
             }
             if let Some(scope) = exclusion_scope
@@ -2236,9 +2342,15 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
         {
             return Ok(());
         }
+        // Every overlay-eligible table the policy reads is recorded, whether
+        // or not it has rows to overlay yet.
+        let read_schema = self.read_view.read_schema;
+        let table_name = request.source.table.clone();
+        self.transaction_overlay
+            .record_read(read_schema, &table_name);
         let Some(rows) = self
             .transaction_overlay
-            .table(self.read_view.read_schema, &request.source.table)
+            .table(read_schema, &table_name)
             .cloned()
         else {
             return Ok(());
@@ -2251,44 +2363,75 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
         }
         let schema_version_alias = self
             .node
-            .ensure_schema_version_alias(self.read_view.read_schema)
+            .ensure_schema_version_alias(read_schema)
             .await
             .map_err(|_| overlay_error())?;
         // Encode the live rows as records of the committed arm's exact
         // inferred output, so both union arms carry one record shape (field
         // order, identities and storage cell types included). The declared
-        // row shape is not always that output.
+        // row shape is not always that output. The encoding is cached on the
+        // round's shared table, so each descriptor is encoded once per round.
         let descriptor = self
             .node
             .database
             .graph_output_descriptor(&resolved.graph)
             .map_err(|_| overlay_error())?;
-        let live_records = rows
-            .values()
-            .flatten()
-            .map(|row| {
-                inline_current_record_for_output(
-                    &resolved.table_schema,
-                    &descriptor,
-                    row,
-                    schema_version_alias,
-                    "transaction-overlay",
-                    &request.requirements,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| overlay_error())?;
-        let live = GraphBuilder::inline_records(descriptor, live_records);
+        let live_records = TransactionOverlayTable::cached(&rows.live_records, descriptor, || {
+            rows.rows
+                .iter()
+                .filter_map(|(row_uuid, row)| row.as_ref().map(|row| (*row_uuid, row)))
+                .map(|(row_uuid, row)| {
+                    inline_current_record_for_output(
+                        &resolved.table_schema,
+                        &descriptor,
+                        row,
+                        schema_version_alias,
+                        "transaction-overlay",
+                        &request.requirements,
+                    )
+                    .map(|record| (row_uuid, record))
+                })
+                .collect()
+        })
+        .map_err(|_| overlay_error())?;
         let row_field = resolved.row_shape.row_uuid_field.clone();
         let written_descriptor = RecordDescriptor::new([(row_field.clone(), ValueType::Uuid)]);
-        let written = rows
-            .keys()
-            .map(|row_uuid| written_descriptor.create(&[Value::Uuid(row_uuid.0)]))
-            .collect::<Result<Vec<_>, _>>()
+        let written_records =
+            TransactionOverlayTable::cached(&rows.written_records, written_descriptor, || {
+                rows.rows
+                    .keys()
+                    .map(|row_uuid| {
+                        Ok::<_, Error>((
+                            *row_uuid,
+                            written_descriptor.create(&[Value::Uuid(row_uuid.0)])?,
+                        ))
+                    })
+                    .collect()
+            })
             .map_err(|_| overlay_error())?;
+        // The row under check is the inline candidate; its committed state
+        // stays untouched.
+        let keep = |row_uuid: &RowUuid| {
+            !self
+                .transaction_overlay
+                .excludes(read_schema, &table_name, *row_uuid)
+        };
+        let live = GraphBuilder::inline_records(
+            descriptor,
+            live_records
+                .iter()
+                .filter(|(row_uuid, _)| keep(row_uuid))
+                .map(|(_, record)| record.clone()),
+        );
         let committed = GraphBuilder::anti_join(
             resolved.graph.clone(),
-            GraphBuilder::inline_records(written_descriptor, written),
+            GraphBuilder::inline_records(
+                written_descriptor,
+                written_records
+                    .iter()
+                    .filter(|(row_uuid, _)| keep(row_uuid))
+                    .map(|(_, record)| record.clone()),
+            ),
             [row_field.clone()],
             [row_field],
         );

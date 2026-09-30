@@ -34,7 +34,8 @@ Invariant digest:
   visible as committed, and a row the unit both inserts and deletes never
   counts. The protected row itself, USING clauses and
   read-for-write checks read committed state, and writes of any other
-  transaction are never evidence.
+  transaction are never evidence. A unit is accepted only if every WITH CHECK
+  clause also passes against the unit's full post-state.
 - `INV-RLS-10`: Query-driven sync MUST compose the root table read policy into the subscribed query and bind policy claims from server-authenticated identity so a client cannot widen...
 - `INV-RLS-11`: Relay peer links MUST have an explicit relay transport capability and no permission subject; client-to-Core peer links MUST use the admitted client AuthorSubject for policy-composed reads.
 - `INV-RLS-12`: Exclusive transaction view shipping MUST be policy-atomic per recipient and maintained subscription view: a non-system recipient MUST NOT receive a result member or pr...
@@ -271,14 +272,40 @@ other inserts, restores and updates:
   transaction's writes are never evidence, even while it is in flight.
 
 A commit unit carries its versions as a canonical set, not in the order the
-client made them. The authority therefore evaluates the unit's checks to a
-fixpoint: a check that fails is retried after another row of the unit has
-passed its checks, and the unit is rejected when a round grounds no new row.
-The unit is accepted exactly when some order of its writes lets each write be
-checked after the writes it depends on. Because a row becomes evidence only
-after its own checks pass, writes cannot justify each other in a cycle. Policy
-evidence is positive (`exists`, joins, reachability and inheritance only ever
-grant), so the result does not depend on evaluation order.
+client made them, so the checks run in two stages:
+
+1. **Grounding.** Every write is checked against the evidence above. A row is
+   grounded once every version the unit writes for it has passed, and from the
+   next round on it shows its post-transaction content. A failed write is
+   checked again only when a table its policy reads has gained grounded rows.
+   Because a row becomes evidence only after its own checks pass, writes
+   cannot justify each other in a cycle. If a round grounds no new row while a
+   write still fails, the unit is rejected.
+2. **Post-state.** When every write has passed, each write whose passing check
+   read a unit row that was not grounded yet is checked once more against the
+   unit's full post-state: committed rows with all of the unit's updates
+   applied and its inserts and restores added, committed rows it deletes still
+   visible, rows it inserts and deletes left out, and the protected row left
+   out as above. A write that passed while every unit row it reads was
+   grounded has already been checked against that post-state.
+
+The unit is accepted exactly when grounding passes every write and every write
+passes against the post-state. So no write is accepted on evidence the
+transaction itself takes away: demoting my own membership from admin to viewer
+in the same transaction as inserting a document that requires admin is
+rejected, although the insert's check passes while the demotion is not yet
+grounded. Both stages run over the canonical set, so the decision does not
+depend on the order in which the client made its writes.
+
+Each round builds one overlay per table and shares it among its checks; a check
+overlays only the tables its policy reads. A check still reads every unit row
+in those tables, so a unit whose policies read a large share of its own rows
+costs time quadratic in its size. The rows a unit's checks read are summed
+over every check, and a unit whose checks would read more than 262,144 of its
+own rows is rejected with `MalformedCommit` ("Reading more than 262144 rows of
+a transaction's own writes in its write-policy checks is not supported yet")
+instead of being evaluated at unbounded cost. A unit whose policies read no
+table it writes reads no overlaid rows and is never bounded this way.
 
 USING clauses (`update_using`, `delete_using`) and read-for-write checks judge
 the rows the transaction acts on, which are the committed rows, so they read

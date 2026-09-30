@@ -670,19 +670,35 @@ where
         Ok(set)
     }
 
+    #[cfg(test)]
     pub(super) async fn commit_unit_satisfies_write_policies(
         &mut self,
         tx: &Transaction,
         versions: &[VersionRecord],
         ingest_context: Option<CommitUnitIngestContext>,
     ) -> Result<bool, Error> {
+        Ok(Box::pin(self.commit_unit_write_policy_rejection(tx, versions, ingest_context))
+            .await?
+            .is_none())
+    }
+
+    /// The rejection a commit unit's write policies call for, if any:
+    /// `AuthorizationDenied` when a check fails, or `MalformedCommit` naming
+    /// the unsupported pattern when the unit's checks would read more of its
+    /// own writes than the evidence budget allows (`INV-RLS-9`).
+    pub(super) async fn commit_unit_write_policy_rejection(
+        &mut self,
+        tx: &Transaction,
+        versions: &[VersionRecord],
+        ingest_context: Option<CommitUnitIngestContext>,
+    ) -> Result<Option<RejectionReason>, Error> {
         if ingest_context.is_some_and(|context| context.trust == CommitUnitTrust::TrustedAdmin) {
-            return Ok(true);
+            return Ok(None);
         }
         let permission_subject = match ingest_context {
             Some(context) => {
                 if context.trust == CommitUnitTrust::Session && tx.made_by != context.identity {
-                    return Ok(false);
+                    return Ok(Some(RejectionReason::AuthorizationDenied));
                 }
                 match context.trust {
                     CommitUnitTrust::Session => context.identity,
@@ -690,7 +706,9 @@ where
                     // write must reach a serving authority through its
                     // topology-owned admission path; it cannot borrow SYSTEM
                     // or the transport identity here.
-                    CommitUnitTrust::Relay => return Ok(context.admitted_write_authorization),
+                    CommitUnitTrust::Relay => {
+                        return Ok((!context.admitted_write_authorization).then_some(RejectionReason::AuthorizationDenied));
+                    }
                     CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAuthority => tx.permission_subject.unwrap_or(tx.made_by),
                     CommitUnitTrust::TrustedAdmin => unreachable!("handled above"),
                 }
@@ -700,7 +718,7 @@ where
         // Gate the effective permission subject so relayed anonymous sessions
         // stay read-only without changing trusted-backend attribution.
         if permission_subject.is_anonymous() {
-            return Ok(false);
+            return Ok(Some(RejectionReason::AuthorizationDenied));
         }
         // Non-root branch writes have mandatory canonical operation intent.
         // Do not treat an absent descriptor as an ordinary insert: that would
@@ -713,10 +731,10 @@ where
             .collect::<Vec<_>>();
         if !branch_versions.is_empty() {
             if tx.kind != TxKind::Mergeable {
-                return Ok(false);
+                return Ok(Some(RejectionReason::AuthorizationDenied));
             }
             let Some(provenance) = &tx.contribution_merge else {
-                return Ok(false);
+                return Ok(Some(RejectionReason::AuthorizationDenied));
             };
             // Content and deletion registers may emit separate final versions
             // for one physical branch row (for example a move's destination
@@ -727,7 +745,7 @@ where
                 let Ok(table_id) = self
                     .physical_table_id_for_schema(version.schema_version(), version.table())
                 else {
-                    return Ok(false);
+                    return Ok(Some(RejectionReason::AuthorizationDenied));
                 };
                 branch_coordinates.insert((
                     table_id,
@@ -737,7 +755,7 @@ where
                 ));
             }
             if provenance.branch_write_intents.len() != branch_coordinates.len() {
-                return Ok(false);
+                return Ok(Some(RejectionReason::AuthorizationDenied));
             }
             for intent in &provenance.branch_write_intents {
                 let matching_versions = branch_versions
@@ -754,7 +772,7 @@ where
                     })
                     .collect::<Vec<_>>();
                 if matching_versions.is_empty() {
-                    return Ok(false);
+                    return Ok(Some(RejectionReason::AuthorizationDenied));
                 }
                 match &intent.operation {
                     crate::tx::BranchWriteOperation::ViewUpdateCopy(evidence) => {
@@ -771,7 +789,7 @@ where
                                 )
                                 .await?
                         {
-                            return Ok(false);
+                            return Ok(Some(RejectionReason::AuthorizationDenied));
                         }
                     }
                     crate::tx::BranchWriteOperation::ExactHeadInsert => {
@@ -784,7 +802,7 @@ where
                             .iter()
                             .any(|version| !version.parents().is_empty())
                         {
-                            return Ok(false);
+                            return Ok(Some(RejectionReason::AuthorizationDenied));
                         }
                     }
                     crate::tx::BranchWriteOperation::ExactHeadUpdate => {
@@ -792,7 +810,7 @@ where
                             .iter()
                             .any(|version| version.parents().is_empty())
                         {
-                            return Ok(false);
+                            return Ok(Some(RejectionReason::AuthorizationDenied));
                         }
                     }
                 }
@@ -808,12 +826,25 @@ where
                     )
                     .await?
                 {
-                    return Ok(false);
+                    return Ok(Some(RejectionReason::AuthorizationDenied));
                 }
             }
         }
-        self.commit_unit_satisfies_write_policy(versions, permission_subject, tx.tx_id)
-            .await
+        Ok(
+            match Box::pin(self.commit_unit_write_policies_allow(
+                versions,
+                permission_subject,
+                tx.tx_id,
+            ))
+            .await?
+            {
+                crate::node::policy::UnitWritePolicyDecision::Allowed => None,
+                crate::node::policy::UnitWritePolicyDecision::Denied => Some(RejectionReason::AuthorizationDenied),
+                crate::node::policy::UnitWritePolicyDecision::Unsupported(reason) => {
+                    Some(RejectionReason::MalformedCommit(reason))
+                }
+            },
+        )
     }
 
     /// Evaluate every write policy of one candidate commit unit under the
@@ -829,7 +860,11 @@ where
     ) -> Result<bool, Error> {
         // Boxed so fate and relay admission frames stay as small as they
         // were with one policy evaluation per version.
-        Box::pin(self.commit_unit_write_policies_allow(versions, author, candidate_tx_id)).await
+        Ok(
+            Box::pin(self.commit_unit_write_policies_allow(versions, author, candidate_tx_id))
+                .await?
+                == crate::node::policy::UnitWritePolicyDecision::Allowed,
+        )
     }
 
     pub(super) async fn cascade_root_for_versions(

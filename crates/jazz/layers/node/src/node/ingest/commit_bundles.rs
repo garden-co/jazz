@@ -175,17 +175,17 @@ where
             .copied()
             .or(stored.tx.permission_subject)
             .unwrap_or(stored.tx.made_by);
-        if !self.commit_unit_satisfies_write_policies(
+        if let Some(reason) = Box::pin(self.commit_unit_write_policy_rejection(
             &Transaction {
                 permission_subject: Some(permission_subject),
                 ..stored.tx.clone()
             },
             &records,
             None,
-        )
+        ))
         .await?
         {
-            let fate = Fate::Rejected(RejectionReason::AuthorizationDenied);
+            let fate = Fate::Rejected(reason);
             self.ingest_rejected_transaction(stored.tx, fate).await?;
             return Ok(PublicationOutcome::settled(()));
         }
@@ -236,11 +236,10 @@ where
         // Locally finalized exclusive commits bypass `ingest_commit_unit_once`,
         // so they must still take the common fate-policy path before their
         // optimistic local versions become globally accepted.
-        if !self
-            .commit_unit_satisfies_write_policies(&tx, &versions, None)
-            .await?
+        if let Some(reason) =
+            Box::pin(self.commit_unit_write_policy_rejection(&tx, &versions, None)).await?
         {
-            let fate = Fate::Rejected(RejectionReason::AuthorizationDenied);
+            let fate = Fate::Rejected(reason);
             self.ingest_rejected_transaction(tx, fate.clone()).await?;
             return Ok(PublicationOutcome::settled(fate));
         }
@@ -545,14 +544,14 @@ where
                 durability: None,
             }]));
         }
-        if !Box::pin(self.commit_unit_satisfies_write_policies(
+        if let Some(reason) = Box::pin(self.commit_unit_write_policy_rejection(
             &tx,
             &versions,
             ingest_context,
         ))
         .await?
         {
-            let fate = Fate::Rejected(RejectionReason::AuthorizationDenied);
+            let fate = Fate::Rejected(reason);
             self.ingest_rejected_transaction(tx.clone(), fate.clone()).await?;
             let mut updates = vec![SyncMessage::FateUpdate {
                 tx_id: tx.tx_id,

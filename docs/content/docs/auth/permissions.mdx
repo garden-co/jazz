@@ -145,7 +145,13 @@ for example, admit a member and remove their join request together. A row the tr
 creates and deletes never counts, and neither do writes from other transactions that the server
 has not accepted yet. Rows a transaction writes cannot grant each other access in a cycle:
 each one has to be allowed by rows that already exist or that the transaction writes and are
-themselves allowed.
+themselves allowed. Every write must also still be allowed by the state the whole transaction
+leaves behind, so demoting your own membership from admin in the same transaction as creating a
+document that requires admin is rejected. The order in which you make the writes doesn't matter.
+
+A transaction whose checks would have to read more than 262,144 of its own rows (for example,
+importing thousands of folders into a table whose policy reads that same table) is rejected as not
+supported yet. Split such an import into smaller transactions.
 
 <Accordions type="single">
 <Accordion title="Recursive inheritance">
