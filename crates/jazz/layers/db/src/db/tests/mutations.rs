@@ -4539,6 +4539,39 @@ fn deferred_publication_does_not_starve_the_queued_operation_holding_node_state(
     assert_eq!(prepared_read(&db, &db.table("todos")).len(), 1);
 }
 
+#[test]
+fn finalize_local_commit_queues_upload_before_waiting_for_node_owner() {
+    let schema = owner_write_schema();
+    let owner = AuthorSubject::for_test_bytes([0xa9; 16]);
+    let db = open_db(0xa9, owner, &schema);
+    let write = block_on(db.insert(
+        "todos",
+        cells("commit finalization", false, owner),
+        Default::default(),
+    ))
+    .unwrap();
+    let tx_id = write.mergeable_tx_id();
+    db.node
+        .outbox
+        .borrow_mut()
+        .retain(|pending| pending.tx_id != tx_id);
+    assert!(!db.node.outbox.borrow().contains(tx_id));
+
+    let node = db.node.node();
+    let _owner_guard = block_on(node.lock());
+    let mut finalize = Box::pin(db.finalize_local_commit(tx_id));
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    assert!(matches!(
+        finalize.as_mut().poll(&mut context),
+        Poll::Pending
+    ));
+    assert!(
+        db.node.outbox.borrow().contains(tx_id),
+        "durable commit must enter the upload outbox before waiting for node ownership"
+    );
+}
+
 /// Causal flow: a mergeable transaction enters the node-owned deferred queue,
 /// its subscriber refresh stalls, and the caller future is cancelled. The next
 /// node tick must still persist the exact queued transaction.
