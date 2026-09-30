@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   densitiesAt,
+  expandCopies,
   layerAt,
   rotated,
   stipple,
@@ -63,6 +64,28 @@ describe("layerAt", () => {
     expect(layerAt(turned, 0, 0.25)).toBeCloseTo(0.25);
     const mirrored: Layer = { ...ramp, warps: [{ type: "mirror", angle: 90 }] };
     expect(layerAt(mirrored, -0.25, 0)).toBeCloseTo(0.25);
+  });
+});
+
+describe("expandCopies", () => {
+  it("adds a turned copy of every layer", () => {
+    const layers = expandCopies({ layers: [ramp], copies: [90] });
+    expect(layers).toHaveLength(2);
+    expect(layerAt(layers[1], 0, 0.25)).toBeCloseTo(0.25);
+  });
+});
+
+describe("mirrored flutes", () => {
+  it("meet at rib lines: one ink ends a rib where the other starts the next", () => {
+    const flute = { type: "flute", angle: 0, period: 0.2, scale: 4, shift: 2 } as const;
+    const source = { type: "radial", x: 0.9, radius: 3 } as const;
+    const a: Layer = { ink: "a", source, warps: [flute] };
+    const b: Layer = { ink: "b", source, warps: [{ ...flute, scale: -4 }] };
+    // Within a rib, b reads what a reads at the mirrored position ...
+    expect(layerAt(b, 0.25, 0)).toBeCloseTo(layerAt(a, 0.35, 0));
+    // ... so at a rib line, b ends one rib and a starts the next on neighbouring
+    // rib centres: nearly the same value, with both sharp edges meeting there.
+    expect(Math.abs(layerAt(b, 0.3999, 0) - layerAt(a, 0.4001, 0))).toBeLessThan(0.1);
   });
 });
 

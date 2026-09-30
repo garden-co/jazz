@@ -22,22 +22,24 @@ export type Source =
   /** 0 at `from` rising to 1 at `to`, along `angle` (0° right, 90° down). */
   | { type: "linear"; angle: number; from: number; to: number; gamma?: number };
 
+/**
+ * Fluted glass with ribs perpendicular to `angle`, `period` apart. Each rib
+ * shows the plane behind it scaled by `scale` around the rib's centre
+ * (negative flips it), shifted by `shift` periods; `bend` curves the scale
+ * towards the rib edges like a real lens.
+ */
+export type Flute = {
+  type: "flute";
+  angle: number;
+  period: number;
+  scale?: number;
+  shift?: number;
+  bend?: number;
+  phase?: number;
+};
+
 export type Warp =
-  /**
-   * Fluted glass with ribs perpendicular to `angle`, `period` apart. Each rib
-   * shows the plane behind it scaled by `scale` around the rib's centre
-   * (negative flips it), shifted by `shift` periods; `bend` curves the scale
-   * towards the rib edges like a real lens.
-   */
-  | {
-      type: "flute";
-      angle: number;
-      period: number;
-      scale?: number;
-      shift?: number;
-      bend?: number;
-      phase?: number;
-    }
+  | Flute
   /** Mirrors across the line through the origin at `angle`. */
   | { type: "mirror"; angle: number }
   | { type: "rotate"; angle: number }
@@ -63,6 +65,11 @@ export type StipplePattern = {
   jitter?: number;
   /** Scales both densities before sampling. */
   gain?: number;
+  /**
+   * Extra copies of all layers, turned by these angles and combined with the
+   * originals before sampling (a grid is stripes plus a copy at 90°).
+   */
+  copies?: number[];
   /** How layers of the same ink combine; defaults to "screen". */
   blend?: Blend;
   /** "independent" samples each ink on its own grid; "shared" allows one dot per cell. */
@@ -180,7 +187,8 @@ export function stipple(
   bounds: { left: number; top: number; right: number; bottom: number },
   emit: (dot: Dot) => void,
 ) {
-  const { spacing, layers } = pattern;
+  const { spacing } = pattern;
+  const layers = expandCopies(pattern);
   const jitter = pattern.jitter ?? 1;
   const gain = pattern.gain ?? 1;
   const seed = pattern.seed ?? 1;
@@ -213,10 +221,18 @@ export function stipple(
   }
 }
 
-/** The same layers turned by `angle`, for grids made of two stripe sets. */
+/** The same layers turned by `angle`. */
 export function rotated(layers: Layer[], angle: number): Layer[] {
   return layers.map((layer) => ({
     ...layer,
     warps: [{ type: "rotate", angle }, ...(layer.warps ?? [])],
   }));
+}
+
+/** The pattern's layers plus its rotated copies. */
+export function expandCopies(pattern: Pick<StipplePattern, "layers" | "copies">): Layer[] {
+  return [
+    ...pattern.layers,
+    ...(pattern.copies ?? []).flatMap((angle) => rotated(pattern.layers, angle)),
+  ];
 }
