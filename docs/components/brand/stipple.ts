@@ -1,72 +1,61 @@
-// Duotone stippling: the dotted grid and stripe patterns from Jazz print
+// Duotone stippling: the dotted stripe and grid patterns from Jazz print
 // material, generated instead of shipped as images.
 //
-// Every point has two ink densities (a and b). A field computes them as the
-// product of its layers, so a layer can shape both inks ("ab") or only one.
-// A layer reads one coordinate of the plane and passes it through a profile:
-// a clamped ramp for gradients and splits, or a periodic pulse for stripes.
-// Narrow ramps and hard pulse edges give the sharp edges; wide ones give
-// continuous gradients. A pattern overlays several fields like light
-// (screen blend), for motifs that are a union rather than a product, such as
-// rings around a grid.
+// Each ink layer is a filter chain read from the output back to a source:
+// a point on the page is pushed through the layer's warps in order (fluted
+// glass, mirror, rotate, translate) and the source gradient is read where it
+// lands. Fluted glass cuts the plane into ribs and shows a stretched slice of
+// the gradient in each, which is where the sharp edges come from. Stripes
+// are a radial gradient behind fluted glass per ink, the second ink mirrored
+// so its sharp edges meet the first's; a grid is the stripes again, turned
+// 90°.
 //
-// The fields are then sampled into dots on a jittered grid: each cell holds
-// at most one dot, inked a or b with probability equal to the densities.
+// The resulting densities are sampled into dots on jittered grids, one grid
+// per ink (dots of different inks may overlap, as in print) or one shared
+// grid (at most one dot per cell).
 
-export type Channel = "a" | "b" | "ab";
+export type Ink = "a" | "b";
 
-export type Coordinate =
-  /** Distance along a direction; 0° points right, 90° points down. */
-  | { type: "linear"; angle: number }
-  /** Distance from the centre. */
-  | { type: "radial" }
-  /** Chebyshev distance: concentric rectangles, `aspect` = width / height. */
-  | { type: "box"; aspect?: number }
-  /** 1 / box distance: a corridor seen head-on, bands crowd the vanishing point. */
-  | { type: "depth"; aspect?: number }
-  /** Distance from the box's diagonals, to open gaps at rectangle corners. */
-  | { type: "diagonal"; aspect?: number };
+export type Source =
+  /** 1 at the centre falling to 0 at `radius`, shaped by `gamma`. */
+  | { type: "radial"; x?: number; y?: number; radius: number; gamma?: number }
+  /** 0 at `from` rising to 1 at `to`, along `angle` (0° right, 90° down). */
+  | { type: "linear"; angle: number; from: number; to: number; gamma?: number };
 
-export type Profile =
-  /** 0 before `from`, 1 after `to`, eased by `gamma`. `from > to` descends. */
-  | { type: "ramp"; from: number; to: number; gamma?: number }
+export type Warp =
   /**
-   * Repeating band. `duty` is the lit share of each period, `soft` the share
-   * of the band spent fading in and out (0 = hard edges), `fade` dims the
-   * band from its leading to its trailing edge (1 = to nothing; negative
-   * values dim the leading edge instead).
+   * Fluted glass with ribs perpendicular to `angle`, `period` apart. Each rib
+   * shows the plane behind it scaled by `scale` around the rib's centre
+   * (negative flips it), shifted by `shift` periods; `bend` curves the scale
+   * towards the rib edges like a real lens.
    */
   | {
-      type: "pulse";
+      type: "flute";
+      angle: number;
       period: number;
+      scale?: number;
+      shift?: number;
+      bend?: number;
       phase?: number;
-      duty?: number;
-      soft?: number;
-      fade?: number;
-    };
+    }
+  /** Mirrors across the line through the origin at `angle`. */
+  | { type: "mirror"; angle: number }
+  | { type: "rotate"; angle: number }
+  | { type: "translate"; x: number; y: number };
 
 export type Layer = {
-  channel: Channel;
-  coordinate: Coordinate;
-  profile: Profile;
-  /** Offset of this layer's origin from the pattern centre. */
-  x?: number;
-  y?: number;
-  invert?: boolean;
-  /** How strongly the layer applies: 0 = no effect, 1 = full. */
-  amount?: number;
-};
-
-export type Field = {
-  /** Which inks the field lays down; the other ink gets nothing from it. */
-  inks?: Channel;
-  layers: Layer[];
+  ink: Ink;
+  source: Source;
+  /** Applied in order, from the page towards the source. */
+  warps?: Warp[];
+  /** Multiplies this layer's density. */
+  gain?: number;
 };
 
 export type StipplePattern = {
-  fields: Field[];
+  layers: Layer[];
   inks: { a: string; b: string };
-  /** Distance between grid cells, in pattern units. */
+  /** Distance between sample cells, in pattern units. */
   spacing: number;
   /** Dot radius, in pattern units. */
   radius: number;
@@ -74,76 +63,96 @@ export type StipplePattern = {
   jitter?: number;
   /** Scales both densities before sampling. */
   gain?: number;
+  /** How layers of the same ink combine; defaults to "screen". */
+  blend?: Blend;
+  /** "independent" samples each ink on its own grid; "shared" allows one dot per cell. */
+  sampling?: "independent" | "shared";
   seed?: number;
 };
 
 export type Densities = { a: number; b: number };
 
 const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
+const rad = (deg: number) => (deg * Math.PI) / 180;
 
-function smoothstep(edge0: number, edge1: number, v: number) {
-  if (edge0 === edge1) return v < edge0 ? 0 : 1;
-  const t = clamp01((v - edge0) / (edge1 - edge0));
-  return t * t * (3 - 2 * t);
-}
-
-function coordinate(c: Coordinate, x: number, y: number) {
-  switch (c.type) {
-    case "linear": {
-      const r = (c.angle * Math.PI) / 180;
-      return x * Math.cos(r) + y * Math.sin(r);
+function warp(w: Warp, x: number, y: number): [number, number] {
+  switch (w.type) {
+    case "flute": {
+      const cos = Math.cos(rad(w.angle));
+      const sin = Math.sin(rad(w.angle));
+      // Across the ribs (t) and along them (s).
+      const t = x * cos + y * sin;
+      const s = -x * sin + y * cos;
+      const u = t / w.period + (w.phase ?? 0);
+      const rib = Math.floor(u);
+      const local = u - rib - 0.5;
+      const bend = 1 + (w.bend ?? 0) * 4 * local * local;
+      const t2 =
+        (rib + 0.5 + local * (w.scale ?? 1) * bend + (w.shift ?? 0) - (w.phase ?? 0)) * w.period;
+      return [t2 * cos - s * sin, t2 * sin + s * cos];
     }
-    case "radial":
-      return Math.hypot(x, y);
-    case "box":
-      return Math.max(Math.abs(x) / (c.aspect ?? 1), Math.abs(y));
-    case "depth":
-      return 1 / Math.max(Math.abs(x) / (c.aspect ?? 1), Math.abs(y), 1e-6);
-    case "diagonal":
-      return Math.abs(Math.abs(x) / (c.aspect ?? 1) - Math.abs(y));
+    case "mirror": {
+      const c = Math.cos(rad(2 * w.angle));
+      const s = Math.sin(rad(2 * w.angle));
+      return [x * c + y * s, x * s - y * c];
+    }
+    case "rotate": {
+      const c = Math.cos(rad(-w.angle));
+      const s = Math.sin(rad(-w.angle));
+      return [x * c - y * s, x * s + y * c];
+    }
+    case "translate":
+      return [x - w.x, y - w.y];
   }
 }
 
-function profile(p: Profile, s: number) {
-  if (p.type === "ramp") {
-    const t = p.from === p.to ? (s < p.from ? 0 : 1) : clamp01((s - p.from) / (p.to - p.from));
-    return p.gamma ? Math.pow(t, p.gamma) : t;
+function source(src: Source, x: number, y: number) {
+  let v: number;
+  if (src.type === "radial") {
+    v = 1 - Math.hypot(x - (src.x ?? 0), y - (src.y ?? 0)) / src.radius;
+  } else {
+    const t = x * Math.cos(rad(src.angle)) + y * Math.sin(rad(src.angle));
+    v = (t - src.from) / (src.to - src.from);
   }
-  const u = s / p.period - (p.phase ?? 0);
-  const f = u - Math.floor(u);
-  const duty = p.duty ?? 0.5;
-  if (f >= duty) return 0;
-  const edge = ((p.soft ?? 0) * duty) / 2;
-  const lit = smoothstep(0, edge, f) * (1 - smoothstep(duty - edge, duty, f));
-  const fade = p.fade ?? 0;
-  const along = f / duty;
-  return lit * (fade >= 0 ? 1 - fade * along : 1 + fade * (1 - along));
+  v = clamp01(v);
+  return src.gamma ? Math.pow(v, src.gamma) : v;
 }
 
-function fieldAt(field: Field, x: number, y: number): Densities {
-  let a = field.inks === "b" ? 0 : 1;
-  let b = field.inks === "a" ? 0 : 1;
-  for (const layer of field.layers) {
-    const s = coordinate(layer.coordinate, x - (layer.x ?? 0), y - (layer.y ?? 0));
-    let v = profile(layer.profile, s);
-    if (layer.invert) v = 1 - v;
-    v = 1 - (layer.amount ?? 1) * (1 - v);
-    if (layer.channel !== "b") a *= v;
-    if (layer.channel !== "a") b *= v;
-  }
-  return { a, b };
+/** Density of one layer at a page point. */
+export function layerAt(layer: Layer, x: number, y: number) {
+  let px = x;
+  let py = y;
+  for (const w of layer.warps ?? []) [px, py] = warp(w, px, py);
+  return clamp01(source(layer.source, px, py) * (layer.gain ?? 1));
 }
 
-/** Ink densities (0–1 each) at a point in pattern units, centre at the origin. */
-export function densitiesAt(fields: Field[], x: number, y: number): Densities {
-  let a = 1;
-  let b = 1;
-  for (const field of fields) {
-    const d = fieldAt(field, x, y);
-    a *= 1 - d.a;
-    b *= 1 - d.b;
+export type Blend = "screen" | "max" | "multiply";
+
+/**
+ * Ink densities (0–1 each) at a page point in pattern units, centre at the
+ * origin. Layers of the same ink combine by `blend`: "screen" overlays them
+ * like light, "max" keeps the brighter, "multiply" keeps only where all are lit.
+ */
+export function densitiesAt(
+  layers: Layer[],
+  x: number,
+  y: number,
+  blend: Blend = "screen",
+): Densities {
+  const d = { a: -1, b: -1 };
+  for (const layer of layers) {
+    const v = layerAt(layer, x, y);
+    const prev = d[layer.ink];
+    d[layer.ink] =
+      prev < 0
+        ? v
+        : blend === "screen"
+          ? 1 - (1 - prev) * (1 - v)
+          : blend === "max"
+            ? Math.max(prev, v)
+            : prev * v;
   }
-  return { a: 1 - a, b: 1 - b };
+  return { a: Math.max(d.a, 0), b: Math.max(d.b, 0) };
 }
 
 /** Stateless hash of a grid cell to three uniform numbers in [0, 1). */
@@ -159,7 +168,7 @@ function cellRandom(seed: number, i: number, j: number, out: number[]) {
   }
 }
 
-export type Dot = { x: number; y: number; ink: "a" | "b" };
+export type Dot = { x: number; y: number; ink: Ink };
 
 /**
  * Samples the pattern over a rectangle (pattern units, centre at the origin)
@@ -171,31 +180,43 @@ export function stipple(
   bounds: { left: number; top: number; right: number; bottom: number },
   emit: (dot: Dot) => void,
 ) {
-  const { spacing, fields } = pattern;
+  const { spacing, layers } = pattern;
   const jitter = pattern.jitter ?? 1;
   const gain = pattern.gain ?? 1;
   const seed = pattern.seed ?? 1;
+  const shared = pattern.sampling === "shared";
   const i0 = Math.floor(bounds.left / spacing);
   const i1 = Math.ceil(bounds.right / spacing);
   const j0 = Math.floor(bounds.top / spacing);
   const j1 = Math.ceil(bounds.bottom / spacing);
   const r = [0, 0, 0];
-  for (let j = j0; j <= j1; j++) {
-    for (let i = i0; i <= i1; i++) {
-      cellRandom(seed, i, j, r);
-      const x = (i + 0.5 + (r[0] - 0.5) * jitter) * spacing;
-      const y = (j + 0.5 + (r[1] - 0.5) * jitter) * spacing;
-      const pick = r[2];
-      const d = densitiesAt(fields, x, y);
-      let a = clamp01(d.a * gain);
-      let b = clamp01(d.b * gain);
-      const sum = a + b;
-      if (sum > 1) {
-        a /= sum;
-        b /= sum;
+  const passes: (Ink | "both")[] = shared ? ["both"] : ["a", "b"];
+  for (const pass of passes) {
+    const passSeed = pass === "b" ? seed + 0x51ed27 : seed;
+    for (let j = j0; j <= j1; j++) {
+      for (let i = i0; i <= i1; i++) {
+        cellRandom(passSeed, i, j, r);
+        const x = (i + 0.5 + (r[0] - 0.5) * jitter) * spacing;
+        const y = (j + 0.5 + (r[1] - 0.5) * jitter) * spacing;
+        const d = densitiesAt(layers, x, y, pattern.blend);
+        let a = pass === "b" ? 0 : clamp01(d.a * gain);
+        let b = pass === "a" ? 0 : clamp01(d.b * gain);
+        const sum = a + b;
+        if (sum > 1) {
+          a /= sum;
+          b /= sum;
+        }
+        if (r[2] < a) emit({ x, y, ink: "a" });
+        else if (r[2] < a + b) emit({ x, y, ink: "b" });
       }
-      if (pick < a) emit({ x, y, ink: "a" });
-      else if (pick < a + b) emit({ x, y, ink: "b" });
     }
   }
+}
+
+/** The same layers turned by `angle`, for grids made of two stripe sets. */
+export function rotated(layers: Layer[], angle: number): Layer[] {
+  return layers.map((layer) => ({
+    ...layer,
+    warps: [{ type: "rotate", angle }, ...(layer.warps ?? [])],
+  }));
 }

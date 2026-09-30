@@ -8,7 +8,7 @@ import type { StipplePattern } from "./stipple";
 import { drawStipple, StippleCanvas } from "./stipple-canvas";
 import { gridPattern, stripePattern } from "./stipple-presets";
 
-const presets: Record<string, StipplePattern> = { grid: gridPattern, stripes: stripePattern };
+const presets: Record<string, StipplePattern> = { stripes: stripePattern, grid: gridPattern };
 
 const sliders = [
   { key: "spacing", min: 0.002, max: 0.03, step: 0.0005 },
@@ -22,10 +22,10 @@ const backgrounds = { dark: "#000000", light: "#f5f5f4", none: "transparent" };
 
 /** Unlisted page for tuning stipple patterns and exporting them as images. */
 export function StipplePlayground() {
-  const [source, setSource] = useState(() => JSON.stringify(gridPattern, null, 2));
+  const [source, setSource] = useState(() => JSON.stringify(stripePattern, null, 2));
   const [aspect, setAspect] = useState(1.1);
   const [background, setBackground] = useState<keyof typeof backgrounds>("dark");
-  const lastGood = useRef(gridPattern);
+  const lastGood = useRef(stripePattern);
   const { pattern, error } = useMemo(() => {
     try {
       lastGood.current = JSON.parse(source) as StipplePattern;
@@ -70,8 +70,9 @@ export function StipplePlayground() {
           />
         </div>
         <Text as="p" display="block" color="secondary">
-          One pattern unit is half the image height. Each field multiplies its layers; fields
-          overlay each other. Exports are 3000 px tall with a transparent background.
+          One pattern unit is half the image height. Each layer reads a gradient through its warps
+          (fluted glass, mirror, rotate), in order from the page towards the source. Exports are
+          3000 px tall with a transparent background.
         </Text>
       </div>
       <div className="space-y-4">
@@ -86,6 +87,27 @@ export function StipplePlayground() {
             ))}
           </select>
         </label>
+        {(
+          [
+            ["blend", ["screen", "max", "multiply"]],
+            ["sampling", ["independent", "shared"]],
+          ] as const
+        ).map(([key, options]) => (
+          <label key={key} className="block space-y-1">
+            <Text weight="medium">{key}</Text>
+            <select
+              className="w-full rounded border border-(--color-border) bg-transparent p-2"
+              value={pattern[key] ?? options[0]}
+              onChange={(event) =>
+                setSource(JSON.stringify({ ...pattern, [key]: event.target.value }, null, 2))
+              }
+            >
+              {options.map((option) => (
+                <option key={option}>{option}</option>
+              ))}
+            </select>
+          </label>
+        ))}
         {sliders.map(({ key, min, max, step }) => (
           <label key={key} className="block space-y-1">
             <Text weight="medium">

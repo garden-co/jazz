@@ -1,135 +1,57 @@
-import type { StipplePattern } from "./stipple";
+import { rotated, type Layer, type StipplePattern } from "./stipple";
 
 // Pattern units: 1 = half the pattern's height. Inks from the print material.
-const inks = { a: "#419373", b: "#465986" };
+const inks = { a: "#62f5c0", b: "#7383e0" };
 
-/** Concentric bands around a checkered grid, green top-left, indigo bottom-right. */
-export const gridPattern: StipplePattern = {
-  inks,
-  spacing: 0.005,
-  radius: 0.0021,
-  gain: 1.5,
-  jitter: 1,
-  seed: 7,
-  fields: [
-    // Rings: concentric rectangles outside the grid, open at the corners.
-    {
-      layers: [
-        {
-          channel: "ab",
-          coordinate: { type: "box", aspect: 1.1 },
-          profile: { type: "pulse", period: 0.1, phase: 0.05, duty: 0.5, soft: 0.3, fade: 0.8 },
-        },
-        {
-          channel: "ab",
-          coordinate: { type: "box", aspect: 1.1 },
-          profile: { type: "ramp", from: 0.42, to: 0.5 },
-        },
-        {
-          channel: "ab",
-          coordinate: { type: "diagonal", aspect: 1.1 },
-          profile: { type: "ramp", from: 0.02, to: 0.12 },
-        },
-        {
-          channel: "ab",
-          coordinate: { type: "box", aspect: 1.1 },
-          profile: { type: "ramp", from: 1.05, to: 0.75 },
-        },
-        // Green top-left, indigo bottom-right, blending across the middle.
-        {
-          channel: "a",
-          coordinate: { type: "linear", angle: 45 },
-          profile: { type: "ramp", from: 0.35, to: -0.35 },
-        },
-        {
-          channel: "b",
-          coordinate: { type: "linear", angle: 45 },
-          profile: { type: "ramp", from: -0.35, to: 0.35 },
-        },
-      ],
-    },
-    // Grid, green: rows lit hard at the top edge, fading downward.
-    {
-      inks: "a",
-      layers: [
-        {
-          channel: "a",
-          coordinate: { type: "linear", angle: 90 },
-          profile: { type: "pulse", period: 0.1, duty: 0.8, soft: 0.1, fade: 0.9 },
-        },
-        {
-          channel: "a",
-          coordinate: { type: "linear", angle: 0 },
-          profile: { type: "pulse", period: 0.13, duty: 0.85, soft: 0.2, fade: -0.5 },
-        },
-        {
-          channel: "a",
-          coordinate: { type: "box", aspect: 1.1 },
-          profile: { type: "ramp", from: 0.5, to: 0.42 },
-        },
-        {
-          channel: "a",
-          coordinate: { type: "linear", angle: 60 },
-          profile: { type: "ramp", from: 0.5, to: -0.3 },
-        },
-      ],
-    },
-    // Grid, indigo: rows lit hard at the bottom edge, fading upward.
-    {
-      inks: "b",
-      layers: [
-        {
-          channel: "b",
-          coordinate: { type: "linear", angle: 90 },
-          profile: { type: "pulse", period: 0.1, phase: 0.1, duty: 0.8, soft: 0.1, fade: -0.9 },
-        },
-        {
-          channel: "b",
-          coordinate: { type: "linear", angle: 0 },
-          profile: { type: "pulse", period: 0.13, phase: 0.5, duty: 0.85, soft: 0.2, fade: 0.5 },
-        },
-        {
-          channel: "b",
-          coordinate: { type: "box", aspect: 1.1 },
-          profile: { type: "ramp", from: 0.5, to: 0.42 },
-        },
-        {
-          channel: "b",
-          coordinate: { type: "linear", angle: 60 },
-          profile: { type: "ramp", from: -0.5, to: 0.3 },
-        },
-      ],
-    },
-  ],
-};
+const flute = { type: "flute", angle: 60, period: 0.16, scale: 9, bend: 0 } as const;
 
-/** Diagonal stripes, indigo above, green below, each band lit hard at one edge. */
+/** Indigo from the top-left, green mirrored from the bottom-right, sharing rib edges. */
+const stripeLayers: Layer[] = [
+  {
+    ink: "b",
+    source: { type: "radial", x: -0.9, y: -1.1, radius: 1.6, gamma: 1.6 },
+    warps: [flute],
+  },
+  {
+    ink: "a",
+    source: { type: "radial", x: 0.9, y: 1.1, radius: 1.6, gamma: 1.6 },
+    warps: [{ ...flute, scale: -flute.scale }],
+  },
+];
+
+/** Diagonal stripes, each rib lit hard at one edge. */
 export const stripePattern: StipplePattern = {
   inks,
-  spacing: 0.005,
-  radius: 0.0021,
-  gain: 1.5,
-  jitter: 1,
+  spacing: 0.006,
+  radius: 0.0025,
+  gain: 1.2,
   seed: 3,
-  fields: [
-    {
-      layers: [
-        {
-          channel: "ab",
-          coordinate: { type: "linear", angle: 60 },
-          profile: { type: "pulse", period: 0.16, duty: 0.75, soft: 0.1, fade: 0.85 },
-        },
-        {
-          channel: "a",
-          coordinate: { type: "linear", angle: 90 },
-          profile: { type: "ramp", from: -0.6, to: 0.4 },
-        },
-        {
-          channel: "b",
-          coordinate: { type: "linear", angle: 90 },
-          profile: { type: "ramp", from: 0.6, to: -0.2 },
-        },
-      ],
-    },
-  ],
+  layers: stripeLayers,
+};
+
+const bands = { type: "flute", angle: 90, period: 0.12, scale: 9, bend: 0 } as const;
+
+/** Horizontal stripes: green from the top-left, indigo mirrored from the bottom-right. */
+const gridStripes: Layer[] = [
+  {
+    ink: "a",
+    source: { type: "radial", x: -1.1, y: -1.1, radius: 1.9, gamma: 1.6 },
+    warps: [bands],
+  },
+  {
+    ink: "b",
+    source: { type: "radial", x: 1.1, y: 1.1, radius: 1.9, gamma: 1.6 },
+    warps: [{ ...bands, scale: -bands.scale }],
+  },
+];
+
+/** Two stripe sets, one turned 90°, combined before sampling (brighter wins). */
+export const gridPattern: StipplePattern = {
+  inks,
+  spacing: 0.006,
+  radius: 0.0025,
+  gain: 1,
+  seed: 7,
+  blend: "max",
+  layers: [...gridStripes, ...rotated(gridStripes, 90)],
 };
