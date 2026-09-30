@@ -14,3 +14,35 @@ export function formatBytes(bytes: number): string {
 export function shortId(id: string): string {
   return id.slice(0, 8);
 }
+
+/** "1 track", "3 tracks". */
+export function countLabel(count: number, singular: string, plural = `${singular}s`): string {
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
+/**
+ * What the track list can show. A streamed track only becomes visible once its
+ * whole file is written, so an album this client is still uploading into has no
+ * rows yet: that is "receiving", not "empty".
+ */
+export type AlbumTracksState = "loading" | "receiving" | "empty" | "ready";
+
+export function albumTracksState(
+  tracks: readonly unknown[] | undefined,
+  isReceivingTracks: boolean,
+): AlbumTracksState {
+  if (tracks === undefined) return "loading";
+  if (tracks.length > 0) return "ready";
+  return isReceivingTracks ? "receiving" : "empty";
+}
+
+export function albumSummary(state: AlbumTracksState, count: number, totalMs: number): string {
+  switch (state) {
+    case "loading":
+      return "Loading tracks…";
+    case "receiving":
+      return "Uploading tracks…";
+    default:
+      return `${countLabel(count, "track")} · ${formatDuration(totalMs)}`;
+  }
+}
