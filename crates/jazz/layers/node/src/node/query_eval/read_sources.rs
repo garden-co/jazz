@@ -2254,21 +2254,26 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
             .ensure_schema_version_alias(self.read_view.read_schema)
             .await
             .map_err(|_| overlay_error())?;
-        // Encode the live rows against the committed arm's exact runtime
-        // descriptor, as receiver-covered inputs do, so both union arms carry
-        // one record shape (field identities and storage cell types included).
-        let descriptor = resolved.row_shape.descriptor;
+        // Encode the live rows as records of the committed arm's exact
+        // inferred output, so both union arms carry one record shape (field
+        // order, identities and storage cell types included). The declared
+        // row shape is not always that output.
+        let descriptor = self
+            .node
+            .database
+            .graph_output_descriptor(&resolved.graph)
+            .map_err(|_| overlay_error())?;
         let live_records = rows
             .values()
             .flatten()
             .map(|row| {
-                inline_current_record_with_source_metadata(
+                inline_current_record_for_output(
                     &resolved.table_schema,
                     &descriptor,
                     row,
                     schema_version_alias,
                     "transaction-overlay",
-                    None,
+                    &request.requirements,
                 )
             })
             .collect::<Result<Vec<_>, _>>()
@@ -5466,6 +5471,29 @@ fn inline_current_record_with_source_metadata_and_deletion(
     branch_witness: Option<(&str, &BranchKey)>,
     deletion_marker: Option<bool>,
 ) -> Result<Vec<u8>, Error> {
+    let values = inline_current_values_with_source_metadata_and_deletion(
+        table,
+        descriptor,
+        row,
+        schema_version_alias,
+        coverage,
+        branch_witness,
+        deletion_marker,
+    )?;
+    Ok(descriptor.create(&values)?)
+}
+
+/// The field values [`inline_current_record_with_source_metadata_and_deletion`]
+/// encodes, in `descriptor` order.
+fn inline_current_values_with_source_metadata_and_deletion(
+    table: &TableSchema,
+    descriptor: &RecordDescriptor,
+    row: &CurrentRow,
+    schema_version_alias: SchemaVersionAlias,
+    coverage: &str,
+    branch_witness: Option<(&str, &BranchKey)>,
+    deletion_marker: Option<bool>,
+) -> Result<Vec<Value>, Error> {
     let mut values = Vec::new();
     values.push(Value::Uuid(row.row_uuid().0));
     for (column_index, column) in table.columns.iter().enumerate() {
@@ -5528,7 +5556,54 @@ fn inline_current_record_with_source_metadata_and_deletion(
     if let Some(deleted) = deletion_marker {
         values.push(Value::Bool(deleted));
     }
-    Ok(descriptor.create(&values)?)
+    Ok(values)
+}
+
+/// Encode one current row as a record of `output`, the exact inferred output
+/// of the committed source arm it will be unioned with. Fields are filled by
+/// name from the row's inline current-source values, adjusting only nullable
+/// wrapping; any field the inline shape cannot supply fails the encoding.
+fn inline_current_record_for_output(
+    table: &TableSchema,
+    output: &RecordDescriptor,
+    row: &CurrentRow,
+    schema_version_alias: SchemaVersionAlias,
+    coverage: &str,
+    requirements: &SourceRequirements,
+) -> Result<Vec<u8>, Error> {
+    let metadata = inline_source_metadata(requirements, None);
+    let inline =
+        current_row_descriptor_with_hidden_source_fields_for_branch(table, &metadata, false);
+    let values = inline_current_values_with_source_metadata_and_deletion(
+        table,
+        &inline,
+        row,
+        schema_version_alias,
+        coverage,
+        None,
+        None,
+    )?;
+    let missing = || Error::InvalidStoredValue("overlay row cannot supply a source field");
+    let fitted = output
+        .fields()
+        .iter()
+        .map(|field| {
+            let name = field.name.as_deref().ok_or_else(missing)?;
+            let index = inline
+                .fields()
+                .iter()
+                .position(|candidate| candidate.name.as_deref() == Some(name))
+                .ok_or_else(missing)?;
+            let value = values.get(index).cloned().ok_or_else(missing)?;
+            Ok(match (&field.value_type, value) {
+                (ValueType::Nullable(_), value @ Value::Nullable(_)) => value,
+                (ValueType::Nullable(_), value) => Value::Nullable(Some(Box::new(value))),
+                (_, Value::Nullable(Some(value))) => *value,
+                (_, value) => value,
+            })
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    Ok(output.create(&fitted)?)
 }
 
 fn inline_snapshot_include_deleted_current_graph_with_source_metadata(
