@@ -5024,10 +5024,27 @@ function rejectionCode(message: string): string {
   return "write_rejected";
 }
 
+/**
+ * Fallback readable reasons for structured authority rejections, used only
+ * when the core diagnostic does not carry its own readable reason (older
+ * native bindings). The core appends ` (reason: …)` with the same text it puts
+ * on `onMutationError` events, so waits and events agree.
+ */
+const READABLE_REJECTION_REASONS: Readonly<Record<string, string>> = {
+  permission_denied: "Write rejected by server authorization",
+  exclusive_conflict: "Exclusive transaction conflicted with another write",
+  causality_violation: "Transaction violated causal ordering",
+  client_clock_too_far_ahead: "Client clock is too far ahead",
+  cascade_rejected: "Transaction was rejected because an ancestor transaction was rejected",
+};
+
 function rejectionReason(message: string): string {
   const reason = extractWriteRejectedReason(message);
   if (reason === null) return message;
-  if (reason.includes("AuthorizationDenied")) return "Write rejected by server authorization";
+  const readable = /^transaction .* was rejected: .* \(reason: (.*)\)$/s.exec(reason)?.[1];
+  if (readable) return readable;
+  const fallback = READABLE_REJECTION_REASONS[rejectionCode(reason)];
+  if (fallback) return fallback;
   return reason || "Write rejected";
 }
 

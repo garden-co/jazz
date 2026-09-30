@@ -1087,6 +1087,81 @@ it("does not emit onMutationError when an active wait handles the rejection", as
   expect(listener).not.toHaveBeenCalled();
 });
 
+const CASCADE_ANCESTOR = "4f6c0b6f3a1e9d2c8b7a6f5e4d3c2b1a";
+it.each([
+  [
+    "ExclusiveConflict (reason: Exclusive transaction conflicted with another write)",
+    "exclusive_conflict",
+    "Exclusive transaction conflicted with another write",
+  ],
+  [
+    `Cascade { root: TxId { time: TxTime(7), node: NodeUuid(00000000-0000-0000-0000-000000000007) } } (reason: Transaction was rejected because ancestor transaction ${CASCADE_ANCESTOR} was rejected)`,
+    "cascade_rejected",
+    `Transaction was rejected because ancestor transaction ${CASCADE_ANCESTOR} was rejected`,
+  ],
+  [
+    "CausalityViolation (reason: Transaction violated causal ordering)",
+    "causality_violation",
+    "Transaction violated causal ordering",
+  ],
+  [
+    "ClientClockTooFarAhead (reason: Client clock is too far ahead)",
+    "client_clock_too_far_ahead",
+    "Client clock is too far ahead",
+  ],
+  // Older native bindings without the appended readable reason.
+  [
+    "ExclusiveConflict",
+    "exclusive_conflict",
+    "Exclusive transaction conflicted with another write",
+  ],
+])(
+  "gives a readable reason for a %s wait rejection and keeps the core diagnostic",
+  async (debugReason, code, reason) => {
+    const txId = "00000000000070008000000000000044" as TxId;
+    const diagnostic = `WriteRejected: transaction TxId { time: TxTime(44), node: NodeUuid(00000000-0000-0000-0000-000000000044) } was rejected: ${debugReason}`;
+    const write = {
+      txId,
+      payload: new Uint8Array(),
+      wait: async () => {
+        throw Object.assign(new Error(diagnostic), { code: "write_rejected" });
+      },
+      writeState: () => ({}),
+    };
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            insert: () => write,
+            onMutationError: () => undefined,
+          }),
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "rejected" } },
+      null,
+      "00000000-0000-0000-0000-000000000044",
+    );
+    const rejection = await runtime
+      .waitForTransaction(txId, "global")
+      .catch((error: unknown) => error);
+
+    expect(rejection).toMatchObject({ kind: "rejected", transactionId: txId, code, reason });
+    expect((rejection as { reason: string }).reason).not.toMatch(/TxId|TxTime|NodeUuid/);
+    expect(Object.getOwnPropertyDescriptor(rejection, "message")).toMatchObject({
+      enumerable: false,
+      value: diagnostic,
+    });
+  },
+);
+
 it("passes caller-supplied updatedAt into staged mergeable transaction writes", () => {
   const updatedAt = 1_704_067_200_123;
   const expectedUpdatedAtMs = updatedAt;
