@@ -116,11 +116,13 @@ it("waits for native upstream authority before accepting an exclusive commit", a
           .wait({ tier: "global" });
         await db.all(app.todos, { tier: ReadTier.Remote });
         const applicationOpens = openForeground.mock.calls.length;
-        await db.disconnect();
-        expect(openForeground).toHaveBeenCalledTimes(applicationOpens);
+        // The exclusive read hydrates its snapshot online; the commit is made
+        // offline. A read made offline could not vouch for the snapshot.
         const tx = db.beginExclusiveTransaction();
         tx.update(app.todos, base.id, { title: "accepted" });
         expect(await tx.one(app.todos)).toEqual({ ...base, title: "accepted" });
+        await db.disconnect();
+        expect(openForeground).toHaveBeenCalledTimes(applicationOpens);
         const committed = tx.commit();
         let settled = false;
         const accepted = committed.wait();

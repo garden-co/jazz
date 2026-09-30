@@ -1,0 +1,176 @@
+---
+title: Upgrading from alpha.55
+description: The breaking changes between alpha.55 and alpha.58, what to change in your app, and what happens to clients that haven't upgraded yet.
+---
+
+This page covers moving an app from `jazz-tools@2.0.0-alpha.55` or `alpha.56` to alpha.58. Stored
+data needs nothing: server data directories and browser storage from alpha.55 open in place, with
+no reset or conversion step. Your code and deployment do need changes.
+
+The changes are grouped by the release that introduced them. If your app is on alpha.56, skip to
+[From alpha.56](#from-alpha56); on alpha.57, read [In alpha.58](#in-alpha58). Upgrade all Jazz
+packages together.
+
+## From alpha.55
+
+### Rewrite the schema
+
+Newer versions don't load an alpha.55 `schema.ts`. Running the CLI on an unchanged alpha.55 schema
+fails with:
+
+```
+s.table(columns, relations) requires a relationship map; use {} for no relationships.
+```
+
+alpha.55 declared a reference as a column, `projectId: s.ref("projects")`, and derived relation
+names from it: the forward relation `project` and the reverse relation `tasksViaProject`. Now
+references are plain UUID columns and every relation is named in a second argument to `s.table`
+(see [Explicit relations](/docs/schemas/defining-tables#explicit-relations)):
+
+1. Change each `s.ref("table")` column to `s.uuid()`, keeping its modifiers:
+   `s.ref("users").optional()` becomes `s.uuid().optional()`, and `s.array(s.ref("users"))` becomes
+   `s.array(s.uuid())`.
+2. Declare a forward relation with `s.rel("table", "column")` for every former reference column,
+   even ones no query uses. It carries the reference target that used to live in `s.ref`.
+3. Declare each reverse relation you use with `s.reverse("table", "forwardRelation")`, under
+   whatever name you like. None are added automatically.
+4. Pass `{}` for tables without relations.
+
+Before (alpha.55):
+
+```ts title="schema.ts"
+const schema = {
+  projects: s.table({
+    name: s.string(),
+  }),
+  tasks: s.table({
+    title: s.string(),
+    done: s.boolean(),
+    projectId: s.ref("projects"),
+  }),
+  notes: s.table({ text: s.string() }),
+};
+```
+
+After:
+
+```ts title="schema.ts"
+const schema = {
+  projects: s.table(
+    {
+      name: s.string(),
+    },
+    { tasks: s.reverse("tasks", "project") },
+  ),
+  tasks: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+      projectId: s.uuid(),
+    },
+    { project: s.rel("projects", "projectId") },
+  ),
+  notes: s.table({ text: s.string() }, {}),
+};
+```
+
+Then update the relation names your queries and permissions use. Forward names can stay the same
+(`project` above), but the generated reverse names are gone, so an include such as
+`app.projects.include({ tasksViaProject: true })` becomes `app.projects.include({ tasks: true })`,
+or whatever name you gave the `s.reverse`. Permission traversals (`allowedTo.*`, `hopTo`,
+`*Referencing`) now also take declared relation names, not column names or the old generated names.
+
+#### No migration needed
+
+Keep every column's name, order, type, modifiers, default and reference target exactly as they
+were. Then the rewritten schema has the same structural hash as the alpha.55 one, so `deploy`
+reports that the schema is already stored and skips publishing it. There's no migration to write,
+and stored rows are untouched.
+
+To check before deploying, export the schema with `jazz-tools schema export` on alpha.55 and again
+after the rewrite, drop each table's `relations` field, and compare. They must be identical. If they
+differ, fix the rewrite; don't reset data. The alpha.56 changelog entry for explicit relationships
+has a ready-made comparison script.
+
+### Define permissions for every table
+
+Reads, inserts, updates and deletes now need explicit policies. A table with no policies, or an app
+with no permissions at all, gets no data back from the server and has every write rejected. Local
+writes still apply optimistically, then fail on the server.
+
+Before upgrading the server, make sure `permissions.ts` defines a policy for every table and
+operation your app uses. See [Permissions](/docs/auth/permissions).
+
+### Publish with `deploy`
+
+`deploy` is now the only way to publish a schema, permissions and migrations, from the CLI and
+from code. It requires a permissions file (an empty one is valid and denies everything) and fails
+before publishing if a required migration is missing. These were removed:
+
+- `pushSchema`, `pushPermissions` and `pushMigration`, and the package-root
+  `publishStoredSchema` and `publishStoredPermissions` exports.
+- The `migrations push` CLI command.
+- The `--no-verify` / `noVerify` bypass.
+
+See [Migrations](/docs/schemas/migrations) for the deploy flow.
+
+### alpha.55 clients against an upgraded server
+
+alpha.56 moved to a newer sync protocol, so once your server (or Jazz Cloud app) runs alpha.56 or
+later, end users still running an alpha.55 build of your app work local-only until they load a
+newer build:
+
+- Local reads and writes keep working.
+- Reads and waits that need the server fail straight away rather than hanging: `global` waits
+  reject and `remote` reads error with
+  `unsupported wire protocol advertisement: remote 2..=2, expected 3..=3`.
+- Local writes are kept. When the page loads a newer build of your app, the same account comes
+  back and resubmits them, and the server checks them like any other write. Exclusive
+  transactions are the exception: the alpha.55 build stored them without the row records an
+  alpha.58 server requires, so one whose queries, table reads or counts match any rows on the
+  server is rejected with `exclusive_conflict` (see [In alpha.58](#in-alpha58)).
+
+To keep this window short, ship the upgraded app build together with the server upgrade, and make
+sure your HTML isn't cached: a cached `index.html` keeps loading the old client.
+
+## From alpha.56
+
+### `remote-if-possible` read tier removed
+
+`ReadTier.RemoteIfPossible` (`"remote-if-possible"`) was removed, and passing it now throws. Use
+`ReadTier.LocalFirstUnlessEmpty` (`"local-first-unless-empty"`) to show local results at once but
+wait for the server when there's nothing local yet, or `ReadTier.Remote` for server-confirmed
+results. See [Durability Tiers](/docs/reference/durability-tiers).
+
+### Server edges removed
+
+Clients now connect straight to the core server, which authorizes and confirms writes.
+
+- Replace write waits on `{ tier: "edge" }` with `{ tier: "global" }`. `"edge"` still works for
+  waits but warns and waits for `"global"`. It throws as a read tier.
+- Remove server upstream and edge configuration.
+- Don't clear local databases: writes an old edge had accepted are resubmitted to the core server.
+
+## In alpha.58
+
+### Upgrade clients that use exclusive transactions
+
+The server now checks an exclusive transaction against the rows it actually read, including counts
+and other aggregates, and rejects the commit with `exclusive_conflict` if any of them changed. It
+needs the row records that alpha.58 clients send with each exclusive read. So an exclusive
+transaction from an older client is rejected with `exclusive_conflict` on every attempt until the
+client is upgraded, whenever one of its queries, table reads or counts matches any rows on the
+server. Retrying doesn't help. Reads of a single row by id are not affected.
+
+Joins, includes and relations inside an exclusive transaction are checked against just the related
+rows the query could have consulted, so a write to an unrelated row doesn't conflict. Some reads
+can't be checked this precisely yet: lookup and flat joins, unions, relations that project selected
+columns, reference-array hops with additional join keys, recursive traversals (`gather`), inherited
+access, policy branches, and `includeDeleted` together with a join, include or relation. Inside an
+exclusive transaction these throw
+`Reading <pattern> is not supported in exclusive transactions yet` instead of running. Filtered
+reads of a single table, and joins, includes and relations keyed by column equality or by
+reference arrays (without additional join keys), are supported.
+
+If your app uses exclusive transactions, ship the alpha.58 client build together with the server
+upgrade. Other writes and reads from alpha.56 and alpha.57 clients keep working.

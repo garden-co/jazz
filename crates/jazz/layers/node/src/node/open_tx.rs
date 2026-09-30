@@ -5,6 +5,7 @@
 //! [`super::query_eval`]. It is the node API layer used by the `Db` facade before
 //! writes become protocol commit units.
 
+use super::query_eval::{ExclusiveSourceReads, NarrowedSourceRead};
 use super::*;
 use crate::tx::{BranchViewCopyEvidence, BranchWriteIntent, BranchWriteOperation};
 
@@ -161,6 +162,8 @@ where
                 row_reads: Vec::new(),
                 absent_reads: Vec::new(),
                 predicate_reads: Vec::new(),
+                source_narrowing: SourceNarrowing::default(),
+                narrowed_predicate_reads: BTreeSet::new(),
                 writes: Vec::new(),
                 user_metadata_json: None,
             },
@@ -242,6 +245,37 @@ where
         Ok(result)
     }
 
+    /// Pin the snapshot version of each root row a transaction query returned.
+    ///
+    /// A predicate read alone is validated by rebuilding the query at the base
+    /// snapshot. A partial node's base cut is only a coordinate in the
+    /// authority's history (any receipt advances it), so a row this node still
+    /// holds may already be deleted or replaced at that cut. Recording the
+    /// version actually observed lets the authority reject that stale read
+    /// row by row (garden-co/jazz#3694). Rows staged by this transaction have
+    /// no snapshot version and need no proof.
+    pub(super) async fn record_tx_query_row_reads(
+        &mut self,
+        tx_id: OpenTransactionId,
+        schema_version: SchemaVersionId,
+        table: &str,
+        rows: impl IntoIterator<Item = RowUuid>,
+    ) -> Result<(), Error> {
+        let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
+        let mut proofs = Vec::new();
+        for row_uuid in rows {
+            if let Some(version) = self
+                .snapshot_row_in_schema(schema_version, table, row_uuid, &snapshot)
+                .await?
+                .read_version
+            {
+                proofs.push((row_uuid, version));
+            }
+        }
+        self.open_tx_mut(tx_id)?.record_row_reads(table, proofs);
+        Ok(())
+    }
+
     /// Classify an explicit exclusive insert target that the transaction's
     /// overlaid point read reports as absent: a committed or staged deletion
     /// still occupies the id. The staged overlay is keyed by `(table, row)`,
@@ -288,7 +322,9 @@ where
     ) -> Result<Vec<CurrentRow>, Error> {
         let schema_version = self.catalogue.active_schema.schema;
         let table_schema = self.table(table)?.clone();
-        self.tx_current_rows_with_table(tx_id, schema_version, table, table_schema, false)
+        // A direct table read proves each row it returns; see
+        // `record_tx_query_row_reads` (garden-co/jazz#3694).
+        self.tx_current_rows_with_table(tx_id, schema_version, table, table_schema, false, true)
             .await
     }
 
@@ -300,12 +336,73 @@ where
         table: &str,
     ) -> Result<Vec<CurrentRow>, Error> {
         let table_schema = self.table_in_schema(table, schema_version)?;
-        self.tx_current_rows_with_table(tx_id, schema_version, table, table_schema, false)
+        // A direct table read proves each row it returns; see
+        // `record_tx_query_row_reads` (garden-co/jazz#3694).
+        self.tx_current_rows_with_table(tx_id, schema_version, table, table_schema, false, true)
             .await
     }
 
+    /// Offer `reads` to the sources of the query an open exclusive
+    /// transaction is about to evaluate. Returns the narrowing in effect
+    /// before, which [`Self::withdraw_tx_narrowed_source_reads`] restores.
+    pub(super) fn offer_tx_narrowed_source_reads(
+        &mut self,
+        tx_id: OpenTransactionId,
+        reads: ExclusiveSourceReads,
+    ) -> Result<SourceNarrowing, Error> {
+        let narrowing = &mut self.open_tx_mut(tx_id)?.source_narrowing;
+        let offered = SourceNarrowing {
+            recording: narrowing.recording,
+            offered: reads.reads,
+            payload: reads.payload,
+            claimed: Vec::new(),
+        };
+        Ok(std::mem::replace(narrowing, offered))
+    }
+
+    /// Restore the narrowing `previous` and return the reads the query's
+    /// sources claimed since it was offered.
+    pub(super) fn withdraw_tx_narrowed_source_reads(
+        &mut self,
+        tx_id: OpenTransactionId,
+        previous: SourceNarrowing,
+    ) -> Result<Vec<NarrowedSourceRead>, Error> {
+        let narrowing = std::mem::replace(&mut self.open_tx_mut(tx_id)?.source_narrowing, previous);
+        Ok(narrowing.claimed)
+    }
+
+    /// Claim the read of `source`, a source beyond its query's root: the
+    /// narrowed read offered for it, or nothing for sync payload or while a
+    /// narrowed read is being recorded. An exclusive transaction reads such a source no other way:
+    /// its query already failed with [`Error::UnsupportedExclusiveRead`] if a
+    /// source had no narrowed read (garden-co/jazz#3694).
+    pub(super) fn claim_tx_source_read(
+        &mut self,
+        tx_id: OpenTransactionId,
+        source: &crate::node::query_engine::SourceId,
+    ) -> Result<(), Error> {
+        let exclusive = self.transaction_is_exclusive(tx_id)?;
+        let narrowing = &mut self.open_tx_mut(tx_id)?.source_narrowing;
+        if narrowing.recording || narrowing.payload.contains(source) {
+            return Ok(());
+        }
+        match narrowing.offered.get(source) {
+            Some(read) => {
+                let read = read.clone();
+                narrowing.claimed.push(read);
+                Ok(())
+            }
+            None if exclusive => Err(Error::UnsupportedExclusiveRead(format!(
+                "`{}` beyond the root of its query",
+                source.table
+            ))),
+            None => Ok(()),
+        }
+    }
+
     /// Read transaction rows through a registered schema view, optionally
-    /// retaining root rows whose deletion register wins.
+    /// retaining root rows whose deletion register wins. Records no read:
+    /// query source resolution records its sources' reads itself.
     pub async fn tx_current_rows_in_schema_with_options(
         &mut self,
         tx_id: OpenTransactionId,
@@ -314,8 +411,15 @@ where
         include_deleted: bool,
     ) -> Result<Vec<CurrentRow>, Error> {
         let table_schema = self.table_in_schema(table, schema_version)?;
-        self.tx_current_rows_with_table(tx_id, schema_version, table, table_schema, include_deleted)
-            .await
+        self.tx_current_rows_with_table(
+            tx_id,
+            schema_version,
+            table,
+            table_schema,
+            include_deleted,
+            false,
+        )
+        .await
     }
 
     async fn tx_current_rows_with_table(
@@ -325,8 +429,10 @@ where
         table: &str,
         table_schema: TableSchema,
         include_deleted: bool,
+        record_table_read: bool,
     ) -> Result<Vec<CurrentRow>, Error> {
         let snapshot = self.open_tx(tx_id)?.base_snapshot.clone();
+        let mut proofs = Vec::new();
         let mut snapshot_rows = self
             .snapshot_rows_in_schema(schema_version, table, &snapshot)
             .await?;
@@ -346,6 +452,7 @@ where
                 None => self.snapshot_row_from_winners(schema_version, table, None, None)?,
             };
             let snapshot_provenance = snapshot_row.provenance.clone();
+            let read_version = snapshot_row.read_version;
             let open_tx = self.open_tx(tx_id)?;
             let provisional_author = open_tx.provisional_author;
             let pending_writes = open_tx
@@ -408,9 +515,16 @@ where
                     current_row_from_positional_cells(&table_schema, row_uuid, &cells)?
                 };
                 current.push(if deleted { row.into_deleted() } else { row });
+                if record_table_read && let Some(version) = read_version {
+                    proofs.push((row_uuid, version));
+                }
             }
         }
+        self.open_tx_mut(tx_id)?.record_row_reads(table, proofs);
         sort_current_rows(&mut current);
+        if !record_table_read {
+            return Ok(current);
+        }
         let schema = self
             .catalogue
             .catalogue_schemas
@@ -937,6 +1051,18 @@ where
         Ok(())
     }
 
+    /// Whether committing this transaction can stage large scalar content.
+    #[doc(hidden)]
+    pub fn transaction_needs_large_value_staging(
+        &self,
+        id: OpenTransactionId,
+    ) -> Result<bool, Error> {
+        Ok(self.open_tx(id)?.writes.iter().any(|write| {
+            let (PendingCells::Replace(cells) | PendingCells::Patch(cells)) = &write.cells;
+            cells.values().any(value_needs_large_value_staging)
+        }))
+    }
+
     /// Commit an exclusive transaction and return its sync commit unit.
     pub async fn commit_exclusive_bound(
         &mut self,
@@ -1223,14 +1349,17 @@ where
                         // This comparison advances only root-table history.
                         // Preserve conservative rejection for relational reads
                         // and aggregates, whose output hides input rewrites.
+                        let narrowed = open_tx
+                            .narrowed_predicate_reads
+                            .contains(&(predicate.shape_id, predicate.binding_id));
                         if query.aggregate.is_some()
-                            || !query.joins.is_empty()
+                            || (!narrowed
+                                && (!query.joins.is_empty() || !query.array_subqueries.is_empty()))
                             || query.flat_join.is_some()
                             || !query.policy_branches.is_empty()
                             || !query.reachable.is_empty()
                             || !query.inherits.is_empty()
                             || !query.includes.is_empty()
-                            || !query.array_subqueries.is_empty()
                             || query.relation.is_some()
                             || self.predicate_read_is_degenerate_whole_table(predicate)?
                         {
@@ -2001,10 +2130,54 @@ pub(super) struct OpenTransaction {
     pub(super) absent_reads: Vec<AbsentRead>,
     /// Predicate reads recorded by the transaction.
     pub(super) predicate_reads: Vec<PredicateRead>,
+    /// Narrowed reads offered to and claimed by the sources of the query
+    /// being evaluated (garden-co/jazz#3694).
+    pub(super) source_narrowing: SourceNarrowing,
+    /// Predicate reads recorded as narrowed source reads. Local only: their
+    /// output alone decides whether a newer version of their table matters,
+    /// so local serializability compares them like single-table reads.
+    pub(super) narrowed_predicate_reads: BTreeSet<(crate::query::ShapeId, crate::query::BindingId)>,
     /// Pending writes staged by the transaction.
     pub(super) writes: Vec<PendingWrite>,
     /// Optional application metadata.
     pub(super) user_metadata_json: Option<String>,
+}
+
+/// Narrowed reads for the non-root sources of the query an open transaction
+/// is evaluating (garden-co/jazz#3694). The query offers one per source
+/// beyond its root; a source that resolves claims its offer, and the query
+/// records each claimed read once it finishes.
+#[derive(Clone, Default)]
+pub(super) struct SourceNarrowing {
+    /// Set while a narrowed read itself is evaluated: the sources beyond its
+    /// root only correlate it with the outer query's root, whose own reads
+    /// cover them, so they record nothing.
+    pub(super) recording: bool,
+    pub(super) offered: BTreeMap<crate::node::query_engine::SourceId, NarrowedSourceRead>,
+    /// Implicit root reference sources: sync payload that records no read.
+    pub(super) payload: BTreeSet<crate::node::query_engine::SourceId>,
+    pub(super) claimed: Vec<NarrowedSourceRead>,
+}
+
+impl OpenTransaction {
+    /// Record row proofs for `table`, skipping ones already recorded.
+    fn record_row_reads(&mut self, table: &str, proofs: impl IntoIterator<Item = (RowUuid, TxId)>) {
+        let mut recorded = self
+            .row_reads
+            .iter()
+            .filter(|read| read.table == table)
+            .map(|read| (read.row_uuid, read.version))
+            .collect::<BTreeSet<_>>();
+        for (row_uuid, version) in proofs {
+            if recorded.insert((row_uuid, version)) {
+                self.row_reads.push(RowRead {
+                    table: table.to_owned(),
+                    row_uuid,
+                    version,
+                });
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

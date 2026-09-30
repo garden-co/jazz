@@ -130,14 +130,23 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
       const deleting = begin();
       try {
         deleting.delete(app.todos, todo.id);
-        const deleted = await deleting.one(
+        const deletedRead = deleting.one(
           app.todos
             .includeDeleted()
             .where({ id: { eq: todo.id } })
             .include({ assignees: app.users.select("id", "name") }),
         );
-        assert(deleted, "staged deleted todo is not defined");
-        expect(deleted.assignees).toEqual([{ id: user.id, name: "Assignee" }]);
+        if (readMode === "exclusive-tx") {
+          // An exclusive read of deleted rows with related rows cannot be
+          // recorded precisely, so it is rejected (garden-co/jazz#3694).
+          await expect(deletedRead).rejects.toThrow(
+            "Reading deleted `todos` rows together with `users` is not supported in exclusive transactions yet",
+          );
+        } else {
+          const deleted = await deletedRead;
+          assert(deleted, "staged deleted todo is not defined");
+          expect(deleted.assignees).toEqual([{ id: user.id, name: "Assignee" }]);
+        }
       } finally {
         deleting.rollback();
       }
@@ -167,25 +176,25 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
   );
 
   it.skipIf(readMode !== "exclusive-tx")(
-    "includeDeleted relation reads retain exclusive transaction conflict witnesses",
+    "includeDeleted relation reads are not supported in exclusive transactions yet",
     async () => {
       const user = insertUser(db, "Assignee");
       const todo = insertTodo(db, { assigneesIds: [user.id] });
       const tx = db.beginExclusiveTransaction();
-
-      const read = await tx.one(
-        app.todos
-          .includeDeleted()
-          .where({ id: { eq: todo.id } })
-          .include({ assignees: app.users.select("id", "name") }),
-      );
-      assert(read, "todo is not defined");
-      expect(read.assignees).toEqual([{ id: user.id, name: "Assignee" }]);
-
-      db.delete(app.users, user.id);
-      tx.update(app.todos, todo.id, { title: "Staged title" });
-
-      await expect(tx.commit().wait()).rejects.toThrow("transaction_conflict");
+      try {
+        await expect(
+          tx.one(
+            app.todos
+              .includeDeleted()
+              .where({ id: { eq: todo.id } })
+              .include({ assignees: app.users.select("id", "name") }),
+          ),
+        ).rejects.toThrow(
+          "Reading deleted `todos` rows together with `users` is not supported in exclusive transactions yet",
+        );
+      } finally {
+        tx.rollback();
+      }
     },
   );
 
