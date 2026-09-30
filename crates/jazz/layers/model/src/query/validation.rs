@@ -1005,9 +1005,10 @@ fn validate_join(
                 return Err(QueryError::OperandTypeMismatch);
             }
             for correlation in &join.correlated_filters {
-                if planner_column_type(root, &correlation.source_column)?
-                    != planner_column_type(&join_table, &correlation.join_column)?
-                {
+                if !column_types_comparable(
+                    planner_column_type(root, &correlation.source_column)?,
+                    planner_column_type(&join_table, &correlation.join_column)?,
+                ) {
                     return Err(QueryError::OperandTypeMismatch);
                 }
             }
@@ -1070,10 +1071,12 @@ fn validate_join(
     } else {
         root_table.to_owned()
     };
+    // A correlation is an equality, so nullability doesn't change whether the
+    // two sides can be compared: a NULL side simply never matches.
     for correlation in &join.correlated_filters {
         let source_type = planner_column_type(root, &correlation.source_column)?;
         let join_type = planner_column_type(&join_table, &correlation.join_column)?;
-        if source_type != join_type {
+        if !column_types_comparable(source_type, join_type) {
             return Err(QueryError::OperandTypeMismatch);
         }
     }

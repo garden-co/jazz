@@ -29,10 +29,7 @@ const blockedServerRoutes = new WeakMap<BrowserContext, Map<string, JazzServerRo
 const browserContextIds = new WeakMap<BrowserContext, number>();
 let nextBrowserContextId = 1;
 
-async function startJazzServer(
-  appId?: string,
-  schema?: ArrayLike<number>,
-): Promise<StartedJazzServer> {
+async function startJazzServer(appId?: string): Promise<StartedJazzServer> {
   const jwtIssuer = await startTestJwtIssuer();
   const adminSecret = "jazz-browser-test-admin";
   const backendSecret = "jazz-browser-test-backend";
@@ -44,7 +41,6 @@ async function startJazzServer(
     inMemory: true,
     adminSecret,
     backendSecret,
-    schema: schema ? Uint8Array.from(schema) : undefined,
   });
   return {
     server,
@@ -55,17 +51,12 @@ async function startJazzServer(
   };
 }
 
-async function getOrStartJazzServer(
-  appId?: string,
-  schema?: ArrayLike<number>,
-): Promise<StartedJazzServer> {
-  const key = schema
-    ? `schema:${appId ?? DEFAULT_JAZZ_SERVER_KEY}:${schemaCacheKey(schema)}`
-    : (appId ?? DEFAULT_JAZZ_SERVER_KEY);
+async function getOrStartJazzServer(appId?: string): Promise<StartedJazzServer> {
+  const key = appId ?? DEFAULT_JAZZ_SERVER_KEY;
   const existing = jazzServerPromises.get(key);
 
   if (!existing) {
-    const startedServer = startJazzServer(appId, schema).catch((error) => {
+    const startedServer = startJazzServer(appId).catch((error) => {
       jazzServerPromises.delete(key);
       throw error;
     });
@@ -76,24 +67,12 @@ async function getOrStartJazzServer(
   return existing;
 }
 
-function schemaCacheKey(schema: ArrayLike<number>): string {
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < schema.length; index += 1) {
-    hash ^= schema[index] ?? 0;
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return `${schema.length}:${(hash >>> 0).toString(16)}`;
-}
-
-export async function jazzServerInfo(
-  appId?: string,
-  schema?: ArrayLike<number>,
-): Promise<{
+export async function jazzServerInfo(appId?: string): Promise<{
   appId: string;
   serverUrl: string;
   adminSecret: string;
 }> {
-  const started = await getOrStartJazzServer(appId, schema);
+  const started = await getOrStartJazzServer(appId);
   return {
     appId: started.appId,
     serverUrl: started.serverUrl,

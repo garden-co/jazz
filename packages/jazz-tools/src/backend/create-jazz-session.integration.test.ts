@@ -340,6 +340,85 @@ describe("Node shared backend session", () => {
       await server.stop();
     }
   }, 30_000);
+  it("reads inside attributed transactions with the attributed Db's backend authority", async () => {
+    const appId = randomUUID();
+    const backendSecret = "attributed-tx-service-secret";
+    const adminSecret = "attributed-tx-publication-secret";
+    const server = await startLocalJazzServer({ appId, backendSecret, adminSecret });
+    const session = await createJazzSession({
+      appId,
+      serverUrl: server.url,
+      app,
+      permissions,
+      driver: { type: "memory" },
+    });
+    const user = await createJazzSession({
+      appId,
+      serverUrl: server.url,
+      app,
+      permissions,
+      driver: { type: "memory" },
+      initial: "local-first",
+    });
+    try {
+      await deploy({
+        serverUrl: server.url,
+        appId,
+        adminSecret,
+        schema: resolveSchemaSource(app),
+        permissions,
+      });
+      await session.becomeBackend({ backendSecret });
+      const backend = session.getSnapshot().client!;
+      const account = user.getSnapshot().account!;
+      const note = await backend.db.insert(app.notes, { text: "invite" }).wait({ tier: "global" });
+      const attributed = await backend.withAttribution(account);
+
+      const exclusive = await attributed.exclusiveTransaction(async (tx) => {
+        const read = await tx.one(app.notes.where({ id: note.id }));
+        return { read, id: tx.insert(app.posts, { text: "exclusive" }).id };
+      });
+      await exclusive.wait();
+      expect(exclusive.value.read).toMatchObject({ text: "invite" });
+
+      const mergeable = await attributed.transaction(async (tx) => {
+        const read = await tx.one(app.notes.where({ id: note.id }));
+        return { read, id: tx.insert(app.posts, { text: "mergeable" }).id };
+      });
+      await mergeable.wait({ tier: "global" });
+      expect(mergeable.value.read).toMatchObject({ text: "invite" });
+
+      // Users may not insert notes; the attributed transaction admits the
+      // write as the backend while recording the user as its author.
+      const admitted = await attributed.exclusiveTransaction(async (tx) => {
+        await tx.one(app.notes.where({ id: note.id }));
+        return tx.insert(app.notes, { text: "backend admitted" }).id;
+      });
+      await admitted.wait();
+      expect(
+        await backend.db.one(app.notes.select("$createdBy").where({ id: admitted.value })),
+      ).toMatchObject({ $createdBy: { account: account.id, identity: account.identity } });
+
+      await expect(
+        attributed.exclusiveTransaction(async (tx) => {
+          await tx.one(app.notes.where({ id: note.id }));
+          tx.insert(app.posts, { text: "rolled back" });
+          throw new Error("abort redeem");
+        }),
+      ).rejects.toThrow("abort redeem");
+      expect(await backend.db.all(app.posts.where({ text: "rolled back" }))).toEqual([]);
+
+      for (const id of [exclusive.value.id, mergeable.value.id]) {
+        expect(await backend.db.one(app.posts.select("$createdBy").where({ id }))).toMatchObject({
+          $createdBy: { account: account.id, identity: account.identity },
+        });
+      }
+    } finally {
+      await user.close();
+      await session.close();
+      await server.stop();
+    }
+  }, 30_000);
   it("reconnects and syncs queued writes after a sync-server outage longer than ten seconds", async () => {
     const appId = randomUUID();
     const backendSecret = "outage-service-secret";

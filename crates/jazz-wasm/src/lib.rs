@@ -612,6 +612,21 @@ enum WasmWriteInner {
     },
 }
 
+fn poll_write_state_once(
+    future: impl Future<Output = Result<jazz::db::WriteState, jazz::db::Error>>,
+) -> Result<JsValue, JsValue> {
+    let mut future = std::pin::pin!(future);
+    match future
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()))
+    {
+        Poll::Ready(result) => write_state_to_js(result.map_err(to_js_error)?),
+        Poll::Pending => Err(JsValue::from_str(
+            "write state is temporarily busy; retry after the next WASM turn",
+        )),
+    }
+}
+
 #[wasm_bindgen]
 impl WasmWrite {
     #[wasm_bindgen(getter, js_name = txId)]
@@ -633,11 +648,11 @@ impl WasmWrite {
     pub fn write_state(&self) -> Result<JsValue, JsValue> {
         match &self.inner {
             Some(WasmWriteInner::MemoryTx { write, .. }) => {
-                write_state_to_js(block_on(write.write_state()).map_err(to_js_error)?)
+                poll_write_state_once(write.write_state())
             }
             #[cfg(target_arch = "wasm32")]
             Some(WasmWriteInner::BrowserTx { write, .. }) => {
-                write_state_to_js(block_on(write.write_state()).map_err(to_js_error)?)
+                poll_write_state_once(write.write_state())
             }
             None => Err(JsValue::from_str("write state is unavailable")),
         }
@@ -959,16 +974,16 @@ impl WasmDbInner {
         })
     }
 
-    fn register_schema_view(&self, schema: JazzSchema) -> Result<Self, String> {
+    fn register_schema_view(&self, schema: JazzSchema) -> Result<Self, JsValue> {
         match self {
             Self::Memory(db) => Ok(Self::Memory(Rc::new(
-                block_on(db.register_schema_view(schema)).map_err(|error| error.to_string())?,
+                block_on(db.register_schema_view(schema)).map_err(to_js_error)?,
             ))),
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => Ok(Self::Browser(Rc::new(
-                block_on(db.register_schema_view(schema)).map_err(|error| error.to_string())?,
+                block_on(db.register_schema_view(schema)).map_err(to_js_error)?,
             ))),
-            Self::Closed => Err("WasmDb is closed".to_owned()),
+            Self::Closed => Err(JsValue::from_str("WasmDb is closed")),
         }
     }
 
@@ -1699,9 +1714,7 @@ impl WasmDb {
         let schema = decode_public_schema(&schema)?;
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(
-                self.open_inner()?
-                    .register_schema_view(schema)
-                    .map_err(to_js_error)?,
+                self.open_inner()?.register_schema_view(schema)?,
             ))),
             owns_runtime: false,
             non_durable_client: Rc::clone(&self.non_durable_client),
@@ -3791,8 +3804,28 @@ fn call_controller_method(
     Ok(())
 }
 
-fn to_js_error(error: impl std::fmt::Display) -> JsValue {
-    JsValue::from_str(&error.to_string())
+/// Convert a Rust error into the value a binding rejects or throws with.
+///
+/// A core [`Error`] becomes a real JavaScript `Error` whose `message` is the
+/// unchanged `Display` text and whose `code` is the stable
+/// [`ErrorCode::as_str`] string, so callers classify it without matching the
+/// message. Every other error keeps its historical bare-string form.
+fn to_js_error(error: impl std::fmt::Display + 'static) -> JsValue {
+    match (&error as &dyn std::any::Any).downcast_ref::<Error>() {
+        Some(core) => core_error_to_js(core),
+        None => JsValue::from_str(&error.to_string()),
+    }
+}
+
+fn core_error_to_js(error: &Error) -> JsValue {
+    let js_error = js_sys::Error::new(&error.to_string());
+    // Setting a data property on a fresh ordinary object cannot fail.
+    let _ = js_sys::Reflect::set(
+        &js_error,
+        &JsValue::from_str("code"),
+        &JsValue::from_str(error.code.as_str()),
+    );
+    js_error.into()
 }
 
 fn bytes_to_js(bytes: Vec<u8>) -> Result<JsValue, JsValue> {

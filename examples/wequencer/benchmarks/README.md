@@ -20,7 +20,11 @@ The first workloads are intentionally small but realistic:
 [metadata.ts](metadata.ts) owns the wall-clock descriptions and timing
 boundaries for `benches/walltime.rs`, which CodSpeed runs on every
 `benchmark`-labelled PR and nightly: opening the 16-track pattern grid (17
-subscriptions) and toggling a pad while that grid is live. The other
+subscriptions), toggling a pad while that grid is live, 100 bandmates opening
+pattern views at once (`wequencer_open_pattern_views[100]`, formerly
+`attach_route_bindings[100]` in `crates/jazz/benches/route_subscription_curve.rs`),
+and reading a pad's current value over 1,000 or 10,000 offline edits
+(`wequencer_pad_edit_history`, formerly W1's `w1_local_ahead_current_history`). The other
 workloads above are exercised by `tests/workloads.rs`.
 
 Fixture setup is outside measured closures. Correctness tests assert exact

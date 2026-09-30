@@ -56,6 +56,29 @@ pub enum ErrorCode {
     HistoricalReadRequiresServer,
 }
 
+impl ErrorCode {
+    /// The stable, snake_case name of this code.
+    ///
+    /// This string is a durable contract: bindings expose it to JavaScript as
+    /// `error.code`, and mutation-error events report it as their `code`. Every
+    /// spelling is written out here rather than derived from `Debug`, so
+    /// renaming a variant cannot silently change it. The table is pinned by the
+    /// `error_code_strings` integration test.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ErrorCode::Schema => "schema",
+            ErrorCode::Query => "query",
+            ErrorCode::WriteRejected => "write_rejected",
+            ErrorCode::TransactionConflict => "transaction_conflict",
+            ErrorCode::Storage => "storage",
+            ErrorCode::Protocol => "protocol",
+            ErrorCode::Backpressure => "backpressure",
+            ErrorCode::NotObserved => "not_observed",
+            ErrorCode::HistoricalReadRequiresServer => "historical_read_requires_server",
+        }
+    }
+}
+
 impl From<crate::node::Error> for Error {
     fn from(error: crate::node::Error) -> Self {
         let code = match &error {
@@ -63,7 +86,9 @@ impl From<crate::node::Error> for Error {
                 ErrorCode::HistoricalReadRequiresServer
             }
             crate::node::Error::Storage(_) | crate::node::Error::Groove(_) => ErrorCode::Storage,
-            crate::node::Error::Query(_) => ErrorCode::Query,
+            crate::node::Error::Query(_) | crate::node::Error::UnsupportedExclusiveRead(_) => {
+                ErrorCode::Query
+            }
             crate::node::Error::TransactionConflict => ErrorCode::TransactionConflict,
             crate::node::Error::TableNotFound(_)
             | crate::node::Error::UnsupportedColumnType(_)

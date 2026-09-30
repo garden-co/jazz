@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createDb, type Db } from "../../../../packages/jazz-tools/src/runtime/db.js";
+import type { Db } from "../../../../packages/jazz-tools/src/runtime/db.js";
+import { createBrowserTestDb } from "../../../../packages/jazz-tools/tests/browser/account-fixtures.js";
 import { deploy } from "../../../../packages/jazz-tools/src/dev/catalogue.js";
 import {
   TestCleanup,
@@ -209,8 +210,7 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
                       warehouseId: warehouse.id,
                       districtId: district.id,
                       customerId: customer.id,
-                      itemId: item.id,
-                      quantity: 3,
+                      lines: [{ itemId: item.id, quantity: 3 }],
                       idempotencyKey: "checkout-17",
                     }),
                   );
@@ -291,8 +291,7 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
                     warehouseId: warehouse.id,
                     districtId: district.id,
                     customerId: customer.id,
-                    itemId: item.id,
-                    quantity: 1,
+                    lines: [{ itemId: item.id, quantity: 1 }],
                     idempotencyKey: "checkout-client-core-loss",
                   });
                   recoveredReceipt = await withTimeout(
@@ -480,8 +479,7 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
                   warehouseId: warehouse.id,
                   districtId: district.id,
                   customerId: customer.id,
-                  itemId: item.id,
-                  quantity: 8,
+                  lines: [{ itemId: item.id, quantity: 8 }],
                   idempotencyKey: "insufficient-stock",
                 }),
               ).rejects.toThrow("insufficient stock");
@@ -545,15 +543,40 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
                 },
               );
               expect(allOrders).toHaveLength(21);
-              expect(allOrders).toMatchObject([
-                { order_number: 17, total_cents: 7_500 },
-                { order_number: 18, total_cents: 2_500 },
+              expect(allOrders.map((order) => order.order_number)).toEqual([
+                17,
+                18,
+                ...Array.from({ length: 19 }, (_, offset) => 100 + offset),
+              ]);
+              expect(allOrders.slice(0, 2)).toMatchObject([
+                {
+                  order_number: 17,
+                  total_cents: 7_500,
+                  status: "pending",
+                  idempotency_key: "checkout-17",
+                  customer_id: customer.id,
+                },
+                {
+                  order_number: 18,
+                  total_cents: 2_500,
+                  status: "pending",
+                  idempotency_key: "checkout-client-core-loss",
+                  customer_id: customer.id,
+                },
               ]);
             },
           },
           {
             name: "transfer warehouse authority and reject the revoked operator",
             run: async () => {
+              // A handover goes to someone already staffed on the warehouse.
+              await owner
+                .insert(app.warehouse_operators, {
+                  warehouse_id: warehouse.id,
+                  account_id: nextOperatorAccount,
+                  name: "Next operator",
+                })
+                .wait({ tier: "global" });
               await owner
                 .update(app.warehouses, warehouse.id, { operator_id: nextOperatorAccount })
                 .wait({ tier: "global" });
@@ -562,8 +585,25 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
                   .update(app.warehouses, warehouse.id, { region: "revoked-owner-write" })
                   .wait({ tier: "global" }),
               ).rejects.toThrow(/AuthorizationDenied|Write rejected/);
+              // #1899: warehouse ownership covers operational rows, so the
+              // transfer also revokes the former manager's stock writes.
+              // A partial update needs the row's current cells locally, so
+              // each client loads the rows it edits first, as the console does.
+              await owner.all(app.stock.where({ id: stock.id }).limit(1), { tier: "remote" });
+              await expect(
+                owner.update(app.stock, stock.id, { on_hand: 99 }).wait({ tier: "global" }),
+              ).rejects.toThrow(/AuthorizationDenied|Write rejected/);
+              await nextOperator.all(app.warehouses.where({ id: warehouse.id }).limit(1), {
+                tier: "remote",
+              });
+              await nextOperator.all(app.stock.where({ id: stock.id }).limit(1), {
+                tier: "remote",
+              });
               await nextOperator
                 .update(app.warehouses, warehouse.id, { region: "next-operator-write" })
+                .wait({ tier: "global" });
+              await nextOperator
+                .update(app.stock, stock.id, { on_hand: 7 })
                 .wait({ tier: "global" });
               await waitForQuery(
                 observer,
@@ -600,11 +640,14 @@ async function openClient(
   jwtToken: string,
   dbName = uniqueDbName(`jamazon-${label}`),
 ): Promise<Db> {
+  // Public clients sign in through a real account handle: the JWT is
+  // registered with the account registry once, and reopening logs it in again.
   return ctx.track(
-    await createDb({
+    await createBrowserTestDb({
       appId: server.appId,
       serverUrl: server.serverUrl,
       jwtToken,
+      registerJwt: true,
       driver: { type: "persistent", dbName },
     }),
   );

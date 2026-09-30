@@ -32,6 +32,18 @@ const largeValueSchema = {
 type LargeValueAppSchema = s.Schema<typeof largeValueSchema>;
 const largeValues: s.App<LargeValueAppSchema> = s.defineApp(largeValueSchema);
 
+const optionalJsonSchema = {
+  jobs: s.table(
+    {
+      title: s.string(),
+      meta: s.json().optional(),
+    },
+    {},
+  ),
+};
+type OptionalJsonAppSchema = s.Schema<typeof optionalJsonSchema>;
+const optionalJson: s.App<OptionalJsonAppSchema> = s.defineApp(optionalJsonSchema);
+
 describe("createDb in-memory driver", () => {
   let db: Db | undefined;
 
@@ -73,6 +85,28 @@ describe("createDb in-memory driver", () => {
 
     const rows = await db.all<Note>(app.notes.where({ done: true }));
     expect(rows).toEqual([updated]);
+  });
+
+  it("writes present values to an optional JSON column", async () => {
+    db = await createDb({
+      ...(await localAccountConfig("in-memory-optional-json-test")),
+      driver: { type: "memory" },
+    });
+
+    const { value: withObject } = db.insert(optionalJson.jobs, {
+      title: "object",
+      meta: { a: 1 },
+    });
+    const { value: unset } = db.insert(optionalJson.jobs, { title: "unset" });
+    await db.update(optionalJson.jobs, unset.id, { meta: [1, "two"] }).wait({ tier: "local" });
+    const { value: exclusive } = await db.exclusiveTransaction((tx) =>
+      tx.insert(optionalJson.jobs, { title: "exclusive", meta: { b: 2 } }),
+    );
+
+    const rows = await db.all(optionalJson.jobs);
+    expect(rows.find((row) => row.id === withObject.id)?.meta).toEqual({ a: 1 });
+    expect(rows.find((row) => row.id === unset.id)?.meta).toEqual([1, "two"]);
+    expect(rows.find((row) => row.id === exclusive.id)?.meta).toEqual({ b: 2 });
   });
 
   it("executes typed partial selects and page-relative diffs end to end", async () => {

@@ -21,9 +21,9 @@ Invariant digest:
 
 ### D.1 Canonical gate source
 
-`.claude/CLAUDE.md` is the operational source of truth for the repository's
+`dev/gates/run-canonical.sh` is the operational source of truth for the repository's
 canonical gates. This appendix mirrors that source for SPEC readers; if the two
-diverge, update this appendix from `.claude/CLAUDE.md` rather than treating the
+diverge, update this appendix from `dev/gates/run-canonical.sh` rather than treating the
 appendix as authoritative.
 
 For ordinary Rust/core work, the full gate set is:
@@ -191,7 +191,7 @@ name the missing closure component.
 
 The required local gates and the GitHub Actions workflow are not equivalent yet.
 The canonical set above is the pre-push discipline mirrored from
-`.claude/CLAUDE.md`; this distinction remains explicit as required by
+`dev/gates/run-canonical.sh`; this distinction remains explicit as required by
 `INV-TEST-4`.
 
 ## Open Questions

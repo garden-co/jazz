@@ -28,6 +28,13 @@ A one-shot query runs once against the database without subscribing to changes.
   </Tab>
 </Tabs>
 
+To read a single row, use `db.one`. It runs the query with a limit of one and resolves to the
+first matching row, or `null` if no row matches or you aren't allowed to read it.
+
+<include cwd lang="ts">
+  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-one-ts
+</include>
+
 ## Subscriptions
 
 Subscribe to a query to receive updates whenever the underlying data changes.
@@ -205,6 +212,9 @@ Each framework has a reactive binding that re-renders when query results change.
 | Svelte     | `new QuerySubscription(query)` | Exposes reactive `.current` / `.isLoading` / `.error` |
 | Solid      | `useAll(() => ({ query }))`    | Returns `{ data, isLoading, error }`                  |
 
+Each one has a single-row variant, covered in [Reading one row](#reading-one-row): `useOne` in
+React, Expo, Vue and Solid, and `QuerySubscriptionOne` in Svelte.
+
 ### The loading state
 
 `useAll`'s `data` field (or Vue's `data` ref and Svelte's `QuerySubscription.current`) are
@@ -239,6 +249,43 @@ array&hairsp;—&hairsp;empty (`[]`) if no rows match, or populated with the req
   tier](#read-durability). Local storage reads are effectively instant and resolve to `[]` if no
   data exists yet.
 </Callout>
+
+### Reading one row
+
+For detail pages, use `useOne` (or `QuerySubscriptionOne` in Svelte). It takes the same query and
+options as `useAll`, limits it to one row, and gives you that row instead of an array:
+
+- `undefined` while the first result is loading, and also when the query failed (see `error`) or
+  was skipped.
+- `null` once loaded, if no row matches or you aren't allowed to read it.
+- The row itself otherwise, with any relations you asked for in `include(...)`.
+
+<Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Solid"]} persist updateAnchor>
+  <Tab value="React">
+    <include cwd lang="tsx">
+      ../examples/docs/todo-client-localfirst-react/src/TodoDetail.tsx#reading-one-react
+    </include>
+  </Tab>
+  <Tab value="Vue">
+    <include cwd lang="vue">
+      ../examples/docs/todo-client-localfirst-vue/src/TodoDetailExample.vue#reading-one-vue
+    </include>
+  </Tab>
+  <Tab value="Svelte">
+    <include cwd lang="svelte">
+      ../examples/docs/todo-client-localfirst-svelte/src/TodoDetailExample.svelte#reading-one-svelte
+    </include>
+  </Tab>
+  <Tab value="Solid">
+    <include cwd lang="tsx">
+      ../examples/docs/todo-client-localfirst-solid/src/TodoDetailExample.tsx#reading-one-solid
+    </include>
+  </Tab>
+</Tabs>
+
+Like `useAll`, `useOne` accepts `undefined` instead of a query to skip evaluation. React and Vue
+also have `useOneSuspense`, which waits for the first result instead of reporting a loading state
+(see [React Suspense and Transitions](#react-suspense-and-transitions)).
 
 ### Fine-grained updates
 
@@ -286,4 +333,11 @@ Pass `undefined` instead of a query to skip evaluation. This is useful when buil
 
 <include cwd lang="tsx" meta='title="App.tsx"'>
   ../examples/docs/todo-client-localfirst-react/src/ConcurrentTodoList.tsx#reading-concurrent-rendering-react
+</include>
+
+`useOneSuspense` does the same for a single row. It returns the row, or `null` if no row matches
+or you aren't allowed to read it.
+
+<include cwd lang="tsx">
+  ../examples/docs/todo-client-localfirst-react/src/TodoDetail.tsx#reading-one-suspense-react
 </include>

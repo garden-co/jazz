@@ -5,7 +5,15 @@ const schema = {
   ...betterAuthSchema,
   albums: s
     .table(
-      { title: s.string(), artist: s.string(), cover_locator: s.string().optional() },
+      {
+        title: s.string(),
+        artist: s.string(),
+        cover_locator: s.string().optional(),
+        // Small cover image bytes and their media type. Albums without one
+        // render a generated placeholder cover.
+        cover_image: s.bytes().optional(),
+        cover_mime: s.string().optional(),
+      },
       { tracksViaAlbum: s.reverse("tracks", "album") },
     )
     .indexOnly(["title"]),
@@ -16,9 +24,11 @@ const schema = {
         title: s.string(),
         ordinal: s.int(),
         duration_ms: s.int(),
-        // `insertStreaming` accepts this field today. Playback/range reads remain
-        // intentionally outside this adapter until the typed Db gains that API.
+        // Written with `insertStreaming`; played back through typed byte-range
+        // selections (`select({ audio_bytes: { from, to } })`).
         audio_bytes: s.bytes().optional(),
+        audio_mime: s.string().optional(),
+        audio_byte_length: s.int().optional(),
       },
       {
         album: s.rel("albums", "album_id"),

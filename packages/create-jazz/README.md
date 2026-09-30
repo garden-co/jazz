@@ -27,20 +27,22 @@ The CLI will:
 The interactive picker lets you choose a framework and auth mode. You can also
 skip the picker with `--starter <name>`:
 
-| Starter                | Framework                       | Auth                                      |
-| ---------------------- | ------------------------------- | ----------------------------------------- |
-| `next-localfirst`      | Next.js                         | Local-first (anonymous)                   |
-| `next-hybrid`          | Next.js                         | Local-first + optional BetterAuth upgrade |
-| `next-betterauth`      | Next.js                         | BetterAuth (email + password)             |
-| `react-localfirst`     | React (Vite)                    | Local-first (anonymous)                   |
-| `react-hybrid`         | React (Vite)                    | Local-first + optional BetterAuth upgrade |
-| `react-betterauth`     | React (Vite)                    | BetterAuth (email + password)             |
-| `sveltekit-localfirst` | SvelteKit                       | Local-first (anonymous)                   |
-| `sveltekit-hybrid`     | SvelteKit                       | Local-first + optional BetterAuth upgrade |
-| `sveltekit-betterauth` | SvelteKit                       | BetterAuth (email + password)             |
-| `ts-localfirst`        | TypeScript (Vite, no framework) | Local-first (anonymous)                   |
-| `ts-hybrid`            | TypeScript (Vite, no framework) | Local-first + optional BetterAuth upgrade |
-| `ts-betterauth`        | TypeScript (Vite, no framework) | BetterAuth (email + password)             |
+| Starter                | Framework                       | Auth                                             |
+| ---------------------- | ------------------------------- | ------------------------------------------------ |
+| `next-localfirst`      | Next.js                         | Local-first (anonymous)                          |
+| `next-hybrid`          | Next.js                         | Local-first + optional BetterAuth upgrade        |
+| `next-betterauth`      | Next.js                         | BetterAuth (email + password)                    |
+| `react-localfirst`     | React (Vite)                    | Local-first (anonymous)                          |
+| `react-hybrid`         | React (Vite)                    | Local-first + optional BetterAuth upgrade        |
+| `react-betterauth`     | React (Vite)                    | BetterAuth (email + password)                    |
+| `sveltekit-localfirst` | SvelteKit                       | Local-first (anonymous)                          |
+| `sveltekit-hybrid`     | SvelteKit                       | Local-first + optional BetterAuth upgrade        |
+| `sveltekit-betterauth` | SvelteKit                       | BetterAuth (email + password)                    |
+| `ts-localfirst`        | TypeScript (Vite, no framework) | Local-first (anonymous)                          |
+| `ts-hybrid`            | TypeScript (Vite, no framework) | Local-first + optional BetterAuth upgrade        |
+| `ts-betterauth`        | TypeScript (Vite, no framework) | BetterAuth (email + password)                    |
+| `ts-effect-localfirst` | TypeScript + Effect             | Local-first (anonymous); Effect client           |
+| `ts-effect-betterauth` | TypeScript + Effect             | BetterAuth; Effect client and Effect HTTP server |
 
 Each starter ships a working todo-list UI with permissions, schema, and
 zero-config local sync.

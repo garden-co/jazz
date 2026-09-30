@@ -60,6 +60,8 @@ const relationalRecipientApp = s.defineApp({
         title: s.string(),
         artist: s.string(),
         cover_locator: s.string().optional(),
+        cover_image: s.bytes().optional(),
+        cover_mime: s.string().optional(),
       },
       { tracksViaAlbum: s.reverse("tracks", "album") },
     )
@@ -72,6 +74,8 @@ const relationalRecipientApp = s.defineApp({
         ordinal: s.int(),
         duration_ms: s.int(),
         audio_bytes: s.bytes().optional(),
+        audio_mime: s.string().optional(),
+        audio_byte_length: s.int().optional(),
       },
       {
         album: s.rel("albums", "album_id"),

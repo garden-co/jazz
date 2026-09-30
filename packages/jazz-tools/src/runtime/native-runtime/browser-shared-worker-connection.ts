@@ -26,6 +26,30 @@ import { MessagePortBrowserFollowerConnection } from "./browser-follower-connect
 import type { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
 import { waitForInspectorOpening } from "./inspector-control-lifecycle.js";
 
+/**
+ * The only place the broker SharedWorker is constructed.
+ *
+ * The foreground lease and the runtime connection must attach to the same
+ * SharedWorker realm, and a realm is keyed by script URL plus name. webpack 5
+ * emits a separate worker chunk (with a distinct URL) for every
+ * `new SharedWorker(new URL(..., import.meta.url))` expression it finds, so
+ * two such expressions put the lease and the runtime in different realms and
+ * the runtime never starts. Keep exactly one statically analyzable
+ * construction here so every bundler emits a single broker worker chunk.
+ */
+function createBrokerSharedWorker(
+  runtimeSources: BrowserWorkerInitOptions["runtimeSources"],
+  name: string,
+): SharedWorker {
+  if (runtimeSources?.brokerWorkerUrl || runtimeSources?.baseUrl || runtimeSources?.wasmVersion) {
+    return new SharedWorker(resolveBrowserWorkerUrl(runtimeSources), { type: "module", name });
+  }
+  return new SharedWorker(new URL("../../worker/jazz-broker-worker.js", import.meta.url), {
+    type: "module",
+    name,
+  });
+}
+
 export type BrowserForegroundNodeLeaseOptions = Pick<
   BrowserWorkerInitOptions,
   "runtimeSources" | "dbName" | "storageOwner"
@@ -111,15 +135,7 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
         "Shared browser foreground lease cancellation cleanup is still pending for this database; wait for the previous worker admission to finish",
       );
     }
-    const createWorker =
-      runtimeSources?.brokerWorkerUrl || runtimeSources?.baseUrl || runtimeSources?.wasmVersion
-        ? (name: string) =>
-            new SharedWorker(resolveBrowserWorkerUrl(runtimeSources), { type: "module", name })
-        : (name: string) =>
-            new SharedWorker(new URL("../../worker/jazz-broker-worker.js", import.meta.url), {
-              type: "module",
-              name,
-            });
+    const createWorker = (name: string) => createBrokerSharedWorker(runtimeSources, name);
     // A named SharedWorker constructor can still attach to a realm after that
     // realm has acknowledged termination but before the browser has finished
     // destroying it. Probe before sending an allocation request so a realm
@@ -452,18 +468,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     const runtimeSources = resolveBrowserWorkerRuntimeSources(options.runtimeSources);
     const workerName = createBrowserSharedWorkerBaseName(runtimeSources, options.dbName);
     this.workerName = workerName;
-    const createWorker =
-      runtimeSources?.brokerWorkerUrl || runtimeSources?.baseUrl || runtimeSources?.wasmVersion
-        ? (name: string) =>
-            new SharedWorker(resolveBrowserWorkerUrl(runtimeSources), {
-              type: "module",
-              name,
-            })
-        : (name: string) =>
-            new SharedWorker(new URL("../../worker/jazz-broker-worker.js", import.meta.url), {
-              type: "module",
-              name,
-            });
+    const createWorker = (name: string) => createBrokerSharedWorker(runtimeSources, name);
     // Retain admission failures as state rather than leaving a process-wide
     // bootstrap promise rejected. The manager converts this state back into
     // the caller's `all()`/`wait()` rejection at its operation boundary; a

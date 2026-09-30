@@ -17,6 +17,9 @@ export function JazzLogo({ className, label, markColor = "#146AFF", ...props }: 
       aria-label={label}
       aria-hidden={label ? undefined : true}
       focusable="false"
+      // The lowest note head touches the viewBox edge; let antialiasing
+      // spill over instead of being cut flat at fractional sizes.
+      overflow="visible"
       {...props}
     >
       <path

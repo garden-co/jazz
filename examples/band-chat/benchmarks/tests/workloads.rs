@@ -45,3 +45,12 @@ fn representative_loads_have_exact_cardinality_and_order() {
         assert_eq!(fixture.author_history_sent_at(), author_messages);
     }
 }
+
+#[test]
+fn a_new_message_changes_only_the_busy_room_view() {
+    use jazz_example_band_chat_benchmark::live_rooms::LiveRoomsFixture;
+    for rooms in [1, 10] {
+        let open = LiveRoomsFixture::seeded(rooms).open_all().new_message();
+        assert!(open.unrelated_messages_are_quiet());
+    }
+}

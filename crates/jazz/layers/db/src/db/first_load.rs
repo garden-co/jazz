@@ -196,9 +196,11 @@ impl RemoteLinkTracker {
         }
     }
 
-    fn may_wait(&self, epoch: u64, deadline: Instant) -> bool {
+    /// Whether a wait armed at `epoch` may continue: no link loss since, the
+    /// remote could still answer, and `deadline` (if any) has not passed.
+    fn may_wait(&self, epoch: u64, deadline: Option<Instant>) -> bool {
         epoch == self.loss_epoch.get()
-            && Instant::now() < deadline
+            && deadline.is_none_or(|deadline| Instant::now() < deadline)
             && match self.reach() {
                 RemoteReach::Live => true,
                 RemoteReach::Attempting { since } => {
@@ -213,7 +215,7 @@ impl RemoteLinkTracker {
     pub(super) fn arm(&self, timeout: Duration) -> Option<(u64, Instant)> {
         let epoch = self.loss_epoch.get();
         let deadline = Instant::now() + timeout;
-        if !self.may_wait(epoch, deadline) {
+        if !self.may_wait(epoch, Some(deadline)) {
             return None;
         }
         if let RemoteReach::Attempting { since } = self.reach() {
@@ -225,6 +227,21 @@ impl RemoteLinkTracker {
             scheduler.schedule_tick_after(timeout.as_millis() as u64 + 1);
         }
         Some((epoch, deadline))
+    }
+
+    /// Arm a wait bounded only by the remote's reachability (no deadline), if
+    /// the remote could answer now, returning its loss epoch. For internal
+    /// reads that must see the authority whenever it is reachable, such as
+    /// exclusive-read hydration; first loads use [`Self::arm`].
+    pub(super) fn arm_until_loss(&self) -> Option<u64> {
+        let epoch = self.loss_epoch.get();
+        if !self.may_wait(epoch, None) {
+            return None;
+        }
+        if let RemoteReach::Attempting { since } = self.reach() {
+            self.schedule_attempt_expiry(since);
+        }
+        Some(epoch)
     }
 
     fn schedule_attempt_expiry(&self, since: Instant) {
@@ -255,6 +272,15 @@ impl RemoteLinkTracker {
             self.schedule_attempt_expiry(since);
         }
         self.notify();
+    }
+
+    fn reported_hint(&self) -> Option<RemoteLinkHint> {
+        self.hint.get().map(|host| match host {
+            HostLink::NoServer => RemoteLinkHint::NoServer,
+            HostLink::Attempting { .. } => RemoteLinkHint::Attempting,
+            HostLink::Live => RemoteLinkHint::Live,
+            HostLink::Failed => RemoteLinkHint::Failed,
+        })
     }
 
     pub(super) fn upstream_attached(&self) {
@@ -317,7 +343,7 @@ impl RemoteLinkTracker {
             let Some(gate) = state_ref.sender.opening_gate() else {
                 continue;
             };
-            if self.may_wait(gate.epoch, gate.deadline) {
+            if self.may_wait(gate.epoch, Some(gate.deadline)) {
                 retained.push(weak);
             } else {
                 state_ref.release_opening_gate();
@@ -401,7 +427,7 @@ impl RemoteLinkTracker {
 struct RemoteAnswerLoss {
     tracker: Rc<RemoteLinkTracker>,
     epoch: u64,
-    deadline: Instant,
+    deadline: Option<Instant>,
 }
 
 impl Future for RemoteAnswerLoss {
@@ -552,6 +578,12 @@ where
         self.node.remote_link.set_hint(hint);
     }
 
+    /// The last hint a host reported, if any.
+    #[doc(hidden)]
+    pub fn remote_link_hint_for_test(&self) -> Option<RemoteLinkHint> {
+        self.node.remote_link.reported_hint()
+    }
+
     /// Resolve a [`FirstLoad::WaitForRemote`] subscription request: the
     /// effective read options and the gate to install, if any.
     pub(super) fn resolve_first_load(
@@ -625,7 +657,7 @@ where
         if !timeout.is_zero()
             && let Some((epoch, deadline)) = self.node.remote_link.arm(timeout)
             && let Some(Ok(result)) = self
-                .race_remote_answer(epoch, deadline, Box::pin(remote()))
+                .race_remote_answer(epoch, Some(deadline), Box::pin(remote()))
                 .await
         {
             return Ok(result);
@@ -634,11 +666,11 @@ where
     }
 
     /// Poll `remote` until it completes, the remote can no longer answer, or
-    /// `deadline` passes. Returning `None` drops the pending remote read.
-    async fn race_remote_answer<T>(
+    /// `deadline` (if any) passes. Returning `None` drops the pending remote read.
+    pub(super) async fn race_remote_answer<T>(
         &self,
         epoch: u64,
-        deadline: Instant,
+        deadline: Option<Instant>,
         remote: impl Future<Output = T>,
     ) -> Option<T> {
         let mut remote = pin!(remote);

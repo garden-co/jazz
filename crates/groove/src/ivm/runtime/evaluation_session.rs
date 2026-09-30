@@ -92,6 +92,19 @@ pub(crate) struct LoadedChunk {
     bytes: LoadedChunkBytes,
 }
 
+impl LoadedChunk {
+    pub(crate) fn bytes(&self) -> &bytes::Bytes {
+        self.bytes.bytes()
+    }
+
+    pub(crate) fn verifies_object_hash(&self, expected: &[u8; 32]) -> bool {
+        match &self.bytes {
+            LoadedChunkBytes::Direct(_) => false,
+            LoadedChunkBytes::Leased(lease) => lease.verifies_object_hash(expected),
+        }
+    }
+}
+
 #[derive(Debug)]
 enum LoadedChunkBytes {
     Direct(bytes::Bytes),
@@ -175,6 +188,13 @@ impl EvaluationInputs {
         &mut self,
         request: ChunkRequest,
     ) -> Result<&bytes::Bytes, super::IvmRuntimeError> {
+        self.loaded_chunk(request).map(LoadedChunk::bytes)
+    }
+
+    pub(crate) fn loaded_chunk(
+        &mut self,
+        request: ChunkRequest,
+    ) -> Result<&LoadedChunk, super::IvmRuntimeError> {
         let key = EvaluationRequestKey::Chunk(request);
         if let Some(scope) = self.chunk_scope {
             self.chunk_owners
@@ -187,7 +207,7 @@ impl EvaluationInputs {
             return Err(super::IvmRuntimeError::EvaluationBlocked);
         }
         match self.loaded.get(&key).expect("loaded key checked") {
-            EvaluationRequestOutput::Chunk(chunk) => Ok(chunk.bytes.bytes()),
+            EvaluationRequestOutput::Chunk(chunk) => Ok(chunk),
             EvaluationRequestOutput::Storage(_) => Err(super::IvmRuntimeError::UnsupportedOperator),
         }
     }

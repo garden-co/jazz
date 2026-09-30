@@ -1,6 +1,7 @@
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
+import { PersistedWriteRejectedError } from "./client.js";
 import { createDb } from "./default-create-db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
@@ -86,7 +87,15 @@ it.each(["local", "global"] as const)(
         .insert(app.notes, { bucket: "destination", title: "Concurrent insert" })
         .wait({ tier });
       tx.insert(app.notes, { bucket: "destination", title: "Must not publish" });
-      await expect(tx.commit().wait()).rejects.toThrow(/transaction_conflict/);
+      const conflict = await tx
+        .commit()
+        .wait()
+        .then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+      expect(conflict).toBeInstanceOf(PersistedWriteRejectedError);
+      expect(conflict).toMatchObject({ code: "transaction_conflict" });
       expect(await db.all(app.notes, { tier: "local-first" })).toEqual([
         { id: phantom.id, bucket: "destination", title: "Concurrent insert" },
       ]);
@@ -131,3 +140,72 @@ it("does not reject a filtered transaction read when an unrelated row is inserte
     await server.stop();
   }
 }, 60_000);
+
+it.each(["offline", "synced"] as const)(
+  "rejects the losing exclusive write on the same row without failing the core tick (%s)",
+  async (mode) => {
+    const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) });
+    const permissions = definePermissions(app, ({ policy }) => {
+      policy.notes.allowRead.always();
+      policy.notes.allowInsert.always();
+      policy.notes.allowUpdate.always();
+    });
+    const server =
+      mode === "synced"
+        ? await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true })
+        : undefined;
+    const uncaught: unknown[] = [];
+    const onUncaught = (error: unknown) => uncaught.push(error);
+    process.on("uncaughtException", onUncaught);
+    process.on("unhandledRejection", onUncaught);
+    let db: Awaited<ReturnType<typeof createDb>> | undefined;
+    try {
+      if (server) {
+        await deploy({
+          serverUrl: server.url,
+          appId: server.appId,
+          adminSecret: server.adminSecret,
+          schema: app,
+          permissions,
+        });
+        db = await createDb(await localAccountConfig(server.appId, server.url));
+      } else {
+        db = await createDb({
+          ...(await localAccountConfig("test-app")),
+          driver: { type: "memory" },
+        });
+      }
+      const row = await db.insert(app.notes, { title: "Shared" }).wait({ tier: "local" });
+
+      // Both transactions read the row before either writes it, so they race
+      // on the same snapshot and exactly one can commit.
+      let releaseWrites!: () => void;
+      const bothRead = new Promise<void>((resolve) => {
+        releaseWrites = resolve;
+      });
+      let reads = 0;
+      const race = (title: string) =>
+        db!.exclusiveTransaction(async (tx) => {
+          await tx.one(app.notes.where({ id: row.id }), { tier: "local-first" });
+          if (++reads === 2) releaseWrites();
+          await bothRead;
+          tx.update(app.notes, row.id, { title });
+        });
+      const writes = await Promise.all([race("First"), race("Second")]);
+      const results = await Promise.allSettled(writes.map((write) => write.wait()));
+
+      expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+      const [rejected] = results.filter((result) => result.status === "rejected");
+      expect(rejected?.reason).toBeInstanceOf(PersistedWriteRejectedError);
+      expect(rejected?.reason).toMatchObject({ code: "transaction_conflict" });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(uncaught).toEqual([]);
+    } finally {
+      process.off("uncaughtException", onUncaught);
+      process.off("unhandledRejection", onUncaught);
+      await db?.shutdown();
+      await server?.stop();
+    }
+  },
+  60_000,
+);

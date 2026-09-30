@@ -5,7 +5,8 @@ edition = "2024"
 publish = false
 
 [dependencies]
-jazz = { workspace = true }
+jazz = { workspace = true, features = ["testing"] }
+groove = { workspace = true, features = ["test"] }
 jazz-benchmark-guard = { path = "../../../crates/benchmark-guard" }
 
 [dev-dependencies]
