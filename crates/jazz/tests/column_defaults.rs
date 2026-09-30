@@ -37,10 +37,27 @@ fn schema() -> JazzSchema {
             .nullable()
             .default(PublicValue::Null),
     ]);
-    let source = Schema::from([(
-        TableName::new("events"),
-        TableSchema::with_policies(columns, allow_all_policies()),
-    )]);
+    let optional_only = RowDescriptor::new(vec![
+        ColumnDescriptor::new("label", ColumnType::Text).nullable(),
+        ColumnDescriptor::new("rank", ColumnType::Integer).nullable(),
+    ]);
+    let optional_json_only = RowDescriptor::new(vec![
+        ColumnDescriptor::new("metadata", ColumnType::Json { schema: None }).nullable(),
+    ]);
+    let source = Schema::from([
+        (
+            TableName::new("events"),
+            TableSchema::with_policies(columns, allow_all_policies()),
+        ),
+        (
+            TableName::new("optional_only"),
+            TableSchema::with_policies(optional_only, allow_all_policies()),
+        ),
+        (
+            TableName::new("optional_json_only"),
+            TableSchema::with_policies(optional_json_only, allow_all_policies()),
+        ),
+    ]);
     compile_schema(&source)
 }
 
@@ -68,14 +85,18 @@ fn cells(values: impl IntoIterator<Item = (&'static str, Value)>) -> BTreeMap<St
 }
 
 fn stored_row(db: &Db, row_id: RowUuid) -> BTreeMap<String, Value> {
+    stored_row_in(db, "events", row_id)
+}
+
+fn stored_row_in(db: &Db, table_name: &str, row_id: RowUuid) -> BTreeMap<String, Value> {
     let table = schema()
         .tables()
         .iter()
-        .find(|table| table.name == "events")
-        .expect("events table")
+        .find(|table| table.name == table_name)
+        .expect("table")
         .clone();
     let prepared = db
-        .prepare_query(&db.table("events"))
+        .prepare_query(&db.table(table_name))
         .expect("prepare query");
     let rows = db.read(&prepared).expect("read rows");
     let row = rows
@@ -240,5 +261,109 @@ fn core_insert_keeps_explicit_values_for_defaulted_columns() {
         Some(&Value::Nullable(Some(Box::new(Value::String(
             "explicit note".to_owned()
         )))))
+    );
+}
+
+#[test]
+fn core_insert_with_every_optional_column_omitted_creates_a_null_row() {
+    let db = open_db();
+
+    let write = jazz::block_on(db.insert(
+        "optional_only",
+        BTreeMap::new(),
+        jazz::db::InsertOptions {
+            row_id: Some(row(5)),
+            ..Default::default()
+        },
+    ))
+    .expect("an insert with every optional column omitted creates the row");
+
+    let stored = stored_row_in(&db, "optional_only", row(5));
+    assert_eq!(stored.get("label"), Some(&Value::Nullable(None)));
+    assert_eq!(stored.get("rank"), Some(&Value::Nullable(None)));
+
+    // Empty updates keep their existing meaning: they validate the target and
+    // reuse its current version rather than authoring an empty content write.
+    let update =
+        jazz::block_on(db.update("optional_only", row(5), BTreeMap::new(), Default::default()))
+            .expect("empty update of an existing row");
+    assert_eq!(update.mergeable_tx_id(), write.mergeable_tx_id());
+}
+
+#[test]
+fn core_insert_with_some_optional_columns_leaves_the_rest_unauthored() {
+    let db = open_db();
+
+    jazz::block_on(db.insert(
+        "optional_only",
+        cells([("rank", Value::Nullable(Some(Box::new(Value::I32(3)))))]),
+        jazz::db::InsertOptions {
+            row_id: Some(row(6)),
+            ..Default::default()
+        },
+    ))
+    .expect("insert row");
+
+    let stored = stored_row_in(&db, "optional_only", row(6));
+    assert_eq!(
+        stored.get("rank"),
+        Some(&Value::Nullable(Some(Box::new(Value::I32(3)))))
+    );
+    // Only an otherwise-empty insert authors explicit nulls; here the
+    // omitted column stays unauthored and reads back as absent (null).
+    assert_eq!(stored.get("label"), None);
+}
+
+#[test]
+fn core_restore_with_empty_content_yields_an_all_null_row() {
+    let db = open_db();
+
+    jazz::block_on(db.insert(
+        "optional_only",
+        cells([(
+            "label",
+            Value::Nullable(Some(Box::new(Value::String("before".to_owned())))),
+        )]),
+        jazz::db::InsertOptions {
+            row_id: Some(row(7)),
+            ..Default::default()
+        },
+    ))
+    .expect("insert row");
+    jazz::block_on(db.delete("optional_only", row(7), Default::default())).expect("delete row");
+    jazz::block_on(db.restore(
+        "optional_only",
+        row(7),
+        Some(BTreeMap::new()),
+        Default::default(),
+    ))
+    .expect("restore with empty content");
+
+    let stored = stored_row_in(&db, "optional_only", row(7));
+    assert_eq!(stored.get("label"), Some(&Value::Nullable(None)));
+    assert_eq!(stored.get("rank"), Some(&Value::Nullable(None)));
+}
+
+#[test]
+fn core_insert_with_every_optional_json_column_omitted_explains_the_gap() {
+    let db = open_db();
+
+    let error = jazz::block_on(db.insert(
+        "optional_json_only",
+        BTreeMap::new(),
+        jazz::db::InsertOptions {
+            row_id: Some(row(8)),
+            ..Default::default()
+        },
+    ))
+    .err()
+    .expect("an all-omitted insert into an optional-JSON-only table is not supported yet");
+    let message = error.message;
+    assert!(
+        message.contains("every column omitted is not supported yet")
+            && message.contains("`optional_json_only`")
+            && message.contains("all JSON")
+            && message.contains("#3007"),
+        "unexpected error: {message}"
     );
 }

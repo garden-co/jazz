@@ -30,12 +30,10 @@ members = [
   # gates until they are rebuilt around the new server boundary.
   # "examples/todo-server-rs",
   # "examples/docs/todo-server-rs",
-  "examples/todo-client-localfirst-ts/benchmarks",
+  "examples/stage-plan/benchmarks",
+  "examples/band-book/benchmarks",
   "examples/permissioned-resources/benchmarks",
-  "examples/policy-scoped-documents/benchmarks",
   "examples/big-label/benchmarks",
-  "examples/chat-react/benchmarks",
-  "examples/auth-simple-chat/benchmarks",
   "examples/epic-drop/benchmarks",
   "examples/band-chat/benchmarks",
   "examples/music-agent/benchmarks",
@@ -44,7 +42,6 @@ members = [
   "examples/poster-shop/benchmarks",
   "examples/jamazon-warehouse/benchmarks",
   "examples/wequencer/benchmarks",
-  "examples/benchmarks/w1",
   "dev/benchmarks/storage/bench-core",
   "dev/spikes/linear-history",
 ]

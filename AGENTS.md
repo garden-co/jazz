@@ -14,6 +14,10 @@ layers, WASM + NAPI + React Native bindings.
   a contract.
 - **No sync bypasses.** Don't add fast paths that skip sync or permissions;
   make the normal path fast.
+- **Unsupported over unscalable.** When a shape can't be handled at a cost
+  proportional to what it touches, fail with a typed error naming the exact
+  pattern ("Reading X is not supported in Y yet"). Never fall back to
+  whole-table loads, full scans or other work that grows with unrelated data.
 - **Tests.** Read `crates/jazz/TESTING_GUIDELINES.md` before writing a Rust
   test.
 - **Existing tests encode decisions.** If one fails because the implementation

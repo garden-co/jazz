@@ -3359,6 +3359,19 @@ fn read_for_write_denied(operation: &str, table: &str) -> Error {
     )
 }
 
+/// An UPDATE on a row this replica does not hold. Staging a mergeable UPDATE
+/// needs the current cells and parent version locally; their absence is a
+/// missing observation, not a read-policy decision.
+fn update_target_not_loaded(operation: &str, table: &str, row: RowUuid) -> Error {
+    Error::new(
+        ErrorCode::NotObserved,
+        format!(
+            "{operation} on table {table} needs the current row, but row {} is not loaded locally; read or subscribe to the row before updating it",
+            row.0
+        ),
+    )
+}
+
 #[doc(hidden)]
 pub mod doctest_support {
     use std::collections::BTreeMap;

@@ -612,6 +612,21 @@ enum WasmWriteInner {
     },
 }
 
+fn poll_write_state_once(
+    future: impl Future<Output = Result<jazz::db::WriteState, jazz::db::Error>>,
+) -> Result<JsValue, JsValue> {
+    let mut future = std::pin::pin!(future);
+    match future
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()))
+    {
+        Poll::Ready(result) => write_state_to_js(result.map_err(to_js_error)?),
+        Poll::Pending => Err(JsValue::from_str(
+            "write state is temporarily busy; retry after the next WASM turn",
+        )),
+    }
+}
+
 #[wasm_bindgen]
 impl WasmWrite {
     #[wasm_bindgen(getter, js_name = txId)]
@@ -633,11 +648,11 @@ impl WasmWrite {
     pub fn write_state(&self) -> Result<JsValue, JsValue> {
         match &self.inner {
             Some(WasmWriteInner::MemoryTx { write, .. }) => {
-                write_state_to_js(block_on(write.write_state()).map_err(to_js_error)?)
+                poll_write_state_once(write.write_state())
             }
             #[cfg(target_arch = "wasm32")]
             Some(WasmWriteInner::BrowserTx { write, .. }) => {
-                write_state_to_js(block_on(write.write_state()).map_err(to_js_error)?)
+                poll_write_state_once(write.write_state())
             }
             None => Err(JsValue::from_str("write state is unavailable")),
         }

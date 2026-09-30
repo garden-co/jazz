@@ -3,6 +3,7 @@
 //! name; `metadata.ts` documents each timed iteration.
 
 use jazz_example_record_player_benchmark::Fixture;
+use jazz_example_record_player_benchmark::audio::ScrubFixture;
 
 #[global_allocator]
 static ALLOCATOR: jazz_benchmark_guard::Allocator = jazz_benchmark_guard::Allocator;
@@ -32,4 +33,12 @@ fn record_player_add_to_playlist(bencher: divan::Bencher<'_, '_>, tracks: usize)
     let fixture = Fixture::new(tracks);
     let mut live = fixture.live_playlist();
     bencher.bench_local(|| divan::black_box(fixture.add_to_playlist(&mut live)));
+}
+
+/// Scrub a track: read 64 KiB from the middle of a 64 MiB streamed audio value,
+/// as the player does when the listener drags the playhead.
+#[divan::bench(sample_count = 20)]
+fn record_player_scrub_track_64mb(bencher: divan::Bencher<'_, '_>) {
+    let fixture = ScrubFixture::new(64 * 1024 * 1024);
+    bencher.bench_local(|| divan::black_box(fixture.scrub_to_middle()));
 }

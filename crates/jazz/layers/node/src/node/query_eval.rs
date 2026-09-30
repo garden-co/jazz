@@ -245,6 +245,10 @@ mod normalization;
 
 use normalization::*;
 
+mod narrowed_reads;
+
+pub(in crate::node) use narrowed_reads::{ExclusiveSourceReads, NarrowedSourceRead};
+
 mod subscriptions;
 
 mod maintained_views;
@@ -3407,7 +3411,8 @@ where
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<RelationSnapshot, Error> {
         let identity = self.transaction_query_identity(tx_id, identity, authorization_mode)?;
-        let predicate_len = self.open_tx(tx_id)?.predicate_reads.len();
+        let narrowing =
+            self.offer_tx_query_narrowed_reads(tx_id, shape, binding, include_deleted)?;
         let program = self
             .compile_open_tx_query_program(
                 tx_id,
@@ -3418,7 +3423,9 @@ where
                 include_deleted,
                 authorization_mode,
             )
-            .await?;
+            .await;
+        let narrowed_reads = self.withdraw_tx_narrowed_source_reads(tx_id, narrowing)?;
+        let program = program?;
         let snapshots = self
             .database
             .query_graphs(lowered_program_sinks(&program))
@@ -3440,8 +3447,32 @@ where
             binding_values: binding.values().clone(),
         };
         let open_tx = self.open_tx_mut(tx_id)?;
-        open_tx.predicate_reads.truncate(predicate_len);
         open_tx.predicate_reads.push(predicate_read);
+        if shape.query().aggregate.is_none() {
+            // Prove every row the relation returns, root and included alike.
+            let mut returned = BTreeMap::<String, Vec<RowUuid>>::new();
+            for row in &snapshot.rows {
+                returned
+                    .entry(row.table().to_owned())
+                    .or_default()
+                    .push(row.row_uuid());
+            }
+            for (table, rows) in returned {
+                self.record_tx_query_row_reads(tx_id, shape.schema_version(), &table, rows)
+                    .await?;
+            }
+        } else {
+            self.record_tx_aggregate_input_reads(
+                tx_id,
+                shape,
+                binding,
+                identity,
+                authorization_mode,
+            )
+            .await?;
+        }
+        self.record_tx_narrowed_source_reads(tx_id, narrowed_reads, identity, authorization_mode)
+            .await?;
         Ok(snapshot)
     }
 
@@ -3456,8 +3487,9 @@ where
     ) -> Result<Vec<CurrentRow>, Error> {
         let identity = self.transaction_query_identity(tx_id, identity, authorization_mode)?;
         let query = shape.query();
-        let predicate_len = self.open_tx(tx_id)?.predicate_reads.len();
         let table = self.table_in_schema(&query.table, shape.schema_version())?;
+        let narrowing =
+            self.offer_tx_query_narrowed_reads(tx_id, shape, binding, include_deleted)?;
         let program = self
             .compile_open_tx_query_program(
                 tx_id,
@@ -3468,7 +3500,9 @@ where
                 include_deleted,
                 authorization_mode,
             )
-            .await?;
+            .await;
+        let narrowed_reads = self.withdraw_tx_narrowed_source_reads(tx_id, narrowing)?;
+        let program = program?;
         let deltas = self
             .database
             .query_graph(lowered_materialization_app_rows_graph(&program)?)
@@ -3491,13 +3525,158 @@ where
             binding_values: binding.values().clone(),
         };
         let open_tx = self.open_tx_mut(tx_id)?;
-        open_tx.predicate_reads.truncate(predicate_len);
         open_tx.predicate_reads.push(predicate_read);
+        if query.aggregate.is_none() {
+            let root_rows = rows
+                .iter()
+                .filter(|row| row.table() == query.table)
+                .map(CurrentRow::row_uuid)
+                .collect::<Vec<_>>();
+            self.record_tx_query_row_reads(tx_id, shape.schema_version(), &query.table, root_rows)
+                .await?;
+        } else {
+            self.record_tx_aggregate_input_reads(
+                tx_id,
+                shape,
+                binding,
+                identity,
+                authorization_mode,
+            )
+            .await?;
+        }
+        self.record_tx_narrowed_source_reads(tx_id, narrowed_reads, identity, authorization_mode)
+            .await?;
         self.finish_engine_query_rows_in_schema(query, shape.schema_version(), &mut rows)?;
         if query.array_subqueries.is_empty() {
             self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
         }
         Ok(rows)
+    }
+
+    /// Prove the rows an exclusive aggregate read consumed. An aggregate
+    /// returns no rows to prove, so the transaction also reads the aggregate's
+    /// input rows; the authority validates the aggregate against them
+    /// (garden-co/jazz#3694).
+    async fn record_tx_aggregate_input_reads(
+        &mut self,
+        tx_id: OpenTransactionId,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        identity: AuthorSubject,
+        authorization_mode: QueryAuthorizationMode,
+    ) -> Result<(), Error> {
+        let Some(input) = shape.query().aggregate_input() else {
+            return Ok(());
+        };
+        if !self.transaction_is_exclusive(tx_id)? {
+            return Ok(());
+        }
+        let schema = &self
+            .catalogue
+            .catalogue_schemas
+            .get(&shape.schema_version())
+            .ok_or(Error::InvalidStoredValue("transaction schema is unknown"))?
+            .schema;
+        let input = input.validate(schema)?;
+        let input_binding = input.bind(binding.values().clone())?;
+        Box::pin(self.tx_query_in_authorization_mode(
+            tx_id,
+            &input,
+            &input_binding,
+            identity,
+            false,
+            authorization_mode,
+        ))
+        .await?;
+        Ok(())
+    }
+
+    /// The queries a partial node hydrates before an exclusive read of
+    /// `shape`: for each source it reads beyond its root (joined, included,
+    /// correlated and relation sources), the narrowed read the transaction
+    /// records for that source (garden-co/jazz#3694). Rows the replica never
+    /// received there then do not make the read conflict. Fails with
+    /// [`Error::UnsupportedExclusiveRead`] before anything is hydrated when a
+    /// source has no narrowed read.
+    #[doc(hidden)]
+    pub fn exclusive_source_hydration_queries(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        include_deleted: bool,
+    ) -> Result<Vec<JazzQuery>, Error> {
+        let mut queries = Vec::new();
+        for read in self
+            .exclusive_source_reads(shape, binding, include_deleted)?
+            .reads
+            .into_values()
+        {
+            let query = read.shape.query().clone();
+            if !queries.contains(&query) {
+                queries.push(query);
+            }
+        }
+        Ok(queries)
+    }
+
+    /// Offer the narrowed reads of `shape`'s non-root sources to the sources
+    /// of an exclusive transaction query about to be compiled. Returns the
+    /// narrowing to restore once it is compiled. Fails with
+    /// [`Error::UnsupportedExclusiveRead`] when a source has none.
+    fn offer_tx_query_narrowed_reads(
+        &mut self,
+        tx_id: OpenTransactionId,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        include_deleted: bool,
+    ) -> Result<SourceNarrowing, Error> {
+        let reads = if self.transaction_is_exclusive(tx_id)?
+            && !self.open_tx(tx_id)?.source_narrowing.recording
+        {
+            self.exclusive_source_reads(shape, binding, include_deleted)?
+        } else {
+            ExclusiveSourceReads::default()
+        };
+        self.offer_tx_narrowed_source_reads(tx_id, reads)
+    }
+
+    /// Record the narrowed reads a transaction query's sources claimed. Each
+    /// runs as its own query in the transaction, which records its predicate
+    /// read and proves the rows it returns; the sources beyond its root only
+    /// correlate it with the outer query's root and record nothing
+    /// (garden-co/jazz#3694).
+    async fn record_tx_narrowed_source_reads(
+        &mut self,
+        tx_id: OpenTransactionId,
+        reads: Vec<NarrowedSourceRead>,
+        identity: AuthorSubject,
+        authorization_mode: QueryAuthorizationMode,
+    ) -> Result<(), Error> {
+        if reads.is_empty() || !self.transaction_is_exclusive(tx_id)? {
+            return Ok(());
+        }
+        for read in reads {
+            let key = (read.shape.shape_id(), read.binding.binding_id());
+            if self.open_tx(tx_id)?.narrowed_predicate_reads.contains(&key) {
+                continue;
+            }
+            self.open_tx_mut(tx_id)?.source_narrowing.recording = true;
+            let recorded = Box::pin(self.tx_query_in_authorization_mode(
+                tx_id,
+                &read.shape,
+                &read.binding,
+                identity,
+                false,
+                authorization_mode,
+            ))
+            .await;
+            self.open_tx_mut(tx_id)?.source_narrowing.recording = false;
+            recorded?;
+            self.open_tx_mut(tx_id)?
+                .narrowed_predicate_reads
+                .insert(key);
+        }
+        Ok(())
     }
 
     fn transaction_query_identity(

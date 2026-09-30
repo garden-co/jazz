@@ -2780,6 +2780,78 @@ fn connect_upstream_waits_for_active_node_state_borrow() {
     let _connection = crate::local_executor::block_on(connection);
 }
 
+/// A trusted-serving host (a backend `forSession()` scope, or the policy test
+/// app) installs a session's claims before each write it admits. An earlier
+/// queued upsert suspended on cold storage owns the node, so installing the
+/// next write's claims must neither re-enter that owner nor overtake it: the
+/// claims wait behind it and take effect in admission order.
+///
+/// Controlled storage is needed to hold the queued upsert suspended; the
+/// binding tests cannot pause it at this ownership boundary.
+#[test]
+fn identity_claims_wait_behind_a_suspended_queued_upsert() {
+    let schema = schema();
+    let author = AuthorSubject::for_test_bytes([0xd8; 16]);
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, control) = TestStorage::controlled(&refs);
+    let eviction = storage.clone();
+    let db = block_on(Db::open(DbConfig {
+        schema,
+        storage,
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xd8; 16]),
+            author,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xd8))),
+    }))
+    .unwrap();
+    let id = row(0xd8);
+    db.insert(
+        "todos",
+        cells("seed", false, author),
+        crate::db::InsertOptions {
+            row_id: Some(id),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.tick().unwrap();
+
+    eviction.evict_all();
+    control.pause_on(TestStorageOperation::ScanOpen);
+    control.pause_on(TestStorageOperation::Get);
+    let first = db
+        .enqueue_upsert(
+            "todos".to_owned(),
+            id,
+            cells("first", false, author),
+            Default::default(),
+        )
+        .unwrap();
+    db.drive_queued_mutation_once();
+    assert!(
+        db.node.node().try_lock().is_none(),
+        "the cold upsert must own the node while suspended"
+    );
+
+    let claims = BTreeMap::from([("role".to_owned(), Value::String("editor".to_owned()))]);
+    db.set_identity_claims(author, claims.clone());
+    assert_eq!(
+        db.queued_mutation_count(),
+        2,
+        "claims must be ordered behind the suspended upsert, not applied around it"
+    );
+
+    control.resume();
+    block_on(db.drain_queued_mutations_for_binding());
+    block_on(first.write_state()).unwrap();
+    assert_eq!(
+        block_on(db.node.node().lock()).session_claims_for(author),
+        claims
+    );
+}
+
 /// Test-only marker for an authenticated SYSTEM backend transport. Ordinary
 /// session links must not send `SessionClaims`: their authenticated handshake
 /// is the authority for those claims.
@@ -3331,6 +3403,91 @@ fn detach_connection_removes_connection_from_db_ticks() {
     assert!(client.detach_connection(&upstream));
     assert!(!client.detach_connection(&upstream));
 
+    client.tick().unwrap();
+    assert!(upstream_transport.try_recv().is_none());
+}
+
+// Internal owner contention: a host can close a transport while a suspended
+// operation owns the peer, but public callers cannot hold that owner
+// deterministically.
+#[test]
+fn detach_while_a_suspended_operation_owns_the_peer_completes_on_next_tick() {
+    let schema = schema();
+    let client_author = AuthorSubject::for_test_bytes([0xc2; 16]);
+    let client = open_db(0xc2, client_author, &schema);
+    let (client_transport, mut upstream_transport) = duplex();
+
+    let query = Query::from("todos").filter(eq(col("done"), lit(false)));
+    let _subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+
+    let suspended_owner = crate::db::block_on(upstream.lock());
+    assert!(client.detach_connection(&upstream));
+    assert!(!client.detach_connection(&upstream));
+    drop(suspended_owner);
+
+    client.tick().unwrap();
+    while upstream_transport.try_recv().is_some() {}
+    assert!(!client.detach_connection(&upstream));
+    client.tick().unwrap();
+    assert!(upstream_transport.try_recv().is_none());
+}
+
+// A poll-once host (NAPI) drops a tick that is still pending. A detach queued
+// behind a suspended owner must survive that dropped tick.
+#[test]
+fn deferred_detach_survives_a_tick_dropped_while_the_owner_is_suspended() {
+    use std::future::Future;
+    use std::pin::pin;
+    use std::task::{Context, Poll, Waker};
+
+    let schema = schema();
+    let client_author = AuthorSubject::for_test_bytes([0xc3; 16]);
+    let client = open_db(0xc3, client_author, &schema);
+    client.set_drops_pending_ticks_for_test(true);
+    let (client_transport, mut upstream_transport) = duplex();
+
+    let query = Query::from("todos").filter(eq(col("done"), lit(false)));
+    let _subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+
+    let suspended_owner = crate::db::block_on(upstream.lock());
+    assert!(client.detach_connection(&upstream));
+    {
+        let mut tick = pin!(client.tick());
+        let mut cx = Context::from_waker(Waker::noop());
+        let _ = tick.as_mut().poll(&mut cx);
+    }
+    drop(suspended_owner);
+
+    client.tick().unwrap();
+    while upstream_transport.try_recv().is_some() {}
+    assert!(!client.detach_connection(&upstream));
+    client.tick().unwrap();
+    assert!(upstream_transport.try_recv().is_none());
+}
+
+// The node owner, not only a peer, can be held by a suspended operation.
+#[test]
+fn detach_while_a_suspended_operation_owns_the_node_completes_on_next_tick() {
+    let schema = schema();
+    let client_author = AuthorSubject::for_test_bytes([0xc4; 16]);
+    let client = open_db(0xc4, client_author, &schema);
+    let (client_transport, mut upstream_transport) = duplex();
+
+    let query = Query::from("todos").filter(eq(col("done"), lit(false)));
+    let _subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+
+    let node = client.node.node();
+    let suspended_owner = crate::db::block_on(node.lock());
+    assert!(client.detach_connection(&upstream));
+    assert!(!client.detach_connection(&upstream));
+    drop(suspended_owner);
+
+    client.tick().unwrap();
+    while upstream_transport.try_recv().is_some() {}
+    assert!(!client.detach_connection(&upstream));
     client.tick().unwrap();
     assert!(upstream_transport.try_recv().is_none());
 }
