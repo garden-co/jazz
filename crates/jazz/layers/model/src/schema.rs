@@ -1079,7 +1079,7 @@ impl TableSchema {
             PrimaryKeyColumn::integer("tx_node_id", IntegerKeyType::U64),
         ]))
         // No secondary index: the rows one transaction wrote are listed in its
-        // `jazz_transactions.touched_rows`, so "versions of transaction T" is a
+        // `jazz_tx_touched_rows` record, so "versions of transaction T" is a
         // point read per listed row rather than an index over every version.
     }
 
@@ -1178,7 +1178,7 @@ impl TableSchema {
                 PrimaryKeyColumn::uuid("row_uuid"),
             ]))
         // No transaction index: an overlay row is found through the history
-        // rows its pending transaction lists in `touched_rows`.
+        // rows its pending transaction lists in `jazz_tx_touched_rows`.
     }
 
     /// Columns available for constrained global-current reads.
@@ -1461,11 +1461,6 @@ fn transactions_table() -> GrooveTableSchema {
             column("reason_detail", GrooveColumnType::String.nullable()),
             // node-local-derived: updated when the node learns stronger durability.
             column("durability", durability_column()),
-            // node-local-derived: the history rows this node stored for the
-            // transaction, grouped by physical lineage and branch. It replaces a
-            // `by_tx` index over every history version (see `touched_rows_column`).
-            // Null when the list spilled to `jazz_tx_touched_rows`.
-            column("touched_rows", touched_rows_column().nullable()),
         ],
     )
     .with_primary_key(PrimaryKey::composite([
@@ -1475,32 +1470,31 @@ fn transactions_table() -> GrooveTableSchema {
     .with_index(GrooveIndexSchema::new("by_global_time", ["global_time"]))
 }
 
-/// `jazz_tx_touched_rows`: the touched-row list of a transaction that wrote
-/// more rows than its record lists inline, one row per touched history row.
-/// Its null `jazz_transactions.touched_rows` cell says the list lives here; a
-/// transaction's rows are the key prefix `(tx_time, tx_node_id)`. Keeping large
-/// lists out of the transaction record keeps every transaction read small.
+/// `jazz_tx_touched_rows`: node-local bookkeeping, one record per transaction
+/// `(tx_time, tx_node_id)`, listing the history rows this node stored for it.
+/// It replaces a `by_tx` index over every history version (SPEC 2 §2.8).
+///
+/// It is deliberately not part of `jazz_transactions`: a transaction record is
+/// the transaction's replicated identity and is compared with incoming copies,
+/// and it is read on hot paths (fates, view updates, covered-input checks).
+/// This list differs between nodes, grows as history arrives, and is written
+/// only when a batch that wrote history rows is applied.
 fn tx_touched_rows_table() -> GrooveTableSchema {
     GrooveTableSchema::new(
         "jazz_tx_touched_rows",
         [
             column("tx_time", GrooveColumnType::U64),
             column("tx_node_id", GrooveColumnType::U64),
-            column("physical_table_id", GrooveColumnType::U64),
-            column("branch_key", GrooveColumnType::Bytes),
-            column("row_uuid", GrooveColumnType::Uuid),
+            column("touched_rows", touched_rows_column()),
         ],
     )
     .with_primary_key(PrimaryKey::composite([
         PrimaryKeyColumn::integer("tx_time", IntegerKeyType::U64),
         PrimaryKeyColumn::integer("tx_node_id", IntegerKeyType::U64),
-        PrimaryKeyColumn::integer("physical_table_id", IntegerKeyType::U64),
-        PrimaryKeyColumn::bytes("branch_key"),
-        PrimaryKeyColumn::uuid("row_uuid"),
     ]))
 }
 
-/// `jazz_transactions.touched_rows`: the rows this node stored in history for
+/// `jazz_tx_touched_rows.touched_rows`: the rows this node stored in history for
 /// one transaction, as canonical groups `(physical_table_id, branch_key,
 /// row_uuids)`. Groups are strictly increasing by `(physical_table_id,
 /// branch_key bytes)`, every group is non-empty, and each group's row UUIDs are

@@ -603,10 +603,10 @@ pub struct NodeState<S = BoxedStorage> {
     /// says whether the row may already hold a shadow (it had an overlay
     /// before this batch touched it).
     ahead_shadow_dirty: Vec<(SchemaVersionId, String, BranchKey, RowUuid, bool)>,
-    /// History rows written in the open batch, per transaction record key
-    /// `(tx_time, tx_node_alias)`; `flush_tx_touched_rows` lists them in the
-    /// transaction's `touched_rows`.
-    tx_touched_dirty: BTreeMap<(TxTime, NodeAlias), TouchedRowsDelta>,
+    /// History rows written since the last applied node batch, per
+    /// transaction `(tx_time, tx_node_alias)`; `apply_node_batch` adds them to
+    /// the transaction's `jazz_tx_touched_rows` list.
+    tx_touched_dirty: BTreeMap<(TxTime, NodeAlias), TouchedRows>,
     /// `made_by` of transactions whose history images omitted `updated_by`
     /// (`resolve_history_updated_by`). Bounded; transaction authors never
     /// change, so entries never go stale.

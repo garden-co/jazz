@@ -410,7 +410,7 @@
         },
         {
           "path": "crates/jazz/layers/node/src/node/tests/general.rs",
-          "anchor": "fn a_transaction_touching_many_rows_spills_its_list_and_keeps_its_record_small"
+          "anchor": "fn a_touched_row_list_is_node_local_and_survives_batches_applied_before_its_transaction"
         },
         {
           "path": "crates/jazz/layers/node/src/node/tests/general.rs",

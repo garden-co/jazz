@@ -122,80 +122,33 @@ groove::define_record! {
         16 => cascade_root: Option<Value>,
         17 => reason_detail: Option<String>,
         18 => durability: DurabilityTier,
-        19 => touched_rows: Option<Vec<Value>>,
     }
 }
 
-/// Pending change to one transaction's `touched_rows` in the open batch.
-#[derive(Clone, Debug, Default)]
-pub(super) struct TouchedRowsDelta {
-    /// The transaction's history rows were deleted (it was rejected): drop
-    /// the stored list before adding `rows`.
-    pub(super) clear: bool,
-    pub(super) rows: TouchedRows,
-}
-
-/// Most rows a transaction lists inline in `jazz_transactions.touched_rows`.
-/// A transaction that touches more spills its whole list to
-/// `jazz_tx_touched_rows` and stores a null cell, so a transaction record
-/// stays small however many rows it wrote: transaction records are read on
-/// hot paths (fates, view updates, covered-input checks) where a record that
-/// grew with the transaction would be copied on every read.
-pub(super) const TOUCHED_ROWS_INLINE_MAX: usize = 32;
-
-/// Spilled touched-row lists, keyed `(tx_time, tx_node_id, physical_table_id,
-/// branch_key, row_uuid)`.
+/// Node-local touched-row lists, one record per transaction `(tx_time,
+/// tx_node_id)` (SPEC 2 §2.8).
 pub(super) const TX_TOUCHED_ROWS_TABLE: &str = "jazz_tx_touched_rows";
 
-/// A stored transaction's `touched_rows` cell, decoded only when a caller
-/// needs the rows (`query_versions_for_tx`). Transaction records are read far
-/// more often than their rows are listed, so decoding stays off that path.
-#[derive(Clone, Debug, Default)]
-pub(super) struct StoredTouchedRows(Option<OwnedRecord>);
-
-impl StoredTouchedRows {
-    /// Keep the transaction record; nothing is decoded yet.
-    pub(super) fn from_transaction_record(record: BorrowedRecord<'_>) -> Self {
-        Self(Some(OwnedRecord::new(
-            record.raw().to_vec(),
-            record.descriptor(),
-        )))
-    }
-
-    /// The inline list, or `None` when the list spilled to
-    /// `jazz_tx_touched_rows`.
-    pub(super) fn decode_inline(&self) -> Result<Option<TouchedRows>, Error> {
-        match &self.0 {
-            Some(record) => TouchedRows::from_transaction_record(record.borrowed()),
-            None => Ok(Some(TouchedRows::default())),
-        }
-    }
-
-    /// The stored cell, unchanged, for rewriting the transaction record.
-    pub(super) fn to_value(&self) -> Result<Value, Error> {
-        match &self.0 {
-            Some(record) => Ok(record
-                .borrowed()
-                .get_idx(TransactionRowRecord::FIELD_TOUCHED_ROWS_IDX)?),
-            None => TouchedRows::default().inline_cell(),
-        }
-    }
-}
+/// Field of the touched-row list in a `jazz_tx_touched_rows` record.
+const TX_TOUCHED_ROWS_LIST_IDX: usize = 2;
 
 /// The history rows one transaction wrote on this node, keyed exactly as
 /// history is: `(physical table lineage, branch key bytes) -> row UUIDs`.
 ///
-/// Stored in `jazz_transactions.touched_rows` while it holds at most
-/// [`TOUCHED_ROWS_INLINE_MAX`] rows, otherwise one `jazz_tx_touched_rows` row
-/// per touched row (SPEC 2 §2.8). It is how the node finds a transaction's
-/// versions (fate replay, relay forwarding, settlement, rejection clean-up)
-/// without a `by_tx` index over every history version: each listed row is one
-/// exact history point read at `(branch, row, tx_time, tx_node)`.
+/// Stored in the node-local `jazz_tx_touched_rows` record of the transaction
+/// (SPEC 2 §2.8), never in the transaction record itself, which is the
+/// replicated identity of the transaction. It is how the node finds a
+/// transaction's versions (fate replay, relay forwarding, settlement,
+/// rejection clean-up) without a `by_tx` index over every history version:
+/// each listed row is one exact history point read at `(branch, row, tx_time,
+/// tx_node)`.
 ///
 /// The list is a superset of the transaction's live history rows. Eviction
 /// may delete a listed row, and a listed row that is absent is skipped; a
-/// rejected transaction's rows are deleted with the list. Inline, it costs 16
-/// bytes per row plus about 20 bytes per `(table, branch)` group.
+/// rejected transaction's rows are deleted with the list. It costs 16 bytes
+/// per row plus about 20 bytes per `(table, branch)` group, and it is read
+/// only when the transaction's versions are listed, which reads every listed
+/// row anyway.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct TouchedRows(BTreeMap<(PhysicalTableId, Vec<u8>), BTreeSet<RowUuid>>);
 
@@ -229,16 +182,7 @@ impl TouchedRows {
         ])
     }
 
-    pub(super) fn len(&self) -> usize {
-        self.0.values().map(BTreeSet::len).sum()
-    }
-
-    /// The canonical inline `touched_rows` cell.
-    pub(super) fn inline_cell(&self) -> Result<Value, Error> {
-        Ok(Value::Nullable(Some(Box::new(self.to_value()?))))
-    }
-
-    /// The canonical inline list.
+    /// The canonical list.
     pub(super) fn to_value(&self) -> Result<Value, Error> {
         let descriptor = Self::group_descriptor();
         let groups = self
@@ -259,29 +203,24 @@ impl TouchedRows {
         Ok(Value::Array(groups))
     }
 
-    /// Decode a stored `touched_rows` cell, refusing any non-canonical
-    /// spelling: unordered or repeated groups, empty groups, unordered or
-    /// repeated rows.
-    ///
-    /// `None` means the list spilled to `jazz_tx_touched_rows`.
-    pub(super) fn from_transaction_record(
-        record: BorrowedRecord<'_>,
-    ) -> Result<Option<Self>, Error> {
-        match record.get_idx(TransactionRowRecord::FIELD_TOUCHED_ROWS_IDX)? {
-            Value::Nullable(None) => Ok(None),
-            Value::Nullable(Some(list)) => {
-                let touched = Self::from_value(&list)?;
-                if touched.len() > TOUCHED_ROWS_INLINE_MAX {
-                    return Err(Error::InvalidStoredValue(
-                        "transaction touched_rows inline list exceeds its bound",
-                    ));
-                }
-                Ok(Some(touched))
-            }
-            _ => Err(Error::InvalidStoredValue(
-                "transaction touched_rows must be nullable",
-            )),
-        }
+    /// Decode a stored `jazz_tx_touched_rows` record's list, refusing any
+    /// non-canonical spelling: unordered or repeated groups, empty groups,
+    /// unordered or repeated rows.
+    pub(super) fn from_list_record(record: BorrowedRecord<'_>) -> Result<Self, Error> {
+        Self::from_value(&record.get_idx(TX_TOUCHED_ROWS_LIST_IDX)?)
+    }
+
+    /// Values of the `jazz_tx_touched_rows` record listing these rows.
+    pub(super) fn list_record_values(
+        &self,
+        tx_time: TxTime,
+        tx_node_alias: NodeAlias,
+    ) -> Result<Vec<Value>, Error> {
+        Ok(vec![
+            Value::U64(tx_time.0),
+            Value::U64(tx_node_alias.0),
+            self.to_value()?,
+        ])
     }
 
     fn from_value(value: &Value) -> Result<Self, Error> {
@@ -2185,8 +2124,6 @@ pub(super) struct StoredTransaction {
     pub(super) durability: DurabilityTier,
     /// True when `n_total_writes` is only the locally known view cardinality.
     pub(super) view_scoped_cardinality: bool,
-    /// The history rows this node stored for the transaction.
-    pub(super) touched_rows: StoredTouchedRows,
 }
 
 impl StoredTransaction {
@@ -3489,10 +3426,7 @@ pub(super) fn runtime_result_identity_bytes(
     Ok(encoded)
 }
 
-/// Values of a `jazz_transactions` record. `touched_rows` carries the rows
-/// already listed for the transaction; a batch that writes history rows adds
-/// them when it is flushed (`flush_tx_touched_rows`).
-#[allow(clippy::too_many_arguments)]
+/// Values of a `jazz_transactions` record.
 pub(super) fn transaction_values(
     node_alias: NodeAlias,
     tx: &Transaction,
@@ -3500,7 +3434,6 @@ pub(super) fn transaction_values(
     global_time: Option<GlobalTime>,
     durability: DurabilityTier,
     contribution_merge: Value,
-    touched_rows: &StoredTouchedRows,
 ) -> Result<Vec<Value>, Error> {
     transaction_values_with_cardinality_scope(
         node_alias,
@@ -3510,11 +3443,9 @@ pub(super) fn transaction_values(
         durability,
         false,
         contribution_merge,
-        touched_rows,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn transaction_values_with_cardinality_scope(
     node_alias: NodeAlias,
     tx: &Transaction,
@@ -3523,7 +3454,6 @@ pub(super) fn transaction_values_with_cardinality_scope(
     durability: DurabilityTier,
     view_scoped_cardinality: bool,
     contribution_merge: Value,
-    touched_rows: &StoredTouchedRows,
 ) -> Result<Vec<Value>, Error> {
     Ok(vec![
         Value::U64(tx.tx_id.time.0),
@@ -3561,7 +3491,6 @@ pub(super) fn transaction_values_with_cardinality_scope(
             rejection_reason_detail(&fate).map(|detail| Box::new(Value::String(detail))),
         ),
         Value::String(durability_string(durability).to_owned()),
-        touched_rows.to_value()?,
     ])
 }
 

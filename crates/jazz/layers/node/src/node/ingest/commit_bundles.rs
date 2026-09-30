@@ -846,7 +846,6 @@ where
                     first.durability,
                     view_scoped,
                     contribution_merge,
-                    &StoredTouchedRows::default(),
                 )?,
             );
 

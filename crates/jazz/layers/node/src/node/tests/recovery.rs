@@ -848,7 +848,6 @@ fn mark_accepted_without_ahead_cleanup<S>(
             stored.durability,
             node.contribution_merge_storage_value(stored.tx.contribution_merge.as_ref())
                 .unwrap(),
-            &stored.touched_rows,
         )
         .unwrap(),
     );
@@ -1013,7 +1012,6 @@ fn reopen_refuses_preexisting_sequenced_non_global_transaction() {
                 DurabilityTier::Local,
                 node.contribution_merge_storage_value(stored.tx.contribution_merge.as_ref())
                     .unwrap(),
-                &stored.touched_rows,
             )
             .unwrap(),
         );
@@ -2180,7 +2178,6 @@ fn transaction_status_projects_state_without_decoding_payloads() {
                     global_time,
                     durability,
                     core.contribution_merge_storage_value(None).unwrap(),
-                    &stored.touched_rows,
                 )
                 .unwrap();
                 values[TransactionRowRecord::FIELD_DURABILITY_IDX] = Value::EnumTag(tag);
@@ -2225,7 +2222,6 @@ fn transaction_status_projects_state_without_decoding_payloads() {
             stored.durability,
             core.contribution_merge_storage_value(stored.tx.contribution_merge.as_ref())
                 .unwrap(),
-            &stored.touched_rows,
         )
         .unwrap();
         let mut batch = core.database.open_batch();
@@ -2391,7 +2387,6 @@ fn legacy_edge_acceptance_reopens_as_replayable_local_write() {
             None,
             DurabilityTier::Local,
             Value::Nullable(None),
-            &stored.touched_rows,
         )
         .unwrap();
         values[TransactionRowRecord::FIELD_DURABILITY_IDX] = Value::EnumTag(2);

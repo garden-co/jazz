@@ -70,8 +70,8 @@ The touched-rows transaction record (2026-09-30) replaced
 lost their `by_tx` indexes and `jazz_transactions` gained `touched_rows`
 (SPEC 2 §2.8). Implicit history `updated_by` (2026-09-30) then replaced `v3`
 with `v4`: a history image stores `updated_by` only when it differs from its
-transaction's `made_by`, and a `touched_rows` list longer than 32 rows moves
-to `jazz_tx_touched_rows` (the cell becomes nullable). Neither v2 nor v3 was in a published release. A v2
+transaction's `made_by`, and the touched-row list moved out of
+`jazz_transactions` into the node-local `jazz_tx_touched_rows`. Neither v2 nor v3 was in a published release. A v2
 or v3 root is refused with `missing: ["groove.durable-index.v2",
 "jazz.history-version-current.v4"], unknown: [<its family>]`
 (`storage_codec_profile::tests::node_profile_refuses_history_v2_and_v3_roots`).

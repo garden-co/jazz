@@ -1681,13 +1681,9 @@ fn every_history_write_is_listed_in_its_transaction_by_the_same_batch() {
         .physical_table_id_for_schema(node.catalogue.local_schema_version_id, "todos")
         .unwrap();
     let listed = |node: &mut NodeState, tx_id| {
-        node.query_transaction(tx_id)
+        let alias = node.query_transaction(tx_id).unwrap().unwrap().node_alias;
+        crate::local_executor::block_on(node.load_tx_touched_rows(None, tx_id.time, alias))
             .unwrap()
-            .unwrap()
-            .touched_rows
-            .decode_inline()
-            .unwrap()
-            .expect("a one-row list is inline")
             .iter()
             .map(|(table, branch, row)| (table, branch.to_vec(), row))
             .collect::<Vec<_>>()
@@ -1708,53 +1704,72 @@ fn every_history_write_is_listed_in_its_transaction_by_the_same_batch() {
 }
 
 #[test]
-fn a_transaction_touching_many_rows_spills_its_list_and_keeps_its_record_small() {
-    // Internal receipt for SPEC 2 §2.8: transaction records are read on hot
-    // paths, so a list longer than `TOUCHED_ROWS_INLINE_MAX` moves to
-    // `jazz_tx_touched_rows` rather than growing the record, and a
-    // rejection removes it with the history rows it lists.
+fn a_touched_row_list_is_node_local_and_survives_batches_applied_before_its_transaction() {
+    // Internal receipt for SPEC 2 §2.8. Ingest can apply another node batch
+    // (a schema or node alias) while the batch holding a transaction's
+    // history rows is still being built, before that transaction's record
+    // exists. That batch lists the marked rows; they must not be dropped
+    // for want of a transaction record, and the replicated transaction
+    // record must not carry the list at all.
     let (_temp_dir, mut node) = open_node();
-    let rows = (0..=TOUCHED_ROWS_INLINE_MAX as u8)
-        .map(|byte| row(byte.wrapping_add(0x40)))
-        .collect::<Vec<_>>();
     let tx_id = node
-        .commit_mergeable_many_settled(
-            rows.iter()
-                .map(|row| {
-                    MergeableCommit::new("todos", *row, 10).cells(title_cells("spilled"))
-                })
-                .collect(),
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(5), 10).cells(title_cells("listed")),
         )
         .unwrap();
-    assert!(node.tx_touched_dirty.is_empty());
-    let stored = node.query_transaction(tx_id).unwrap().unwrap();
-    assert!(stored.touched_rows.decode_inline().unwrap().is_none());
-    let spilled = |node: &mut NodeState| {
-        node.database
-            .primary_key_scan_raw(TX_TOUCHED_ROWS_TABLE, &[])
-            .unwrap()
-            .len()
-    };
-    assert_eq!(spilled(&mut node), rows.len());
+    let version = node.query_versions_for_tx(tx_id).unwrap().remove(0);
+    let alias = version.tx_node_alias();
+    let table_id = node
+        .physical_table_id_for_schema(node.catalogue.local_schema_version_id, "todos")
+        .unwrap();
+    let transaction = node
+        .database
+        .primary_key_get_raw("jazz_transactions", &[Value::U64(tx_id.time.0), Value::U64(alias.0)])
+        .unwrap()
+        .unwrap()
+        .owned_record();
     assert_eq!(
-        node.query_versions_for_tx(tx_id)
-            .unwrap()
-            .into_iter()
-            .map(|version| version.row_uuid())
-            .collect::<Vec<_>>(),
-        rows
+        transaction.borrowed().descriptor().fields().len(),
+        TransactionRowRecord::FIELD_DURABILITY_IDX + 1,
+        "the transaction record ends at durability; it carries no node-local list"
     );
 
-    node.apply_fate_update(
-        tx_id,
-        Fate::Rejected(RejectionReason::ExclusiveConflict),
-        None,
-        None,
-    )
-    .unwrap();
+    // Forget the list and the transaction record, as if neither was written yet.
+    let mut forget = node.database.open_batch();
+    forget.delete(
+        TX_TOUCHED_ROWS_TABLE,
+        PrimaryKeyValue::Composite(vec![
+            PrimaryKeyValue::U64(tx_id.time.0),
+            PrimaryKeyValue::U64(alias.0),
+        ]),
+    );
+    forget.delete(
+        "jazz_transactions",
+        PrimaryKeyValue::Composite(vec![
+            PrimaryKeyValue::U64(tx_id.time.0),
+            PrimaryKeyValue::U64(alias.0),
+        ]),
+    );
+    let applied = crate::local_executor::block_on(node.database.apply_batch(forget)).unwrap();
+    let persisted = crate::local_executor::block_on(applied.persist());
+    node.database.finish_persistence(persisted).unwrap();
+
+    // The history write is marked, then an unrelated node batch applies first.
+    node.mark_tx_touched_row(table_id, &version);
+    let unrelated = node.database.open_batch();
+    let applied = crate::local_executor::block_on(node.apply_node_batch(unrelated)).unwrap();
+    let persisted = crate::local_executor::block_on(applied.persist());
+    node.database.finish_persistence(persisted).unwrap();
+
     assert!(node.tx_touched_dirty.is_empty());
-    assert_eq!(spilled(&mut node), 0);
-    assert!(node.query_versions_for_tx(tx_id).unwrap().is_empty());
+    assert_eq!(
+        crate::local_executor::block_on(node.load_tx_touched_rows(None, tx_id.time, alias))
+            .unwrap()
+            .iter()
+            .map(|(table, branch, row)| (table, branch.to_vec(), row))
+            .collect::<Vec<_>>(),
+        vec![(table_id, version.branch_key().canonical_bytes(), row(5))]
+    );
 }
 
 #[test]

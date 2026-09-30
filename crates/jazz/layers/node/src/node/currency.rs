@@ -591,7 +591,7 @@ where
         // no longer stored (evicted) is skipped.
         let mut versions = Vec::new();
         let touched_rows = self
-            .load_tx_touched_rows(None, tx_id.time, tx.node_alias, &tx.touched_rows)
+            .load_tx_touched_rows(None, tx_id.time, tx.node_alias)
             .await?;
         for (table_id, branch_key, row_uuid) in touched_rows.iter() {
             let storage_table = physical_history_table_name(table_id);
@@ -1120,7 +1120,6 @@ where
             view_scoped_cardinality: record
                 .get_nullable_string(TransactionRowRecord::FIELD_MERGE_STRATEGY_IDX)?
                 .is_some_and(|value| value == "view-scoped-cardinality"),
-            touched_rows: StoredTouchedRows::from_transaction_record(record),
         })
     }
 

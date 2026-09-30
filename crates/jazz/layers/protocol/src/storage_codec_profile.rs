@@ -52,12 +52,12 @@ pub fn epoch_1_storage_codec_profile() -> Result<StorageCodecProfile, Error> {
 /// history record per accepted transaction holding the merged row state,
 /// `_deletion` as a cell, hidden `U48` column stamps, a `by_seq` current
 /// index and a per-row ahead overlay. History and ahead-current tables carry
-/// no `by_tx` secondary index; each `jazz_transactions` record lists the rows
-/// it touched (`touched_rows`) instead. A history image stores `updated_by`
+/// no `by_tx` secondary index; the node-local `jazz_tx_touched_rows` record of
+/// each transaction lists the rows it touched instead. A history image stores `updated_by`
 /// only when it differs from its transaction's `made_by`.
 ///
-/// It replaces the unreleased `v2` (`by_tx` indexes, no `touched_rows`) and
-/// `v3` (`touched_rows`, `updated_by` always stored) and the DAG layout (`jazz.history-version-current.v1`, alpha.54 to alpha.57),
+/// It replaces the unreleased `v2` (`by_tx` indexes) and `v3` (a
+/// `jazz_transactions.touched_rows` column, `updated_by` always stored) and the DAG layout (`jazz.history-version-current.v1`, alpha.54 to alpha.57),
 /// which was never a manifest member. A root written by either lacks this
 /// family and is refused at manifest admission with
 /// [`Error::UnsupportedStorageCodecs`] before any record is decoded.
