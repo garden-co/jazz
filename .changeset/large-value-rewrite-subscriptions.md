@@ -2,4 +2,4 @@
 "jazz-tools": patch
 ---
 
-Keep browser subscriptions delivering while a backend rapidly rewrites a row in a query that also covers a large (chunked) value, instead of silently stalling until reload.
+Fix browser subscriptions that silently stopped delivering while a backend rapidly rewrote rows next to a large (chunked) value. Persisting a publication now keeps driving the query work that owns an in-flight chunk install, so the SharedWorker no longer deadlocks on IndexedDB's write gate, and direct query openings no longer take over the runtime owner's wake-up for suspended cold work.

@@ -323,7 +323,24 @@ impl Database {
             if roots.is_empty() || self.large_value_publication_lifecycle_guard.is_some() {
                 None
             } else {
-                Some(self.large_value_lifecycle.clone().lock_owned().await)
+                // A cold evaluation's chunk install may hold this lock across
+                // storage I/O and only advance on an owner turn. This direct
+                // write owns the runtime meanwhile, so it drives that work
+                // rather than waiting for a turn it is itself blocking.
+                let mut lock = std::pin::pin!(self.large_value_lifecycle.clone().lock_owned());
+                Some(
+                    std::future::poll_fn(|cx| {
+                        if let std::task::Poll::Ready(guard) = lock.as_mut().poll(cx) {
+                            return std::task::Poll::Ready(guard);
+                        }
+                        if self.has_pending_progress() {
+                            let _ = self.poll_progress(cx);
+                            return lock.as_mut().poll(cx);
+                        }
+                        std::task::Poll::Pending
+                    })
+                    .await,
+                )
             };
         if !roots.is_empty() {
             let mut node_transitions = Vec::<(crate::large_values::NodeRef, i8)>::new();
@@ -422,6 +439,40 @@ impl Database {
             lifecycle: Rc::new(Cell::new(AppliedBatchLifecycle::Applied)),
             abandoned_application: Rc::clone(&self.abandoned_application),
         })
+    }
+
+    /// Persist a resident publication while this caller keeps driving the
+    /// suspended query work it owns.
+    ///
+    /// A cold evaluation's chunk install writes its recovery journal, bytes
+    /// and metadata through the same storage handle as publications, and a
+    /// backend may serialize those writes (IndexedDB holds a mutation gate
+    /// across its I/O). That install only advances when the runtime owner
+    /// polls the evaluation. A caller that holds the owner while it waits for
+    /// its own publication would otherwise wait forever behind an install
+    /// that can only finish on the owner's next turn. Polling progress here
+    /// is the owner turn; suspended work keeps the retained owner wake, so
+    /// nothing is lost when this returns first.
+    pub async fn persist_with_progress(&mut self, applied: &AppliedBatch) -> PersistedBatch {
+        use std::task::Poll;
+
+        let mut persist = std::pin::pin!(applied.persist());
+        std::future::poll_fn(|cx| {
+            if let Poll::Ready(persisted) = persist.as_mut().poll(cx) {
+                return Poll::Ready(persisted);
+            }
+            // A progress failure poisons the database, which the caller
+            // observes on its next operation. The publication itself must
+            // still settle through `finish_persistence`.
+            if self.has_pending_progress() {
+                let _ = self.poll_progress(cx);
+                if let Poll::Ready(persisted) = persist.as_mut().poll(cx) {
+                    return Poll::Ready(persisted);
+                }
+            }
+            Poll::Pending
+        })
+        .await
     }
 
     /// Install one persistence result and advance only the contiguous durable
