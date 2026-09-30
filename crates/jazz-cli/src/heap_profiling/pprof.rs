@@ -62,42 +62,44 @@ pub(super) fn encode(
         });
     }
 
-    let mut location_ids = HashMap::new();
+    let mut frames: HashMap<usize, Frame> = HashMap::new();
     let mut function_ids = HashMap::new();
     for (stack, _) in profile.iter() {
         let mut sample = Sample {
             value: vec![stack.weight.trunc() as i64],
             ..Default::default()
         };
+        let mut in_allocator = true;
         // `parse_jeheap` stores stacks root first; pprof wants the leaf first.
         for &return_address in stack.addrs.iter().rev() {
             // Point into the call instruction rather than just after it, so
             // the frame resolves to the caller's line, as pprof expects.
             let address = return_address.saturating_sub(1);
-            let location_id = *location_ids.entry(address).or_insert_with(|| {
+            let frame = *frames.entry(address).or_insert_with(|| {
                 let id = out.location.len() as u64 + 1;
                 let mapping_index = profile.mappings.iter().position(|mapping| {
                     (mapping.memory_start..mapping.memory_end).contains(&address)
                 });
-                let mut line = Vec::new();
-                if let Some(index) = mapping_index
-                    && let Some(symbols) = symbolized[index]
-                {
+                let name = mapping_index.and_then(|index| {
+                    let symbols = symbolized[index]?;
                     let mapping = &profile.mappings[index];
                     let vaddr = address - mapping.memory_start + mapping.memory_offset;
-                    if let Some(name) = symbols.function_at(vaddr as u64) {
-                        let function_id = *function_ids.entry(name).or_insert_with_key(|name| {
-                            let function_id = out.function.len() as u64 + 1;
-                            let name = strings.index(name);
-                            out.function.push(Function {
-                                id: function_id,
-                                name,
-                                system_name: name,
-                            });
-                            function_id
+                    symbols.function_at(vaddr as u64)
+                });
+                let allocator = name.as_deref().is_some_and(is_allocator_frame);
+                let mut line = Vec::new();
+                if let Some(name) = name {
+                    let function_id = *function_ids.entry(name).or_insert_with_key(|name| {
+                        let function_id = out.function.len() as u64 + 1;
+                        let name = strings.index(name);
+                        out.function.push(Function {
+                            id: function_id,
+                            name,
+                            system_name: name,
                         });
-                        line.push(Line { function_id });
-                    }
+                        function_id
+                    });
+                    line.push(Line { function_id });
                 }
                 out.location.push(Location {
                     id,
@@ -105,9 +107,17 @@ pub(super) fn encode(
                     address: address as u64,
                     line,
                 });
-                id
+                Frame {
+                    location_id: id,
+                    allocator,
+                }
             });
-            sample.location_id.push(location_id);
+            // Attribute each sample to the code that allocated, not to
+            // jemalloc's sampling path that every sampled stack ends in.
+            in_allocator &= frame.allocator;
+            if !in_allocator {
+                sample.location_id.push(frame.location_id);
+            }
         }
         out.sample.push(sample);
     }
@@ -117,6 +127,39 @@ pub(super) fn encode(
     gzip.write_all(&out.encode_to_vec())
         .expect("writing to a Vec cannot fail");
     gzip.finish().expect("writing to a Vec cannot fail")
+}
+
+#[derive(Clone, Copy)]
+struct Frame {
+    location_id: u64,
+    allocator: bool,
+}
+
+/// Frames of jemalloc and the Rust allocator shims at the leaf of a sampled
+/// stack: the sampling path (`prof_backtrace_impl`, `_rjem_je_prof_*`) and
+/// the allocation entry points, which `unprefixed_malloc_on_supported_platforms`
+/// exports under their libc names.
+fn is_allocator_frame(name: &str) -> bool {
+    name.starts_with("_rjem_")
+        || name.starts_with("prof_")
+        || name.starts_with("tikv_jemallocator::")
+        || matches!(
+            name,
+            "malloc"
+                | "calloc"
+                | "realloc"
+                | "posix_memalign"
+                | "aligned_alloc"
+                | "memalign"
+                | "valloc"
+                | "mallocx"
+                | "rallocx"
+                | "xallocx"
+                | "do_rallocx"
+                | "__rust_alloc"
+                | "__rust_alloc_zeroed"
+                | "__rust_realloc"
+        )
 }
 
 struct StringTable {
@@ -231,4 +274,90 @@ struct Function {
     name: i64,
     #[prost(int64, tag = "3")]
     system_name: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit-level because which frames a sample keeps is only visible by
+    //! decoding the profile; the process test only sees that names exist.
+
+    use std::io::Read;
+    use std::path::Path;
+
+    use flate2::read::GzDecoder;
+    use jemalloc_pprof::WeightedStack;
+
+    use super::*;
+
+    #[inline(never)]
+    fn pprof_allocating_caller_marker() -> usize {
+        std::hint::black_box(11)
+    }
+
+    fn decode(profile: &StackProfile, symbols: &ExecutableSymbols) -> Profile {
+        let exe = std::env::current_exe().unwrap();
+        let gzipped = encode(profile, 1, Some((exe.as_path(), symbols)));
+        let mut encoded = Vec::new();
+        GzDecoder::new(gzipped.as_slice())
+            .read_to_end(&mut encoded)
+            .unwrap();
+        Profile::decode(encoded.as_slice()).unwrap()
+    }
+
+    fn frame_names(profile: &Profile, sample: &Sample) -> Vec<String> {
+        sample
+            .location_id
+            .iter()
+            .map(|&id| {
+                let location = &profile.location[id as usize - 1];
+                location.line.first().map_or_else(String::new, |line| {
+                    let function = &profile.function[line.function_id as usize - 1];
+                    profile.string_table[function.name as usize].clone()
+                })
+            })
+            .collect()
+    }
+
+    /// A sample taken inside `malloc` is attributed to the function that
+    /// called it, and its mapping keeps the runtime range and file offset
+    /// offline symbolizers need.
+    #[test]
+    fn samples_start_at_the_allocating_caller() {
+        let symbols = ExecutableSymbols::open(Path::new("/proc/self/exe")).unwrap();
+        let mut profile = StackProfile::default();
+        for mapping in mappings::MAPPINGS.as_deref().unwrap() {
+            profile.push_mapping(jemalloc_pprof::Mapping {
+                memory_start: mapping.memory_start,
+                memory_end: mapping.memory_end,
+                memory_offset: mapping.memory_offset,
+                file_offset: mapping.file_offset,
+                pathname: mapping.pathname.clone(),
+                build_id: None,
+            });
+        }
+        let caller = pprof_allocating_caller_marker as *const () as usize;
+        let malloc = libc::malloc as *const () as usize;
+        // Root first, as `parse_jeheap` stores stacks; +1 because stacks
+        // hold return addresses.
+        profile.push_stack(
+            WeightedStack {
+                addrs: vec![caller + 1, malloc + 1],
+                weight: 4096.0,
+            },
+            None,
+        );
+
+        let decoded = decode(&profile, &symbols);
+
+        assert_eq!(
+            frame_names(&decoded, &decoded.sample[0]),
+            ["jazz_cli::heap_profiling::pprof::tests::pprof_allocating_caller_marker"]
+        );
+        assert_eq!(decoded.sample[0].value, [4096]);
+        let location = &decoded.location[decoded.sample[0].location_id[0] as usize - 1];
+        let mapping = &decoded.mapping[location.mapping_id as usize - 1];
+        assert!((mapping.memory_start..mapping.memory_limit).contains(&(caller as u64)));
+        assert_eq!(location.address, caller as u64);
+        assert_eq!(pprof_allocating_caller_marker(), 11);
+    }
 }
