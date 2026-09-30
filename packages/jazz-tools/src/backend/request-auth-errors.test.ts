@@ -1,4 +1,4 @@
-import { createHmac } from "node:crypto";
+import { createHmac, createSign, generateKeyPairSync } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -158,9 +158,12 @@ describe("client-caused request auth failures are RequestAuthenticationErrors", 
 
   it.each([
     [401, "account_request_failed"],
-    [403, "identity_revoked"],
+    [403, "identity_not_authorized"],
     [404, "identity_not_assigned"],
-  ])("rejects an identity the account registry refuses with %i", async (status, code) => {
+    [409, "identity_already_assigned"],
+    [400, "use_local_first_founding"],
+    [400, "local_first_proof_required"],
+  ])("rejects an identity the account registry refuses with %i %s", async (status, code) => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(status === 401 ? "invalid account credential" : code, { status }),
     );
@@ -171,6 +174,48 @@ describe("client-caused request auth failures are RequestAuthenticationErrors", 
       }),
     );
     expect(error.code).toBe(code);
+  });
+
+  describe("with a static asymmetric key", () => {
+    const rsa = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const rsaPem = rsa.publicKey.export({ type: "spki", format: "pem" }).toString();
+    const ec = generateKeyPairSync("ec", { namedCurve: "P-256" });
+    const ecJwk = { ...ec.publicKey.export({ format: "jwk" }), kid: KID };
+    const payload = b64(JSON.stringify({ iss: ISSUER, sub: "reader" }));
+    const unsigned = (alg: string) => `${b64(JSON.stringify({ alg, typ: "JWT" }))}.${payload}`;
+    const rs256 = () => {
+      const input = unsigned("RS256");
+      return `${input}.${b64(createSign("RSA-SHA256").update(input).sign(rsa.privateKey))}`;
+    };
+    const hmacSigned = (alg: string, secret: string) =>
+      `${unsigned(alg)}.${b64(createHmac("sha256", secret).update(unsigned(alg)).digest())}`;
+
+    it("accepts a token signed for the configured key", async () => {
+      await expect(
+        resolveRequestSession(bearer(rs256()), { appId: "app", jwtPublicKey: rsaPem }),
+      ).resolves.toMatchObject({ user_id: "reader" });
+    });
+
+    it.each([
+      ["HS256 with the public key as its secret", hmacSigned("HS256", rsaPem)],
+      ["none", `${unsigned("none")}.`],
+      ["ES256", `${unsigned("ES256")}.${b64("signature")}`],
+      ["an unknown algorithm", `${unsigned("XX999")}.${b64("signature")}`],
+    ])("rejects a token for an RSA PEM key that uses %s", async (_alg, token) => {
+      const error = await authFailure(
+        resolveRequestSession(bearer(token), { appId: "app", jwtPublicKey: rsaPem }),
+      );
+      expect(error.message).toMatch(/^Invalid JWT/);
+    });
+
+    it("rejects an HS256 token for an EC JWK", async () => {
+      await authFailure(
+        resolveRequestSession(bearer(hmacSigned("HS256", "anything")), {
+          appId: "app",
+          jwtPublicKey: ecJwk,
+        }),
+      );
+    });
   });
 
   it("recognises the error from another copy of jazz-tools by name", () => {
@@ -270,5 +315,22 @@ describe("server-side request auth failures stay plain errors", () => {
     await serverFailure(resolveRequestSession(bearer(valid()), config));
     fetcher.mockResolvedValueOnce(new Response(JSON.stringify({ account: "nope" })));
     await serverFailure(resolveRequestSession(bearer(valid()), config));
+  });
+
+  it("fails when the registry answers 403 or 404 without a rejection code", async () => {
+    // Core's app gate answers a wrong app id or registry path with a bare 404:
+    // a misconfiguration must not sign every user out.
+    const config = { ...staticConfig, accountRegistry: "https://core.example/apps/app/accounts" };
+    const fetcher = vi.spyOn(globalThis, "fetch");
+    for (const response of [
+      new Response(null, { status: 404 }),
+      new Response("not found", { status: 404 }),
+      new Response(null, { status: 403 }),
+      new Response("identity_not_authorized", { status: 404 }),
+      new Response("identity_not_assigned", { status: 500 }),
+    ]) {
+      fetcher.mockResolvedValueOnce(response);
+      await serverFailure(resolveRequestSession(bearer(valid()), config));
+    }
   });
 });
