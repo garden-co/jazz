@@ -97,11 +97,13 @@ describe("BandChat cross-topology recovery", () => {
               });
               roomId = room.id;
               await owner.db
-                .insert(app.roomMembers, { roomId, memberAuthor: owner.author })
+                .insert(app.roomMembers, {
+                  roomId,
+                  memberAuthor: owner.author,
+                  memberProfileId: owner.profileId,
+                })
                 .wait({ tier: "global" });
-              await owner.db
-                .insert(app.roomMembers, { roomId, memberAuthor: peer.author })
-                .wait({ tier: "global" });
+              await admitAfterRequest(owner, peer, roomId);
               await waitForQuery(
                 peer.db,
                 app.rooms.where({ id: roomId }),
@@ -259,15 +261,16 @@ describe("BandChat cross-topology recovery", () => {
         ),
         owner.db.subscribe(app.profiles.where({ author: owner.author }), () => {}),
       );
-      void owner.db.insert(app.profiles, {
+      const ownerProfileId = owner.db.insert(app.profiles, {
         author: owner.author,
         displayName: "subscription-owner",
-      });
+      }).value.id;
       const ownerRoom = owner.db.insert(app.rooms, { name: "Owner subscription room" });
       const ownerRoomId = ownerRoom.value.id;
       void owner.db.insert(app.roomMembers, {
         roomId: ownerRoomId,
         memberAuthor: owner.author,
+        memberProfileId: ownerProfileId,
       });
       unsubscribers.push(owner.db.subscribe(app.rooms.where({ id: ownerRoomId }), () => {}));
 
@@ -285,14 +288,15 @@ describe("BandChat cross-topology recovery", () => {
         ),
         guest.db.subscribe(app.profiles.where({ author: guest.author }), () => {}),
       );
-      void guest.db.insert(app.profiles, {
+      const guestProfileId = guest.db.insert(app.profiles, {
         author: guest.author,
         displayName: "subscription-guest",
-      });
+      }).value.id;
       const guestRoom = guest.db.insert(app.rooms, { name: "Guest bootstrap room" });
       void guest.db.insert(app.roomMembers, {
         roomId: guestRoom.value.id,
         memberAuthor: guest.author,
+        memberProfileId: guestProfileId,
       });
       unsubscribers.push(guest.db.subscribe(app.rooms.where({ id: guestRoom.value.id }), () => {}));
 
@@ -371,12 +375,13 @@ describe("BandChat cross-topology recovery", () => {
               });
               roomId = room.id;
               await owner.db
-                .insert(app.roomMembers, { roomId, memberAuthor: owner.author })
+                .insert(app.roomMembers, {
+                  roomId,
+                  memberAuthor: owner.author,
+                  memberProfileId: owner.profileId,
+                })
                 .wait({ tier: "global" });
-              const membership = await owner.db
-                .insert(app.roomMembers, { roomId, memberAuthor: peer.author })
-                .wait({ tier: "global" });
-              peerMembershipId = membership.id;
+              peerMembershipId = await admitAfterRequest(owner, peer, roomId);
             },
           },
           {
@@ -489,6 +494,28 @@ async function openMemberDb(
     }),
   );
   return { db, author: account.id };
+}
+
+/**
+ * Admission as the app does it: the peer asks to join with its own profile,
+ * then the creator admits that profile. Returns the membership id.
+ */
+async function admitAfterRequest(
+  owner: ClientIdentity,
+  peer: ClientIdentity,
+  roomId: string,
+): Promise<string> {
+  await peer.db
+    .insert(app.joinRequests, { roomId, requester: peer.author, profileId: peer.profileId })
+    .wait({ tier: "global" });
+  const membership = await owner.db
+    .insert(app.roomMembers, {
+      roomId,
+      memberAuthor: peer.author,
+      memberProfileId: peer.profileId,
+    })
+    .wait({ tier: "global" });
+  return membership.id;
 }
 
 async function openMember(

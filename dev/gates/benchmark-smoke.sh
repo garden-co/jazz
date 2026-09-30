@@ -38,15 +38,17 @@ if [[ "${1:-}" == "--ci" && $# == 1 ]]; then
   run_phase legacy-benchmark-correctness \
     cargo test -p jazz --features testing --test legacy_benchmark_smoke
   run_phase jazz-sim-scenario-correctness cargo test -p jazz-sim --test scenario_smoke
-  run_phase policy-document-pages cargo test -p jazz-example-policy-scoped-documents-benchmark --test pages
-  run_phase permissioned-subscription-fanout cargo test -p jazz-example-benchmark-w1 --lib subscription_fanout::tests::fanout_preserves_exact_membership_updates_and_revocation -- --exact
+  run_phase band-book-pages cargo test -p jazz-example-band-book-benchmark --test pages
+  run_phase stage-plan-crew-dashboard cargo test -p jazz-example-stage-plan-benchmark --lib board::crew_dashboard::tests::fanout_preserves_exact_membership_updates_and_revocation -- --exact
   exit 0
 fi
 
 if [[ "${1:-}" == "--compile-ci" && $# == 1 ]]; then
   run_phase jazz-benchmark-api cargo check -p jazz --benches --features testing
   run_phase jazz-sim-benchmark-api cargo check -p jazz-sim --benches
-  run_phase policy-document-benchmark-api cargo check -p jazz-example-policy-scoped-documents-benchmark --all-targets
+  # --all-targets also compiles the nightly benches, which CodSpeed does not run.
+  run_phase band-book-benchmark-api cargo check -p jazz-example-band-book-benchmark --all-targets
+  run_phase stage-plan-benchmark-api cargo check -p jazz-example-stage-plan-benchmark --all-targets
   exit 0
 fi
 

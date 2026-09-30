@@ -12,7 +12,12 @@ import {
 } from "./websocket.js";
 import { BrowserWorkerTransportPump } from "./browser-worker-transport.js";
 import { NativeRuntimeAdapter, type Transport } from "./native-runtime-adapter.js";
-import { type TxId, type WriteReceipt } from "../client.js";
+import {
+  JazzClient,
+  PersistedWriteRejectedError,
+  type TxId,
+  type WriteReceipt,
+} from "../client.js";
 
 const previousWebSocket = globalThis.WebSocket;
 const TEST_RUNTIME_AUTHOR = new TextEncoder().encode('["urn:jazz:test","runtime"]');
@@ -125,10 +130,25 @@ describe("NativeRuntimeAdapter server transport", () => {
   it.each([
     [
       "transport mentioning a nested rejection",
-      new Error("Protocol: upstream reported WriteRejected: quoted peer diagnostic"),
+      Object.assign(
+        new Error("Protocol: upstream reported WriteRejected: quoted peer diagnostic"),
+        {
+          code: "protocol",
+        },
+      ),
     ],
-    ["not-observed", new Error("NotObserved: transaction is not resident")],
-    ["schema", new Error("Schema: invalid authored branch value")],
+    // Only the core code classifies a rejection; rejection-shaped text alone does not.
+    ["uncoded rejection-shaped text", new Error("WriteRejected: no core code")],
+    [
+      "not-observed",
+      Object.assign(new Error("NotObserved: transaction is not resident"), {
+        code: "not_observed",
+      }),
+    ],
+    [
+      "schema",
+      Object.assign(new Error("Schema: invalid authored branch value"), { code: "schema" }),
+    ],
     ["cancellation", Object.assign(new Error("operation cancelled"), { name: "AbortError" })],
     ["unknown", new Error("unknown lifecycle failure")],
   ])("preserves %s lifecycle errors from native write waits", async (_kind, nativeError) => {
@@ -199,7 +219,9 @@ describe("NativeRuntimeAdapter server transport", () => {
     const write = {
       ...fakeWrite(),
       wait: async () => {
-        throw new Error("WriteRejected: queued write was denied");
+        throw Object.assign(new Error("WriteRejected: queued write was denied"), {
+          code: "write_rejected",
+        });
       },
     };
     const runtime = new NativeRuntimeAdapter(
@@ -229,6 +251,61 @@ describe("NativeRuntimeAdapter server transport", () => {
       transactionId: await committedTxId(inserted),
       code: "write_rejected",
       reason: "queued write was denied",
+    });
+  });
+
+  it("surfaces a native local exclusive conflict as PersistedWriteRejectedError", async () => {
+    const conflictedWrite = {
+      ...fakeWrite(),
+      wait: async () => {
+        throw Object.assign(
+          new Error(
+            "(transaction_conflict): row visible parent changed since transaction write was staged",
+          ),
+          { code: "transaction_conflict" },
+        );
+      },
+    };
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({ commitTransaction: () => conflictedWrite, tick: () => undefined }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const openTransactionId = runtime.beginTransaction(
+      "exclusive",
+      "00000000-0000-0000-0000-000000000013" as never,
+    );
+    const txId = runtime.commitTransaction(openTransactionId);
+
+    await expect(runtime.waitForTransaction(txId, "local")).rejects.toMatchObject({
+      kind: "rejected",
+      transactionId: txId,
+      code: "transaction_conflict",
+      reason: "row visible parent changed since transaction write was staged",
+    });
+
+    const client = JazzClient.connectWithRuntime(runtime as never, {
+      appId: "test-app",
+      schema: {},
+    });
+    const error = await client.waitForExclusiveTransaction(txId).then(
+      () => undefined,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(PersistedWriteRejectedError);
+    expect(error).toMatchObject({
+      transactionId: txId,
+      code: "transaction_conflict",
+      reason: "row visible parent changed since transaction write was staged",
     });
   });
 
@@ -411,6 +488,63 @@ describe("NativeRuntimeAdapter server transport", () => {
       await runtime.close();
     },
   );
+
+  it("turns a pump failure during a parked read into a transport error, not an unhandled rejection", async () => {
+    globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+    const pumpFailure = new Error("core tick failed");
+    let failTicks = false;
+    let polls = 0;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => new FakeTransport([]),
+            tick: () => {
+              if (!failTicks) return;
+              // Fail only the tick the read's pump drives.
+              failTicks = false;
+              throw pumpFailure;
+            },
+            all: () => ({
+              poll: () => {
+                polls += 1;
+                failTicks = true;
+                return null;
+              },
+              cancel: () => undefined,
+            }),
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    try {
+      const terminal = vi.fn();
+      runtime.onServerTransportError(terminal);
+      runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+      await runtime.waitForUpstreamServerConnection();
+
+      await expect(
+        runtime.query(JSON.stringify({ table: "todos" }), null, "global"),
+      ).rejects.toThrow("core tick failed");
+      await waitForServerPumpTimer();
+
+      expect(polls).toBeGreaterThan(0);
+      expect(terminal).toHaveBeenCalledWith(pumpFailure);
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off("unhandledRejection", unhandled);
+      await runtime.close().catch(() => undefined);
+    }
+  });
 
   it("reconnects after a negotiated Core reports its account registry temporarily unavailable", async () => {
     const sockets: FakeWebSocket[] = [];

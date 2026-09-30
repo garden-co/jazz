@@ -1,7 +1,7 @@
 # Jazz performance timeline data
 
-Read-only CodSpeed wallclock history for public `garden-co/jazz`, served at
-`/api/timeline` and shown on the docs site's examples & benchmarks page
+Read-only CodSpeed wallclock history for public `garden-co/jazz`, snapshotted
+daily and served at `/api/timeline` and shown on the docs site's examples & benchmarks page
 (`/examples`, `components/showcase/`). No Jazz native build, database, or
 CodSpeed token is needed. `/perf-timeline`, the former standalone explorer,
 redirects to `/examples`.
@@ -24,55 +24,64 @@ an independent mean-throughput or sustained-concurrency measurement.
   trials and unregistered branches are excluded from the API dataset.
 - Releases without an exact measured commit are identified but never assigned
   estimated values. Missing and simulation-only results are excluded; reruns
-  remain separate receipts, not averaged.
+  remain separate receipts, not averaged. The scheduled nightly CodSpeed run
+  adds points only for benchmarks not already measured at that commit, so it
+  never gives a merge case a second point at one SHA.
 - A metric card's number is the newest released measurement
   (`lib/showcase/summary.ts`); open-PR experiments never feed a card.
+- A benchmark renamed without changing its numbers (declared `stitch` in
+  `dev/benchmarks/metadata/former-names.ts`, backed by same-base CodSpeed
+  runs) continues its former name's history, so its card keeps its releases.
+  Other renames start a new history.
 
 ## Sources and caching
 
-`lib/source.ts` uses ordinary unauthenticated GraphQL at
-`https://gql.codspeed.io/`. It first lists `repository.runs` with
+The site never calls CodSpeed or GitHub's API. `/api/timeline` only reads a
+prebuilt snapshot, `timeline.json` on the `perf-timeline-data` pre-release
+(`PERF_TIMELINE_SNAPSHOT_URL` overrides the URL), and is CDN-cached for an
+hour and served stale for up to a week while it revalidates. A snapshot more
+than two days old shows a visible "last refreshed" warning. When the snapshot
+cannot be read, a server instance that already read one keeps serving it; a
+cold instance returns HTTP 502 with a retry UI.
+
+`.github/workflows/perf-timeline-snapshot.yml` builds the snapshot once a day,
+when a GitHub release is published, when the alpha publish workflow finishes,
+and on manual dispatch. It runs `scripts/perf-timeline-snapshot.ts`
+(`lib/perf-timeline/snapshot.ts`) on a full-history checkout and uploads the
+result to that release with the Actions token; no other secret is needed. A
+failed build leaves the previous snapshot in place. The release is marked
+pre-release and never latest, and its tag is not a version tag. It lives on a
+release, not a branch, so Vercel's git integration never tries to deploy it.
+
+CodSpeed is read through ordinary unauthenticated GraphQL at
+`https://gql.codspeed.io/`. The build first lists `repository.runs` with
 `commit.branch.pullRequest` metadata but no results, then fetches walltime
 distributions via `repository.run(id:)`, one run per request, only for runs the
 timeline can admit (main, open PRs, exact tags and registered backfills).
 Asking for every run's results at once exceeded CodSpeed's gateway timeout at
 ~400 runs. `runs` takes no pagination arguments; the UI reports the actual
-returned count, not a claim of exhaustive retention. This public web API is not
-a pinned SDK contract: API errors fail visibly rather than returning demo data.
-See also `../../../dev/benchmarks/CODSPEED_GQL.md` for profile access.
+returned count, not a claim of exhaustive retention. Results of runs older than
+a week are reused from the previous snapshot's `codspeed-results.json`; newer
+runs are re-read, because results can still be processing right after a run
+and re-running a CI job can replace results inside an existing run. A daily
+build therefore asks CodSpeed for the run list plus the last week's runs. This
+public web API is not a pinned SDK contract: API errors fail the build rather
+than publishing demo data. See also `../../../dev/benchmarks/CODSPEED_GQL.md`
+for profile access.
 
-GitHub's public tags endpoint supplies exact version-tag SHA mappings. Optional
-server-only `PERF_GITHUB_TOKEN` can raise its rate limit; never prefix it with
-`NEXT_PUBLIC_`. An unavailable GitHub source produces a visible warning and
-leaves release classification unknown, while CodSpeed history still works.
-
-Main-run ancestry is checked with GitHub's `compare/<measured-SHA>...<tag-SHA>`:
-only `ahead` or `identical` proves inclusion. Neither dates nor a shared merge
-base prove inclusion. Deduplicated SHA comparisons cache for one day, with three
-concurrent requests and an overall 50-second source deadline. The per-refresh
-comparison budget is 40 (200 with the optional token); errors or exhausted
-budgets visibly warn that remaining main release statuses are unverified. No PR
-trial is reclassified through ancestry, and missing evidence never fabricates a
-release measurement.
-
-The run list is cached for five minutes. A run's results are cached for five
-minutes while the run is under two hours old, then for a day: results can still
-be processing right after a run, and re-running a CI job can replace results
-inside an existing run, so even settled runs expire daily. A warm refresh
-therefore asks CodSpeed for the run list plus only new runs. The API response is
-CDN-cached for 30 minutes and may be served stale for up to a day while it
-revalidates. GitHub tags cache for one hour. Refresh reads that cache; it does
-not bypass rate protection. No credentials, callgraph presigned URLs, or private
-data reach the browser. When CodSpeed fails, a server instance that already
-built a timeline returns it with a warning naming when it was retrieved; a
-cold instance returns HTTP 502 with a retry UI.
+Version tags and release ancestry come from the checkout's own git history:
+a main commit belongs to the oldest version tag that contains it
+(`git tag --contains`). Neither dates nor a shared merge base prove inclusion.
+A measured commit missing from the checkout stays unreleased with a visible
+warning. No PR trial is reclassified through ancestry, and missing evidence
+never fabricates a release measurement.
 
 ## Deployment
 
-Deploy through the existing docs project; no separate app or Vercel project is
-required. Set the optional server-only `PERF_GITHUB_TOKEN` on that project only
-if higher public-source limits are needed. `tests/examples.browser.mjs` checks
-the page against a fixture after `pnpm --filter docs build`.
+Deploy through the existing docs project; no separate app, Vercel project or
+Vercel setting is required. `tests/examples.browser.mjs` checks the page
+against a fixture after `pnpm --filter docs build`. To refresh the data by
+hand, dispatch the "Benchmark timeline snapshot" workflow.
 
 ## Audited historical backfills
 

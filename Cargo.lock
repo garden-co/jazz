@@ -2166,12 +2166,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "jazz-example-auth-chat-benchmark"
+name = "jazz-example-band-book-benchmark"
 version = "0.1.0"
 dependencies = [
  "codspeed-divan-compat",
  "jazz",
  "jazz-benchmark-guard",
+ "jazz-storage-rocksdb",
+ "serde_json",
+ "tempfile",
  "uuid",
 ]
 
@@ -2182,17 +2185,7 @@ dependencies = [
  "codspeed-divan-compat",
  "jazz",
  "jazz-benchmark-guard",
-]
-
-[[package]]
-name = "jazz-example-benchmark-w1"
-version = "0.1.0"
-dependencies = [
- "codspeed-divan-compat",
- "jazz",
- "jazz-benchmark-guard",
- "jazz-storage-rocksdb",
- "tempfile",
+ "uuid",
 ]
 
 [[package]]
@@ -2202,16 +2195,9 @@ dependencies = [
  "codspeed-divan-compat",
  "jazz",
  "jazz-benchmark-guard",
-]
-
-[[package]]
-name = "jazz-example-chat-benchmark"
-version = "0.1.0"
-dependencies = [
- "codspeed-divan-compat",
- "jazz",
- "jazz-benchmark-guard",
- "uuid",
+ "jazz-storage-rocksdb",
+ "sha2 0.10.9",
+ "tempfile",
 ]
 
 [[package]]
@@ -2263,19 +2249,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "jazz-example-policy-scoped-documents-benchmark"
-version = "0.1.0"
-dependencies = [
- "codspeed-divan-compat",
- "jazz",
- "jazz-benchmark-guard",
- "jazz-storage-rocksdb",
- "serde_json",
- "tempfile",
- "uuid",
-]
-
-[[package]]
 name = "jazz-example-poster-shop-benchmark"
 version = "0.1.0"
 dependencies = [
@@ -2289,13 +2262,14 @@ name = "jazz-example-record-player-benchmark"
 version = "0.1.0"
 dependencies = [
  "codspeed-divan-compat",
+ "groove",
  "jazz",
  "jazz-benchmark-guard",
  "serde_json",
 ]
 
 [[package]]
-name = "jazz-example-todo-benchmark"
+name = "jazz-example-stage-plan-benchmark"
 version = "0.1.0"
 dependencies = [
  "codspeed-divan-compat",
@@ -2315,6 +2289,8 @@ dependencies = [
  "codspeed-divan-compat",
  "jazz",
  "jazz-benchmark-guard",
+ "jazz-storage-rocksdb",
+ "tempfile",
 ]
 
 [[package]]
