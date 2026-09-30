@@ -13,3 +13,4 @@ mod pagination;
 mod recursive_queries;
 mod subqueries;
 mod subscriptions;
+mod writer_nested_subscriptions;
