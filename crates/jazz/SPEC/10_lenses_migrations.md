@@ -38,6 +38,7 @@ Invariant digest:
   encodings.
 - `INV-LENS-22`: A content version's explicit authored-column presence MUST be stored only as a nullable, strictly increasing array of nonzero local `PhysicalColumnId`s; the exact authored schema/table mapping converts it to or from logical wire names, and malformed or unmapped ids MUST fail before any derived current row is persisted.
 - `INV-LENS-24`: A global physical UUID is permanently issued across the whole durable catalogue lineage. Admission, pending/staged replay, snapshot installation, reopen, and authority allocation MUST reject or avoid reusing any retired table, column epoch, or recursive enum-occurrence UUID; only an exact compatible source-to-target coordinate may retain its UUID.
+- `INV-LENS-26`: A local content update whose single parent is the current content winner authored under another schema MUST NOT drop that base's cells: when the writer's schema cannot carry every base cell and every authored column has a counterpart in the base schema, the version MUST be authored under the base schema, with the lens-translated authored columns overlaying the base cells and `authored_columns` naming only the translated authored columns.
 
 ## Details
 
@@ -595,6 +596,31 @@ sparse deletion events and combined current row. Adding or incompatibly
 replacing a table allocates a new id and cannot observe old deletion events even
 if a caller reuses a `RowUuid`; dropped ids remain retained for history and are
 never reassigned (`INV-LENS-21`).
+
+An update carries forward what its writer did not change, including columns
+the writer's schema does not know (`INV-LENS-26`). A content version stores a
+complete row in its authored variant, so an older-schema writer updating a row
+whose current version was authored under a newer schema cannot encode the
+newer columns in its own variant; projecting its version would refill them
+with the migration default and silently lose the newer value. When the
+writer's schema cannot round-trip the base cells, the local write is instead
+authored under the base version's schema, which this node necessarily holds
+as a registered variant because it stores that base. The writer's patch is
+lens-translated into the base schema, overlays the base's own cells, and
+`authored_columns` still names only what the writer asserted. No new stored
+or wire representation is involved: the result is an ordinary version of an
+admitted schema. For example, `v1.tasks { title, done }` evolving to
+`v2.tasks { title, done, dueDate }` through `AddColumn(dueDate, null)`: Bob
+(v2) inserts `{ dueDate: "2026-10-01" }`, Alice (v1) updates `{ done: true }`,
+and her version is authored as `v2 { done: true, dueDate: "2026-10-01" }`
+with `authored_columns = { done }`; Alice's own reads project it back to v1.
+The writer's schema is kept when nothing would be lost (the base is the same
+or an older schema), when the update does not name exactly the current
+content winner as its only parent, for named-branch writes, and when an
+authored column has no counterpart in the base schema (the base schema
+dropped it). The last case cannot be expressed as one authored variant and
+still loses the base-only columns; representing a version that asserts
+columns from two schemas needs a new encoding.
 
 A current-write-pointer flip is a core-ordered, monotone catalogue write
 (§10.2) and **never invalidates in-flight work**. The pointer selects the schema

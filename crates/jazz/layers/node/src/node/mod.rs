@@ -1672,6 +1672,46 @@ pub(super) fn apply_compiled_lens_path(
     path.target_table.clone()
 }
 
+/// Columns of the path's target schema whose values derive from `column` of
+/// its source schema. Empty when the path drops the column.
+pub(super) fn compiled_lens_path_column_targets(
+    path: &CompiledLensPath,
+    column: &str,
+) -> BTreeSet<String> {
+    let mut names = BTreeSet::from([column.to_owned()]);
+    for op in &path.ops {
+        match op {
+            CompiledLensOp::Rename { from, to } => {
+                if names.remove(from) {
+                    names.insert(to.clone());
+                } else {
+                    names.remove(to);
+                }
+            }
+            CompiledLensOp::Copy { from, to } => {
+                if names.contains(from) {
+                    names.insert(to.clone());
+                } else {
+                    names.remove(to);
+                }
+            }
+            CompiledLensOp::Add { .. } => {}
+            CompiledLensOp::Drop { column } => {
+                names.remove(column);
+            }
+        }
+    }
+    names
+}
+
+/// A content winner in the schema variant that authored it.
+struct AuthoredContentWinner {
+    schema: SchemaVersionId,
+    table: String,
+    cells: BTreeMap<String, Value>,
+    tx_id: TxId,
+}
+
 fn push_compiled_forward_lens_op(
     op: &LensOp,
     compiled: &mut Vec<CompiledLensOp>,

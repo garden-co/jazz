@@ -341,6 +341,10 @@ where
                 }
             }
         }
+        for (schema_version, commit) in &mut commits {
+            self.author_update_under_lossless_base_schema(schema_version, commit)
+                .await?;
+        }
         // This is the lowest common local commit construction boundary: direct
         // inserts, facade update/upsert, open transactions, and batched paths
         // all pass here before durable/outbox publication. Fill only exact
@@ -1010,37 +1014,19 @@ where
         if deletion.is_some_and(|version| version.deletion() == Some(DeletionEvent::Deleted)) {
             return Ok(None);
         }
-        let content = match self.query_local_layer_winner_in_branch(
-            table,
-            &branch_key,
-            row_uuid,
-            VersionLayer::Content,
-        )
-        .await?
-        {
-            Some(version) => Some(version),
-            None => self.query_global_layer_winner_in_branch(
-                table,
-                &branch_key,
-                row_uuid,
-                VersionLayer::Content,
-            )
-            .await?,
-        };
-        let Some(content) = content
+        let Some(AuthoredContentWinner {
+            schema: authored_schema,
+            table: authored_table,
+            mut cells,
+            tx_id: content_tx,
+        }) = self
+            .authored_content_winner_in_branch(table, &branch_key, row_uuid)
+            .await?
         else {
             return Ok(None);
         };
-        let content_tx = self.version_tx_id(&content)?;
-        let authored_schema = self
-            .schema_version_for_alias(content.schema_version_alias())
-            .ok_or(Error::InvalidStoredValue(
-                "current version schema alias must exist",
-            ))?;
-        let authored_table = self.table_in_schema_ref(content.table(), authored_schema)?;
-        let mut cells = self.materialized_cells_for_version(authored_table, &content)?;
         let Some(projected_table) =
-            self.translate_cells(authored_schema, schema_version, content.table(), &mut cells)?
+            self.translate_cells(authored_schema, schema_version, &authored_table, &mut cells)?
         else {
             return Ok(None);
         };
@@ -1050,6 +1036,151 @@ where
             ));
         }
         Ok(Some((cells, content_tx)))
+    }
+
+    /// Read the content winner of one exact branch-local row in the schema
+    /// that authored it, retaining indirect scalar descriptors.
+    async fn authored_content_winner_in_branch(
+        &mut self,
+        table: &str,
+        branch_key: &BranchKey,
+        row_uuid: RowUuid,
+    ) -> Result<Option<AuthoredContentWinner>, Error> {
+        let content = match self
+            .query_local_layer_winner_in_branch(table, branch_key, row_uuid, VersionLayer::Content)
+            .await?
+        {
+            Some(version) => Some(version),
+            None => {
+                self.query_global_layer_winner_in_branch(
+                    table,
+                    branch_key,
+                    row_uuid,
+                    VersionLayer::Content,
+                )
+                .await?
+            }
+        };
+        let Some(content) = content else {
+            return Ok(None);
+        };
+        let tx_id = self.version_tx_id(&content)?;
+        let schema = self
+            .schema_version_for_alias(content.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue(
+                "current version schema alias must exist",
+            ))?;
+        let authored_table = self.table_in_schema_ref(content.table(), schema)?;
+        let cells = self.materialized_cells_for_version(authored_table, &content)?;
+        Ok(Some(AuthoredContentWinner {
+            schema,
+            table: content.table().to_owned(),
+            cells,
+            tx_id,
+        }))
+    }
+
+    /// Author a local update under its base version's schema when the
+    /// writer's own schema cannot carry every cell of that base (`INV-LENS-26`).
+    ///
+    /// A mergeable content version stores a complete row in its authored
+    /// schema. When an older-schema writer updates a row whose base version
+    /// was authored under a newer schema, encoding the result in the writer's
+    /// schema would drop the base's newer columns, and every lens projection
+    /// would then refill them with the migration default. The writer never
+    /// asserted those columns, so they must carry forward from the exact base
+    /// the update applied to. That base's schema is an admitted, registered
+    /// variant on this node (its version is stored here), so authoring under
+    /// it needs no new encoding: the translated authored columns overlay the
+    /// base's own cells, and `authored_columns` stays the writer's intent.
+    ///
+    /// The writer's schema is kept when nothing would be lost (same schema,
+    /// or a lossless round trip such as an older base), when the update does
+    /// not name exactly one parent that is still the local content winner,
+    /// when it targets a named branch, or when an authored column has no
+    /// counterpart in the base schema (a column the base schema dropped); the
+    /// last case cannot be expressed as one authored variant.
+    async fn author_update_under_lossless_base_schema(
+        &mut self,
+        schema_version: &mut SchemaVersionId,
+        commit: &mut MergeableCommit,
+    ) -> Result<(), Error> {
+        let writer_schema = *schema_version;
+        if self.catalogue.catalogue_schemas.len() < 2
+            || commit.deletion.is_some()
+            || commit.parents.len() != 1
+            || !commit.branch.values.is_empty()
+        {
+            return Ok(());
+        }
+        let branch_key = {
+            let table_schema = self.table_in_schema_ref(&commit.table, writer_schema)?;
+            let schema = &self
+                .catalogue
+                .catalogue_schemas
+                .get(&writer_schema)
+                .ok_or(Error::InvalidStoredValue("commit schema missing"))?
+                .schema;
+            schema
+                .project_branch_selector(table_schema, &commit.branch)
+                .map_err(Error::InvalidBranchKey)?
+                .0
+        };
+        let Some(base) = self
+            .authored_content_winner_in_branch(&commit.table, &branch_key, commit.row_uuid)
+            .await?
+        else {
+            return Ok(());
+        };
+        if base.schema == writer_schema || base.tx_id != commit.parents[0] {
+            return Ok(());
+        }
+        let mut round_trip = base.cells.clone();
+        if self
+            .translate_cells(base.schema, writer_schema, &base.table, &mut round_trip)?
+            .is_none()
+        {
+            return Ok(());
+        }
+        let Some(path) = self.compiled_lens_path(writer_schema, base.schema, &commit.table)? else {
+            return Ok(());
+        };
+        let base_table = apply_compiled_lens_path(&path, &mut round_trip);
+        if round_trip == base.cells || base_table != base.table {
+            return Ok(());
+        }
+        let writer_authored = commit
+            .authored_columns
+            .clone()
+            .unwrap_or_else(|| commit.cells.keys().cloned().collect());
+        let mut base_authored = BTreeSet::new();
+        for column in &writer_authored {
+            let translated = compiled_lens_path_column_targets(&path, column);
+            if translated.is_empty() {
+                return Ok(());
+            }
+            base_authored.extend(translated);
+        }
+        let mut writer_cells = commit.cells.clone();
+        apply_compiled_lens_path(&path, &mut writer_cells);
+        let mut cells = base.cells;
+        for column in &base_authored {
+            let value = writer_cells
+                .remove(column)
+                .ok_or(Error::InvalidMergeableCommit(
+                    "authored column is missing after lens translation",
+                ))?;
+            cells.insert(column.clone(), value);
+        }
+        commit.prepared_large_columns = std::mem::take(&mut commit.prepared_large_columns)
+            .iter()
+            .flat_map(|column| compiled_lens_path_column_targets(&path, column))
+            .collect();
+        commit.table = base.table;
+        commit.cells = cells;
+        commit.authored_columns = Some(base_authored);
+        *schema_version = base.schema;
+        Ok(())
     }
 
     /// Return the exact local content parent for a branch-local row.

@@ -562,3 +562,223 @@ fn exclusive_view_commit_rejects_concurrent_local_row_change() {
         );
     });
 }
+
+/// `tasks` as deployed first: an older client keeps this schema.
+fn tasks_v1() -> JazzSchema {
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("tasks")
+                    .column("title", ColumnType::Text)
+                    .column("done", ColumnType::Boolean)
+                    .nullable_column("notes", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    )
+}
+
+/// `tasks` after the `add-due-date` migration (`dueDate` defaults to null).
+fn tasks_v2() -> JazzSchema {
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("tasks")
+                    .column("title", ColumnType::Text)
+                    .column("done", ColumnType::Boolean)
+                    .nullable_column("notes", ColumnType::Text)
+                    .nullable_column("dueDate", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    )
+}
+
+fn text(value: &str) -> Value {
+    Value::String(value.to_owned())
+}
+
+fn nullable_text(value: &str) -> Value {
+    Value::Nullable(Some(Box::new(text(value))))
+}
+
+fn task_cell(view: &Db, schema: &JazzSchema, row: RowUuid, column: &str) -> Option<Value> {
+    let prepared = view.prepare_query(&view.table("tasks")).unwrap();
+    view.read(&prepared)
+        .unwrap()
+        .into_iter()
+        .find(|candidate| candidate.row_uuid() == row)
+        .expect("task row is visible")
+        .cell(&schema.tables[0], column)
+}
+
+/// Insert a task through the v2 view with every column set.
+async fn insert_v2_task(new_client: &Db, row: RowUuid) {
+    new_client
+        .insert(
+            "tasks",
+            [
+                ("title".to_owned(), text("ship")),
+                ("done".to_owned(), Value::Bool(false)),
+                ("notes".to_owned(), nullable_text("draft")),
+                ("dueDate".to_owned(), nullable_text("2026-10-01")),
+            ]
+            .into(),
+            jazz::db::InsertOptions {
+                row_id: Some(row),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+}
+
+/// A partial update from an older-schema writer leaves a column added by a
+/// later migration unchanged instead of resetting it to the lens default
+/// (#3562). The old writer's `authored_columns` stay exactly what it changed.
+///
+/// ```text
+/// bob(v2) ──insert {dueDate: "2026-10-01"}──► row
+/// alice(v1) ──update {done: true}───────────► row   (never names dueDate)
+/// bob(v2) ──read──► {done: true, dueDate: "2026-10-01"}
+/// ```
+#[test]
+fn older_schema_partial_update_keeps_newer_schema_column() {
+    futures::executor::block_on(async {
+        let owner = open_owner(tasks_v1()).await;
+        let alice_v1 = owner.register_schema_view(tasks_v1()).await.unwrap();
+        let bob_v2 = owner.register_schema_view(tasks_v2()).await.unwrap();
+        let row = RowUuid::from_bytes([0x35; 16]);
+        insert_v2_task(&bob_v2, row).await;
+        let due_date = task_cell(&bob_v2, &tasks_v2(), row, "dueDate");
+        assert!(due_date.is_some());
+
+        alice_v1
+            .update(
+                "tasks",
+                row,
+                [("done".to_owned(), Value::Bool(true))].into(),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            task_cell(&bob_v2, &tasks_v2(), row, "done"),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(task_cell(&bob_v2, &tasks_v2(), row, "dueDate"), due_date);
+        assert_eq!(
+            task_cell(&bob_v2, &tasks_v2(), row, "title"),
+            Some(text("ship"))
+        );
+        // The older writer still reads its own write through its schema.
+        assert_eq!(
+            task_cell(&alice_v1, &tasks_v1(), row, "done"),
+            Some(Value::Bool(true))
+        );
+    });
+}
+
+/// An older-schema writer explicitly clearing a column it does know still
+/// clears it, while the newer column it does not know is carried forward.
+///
+/// ```text
+/// bob(v2) ──insert {notes: "draft", dueDate: "2026-10-01"}──► row
+/// alice(v1) ──update {notes: null}──────────────────────────► row
+/// bob(v2) ──read──► {notes: null, dueDate: "2026-10-01"}
+/// ```
+#[test]
+fn older_schema_explicit_null_clears_known_column_and_keeps_newer_column() {
+    futures::executor::block_on(async {
+        let owner = open_owner(tasks_v1()).await;
+        let alice_v1 = owner.register_schema_view(tasks_v1()).await.unwrap();
+        let bob_v2 = owner.register_schema_view(tasks_v2()).await.unwrap();
+        let row = RowUuid::from_bytes([0x36; 16]);
+        insert_v2_task(&bob_v2, row).await;
+        let due_date = task_cell(&bob_v2, &tasks_v2(), row, "dueDate");
+
+        alice_v1
+            .update(
+                "tasks",
+                row,
+                [("notes".to_owned(), Value::Nullable(None))].into(),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+
+        let cleared = task_cell(&alice_v1, &tasks_v1(), row, "notes");
+        assert_ne!(cleared, Some(nullable_text("draft")));
+        assert_eq!(task_cell(&bob_v2, &tasks_v2(), row, "notes"), cleared);
+        assert_eq!(task_cell(&bob_v2, &tasks_v2(), row, "dueDate"), due_date);
+    });
+}
+
+/// The newer writer updating a row last written by an older writer, and the
+/// older writer updating again afterwards, both keep every column the other
+/// side wrote.
+///
+/// ```text
+/// alice(v1) ──insert──────────────────► row
+/// bob(v2) ──update {dueDate}──────────► row
+/// alice(v1) ──update {title}──────────► row
+/// bob(v2) ──read──► {title: "renamed", dueDate: "2026-10-01"}
+/// ```
+#[test]
+fn alternating_schema_updates_keep_each_writers_columns() {
+    futures::executor::block_on(async {
+        let owner = open_owner(tasks_v1()).await;
+        let alice_v1 = owner.register_schema_view(tasks_v1()).await.unwrap();
+        let bob_v2 = owner.register_schema_view(tasks_v2()).await.unwrap();
+        let row = RowUuid::from_bytes([0x37; 16]);
+        alice_v1
+            .insert(
+                "tasks",
+                [
+                    ("title".to_owned(), text("ship")),
+                    ("done".to_owned(), Value::Bool(false)),
+                ]
+                .into(),
+                jazz::db::InsertOptions {
+                    row_id: Some(row),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let unset_due_date = task_cell(&bob_v2, &tasks_v2(), row, "dueDate");
+
+        bob_v2
+            .update(
+                "tasks",
+                row,
+                [("dueDate".to_owned(), nullable_text("2026-10-01"))].into(),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        let due_date = task_cell(&bob_v2, &tasks_v2(), row, "dueDate");
+        assert_ne!(due_date, unset_due_date);
+
+        alice_v1
+            .update(
+                "tasks",
+                row,
+                [("title".to_owned(), text("renamed"))].into(),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            task_cell(&bob_v2, &tasks_v2(), row, "title"),
+            Some(text("renamed"))
+        );
+        assert_eq!(task_cell(&bob_v2, &tasks_v2(), row, "dueDate"), due_date);
+        assert_eq!(
+            task_cell(&alice_v1, &tasks_v1(), row, "title"),
+            Some(text("renamed"))
+        );
+    });
+}
