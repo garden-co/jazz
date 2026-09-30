@@ -24,6 +24,149 @@ impl crate::db::Transport for TrustedBackendRelayTransport {
     }
 }
 
+/// A relation-backed SELECT policy must require every equality in a compound
+/// join, including equalities that reference distinct aliases from its left
+/// input. The reader may see `allowed` only when its proof row matches both.
+///
+/// left_facts ──┐
+///              ├── compound join ──► evidence
+/// right_facts ─┘                         │
+/// resource row id ── correlated filter ──┘
+#[test]
+fn exists_rel_compound_join_requires_cross_alias_equalities_for_read() {
+    let resource_id = |byte| row(byte);
+    let reader = AuthorSubject::for_test_bytes([0x9a; 16]);
+    let relation_column = |scope: &str, column: &str| PublicRelColumnRef {
+        scope: Some(scope.to_owned()),
+        column: column.to_owned(),
+    };
+    let equality = |left: (&str, &str), right: (&str, &str)| PublicRelJoinCondition {
+        left: relation_column(left.0, left.1),
+        right: relation_column(right.0, right.1),
+    };
+    let rel = PublicRelExpr::Filter {
+        input: Box::new(PublicRelExpr::Join {
+            left: Box::new(PublicRelExpr::Join {
+                left: Box::new(PublicRelExpr::TableScan {
+                    table: "left_facts".into(),
+                    alias: Some("left_fact".to_owned()),
+                }),
+                right: Box::new(PublicRelExpr::TableScan {
+                    table: "right_facts".into(),
+                    alias: Some("right_fact".to_owned()),
+                }),
+                on: vec![equality(
+                    ("left_fact", "resource_id"),
+                    ("right_fact", "resource_id"),
+                )],
+                join_kind: PublicRelJoinKind::Inner,
+            }),
+            right: Box::new(PublicRelExpr::TableScan {
+                table: "evidence".into(),
+                alias: Some("evidence".to_owned()),
+            }),
+            on: vec![
+                equality(("left_fact", "left_key"), ("evidence", "left_key")),
+                equality(("right_fact", "right_key"), ("evidence", "right_key")),
+            ],
+            join_kind: PublicRelJoinKind::Inner,
+        }),
+        predicate: PublicRelPredicateExpr::Cmp {
+            left: relation_column("left_fact", "resource_id"),
+            op: PublicRelPredicateCmpOp::Eq,
+            right: PublicRelValueRef::RowId(PublicRelRowIdRef::Outer),
+        },
+    };
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("resources")
+                    .column("label", PublicColumnType::Text)
+                    .policies(
+                        PublicTablePolicies::new().with_select(PublicPolicyExpr::ExistsRel { rel }),
+                    ),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("left_facts")
+                    .column("resource_id", PublicColumnType::Uuid)
+                    .column("left_key", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("right_facts")
+                    .column("resource_id", PublicColumnType::Uuid)
+                    .column("right_key", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("evidence")
+                    .column("left_key", PublicColumnType::Text)
+                    .column("right_key", PublicColumnType::Text),
+            ),
+    );
+    let db = open_db(0x9a, AuthorSubject::SYSTEM, &schema);
+    let denied = resource_id(0xd1);
+    let allowed = resource_id(0xa1);
+    for (id, label) in [
+        (denied, "first equality only"),
+        (allowed, "both equalities"),
+    ] {
+        db.insert(
+            "resources",
+            BTreeMap::from([("label".to_owned(), Value::String(label.to_owned()))]),
+            crate::db::InsertOptions {
+                row_id: Some(id),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    for (id, left_key, right_key) in [
+        (denied, "left-denied", "right-denied"),
+        (allowed, "left-allowed", "right-allowed"),
+    ] {
+        db.insert(
+            "left_facts",
+            BTreeMap::from([
+                ("resource_id".to_owned(), Value::Uuid(id.0)),
+                ("left_key".to_owned(), Value::String(left_key.to_owned())),
+            ]),
+            Default::default(),
+        )
+        .unwrap();
+        db.insert(
+            "right_facts",
+            BTreeMap::from([
+                ("resource_id".to_owned(), Value::Uuid(id.0)),
+                ("right_key".to_owned(), Value::String(right_key.to_owned())),
+            ]),
+            Default::default(),
+        )
+        .unwrap();
+    }
+    for (left_key, right_key) in [
+        ("left-denied", "not-right-denied"),
+        ("left-allowed", "right-allowed"),
+    ] {
+        db.insert(
+            "evidence",
+            BTreeMap::from([
+                ("left_key".to_owned(), Value::String(left_key.to_owned())),
+                ("right_key".to_owned(), Value::String(right_key.to_owned())),
+            ]),
+            Default::default(),
+        )
+        .unwrap();
+    }
+
+    let prepared = db.prepare_query(&Query::from("resources")).unwrap();
+    let mut subscription =
+        block_on(db.subscribe_for_identity(&prepared, ReadOpts::default(), reader)).unwrap();
+    assert_eq!(
+        row_ids(&opened_rows(block_on(subscription.next_raw()).unwrap())),
+        vec![allowed],
+        "the row whose evidence matches only the first compound equality must be denied"
+    );
+}
+
 #[test]
 fn local_membership_revocation_refreshes_policy_dependent_subscription() {
     let schema = membership_scoped_relation_schema();
