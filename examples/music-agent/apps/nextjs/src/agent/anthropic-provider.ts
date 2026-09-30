@@ -1,3 +1,4 @@
+import "server-only";
 import Anthropic from "@anthropic-ai/sdk";
 import type { AgentProvider, GenerateInput } from "./provider";
 import { isToolName, parseToolInput, toolDefinitions } from "./tools";
@@ -27,13 +28,16 @@ export function anthropicProvider(model: string): AgentProvider {
       let wroteText = false;
       let paragraphBreak = false;
       for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-        const stream = client.messages.stream({
-          model,
-          max_tokens: 16000,
-          system: systemPrompt(input),
-          tools,
-          messages,
-        });
+        const stream = client.messages.stream(
+          {
+            model,
+            max_tokens: 16000,
+            system: systemPrompt(input),
+            tools,
+            messages,
+          },
+          { signal: input.signal },
+        );
         for await (const event of stream) {
           if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
             // Keep prose from separate model rounds in separate paragraphs.

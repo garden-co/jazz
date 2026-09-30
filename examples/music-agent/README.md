@@ -74,10 +74,15 @@ their result, so they show up in `ChatToolCalls` while they run.
 
 **Durable execution.** The server writes with backend authority; permissions
 let a client write only its own user turns and attachments, never an agent
-reply. A running turn records which server process owns it (`runnerId`) and a
-heartbeat every 3 seconds. `instrumentation.ts` starts a sweeper when the server
+reply. Queueing a reply and moving the conversation's head to it happen in one
+exclusive transaction. A runner claims the turn with a lease id of its own
+(`runnerId`) and renews a heartbeat every 3 seconds; the renewal, every body
+append and the final write are all conditional on still holding that lease,
+and a runner that loses it aborts the model call and stops writing.
+`instrumentation.ts` checks the provider and starts a sweeper when the server
 boots: a `streaming` turn whose heartbeat is older than 15 seconds lost its
-process and is marked `interrupted` (in an exclusive transaction, so two
+process, and a `queued` turn that no runner claimed within 15 seconds never
+started; both are marked `interrupted` (in an exclusive transaction, so two
 servers never disagree). The conversation then offers **Resume**, which claims
 the turn again and continues in place, or **Regenerate**. The scripted agent is
 deterministic, so resuming replays it and skips what was already written; Claude

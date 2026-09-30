@@ -5,11 +5,11 @@ import { createAccountManager } from "jazz-tools";
 import { createJazzClient, JazzClientProvider, type JazzClient } from "jazz-tools/react";
 import { authClient, getJwtFromBetterAuth } from "@/src/lib/auth-client";
 import { loginOrRegister } from "@/src/lib/account-enrollment";
-import { jazzEnv } from "@/src/lib/jazz-env";
+import { jazzAppId, jazzEnv, jazzServerUrl } from "@/src/lib/jazz-env";
 import { StatusScreen } from "./status-screen";
 
-const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID ?? "music-agent-local";
-const serverUrl = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL ?? "http://127.0.0.1:4200";
+const appId = jazzAppId;
+const serverUrl = jazzServerUrl;
 
 export function JazzProvider({ children }: { children: React.ReactNode }) {
   const { data: session } = authClient.useSession();

@@ -1,3 +1,4 @@
+import "server-only";
 import { anthropicProvider } from "./anthropic-provider";
 import type { AgentProvider } from "./provider";
 import { scriptedProvider } from "./scripted-provider";
@@ -21,11 +22,11 @@ export function agentProvider(): AgentProvider {
   return scriptedProvider(Number(process.env.SCRIPTED_AGENT_TOKEN_DELAY_MS ?? 30));
 }
 
-/** The label the UI shows for replies from the configured provider. */
+/**
+ * The label the UI shows for replies from the configured provider. A bad
+ * configuration throws here too; instrumentation.ts validates it at boot so
+ * the server never starts with a provider it can't run.
+ */
 export function agentLabel(): string {
-  try {
-    return agentProvider().label;
-  } catch {
-    return "Agent not configured";
-  }
+  return agentProvider().label;
 }

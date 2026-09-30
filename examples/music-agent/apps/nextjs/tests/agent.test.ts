@@ -60,7 +60,11 @@ describe("MusicAgent server execution", () => {
 
     // A regenerated sibling whose server stopped partway: streaming, a stale
     // heartbeat and half a reply.
-    const sibling = queueAssistantTurn(db, original.conversationId, original.parentId!);
+    const { turnId: sibling } = await queueAssistantTurn(
+      db,
+      original.conversationId,
+      original.parentId!,
+    );
     const partial = original.body.slice(0, 60);
     await db
       .update(app.turns, sibling, {
@@ -91,5 +95,50 @@ describe("MusicAgent server execution", () => {
     await runTurn(firstReply); // complete, so nothing to claim
     const after = (await db.one(app.turns.where({ id: firstReply }), { tier: "global" }))!;
     expect(after.body).toBe(before.body);
+  });
+
+  test("two runners racing to claim one reply write it once", async () => {
+    const { queueAssistantTurn, runTurn, db } = await load();
+    const original = (await db.one(app.turns.where({ id: firstReply }), { tier: "global" }))!;
+    const { turnId } = await queueAssistantTurn(db, original.conversationId, original.parentId!);
+
+    await Promise.all([runTurn(turnId), runTurn(turnId)]);
+
+    const reply = (await db.one(app.turns.where({ id: turnId }), { tier: "global" }))!;
+    expect(reply.status).toBe("complete");
+    expect(reply.body).toBe(original.body);
+    const calls = await db.all(app.toolCalls.where({ turnId }), { tier: "global" });
+    expect(calls.map((call) => call.name).sort()).toEqual(["check_calendar", "find_venues"]);
+  });
+
+  test("a runner that loses its lease stops writing and never finishes the turn", async () => {
+    const { queueAssistantTurn, runTurn, db, HEARTBEAT_MS } = await load();
+    const original = (await db.one(app.turns.where({ id: firstReply }), { tier: "global" }))!;
+    const { turnId } = await queueAssistantTurn(db, original.conversationId, original.parentId!);
+    const read = async () => (await db.one(app.turns.where({ id: turnId }), { tier: "global" }))!;
+
+    // Slow enough that the reply is still streaming at the first heartbeat.
+    process.env.SCRIPTED_AGENT_TOKEN_DELAY_MS = "60";
+    try {
+      const run = runTurn(turnId);
+      await expect
+        .poll(async () => (await read()).body.length, { timeout: 30_000 })
+        .toBeGreaterThan(0);
+
+      // Another runner took the turn over (as after a sweep and a resume elsewhere).
+      await db.update(app.turns, turnId, { runnerId: "another-runner" }).wait({ tier: "global" });
+      await run; // aborts at its next heartbeat
+
+      const stopped = await read();
+      expect(stopped.status).toBe("streaming");
+      expect(stopped.runnerId).toBe("another-runner");
+      expect(stopped.body.length).toBeLessThan(original.body.length);
+
+      // Nothing more arrives from the old runner.
+      await new Promise((resolve) => setTimeout(resolve, HEARTBEAT_MS));
+      expect((await read()).body).toBe(stopped.body);
+    } finally {
+      process.env.SCRIPTED_AGENT_TOKEN_DELAY_MS = "0";
+    }
   });
 });

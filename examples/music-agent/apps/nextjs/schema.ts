@@ -17,6 +17,7 @@ const schema = {
     {
       songsViaArtist: s.reverse("songs", "artist"),
       calendarEventsViaArtist: s.reverse("calendarEvents", "artist"),
+      conversationsViaArtist: s.reverse("conversations", "artist"),
     },
   ),
   songs: s
@@ -68,6 +69,7 @@ const schema = {
         headTurnId: s.uuid().optional(),
       },
       {
+        artist: s.rel("artists", "artistId"),
         turnsViaConversation: s.reverse("turns", "conversation"),
         toolCallsViaConversation: s.reverse("toolCalls", "conversation"),
         attachmentsViaConversation: s.reverse("attachments", "conversation"),
@@ -95,6 +97,8 @@ const schema = {
       },
       {
         conversation: s.rel("conversations", "conversationId"),
+        parent: s.rel("turns", "parentId"),
+        childrenViaParent: s.reverse("turns", "parent"),
         attachmentsViaTurn: s.reverse("attachments", "turn"),
       },
     )

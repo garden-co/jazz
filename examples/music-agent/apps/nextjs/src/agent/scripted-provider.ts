@@ -32,7 +32,7 @@ export function scriptedProvider(tokenDelayMs: number): AgentProvider {
     label: "Scripted agent",
     resume: "replay",
     async generate(input, sink) {
-      const say = (text: string) => stream(sink, text, tokenDelayMs);
+      const say = (text: string) => stream(sink, text, tokenDelayMs, input.signal);
       const request = input.history.at(-1);
       const prompt = request?.text.toLowerCase() ?? "";
       let answered = false;
@@ -113,8 +113,9 @@ export function scriptedProvider(tokenDelayMs: number): AgentProvider {
 }
 
 /** Stream prose in word-sized pieces so it arrives the way model output does. */
-async function stream(sink: TurnSink, text: string, delayMs: number) {
+async function stream(sink: TurnSink, text: string, delayMs: number, signal?: AbortSignal) {
   for (const piece of text.match(/\s*\S+|\s+/g) ?? []) {
+    signal?.throwIfAborted();
     await sink.text(piece);
     if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
   }

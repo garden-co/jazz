@@ -45,15 +45,25 @@ export function ConversationView({
 
   async function send(text: string, files: File[]) {
     // The browser writes the user's turn and audio into Jazz itself, then asks
-    // the server to answer it. The reply streams back through Jazz.
-    const userWrite = db.insert(app.turns, {
-      conversationId: conversation.id,
-      parentId: head?.id,
-      role: "user",
-      body: text,
-      status: "complete",
+    // the server to answer it. The reply streams back through Jazz. The turn
+    // and the head move are one transaction, so no client ever sees a head
+    // that points at a turn which isn't there.
+    const turnWrite = await db.transaction((tx) => {
+      const turn = tx.insert(app.turns, {
+        conversationId: conversation.id,
+        parentId: head?.id,
+        role: "user",
+        body: text,
+        status: "complete",
+      });
+      tx.update(app.conversations, conversation.id, {
+        headTurnId: turn.id,
+        ...(conversation.title === NEW_TITLE && text ? { title: titleFrom(text) } : {}),
+      });
+      return turn.id;
     });
-    const userTurnId = userWrite.value.id;
+    const userTurnId = turnWrite.value;
+    // Audio streams in after the turn it belongs to, outside the transaction.
     const uploads = await Promise.all(
       files.map((file) =>
         db.insertStreaming(app.attachments, {
@@ -66,11 +76,7 @@ export function ConversationView({
         }),
       ),
     );
-    db.update(app.conversations, conversation.id, {
-      headTurnId: userTurnId,
-      ...(conversation.title === NEW_TITLE && text ? { title: titleFrom(text) } : {}),
-    });
-    await userWrite.wait({ tier: "global" });
+    await turnWrite.wait({ tier: "global" });
     await Promise.all(uploads.map((upload) => upload.wait({ tier: "global" })));
     await requestReply(userTurnId);
   }

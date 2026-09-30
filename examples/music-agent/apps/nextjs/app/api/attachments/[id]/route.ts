@@ -1,6 +1,5 @@
 import { app } from "@/schema";
-import { backendJazzClient } from "@/src/lib/backend-jazz-client";
-import { errorResponse, requireAccount, requireConversation } from "@/src/server/access";
+import { errorResponse, userDb } from "@/src/server/access";
 
 export const runtime = "nodejs";
 
@@ -14,15 +13,13 @@ const MAX_PAGE_BYTES = 256 * 1024;
  */
 export async function GET(request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
-    const accountId = await requireAccount(request);
-    const db = (await backendJazzClient()).db;
+    // Reads as the user, so an attachment in someone else's workspace is not found.
+    const db = await userDb(request);
     const id = (await params).id;
-    const meta = await db.one(
-      app.attachments.where({ id }).select("conversationId", "mediaType", "byteLength"),
-      { tier: "global" },
-    );
+    const meta = await db.one(app.attachments.where({ id }).select("mediaType", "byteLength"), {
+      tier: "global",
+    });
     if (!meta) return Response.json({ error: "attachment not found" }, { status: 404 });
-    await requireConversation(accountId, meta.conversationId);
 
     const range = parseRange(request.headers.get("range"), meta.byteLength);
     if (range === "invalid")

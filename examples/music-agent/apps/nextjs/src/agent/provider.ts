@@ -13,6 +13,8 @@ export type GenerateInput = {
   tools: ToolContext;
   /** Set when an interrupted reply resumes: the prose already written. */
   partialReply?: string;
+  /** Aborted when this runner loses the turn to another; stop generating. */
+  signal?: AbortSignal;
 };
 
 /**

@@ -1,8 +1,10 @@
+import "server-only";
 import { app } from "@/schema";
 import permissions from "@/permissions";
 import type { JazzClient } from "jazz-tools/backend";
 import { createRequire as createRequireFromModule } from "node:module";
-import { jazzEnv } from "./jazz-env";
+import { appOrigin } from "./app-origin";
+import { jazzAppId, jazzEnv, jazzServerUrl } from "./jazz-env";
 import { serverSecret } from "./server-secret";
 
 const createRequire =
@@ -23,11 +25,13 @@ export async function backendJazzClient(): Promise<JazzClient> {
   const pending = (globalThis.__musicAgentBackendSession ??= createJazzSession({
     app,
     permissions,
-    // These explicit local defaults let Next evaluate auth routes during a
-    // bare production build. Deployments replace both public values.
-    appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID ?? "music-agent-local",
+    appId: jazzAppId,
     driver: { type: "memory" },
-    serverUrl: process.env.NEXT_PUBLIC_JAZZ_SERVER_URL ?? "http://127.0.0.1:4200",
+    serverUrl: jazzServerUrl,
+    // forRequest() verifies the user's app JWT with these, then reads as that user.
+    jwksUrl: `${appOrigin}/api/auth/jwks`,
+    jwtIssuer: appOrigin,
+    jwtAudience: appOrigin,
     initial: {
       backendSecret: serverSecret("BACKEND_SECRET", "music-agent-development-backend-secret"),
     },

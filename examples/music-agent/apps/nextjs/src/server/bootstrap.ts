@@ -1,7 +1,9 @@
+import "server-only";
 import { app } from "@/schema";
 import { addDays } from "@/src/agent/tools";
 import { queueAssistantTurn } from "@/src/agent/runner";
 import { backendJazzClient } from "@/src/lib/backend-jazz-client";
+import { retryOnConflict } from "@/src/lib/retry";
 import { demoRoughMix } from "./demo-audio";
 
 const SONGS = [
@@ -49,87 +51,80 @@ export const FIRST_PROMPT =
  */
 export async function ensureWorkspace(accountId: string, authUserId: string, displayName: string) {
   const db = (await backendJazzClient()).db;
-  for (;;) {
-    try {
-      const write = await db.exclusiveTransaction(async (tx) => {
-        const existing = await tx.all(app.profiles.where({ accountId }));
-        if (existing[0]) return null;
-        const ownerAccount = accountId;
+  // A concurrent first open that wins the race makes this attempt conflict; the
+  // retry then finds its profile and returns null.
+  return retryOnConflict(async () => {
+    const write = await db.exclusiveTransaction(async (tx) => {
+      const existing = await tx.all(app.profiles.where({ accountId }));
+      if (existing[0]) return null;
+      const ownerAccount = accountId;
+      tx.insert(app.profiles, { accountId, authUserId, displayName }, { id: crypto.randomUUID() });
+      const artistId = crypto.randomUUID();
+      tx.insert(
+        app.artists,
+        { ownerAccount, name: "The Night Shift Trio", homeCity: "Chicago", genre: "jazz" },
+        { id: artistId },
+      );
+      for (const [title, durationSeconds, energy] of SONGS)
         tx.insert(
-          app.profiles,
-          { accountId, authUserId, displayName },
+          app.songs,
+          { ownerAccount, artistId, title, durationSeconds, energy },
           { id: crypto.randomUUID() },
         );
-        const artistId = crypto.randomUUID();
+      for (const [name, city, capacity, style, bookingContact] of VENUES)
         tx.insert(
-          app.artists,
-          { ownerAccount, name: "The Night Shift Trio", homeCity: "Chicago", genre: "jazz" },
-          { id: artistId },
+          app.venues,
+          { ownerAccount, name, city, capacity, style, bookingContact },
+          { id: crypto.randomUUID() },
         );
-        for (const [title, durationSeconds, energy] of SONGS)
-          tx.insert(
-            app.songs,
-            { ownerAccount, artistId, title, durationSeconds, energy },
-            { id: crypto.randomUUID() },
-          );
-        for (const [name, city, capacity, style, bookingContact] of VENUES)
-          tx.insert(
-            app.venues,
-            { ownerAccount, name, city, capacity, style, bookingContact },
-            { id: crypto.randomUUID() },
-          );
-        const today = new Date().toISOString().slice(0, 10);
-        for (const [offset, kind, title, city] of CALENDAR)
-          tx.insert(
-            app.calendarEvents,
-            { ownerAccount, artistId, date: addDays(today, offset), kind, title, city },
-            { id: crypto.randomUUID() },
-          );
+      const today = new Date().toISOString().slice(0, 10);
+      for (const [offset, kind, title, city] of CALENDAR)
+        tx.insert(
+          app.calendarEvents,
+          { ownerAccount, artistId, date: addDays(today, offset), kind, title, city },
+          { id: crypto.randomUUID() },
+        );
 
-        const conversationId = crypto.randomUUID();
-        const userTurnId = crypto.randomUUID();
-        tx.insert(
-          app.conversations,
-          {
-            ownerAccount,
-            artistId,
-            title: "Single release show",
-            headTurnId: userTurnId,
-          },
-          { id: conversationId },
-        );
-        tx.insert(
-          app.turns,
-          {
-            conversationId,
-            role: "user",
-            body: FIRST_PROMPT,
-            status: "complete",
-          },
-          { id: userTurnId },
-        );
-        const payload = demoRoughMix();
-        tx.insert(
-          app.attachments,
-          {
-            conversationId,
-            turnId: userTurnId,
-            filename: "night-shift-single-rough-mix.wav",
-            mediaType: "audio/wav",
-            byteLength: payload.byteLength,
-            payload,
-          },
-          { id: crypto.randomUUID() },
-        );
-        return { conversationId, userTurnId };
-      });
-      await write.wait();
-      return write.value;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (!/exclusive_conflict|transaction_conflict|cascade_rejected/.test(message)) throw error;
-    }
-  }
+      const conversationId = crypto.randomUUID();
+      const userTurnId = crypto.randomUUID();
+      tx.insert(
+        app.conversations,
+        {
+          ownerAccount,
+          artistId,
+          title: "Single release show",
+          headTurnId: userTurnId,
+        },
+        { id: conversationId },
+      );
+      tx.insert(
+        app.turns,
+        {
+          conversationId,
+          role: "user",
+          body: FIRST_PROMPT,
+          status: "complete",
+        },
+        { id: userTurnId },
+      );
+      const payload = demoRoughMix();
+      tx.insert(
+        app.attachments,
+        {
+          conversationId,
+          turnId: userTurnId,
+          filename: "night-shift-single-rough-mix.wav",
+          mediaType: "audio/wav",
+          byteLength: payload.byteLength,
+          payload,
+        },
+        { id: crypto.randomUUID() },
+      );
+      return { conversationId, userTurnId };
+    });
+    await write.wait();
+    return write.value;
+  });
 }
 
 /** Seed, then queue the first reply. Returns the turn to generate, if any. */
@@ -141,5 +136,8 @@ export async function bootstrapWorkspace(
   const seeded = await ensureWorkspace(accountId, authUserId, displayName);
   if (!seeded) return undefined;
   const db = (await backendJazzClient()).db;
-  return queueAssistantTurn(db, seeded.conversationId, seeded.userTurnId);
+  const reply = await queueAssistantTurn(db, seeded.conversationId, seeded.userTurnId, {
+    reuse: true,
+  });
+  return reply.turnId;
 }

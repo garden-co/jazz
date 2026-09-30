@@ -1,8 +1,7 @@
 import { after } from "next/server";
-import { app } from "@/schema";
 import { queueAssistantTurn, runTurn } from "@/src/agent/runner";
 import { backendJazzClient } from "@/src/lib/backend-jazz-client";
-import { errorResponse, requireAccount, requireTurn } from "@/src/server/access";
+import { errorResponse, requireTurn, userDb } from "@/src/server/access";
 
 export const runtime = "nodejs";
 
@@ -13,20 +12,21 @@ export const runtime = "nodejs";
  */
 export async function POST(request: Request) {
   try {
-    const accountId = await requireAccount(request);
+    const db = await userDb(request);
     const { userTurnId } = (await request.json()) as { userTurnId?: string };
     if (!userTurnId) return Response.json({ error: "userTurnId required" }, { status: 400 });
-    const userTurn = await requireTurn(accountId, userTurnId);
+    const userTurn = await requireTurn(db, userTurnId);
     if (userTurn.role !== "user")
       return Response.json({ error: "only user turns get replies" }, { status: 400 });
-    const db = (await backendJazzClient()).db;
-    // Idempotent: a retried request returns the reply that already exists.
-    const existing = await db.one(
-      app.turns.where({ conversationId: userTurn.conversationId, parentId: userTurnId }),
-      { tier: "global" },
+    // Idempotent: a retried request gets the reply that already exists. Finding
+    // it, queueing a new one and moving the head are one exclusive transaction.
+    const { turnId } = await queueAssistantTurn(
+      (await backendJazzClient()).db,
+      userTurn.conversationId,
+      userTurnId,
+      { reuse: true },
     );
-    if (existing) return Response.json({ turnId: existing.id });
-    const turnId = queueAssistantTurn(db, userTurn.conversationId, userTurnId);
+    // Claiming is idempotent too: a reply that is already running or done is left alone.
     after(() => runTurn(turnId));
     return Response.json({ turnId });
   } catch (error) {

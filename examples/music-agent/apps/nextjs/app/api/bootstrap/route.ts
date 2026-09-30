@@ -3,6 +3,7 @@ import { accountRegistryUrl } from "jazz-tools";
 import { resolveRequestSession } from "jazz-tools/backend";
 import { runTurn } from "@/src/agent/runner";
 import { appOrigin } from "@/src/lib/app-origin";
+import { jazzAppId, jazzServerUrl } from "@/src/lib/jazz-env";
 import { auth } from "@/src/lib/auth";
 import { bootstrapWorkspace } from "@/src/server/bootstrap";
 
@@ -12,11 +13,9 @@ export const runtime = "nodejs";
 export async function POST(request: Request) {
   const session = await auth.api.getSession({ headers: request.headers });
   if (!session?.user) return Response.json({ error: "sign in required" }, { status: 401 });
-  const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID ?? "music-agent-local";
-  const serverUrl = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL ?? "http://127.0.0.1:4200";
   const jazzSession = await resolveRequestSession(request, {
-    appId,
-    accountRegistry: accountRegistryUrl(serverUrl, appId),
+    appId: jazzAppId,
+    accountRegistry: accountRegistryUrl(jazzServerUrl, jazzAppId),
     jwksUrl: `${appOrigin}/api/auth/jwks`,
     jwtIssuer: appOrigin,
     jwtAudience: appOrigin,
