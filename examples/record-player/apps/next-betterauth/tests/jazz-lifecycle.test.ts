@@ -124,4 +124,33 @@ describe("RecordPlayer JazzLifecycle", () => {
     await Promise.all([a, b]);
     expect(events).toEqual(["open:a", "shutdown:a:undefined", "open:b"]);
   });
+
+  // #3840: React development mode mounts the provider, cleans it up and mounts
+  // it again in the same tick. On a reload the session is already signed in,
+  // so nothing re-runs the effect afterwards: the second mount must not reuse
+  // the first mount's reconciliation, which the cleanup's close() undoes.
+  it("reopens when a mount, cleanup and remount happen before the first open", async () => {
+    const events: string[] = [];
+    const published: unknown[] = [];
+    const selected = account("a");
+    const manager = { getLoggedIn: () => selected, logout: vi.fn() } as never;
+    const lifecycle = new JazzLifecycle(
+      manager,
+      async (next) => {
+        events.push(`open:${next.identity.subject}`);
+        return client(events, next.identity.subject);
+      },
+      (next) => published.push(next),
+    );
+    const login = async () => {
+      events.push("login:a");
+    };
+    const first = lifecycle.reconcile("a", "session-a", login);
+    const closed = lifecycle.close();
+    const second = lifecycle.reconcile("a", "session-a", login);
+    await Promise.all([first, closed, second]);
+    expect(published.at(-1)).toBeDefined();
+    expect(lifecycle.isCurrent("a", "session-a")).toBe(true);
+    expect(events.at(-1)).toBe("open:a");
+  });
 });

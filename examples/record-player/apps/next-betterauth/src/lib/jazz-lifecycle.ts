@@ -61,6 +61,7 @@ export class JazzLifecycle {
   }
 
   transition(action: (accounts: Accounts) => Promise<unknown> | unknown): Promise<void> {
+    this.forgetReconciliation();
     return this.enqueue(async () => {
       await this.closeCurrent(true);
       await action(this.accounts);
@@ -69,6 +70,7 @@ export class JazzLifecycle {
 
   close(): Promise<void> {
     this.closed = true;
+    this.forgetReconciliation();
     return this.enqueue(() => this.closeCurrent(false));
   }
 
@@ -105,6 +107,17 @@ export class JazzLifecycle {
     const task = this.chain.then(operation);
     this.chain = task.catch(() => {});
     return task;
+  }
+
+  /**
+   * A reconciliation queued before a close or transition is undone by it, so
+   * a later reconcile for the same session must queue a new one instead of
+   * reusing it. React development mode does exactly this on every mount:
+   * reconcile, clean up (close), reconcile again.
+   */
+  private forgetReconciliation(): void {
+    this.reconciliation = undefined;
+    this.reconcilingPrincipal = undefined;
   }
 
   private clearReconciliation(reconciliation: Promise<void>): void {
