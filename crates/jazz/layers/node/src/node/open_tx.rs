@@ -1792,7 +1792,8 @@ where
     /// A runtime reopened as a new node after an unclean close (every browser foreground
     /// runtime) receives its previous node's unsynced writes this way. Only transactions
     /// ingested by this runtime are tracked, so opening a transaction never scans history;
-    /// each is confirmed by a point lookup and dropped once sequenced or gone.
+    /// each is confirmed pending and unsequenced by a point lookup, and dropped once it is
+    /// sequenced, settled or gone.
     async fn pending_foreign_transaction_ids(&mut self) -> Result<Vec<TxId>, Error> {
         let mut tx_ids = Vec::new();
         let tracked: Vec<TxId> = self
@@ -1802,7 +1803,10 @@ where
             .copied()
             .collect();
         for tx_id in tracked {
-            if matches!(self.query_transaction_global_time(tx_id).await?, Some(None)) {
+            if matches!(
+                self.query_transaction_state(tx_id).await?,
+                Some((Fate::Pending, None, _))
+            ) {
                 tx_ids.push(tx_id);
             } else {
                 self.open_tx.pending_foreign_transactions.remove(&tx_id);
