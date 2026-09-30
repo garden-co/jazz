@@ -695,7 +695,8 @@ async function exclusiveCell(name, sv, cv) {
         ["txReadById", { id: rows[1] }],
         ["txInsert", { values: { label: "by-id", body: "saw", author: cv.key } }],
       ],
-      accepted,
+      // An old client's by-id read proves nothing the server can check (#3694).
+      sv === V.new && cv === V.old ? conflict : accepted,
     );
     await exclusive(
       "blind-update",
