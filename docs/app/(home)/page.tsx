@@ -282,7 +282,7 @@ const hostingRows: {
     topic: meter.name,
     selfHosted: {
       Compute: "Your own servers; one instance runs a whole app",
-      Storage: "Your own disks; keep room for row history",
+      Storage: "Your own disks",
       Egress: "Your hosting provider's rates",
     }[meter.name],
     cloud: (
