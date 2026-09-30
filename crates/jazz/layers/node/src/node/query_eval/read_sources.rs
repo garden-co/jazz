@@ -2348,9 +2348,10 @@ where
                 .prepare_source_graph_without_local_exclusions(request)
                 .await?;
             // Only a write-policy check of a multi-row unit carries an
-            // overlay. Box it so ordinary reads keep their poll frames.
+            // overlay; ordinary reads never await it.
             if self.transaction_overlay.is_active() {
-                Box::pin(self.overlay_transaction_writes(request, &mut resolved)).await?;
+                self.boxed_overlay_transaction_writes(request, &mut resolved)
+                    .await?;
             }
             if let Some(scope) = exclusion_scope
                 && !self.excludes_below_pending(request)
@@ -2375,6 +2376,22 @@ where
 }
 
 impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
+    /// [`Self::overlay_transaction_writes`], boxed and built in this frame
+    /// rather than the caller's.
+    ///
+    /// Boxing at the call site alone still materializes the whole overlay
+    /// future in `prepare_source_graph`'s poll frame in unoptimized builds,
+    /// so every source of every read would pay for it on a recursion that
+    /// already nears the 1 MiB WASM stack of the dev build ("memory access
+    /// out of bounds" while lowering a read's sources).
+    fn boxed_overlay_transaction_writes<'a>(
+        &'a mut self,
+        request: &'a SourceRequest,
+        resolved: &'a mut ResolvedSource,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SourceResolutionError>> + 'a>> {
+        Box::pin(self.overlay_transaction_writes(request, resolved))
+    }
+
     /// Layer the candidate transaction's own writes over one committed
     /// write-policy evidence source (`INV-RLS-9`).
     ///
