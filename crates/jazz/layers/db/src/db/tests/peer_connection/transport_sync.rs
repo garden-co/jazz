@@ -2683,7 +2683,8 @@ fn oversized_view_updates_hydrate_through_body_repair() {
     }
 }
 
-/// A client and a Core over a real byte link whose client-bound frames the
+/// A client and a Core over a real, uncompressed byte link (so queued frame
+/// bytes track encoded message size) whose client-bound frames the
 /// test can withhold, with `BATCH` bulky rows seeded so the whole-table
 /// snapshot must cross as bounded `ViewUpdatePart`s under a lowered limit.
 struct OversizedSnapshotLink {
@@ -2718,10 +2719,8 @@ impl OversizedSnapshotLink {
         }
         let (client_raw, server_raw) = byte_duplex_raw();
         let client_inbound = Rc::clone(&client_raw.inbound);
-        let upstream =
-            block_on(client.connect_upstream(Box::new(WireTransportAdapter::current(client_raw))));
-        let subscriber =
-            server.accept_subscriber(Box::new(WireTransportAdapter::current(server_raw)), alice);
+        let upstream = block_on(client.connect_upstream(uncompressed_adapter(client_raw)));
+        let subscriber = server.accept_subscriber(uncompressed_adapter(server_raw), alice);
         Self {
             server,
             client,
