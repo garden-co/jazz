@@ -750,11 +750,14 @@ impl EvaluationWorkQueue {
         }
     }
 
+    /// Whether `node` still waits on a predecessor and has not been evaluated.
+    /// A durable node is evaluated as the tick begins, before its temporal
+    /// blockers are attached, so it can carry a wait count while complete.
     fn is_temporally_waiting(&self, node: NodeId) -> bool {
-        self.layout
-            .slots
-            .get(&node)
-            .is_some_and(|&slot| self.temporal_waiting[slot] > 0)
+        self.layout.slots.get(&node).is_some_and(|&slot| {
+            self.temporal_waiting[slot] > 0
+                && self.entries[self.task_slots[slot]] != EvaluationEntry::Complete
+        })
     }
 
     fn temporal_ready(&mut self, node: NodeId) {
@@ -1136,10 +1139,6 @@ impl<'a> IncrementalEvaluation<'a> {
             .collect::<HashMap<_, _>>();
         carry_live_node_lifecycle(&mut node_meta, runtime, &installed);
         runtime.node_meta.extend(node_meta);
-        // Written-back arrangements are stamped at this evaluation's tick. A
-        // later evaluation must begin at a later tick, or it would take them
-        // for its own already-applied input.
-        runtime.current_tick = runtime.current_tick.max(self.current_tick);
     }
 
     /// Replace the state staged for `node` with the live runtime's, once the
@@ -2584,6 +2583,11 @@ impl IvmRuntime {
                 // would rerun its transitions from pre-park state (#3815).
                 let completed = evaluation.work_queue.complete_nodes().collect::<Vec<_>>();
                 evaluation.write_back_or_hold(self, completed);
+                // State this evaluation writes back or installs later is
+                // stamped at its tick. A later evaluation restages it, so it
+                // must begin at a later tick, or `Accumulate` would take that
+                // state for its own already-applied input and drop its delta.
+                self.current_tick = self.current_tick.max(evaluation.current_tick);
                 let mut pending = self.pending_incremental.0.borrow_mut();
                 let evaluation_id = pending.next_id;
                 pending.next_id = pending.next_id.saturating_add(1);
