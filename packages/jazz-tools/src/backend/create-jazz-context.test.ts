@@ -372,15 +372,15 @@ describe("backend/create-jazz-context", () => {
     // An un-attributed backend read deliberately passes no logical session:
     // it is trusted serving, not a public request impersonating SYSTEM. A
     // request keeps its external session and therefore remains policy-scoped.
-    expect((backendDb as any).getRuntimeOperationContext()).toBeNull();
-    expect((requestDb as any).getRuntimeOperationContext()).toMatchObject({
-      session,
-      readSession: undefined,
+    expect((backendDb as any).getAccessContext()).toBeNull();
+    expect((requestDb as any).getAccessContext()).toMatchObject({
+      writeSession: session,
+      readSession: session,
     });
     // Attributed Dbs keep the user's session for provenance only; reads, in
     // and out of transactions, use backend authority.
-    expect((attributedSessionDb as any).getRuntimeOperationContext()).toMatchObject({
-      session,
+    expect((attributedSessionDb as any).getAccessContext()).toMatchObject({
+      writeSession: session,
       readSession: SYSTEM_READ_SESSION,
     });
 
