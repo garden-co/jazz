@@ -1835,7 +1835,13 @@ where
                         if let Some(retained) = current {
                             return Err(invalid(&format!(
                                 "scope addition duplicates a retained physical coordinate \
-                                 (receiver {receiver_role}: retained {}, added {})",
+                                 (receiver {receiver_role}, {} frame, retained from {}: retained {}, added {})",
+                                if *cleared { "reset" } else { "incremental" },
+                                if changes.contains_key(&coordinate) {
+                                    "this frame"
+                                } else {
+                                    "predecessor"
+                                },
                                 supporting_row_diagnostic(retained),
                                 supporting_row_diagnostic(row),
                             )));

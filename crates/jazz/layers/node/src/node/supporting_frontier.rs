@@ -18,6 +18,8 @@ std::thread_local! {
 pub(super) struct SupportingFrontier {
     weights: BTreeMap<SupportingRow, [i64; 4]>,
     unpublished: Option<BTreeMap<SupportingRow, bool>>,
+    /// Diagnostic (#3815): the last contributions to each retained row.
+    history: BTreeMap<SupportingRow, std::collections::VecDeque<String>>,
 }
 
 impl SupportingFrontier {
@@ -35,10 +37,65 @@ impl SupportingFrontier {
         let weights = self.weights.entry(row.clone()).or_default();
         weights[origin] += weight;
         let after = weights.iter().any(|weight| *weight > 0);
-        if weights.iter().all(|weight| *weight == 0) {
+        let removed = weights.iter().all(|weight| *weight == 0);
+        if removed {
             self.weights.remove(&row);
+            self.history.remove(&row);
+        } else {
+            let history = self.history.entry(row).or_default();
+            history.push_back(format!("o{origin}{weight:+}"));
+            while history.len() > 12 {
+                history.pop_front();
+            }
         }
         (before != after).then_some(after)
+    }
+
+    /// Diagnostic (#3815): annotate the latest contribution with its source.
+    pub(super) fn note_source(&mut self, row: &SupportingRow, source: &dyn std::fmt::Debug) {
+        if let Some(last) = self
+            .history
+            .get_mut(row)
+            .and_then(|history| history.back_mut())
+        {
+            use std::fmt::Write as _;
+            let _ = write!(last, "@{source:?}");
+        }
+    }
+
+    /// Diagnostic (#3815): every physical coordinate retained at more than one
+    /// version, with each version's per-origin weights, journal state and
+    /// recent contributions. A well-formed frontier returns nothing.
+    pub(super) fn coordinate_conflicts(&self) -> Vec<String> {
+        let mut by_coordinate =
+            BTreeMap::<super::CoveredInputCoordinate, Vec<&SupportingRow>>::new();
+        for row in self.rows() {
+            by_coordinate
+                .entry(super::CoveredInputCoordinate::from(row))
+                .or_default()
+                .push(row);
+        }
+        by_coordinate
+            .into_values()
+            .filter(|rows| rows.len() > 1)
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|row| {
+                        format!(
+                            "[{} {} {:?} tx {:?} weights {:?} journal {:?} history {:?}]",
+                            row.version_table.as_str(),
+                            row.row.0,
+                            row.version.layer,
+                            row.version.tx,
+                            self.weights.get(row),
+                            self.unpublished.as_ref().map(|journal| journal.get(row)),
+                            self.history.get(row),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" vs ")
+            })
+            .collect()
     }
 
     pub(super) fn rows(&self) -> impl Iterator<Item = &SupportingRow> {

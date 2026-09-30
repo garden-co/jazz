@@ -1290,6 +1290,21 @@ impl PeerState {
                 maintained.supporting_rows().cloned().collect(),
             )
         };
+        // Diagnostic (#3815): a frontier holding two versions of one physical
+        // coordinate cannot be published; name it instead of letting the
+        // receiver reject an opaque duplicate.
+        let conflicts = maintained.supporting_coordinate_conflicts();
+        if !conflicts.is_empty() {
+            return Err(Error::InvalidAuthoritySourceClosure {
+                subscription,
+                transition: format!(
+                    "publisher {:?} ({}) frontier retains two versions of one coordinate: {}",
+                    self.role,
+                    if supporting_rows.is_snapshot() { "snapshot" } else { "delta" },
+                    conflicts.join("; ")
+                ),
+            });
+        }
         let fact_add_count = supporting_rows.added_rows().len();
         let fact_remove_count = supporting_rows.removed_rows().len();
         if result_member_adds.is_empty()
@@ -2627,6 +2642,24 @@ impl PeerState {
         };
         let (policy_identity, policy_claims) =
             self.served_subscription_policy_binding(target_subscription)?;
+        if let Some(maintained) = self
+            .publication_states
+            .get(&maintained_subscription)
+            .and_then(|state| state.maintained_subscription_view.as_ref())
+        {
+            // Diagnostic (#3815), as for the canonical publication.
+            let conflicts = maintained.maintained.supporting_coordinate_conflicts();
+            if !conflicts.is_empty() {
+                return Err(Error::InvalidAuthoritySourceClosure {
+                    subscription: target_subscription,
+                    transition: format!(
+                        "publisher {:?} (rehydrated snapshot) frontier retains two versions of one coordinate: {}",
+                        self.role,
+                        conflicts.join("; ")
+                    ),
+                });
+            }
+        }
         let settled_through = self.maintained_publication_cut(node, maintained_subscription);
         let update = {
             let mut scoped = node.scoped_active_session_claims(policy_identity, policy_claims);

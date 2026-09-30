@@ -3517,6 +3517,16 @@ fn server_subscription_failure_rejection_message(
     subscription: SubscriptionKey,
     error: &crate::node::Error,
 ) -> SyncMessage {
+    // A publisher-side source-closure diagnosis is built to be safe to
+    // share (no row bodies or claims); forward it like a receiver's.
+    if let crate::node::Error::InvalidAuthoritySourceClosure { transition, .. } = error {
+        return subscription_rejection_message(
+            subscription,
+            SubscribeRejectReason::InvalidAuthoritySourceClosure {
+                transition: transition.clone(),
+            },
+        );
+    }
     // Keep the complete error on the serving process only. Subscription keys
     // provide a correlation handle without disclosing schema, policy, or
     // storage details to the peer.
