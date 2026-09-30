@@ -345,6 +345,10 @@ class VectorMutableBuffer final : public facebook::jsi::MutableBuffer {
     case JAZZ_NATIVE_RELAY_BACKPRESSURE:
       throw JSError(runtime, std::string("Jazz native foreground runtime is busy during ") +
                                 operation + "; retry after the next scheduled tick");
+    case JAZZ_NATIVE_RELAY_REMOTE_PLAINTEXT_ENDPOINT:
+      throw JSError(runtime,
+                    "Remote HTTP sessions require HTTPS; local development endpoints "
+                    "remain supported.");
     default:
       throw JSError(runtime, std::string("Jazz native foreground runtime failed during ") +
                                 operation);
