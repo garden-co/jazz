@@ -1,10 +1,12 @@
 "use client";
 
+import { Banner, Spinner } from "@astryxdesign/core";
+import { CenteredPage } from "@/components/centered-page";
 import { useEffect, useRef, useState } from "react";
 import { createAccountManager } from "jazz-tools";
 import { createJazzClient, JazzClientProvider, type JazzClient } from "jazz-tools/react";
 import { authClient, getJwtFromBetterAuth } from "@/src/lib/auth-client";
-import { loginOrRegister } from "@/src/lib/account-enrollment";
+import { jazzEnv } from "@/src/lib/jazz-env";
 
 const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID ?? "poster-shop-local";
 const serverUrl = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL ?? "http://127.0.0.1:4200";
@@ -21,10 +23,12 @@ export function JazzProvider({ children }: { children: React.ReactNode }) {
     let cancelled = false;
     setError(undefined);
     void (async () => {
-      const accounts = await createAccountManager({ appId, serverUrl, env: "dev" });
+      const accounts = await createAccountManager({ appId, serverUrl, env: jazzEnv });
       const credential = { getToken: requireBetterAuthToken };
-      const account = await loginOrRegister(accounts, credential);
-      const opened = await createJazzClient({ appId, serverUrl, account });
+      // One ordered core decision: the active assignment, or a new account
+      // for a fresh identity (docs/auth/authentication).
+      const account = await accounts.loginOrRegisterJWT(credential);
+      const opened = await createJazzClient({ appId, serverUrl, env: jazzEnv, account });
       if (cancelled) return void opened.shutdown();
       await clientRef.current?.shutdown({ waitForSync: true });
       if (cancelled) return void opened.shutdown();
@@ -52,12 +56,26 @@ export function JazzProvider({ children }: { children: React.ReactNode }) {
     error?.sessionId === session.session.id && error.userId === session.user.id
       ? error.cause
       : undefined;
-  if (visibleError) return <p role="alert">Could not open poster studio: {visibleError.message}</p>;
+  if (visibleError)
+    return (
+      <CenteredPage>
+        <Banner
+          status="error"
+          title="Could not open the poster studio"
+          description={visibleError.message}
+        />
+      </CenteredPage>
+    );
   const client =
     connection?.sessionId === session.session.id && connection.userId === session.user.id
       ? connection.client
       : undefined;
-  if (!client) return <p>Opening poster studio…</p>;
+  if (!client)
+    return (
+      <CenteredPage>
+        <Spinner label="Opening the poster studio" />
+      </CenteredPage>
+    );
   return <JazzClientProvider client={client}>{children}</JazzClientProvider>;
 }
 

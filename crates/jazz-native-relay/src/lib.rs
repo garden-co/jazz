@@ -316,6 +316,7 @@ fn validate_private_session_endpoint(server_url: &str) -> Result<url::Url, JazzN
     match url.scheme() {
         "https" => Ok(url),
         "http" if private_plaintext_host_is_allowed(&url) => Ok(url),
+        "http" if url.host_str().is_some() => Err(JazzNativeRelayStatus::RemotePlaintextEndpoint),
         "http" => Err(JazzNativeRelayStatus::LifecycleFailure),
         _ => Err(JazzNativeRelayStatus::LifecycleFailure),
     }
@@ -751,6 +752,7 @@ pub enum JazzNativeRelayStatus {
     InvalidAbiRange = 6,
     IncompatibleAbi = 7,
     Backpressure = 8,
+    RemotePlaintextEndpoint = 9,
 }
 
 /// Explicit host-owned lifecycle registry for JNI/Swift. No global relay map.
@@ -1459,8 +1461,8 @@ impl NativeRelayHost {
     /// own upstream is the local relay core, which is always attached, so it
     /// cannot tell whether the authoritative server could answer. Only a
     /// change is reported, so an `Attempting` report timestamps the start of
-    /// the attempt the relay first observed. Foregrounds without a native
-    /// socket session keep the core's derived state.
+    /// the attempt the relay first observed. A foreground without a native
+    /// socket session has no server to wait for.
     fn sync_foreground_remote_link(&mut self, foreground: u64) {
         let Some(opened) = self.foregrounds.get(&foreground) else {
             return;
@@ -1472,6 +1474,7 @@ impl NativeRelayHost {
             .private_socket_sessions
             .contains_key(&relay.admitted_scope)
         {
+            self.report_foreground_remote_link(foreground, RemoteLinkHint::NoServer);
             return;
         }
         let scope = opened.scope.clone();
@@ -1506,6 +1509,17 @@ impl NativeRelayHost {
             }
         };
         if previous == Some(hint) {
+            return;
+        }
+        self.report_foreground_remote_link(foreground, hint);
+    }
+
+    fn report_foreground_remote_link(&mut self, foreground: u64, hint: RemoteLinkHint) {
+        if self
+            .foregrounds
+            .get(&foreground)
+            .is_none_or(|opened| opened.remote_link_hint == Some(hint))
+        {
             return;
         }
         let reported = self
@@ -4965,6 +4979,8 @@ struct ConnectedClient {
     refreshed_claims: Option<BTreeMap<String, Value>>,
     retiring: bool,
     admitted_scope_advice: bool,
+    /// Reachability last reported to a client the host does not manage.
+    relay_link_hint: Option<RemoteLinkHint>,
     db: Rc<Db>,
     tick: Option<RelayTickFuture>,
     upstream_io: RelayPeerIo,
@@ -5735,6 +5751,7 @@ impl RelayWorker {
                 refreshed_claims: None,
                 retiring: false,
                 admitted_scope_advice,
+                relay_link_hint: None,
                 mutations: foreground_mutations::MutationHandles::new(&db),
                 db,
                 tick: None,
@@ -5756,6 +5773,7 @@ impl RelayWorker {
                 _served: None,
             },
         );
+        self.report_relay_link();
         let client = self.clients.get_mut(&id).expect("new client was inserted");
         client.poll_admission(&Waker::from(Arc::clone(&self.wake)));
         if let Err(error) = client.check_admission() {
@@ -5832,9 +5850,33 @@ impl RelayWorker {
         self.flush_foreground_wakes();
     }
 
+    /// What a client's reads can expect from the authority through this
+    /// relay: its connected clients' own upstream is the relay, which answers
+    /// for the authority only while its socket upstream is installed.
+    fn relay_link_hint(&self) -> RemoteLinkHint {
+        match (&self.socket_wire, &self.upstream_transition) {
+            (None, _) => RemoteLinkHint::NoServer,
+            (Some(_), None) if self.upstream_attached => RemoteLinkHint::Live,
+            (Some(_), _) => RemoteLinkHint::Attempting,
+        }
+    }
+
+    /// Report the relay's reachability to clients whose host does not report
+    /// it (host-opened foregrounds get the host's own hint).
+    fn report_relay_link(&mut self) {
+        let hint = self.relay_link_hint();
+        for client in self.clients.values_mut() {
+            if !client.admitted_scope_advice && client.relay_link_hint != Some(hint) {
+                client.relay_link_hint = Some(hint);
+                client.db.set_remote_link_hint(hint);
+            }
+        }
+    }
+
     fn pump(&mut self) -> Result<(), RelayError> {
         let waker = Waker::from(Arc::clone(&self.wake));
         self.poll_upstream_transition()?;
+        self.report_relay_link();
         self.poll_closing(&waker)?;
         // One fair relay turn has exactly three protocol phases. A UI upload
         // becomes relay input, the relay applies/forwards it, then UI clients
@@ -8405,10 +8447,6 @@ mod tests {
             matches!(remote, ForegroundDbCommandResponse::Rows { .. }),
             "{remote:?}"
         );
-        fixture.execute(
-            foreground,
-            ForegroundDbCommandRequest::DisconnectNativeUpstream,
-        );
         let ForegroundDbCommandResponse::TransactionOpened { transaction } = fixture.execute(
             foreground,
             ForegroundDbCommandRequest::BeginTransaction {
@@ -8450,6 +8488,11 @@ mod tests {
         assert!(
             matches!(read, ForegroundDbCommandResponse::Rows { .. }),
             "{read:?}"
+        );
+        // The read hydrated its snapshot online; the commit is made offline.
+        fixture.execute(
+            foreground,
+            ForegroundDbCommandRequest::DisconnectNativeUpstream,
         );
         let ForegroundDbCommandResponse::TransactionCommitted { tx_id } = fixture.execute(
             foreground,
@@ -10938,6 +10981,92 @@ mod tests {
         };
         assert_exact_todo_rows(&rows, row_id, "queued");
         client.close().unwrap();
+    }
+
+    // Internal receipt: the reported hint is the core read gate's input, which
+    // no public surface exposes. A plain relay client's own upstream is the
+    // relay, so it must see the relay's server link, not an always-live peer.
+    #[test]
+    fn plain_relay_clients_see_the_relay_server_link() {
+        let directory = tempfile::tempdir().unwrap();
+        let relay =
+            NativeRelay::spawn(config(directory.path().join("link.sqlite"), Some("link"))).unwrap();
+        let client = relay
+            .attach_client(
+                fresh_client_identity(AuthorSubject::for_test_bytes([0x4a; 16])).unwrap(),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let id = client.id;
+        let hint = |relay: &NativeRelay| {
+            relay
+                .run(move |worker| Ok(worker.foreground_client(id)?.db.remote_link_hint_for_test()))
+                .unwrap()
+        };
+        assert_eq!(hint(&relay), Some(RemoteLinkHint::NoServer));
+
+        let generation = relay
+            .run(|worker| {
+                worker
+                    .begin_socket_upstream(None)
+                    .map(|(generation, _)| generation)
+            })
+            .unwrap();
+        relay.pump().unwrap();
+        assert!(matches!(
+            hint(&relay),
+            Some(RemoteLinkHint::Attempting | RemoteLinkHint::Live)
+        ));
+        for _ in 0..10 {
+            if hint(&relay) == Some(RemoteLinkHint::Live) {
+                break;
+            }
+            relay.pump().unwrap();
+        }
+        assert_eq!(hint(&relay), Some(RemoteLinkHint::Live));
+
+        assert!(
+            relay
+                .run(move |worker| worker.retire_socket_upstream(generation))
+                .unwrap()
+        );
+        relay.pump().unwrap();
+        assert_eq!(hint(&relay), Some(RemoteLinkHint::NoServer));
+        client.close().unwrap();
+    }
+
+    // Internal receipt: see above. A host foreground whose scope has no native
+    // socket session has no server its reads could wait for.
+    #[test]
+    fn host_foreground_without_a_socket_session_reports_no_server() {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = NativeHostAbiFixture::new();
+        let capability = fixture.admit(
+            &directory.path().join("no-socket.sqlite"),
+            "no-socket",
+            &permissive_schema(),
+            0xc7,
+        );
+        let foreground = fixture.open_foreground(&capability);
+        fixture.execute(
+            foreground,
+            ForegroundDbCommandRequest::NativeSessionMetadata,
+        );
+        let client = unsafe { &*fixture.host }
+            .inner
+            .lock()
+            .unwrap()
+            .foreground_client(foreground)
+            .unwrap()
+            .clone();
+        let id = client.id;
+        assert_eq!(
+            client
+                .relay
+                .run(move |worker| Ok(worker.foreground_client(id)?.db.remote_link_hint_for_test()))
+                .unwrap(),
+            Some(RemoteLinkHint::NoServer)
+        );
     }
 
     // Internal receipt: JS cannot deliberately hold the native owner. All results

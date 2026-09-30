@@ -929,7 +929,7 @@ fn commit_metric_global_to_authority(
 }
 
 #[test]
-fn grouped_aggregate_authority_validation_compares_public_payloads() {
+fn grouped_aggregate_authority_validation_checks_consumed_row_versions() {
     let schema = signed_metric_schema();
     let (_writer_dir, mut writer) =
         open_node_with_uuid(NodeUuid::from_bytes([0xa4; 16]), schema.clone());
@@ -975,15 +975,6 @@ fn grouped_aggregate_authority_validation_compares_public_payloads() {
             .len(),
         2
     );
-    commit_metric_global_to_authority(&mut other, &mut authority, row(1), "a", 1, 1_004);
-    assert_eq!(
-        signature(
-            &authority
-                .query_rows(&shape, &binding, DurabilityTier::Global)
-                .unwrap(),
-        ),
-        expected_signature
-    );
     let (_tx_id, unchanged_unit) = writer
         .commit_exclusive_settled(unchanged_tx, AuthorSubject::SYSTEM, 1_005)
         .unwrap();
@@ -1009,7 +1000,9 @@ fn grouped_aggregate_authority_validation_compares_public_payloads() {
         writer.tx_query(changed_tx, &shape, &binding).unwrap().len(),
         2
     );
-    commit_metric_global_to_authority(&mut other, &mut authority, row(2), "a", 20, 1_006);
+    // A rewrite that leaves every group's payload unchanged still conflicts:
+    // the aggregate is validated through the row versions it consumed.
+    commit_metric_global_to_authority(&mut other, &mut authority, row(2), "a", 2, 1_006);
     let (_tx_id, changed_unit) = writer
         .commit_exclusive_settled(changed_tx, AuthorSubject::SYSTEM, 1_007)
         .unwrap();
@@ -1365,8 +1358,24 @@ fn tx_query_reachable_uses_shared_snapshot_sources() {
     let binding = shape
         .bind(BTreeMap::from([("team".to_owned(), Value::Uuid(team1.0))]))
         .unwrap();
+    // An exclusive transaction cannot record a recursive traversal as a
+    // narrowed read, so it rejects the read rather than recording whole
+    // tables (garden-co/jazz#3694). A mergeable transaction reads the same
+    // snapshot sources.
+    let exclusive = OpenTransactionId::new();
+    node.open_exclusive(exclusive).unwrap();
+    assert_eq!(
+        node.tx_query(exclusive, &shape, &binding)
+            .unwrap_err()
+            .to_string(),
+        "Reading `resources` through a recursive traversal of `teamTeamMemberships` is not \
+         supported in exclusive transactions yet"
+    );
+    node.abandon_tx(exclusive).unwrap();
+
     let tx = OpenTransactionId::new();
-    node.open_exclusive(tx).unwrap();
+    node.open_mergeable(tx, AuthorSubject::SYSTEM, None)
+        .unwrap();
     let rows = node
         .tx_query(tx, &shape, &binding)
         .unwrap()

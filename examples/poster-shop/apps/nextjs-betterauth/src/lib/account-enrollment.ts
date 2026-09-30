@@ -1,29 +1,20 @@
-import {
-  AccountAuthError,
-  type AccountHandle,
-  type AccountManager,
-  type JWTAuth,
-} from "jazz-tools";
+/** An invite as carried in a link's URL fragment: never a path or query value. */
+export type InviteLink = { canvasId: string; token: string };
 
-export async function loginOrRegister(
-  accounts: AccountManager<JWTAuth>,
-  credential: JWTAuth,
-): Promise<AccountHandle> {
-  try {
-    return await accounts.loginJWT(credential);
-  } catch (cause) {
-    if (!(cause instanceof AccountAuthError) || cause.code !== "identity_not_assigned") throw cause;
-    try {
-      return await accounts.registerJWT(credential);
-    } catch (registerCause) {
-      if (
-        !(registerCause instanceof AccountAuthError) ||
-        registerCause.code !== "identity_already_assigned"
-      )
-        throw registerCause;
-      return await accounts.loginJWT(credential);
-    }
-  }
+const INVITE_FRAGMENT = /^#invite\/([0-9a-f-]{36})\/([0-9a-f-]{36})$/;
+
+/**
+ * Invite links look like `/dashboard#invite/<canvasId>/<token>`. The fragment
+ * never reaches the server, so the token stays out of access logs, CDN logs
+ * and `Referer` headers; the client posts it in a request body instead.
+ */
+export function inviteLinkFor(origin: string, invite: InviteLink): string {
+  return `${origin}/dashboard#invite/${invite.canvasId}/${invite.token}`;
+}
+
+export function parseInviteFragment(hash: string): InviteLink | null {
+  const match = INVITE_FRAGMENT.exec(hash);
+  return match ? { canvasId: match[1]!, token: match[2]! } : null;
 }
 
 export async function bootstrapPersonalCanvas(token: string): Promise<Response> {
@@ -32,4 +23,56 @@ export async function bootstrapPersonalCanvas(token: string): Promise<Response> 
     credentials: "same-origin",
     headers: { authorization: `Bearer ${token}` },
   });
+}
+
+export async function joinCanvasWithInvite(token: string, invite: InviteLink): Promise<Response> {
+  return await fetch("/api/join", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify(invite),
+  });
+}
+
+export type StudioPreparation =
+  | {
+      ok: true;
+      joinedCanvasId: string | null;
+      /** The link was unknown, already used or revoked: open the user's own studio. */
+      inviteRejected: boolean;
+    }
+  | { ok: false };
+
+// One preparation per user and invite at a time: React StrictMode mounts the
+// dashboard effect twice, and both mounts share this promise instead of
+// sending two bootstrap requests.
+const inFlight = new Map<string, Promise<StudioPreparation>>();
+
+export function prepareStudio(
+  userId: string,
+  getToken: () => Promise<string | null>,
+  invite: InviteLink | null,
+): Promise<StudioPreparation> {
+  const key = `${userId}:${invite?.token ?? ""}`;
+  let pending = inFlight.get(key);
+  if (!pending) {
+    pending = (async (): Promise<StudioPreparation> => {
+      const token = await getToken();
+      if (!token) return { ok: false };
+      const bootstrapped = await bootstrapPersonalCanvas(token);
+      if (!bootstrapped.ok) return { ok: false };
+      if (!invite) return { ok: true, joinedCanvasId: null, inviteRejected: false };
+      const joined = await joinCanvasWithInvite(token, invite);
+      // 400/404 are final answers about the link; retrying cannot help.
+      if (joined.status === 400 || joined.status === 404)
+        return { ok: true, joinedCanvasId: null, inviteRejected: true };
+      if (!joined.ok) return { ok: false };
+      const { canvasId } = (await joined.json()) as { canvasId: string };
+      return { ok: true, joinedCanvasId: canvasId, inviteRejected: false };
+    })()
+      .catch((): StudioPreparation => ({ ok: false }))
+      .finally(() => inFlight.delete(key));
+    inFlight.set(key, pending);
+  }
+  return pending;
 }
