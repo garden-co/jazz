@@ -558,14 +558,12 @@ export default function HomePage() {
               </TableBody>
             </Table>
           </div>
-          <div className="mt-12 grid gap-8 lg:grid-cols-12">
-            <div className="lg:col-span-4">
-              <Heading level={3}>Estimate your Jazz Cloud bill</Heading>
-            </div>
+          <div className="mt-12 grid gap-8">
+            <Heading level={3}>Estimate your Jazz Cloud bill</Heading>
             {/* Not ported to Astryx yet. A data-astryx-theme attribute ends the
                 theme's @scope, so its element resets (p, h1-h6, code) leave the
                 calculator's Tailwind typography alone. */}
-            <div className="lg:col-span-8" data-astryx-theme="none">
+            <div data-astryx-theme="none">
               <PricingCalculator />
             </div>
           </div>

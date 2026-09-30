@@ -197,10 +197,10 @@ export function PricingCalculator() {
         </div>
         {/* The result sits right under the sliders, so on phones both stay in
             view together. */}
-        <div className="grid grid-cols-2 items-end gap-6 border-t pt-8 sm:flex sm:gap-12">
+        <div className="grid grid-cols-2 items-start gap-6 border-t pt-8 sm:flex sm:gap-12">
           <div>
             <p className="text-sm text-fd-muted-foreground">Cost per user / mo</p>
-            <p className="font-display mt-2 text-3xl font-black tracking-[-0.05em]">
+            <p className="font-display mt-2 text-3xl font-black tracking-[-0.03em]">
               {formatCurrency(monthlyCostPerUser)}
             </p>
             <p className="mt-1 text-sm leading-relaxed text-fd-muted-foreground">
@@ -209,7 +209,7 @@ export function PricingCalculator() {
           </div>
           <div>
             <p className="text-sm text-fd-muted-foreground">Estimated monthly bill</p>
-            <p className="font-display mt-2 text-4xl font-black tracking-[-0.06em] sm:text-5xl">
+            <p className="font-display mt-2 text-3xl font-black tracking-[-0.03em]">
               {formatCurrency(estimate.totalMonthlyCost)}
             </p>
             {estimate.isWithinFreeTier ? (
