@@ -2030,8 +2030,28 @@ where
                             }
                         }
                         let pending_index = 0;
+                        // A Global usage is answered from the authority's state
+                        // alone: its reader overlays none of this node's pending
+                        // writes. Read-your-writes therefore rests on wire order,
+                        // with every earlier local commit reaching the authority
+                        // before the usage opens. The upload loop below holds
+                        // commits back while a large value is still uploading,
+                        // so an open must not overtake them. It waits, and the
+                        // commands behind it keep their order (#3839).
+                        let mut deferred_global_open = false;
                         while pending_index < pending.len() {
                             match &mut pending[pending_index] {
+                                PendingUpstreamCommand::Subscribe(pending_subscription)
+                                    if pending_subscription.opts.tier >= DurabilityTier::Global
+                                        && outbox_has_unsent_uploads(
+                                            &outbox.borrow(),
+                                            uploaded,
+                                            failed_large_value_uploads,
+                                        ) =>
+                                {
+                                    deferred_global_open = true;
+                                    break;
+                                }
                                 PendingUpstreamCommand::Subscribe(pending_subscription) => {
                                     let shape = &pending_subscription.shape;
                                     let binding = &pending_subscription.binding;
@@ -2554,6 +2574,19 @@ where
                             }
                             large_value_uploads.remove(&tx_id);
                             uploaded.insert(tx_id);
+                        }
+                        // The commits a deferred open waited behind are all on
+                        // the wire now; send the open on the next turn. While a
+                        // commit is still held, its chunk receipt or retry
+                        // deadline schedules that turn.
+                        if deferred_global_open
+                            && !outbox_has_unsent_uploads(
+                                &outbox.borrow(),
+                                uploaded,
+                                failed_large_value_uploads,
+                            )
+                        {
+                            schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
                         }
                         Ok::<bool, Error>(false)
                     })
@@ -6101,6 +6134,17 @@ where
             *serve_dirty = true;
         }
     }
+}
+
+/// Whether this link still holds a local commit it has not put on the wire.
+fn outbox_has_unsent_uploads(
+    outbox: &UploadOutbox,
+    uploaded: &BTreeSet<TxId>,
+    failed: &BTreeSet<TxId>,
+) -> bool {
+    outbox
+        .iter()
+        .any(|pending| !uploaded.contains(&pending.tx_id) && !failed.contains(&pending.tx_id))
 }
 
 pub(super) fn schedule_tick_in(scheduler: &SharedTickScheduler, urgency: TickUrgency) {
