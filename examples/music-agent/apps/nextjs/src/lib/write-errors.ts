@@ -13,10 +13,6 @@ export function writeErrorCode(error: unknown): string | undefined {
     (error instanceof Error && error.name === "PersistedWriteRejectedError")
   )
     return (error as PersistedWriteRejectedError).code;
-  // A conflict the local runtime finds while settling an exclusive transaction
-  // currently surfaces as a plain Error that still carries its code.
-  const code = error instanceof Error ? (error as Error & { code?: unknown }).code : undefined;
-  if (typeof code === "string") return code;
   return undefined;
 }
 

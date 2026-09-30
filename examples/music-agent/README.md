@@ -51,34 +51,39 @@ returns immediately; the reply is generated after the response with Next's
 `after()`. The browser never receives the reply from that request. It watches
 the turn's row, like every other open client.
 
-**Streaming is a large-value append.** The runner
-(`src/agent/runner.ts`) batches tokens for a few milliseconds and writes each
-batch as a page-relative splice at the end of the turn's `body`:
+**Streaming is a lease write.** The runner (`src/agent/runner.ts`) collects
+tokens while its previous write is in flight and writes each batch in an
+exclusive transaction that first checks the turn is still `streaming` under
+this runner's lease:
 
 ```ts
-db.update(
-  app.turns,
-  turnId,
-  {},
-  {
-    applyDiffs: {
-      body: { within: { from: end, to: end }, splices: [{ at: 0, delete: 0, insert }] },
-    },
-  },
-);
+const write = await db.exclusiveTransaction(async (tx) => {
+  const turn = await tx.one(app.turns.where({ id: turnId }));
+  if (turn?.runnerId !== lease.id || turn.status !== "streaming") return false;
+  tx.update(app.turns, turnId, { body: turn.body + batch, heartbeatAt: new Date() });
+  return true;
+});
+await write.wait();
 ```
 
-No write resends the whole reply, and every subscribed client sees it grow.
-Tool calls are rows of their own, written as `running` and then updated with
-their result, so they show up in `ChatToolCalls` while they run.
+Every subscribed client sees the reply grow. A transaction can't take
+`applyDiffs`, so each batch writes the whole body instead of a page-relative
+splice; the library in `apps/ts-localfirst` shows the splice form, which fits
+a writer that doesn't need the ownership check. Tool calls are rows of their
+own, written as `running` and then updated with their result (in the same
+kind of lease transaction), so they show up in `ChatToolCalls` while they run.
 
 **Durable execution.** The server writes with backend authority; permissions
 let a client write only its own user turns and attachments, never an agent
 reply. Queueing a reply and moving the conversation's head to it happen in one
 exclusive transaction. A runner claims the turn with a lease id of its own
-(`runnerId`) and renews a heartbeat every 3 seconds; the renewal, every body
-append and the final write are all conditional on still holding that lease,
-and a runner that loses it aborts the model call and stops writing.
+(`runnerId`). Everything it writes afterwards (body batches, tool calls, a
+heartbeat every 3 seconds when nothing else was written, and the final
+status) goes through that lease transaction, one at a time. Each commits only
+while the turn still belongs to the lease and renews its heartbeat. Once a
+write finds another owner, the runner aborts the model call and writes
+nothing more: the authority rejects a transaction whose read changed, so a
+runner that was taken over can't land a late write.
 `instrumentation.ts` checks the provider and starts a sweeper when the server
 boots: a `streaming` turn whose heartbeat is older than 15 seconds lost its
 process, and a `queued` turn that no runner claimed within 15 seconds never
@@ -116,6 +121,9 @@ cargo test -p jazz-example-music-agent-benchmark
 ```
 
 The Next.js tests run the agent runner, tools and recovery against a local Jazz
-server with the app's real schema and permissions. The library tests run the
+server with the app's real schema and permissions, including runners racing
+for one reply in one process and across two backend clients, a runner that
+loses its lease, and a second user who can't read or build on the first
+user's workspace. The library tests run the
 same scenarios on an in-memory store and on Jazz, including a second client
 watching an assistant turn grow append by append.

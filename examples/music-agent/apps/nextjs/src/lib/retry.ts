@@ -12,11 +12,12 @@ export async function retryOnConflict<T>(
   attempt: () => Promise<T>,
   attempts = CONFLICT_ATTEMPTS,
 ): Promise<T> {
-  for (let tries = 1; ; tries++) {
+  for (let tries = 1; tries < attempts; tries++) {
     try {
       return await attempt();
     } catch (error) {
-      if (tries >= attempts || !isExclusiveConflict(error)) throw error;
+      if (!isExclusiveConflict(error)) throw error;
     }
   }
+  return attempt();
 }

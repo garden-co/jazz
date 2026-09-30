@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import type { Db } from "jazz-tools";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "jazz-tools/testing";
 import { app } from "../schema";
 import permissions from "../permissions";
@@ -17,8 +18,34 @@ beforeAll(async () => {
   process.env.SCRIPTED_AGENT_TOKEN_DELAY_MS = "0";
 });
 afterAll(async () => {
+  await secondSession?.close();
   await server?.stop();
 });
+
+// A second server process: its own backend client, which sees the first
+// one's writes only through the Jazz server.
+let second: Db | undefined;
+let secondSession: { close(): Promise<void> } | undefined;
+async function secondBackend(): Promise<Db> {
+  if (second) return second;
+  const { createJazzSession } = await import("jazz-tools/backend");
+  const { jazzEnv } = await import("../src/lib/jazz-env");
+  const session = await createJazzSession({
+    app,
+    permissions,
+    appId: server.appId,
+    driver: { type: "memory" },
+    serverUrl: server.url,
+    initial: { backendSecret: server.backendSecret },
+    env: jazzEnv,
+    tier: "global",
+  });
+  secondSession = session;
+  const client = session.getSnapshot().client;
+  if (!client) throw new Error("second backend session is not ready");
+  second = client.db;
+  return second;
+}
 
 const load = async () => ({
   ...(await import("../src/agent/runner")),
@@ -100,15 +127,62 @@ describe("MusicAgent server execution", () => {
   test("two runners racing to claim one reply write it once", async () => {
     const { queueAssistantTurn, runTurn, db } = await load();
     const original = (await db.one(app.turns.where({ id: firstReply }), { tier: "global" }))!;
-    const { turnId } = await queueAssistantTurn(db, original.conversationId, original.parentId!);
 
-    await Promise.all([runTurn(turnId), runTurn(turnId)]);
+    // Two runners in one process: they collide on the local runtime.
+    const { turnId: local } = await queueAssistantTurn(
+      db,
+      original.conversationId,
+      original.parentId!,
+    );
+    await Promise.all([runTurn(local), runTurn(local)]);
 
-    const reply = (await db.one(app.turns.where({ id: turnId }), { tier: "global" }))!;
-    expect(reply.status).toBe("complete");
-    expect(reply.body).toBe(original.body);
-    const calls = await db.all(app.toolCalls.where({ turnId }), { tier: "global" });
-    expect(calls.map((call) => call.name).sort()).toEqual(["check_calendar", "find_venues"]);
+    // Two servers: the second backend client only learns of the other claim
+    // from the authority.
+    const other = await secondBackend();
+    const { turnId: remote } = await queueAssistantTurn(
+      db,
+      original.conversationId,
+      original.parentId!,
+    );
+    await other.one(app.turns.where({ id: remote }), { tier: "global" });
+    await Promise.all([runTurn(remote), runTurn(remote, other)]);
+
+    for (const turnId of [local, remote]) {
+      const reply = (await db.one(app.turns.where({ id: turnId }), { tier: "global" }))!;
+      expect(reply.status).toBe("complete");
+      expect(reply.body).toBe(original.body);
+      const calls = await db.all(app.toolCalls.where({ turnId }), { tier: "global" });
+      expect(calls.map((call) => call.name).sort()).toEqual(["check_calendar", "find_venues"]);
+    }
+  });
+
+  test("an exclusive write that loses at the authority is a retryable conflict", async () => {
+    const { db } = await load();
+    const { isExclusiveConflict } = await import("../src/lib/write-errors");
+    const other = await secondBackend();
+    const turn = (await db.one(app.turns.where({ id: firstReply }), { tier: "global" }))!;
+    await other.one(app.turns.where({ id: turn.id }), { tier: "global" });
+
+    // Both read the turn, then both write it: only one of them can commit.
+    let read = 0;
+    let bothRead!: () => void;
+    const barrier = new Promise<void>((resolve) => (bothRead = resolve));
+    const results = await Promise.allSettled(
+      [db, other].map(async (client) => {
+        const write = await client.exclusiveTransaction(async (tx) => {
+          await tx.one(app.turns.where({ id: turn.id }));
+          if (++read === 2) bothRead();
+          await barrier;
+          tx.update(app.turns, turn.id, { heartbeatAt: new Date() });
+        });
+        await write.wait();
+      }),
+    );
+    const failures = results.flatMap((result) =>
+      result.status === "rejected" ? [result.reason] : [],
+    );
+    expect(failures).toHaveLength(1);
+    expect(isExclusiveConflict(failures[0])).toBe(true);
   });
 
   test("a runner that loses its lease stops writing and never finishes the turn", async () => {
@@ -117,7 +191,7 @@ describe("MusicAgent server execution", () => {
     const { turnId } = await queueAssistantTurn(db, original.conversationId, original.parentId!);
     const read = async () => (await db.one(app.turns.where({ id: turnId }), { tier: "global" }))!;
 
-    // Slow enough that the reply is still streaming at the first heartbeat.
+    // Slow enough that the reply is still streaming well after the takeover.
     process.env.SCRIPTED_AGENT_TOKEN_DELAY_MS = "60";
     try {
       const run = runTurn(turnId);
@@ -125,18 +199,29 @@ describe("MusicAgent server execution", () => {
         .poll(async () => (await read()).body.length, { timeout: 30_000 })
         .toBeGreaterThan(0);
 
-      // Another runner took the turn over (as after a sweep and a resume elsewhere).
-      await db.update(app.turns, turnId, { runnerId: "another-runner" }).wait({ tier: "global" });
-      await run; // aborts at its next heartbeat
+      // Another runner takes the turn over (as after a sweep and a resume
+      // elsewhere), and notes the body as it stood at that moment.
+      const { retryOnConflict } = await import("../src/lib/retry");
+      const takeover = await retryOnConflict(async () => {
+        const write = await db.exclusiveTransaction(async (tx) => {
+          const current = (await tx.one(app.turns.where({ id: turnId })))!;
+          tx.update(app.turns, turnId, { runnerId: "another-runner" });
+          return current.body;
+        });
+        await write.wait();
+        return write.value;
+      });
+      await run; // its next write is refused, and it stops
 
       const stopped = await read();
       expect(stopped.status).toBe("streaming");
       expect(stopped.runnerId).toBe("another-runner");
+      // Not one splice landed after the takeover.
+      expect(stopped.body).toBe(takeover);
       expect(stopped.body.length).toBeLessThan(original.body.length);
 
-      // Nothing more arrives from the old runner.
       await new Promise((resolve) => setTimeout(resolve, HEARTBEAT_MS));
-      expect((await read()).body).toBe(stopped.body);
+      expect((await read()).body).toBe(takeover);
     } finally {
       process.env.SCRIPTED_AGENT_TOKEN_DELAY_MS = "0";
     }

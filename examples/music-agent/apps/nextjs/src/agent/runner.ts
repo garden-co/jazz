@@ -8,16 +8,10 @@ import { agentProvider } from "./config";
 import type { GenerateInput, HistoryTurn, TurnSink } from "./provider";
 import { runTool, type ToolContext } from "./tools";
 
-/** How often a running turn renews its lease. */
+/** How often a running turn renews its lease when nothing else was written. */
 export const HEARTBEAT_MS = 3_000;
 /** A streaming turn whose heartbeat is older than this lost its process. */
 export const STALE_AFTER_MS = 15_000;
-/**
- * A runner writes only while its last confirmed renewal is younger than this.
- * It is well inside STALE_AFTER_MS, so no sweeper can have interrupted the
- * turn (and let another runner claim it) while this runner is still writing.
- */
-const WRITABLE_FOR_MS = STALE_AFTER_MS / 2;
 
 const CLAIMABLE: Turn["status"][] = ["queued", "interrupted", "failed"];
 
@@ -78,16 +72,30 @@ class LeaseLostError extends Error {
   override name = "LeaseLostError";
 }
 
+type Tx = Parameters<Parameters<Db["exclusiveTransaction"]>[0]>[0];
+
 /**
  * The right to write one turn, held by one claim. Its id is stored as the
  * turn's `runnerId`; each claim gets a fresh id, so a resumed turn can never be
  * mistaken for an older run of the same process.
+ *
+ * Every write the holder makes (body appends, tool calls, heartbeats and the
+ * final status) goes through `write`: one exclusive transaction that first
+ * checks the turn is still streaming under this lease, and renews the
+ * heartbeat with it. The authority rejects the transaction if the turn changed
+ * meanwhile, so a runner that was swept and taken over can never land a write
+ * after the takeover. Writes run one at a time, so the holder never races
+ * itself.
  */
 class Lease {
   readonly id = `${runner.id}/${crypto.randomUUID()}`;
   private readonly controller = new AbortController();
-  private confirmedAt = Date.now();
-  renewing = false;
+  private queue: Promise<unknown> = Promise.resolve();
+
+  constructor(
+    private readonly db: Db,
+    private readonly turnId: string,
+  ) {}
 
   get signal() {
     return this.controller.signal;
@@ -95,27 +103,34 @@ class Lease {
   get lost() {
     return this.controller.signal.aborted;
   }
-  /** Safe to write now: still ours, recently confirmed, and no renewal in flight. */
-  get writable() {
-    return !this.lost && !this.renewing && Date.now() - this.confirmedAt < WRITABLE_FOR_MS;
-  }
-  confirm(at: number) {
-    this.confirmedAt = at;
-  }
   lose(reason: string) {
     if (!this.lost) this.controller.abort(new LeaseLostError(reason));
   }
   assertHeld() {
     if (this.lost) throw this.signal.reason;
   }
-  /** Wait until writing is safe; give up (and the lease) if it isn't within the stale window. */
-  async ready() {
-    const deadline = Date.now() + STALE_AFTER_MS;
-    while (!this.writable) {
+
+  /** Run `change` in a transaction that only commits while this lease owns the turn. */
+  write(change: (tx: Tx, turn: Turn) => void = () => {}): Promise<void> {
+    const next = this.queue.then(async () => {
       this.assertHeld();
-      if (Date.now() > deadline) this.lose("lease could not be renewed");
-      await sleep(50);
-    }
+      const held = await retryOnConflict(async () => {
+        const write = await this.db.exclusiveTransaction(async (tx) => {
+          const turn = await tx.one(app.turns.where({ id: this.turnId }));
+          if (turn?.runnerId !== this.id || turn.status !== "streaming") return false;
+          change(tx, turn);
+          tx.update(app.turns, this.turnId, { heartbeatAt: new Date() });
+          return true;
+        });
+        await write.wait();
+        return write.value;
+      });
+      if (!held) this.lose("another runner owns this turn");
+      this.assertHeld();
+    });
+    // A failed write must not block the ones after it; each caller sees its own error.
+    this.queue = next.catch(() => undefined);
+    return next;
   }
 }
 
@@ -126,15 +141,15 @@ class Lease {
  * stalls or dies, the heartbeat stops, the sweeper marks the turn interrupted
  * and another runner may claim it; this runner then stops writing.
  */
-export async function runTurn(turnId: string): Promise<void> {
-  const db = (await backendJazzClient()).db;
-  const lease = new Lease();
+export async function runTurn(turnId: string, client?: Db): Promise<void> {
+  const db = client ?? (await backendJazzClient()).db;
+  const lease = new Lease(db, turnId);
   const turn = await claim(db, turnId, lease);
   if (!turn) return;
 
   runner.active.add(turnId);
-  const heartbeat = keepLease(db, turnId, lease);
-  const body = new BodyWriter(db, turnId, turn.body.length, lease);
+  const heartbeat = keepLease(turnId, lease);
+  const body = new BodyWriter(lease);
   try {
     let outcome: Partial<Turn> & Pick<Turn, "status">;
     try {
@@ -145,6 +160,7 @@ export async function runTurn(turnId: string): Promise<void> {
         provider.resume === "continue" && turn.body ? { ...input, partialReply: turn.body } : input,
         sink,
       );
+      await body.drain();
       outcome = { status: "complete", provider: provider.label };
     } catch (error) {
       if (lease.lost) {
@@ -153,10 +169,11 @@ export async function runTurn(turnId: string): Promise<void> {
       }
       console.error(`MusicAgent turn ${turnId} failed`, error);
       outcome = { status: "failed", error: error instanceof Error ? error.message : String(error) };
+      // Keep what was written before the failure; resume continues from it.
+      await body.drain().catch(() => undefined);
     }
-    await body.drain();
     await heartbeat.stop();
-    await finish(db, turnId, lease, outcome);
+    await finish(turnId, lease, outcome);
   } finally {
     body.stop();
     await heartbeat.stop();
@@ -179,43 +196,28 @@ async function claim(db: Db, turnId: string, lease: Lease): Promise<Turn | null>
       return turn;
     });
     await write.wait();
-    lease.confirm(Date.now());
     return write.value;
   });
 }
 
 /**
- * Renew the lease every HEARTBEAT_MS. Each renewal is an exclusive
- * transaction that only succeeds while this lease still owns a streaming
- * turn; once another runner owns it (or it was interrupted), generation is
- * aborted and nothing more is written.
+ * Renew the lease every HEARTBEAT_MS. A renewal only commits while this lease
+ * still owns a streaming turn; once another runner owns it (or it was
+ * interrupted), generation is aborted and nothing more is written.
  */
-function keepLease(db: Db, turnId: string, lease: Lease) {
+function keepLease(turnId: string, lease: Lease) {
   let timer: NodeJS.Timeout | undefined;
   let inFlight: Promise<void> = Promise.resolve();
   let stopped = false;
 
   const renew = async () => {
-    const at = Date.now();
-    lease.renewing = true;
     try {
-      const held = await retryOnConflict(async () => {
-        const write = await db.exclusiveTransaction(async (tx) => {
-          const current = await tx.one(app.turns.where({ id: turnId }));
-          if (current?.runnerId !== lease.id || current.status !== "streaming") return false;
-          tx.update(app.turns, turnId, { heartbeatAt: new Date(at) });
-          return true;
-        });
-        await write.wait();
-        return write.value;
-      });
-      if (held) lease.confirm(at);
-      else lease.lose("another runner owns this turn");
+      await lease.write();
     } catch (error) {
-      // Not proof of loss: writes pause until a renewal succeeds or the lease expires.
-      console.warn(`MusicAgent turn ${turnId}: lease renewal failed`, error);
-    } finally {
-      lease.renewing = false;
+      // Not proof of loss: the next write or renewal checks again. If none gets
+      // through for STALE_AFTER_MS, the sweeper interrupts the turn and every
+      // later write from this runner is refused.
+      if (!lease.lost) console.warn(`MusicAgent turn ${turnId}: lease renewal failed`, error);
     }
   };
   const schedule = () => {
@@ -236,24 +238,13 @@ function keepLease(db: Db, turnId: string, lease: Lease) {
 }
 
 /** Record how the turn ended, only if this lease still owns it. */
-async function finish(
-  db: Db,
-  turnId: string,
-  lease: Lease,
-  outcome: Partial<Turn> & Pick<Turn, "status">,
-) {
+async function finish(turnId: string, lease: Lease, outcome: Partial<Turn> & Pick<Turn, "status">) {
   if (lease.lost) return;
-  const recorded = await retryOnConflict(async () => {
-    const write = await db.exclusiveTransaction(async (tx) => {
-      const current = await tx.one(app.turns.where({ id: turnId }));
-      if (current?.runnerId !== lease.id || current.status !== "streaming") return false;
-      tx.update(app.turns, turnId, { ...outcome, heartbeatAt: new Date() });
-      return true;
+  await lease
+    .write((tx) => tx.update(app.turns, turnId, outcome))
+    .catch((error: unknown) => {
+      if (!lease.lost) throw error;
     });
-    await write.wait();
-    return write.value;
-  });
-  if (!recorded) lease.lose("another runner owns this turn");
 }
 
 /** The conversation path from its first turn to this reply's parent. */
@@ -332,18 +323,23 @@ function turnSink(
       if (earlier?.status === "complete" && earlier.resultJson)
         return JSON.parse(earlier.resultJson) as unknown;
       await body.drain();
-      await lease.ready();
       const started = Date.now();
-      const id =
-        earlier?.id ??
-        db.insert(app.toolCalls, {
-          conversationId: turn.conversationId,
-          turnId: turn.id,
-          ordinal: position,
-          name,
-          argumentsJson: JSON.stringify(input),
-          status: "running",
-        }).value.id;
+      const id = earlier?.id ?? crypto.randomUUID();
+      if (!earlier)
+        await lease.write((tx) =>
+          tx.insert(
+            app.toolCalls,
+            {
+              conversationId: turn.conversationId,
+              turnId: turn.id,
+              ordinal: position,
+              name,
+              argumentsJson: JSON.stringify(input),
+              status: "running",
+            },
+            { id },
+          ),
+        );
       let update: { status: "complete" | "error"; resultJson: string };
       let failure: unknown;
       let result: unknown;
@@ -355,8 +351,9 @@ function turnSink(
         const message = error instanceof Error ? error.message : String(error);
         update = { status: "error", resultJson: JSON.stringify({ error: message }) };
       }
-      await lease.ready();
-      db.update(app.toolCalls, id, { ...update, durationMs: Date.now() - started });
+      await lease.write((tx) =>
+        tx.update(app.toolCalls, id, { ...update, durationMs: Date.now() - started }),
+      );
       if (failure) throw failure;
       return result;
     },
@@ -364,59 +361,58 @@ function turnSink(
 }
 
 /**
- * Appends prose to the turn's body. Tokens are batched briefly so a fast
- * stream becomes a few writes per second; each write is a page-relative
- * splice at the current end of the text, so no write resends the whole body.
- * A splice is only written while the lease is writable; otherwise it waits
- * for the next renewal, and it is dropped if the lease is lost.
+ * Appends prose to the turn's body. Tokens are batched: while one append is
+ * being written, the next batch collects, so a fast stream becomes a few
+ * writes per second. Each append is a lease write, so it only lands while
+ * this runner still owns the turn.
+ *
+ * A transaction can't take `applyDiffs`, so an append writes the whole body
+ * (the stored text plus the batch) rather than a page-relative splice.
  */
 class BodyWriter {
   private pending = "";
   private timer: NodeJS.Timeout | undefined;
+  private writing: Promise<void> | undefined;
+  private failure: unknown;
 
-  constructor(
-    private readonly db: Db,
-    private readonly turnId: string,
-    private length: number,
-    private readonly lease: Lease,
-  ) {}
+  constructor(private readonly lease: Lease) {}
 
   append(text: string) {
+    if (this.failure) throw this.failure;
     this.pending += text;
-    if (this.pending.length >= 200) this.flush();
-    else this.timer ??= setTimeout(() => this.flush(), 50);
+    if (!this.writing) this.timer ??= setTimeout(() => this.start(), 50);
   }
 
-  /** Write what is pending if the lease allows it now; returns whether nothing is left. */
-  private flush(): boolean {
+  private start() {
     clearTimeout(this.timer);
     this.timer = undefined;
-    if (this.lease.lost) this.pending = "";
-    if (!this.pending) return true;
-    if (!this.lease.writable) {
-      this.timer = setTimeout(() => this.flush(), 50);
-      return false;
-    }
-    const insert = this.pending;
-    this.pending = "";
-    const end = this.length;
-    this.db.update(
-      app.turns,
-      this.turnId,
-      {},
-      {
-        applyDiffs: {
-          body: { within: { from: end, to: end }, splices: [{ at: 0, delete: 0, insert }] },
-        },
-      },
-    );
-    this.length += insert.length;
-    return true;
+    this.writing ??= this.writeAll().finally(() => {
+      this.writing = undefined;
+      // Text that arrived as the last write settled starts the next one.
+      if (this.pending) this.timer ??= setTimeout(() => this.start(), 50);
+    });
+    return this.writing;
   }
 
-  /** Write everything pending, waiting for the lease if needed. */
+  private async writeAll() {
+    try {
+      while (this.pending) {
+        const insert = this.pending;
+        this.pending = "";
+        await this.lease.write((tx, turn) =>
+          tx.update(app.turns, turn.id, { body: turn.body + insert }),
+        );
+      }
+    } catch (error) {
+      this.failure ??= error;
+      this.pending = "";
+    }
+  }
+
+  /** Write everything pending; throws if an append was refused. */
   async drain() {
-    while (!this.flush()) await this.lease.ready().catch(() => undefined);
+    while (this.pending || this.writing) await this.start();
+    if (this.failure) throw this.failure;
   }
 
   stop() {
@@ -457,10 +453,6 @@ export async function sweepStaleTurns(now = Date.now()): Promise<number> {
 
 function isStale(turn: Turn, now: number) {
   return !turn.heartbeatAt || now - new Date(turn.heartbeatAt).getTime() > STALE_AFTER_MS;
-}
-
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export function startSweeper() {
