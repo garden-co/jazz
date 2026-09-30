@@ -3542,9 +3542,18 @@ fn scope_isolated_relay_terminal_write_rejects_empty_handshake_claims() {
 /// makes the final assertion observe B and fail.
 #[test]
 fn terminal_commit_support_keeps_same_author_sibling_claim_snapshot() {
-    let schema = editor_claim_write_schema();
+    // The clause must read a row besides the candidate: claim-only clauses
+    // prove without hydrating any support receiver.
+    let schema = editor_claim_workspace_write_schema();
     let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
     let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    server
+        .insert_with_id(
+            "workspaces",
+            row(0x3e),
+            BTreeMap::from([("open".to_owned(), Value::Bool(true))]),
+        )
+        .unwrap();
     let a_claims = BTreeMap::from([(
         crate::query::provider_claim_key("role"),
         Value::String("editor".to_owned()),
