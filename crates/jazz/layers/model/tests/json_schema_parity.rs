@@ -31,7 +31,7 @@ fn cases() -> Vec<Case> {
 }
 
 fn check(schema: &Value, instance: &Value) -> Result<(), JsonSchemaError> {
-    validate(schema, instance, &instance.to_string())
+    validate(schema, instance)
 }
 
 /// Every fixture value gets the verdict the fixture records, and every schema

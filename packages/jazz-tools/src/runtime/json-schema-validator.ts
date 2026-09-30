@@ -1,5 +1,14 @@
-import { Validator, type OutputUnit, type Schema, type SchemaDraft } from "@cfworker/json-schema";
+import {
+  type Dialect,
+  type OutputUnit,
+  type Schema,
+  dereference,
+  evaluate,
+  resolveReference,
+} from "./json-schema-evaluate.js";
+import { parseJson, withPlainNumbers } from "./json-schema-json.js";
 import { META_SCHEMAS } from "./json-schema-metaschemas.js";
+import { RegexSyntaxError, UnsupportedRegexError, compileRegex } from "./json-schema-regex.js";
 
 /**
  * JSON Schema validation for the browser WASM runtime.
@@ -9,7 +18,7 @@ import { META_SCHEMAS } from "./json-schema-metaschemas.js";
  * are a large share of the WASM binary) and calls this module instead, through
  * the callback `installJsonSchemaValidator` hands to the WASM module.
  *
- * The validator underneath (`@cfworker/json-schema`) needs no `eval`, so it
+ * The evaluator underneath (`json-schema-evaluate.ts`) needs no `eval`, so it
  * works under a strict Content-Security-Policy. This module gives it the same
  * contract as `jsonschema::validator_for` + `Validator::validate`:
  * - the dialect comes from `$schema`, defaulting to 2020-12;
@@ -19,19 +28,21 @@ import { META_SCHEMAS } from "./json-schema-metaschemas.js";
  * - keywords a dialect does not define are ignored, as are the siblings of
  *   `$ref` in drafts 4, 6 and 7;
  * - `format` is asserted in drafts 4, 6 and 7 (for the formats the native
- *   runtime knows in that draft) and only annotates in 2019-09 and 2020-12;
- * - `contentEncoding` is asserted in drafts 6 and 7.
+ *   runtime knows in that draft, with its definitions) and only annotates in
+ *   2019-09 and 2020-12;
+ * - `contentEncoding` is asserted in drafts 6 and 7;
+ * - patterns use the native regex syntax, numbers compare exactly (including
+ *   integers beyond 2^53), and `multipleOf` is decided as natively.
  *
  * Features it cannot express are rejected explicitly instead of being skipped,
  * so the browser never accepts a value a native runtime would refuse on those
  * grounds: `$dynamicRef`/`$dynamicAnchor`, draft 6/7 `contentMediaType`, and
  * the internationalized formats (`idn-email`, `idn-hostname`, `iri`,
- * `iri-reference`) in the drafts that assert formats.
+ * `iri-reference`) in the drafts that assert formats, and the few regex
+ * constructs `json-schema-regex.ts` lists.
  */
 
 export type JsonSchemaCheck = (instanceJson: string) => string | undefined;
-
-type Dialect = "4" | "6" | "7" | "2019-09" | "2020-12";
 
 const DIALECT_BY_URI: Record<string, Dialect> = {
   "json-schema.org/draft/2020-12/schema": "2020-12",
@@ -41,17 +52,8 @@ const DIALECT_BY_URI: Record<string, Dialect> = {
   "json-schema.org/draft-04/schema": "4",
 };
 
-/** Draft the underlying validator runs a dialect as (it has no draft-06 mode). */
-const VALIDATOR_DRAFT: Record<Dialect, SchemaDraft> = {
-  "4": "4",
-  "6": "7",
-  "7": "7",
-  "2019-09": "2019-09",
-  "2020-12": "2020-12",
-};
-
 /**
- * Every keyword the underlying validator acts on, whatever the draft. The ones
+ * Every keyword the evaluator acts on, whatever the draft. The ones
  * a dialect does not define are removed before it sees the schema; all other
  * unknown keywords are kept, so `$ref`s into them still resolve.
  */
@@ -183,7 +185,7 @@ const VOCABULARIES: Record<Dialect, Vocabulary> = {
   "2020-12": DRAFT2020,
 };
 
-/** Keywords a dialect defines that the underlying validator cannot evaluate. */
+/** Keywords a dialect defines that the evaluator cannot evaluate. */
 const UNSUPPORTED_KEYWORDS: Record<Dialect, string[]> = {
   "4": [],
   "6": ["contentMediaType"],
@@ -215,7 +217,7 @@ const ASSERTED_FORMATS: Partial<Record<Dialect, string[]>> = {
   "7": [...DRAFT6_FORMATS, "idn-hostname", "iri", "iri-reference", "relative-json-pointer"],
 };
 
-/** Asserted `format`s the underlying validator has no check for. */
+/** Asserted `format`s the browser has no check for (they need IDNA tables). */
 const UNSUPPORTED_FORMATS = ["idn-email", "idn-hostname", "iri", "iri-reference"];
 
 /**
@@ -270,7 +272,7 @@ function isObject(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Copy `schema` so the underlying validator follows `dialect`: it evaluates
+ * Copy `schema` so the evaluator follows `dialect`: it evaluates
  * every keyword it knows regardless of draft, so the ones `dialect` does not
  * define are dropped, and draft 6/7 content encodings become patterns.
  * `allowed` admits otherwise unsupported keywords (for the meta-schemas).
@@ -301,6 +303,11 @@ function normalizeSchema(
     }
     if (VALIDATOR_KEYWORDS.has(keyword)) {
       if (!defined.has(keyword) || (refOnly && keyword !== "$ref")) continue;
+    }
+    // Patterns are compiled when the schema is, as natively.
+    if (keyword === "pattern" && typeof value === "string") compilePattern(value);
+    if (keyword === "patternProperties" && isObject(value)) {
+      for (const pattern of Object.keys(value)) compilePattern(pattern);
     }
     if (keyword === "format" && typeof value === "string") {
       if (!ASSERTED_FORMATS[dialect]?.includes(value)) continue;
@@ -347,53 +354,39 @@ function normalizeMap(
   );
 }
 
-/** Walk every object in a normalized schema, skipping literal values. */
-function visitSchemas(schema: unknown, visit: (node: Record<string, unknown>) => void): void {
-  if (Array.isArray(schema)) {
-    for (const entry of schema) visitSchemas(entry, visit);
-    return;
-  }
-  if (!isObject(schema)) return;
-  visit(schema);
-  for (const [keyword, value] of Object.entries(schema)) {
-    if (keyword === "enum" || keyword === "const") continue;
-    visitSchemas(value, visit);
-  }
-}
-
-/** Reject patterns the regex engine cannot compile, as the native runtime does. */
-function checkPatterns(schema: unknown): void {
-  visitSchemas(schema, (node) => {
-    if (typeof node.pattern === "string") compilePattern(node.pattern);
-    if (isObject(node.patternProperties)) {
-      for (const pattern of Object.keys(node.patternProperties)) compilePattern(pattern);
-    }
-  });
-}
-
 function compilePattern(pattern: string): void {
   try {
-    new RegExp(pattern, "u");
+    compileRegex(pattern);
   } catch (error) {
-    throw new InvalidSchemaError(`"${pattern}" is not a valid regular expression: ${error}`);
+    if (error instanceof RegexSyntaxError) {
+      throw new InvalidSchemaError(
+        `"${pattern}" is not a valid regular expression: ${error.message}`,
+      );
+    }
+    if (error instanceof UnsupportedRegexError) {
+      throw new InvalidSchemaError(
+        `the regular expression "${pattern}" is not supported by the browser runtime yet: ${error.message}`,
+      );
+    }
+    throw error;
   }
 }
 
 /** Reject references that resolve neither inside the schema nor to a meta-schema. */
-function checkReferences(schema: unknown, lookup: Record<string, unknown>): void {
-  visitSchemas(schema, (node) => {
-    if (typeof node.$ref !== "string") return;
-    const absolute = (node as { __absolute_ref__?: string }).__absolute_ref__;
-    if (absolute === undefined || !(absolute in lookup)) {
-      throw new InvalidSchemaError(`unresolvable reference "${node.$ref}"`);
+function checkReferences(validator: CompiledSchema): void {
+  for (const reference of validator.references) {
+    if (resolveReference(validator.lookup, reference) === undefined) {
+      throw new InvalidSchemaError(
+        `unresolvable reference "${decodeURI(reference.replace(/^json-schema:\/\/\//, ""))}"`,
+      );
     }
-  });
+  }
 }
 
 /**
  * The 2020-12 meta-schema recurses through `$dynamicRef: "#meta"`. Without
  * dialect extensions that always resolves to the 2020-12 root, which is what
- * 2019-09's `$recursiveRef: "#"` expresses and the validator understands.
+ * 2019-09's `$recursiveRef: "#"` expresses and the evaluator understands.
  */
 function withRecursiveRefs(schema: unknown): unknown {
   if (Array.isArray(schema)) return schema.map(withRecursiveRefs);
@@ -417,8 +410,8 @@ const META_SCHEMA_SOURCES: Record<Dialect, readonly unknown[]> = {
 
 /**
  * Fresh copies of a dialect's meta-schemas (root first), normalized under the
- * dialect's own rules. The validator annotates the schemas it registers, so
- * every validator gets its own copies.
+ * dialect's own rules. Registering annotates the schemas, so every compiled
+ * schema gets its own copies.
  */
 function metaSchemas(dialect: Dialect): Schema[] {
   return META_SCHEMA_SOURCES[dialect].map((schema) =>
@@ -430,27 +423,36 @@ function metaSchemas(dialect: Dialect): Schema[] {
   );
 }
 
-const metaValidators = new Map<Dialect, Validator>();
+/** A schema registered with the meta-schemas of its dialect, ready to evaluate. */
+class CompiledSchema {
+  readonly lookup: Record<string, Schema | boolean>;
+  readonly references: string[] = [];
 
-function metaValidator(dialect: Dialect): Validator {
+  constructor(
+    private readonly schema: Schema | boolean,
+    private readonly dialect: Dialect,
+    private readonly shortCircuit: boolean,
+    additional: Schema[],
+  ) {
+    this.lookup = dereference(schema, undefined, this.references);
+    for (const extra of additional) dereference(extra, this.lookup);
+  }
+
+  validate(instance: unknown) {
+    return evaluate(instance, this.schema, this.dialect, this.lookup, this.shortCircuit);
+  }
+}
+
+const metaValidators = new Map<Dialect, CompiledSchema>();
+
+function metaValidator(dialect: Dialect): CompiledSchema {
   let validator = metaValidators.get(dialect);
   if (!validator) {
     const [root, ...vocabularies] = metaSchemas(dialect);
-    validator = new Validator(root!, VALIDATOR_DRAFT[dialect], false);
-    for (const vocabulary of vocabularies) validator.addSchema(vocabulary);
+    validator = new CompiledSchema(root!, dialect, false, vocabularies);
     metaValidators.set(dialect, validator);
   }
   return validator;
-}
-
-/**
- * Parse JSON into objects without a prototype, so keywords like `required`
- * and `properties` treat `__proto__` or `toString` as ordinary keys.
- */
-function parseJson(text: string): unknown {
-  return JSON.parse(text, (_key, value) =>
-    isObject(value) ? Object.assign(Object.create(null), value) : value,
-  );
 }
 
 function describe(errors: OutputUnit[]): string {
@@ -473,11 +475,9 @@ export function compileJsonSchema(schema: unknown): JsonSchemaCheck {
     const meta = metaValidator(dialect).validate(schema);
     if (!meta.valid) throw new InvalidSchemaError(describe(meta.errors));
   }
-  const normalized = normalizeSchema(schema, dialect);
-  checkPatterns(normalized);
-  const validator = new Validator(normalized as Schema, VALIDATOR_DRAFT[dialect]);
-  for (const metaSchema of metaSchemas(dialect)) validator.addSchema(metaSchema);
-  checkReferences(normalized, (validator as unknown as { lookup: Record<string, unknown> }).lookup);
+  const normalized = normalizeSchema(withPlainNumbers(schema), dialect) as Schema | boolean;
+  const validator = new CompiledSchema(normalized, dialect, true, metaSchemas(dialect));
+  checkReferences(validator);
   return (instanceJson) => {
     const result = validator.validate(parseJson(instanceJson));
     return result.valid ? undefined : describe(result.errors);

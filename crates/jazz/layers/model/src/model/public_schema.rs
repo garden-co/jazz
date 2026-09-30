@@ -37,7 +37,7 @@ pub fn validate_json_value(
             let Some(schema) = schema else {
                 return Ok(());
             };
-            json_schema::validate(schema, &instance, source).map_err(|error| match error {
+            json_schema::validate(schema, &instance).map_err(|error| match error {
                 JsonSchemaError::Mismatch(error) => {
                     format!("JSON schema validation failed for column `{path}`: {error}")
                 }

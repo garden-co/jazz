@@ -265,5 +265,152 @@
       "contentMediaType": "application/json"
     },
     "browserUnsupported": true
+  },
+  {
+    "description": "draft-07 time needs a UTC offset with a colon",
+    "schema": { "$schema": "http://json-schema.org/draft-07/schema#", "format": "time" },
+    "valid": ["12:00:00Z", "12:00:00.5+01:00", "23:59:60Z"],
+    "invalid": ["12:00:00", "12:00:00+0100", "24:00:00Z", "22:59:60Z"]
+  },
+  {
+    "description": "draft-07 date-time follows RFC 3339 strictly",
+    "schema": { "$schema": "http://json-schema.org/draft-07/schema#", "format": "date-time" },
+    "valid": ["2026-09-30T12:00:00+01:00", "2026-09-30t12:00:00z", "2024-02-29T00:00:00Z"],
+    "invalid": ["2026-09-30T12:00:00+0100", "2026-09-30T12:00:00", "2026-02-29T00:00:00Z", "2026-09-30 12:00:00Z"]
+  },
+  {
+    "description": "draft-07 ipv4 and ipv6 reject leading zeros and zones",
+    "schema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": { "v4": { "format": "ipv4" }, "v6": { "format": "ipv6" } }
+    },
+    "valid": [{ "v4": "1.2.3.4", "v6": "::ffff:1.2.3.4" }, { "v4": "0.0.0.0", "v6": "1:2:3:4:5:6:7::" }],
+    "invalid": [{ "v4": "01.02.03.04" }, { "v4": "256.0.0.1" }, { "v6": "fe80::1%eth0" }, { "v6": "::ffff:01.2.3.4" }]
+  },
+  {
+    "description": "draft-07 hostname rejects a trailing dot and checks punycode labels",
+    "schema": { "$schema": "http://json-schema.org/draft-07/schema#", "format": "hostname" },
+    "valid": ["example.com", "xn--bcher-kva.example", "localhost"],
+    "invalid": ["example.com.", "ab--cd.com", "-example.com", "ex_ample.com", "xn--1ug"]
+  },
+  {
+    "description": "draft-07 email follows the native address parser",
+    "schema": { "$schema": "http://json-schema.org/draft-07/schema#", "format": "email" },
+    "valid": ["joe@example.com", "\"joe bloggs\"@example.com", "joe@[127.0.0.1]", "joe@[IPv6:::1]", "Joe <joe@example.com>"],
+    "invalid": ["joe@example.com.", "jo..e@example.com", "joe@[300.0.0.1]", "<joe@example.com>", "joe@ex_ample.com"]
+  },
+  {
+    "description": "draft-07 uri and uri-reference follow RFC 3986",
+    "schema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": { "uri": { "format": "uri" }, "ref": { "format": "uri-reference" } }
+    },
+    "valid": [{ "uri": "http://[::1]:80/x?q#f", "ref": "./a:b" }, { "uri": "urn:isbn:0451450523", "ref": "" }],
+    "invalid": [{ "uri": "http://example.com/a b" }, { "uri": "//example.com" }, { "ref": "%zz" }, { "ref": "a:b c" }]
+  },
+  {
+    "description": "draft-07 regex format uses the native regex syntax",
+    "schema": { "$schema": "http://json-schema.org/draft-07/schema#", "format": "regex" },
+    "valid": ["^\\d{3}\\-\\d{4}$", "[]a]", "(?i)abc", "a\\z", "(?=a"],
+    "invalid": ["(", "[z-a]", "\\q", "a{,3}"]
+  },
+  {
+    "description": "multipleOf compares decimal values exactly",
+    "schema": { "multipleOf": 0.01 },
+    "valid": [0, 19.99, 0.07, 100.01, 12.34],
+    "invalid": [1e-7, 0.001, 12.345]
+  },
+  {
+    "description": "integers beyond 2^53 compare exactly",
+    "schema": {
+      "properties": {
+        "max": { "maximum": 9007199254740992 },
+        "min": { "minimum": 9007199254740993 },
+        "exact": { "const": 9007199254740993 },
+        "int": { "type": "integer" }
+      }
+    },
+    "valid": [
+      { "max": 9007199254740992, "min": 9007199254740993, "exact": 9007199254740993 },
+      { "int": 18446744073709551615 }
+    ],
+    "invalid": [
+      { "max": 9007199254740993 },
+      { "min": 9007199254740992 },
+      { "exact": 9007199254740992 },
+      { "int": 1.5 }
+    ]
+  },
+  {
+    "description": "draft 4 does not count 1.0 as an integer",
+    "schema": { "$schema": "http://json-schema.org/draft-04/schema#", "type": "integer" },
+    "valid": [1, -9223372036854775808],
+    "invalid": [1.0, 1e3]
+  },
+  {
+    "description": "later drafts count 1.0 as an integer",
+    "schema": { "$schema": "http://json-schema.org/draft-07/schema#", "type": "integer" },
+    "valid": [1, 1.0, 1e3],
+    "invalid": [1.5]
+  },
+  {
+    "description": "patterns use the native regex syntax",
+    "schema": {
+      "properties": {
+        "phone": { "pattern": "^\\d{3}\\-\\d{4}$" },
+        "bracket": { "pattern": "^[]a]$" },
+        "caseless": { "pattern": "(?i)^abc$" },
+        "end": { "pattern": "^a\\z" },
+        "lines": { "pattern": "(?m)^b$" },
+        "word": { "pattern": "^\\w+$" },
+        "punctuation": { "pattern": "^\\:\\/\\@$" }
+      },
+      "patternProperties": { "^x\\-": { "type": "integer" } }
+    },
+    "valid": [
+      { "phone": "123-4567", "bracket": "]", "caseless": "ABC", "end": "a", "lines": "a\nb", "word": "a_1", "punctuation": ":/@" },
+      { "x-count": 3 }
+    ],
+    "invalid": [
+      { "phone": "1234567" },
+      { "phone": "١٢٣-٤٥٦٧" },
+      { "bracket": "b" },
+      { "caseless": "abd" },
+      { "end": "a\n" },
+      { "lines": "a\nbc" },
+      { "word": "é" },
+      { "x-count": "3" }
+    ]
+  },
+  {
+    "description": "patterns with a lookaround keep Unicode classes",
+    "schema": { "pattern": "^(?=\\d)\\d+$" },
+    "valid": ["123", "١٢٣"],
+    "invalid": ["abc"]
+  },
+  {
+    "description": "an invalid range in a pattern",
+    "schema": { "pattern": "[z-a]" },
+    "invalidSchema": true
+  },
+  {
+    "description": "an unknown escape in a pattern",
+    "schema": { "pattern": "\\q" },
+    "invalidSchema": true
+  },
+  {
+    "description": "two quantifiers in a row in a pattern",
+    "schema": { "pattern": "a**" },
+    "invalidSchema": true
+  },
+  {
+    "description": "a scoped case-insensitive group",
+    "schema": { "pattern": "^(?i:a)b$" },
+    "browserUnsupported": true
+  },
+  {
+    "description": "a possessive quantifier",
+    "schema": { "pattern": "^a*+b$" },
+    "browserUnsupported": true
   }
 ]

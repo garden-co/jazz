@@ -20,7 +20,7 @@ pub enum JsonSchemaError {
     InvalidSchema(String),
     /// The value does not match the declared schema.
     Mismatch(String),
-    /// No validator is available on this target.
+    /// No validator is available on this target, or the host's failed.
     Unavailable(String),
 }
 
@@ -34,8 +34,9 @@ pub trait HostJsonSchemaValidator {
 /// A schema compiled by a [`HostJsonSchemaValidator`].
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub trait HostCompiledJsonSchema {
-    /// Check a value given as JSON text, or say why it does not match.
-    fn validate(&self, instance_json: &str) -> Result<(), String>;
+    /// Check a value given as JSON text: `Ok(None)` if it matches,
+    /// `Ok(Some(reason))` if it does not, `Err` if the check itself failed.
+    fn validate(&self, instance_json: &str) -> Result<Option<String>, String>;
 }
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -107,27 +108,26 @@ pub fn check_schema(schema: &serde_json::Value) -> Result<(), JsonSchemaError> {
     compiled(schema).map(|_| ())
 }
 
-/// Check a value against a declared schema. `instance_json` is the value's
-/// JSON source text and `instance` the same value parsed.
+/// Check a value against a declared schema.
 pub fn validate(
     schema: &serde_json::Value,
     instance: &serde_json::Value,
-    instance_json: &str,
 ) -> Result<(), JsonSchemaError> {
     match &*compiled(schema)? {
         #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-        Compiled::Native(validator) => {
-            let _ = instance_json;
-            validator
-                .validate(instance)
-                .map_err(|error| JsonSchemaError::Mismatch(error.to_string()))
-        }
+        Compiled::Native(validator) => validator
+            .validate(instance)
+            .map_err(|error| JsonSchemaError::Mismatch(error.to_string())),
+        // The host gets the value re-serialized rather than its source text, so
+        // it sees the numbers `serde_json` parsed, exactly as the native
+        // validator does.
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-        Compiled::Host(validator) => {
-            let _ = instance;
-            validator
-                .validate(instance_json)
-                .map_err(JsonSchemaError::Mismatch)
-        }
+        Compiled::Host(validator) => match validator.validate(&instance.to_string()) {
+            Ok(None) => Ok(()),
+            Ok(Some(reason)) => Err(JsonSchemaError::Mismatch(reason)),
+            Err(error) => Err(JsonSchemaError::Unavailable(format!(
+                "the JSON Schema validator failed: {error}"
+            ))),
+        },
     }
 }

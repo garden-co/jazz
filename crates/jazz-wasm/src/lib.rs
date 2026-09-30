@@ -126,7 +126,9 @@ pub fn subscribe_trace_entries(callback: js_sys::Function) -> js_sys::Function {
 /// The browser build leaves the Rust validator out to keep the binary small.
 /// `compile` takes a declared schema as JSON text and returns a check that
 /// takes a value as JSON text and returns why it does not match, or
-/// `undefined`. `compile` throws when the schema itself is invalid.
+/// `undefined`. `compile` throws when the schema itself is invalid; a check
+/// that throws is reported as the validator failing, not as a mismatch.
+/// Until this is called, JSON column schemas are reported as unavailable.
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 #[wasm_bindgen(js_name = setJsonSchemaValidator)]
 pub fn set_json_schema_validator(compile: js_sys::Function) {
@@ -162,15 +164,12 @@ impl jazz::model::json_schema::HostJsonSchemaValidator for JsJsonSchemaValidator
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 impl jazz::model::json_schema::HostCompiledJsonSchema for JsCompiledJsonSchema {
-    fn validate(&self, instance_json: &str) -> Result<(), String> {
+    fn validate(&self, instance_json: &str) -> Result<Option<String>, String> {
         let outcome = self
             .check
             .call1(&JsValue::NULL, &JsValue::from_str(instance_json))
             .map_err(|error| js_error_message(&error))?;
-        match outcome.as_string() {
-            Some(reason) => Err(reason),
-            None => Ok(()),
-        }
+        Ok(outcome.as_string())
     }
 }
 
